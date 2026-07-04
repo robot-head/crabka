@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use crabka_metadata::MetadataImage;
 
-use super::buckets::QuotaBuckets;
-use super::lookup::lookup_quota_with_key;
+use super::{buckets::QuotaBuckets, lookup::lookup_quota_with_key};
 
 /// Consume `elapsed_micros` of request-handler time from the
 /// `request_percentage` bucket for `(principal, client_id)`. Returns the
@@ -57,9 +56,10 @@ pub fn consume_request_quota(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
+
+    use super::*;
 
     fn img_with_quota(entity: Vec<(&str, Option<&str>)>, rate: f64) -> MetadataImage {
         let mut img = MetadataImage::new(uuid::Uuid::nil());

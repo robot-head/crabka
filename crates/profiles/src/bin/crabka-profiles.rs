@@ -8,28 +8,26 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::net::SocketAddr;
-use std::path::Path;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use clap::{Parser, ValueEnum};
 use crabka_blockstore::ProfileIndex;
 use crabka_client_producer::Producer;
 use crabka_pprof::UnionProfileStore;
-use crabka_profiles::blockbuilder::BlockBuilderConfig;
-use crabka_profiles::cold_store::ColdProfileStore;
-use crabka_profiles::compactor::{DownsamplePolicy, compact_once_with_policy};
-use crabka_profiles::distributor::{DistributorState, KafkaSink, serve};
-use crabka_profiles::hot_store::{WalTailProfileStore, run_wal_tail};
-use crabka_profiles::ingest::{RelabelConfig, TenantLimitConfig};
-use crabka_profiles::limits::OverridesProvider;
-use crabka_profiles::metrics::ServiceMetrics;
-use crabka_profiles::query::{QuerierState, serve as serve_querier};
-use crabka_profiles::query_frontend::FrontendConfig;
+use crabka_profiles::{
+    blockbuilder::BlockBuilderConfig,
+    cold_store::ColdProfileStore,
+    compactor::{DownsamplePolicy, compact_once_with_policy},
+    distributor::{DistributorState, KafkaSink, serve},
+    hot_store::{WalTailProfileStore, run_wal_tail},
+    ingest::{RelabelConfig, TenantLimitConfig},
+    limits::OverridesProvider,
+    metrics::ServiceMetrics,
+    query::{QuerierState, serve as serve_querier},
+    query_frontend::FrontendConfig,
+};
 use crabka_telemetry::OtlpConfig;
-use object_store::ObjectStore;
-use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, path::Path as ObjectPath};
 
 #[derive(Debug, Parser)]
 struct Cli {

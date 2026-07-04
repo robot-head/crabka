@@ -23,16 +23,21 @@
 //! off the cache (no shadow key set). Cache entries win on key collision and a
 //! cached tombstone hides the inner value.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use bytes::Bytes;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::processor::record::RecordContext;
-use crate::store::byte::ByteKeyValueStore;
-use crate::store::cache::entry::LruCacheEntry;
-use crate::store::cache::named::NamedCache;
+use crate::{
+    processor::record::RecordContext,
+    store::{
+        byte::ByteKeyValueStore,
+        cache::{entry::LruCacheEntry, named::NamedCache},
+    },
+};
 
 pub(crate) struct CachingKeyValueStore {
     cache: Arc<Mutex<NamedCache>>,

@@ -2,13 +2,15 @@
 //! queries at scenario end to capture resource usage on the broker pods
 //! and (Strimzi only) JVM heap / non-heap from the JMX exporter.
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
-use crate::scenario::{BrokerSample, Resource, Stack};
+use crate::{
+    ids::{DurationSeconds, MessageCount, TimeOffsetMs},
+    scenario::{BrokerSample, Resource, Stack},
+};
 
 pub struct PromClient {
     base_url: String,
@@ -170,7 +172,7 @@ impl PromClient {
         Ok(by_ts
             .into_iter()
             .map(|(ts_ms, (cpu_cores, mem))| BrokerSample {
-                t_offset_ms: ts_ms.saturating_sub(start_ms),
+                t_offset_ms: TimeOffsetMs(ts_ms.saturating_sub(start_ms)),
                 cpu_cores,
                 mem_working_set_bytes: mem,
             })
@@ -184,8 +186,8 @@ impl PromClient {
         &self,
         stack: Stack,
         namespace: &str,
-        window_s: u64,
-        msgs_produced: u64,
+        window_s: DurationSeconds,
+        msgs_produced: MessageCount,
     ) -> Result<Resource> {
         // `broker_pod_regex()` returns a `^`-anchored *prefix* (e.g.
         // `^demo-broker`) shared with `failover.rs`, which strips the `^` and
@@ -197,7 +199,7 @@ impl PromClient {
         // append `.*` so `demo-broker.*` matches the ordinal-suffixed pods.
         let pod_re = format!("{}.*", stack.broker_pod_regex().trim_start_matches('^'));
         let pod_re = pod_re.as_str();
-        let win = window_s.max(15); // PromQL needs at least one full scrape
+        let win = window_s.0.max(15); // PromQL needs at least one full scrape
 
         // GKE's kubelet-cadvisor series carry `pod`/`namespace` but NO
         // `container` label — so the old `container!=""` filter matched nothing
@@ -226,7 +228,7 @@ impl PromClient {
             jvm_nonheap_used_bytes: None,
             kafka_page_cache_approx_bytes: None,
             msgs_per_cpu_core: if broker_cpu_seconds > 0.0 {
-                msgs_produced as f64 / broker_cpu_seconds
+                msgs_produced.0 as f64 / broker_cpu_seconds
             } else {
                 0.0
             },
@@ -287,8 +289,9 @@ struct PromResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn parses_success_with_one_result() {

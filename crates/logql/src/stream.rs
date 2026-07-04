@@ -1,10 +1,9 @@
 use regex::Regex;
 
-use crate::extract::LogfmtParser;
 use crate::{
     FieldFilter, FieldFilterChain, FieldFilterExpression, JsonParserConfig, LabelFormat,
     LabelSelectionSet, Labels, LineFilter, LineFormat, LogfmtParserConfig, ParseError,
-    UnwrapExpression,
+    UnwrapExpression, extract::LogfmtParser,
 };
 
 #[derive(Clone, Debug, PartialEq)]

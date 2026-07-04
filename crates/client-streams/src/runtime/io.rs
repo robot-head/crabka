@@ -128,8 +128,9 @@ pub trait OffsetStore: Send + Sync + 'static {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn fetch_batch_next_offset_advances_past_last() {

@@ -105,12 +105,14 @@ pub fn membership_topic_ids(group: &GroupState, input: &ReconcileInput) -> HashS
 
 #[cfg(test)]
 mod tests {
-    use super::super::assignor::UniformAssignor;
-    use super::*;
-    use crate::coordinator::unified::consumer_state::MemberState;
-    use crate::coordinator::unified::persistence_next_gen::MemberAssignmentState;
-    use assert2::{assert, check};
     use std::time::{Duration, Instant};
+
+    use assert2::{assert, check};
+
+    use super::{super::assignor::UniformAssignor, *};
+    use crate::coordinator::unified::{
+        consumer_state::MemberState, persistence_next_gen::MemberAssignmentState,
+    };
 
     fn fresh_member(id: &str, topic: &str) -> MemberState {
         let mut sub = HashSet::new();

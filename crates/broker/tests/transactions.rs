@@ -9,20 +9,17 @@
 //! control plane is platform-correct; the gate avoids a flaky CI
 //! signal until the Windows scheduling work is addressed.
 
-use assert2::assert;
 use std::time::Duration;
 
+use assert2::assert;
 use bytes::Bytes;
-use tempfile::TempDir;
-
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_broker::{Broker, BrokerConfig, BrokerHandle, config::ListenerSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
-use crabka_client_producer::ConsumerGroupMetadata;
-use crabka_client_producer::{Producer, ProducerRecord};
+use crabka_client_producer::{ConsumerGroupMetadata, Producer, ProducerRecord};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_security::{ListenerProtocol, SaslMechanism};
+use tempfile::TempDir;
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
@@ -657,9 +654,11 @@ async fn txn_offset_commit_fences_classic_generation_and_member() {
 /// current epoch. The member epoch travels in the `generation_id` field.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn txn_offset_commit_fences_next_gen_member_epoch() {
-    use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest;
-    use crabka_protocol::owned::txn_offset_commit_request::{
-        TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+    use crabka_protocol::owned::{
+        consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest,
+        txn_offset_commit_request::{
+            TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+        },
     };
 
     let (broker, bootstrap, _dir) = boot_single().await;

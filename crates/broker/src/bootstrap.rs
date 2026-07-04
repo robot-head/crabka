@@ -93,12 +93,13 @@ pub fn load_bootstrap_records(log_dir: &Path) -> Result<Vec<MetadataRecord>, Bro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::ScramCredentialRecord;
     use crabka_security::SaslMechanism;
     use serde_wincode::SerdeCompat;
     use wincode::Serialize;
+
+    use super::*;
 
     fn write_frame(out: &mut Vec<u8>, rec: &MetadataRecord) {
         let bytes = <SerdeCompat<MetadataRecord>>::serialize(rec).unwrap();
@@ -144,7 +145,7 @@ mod tests {
         use crabka_metadata::{Voter, VoterEndpoint, VoterSet, VotersRecord};
         let dir = tempfile::tempdir().unwrap();
         let seeded = VoterSet::from_voters([Voter {
-            id: 7,
+            id: crabka_audit::NodeId(7),
             directory_id: uuid::Uuid::from_u128(7),
             endpoints: vec![VoterEndpoint {
                 name: "CONTROLLER".into(),

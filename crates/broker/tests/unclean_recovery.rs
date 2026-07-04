@@ -39,19 +39,23 @@
 //! Gated to non-Windows to match the multi-broker test convention (openraft
 //! `debug_assert!` races on the hosted Windows scheduler are unrelated).
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{io, net::SocketAddr, time::Duration};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::BrokerHandle;
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicConfigRecord};
-use crabka_protocol::owned::elect_leaders_request::{ElectLeadersRequest, TopicPartitions};
-use crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse;
-use crabka_protocol::{Decode, Encode};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        elect_leaders_request::{ElectLeadersRequest, TopicPartitions},
+        elect_leaders_response::ElectLeadersResponse,
+    },
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 mod support;
 
@@ -119,8 +123,10 @@ async fn create_topic_plaintext(
     partitions: i32,
     replication_factor: i16,
 ) {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    };
 
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {
@@ -235,7 +241,7 @@ async fn wait_partition_isr_only(
             img.partition(topic, partition).is_some_and(|p| {
                 p.isr
                     .iter()
-                    .copied()
+                    .map(|n| n.get())
                     .collect::<std::collections::HashSet<u64>>()
                     == expected_set
             })
@@ -281,7 +287,12 @@ async fn unclean_recovery_elects_longest_log_replica() {
         .expect("partition record present after wait_until_partition_present");
     eprintln!("partition before divergence: {pr_before:?}");
     assert!(
-        pr_before.replicas == vec![1, 2, 3],
+        pr_before.replicas
+            == vec![
+                crabka_broker::NodeId(1),
+                crabka_broker::NodeId(2),
+                crabka_broker::NodeId(3)
+            ],
         "expected RF=3 replicas [1,2,3]; got {:?}",
         pr_before.replicas
     );
@@ -310,10 +321,14 @@ async fn unclean_recovery_elects_longest_log_replica() {
     let forged = MetadataRecord::V1Partition(PartitionRecord {
         topic: topic.to_string(),
         partition: 0,
-        leader: 99,
-        replicas: vec![1, 2, 3],
-        isr: vec![99],
-        leader_epoch: pr_before.leader_epoch + 1,
+        leader: crabka_broker::NodeId(99),
+        replicas: vec![
+            crabka_broker::NodeId(1),
+            crabka_broker::NodeId(2),
+            crabka_broker::NodeId(3),
+        ],
+        isr: vec![crabka_broker::NodeId(99)],
+        leader_epoch: pr_before.leader_epoch.next(),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],

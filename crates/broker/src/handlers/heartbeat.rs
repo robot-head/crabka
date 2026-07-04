@@ -2,18 +2,20 @@
 //! refreshes the member's `last_heartbeat` clock inside the group's actor.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{heartbeat_request::HeartbeatRequest, heartbeat_response::HeartbeatResponse},
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
-use crabka_protocol::owned::heartbeat_response::HeartbeatResponse;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::actor::GroupActorMessage;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::actor::GroupActorMessage,
+    error::BrokerError,
+};
 
 #[tracing::instrument(
     name = "handle_heartbeat",
@@ -112,8 +114,9 @@ fn encode_denied(version: i16) -> Result<Bytes, BrokerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn group_read_denied_yields_group_authorization_failed() {

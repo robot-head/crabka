@@ -17,18 +17,18 @@ mod diff;
 
 use std::fmt::Write as _;
 
+use prost_reflect::{
+    DescriptorPool,
+    prost::Message,
+    prost_types::{
+        DescriptorProto, EnumDescriptorProto, FieldDescriptorProto, FileDescriptorProto,
+        FileDescriptorSet, ServiceDescriptorProto,
+        field_descriptor_proto::{Label, Type as FieldType},
+    },
+};
+
 use super::ParsedSchema;
 use crate::error::SrError;
-
-use prost_reflect::DescriptorPool;
-use prost_reflect::prost::Message;
-use prost_reflect::prost_types::FileDescriptorSet;
-use prost_reflect::prost_types::field_descriptor_proto::Label;
-use prost_reflect::prost_types::field_descriptor_proto::Type as FieldType;
-use prost_reflect::prost_types::{
-    DescriptorProto, EnumDescriptorProto, FieldDescriptorProto, FileDescriptorProto,
-    ServiceDescriptorProto,
-};
 
 pub struct ProtobufSchema {
     descriptor: FileDescriptorProto,

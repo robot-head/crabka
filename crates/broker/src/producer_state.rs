@@ -2,18 +2,14 @@
 //! idempotent-producer dedup / out-of-order / epoch-fence checks in
 //! `handlers::produce`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
+use crabka_ids::PartitionIndex;
+use crabka_log::ProducerId;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 
 use crate::partition::LogOffset;
-
-/// Kafka producer id (PID) assigned by `InitProducerId`. Alias only —
-/// distinguishes the id from the offset/timestamp `i64`s that travel
-/// alongside it in produce-path signatures.
-pub type ProducerId = i64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProducerEntry {
@@ -95,7 +91,7 @@ pub(crate) fn check_pure(
 /// allocate nothing; the outer topic map is keyed by `String` but its
 /// `get`/`entry` accept a borrowed `&str` and only allocate the owned
 /// topic key on the first produce to a previously-unseen topic.
-type PartitionMap = DashMap<i32, Arc<Mutex<PartitionProducerState>>>;
+type PartitionMap = DashMap<PartitionIndex, Arc<Mutex<PartitionProducerState>>>;
 
 #[derive(Debug, Default)]
 pub struct ProducerState {
@@ -118,8 +114,8 @@ impl ProducerState {
     pub async fn check(
         &self,
         topic: &str,
-        partition: i32,
-        producer_id: ProducerId,
+        partition: PartitionIndex,
+        producer_id: i64,
         producer_epoch: i16,
         base_sequence: i32,
         last_offset_delta: i32,
@@ -127,7 +123,11 @@ impl ProducerState {
         let handle = self.handle(topic, partition);
         let s = handle.lock().await;
         let _ = last_offset_delta; // used only by the caller to compute last_sequence on commit
-        check_pure(s.entries.get(&producer_id), producer_epoch, base_sequence)
+        check_pure(
+            s.entries.get(&ProducerId(producer_id)),
+            producer_epoch,
+            base_sequence,
+        )
     }
 
     /// Commit a successful append into the tracker.
@@ -135,8 +135,8 @@ impl ProducerState {
     pub async fn commit(
         &self,
         topic: &str,
-        partition: i32,
-        producer_id: ProducerId,
+        partition: PartitionIndex,
+        producer_id: i64,
         producer_epoch: i16,
         base_sequence: i32,
         last_offset_delta: i32,
@@ -148,7 +148,7 @@ impl ProducerState {
         let last_sequence = base_sequence + last_offset_delta;
         let last_offset = base_offset + i64::from(last_offset_delta);
         s.entries.insert(
-            producer_id,
+            ProducerId(producer_id),
             ProducerEntry {
                 epoch: producer_epoch,
                 last_sequence,
@@ -173,7 +173,7 @@ impl ProducerState {
     /// retry re-append fresh instead. Mirrors Kafka's
     /// `ProducerStateManager.truncateAndReload`. Does not create state for a
     /// partition that has never been tracked.
-    pub async fn truncate(&self, topic: &str, partition: i32, offset: LogOffset) {
+    pub async fn truncate(&self, topic: &str, partition: PartitionIndex, offset: LogOffset) {
         let Some(parts) = self.by_topic.get(topic).map(|e| e.value().clone()) else {
             return;
         };
@@ -188,7 +188,7 @@ impl ProducerState {
     /// outer topic lookup borrows `&str` and only allocates an owned
     /// `String` key when the topic is seen for the first time; the inner
     /// partition lookup is keyed by `i32` and never allocates.
-    fn handle(&self, topic: &str, partition: i32) -> Arc<Mutex<PartitionProducerState>> {
+    fn handle(&self, topic: &str, partition: PartitionIndex) -> Arc<Mutex<PartitionProducerState>> {
         // `get` first to avoid allocating the topic `String` on the hot
         // path (the topic almost always already exists).
         let parts = if let Some(existing) = self.by_topic.get(topic) {
@@ -217,7 +217,11 @@ impl ProducerState {
     ///
     /// The snapshot drops the mutex before returning, so callers don't
     /// hold the per-partition lock across response encoding.
-    pub async fn snapshot(&self, topic: &str, partition: i32) -> Vec<(ProducerId, ProducerEntry)> {
+    pub async fn snapshot(
+        &self,
+        topic: &str,
+        partition: PartitionIndex,
+    ) -> Vec<(i64, ProducerEntry)> {
         // Cheaper to bypass `handle` (which inserts on miss): a snapshot
         // for an unknown partition should report "no producers", not
         // wire up an empty entry. The borrowed `&str` / `i32` lookups
@@ -233,7 +237,14 @@ impl ProducerState {
         let handle = part_ref.value().clone();
         drop(part_ref);
         let state = handle.lock().await;
-        state.entries.iter().map(|(pid, e)| (*pid, *e)).collect()
+        // Keep the public return `i64`: unwrap the map's `ProducerId` key at the
+        // snapshot boundary (the `DescribeProducers` handler writes it straight
+        // into the raw-`i64` wire field).
+        state
+            .entries
+            .iter()
+            .map(|(pid, e)| (pid.get(), *e))
+            .collect()
     }
 
     /// Snapshot of currently-active producers on `(topic, partition)`:
@@ -255,10 +266,10 @@ impl ProducerState {
     pub async fn active_snapshot(
         &self,
         topic: &str,
-        partition: i32,
+        partition: PartitionIndex,
         now_ms: i64,
         expiration_ms: i64,
-    ) -> HashMap<ProducerId, LogOffset> {
+    ) -> HashMap<i64, LogOffset> {
         // Mirror `snapshot`: avoid inserting an empty entry for an unknown
         // partition (the borrowed lookups allocate nothing on a miss).
         let Some(topic_ref) = self.by_topic.get(topic) else {
@@ -272,11 +283,13 @@ impl ProducerState {
         let handle = part_ref.value().clone();
         drop(part_ref);
         let state = handle.lock().await;
+        // Public return stays `HashMap<i64, i64>`; unwrap the `ProducerId` key at
+        // the boundary (the caller re-wraps into the log seam's `ProducerId`).
         state
             .entries
             .iter()
             .filter(|(_pid, e)| now_ms.saturating_sub(e.last_activity_ms) <= expiration_ms)
-            .map(|(pid, e)| (*pid, e.base_offset))
+            .map(|(pid, e)| (pid.get(), e.base_offset))
             .collect()
     }
 
@@ -303,7 +316,7 @@ impl ProducerState {
             .map(|e| (e.key().clone(), e.value().clone()))
             .collect();
         for (topic, parts) in topics {
-            let partition_refs: Vec<(i32, Arc<Mutex<PartitionProducerState>>)> = parts
+            let partition_refs: Vec<(PartitionIndex, Arc<Mutex<PartitionProducerState>>)> = parts
                 .iter()
                 .map(|e| (*e.key(), e.value().clone()))
                 .collect();
@@ -338,13 +351,14 @@ mod producer_state_model;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[tokio::test]
     async fn first_batch_appends() {
         let s = ProducerState::new();
-        let d = s.check("t", 0, 1000, 0, 0, 4).await;
+        let d = s.check("t", PartitionIndex(0), 1000, 0, 0, 4).await;
         assert!(d == Decision::Append);
     }
 
@@ -352,18 +366,25 @@ mod tests {
     async fn next_sequence_appends() {
         let s = ProducerState::new();
         s.commit(
-            "t", 0, 1000, 0, 0, 4, /* base_offset */ 0, /* ts */ 1,
+            "t",
+            PartitionIndex(0),
+            1000,
+            0,
+            0,
+            4,
+            /* base_offset */ 0,
+            /* ts */ 1,
         )
         .await;
-        let d = s.check("t", 0, 1000, 0, 5, 2).await;
+        let d = s.check("t", PartitionIndex(0), 1000, 0, 5, 2).await;
         assert!(d == Decision::Append);
     }
 
     #[tokio::test]
     async fn duplicate_returns_cached_offset() {
         let s = ProducerState::new();
-        s.commit("t", 0, 1000, 0, 0, 4, 0, 1).await;
-        let d = s.check("t", 0, 1000, 0, 0, 4).await;
+        s.commit("t", PartitionIndex(0), 1000, 0, 0, 4, 0, 1).await;
+        let d = s.check("t", PartitionIndex(0), 1000, 0, 0, 4).await;
         assert!(d == Decision::Duplicate { base_offset: 0 });
     }
 
@@ -377,18 +398,25 @@ mod tests {
         // log can never reach, stalling the producer.
         let s = ProducerState::new();
         s.commit(
-            "t", 0, 1000, 0, /*base_seq*/ 0, /*delta*/ 13, 1_471_686, 1,
+            "t",
+            PartitionIndex(0),
+            1000,
+            0,
+            /*base_seq*/ 0,
+            /*delta*/ 13,
+            1_471_686,
+            1,
         )
         .await;
         assert!(
-            s.check("t", 0, 1000, 0, 0, 13).await
+            s.check("t", PartitionIndex(0), 1000, 0, 0, 13).await
                 == Decision::Duplicate {
                     base_offset: 1_471_686
                 }
         );
-        s.truncate("t", 0, 1_471_686).await;
+        s.truncate("t", PartitionIndex(0), 1_471_686).await;
         assert!(
-            s.check("t", 0, 1000, 0, 0, 13).await == Decision::Append,
+            s.check("t", PartitionIndex(0), 1000, 0, 0, 13).await == Decision::Append,
             "after truncation the retried batch must re-append, not dedup against the truncated offset"
         );
     }
@@ -398,10 +426,22 @@ mod tests {
         // A batch whose records survive the truncation (last_offset < offset)
         // must stay deduplicated.
         let s = ProducerState::new();
-        s.commit("t", 0, 1000, 0, 0, 4, /*base_offset*/ 100, 1)
-            .await; // last_offset 104
-        s.truncate("t", 0, 200).await;
-        assert!(s.check("t", 0, 1000, 0, 0, 4).await == Decision::Duplicate { base_offset: 100 });
+        s.commit(
+            "t",
+            PartitionIndex(0),
+            1000,
+            0,
+            0,
+            4,
+            /*base_offset*/ 100,
+            1,
+        )
+        .await; // last_offset 104
+        s.truncate("t", PartitionIndex(0), 200).await;
+        assert!(
+            s.check("t", PartitionIndex(0), 1000, 0, 0, 4).await
+                == Decision::Duplicate { base_offset: 100 }
+        );
     }
 
     #[tokio::test]
@@ -409,33 +449,42 @@ mod tests {
         // Truncating at an entry's last_offset removes that entry: the last
         // accepted record is no longer below the log end being retained.
         let s = ProducerState::new();
-        s.commit("t", 0, 1000, 0, 0, 4, /*base_offset*/ 100, 1)
-            .await; // last_offset 104
-        s.truncate("t", 0, 104).await;
-        assert!(s.check("t", 0, 1000, 0, 0, 4).await == Decision::Append);
+        s.commit(
+            "t",
+            PartitionIndex(0),
+            1000,
+            0,
+            0,
+            4,
+            /*base_offset*/ 100,
+            1,
+        )
+        .await; // last_offset 104
+        s.truncate("t", PartitionIndex(0), 104).await;
+        assert!(s.check("t", PartitionIndex(0), 1000, 0, 0, 4).await == Decision::Append);
     }
 
     #[tokio::test]
     async fn truncate_unknown_partition_is_noop() {
         let s = ProducerState::new();
-        s.truncate("never-seen", 7, 0).await; // must not panic or create state
-        assert!(s.snapshot("never-seen", 7).await.is_empty());
+        s.truncate("never-seen", PartitionIndex(7), 0).await; // must not panic or create state
+        assert!(s.snapshot("never-seen", PartitionIndex(7)).await.is_empty());
     }
 
     #[tokio::test]
     async fn out_of_order_when_gap() {
         let s = ProducerState::new();
-        s.commit("t", 0, 1000, 0, 0, 4, 0, 1).await;
+        s.commit("t", PartitionIndex(0), 1000, 0, 0, 4, 0, 1).await;
         // Last seq is 4; next valid base_seq is 5. Sending 10 → OutOfOrder.
-        let d = s.check("t", 0, 1000, 0, 10, 2).await;
+        let d = s.check("t", PartitionIndex(0), 1000, 0, 10, 2).await;
         assert!(d == Decision::OutOfOrder);
     }
 
     #[tokio::test]
     async fn lower_epoch_is_fenced() {
         let s = ProducerState::new();
-        s.commit("t", 0, 1000, 5, 0, 4, 0, 1).await;
-        let d = s.check("t", 0, 1000, 4, 5, 2).await;
+        s.commit("t", PartitionIndex(0), 1000, 5, 0, 4, 0, 1).await;
+        let d = s.check("t", PartitionIndex(0), 1000, 4, 5, 2).await;
         assert!(d == Decision::Fenced);
     }
 
@@ -452,10 +501,19 @@ mod tests {
     async fn higher_epoch_at_seq_zero_appends() {
         let s = ProducerState::new();
         // Epoch 5 committed sequences 0..=2 (last_sequence = 2).
-        s.commit("t", 0, 1000, 5, 0, 2, /* base_offset */ 0, 1)
-            .await;
+        s.commit(
+            "t",
+            PartitionIndex(0),
+            1000,
+            5,
+            0,
+            2,
+            /* base_offset */ 0,
+            1,
+        )
+        .await;
         // Same pid, epoch 6, base_sequence 0 — a fresh write, NOT a duplicate.
-        let d = s.check("t", 0, 1000, 6, 0, 0).await;
+        let d = s.check("t", PartitionIndex(0), 1000, 6, 0, 0).await;
         assert!(d == Decision::Append);
     }
 
@@ -468,22 +526,31 @@ mod tests {
     #[tokio::test]
     async fn higher_epoch_continuing_sequence_appends() {
         let s = ProducerState::new();
-        s.commit("t", 0, 1000, 5, 0, 2, 0, 1).await;
+        s.commit("t", PartitionIndex(0), 1000, 5, 0, 2, 0, 1).await;
         // Epoch 6 (KIP-890 bump), sequence continues at 3 — still a fresh append.
-        let d = s.check("t", 0, 1000, 6, 3, 0).await;
+        let d = s.check("t", PartitionIndex(0), 1000, 6, 3, 0).await;
         assert!(d == Decision::Append);
         // After committing the new epoch's batch, same-epoch dedup resumes.
-        s.commit("t", 0, 1000, 6, 3, 0, /* base_offset */ 10, 2)
-            .await;
-        let dup = s.check("t", 0, 1000, 6, 3, 0).await;
+        s.commit(
+            "t",
+            PartitionIndex(0),
+            1000,
+            6,
+            3,
+            0,
+            /* base_offset */ 10,
+            2,
+        )
+        .await;
+        let dup = s.check("t", PartitionIndex(0), 1000, 6, 3, 0).await;
         assert!(dup == Decision::Duplicate { base_offset: 10 });
     }
 
     #[tokio::test]
     async fn snapshot_reports_committed_entries() {
         let s = ProducerState::new();
-        s.commit("t", 3, 1000, 0, 0, 4, 7, 1).await;
-        let snap = s.snapshot("t", 3).await;
+        s.commit("t", PartitionIndex(3), 1000, 0, 0, 4, 7, 1).await;
+        let snap = s.snapshot("t", PartitionIndex(3)).await;
         // `last_activity_ms` is wall-clock; copy it from the actual entry so
         // the comparison stays deterministic.
         let expected = vec![(
@@ -499,7 +566,7 @@ mod tests {
         )];
         assert!(snap == expected);
         // Untouched partition / topic report empty without panicking.
-        for (topic, partition) in [("t", 0), ("other", 3)] {
+        for (topic, partition) in [("t", PartitionIndex(0)), ("other", PartitionIndex(3))] {
             assert!(
                 s.snapshot(topic, partition).await == vec![],
                 "case: {topic}/{partition}"
@@ -513,19 +580,19 @@ mod tests {
         // Two producers on the same partition with controlled activity
         // timestamps: we commit, then overwrite last_activity_ms directly
         // to simulate age without sleeping.
-        s.commit("t", 0, 1, 0, 0, 0, 0, 0).await;
-        s.commit("t", 0, 2, 0, 0, 0, 0, 0).await;
+        s.commit("t", PartitionIndex(0), 1, 0, 0, 0, 0, 0).await;
+        s.commit("t", PartitionIndex(0), 2, 0, 0, 0, 0, 0).await;
         {
-            let h = s.handle("t", 0);
+            let h = s.handle("t", PartitionIndex(0));
             let mut st = h.lock().await;
-            st.entries.get_mut(&1).unwrap().last_activity_ms = 1_000; // old
-            st.entries.get_mut(&2).unwrap().last_activity_ms = 9_000; // recent
+            st.entries.get_mut(&ProducerId(1)).unwrap().last_activity_ms = 1_000; // old
+            st.entries.get_mut(&ProducerId(2)).unwrap().last_activity_ms = 9_000; // recent
         }
         // now = 10_000, ttl = 5_000 → pid 1 (age 9_000) expires, pid 2
         // (age 1_000) survives.
         let evicted = s.expire_older_than(10_000, 5_000).await;
         assert!(evicted == 1);
-        let snap = s.snapshot("t", 0).await;
+        let snap = s.snapshot("t", PartitionIndex(0)).await;
         assert!(snap.len() == 1);
         assert!(snap[0].0 == 2, "only the recently-active producer survives");
     }
@@ -533,36 +600,63 @@ mod tests {
     #[tokio::test]
     async fn expire_evicts_entry_at_exact_ttl_boundary() {
         let s = ProducerState::new();
-        s.commit("t", 0, 1, 0, 0, 0, 0, 0).await;
+        s.commit("t", PartitionIndex(0), 1, 0, 0, 0, 0, 0).await;
         {
-            let h = s.handle("t", 0);
-            h.lock().await.entries.get_mut(&1).unwrap().last_activity_ms = 5_000;
+            let h = s.handle("t", PartitionIndex(0));
+            h.lock()
+                .await
+                .entries
+                .get_mut(&ProducerId(1))
+                .unwrap()
+                .last_activity_ms = 5_000;
         }
 
         let evicted = s.expire_older_than(10_000, 5_000).await;
         assert!(evicted == 1);
-        assert!(s.snapshot("t", 0).await.is_empty());
+        assert!(s.snapshot("t", PartitionIndex(0)).await.is_empty());
     }
 
     #[tokio::test]
     async fn active_snapshot_excludes_expired_includes_active() {
         let s = ProducerState::new();
         // pid 1: last batch base_offset 10; pid 2: base_offset 20.
-        s.commit("t", 0, 1, 0, 0, 0, /* base_offset */ 10, 0).await;
-        s.commit("t", 0, 2, 0, 0, 0, /* base_offset */ 20, 0).await;
+        s.commit(
+            "t",
+            PartitionIndex(0),
+            1,
+            0,
+            0,
+            0,
+            /* base_offset */ 10,
+            0,
+        )
+        .await;
+        s.commit(
+            "t",
+            PartitionIndex(0),
+            2,
+            0,
+            0,
+            0,
+            /* base_offset */ 20,
+            0,
+        )
+        .await;
         {
-            let h = s.handle("t", 0);
+            let h = s.handle("t", PartitionIndex(0));
             let mut st = h.lock().await;
-            st.entries.get_mut(&1).unwrap().last_activity_ms = 1_000; // old
-            st.entries.get_mut(&2).unwrap().last_activity_ms = 9_500; // recent
+            st.entries.get_mut(&ProducerId(1)).unwrap().last_activity_ms = 1_000; // old
+            st.entries.get_mut(&ProducerId(2)).unwrap().last_activity_ms = 9_500; // recent
         }
         // now = 10_000, expiration = 5_000 → pid 1 (age 9_000 > 5_000)
         // excluded; pid 2 (age 500 <= 5_000) included with its base_offset.
-        let snap = s.active_snapshot("t", 0, 10_000, 5_000).await;
+        let snap = s
+            .active_snapshot("t", PartitionIndex(0), 10_000, 5_000)
+            .await;
         let expected: HashMap<i64, i64> = [(2, 20)].into_iter().collect();
         assert!(snap == expected);
         // Unknown partition / topic → empty without panicking.
-        for (topic, partition) in [("t", 99), ("nope", 0)] {
+        for (topic, partition) in [("t", PartitionIndex(99)), ("nope", PartitionIndex(0))] {
             assert!(
                 s.active_snapshot(topic, partition, 10_000, 5_000).await == HashMap::new(),
                 "case: {topic}/{partition}"
@@ -573,17 +667,22 @@ mod tests {
     #[tokio::test]
     async fn expire_drops_empty_partition_and_topic_slots() {
         let s = ProducerState::new();
-        s.commit("t", 0, 1, 0, 0, 0, 0, 0).await;
+        s.commit("t", PartitionIndex(0), 1, 0, 0, 0, 0, 0).await;
         {
-            let h = s.handle("t", 0);
-            h.lock().await.entries.get_mut(&1).unwrap().last_activity_ms = 0;
+            let h = s.handle("t", PartitionIndex(0));
+            h.lock()
+                .await
+                .entries
+                .get_mut(&ProducerId(1))
+                .unwrap()
+                .last_activity_ms = 0;
         }
         let evicted = s.expire_older_than(1_000_000, 1).await;
         // The empty partition and topic maps are pruned (the empty topic slot
         // must be removed), and a subsequent produce still works after pruning.
         check!(evicted == 1);
         check!(s.by_topic.get("t").is_none());
-        check!(s.check("t", 0, 1, 0, 0, 0).await == Decision::Append);
+        check!(s.check("t", PartitionIndex(0), 1, 0, 0, 0).await == Decision::Append);
     }
 }
 

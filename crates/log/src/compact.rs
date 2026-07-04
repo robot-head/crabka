@@ -13,19 +13,24 @@
 //! as the most-recent entry for their key. `delete.retention.ms`
 //! ages them out.
 
-use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use bytes::{Bytes, BytesMut};
+use crabka_ids::{Offset, ProducerId};
 use crabka_protocol::records::RecordBatch;
 use tracing::instrument;
 
-use crate::error::LogError;
-use crate::name;
-use crate::segment::Segment;
-use crate::txn_index::{AbortedTxn, TxnIndex};
+use crate::{
+    error::LogError,
+    name,
+    segment::Segment,
+    txn_index::{AbortedTxn, TxnIndex},
+};
 
 // ---------------------------------------------------------------------------
 // KIP-534 pure decision cores
@@ -47,7 +52,7 @@ pub(crate) struct RecordMeta {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct BatchMeta {
     pub is_control: bool,
-    pub producer_id: i64,
+    pub producer_id: ProducerId,
     /// The batch's existing delete horizon (`base_timestamp` when bit 6 is
     /// set), `None` if the batch has never been stamped.
     pub existing_horizon: Option<i64>,
@@ -116,7 +121,10 @@ pub(crate) fn rewrite_batch_horizon(
 /// (which folds this in); this standalone form exists for `core_tests` and
 /// the upcoming stateright/proptest model.
 #[allow(dead_code)]
-pub(crate) fn txn_data_fully_gone(producer_id: i64, survivors: &HashSet<i64>) -> bool {
+pub(crate) fn txn_data_fully_gone(
+    producer_id: ProducerId,
+    survivors: &HashSet<ProducerId>,
+) -> bool {
     !survivors.contains(&producer_id)
 }
 
@@ -165,9 +173,9 @@ pub(crate) fn retain_decision(
 #[cfg(test)]
 #[allow(clippy::similar_names)]
 mod core_tests {
+    use assert2::{assert, check};
+
     use super::*;
-    use assert2::assert;
-    use assert2::check;
 
     fn data(has_key: bool, has_value: bool) -> RecordMeta {
         RecordMeta { has_key, has_value }
@@ -176,7 +184,7 @@ mod core_tests {
     fn batch(is_control: bool, producer_id: i64, existing_horizon: Option<i64>) -> BatchMeta {
         BatchMeta {
             is_control,
-            producer_id,
+            producer_id: ProducerId(producer_id),
             existing_horizon,
         }
     }
@@ -298,9 +306,9 @@ mod core_tests {
     #[test]
     fn txn_data_fully_gone_checks_survivor_set() {
         let mut survivors = HashSet::new();
-        survivors.insert(1000i64);
-        assert!(txn_data_fully_gone(2000, &survivors) == true);
-        assert!(txn_data_fully_gone(1000, &survivors) == false);
+        survivors.insert(ProducerId(1000));
+        assert!(txn_data_fully_gone(ProducerId(2000), &survivors) == true);
+        assert!(txn_data_fully_gone(ProducerId(1000), &survivors) == false);
     }
 }
 
@@ -311,7 +319,7 @@ mod core_tests {
 /// `last_offset = base_offset - 1` until a tail-scan populates it,
 /// and `Segment::read(base_offset, ..)` would short-circuit to empty).
 fn read_all_batches(seg: &Segment) -> Result<Vec<RecordBatch>, LogError> {
-    let path = name::log_path(seg.dir(), seg.base_offset());
+    let path = name::log_path(seg.dir(), seg.base_offset().0);
     let bytes = std::fs::read(&path)?;
     let mut cursor: &[u8] = &bytes;
     let mut out: Vec<RecordBatch> = Vec::new();
@@ -336,11 +344,11 @@ fn read_all_batches(seg: &Segment) -> Result<Vec<RecordBatch>, LogError> {
     fields(segments = segments.len(), keys = tracing::field::Empty),
     err,
 )]
-pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, i64>, LogError> {
+pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, Offset>, LogError> {
     // Keyed by `Bytes` (cheap refcounted clone of the record key) rather
     // than `Vec<u8>` to avoid a heap copy of every key. Zero-length keys
     // are legal in Kafka and dedup as a distinct "empty key" like any other.
-    let mut map: HashMap<Bytes, i64> = HashMap::new();
+    let mut map: HashMap<Bytes, Offset> = HashMap::new();
     for seg in segments {
         for batch in read_all_batches(seg)? {
             // Control batches (txn commit/abort markers) carry a control-type
@@ -355,7 +363,7 @@ pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, i64>, Lo
                     continue;
                 }
                 let key_bytes = record.key.as_ref().expect("should_index_key checked Some");
-                let absolute = batch.base_offset + i64::from(record.offset_delta);
+                let absolute = Offset(batch.base_offset + i64::from(record.offset_delta));
                 map.insert(key_bytes.clone(), absolute);
             }
         }
@@ -374,7 +382,7 @@ pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, i64>, Lo
 /// whose data still partially survives.
 pub struct CleanedTransactionMetadata {
     /// Producers (`producer_id`) with at least one surviving data record.
-    survivors: HashSet<i64>,
+    survivors: HashSet<ProducerId>,
     /// Aborted-txn entries gathered from the consumed segments' `.txnindex`
     /// files, in input order.
     aborted: Vec<AbortedTxn>,
@@ -393,9 +401,9 @@ impl CleanedTransactionMetadata {
     )]
     pub fn build(
         segments: &[&Segment],
-        offset_map: &HashMap<Bytes, i64>,
+        offset_map: &HashMap<Bytes, Offset>,
     ) -> Result<Self, LogError> {
-        let mut survivors: HashSet<i64> = HashSet::new();
+        let mut survivors: HashSet<ProducerId> = HashSet::new();
         let mut aborted: Vec<AbortedTxn> = Vec::new();
         for seg in segments {
             // Seed aborted-txn entries from this segment's transaction index.
@@ -418,9 +426,9 @@ impl CleanedTransactionMetadata {
                     let Some(key_bytes) = record.key.as_ref() else {
                         continue;
                     };
-                    let absolute = batch.base_offset + i64::from(record.offset_delta);
+                    let absolute = Offset(batch.base_offset + i64::from(record.offset_delta));
                     if offset_map.get(key_bytes.as_ref()).copied() == Some(absolute) {
-                        survivors.insert(batch.producer_id);
+                        survivors.insert(ProducerId(batch.producer_id));
                         break;
                     }
                 }
@@ -432,8 +440,8 @@ impl CleanedTransactionMetadata {
 
     /// The transactional-data state for a given producer.
     #[must_use]
-    pub fn txn_state(&self, producer_id: i64) -> TxnDataState {
-        if producer_id < 0 {
+    pub fn txn_state(&self, producer_id: ProducerId) -> TxnDataState {
+        if producer_id.is_none() {
             return TxnDataState::NotTransactional;
         }
         if self.survivors.contains(&producer_id) {
@@ -462,11 +470,13 @@ impl CleanedTransactionMetadata {
     clippy::cast_possible_wrap
 )]
 mod build_map_tests {
-    use super::*;
     use assert2::assert;
     use bytes::Bytes;
+    use crabka_ids::Offset;
     use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
+
+    use super::*;
 
     pub(super) fn make_record(
         offset_delta: i32,
@@ -486,7 +496,7 @@ mod build_map_tests {
         base_offset: i64,
         records: Vec<Record>,
     ) -> Segment {
-        let mut seg = Segment::create(dir, base_offset).unwrap();
+        let mut seg = Segment::create(dir, Offset(base_offset)).unwrap();
         let n = i32::try_from(records.len()).expect("record count fits i32");
         let max_ts = records.iter().map(|r| r.timestamp_delta).max().unwrap_or(0);
         let batch = RecordBatch {
@@ -507,7 +517,7 @@ mod build_map_tests {
     /// control batches and mixed data/control layouts.
     pub(super) fn write_sealed_batches(dir: &Path, batches: &[RecordBatch]) -> Segment {
         let base = batches.first().map_or(0, |b| b.base_offset);
-        let mut seg = Segment::create(dir, base).unwrap();
+        let mut seg = Segment::create(dir, Offset(base)).unwrap();
         for batch in batches {
             seg.append(batch, 4096).unwrap();
         }
@@ -558,7 +568,7 @@ mod build_map_tests {
         let segs: Vec<&Segment> = vec![&seg];
         let map = build_offset_map(&segs).unwrap();
         // The data key is present.
-        assert!(map.get(b"k1".as_ref()) == Some(&1));
+        assert!(map.get(b"k1".as_ref()) == Some(&Offset(1)));
         // The control-marker key (\x00\x00\x00\x01) is NOT present.
         let marker_key: &[u8] = &[0, 0, 0, 1];
         assert!(map.get(marker_key) == None);
@@ -579,8 +589,8 @@ mod build_map_tests {
         );
         let segs: Vec<&Segment> = vec![&seg0];
         let map = build_offset_map(&segs).unwrap();
-        assert!(map.get(b"k1".as_ref()) == Some(&2));
-        assert!(map.get(b"k2".as_ref()) == Some(&1));
+        assert!(map.get(b"k1".as_ref()) == Some(&Offset(2)));
+        assert!(map.get(b"k2".as_ref()) == Some(&Offset(1)));
     }
 
     #[test]
@@ -598,7 +608,7 @@ mod build_map_tests {
         let segs: Vec<&Segment> = vec![&seg0];
         let map = build_offset_map(&segs).unwrap();
         assert!(map.len() == 1);
-        assert!(map.get(b"k1".as_ref()) == Some(&1));
+        assert!(map.get(b"k1".as_ref()) == Some(&Offset(1)));
     }
 
     #[test]
@@ -616,7 +626,55 @@ mod build_map_tests {
         );
         let segs: Vec<&Segment> = vec![&seg0, &seg1];
         let map = build_offset_map(&segs).unwrap();
-        assert!(map.get(b"k1".as_ref()) == Some(&10));
+        assert!(map.get(b"k1".as_ref()) == Some(&Offset(10)));
+    }
+
+    // Survivor detection compares each record's absolute offset
+    // (`base_offset + offset_delta`) against the newest-for-key offset in the
+    // offset map (`== Some(absolute)`). Two transactional producers write the
+    // SAME key k1:
+    //   - producer 1000 at offset 0 (superseded), and
+    //   - producer 2000 at base 10, delta 5 → offset 15 (newest for k1).
+    // The map therefore holds k1 → 15, so producer 2000 survives and producer
+    // 1000 does not. This pins:
+    //   - `absolute = base_offset + offset_delta` (line 429): mutating `+`→`-`
+    //     makes 2000's record resolve to 5, not 15 → 2000 misclassified
+    //     `DataFullyGone`.
+    //   - the `== Some(absolute)` equality (line 430): mutating `==`→`!=`
+    //     inverts the match — 2000 (the match) becomes `DataFullyGone` and
+    //     1000 (the non-match) becomes `DataSurvives`.
+    #[test]
+    fn build_detects_surviving_txn_producer() {
+        let dir = tempdir().unwrap();
+        // Producer 1000: k1 at offset 0 — superseded by producer 2000.
+        let old = RecordBatch {
+            base_offset: 0,
+            last_offset_delta: 0,
+            producer_id: 1000,
+            attributes: Attributes::default().with_transactional(true),
+            records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+            ..RecordBatch::default()
+        };
+        // Producer 2000: k1 at base 10, offset_delta 5 → absolute offset 15,
+        // the newest-for-key record.
+        let newest = RecordBatch {
+            base_offset: 10,
+            last_offset_delta: 5,
+            producer_id: 2000,
+            attributes: Attributes::default().with_transactional(true),
+            records: vec![make_record(5, Some(b"k1"), Some(b"v2"))],
+            ..RecordBatch::default()
+        };
+        let seg = write_sealed_batches(dir.path(), &[old, newest]);
+        let segs: Vec<&Segment> = vec![&seg];
+        let map = build_offset_map(&segs).unwrap();
+        // Sanity: the newest-for-key absolute offset is 15 (10 + 5).
+        assert!(map.get(b"k1".as_ref()) == Some(&Offset(15)));
+
+        let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+        // Producer 2000's newest data survives; producer 1000's is superseded.
+        assert!(txn.txn_state(ProducerId(2000)) == TxnDataState::DataSurvives);
+        assert!(txn.txn_state(ProducerId(1000)) == TxnDataState::DataFullyGone);
     }
 }
 
@@ -627,10 +685,10 @@ pub struct RewriteOutput {
     pub index_swap: PathBuf,
     pub timeindex_swap: PathBuf,
     /// `base_offset` of the new segment (== lowest input segment).
-    pub new_base_offset: i64,
+    pub new_base_offset: Offset,
     /// Highest absolute offset of any surviving record.
     #[allow(dead_code)]
-    pub new_last_offset: i64,
+    pub new_last_offset: Offset,
     /// Path to the rewritten survivor `.txnindex`, written only when any
     /// aborted-txn entries were carried forward. `None` when no aborted
     /// transactions survive.
@@ -673,22 +731,22 @@ pub struct RewriteOutput {
 pub fn rewrite_segments(
     dir: &Path,
     segments: &[&Segment],
-    offset_map: &HashMap<Bytes, i64>,
+    offset_map: &HashMap<Bytes, Offset>,
     txn_meta: &CleanedTransactionMetadata,
     now_ms: i64,
     delete_retention_ms: i64,
-    active_producers: &HashMap<i64, i64>,
+    active_producers: &HashMap<ProducerId, Offset>,
     _index_interval_bytes: u32,
 ) -> Result<RewriteOutput, LogError> {
     let first = segments
         .first()
         .ok_or_else(|| LogError::Io(std::io::Error::other("rewrite_segments: empty input")))?;
     let new_base = first.base_offset();
-    tracing::Span::current().record("new_base", new_base);
+    tracing::Span::current().record("new_base", new_base.0);
 
-    let log_swap = swap_path(dir, new_base, "log");
-    let index_swap = swap_path(dir, new_base, "index");
-    let timeindex_swap = swap_path(dir, new_base, "timeindex");
+    let log_swap = swap_path(dir, new_base.0, "log");
+    let index_swap = swap_path(dir, new_base.0, "index");
+    let timeindex_swap = swap_path(dir, new_base.0, "timeindex");
 
     // Truncate (or create) all three swap files. We rewrite the .log
     // file proper here; for the index sidecars we write empty files
@@ -719,10 +777,11 @@ pub fn rewrite_segments(
     }
     let last_batch_index = all_batches.len().saturating_sub(1);
     // The index of each active producer's last batch in `all_batches`.
-    let mut producer_last_batch: HashMap<i64, usize> = HashMap::new();
+    let mut producer_last_batch: HashMap<ProducerId, usize> = HashMap::new();
     for (i, batch) in all_batches.iter().enumerate() {
-        if active_producers.contains_key(&batch.producer_id) {
-            producer_last_batch.insert(batch.producer_id, i);
+        let pid = ProducerId(batch.producer_id);
+        if active_producers.contains_key(&pid) {
+            producer_last_batch.insert(pid, i);
         }
     }
 
@@ -730,10 +789,11 @@ pub fn rewrite_segments(
 
     for (batch_idx, batch) in all_batches.iter().enumerate() {
         let is_control = batch.attributes.is_control_batch();
-        let txn = txn_meta.txn_state(batch.producer_id);
+        let producer_id = ProducerId(batch.producer_id);
+        let txn = txn_meta.txn_state(producer_id);
         let batch_meta = BatchMeta {
             is_control,
-            producer_id: batch.producer_id,
+            producer_id,
             existing_horizon: batch.delete_horizon_ms(),
         };
 
@@ -743,7 +803,7 @@ pub fn rewrite_segments(
         // decision asks for it (stamp once per batch).
         let mut stamp_horizon: Option<i64> = None;
         for record in &batch.records {
-            let absolute = batch.base_offset + i64::from(record.offset_delta);
+            let absolute = Offset(batch.base_offset + i64::from(record.offset_delta));
             let is_newest_for_key = record
                 .key
                 .as_ref()
@@ -775,7 +835,7 @@ pub fn rewrite_segments(
             // of the consolidated output, so producer sequence/epoch and the
             // log-end offset survive.
             let is_producer_last =
-                producer_last_batch.get(&batch.producer_id).copied() == Some(batch_idx);
+                producer_last_batch.get(&producer_id).copied() == Some(batch_idx);
             let is_output_last = batch_idx == last_batch_index;
             if !(is_producer_last || is_output_last) {
                 continue;
@@ -795,7 +855,7 @@ pub fn rewrite_segments(
             let mut buf = BytesMut::with_capacity(out_batch.encoded_len());
             out_batch.encode(&mut buf)?;
             log_file.write_all(&buf)?;
-            let batch_last = out_batch.base_offset + i64::from(out_batch.last_offset_delta);
+            let batch_last = Offset(out_batch.base_offset + i64::from(out_batch.last_offset_delta));
             if batch_last > last_kept_offset {
                 last_kept_offset = batch_last;
             }
@@ -829,7 +889,7 @@ pub fn rewrite_segments(
         out_batch.encode(&mut buf)?;
         log_file.write_all(&buf)?;
 
-        let batch_last = out_batch.base_offset + i64::from(out_batch.last_offset_delta);
+        let batch_last = Offset(out_batch.base_offset + i64::from(out_batch.last_offset_delta));
         if batch_last > last_kept_offset {
             last_kept_offset = batch_last;
         }
@@ -843,7 +903,7 @@ pub fn rewrite_segments(
     let txnindex_swap = if retained.is_empty() {
         None
     } else {
-        let path = swap_path(dir, new_base, "txnindex");
+        let path = swap_path(dir, new_base.0, "txnindex");
         // Truncate any stale swap, then append the retained entries.
         OpenOptions::new()
             .write(true)
@@ -857,7 +917,7 @@ pub fn rewrite_segments(
         Some(path)
     };
 
-    tracing::Span::current().record("new_last_offset", last_kept_offset);
+    tracing::Span::current().record("new_last_offset", last_kept_offset.0);
     Ok(RewriteOutput {
         log_swap,
         index_swap,
@@ -879,14 +939,16 @@ fn swap_path(dir: &Path, base_offset: i64, ext: &str) -> PathBuf {
 #[cfg(test)]
 #[allow(clippy::similar_names)]
 mod rewrite_tests {
-    use super::build_map_tests::{
-        control_batch, make_record, write_sealed_batches, write_sealed_segment,
-    };
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
-    use crabka_protocol::records::Record;
     use std::fs;
+
+    use assert2::{assert, check};
+    use crabka_ids::Offset;
+    use crabka_protocol::records::Record;
+
+    use super::{
+        build_map_tests::{control_batch, make_record, write_sealed_batches, write_sealed_segment},
+        *,
+    };
 
     /// A far-future `now` so nothing in the simple tests ages out, plus an
     /// empty active-producer set and no surviving transactions.
@@ -896,7 +958,7 @@ mod rewrite_tests {
     fn rewrite_simple(dir: &Path, segs: &[&Segment]) -> RewriteOutput {
         let map = build_offset_map(segs).unwrap();
         let txn = CleanedTransactionMetadata::build(segs, &map).unwrap();
-        let active: HashMap<i64, i64> = HashMap::new();
+        let active: HashMap<ProducerId, Offset> = HashMap::new();
         rewrite_segments(
             dir,
             segs,
@@ -936,7 +998,7 @@ mod rewrite_tests {
         );
         let segs = vec![&seg0];
         let out = rewrite_simple(dir.path(), &segs);
-        assert!(out.new_base_offset == 0);
+        assert!(out.new_base_offset == Offset(0));
 
         // Decode the swap .log to verify contents.
         let bytes = fs::read(&out.log_swap).unwrap();
@@ -986,8 +1048,8 @@ mod rewrite_tests {
         );
         let segs = vec![&seg0];
         let out = rewrite_simple(dir.path(), &segs);
-        assert!(out.new_base_offset == 100);
-        assert!(out.new_last_offset == 102);
+        assert!(out.new_base_offset == Offset(100));
+        assert!(out.new_last_offset == Offset(102));
 
         let bytes = std::fs::read(&out.log_swap).unwrap();
         let mut cursor = &bytes[..];
@@ -1164,7 +1226,7 @@ mod rewrite_tests {
         let map = build_offset_map(&segs).unwrap();
         let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
         let mut active = HashMap::new();
-        active.insert(1000i64, 0i64); // pid 1000 active, last batch base 0
+        active.insert(ProducerId(1000), Offset(0)); // pid 1000 active, last batch base 0
         let out =
             rewrite_segments(dir.path(), &segs, &map, &txn, 0, RET_MS, &active, 4096).unwrap();
         let bytes = fs::read(&out.log_swap).unwrap();
@@ -1178,6 +1240,53 @@ mod rewrite_tests {
         check!(bare.producer_epoch == 7);
         check!(bare.base_sequence == 3);
         check!(bare.base_offset == 0);
+    }
+
+    // `RETAIN_EMPTY` last-offset arithmetic: an emptied output-last batch is
+    // re-emitted as a bare header, and its `base_offset + last_offset_delta`
+    // must extend `new_last_offset`. The emptied batch sits at base_offset 100
+    // with `last_offset_delta` 5, so its last absolute offset is `100 + 5 =
+    // 105`. This pins the `+` in `Offset(base_offset + last_offset_delta)`:
+    // mutating it to `-` would report `new_last_offset == 95`.
+    #[test]
+    fn rewrite_retain_empty_extends_last_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        // Batch 0 (base 0): one surviving keyed record (abs offset 0).
+        let data0 = RecordBatch {
+            base_offset: 0,
+            last_offset_delta: 0,
+            producer_id: -1,
+            records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+            ..RecordBatch::default()
+        };
+        // Batch 1 (base 100, last_offset_delta 5): only NULL-key records, all
+        // dropped, so the batch is emptied. As the output-last batch it is
+        // re-emitted as a bare header spanning abs offsets 100..=105.
+        let data1 = RecordBatch {
+            base_offset: 100,
+            last_offset_delta: 5,
+            producer_id: -1,
+            records: vec![
+                make_record(0, None, Some(b"n1")),
+                make_record(5, None, Some(b"n2")),
+            ],
+            ..RecordBatch::default()
+        };
+        let seg = write_sealed_batches(dir.path(), &[data0, data1]);
+        let segs = vec![&seg];
+        let out = rewrite_simple(dir.path(), &segs);
+
+        // The emptied batch is re-emitted as a bare header at base_offset 100.
+        let bytes = fs::read(&out.log_swap).unwrap();
+        let batches = decode_all(&bytes);
+        let bare = batches
+            .iter()
+            .find(|b| b.base_offset == 100)
+            .expect("emptied output-last batch re-emitted as bare header");
+        check!(bare.records.is_empty());
+        check!(bare.last_offset_delta == 5);
+        // new_last_offset covers the bare header's last absolute offset: 100+5.
+        assert!(out.new_last_offset == Offset(105));
     }
 }
 
@@ -1200,13 +1309,13 @@ mod rewrite_tests {
     fields(
         dir = %dir.display(),
         consumed = consumed_base_offsets.len(),
-        new_base = rewrite.new_base_offset,
+        new_base = rewrite.new_base_offset.0,
     ),
     err,
 )]
 pub fn atomic_swap(
     dir: &Path,
-    consumed_base_offsets: &[i64],
+    consumed_base_offsets: &[Offset],
     rewrite: &RewriteOutput,
 ) -> Result<(), LogError> {
     // Step 1: fsync swap files. Open with write access so
@@ -1231,27 +1340,30 @@ pub fn atomic_swap(
     // rewritten survivor `.txnindex` carries forward only surviving aborted
     // transactions).
     for base in consumed_base_offsets {
-        let _ = std::fs::remove_file(name::log_path(dir, *base));
-        let _ = std::fs::remove_file(name::index_path(dir, *base));
-        let _ = std::fs::remove_file(name::timeindex_path(dir, *base));
-        let _ = std::fs::remove_file(name::txnindex_path(dir, *base));
+        let _ = std::fs::remove_file(name::log_path(dir, base.0));
+        let _ = std::fs::remove_file(name::index_path(dir, base.0));
+        let _ = std::fs::remove_file(name::timeindex_path(dir, base.0));
+        let _ = std::fs::remove_file(name::txnindex_path(dir, base.0));
     }
 
     // Step 3: rename swap → final.
     std::fs::rename(
         &rewrite.log_swap,
-        name::log_path(dir, rewrite.new_base_offset),
+        name::log_path(dir, rewrite.new_base_offset.0),
     )?;
     std::fs::rename(
         &rewrite.index_swap,
-        name::index_path(dir, rewrite.new_base_offset),
+        name::index_path(dir, rewrite.new_base_offset.0),
     )?;
     std::fs::rename(
         &rewrite.timeindex_swap,
-        name::timeindex_path(dir, rewrite.new_base_offset),
+        name::timeindex_path(dir, rewrite.new_base_offset.0),
     )?;
     if let Some(txn_swap) = &rewrite.txnindex_swap {
-        std::fs::rename(txn_swap, name::txnindex_path(dir, rewrite.new_base_offset))?;
+        std::fs::rename(
+            txn_swap,
+            name::txnindex_path(dir, rewrite.new_base_offset.0),
+        )?;
     }
 
     // Step 4: fsync the directory. On Windows this is a no-op
@@ -1268,9 +1380,13 @@ pub fn atomic_swap(
 #[cfg(test)]
 #[allow(clippy::similar_names)]
 mod swap_tests {
-    use super::build_map_tests::{make_record, write_sealed_segment};
-    use super::*;
     use assert2::check;
+    use crabka_ids::Offset;
+
+    use super::{
+        build_map_tests::{make_record, write_sealed_segment},
+        *,
+    };
 
     #[test]
     fn atomic_swap_replaces_two_segments_with_one() {
@@ -1305,7 +1421,7 @@ mod swap_tests {
             .unwrap()
             // seg0, seg1 dropped here — file handles closed
         };
-        atomic_swap(dir.path(), &[0, 10], &rewrite).unwrap();
+        atomic_swap(dir.path(), &[Offset(0), Offset(10)], &rewrite).unwrap();
 
         // After swap: only one .log (base 0). The base 10 segment is gone.
         check!(name::log_path(dir.path(), 0).exists());
@@ -1328,8 +1444,9 @@ mod compact_model;
 /// real `RecordBatch` delete-horizon wire round-trip.
 #[cfg(test)]
 mod retention_fuzz {
-    use super::*;
     use proptest::prelude::*;
+
+    use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     enum EntryKind {
@@ -1415,7 +1532,7 @@ mod retention_fuzz {
                     },
                     BatchMeta {
                         is_control: false,
-                        producer_id: -1,
+                        producer_id: ProducerId(-1),
                         existing_horizon: e.horizon,
                     },
                     e.key.is_some_and(|k| map.get(&k).copied() == Some(idx)),
@@ -1428,7 +1545,7 @@ mod retention_fuzz {
                     },
                     BatchMeta {
                         is_control: true,
-                        producer_id: i64::from(*producer_id),
+                        producer_id: ProducerId(i64::from(*producer_id)),
                         existing_horizon: e.horizon,
                     },
                     false,

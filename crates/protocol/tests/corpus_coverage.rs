@@ -1,8 +1,10 @@
-use assert2::assert;
-use std::collections::BTreeSet;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
+use assert2::assert;
 use serde::Deserialize;
 
 include!(concat!(

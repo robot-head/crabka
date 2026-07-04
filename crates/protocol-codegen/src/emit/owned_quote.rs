@@ -21,19 +21,26 @@ use std::str::FromStr;
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
 
-use crate::emit::common::banner;
-use crate::emit::owned::{
-    self, EmitError, base_type, decode_call, decode_call_with_buf, emit_common_imports,
-    encode_call, encode_call_option_as_non_nullable, encode_call_with_buf, encoded_len_expr,
-    field_forces_non_flex, flex_min, has_any_flex, has_float64_recursive, is_nullable, is_tagged,
-    needs_manual_default, nullable_split_cond, owned_default_expr, owned_populated_value,
-    struct_path_for, tagged_is_default_cond, version_cond, wrap_non_nullable_for_option,
+use crate::{
+    emit::{
+        EmittedMessage,
+        common::banner,
+        default_json,
+        owned::{
+            self, EmitError, base_type, decode_call, decode_call_with_buf, emit_common_imports,
+            encode_call, encode_call_option_as_non_nullable, encode_call_with_buf,
+            encoded_len_expr, field_forces_non_flex, flex_min, has_any_flex, has_float64_recursive,
+            is_nullable, is_tagged, needs_manual_default, nullable_split_cond, owned_default_expr,
+            owned_populated_value, struct_path_for, tagged_is_default_cond, version_cond,
+            wrap_non_nullable_for_option,
+        },
+        protocol_request,
+    },
+    ir::{FieldSpec, MessageSpec, MessageType},
+    name_conv,
+    resolve::{self, Resolution, StructKind},
+    type_map,
 };
-use crate::emit::{EmittedMessage, default_json, protocol_request};
-use crate::ir::{FieldSpec, MessageSpec, MessageType};
-use crate::name_conv;
-use crate::resolve::{self, Resolution, StructKind};
-use crate::type_map;
 
 type ResMap = std::collections::HashMap<String, Resolution>;
 

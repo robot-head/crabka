@@ -4,7 +4,8 @@
 //! that contract by asserting v1 ↔ v1 round-trips here.
 
 use crabka_metadata::{
-    BrokerRegistrationRecord, DeleteTopicRecord, MetadataRecord, PartitionRecord, TopicRecord,
+    BrokerRegistrationRecord, DeleteTopicRecord, LeaderEpoch, MetadataRecord, NodeId,
+    PartitionRecord, TopicRecord,
 };
 use proptest::prelude::*;
 use serde_wincode::SerdeCompat;
@@ -33,9 +34,10 @@ prop_compose! {
         replicas in prop::collection::vec(0..32u64, 1..6),
         leader_epoch in 0..i32::MAX,
     ) -> PartitionRecord {
+        let replicas: Vec<NodeId> = replicas.into_iter().map(NodeId).collect();
         let leader = replicas[0];
         let isr = replicas.clone();
-        PartitionRecord { topic, partition, leader, replicas, isr, leader_epoch, adding_replicas: vec![], removing_replicas: vec![], directories: vec![], partition_epoch: 0 }
+        PartitionRecord { topic, partition, leader, replicas, isr, leader_epoch: LeaderEpoch(leader_epoch), adding_replicas: vec![], removing_replicas: vec![], directories: vec![], partition_epoch: 0 }
     }
 }
 
@@ -46,7 +48,7 @@ prop_compose! {
         port in 1024..65535u16,
         rack in prop::option::of("[a-zA-Z][a-zA-Z0-9-]{0,16}"),
     ) -> BrokerRegistrationRecord {
-        BrokerRegistrationRecord { node_id, broker_epoch: 0, incarnation_id: uuid::Uuid::nil(), host, port, rack, endpoints: vec![] }
+        BrokerRegistrationRecord { node_id: NodeId(node_id), broker_epoch: 0, incarnation_id: uuid::Uuid::nil(), host, port, rack, endpoints: vec![] }
     }
 }
 

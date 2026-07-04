@@ -1,12 +1,15 @@
 //! `ColumnarSerde<T>`: native zero-copy `columnar` encoding at the `Serde<T>` boundary.
 
-use crate::processor::serde::{Serde, SerdeAssociate, SerdeError};
-use bytes::Bytes;
 use std::marker::PhantomData;
 
-use ::columnar::bytes::stash::Stash;
-use ::columnar::common::{Index, Len, Push};
-use ::columnar::{Borrow, Columnar, ContainerOf};
+use ::columnar::{
+    Borrow, Columnar, ContainerOf,
+    bytes::stash::Stash,
+    common::{Index, Len, Push},
+};
+use bytes::Bytes;
+
+use crate::processor::serde::{Serde, SerdeAssociate, SerdeError};
 
 /// `Serde<T>` for any `T: columnar::Columnar`, using columnar's native byte layout.
 /// Opt-in per type (no `DefaultSerde` blanket impl — Rust coherence forbids it).
@@ -76,9 +79,10 @@ impl<T: Send + Sync + 'static> SerdeAssociate for ColumnarSerde<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use ::columnar::Columnar;
     use assert2::check;
+
+    use super::*;
 
     #[derive(Columnar, Clone, Debug, PartialEq)]
     struct Point {

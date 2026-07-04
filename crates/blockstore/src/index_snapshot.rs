@@ -1,10 +1,13 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use futures::StreamExt as _;
-use object_store::path::Path;
-use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use tracing::instrument;
 
 use crate::error::{BlockStoreError, Result};

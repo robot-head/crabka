@@ -3,8 +3,10 @@
 
 use std::time::Duration;
 
-use crabka_grpc_gateway::health::{self, Readiness};
-use crabka_grpc_gateway::serve;
+use crabka_grpc_gateway::{
+    health::{self, Readiness},
+    serve,
+};
 use tokio_util::sync::CancellationToken;
 
 fn install_provider() {

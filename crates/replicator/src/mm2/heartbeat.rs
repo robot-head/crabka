@@ -1,6 +1,5 @@
-use crate::error::ReplicatorError;
-
 use super::{Reader, Writer};
+use crate::error::ReplicatorError;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Heartbeat {

@@ -4,9 +4,13 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
+use crabka_protocol::{
+    Decode, Encode, UnknownTaggedFields,
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        api_versions_response::{ApiVersion, ApiVersionsResponse},
+    },
+};
 
 #[test]
 fn owned_api_versions_request_v0_is_empty() {

@@ -1,5 +1,4 @@
-use std::fs;
-use std::process::Command;
+use std::{fs, process::Command};
 
 #[test]
 fn derive_works_when_crabka_connect_dependency_is_renamed() {

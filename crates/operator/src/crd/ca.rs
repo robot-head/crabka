@@ -3,6 +3,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::ids::{CertGeneration, KeyGeneration};
+
 /// Per-CA declarative config. Strimzi-shaped.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -61,11 +63,11 @@ pub struct CertificateAuthorityStatus {
     /// Monotonic generation of the active signing cert (bumped on
     /// same-key renewal and on key promotion).
     #[serde(default)]
-    pub cert_generation: u64,
+    pub cert_generation: CertGeneration,
     /// Monotonic generation of the active signing key (bumped only on
     /// key replacement).
     #[serde(default)]
-    pub key_generation: u64,
+    pub key_generation: KeyGeneration,
     /// Staged key-replacement phase
     /// (`idle` | `key-replace-trust` | `key-replace-promote`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -77,8 +79,9 @@ pub struct CertificateAuthorityStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn defaults_match_strimzi() {

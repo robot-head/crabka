@@ -1,8 +1,12 @@
 //! Injectable clock for deterministic metrics-generator tests.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 /// Wall-clock source in epoch nanoseconds.
 pub trait Clock: Send + Sync {

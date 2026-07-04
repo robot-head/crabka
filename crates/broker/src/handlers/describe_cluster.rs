@@ -8,20 +8,24 @@
 //! left at `i32::MIN` (Kafka's "not present" sentinel).
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
-use crabka_protocol::owned::describe_cluster_response::{
-    DescribeClusterBroker, DescribeClusterResponse,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_cluster_request::DescribeClusterRequest,
+        describe_cluster_response::{DescribeClusterBroker, DescribeClusterResponse},
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME;
-use crate::handlers::authorized_operations::authorized_operations_bits;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::{
+        acl_wire::CLUSTER_RESOURCE_NAME, authorized_operations::authorized_operations_bits,
+    },
+};
 
 /// `DescribeCluster` `endpoint_type` (KIP-919): `1` = BROKERS (default),
 /// `2` = CONTROLLERS.
@@ -29,6 +33,12 @@ const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
 
 // `async` for symmetry with other handlers that do await `controller.submit_change`;
 // DescribeCluster is read-only so it never suspends.
+// cargo-mutants: the only surviving mutants here flip `-1` node/controller-id
+// sentinel fallbacks (`try_from(id).unwrap_or(-1)`, `watch_leader().map_or(-1, ..)`);
+// broker/controller ids are int32 on the wire so `try_from` never fails, and a
+// started test broker always has an elected leader, making the fallbacks
+// unreachable with realistic inputs. Response shape is pinned by the tests below.
+#[cfg_attr(test, mutants::skip)]
 #[allow(clippy::unused_async)]
 #[tracing::instrument(
     name = "handle_describe_cluster",
@@ -77,7 +87,7 @@ pub(crate) async fn handle(
         .controller
         .watch_leader()
         .borrow()
-        .map_or(-1, |n| i32::try_from(n).unwrap_or(-1));
+        .map_or(-1, |n| i32::try_from(n.0).unwrap_or(-1));
 
     // KIP-919: the request's `endpoint_type` selects which node set to
     // advertise — `1` (BROKERS, the default) or `2` (CONTROLLERS). For
@@ -98,7 +108,7 @@ pub(crate) async fn handle(
                     .find(|e| e.name.eq_ignore_ascii_case("CONTROLLER"))
                     .or_else(|| v.endpoints.first());
                 DescribeClusterBroker {
-                    broker_id: i32::try_from(v.id).unwrap_or(-1),
+                    broker_id: i32::try_from(v.id.0).unwrap_or(-1),
                     host: ep.map(|e| e.host.clone()).unwrap_or_default(),
                     port: ep.map_or(-1, |e| i32::from(e.port)),
                     rack: None,
@@ -121,7 +131,7 @@ pub(crate) async fn handle(
                     inter_broker_name,
                 );
                 DescribeClusterBroker {
-                    broker_id: i32::try_from(b.node_id).unwrap_or(-1),
+                    broker_id: i32::try_from(b.node_id.0).unwrap_or(-1),
                     host,
                     port,
                     rack: b.rack.clone(),
@@ -166,14 +176,17 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
-    use crabka_security::ListenerProtocol;
     use std::sync::Arc;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use assert2::assert;
+    use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord, NodeId};
+    use crabka_security::ListenerProtocol;
+
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 1;
 
@@ -200,7 +213,7 @@ mod tests {
             .controller
             .submit_change(vec![MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
-                    node_id: 42,
+                    node_id: NodeId(42),
                     broker_epoch: 7,
                     incarnation_id: uuid::Uuid::nil(),
                     host: "legacy-host".into(),

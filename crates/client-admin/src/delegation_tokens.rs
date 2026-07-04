@@ -12,18 +12,18 @@
 
 use bytes::Bytes;
 use crabka_metadata::DelegationToken;
-use crabka_protocol::owned::create_delegation_token_request::{
-    CreatableRenewers, CreateDelegationTokenRequest,
+use crabka_protocol::owned::{
+    create_delegation_token_request::{CreatableRenewers, CreateDelegationTokenRequest},
+    create_delegation_token_response::CreateDelegationTokenResponse,
+    describe_delegation_token_request::{
+        DescribeDelegationTokenOwner, DescribeDelegationTokenRequest,
+    },
+    describe_delegation_token_response::{
+        DescribeDelegationTokenResponse, DescribedDelegationToken,
+    },
+    expire_delegation_token_request::ExpireDelegationTokenRequest,
+    renew_delegation_token_request::RenewDelegationTokenRequest,
 };
-use crabka_protocol::owned::create_delegation_token_response::CreateDelegationTokenResponse;
-use crabka_protocol::owned::describe_delegation_token_request::{
-    DescribeDelegationTokenOwner, DescribeDelegationTokenRequest,
-};
-use crabka_protocol::owned::describe_delegation_token_response::{
-    DescribeDelegationTokenResponse, DescribedDelegationToken,
-};
-use crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest;
-use crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest;
 use crabka_security::KafkaPrincipal;
 
 use crate::{AdminClient, AdminError, kafka_error_name};
@@ -211,13 +211,17 @@ fn broker_err(api: &'static str, code: i16, message: Option<String>) -> AdminErr
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use bytes::Bytes;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::describe_delegation_token_response::{
-        DescribeDelegationTokenResponse, DescribedDelegationToken, DescribedDelegationTokenRenewer,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::describe_delegation_token_response::{
+            DescribeDelegationTokenResponse, DescribedDelegationToken,
+            DescribedDelegationTokenRenewer,
+        },
     };
+
+    use super::*;
 
     // ── build_create_delegation_token ─────────────────────────────────
     //

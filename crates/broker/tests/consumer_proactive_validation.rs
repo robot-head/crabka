@@ -66,22 +66,23 @@
 
 #![allow(clippy::too_many_lines)]
 
-use assert2::{assert, check};
 use std::time::{Duration, Instant};
 
+use assert2::{assert, check};
 use bytes::Bytes;
-use tempfile::TempDir;
-
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerError};
 use crabka_client_core::Client;
 use crabka_metadata::{MetadataRecord, PartitionRecord};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::records::{Record, RecordBatch};
+use tempfile::TempDir;
 
 async fn topic_id_for(client: &Client, name: &str) -> crabka_protocol::primitives::uuid::Uuid {
     let resp = client
@@ -285,7 +286,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         leader: pr0.leader,
         replicas: pr0.replicas.clone(),
         isr: pr0.isr.clone(),
-        leader_epoch: pr0.leader_epoch + 1,
+        leader_epoch: pr0.leader_epoch.next(),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],

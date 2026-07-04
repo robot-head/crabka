@@ -1,8 +1,10 @@
 //! Block-builder helpers for turning WAL span records into span blocks.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use arrow::compute::concat_batches;
 use crabka_blockstore::{
@@ -12,15 +14,17 @@ use crabka_blockstore::{
 };
 use crabka_client_consumer::{Consumer, ConsumerRecord};
 use object_store::ObjectStore;
-use tokio::sync::Mutex;
-use tokio::time::Instant;
+use tokio::{sync::Mutex, time::Instant};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
-use crate::error::TracesError;
-use crate::metrics::ServiceMetrics;
-use crate::span::{AttrValue, Span, batch::span_batch_with_promoted_attrs};
-use crate::wal::SpanRecord;
+use crate::{
+    error::TracesError,
+    ids::{MaxOffset, MinOffset, WindowStartNs},
+    metrics::ServiceMetrics,
+    span::{AttrValue, Span, batch::span_batch_with_promoted_attrs},
+    wal::SpanRecord,
+};
 
 /// W3C trace-context header key carried on WAL records by the distributor's
 /// ingest span; used to continue the same distributed trace on the consume side.
@@ -201,10 +205,11 @@ impl FlushAccumulator {
 pub fn object_key(
     tenant: &str,
     partition: i32,
-    min_offset: i64,
-    max_offset: i64,
-    window_start_ns: i64,
+    min_offset: MinOffset,
+    max_offset: MaxOffset,
+    window_start_ns: WindowStartNs,
 ) -> String {
+    let (min_offset, max_offset, window_start_ns) = (min_offset.0, max_offset.0, window_start_ns.0);
     format!(
         "traces/{tenant}/{partition:05}/{min_offset:020}-{max_offset:020}-{window_start_ns}.parquet"
     )
@@ -364,9 +369,9 @@ async fn build_blocks_with_options(
     let key = object_key(
         tenant,
         partition,
-        offset_range.0,
-        offset_range.1,
-        window_start_ns,
+        MinOffset(offset_range.0),
+        MaxOffset(offset_range.1),
+        WindowStartNs(window_start_ns),
     );
     let key = prefixed_object_key(options.object_key_prefix, &key);
     let meta = writer

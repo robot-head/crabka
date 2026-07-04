@@ -8,17 +8,21 @@
 use std::collections::BTreeMap;
 
 use crabka_blockstore::Labels;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
-use opentelemetry_proto::tonic::metrics::v1::{
-    AggregationTemporality, Exemplar as OtlpExemplar, ExponentialHistogram,
-    ExponentialHistogramDataPoint, Gauge, Histogram, HistogramDataPoint, Metric, MetricsData,
-    NumberDataPoint, ScopeMetrics, Sum, Summary, SummaryDataPoint, exemplar as otlp_exemplar,
-    exponential_histogram_data_point, metric, number_data_point,
+use opentelemetry_proto::tonic::{
+    common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
+    metrics::v1::{
+        AggregationTemporality, Exemplar as OtlpExemplar, ExponentialHistogram,
+        ExponentialHistogramDataPoint, Gauge, Histogram, HistogramDataPoint, Metric, MetricsData,
+        NumberDataPoint, ScopeMetrics, Sum, Summary, SummaryDataPoint, exemplar as otlp_exemplar,
+        exponential_histogram_data_point, metric, number_data_point,
+    },
 };
 use prost::Message as _;
 
-use crate::wire::{DecodedExemplar, DecodedMetadata, DecodedSample, DecodedSeries};
-use crate::{BucketSpan, NativeHistogram, ResetHint};
+use crate::{
+    BucketSpan, NativeHistogram, ResetHint,
+    wire::{DecodedExemplar, DecodedMetadata, DecodedSample, DecodedSeries},
+};
 
 const MAX_NATIVE_HISTOGRAM_SCHEMA: i32 = 8;
 const MIN_NATIVE_HISTOGRAM_SCHEMA: i32 = -4;
@@ -1255,24 +1259,25 @@ fn spans_from_buckets(buckets: BTreeMap<i32, u64>) -> (Vec<BucketSpan>, Vec<f64>
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_blockstore::Labels;
-    use opentelemetry_proto::tonic::common::v1::{
-        AnyValue, InstrumentationScope, KeyValue, any_value,
+    use opentelemetry_proto::tonic::{
+        common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
+        metrics::v1::{
+            AggregationTemporality, Exemplar, ExponentialHistogram, ExponentialHistogramDataPoint,
+            Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
+            ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint,
+            exemplar as otlp_exemplar, exponential_histogram_data_point, metric, number_data_point,
+            summary_data_point,
+        },
+        resource::v1::Resource,
     };
-    use opentelemetry_proto::tonic::metrics::v1::{
-        AggregationTemporality, Exemplar, ExponentialHistogram, ExponentialHistogramDataPoint,
-        Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
-        ResourceMetrics, ScopeMetrics, Sum, Summary, SummaryDataPoint, exemplar as otlp_exemplar,
-        exponential_histogram_data_point, metric, number_data_point, summary_data_point,
-    };
-    use opentelemetry_proto::tonic::resource::v1::Resource;
-
-    use crate::BucketSpan;
-    use crate::wire::{DecodedMetadata, DecodedSample, DecodedSeries};
 
     use super::{DeltaAccumulator, TranslationStrategy, decode_otlp, decode_otlp_stateful};
+    use crate::{
+        BucketSpan,
+        wire::{DecodedMetadata, DecodedSample, DecodedSeries},
+    };
 
     fn kv(key: &str, value: &str) -> KeyValue {
         KeyValue {

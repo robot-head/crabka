@@ -102,8 +102,9 @@ pub(crate) fn should_abort_idle_txn(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn resolve_timeout_2pc_is_sentinel_regardless_of_request() {

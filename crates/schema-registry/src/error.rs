@@ -2,8 +2,10 @@
 //! serialised as `{"error_code":N,"message":"..."}` with the vendor
 //! content-type. Serdes branch on `error_code`, so the numbers are exact.
 
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 
 pub const CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
 
@@ -116,9 +118,9 @@ impl IntoResponse for SrError {
 
 #[cfg(test)]
 mod tests {
+    use axum::{http::StatusCode, response::IntoResponse};
+
     use super::*;
-    use axum::http::StatusCode;
-    use axum::response::IntoResponse;
 
     #[test]
     fn incompatible_is_409_conflict() {

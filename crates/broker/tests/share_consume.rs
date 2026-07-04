@@ -21,29 +21,30 @@
 //! - a record that exhausts `max_delivery_attempts` is archived (poison pill);
 //! - the share-session epoch state machine rejects stale / unknown epochs.
 
-use assert2::{assert, check};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use assert2::{assert, check};
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        find_coordinator_request::FindCoordinatorRequest,
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        share_acknowledge_request::{
+            AcknowledgePartition, AcknowledgeTopic, AcknowledgementBatch as AckAckBatch,
+            ShareAcknowledgeRequest,
+        },
+        share_acknowledge_response::ShareAcknowledgeResponse,
+        share_fetch_request::{
+            AcknowledgementBatch as FetchAckBatch, FetchPartition, FetchTopic, ShareFetchRequest,
+        },
+        share_fetch_response::ShareFetchResponse,
+        share_group_heartbeat_request::ShareGroupHeartbeatRequest,
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::owned::share_acknowledge_request::{
-    AcknowledgePartition, AcknowledgeTopic, AcknowledgementBatch as AckAckBatch,
-    ShareAcknowledgeRequest,
-};
-use crabka_protocol::owned::share_acknowledge_response::ShareAcknowledgeResponse;
-use crabka_protocol::owned::share_fetch_request::{
-    AcknowledgementBatch as FetchAckBatch, FetchPartition, FetchTopic, ShareFetchRequest,
-};
-use crabka_protocol::owned::share_fetch_response::ShareFetchResponse;
-use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{Record, RecordBatch};
 
 const NONE: i16 = 0;
 const INVALID_SHARE_SESSION_EPOCH: i16 = 123;

@@ -1,17 +1,24 @@
 //! Distributor role: decode ingress doors, split profiles, and append WAL records.
 
-use std::collections::{BTreeSet, HashMap};
-use std::future::Future;
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::{BTreeSet, HashMap},
+    future::Future,
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
-use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, RawQuery};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::{Extension, Router, routing::post};
-use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
-use connectrpc_axum::{MakeServiceBuilder, MessageLimits};
+use axum::{
+    Extension, Router,
+    body::Bytes,
+    extract::{DefaultBodyLimit, RawQuery},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::post,
+};
+use connectrpc_axum::{
+    MakeServiceBuilder, MessageLimits,
+    message::{Code, ConnectError, ConnectRequest, ConnectResponse},
+};
 use crabka_broker::throttle::TokenBucket;
 use crabka_client_producer::{Header, Producer, ProducerRecord};
 use crabka_pprof::PprofProfile;
@@ -19,19 +26,22 @@ use prost::Message;
 use tokio::net::TcpListener;
 use tracing::Instrument as _;
 
-use crate::error::ProfilesError;
-use crate::ingest::{
-    RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id, decode_ingest_body,
-    decode_otlp, decode_push, enforce_limits, parse_ingest_query, require_service_name,
-    split_sample_types,
+use crate::{
+    error::ProfilesError,
+    ids::{IngestBytes, IngestItems},
+    ingest::{
+        RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id, decode_ingest_body,
+        decode_otlp, decode_push, enforce_limits, parse_ingest_query, require_service_name,
+        split_sample_types,
+    },
+    limits::{Limits, OverridesProvider},
+    metrics::ServiceMetrics,
+    wal::{
+        PROFILES_WAL_TOPIC, ProfileRecord, WalFunction, WalLocation, WalMapping, WalSample,
+        WalSymbolSet, partition_key,
+    },
+    wire::pb,
 };
-use crate::limits::{Limits, OverridesProvider};
-use crate::metrics::ServiceMetrics;
-use crate::wal::{
-    PROFILES_WAL_TOPIC, ProfileRecord, WalFunction, WalLocation, WalMapping, WalSample,
-    WalSymbolSet, partition_key,
-};
-use crate::wire::pb;
 
 /// Maximum decompressed/decoded request body the distributor will accept, in
 /// bytes (16 MiB). This is wired into both the axum `DefaultBodyLimit` for the
@@ -472,9 +482,12 @@ async fn push_handler(
     if let Ok(tenant) = tenant_from_headers(&headers) {
         state.metrics.record_ingest_samples(&tenant, items);
     }
-    state
-        .metrics
-        .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
+    state.metrics.record_ingest(
+        result.is_ok(),
+        IngestBytes(bytes),
+        IngestItems(items),
+        start.elapsed().as_secs_f64(),
+    );
     result.map_err(connect_error)?;
     Ok(ConnectResponse::new(pb::push::v1::PushResponse {}))
 }
@@ -513,9 +526,12 @@ async fn export_handler(
     if let Ok(tenant) = tenant_from_headers(&headers) {
         state.metrics.record_ingest_samples(&tenant, items);
     }
-    state
-        .metrics
-        .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
+    state.metrics.record_ingest(
+        result.is_ok(),
+        IngestBytes(bytes),
+        IngestItems(items),
+        start.elapsed().as_secs_f64(),
+    );
     result.map_err(connect_error)?;
     Ok(ConnectResponse::new(
         pb::otlp_profiles::ExportProfilesServiceResponse {
@@ -564,9 +580,12 @@ async fn otlp_http_handler(
     if let Ok(tenant) = tenant_from_headers(&headers) {
         state.metrics.record_ingest_samples(&tenant, items);
     }
-    state
-        .metrics
-        .record_ingest(result.is_ok(), bytes, items, start.elapsed().as_secs_f64());
+    state.metrics.record_ingest(
+        result.is_ok(),
+        IngestBytes(bytes),
+        IngestItems(items),
+        start.elapsed().as_secs_f64(),
+    );
     match result {
         Ok(body) => (
             StatusCode::OK,
@@ -613,9 +632,12 @@ async fn ingest_handler(
         state.metrics.record_ingest_samples(&tenant, 1);
     }
     // The `/ingest` door carries exactly one profile per request.
-    state
-        .metrics
-        .record_ingest(result.is_ok(), bytes, 1, start.elapsed().as_secs_f64());
+    state.metrics.record_ingest(
+        result.is_ok(),
+        IngestBytes(bytes),
+        IngestItems(1),
+        start.elapsed().as_secs_f64(),
+    );
     match result {
         Ok(()) => StatusCode::OK.into_response(),
         Err(err) => profiles_error_response(err),
@@ -852,10 +874,12 @@ mod tests {
         assert!(ingest_span_tenant(&empty) == "unknown");
     }
 
-    use crate::error::ProfilesError;
-    use crate::ingest::{RelabelAction, RelabelConfig, TenantLimitConfig, TenantLimits};
-    use crate::limits::OverridesProvider;
-    use crate::wal::ProfileRecord;
+    use crate::{
+        error::ProfilesError,
+        ingest::{RelabelAction, RelabelConfig, TenantLimitConfig, TenantLimits},
+        limits::OverridesProvider,
+        wal::ProfileRecord,
+    };
 
     #[derive(Default)]
     struct RecordingSink(Mutex<Vec<ProfileRecord>>);
@@ -895,11 +919,15 @@ mod tests {
     }
 
     fn otlp_export_request() -> pb::otlp_profiles::ExportProfilesServiceRequest {
-        use pb::opentelemetry::proto::common::v1::{AnyValue, KeyValue, any_value::Value};
-        use pb::opentelemetry::proto::resource::v1::Resource;
-        use pb::otlp_profiles::{
-            Function, Line, Location, Profile, ProfilesDictionary, ResourceProfiles, Sample,
-            ScopeProfiles, Stack, ValueType,
+        use pb::{
+            opentelemetry::proto::{
+                common::v1::{AnyValue, KeyValue, any_value::Value},
+                resource::v1::Resource,
+            },
+            otlp_profiles::{
+                Function, Line, Location, Profile, ProfilesDictionary, ResourceProfiles, Sample,
+                ScopeProfiles, Stack, ValueType,
+            },
         };
 
         let dictionary = ProfilesDictionary {
@@ -1330,6 +1358,102 @@ overrides:
         assert!(
             err.message()
                 .is_some_and(|message| message.contains("max series exceeded"))
+        );
+    }
+
+    fn push_request_one_sample() -> pb::push::v1::PushRequest {
+        use std::io::Write as _;
+
+        let pprof_bytes = crate::wire::test_fixtures::cpu_profile_pprof_bytes();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&pprof_bytes).unwrap();
+        let gzipped = encoder.finish().unwrap();
+
+        pb::push::v1::PushRequest {
+            series: vec![pb::push::v1::RawProfileSeries {
+                labels: vec![
+                    pb::types::v1::LabelPair {
+                        name: "__name__".into(),
+                        value: "process_cpu".into(),
+                    },
+                    pb::types::v1::LabelPair {
+                        name: "service_name".into(),
+                        value: "api".into(),
+                    },
+                ],
+                samples: vec![pb::push::v1::RawSample {
+                    raw_profile: gzipped,
+                    id: "s1".into(),
+                }],
+                annotations: Vec::new(),
+            }],
+        }
+    }
+
+    // The Connect `push` handler must decode the request, append the decoded
+    // profile to the WAL sink, and record the ingest metrics. A body replaced
+    // with a bare `Ok(Default::default())` would append nothing.
+    #[tokio::test]
+    async fn push_handler_appends_record_and_records_metrics() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = state_with(sink.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-scope-orgid", "tenant-a".parse().unwrap());
+
+        push_handler(
+            Extension(state.clone()),
+            headers,
+            ConnectRequest(push_request_one_sample()),
+        )
+        .await
+        .unwrap();
+
+        let recs = sink.0.lock().unwrap();
+        check!(recs.len() == 1);
+        check!(recs[0].tenant == "tenant-a");
+        // Metrics side effect: one ok ingest request was recorded.
+        check!(
+            state
+                .metrics
+                .ingest_requests
+                .get_or_create(&crate::metrics::StatusLabel {
+                    status: "ok".into(),
+                })
+                .get()
+                == 1
+        );
+    }
+
+    // The Connect `export` (OTLP) handler must decode the request, append the
+    // decoded profile to the WAL sink, and record the ingest metrics. A body
+    // replaced with a bare `Ok(Default::default())` would append nothing.
+    #[tokio::test]
+    async fn export_handler_appends_record_and_records_metrics() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = state_with(sink.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-scope-orgid", "tenant-a".parse().unwrap());
+
+        export_handler(
+            Extension(state.clone()),
+            headers,
+            ConnectRequest(otlp_export_request()),
+        )
+        .await
+        .unwrap();
+
+        let recs = sink.0.lock().unwrap();
+        check!(recs.len() == 1);
+        check!(recs[0].tenant == "tenant-a");
+        check!(
+            state
+                .metrics
+                .ingest_requests
+                .get_or_create(&crate::metrics::StatusLabel {
+                    status: "ok".into(),
+                })
+                .get()
+                == 1
         );
     }
 

@@ -2,13 +2,15 @@
 
 use std::collections::BTreeMap;
 
-use crabka_protocol::owned::{
-    create_partitions_request::{CreatePartitionsRequest, CreatePartitionsTopic},
-    create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
-    delete_topics_request::{DeleteTopicState, DeleteTopicsRequest},
-    metadata_request::{MetadataRequest, MetadataRequestTopic},
+use crabka_protocol::{
+    owned::{
+        create_partitions_request::{CreatePartitionsRequest, CreatePartitionsTopic},
+        create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
+        delete_topics_request::{DeleteTopicState, DeleteTopicsRequest},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+    },
+    primitives::uuid::Uuid as ProtoUuid,
 };
-use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
 use uuid::Uuid;
 
 use crate::{AdminClient, AdminError, KafkaError, NOT_CONTROLLER, kafka_error_name};
@@ -323,10 +325,12 @@ fn error_if(code: i16, message: Option<String>) -> Option<KafkaError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::BTreeMap;
+
     use assert2::assert;
     use crabka_protocol::UnknownTaggedFields;
-    use std::collections::BTreeMap;
+
+    use super::*;
 
     #[test]
     fn build_create_topics_one_spec() {

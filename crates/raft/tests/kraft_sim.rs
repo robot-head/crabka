@@ -10,10 +10,11 @@
 
 mod sim_harness;
 
+use crabka_ids::NodeId;
 use sim_harness::{Sim, SimLog};
 
 /// A cluster whose nodes use the in-memory fake log.
-fn new_sim(voter_ids: &[u64]) -> Sim<SimLog> {
+fn new_sim(voter_ids: &[NodeId]) -> Sim<SimLog> {
     Sim::new_with(voter_ids, |_id| SimLog::default())
 }
 
@@ -21,7 +22,7 @@ use assert2::assert;
 
 #[test]
 fn three_nodes_elect_exactly_one_leader() {
-    let mut sim = new_sim(&[1, 2, 3]);
+    let mut sim = new_sim(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
     assert!(
         sim.leaders().len() == 1,
@@ -38,7 +39,7 @@ fn three_nodes_elect_exactly_one_leader() {
 
 #[test]
 fn re_elects_single_leader_after_leader_partition() {
-    let mut sim = new_sim(&[1, 2, 3]);
+    let mut sim = new_sim(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
     assert!(
         sim.leaders().len() == 1,
@@ -79,7 +80,7 @@ fn re_elects_single_leader_after_leader_partition() {
 
 #[test]
 fn committed_high_watermark_agrees_across_voters() {
-    let mut sim = new_sim(&[1, 2, 3]);
+    let mut sim = new_sim(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
     assert!(sim.leaders().len() == 1, "no leader: {:?}", sim.leaders());
     let leader = sim.leaders()[0];

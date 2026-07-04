@@ -1,7 +1,6 @@
 //! DSL golden frame: the wire `Topology` the DSL lowers to must byte-match the
 //! captured JVM 4.x fixture for the same logical pipeline.
-use crabka_client_streams::dsl::StreamsBuilder;
-use crabka_client_streams::{Consumed, Produced, StringSerde};
+use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
 
 fn assert_matches_fixture(wire: &crabka_client_streams::topology::WireTopology, fixture: &str) {
     let path = format!("tests/testdata/golden/dsl/{fixture}.topology.json");

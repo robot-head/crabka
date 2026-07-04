@@ -3,9 +3,7 @@
 use std::io::{Read, Write};
 
 use bytes::Bytes;
-use flate2::Compression as GzipLevel;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
+use flate2::{Compression as GzipLevel, read::GzDecoder, write::GzEncoder};
 
 use crate::CompressionError;
 
@@ -36,8 +34,9 @@ pub fn decompress(data: &[u8], max_output: usize) -> Result<Bytes, CompressionEr
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     const HELLO: &[u8] = b"hello kafka, this is a moderately repetitive payload to compress";
     const BIG_CAP: usize = 256 * 1024 * 1024;

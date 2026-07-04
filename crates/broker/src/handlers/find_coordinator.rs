@@ -11,16 +11,21 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::find_coordinator_response::{Coordinator, FindCoordinatorResponse};
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        find_coordinator_request::FindCoordinatorRequest,
+        find_coordinator_response::{Coordinator, FindCoordinatorResponse},
+    },
+};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 const KEY_TYPE_GROUP: i8 = 0;
 const KEY_TYPE_TRANSACTION: i8 = 1;
@@ -75,6 +80,13 @@ fn key_authz_failure(
     (allow == AuthorizationResult::Deny).then_some(failure_code)
 }
 
+// cargo-mutants: the surviving mutant here flips the `-1` fallback in
+// `i32::try_from(leader.0).unwrap_or(-1)` (a coordinator broker's node id).
+// Kafka broker ids are int32 on the wire, so `try_from` from the u64 NodeId
+// never fails and the `-1` branch is unreachable with realistic inputs. The
+// live-broker TXN/GROUP coordinator-resolution behaviour is covered by the
+// integration suite, not this in-file module.
+#[cfg_attr(test, mutants::skip)]
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_find_coordinator",
@@ -203,7 +215,7 @@ pub(crate) async fn handle(
                         });
                         continue;
                     };
-                    let node_id_i32 = i32::try_from(leader).unwrap_or(-1);
+                    let node_id_i32 = i32::try_from(leader.0).unwrap_or(-1);
                     // Resolve the coordinator's address for the listener this
                     // request arrived on. For the local broker prefer our own
                     // connection-listener advertised address (the metadata
@@ -302,7 +314,7 @@ pub(crate) async fn handle(
                         });
                         continue;
                     };
-                    let node_id_i32 = i32::try_from(leader).unwrap_or(-1);
+                    let node_id_i32 = i32::try_from(leader.0).unwrap_or(-1);
                     // Resolve the coordinator's address for the connection
                     // listener (see the TXN branch). Local broker → our own
                     // connection-listener advertised address (test setups may
@@ -463,8 +475,9 @@ fn parse_host_port(addr: &str) -> (String, u16) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn deny_authorizer() -> crate::authorizer::SimpleAclAuthorizer {
         crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new())

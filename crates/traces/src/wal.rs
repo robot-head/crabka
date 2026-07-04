@@ -4,8 +4,7 @@ use bytes::Bytes;
 use crabka_blockstore::fnv1_32;
 use serde::{Deserialize, Serialize};
 
-use crate::error::TracesError;
-use crate::span::Span;
+use crate::{error::TracesError, span::Span};
 
 /// The traces WAL topic name.
 pub const TRACES_WAL_TOPIC: &str = "__crabka_traces_wal";

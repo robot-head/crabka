@@ -343,8 +343,9 @@ fn is_ident_continue(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn toks(s: &str) -> Vec<Token> {
         let mut t = lex(s).unwrap();

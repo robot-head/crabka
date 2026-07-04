@@ -1,28 +1,28 @@
 //! Coverage for the Forwarder's response/error mapping and the internal
 //! forward endpoint's error arm — without the full multi-replica path.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use axum::Json;
-use axum::Router;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
+use axum::{
+    Json, Router,
+    body::Body,
+    http::{Request, StatusCode},
+    response::{IntoResponse, Response},
+    routing::post,
+};
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::config::{ClientAuthMode, GatewayConfig, TlsSettings};
-use crabka_grpc_gateway::dedup::DedupEngine;
-use crabka_grpc_gateway::dedup::store::DedupStore;
-use crabka_grpc_gateway::error::GatewayError;
-use crabka_grpc_gateway::forward::{
-    ForwardError, ForwardRecord, ForwardResult, Forwarder, forward_router,
+use crabka_grpc_gateway::{
+    codec::RawCodec,
+    config::{ClientAuthMode, GatewayConfig, TlsSettings},
+    dedup::{DedupEngine, store::DedupStore},
+    error::GatewayError,
+    forward::{ForwardError, ForwardRecord, ForwardResult, Forwarder, forward_router},
+    ids::{Offset, PartitionIndex},
+    produce::ProduceCore,
+    state::AppState,
+    types::GatewayRecord,
 };
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::state::AppState;
-use crabka_grpc_gateway::types::GatewayRecord;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -53,15 +53,15 @@ fn anon() -> crabka_security::Principal {
 async fn mock_forward(Json(req): Json<ForwardRecord>) -> Response {
     match req.topic.as_str() {
         "ok" => Json(ForwardResult {
-            partition: 7,
-            offset: 11,
+            partition: PartitionIndex(7),
+            offset: Offset(11),
             deduplicated: true,
             error: None,
         })
         .into_response(),
         "retriable" => Json(ForwardResult {
-            partition: -1,
-            offset: -1,
+            partition: PartitionIndex(-1),
+            offset: Offset(-1),
             deduplicated: false,
             error: Some(ForwardError {
                 message: "warming".into(),
@@ -70,8 +70,8 @@ async fn mock_forward(Json(req): Json<ForwardRecord>) -> Response {
         })
         .into_response(),
         "fatal" => Json(ForwardResult {
-            partition: -1,
-            offset: -1,
+            partition: PartitionIndex(-1),
+            offset: Offset(-1),
             deduplicated: false,
             error: Some(ForwardError {
                 message: "boom".into(),
@@ -115,7 +115,10 @@ async fn forward_maps_owner_responses() {
 
     // Happy path: error: None => Ok with the forwarded outcome.
     let ok = fwd.forward(&addr, &rec("ok"), &anon()).await.unwrap();
-    assert_eq!((ok.partition, ok.offset, ok.deduplicated), (7, 11, true));
+    assert_eq!(
+        (ok.partition, ok.offset, ok.deduplicated),
+        (PartitionIndex(7), Offset(11), true)
+    );
 
     // error: Some{retriable:true} => Unavailable (origin retries / re-resolves).
     assert!(matches!(

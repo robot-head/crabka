@@ -84,8 +84,9 @@ pub mod pb {
 
     /// Ergonomic alias for OTLP collector profile service + message types.
     pub mod otlp_profiles {
-        pub use super::opentelemetry::proto::collector::profiles::v1development::*;
-        pub use super::opentelemetry::proto::profiles::v1development::*;
+        pub use super::opentelemetry::proto::{
+            collector::profiles::v1development::*, profiles::v1development::*,
+        };
     }
 }
 

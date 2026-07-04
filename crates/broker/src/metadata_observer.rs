@@ -6,18 +6,15 @@
 //! each record batch through the `crabka_metadata` Kafka-record bridge, and
 //! applying records exactly as the controller state machine would.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use qubit_clock::sleep::AsyncSleeper;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use std::{sync::Arc, time::Duration};
 
 use crabka_metadata::{MetadataImage, from_kraft_value};
 use crabka_protocol::records::RecordBatch;
 use crabka_raft::{NodeId, OutboundDialer};
+use qubit_clock::sleep::AsyncSleeper;
+use tokio::{sync::watch, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, warn};
 
 /// Static configuration for the observer.
 #[derive(Clone)]
@@ -263,21 +260,28 @@ async fn run_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use assert2::assert;
     use bytes::{Bytes, BytesMut};
     use crabka_metadata::{MetadataRecord, TopicRecord, to_kraft_values};
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_request;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-    use crabka_protocol::records::header::Attributes;
-    use crabka_protocol::records::{Record, RecordBatch};
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+        },
+        records::{Record, RecordBatch, header::Attributes},
+    };
     use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
-    use qubit_clock::MockWaiterKind;
-    use qubit_clock::sleep::{MockSleeper, SystemSleeper};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use qubit_clock::{
+        MockWaiterKind,
+        sleep::{MockSleeper, SystemSleeper},
+    };
     use tempfile::TempDir;
     use uuid::Uuid;
+
+    use super::*;
 
     #[derive(Clone)]
     struct RecordingDialer {
@@ -413,16 +417,22 @@ mod tests {
     #[test]
     fn voter_at_wraps_round_robin_by_modulo() {
         let voters = vec![
-            (1u64, "a:9093".to_string()),
-            (2u64, "b:9093".to_string()),
-            (3u64, "c:9093".to_string()),
+            (crabka_raft::NodeId(1), "a:9093".to_string()),
+            (crabka_raft::NodeId(2), "b:9093".to_string()),
+            (crabka_raft::NodeId(3), "c:9093".to_string()),
         ];
         // In-range picks each distinct voter. `idx / len` (the `%`→`/` mutant)
         // would collapse 1 and 2 to index 0 ("a"), so distinguishing 0/1/2 here
         // proves the modulo, not integer division, indexes the list.
         // Wrap-around: index 3 must rotate back to the first voter (3 % 3 == 0);
         // `3 / 3 == 1` would return the second voter instead.
-        let cases = [(0usize, 1u64), (1, 2), (2, 3), (3, 1), (4, 2)];
+        let cases = [
+            (0usize, crabka_raft::NodeId(1)),
+            (1, crabka_raft::NodeId(2)),
+            (2, crabka_raft::NodeId(3)),
+            (3, crabka_raft::NodeId(1)),
+            (4, crabka_raft::NodeId(2)),
+        ];
         for (idx, expected_id) in cases {
             assert!(voter_at(&voters, idx).0 == expected_id, "idx {idx}");
         }
@@ -486,7 +496,7 @@ mod tests {
         let sleeper = MockSleeper::new();
         let timeline = sleeper.timeline();
         let observer = MetadataObserver::start(ObserverConfig {
-            voters: vec![(1, mock.addr.to_string())],
+            voters: vec![(crabka_raft::NodeId(1), mock.addr.to_string())],
             dialer: Arc::new(CountingDialer {
                 dial_count: dial_count.clone(),
             }),
@@ -540,7 +550,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Bootstrap,
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(crabka_raft::NodeId(1), dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
         let mut leader_rx = ctrl.watch_leader();
@@ -559,7 +569,7 @@ mod tests {
         let client_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let observer = MetadataObserver::start(ObserverConfig {
-            voters: vec![(1, ctrl_addr.to_string())],
+            voters: vec![(crabka_raft::NodeId(1), ctrl_addr.to_string())],
             dialer: Arc::new(RecordingDialer {
                 client_ids: client_ids.clone(),
             }),

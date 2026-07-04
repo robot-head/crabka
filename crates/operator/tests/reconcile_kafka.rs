@@ -20,14 +20,16 @@
 //! `broker-{id}.toml` key per pool — we have to enumerate the pools
 //! first to know which keys to emit.
 
-use assert2::{assert, check};
 use std::sync::Arc;
 
-use crabka_operator::controller::kafka::reconcile;
-use crabka_operator::crd::{
-    ConfigMapKeyRef, ExternalLoggingSource, Kafka, KafkaSpec, Listener, ListenerAuthentication,
-    ListenerType, Logging, LoggingType, MetricsConfig, NetworkPolicySpec, PodMonitorSpec,
-    ServiceMonitorSpec,
+use assert2::{assert, check};
+use crabka_operator::{
+    controller::kafka::reconcile,
+    crd::{
+        ConfigMapKeyRef, ExternalLoggingSource, Kafka, KafkaSpec, Listener, ListenerAuthentication,
+        ListenerType, Logging, LoggingType, MetricsConfig, NetworkPolicySpec, PodMonitorSpec,
+        ServiceMonitorSpec,
+    },
 };
 use http::{Method, Response};
 use serde_json::json;

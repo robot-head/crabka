@@ -1,14 +1,18 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
+
 use tokio::sync::Mutex as TokioMutex;
 
-use crate::error::StreamsClientError;
-use crate::membership::StreamsAssignment;
-use crate::runtime::eos::{ProcessingGuarantee, StreamsGroupMeta, TransactionalProducer};
-use crate::runtime::io::{BeginTxnGate, OffsetStore, RecordFetcher, RecordProducer};
-use crate::runtime::iq::{IqRequest, answer_iq};
-use crate::runtime::task::{StreamTask, TaskRole};
-use crate::topology::BuiltTopology;
+use crate::{
+    error::StreamsClientError,
+    membership::StreamsAssignment,
+    runtime::{
+        eos::{ProcessingGuarantee, StreamsGroupMeta, TransactionalProducer},
+        io::{BeginTxnGate, OffsetStore, RecordFetcher, RecordProducer},
+        iq::{IqRequest, answer_iq},
+        task::{StreamTask, TaskRole},
+    },
+    topology::BuiltTopology,
+};
 
 pub(crate) struct StreamThread {
     tasks: HashMap<(String, i32), StreamTask>,
@@ -532,11 +536,17 @@ impl StreamThread {
         fields(store = %req.store, kind = ?req.kind, tasks = self.tasks.len()),
     )]
     pub(crate) async fn serve_iq2(&mut self, req: crate::runtime::iqv2::dispatch::Iq2Request) {
-        use crate::runtime::iqv2::dispatch::Iq2Outcome;
-        use crate::runtime::iqv2::request::{PartitionSel, PositionBound};
-        use crate::runtime::iqv2::result::FailureReason;
-        use crate::runtime::task::TaskRole;
-        use crate::store::iq::Iq2Failure;
+        use crate::{
+            runtime::{
+                iqv2::{
+                    dispatch::Iq2Outcome,
+                    request::{PartitionSel, PositionBound},
+                    result::FailureReason,
+                },
+                task::TaskRole,
+            },
+            store::iq::Iq2Failure,
+        };
 
         let had_tasks = !self.tasks.is_empty();
         let mut per_partition = Vec::new();
@@ -657,19 +667,26 @@ impl BeginTxnGate for EosBeginGate {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::membership::{StreamsAssignment, TaskAssignment, TaskOffsetTracker, TopicPartition};
-    use crate::processor::api::{Processor, ProcessorContext};
-    use crate::processor::record::Record;
-    use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::runtime::io::{
-        FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex as StdMutex},
     };
-    use crate::topology::{NodeHandle, Topology};
+
     use assert2::check;
-    use std::collections::HashMap;
-    use std::sync::Arc;
-    use std::sync::Mutex as StdMutex;
+
+    use super::*;
+    use crate::{
+        membership::{StreamsAssignment, TaskAssignment, TaskOffsetTracker, TopicPartition},
+        processor::{
+            api::{Processor, ProcessorContext},
+            record::Record,
+            serde::{I64Serde, StringSerde},
+        },
+        runtime::io::{
+            FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+        },
+        topology::{NodeHandle, Topology},
+    };
 
     // ─── stateless Upper processor ────────────────────────────────────────────
 
@@ -1150,9 +1167,11 @@ mod tests {
     /// returns `RebalanceInProgress`.
     #[tokio::test]
     async fn serve_iq_reads_restored_kv_store() {
-        use crate::processor::serde::{I64Serde, Serde, StringSerde};
-        use crate::runtime::iq::{IqError, IqOp, IqPayload, IqRequest};
-        use crate::store::iq::StoreKind;
+        use crate::{
+            processor::serde::{I64Serde, Serde, StringSerde},
+            runtime::iq::{IqError, IqOp, IqPayload, IqRequest},
+            store::iq::StoreKind,
+        };
 
         // --- build a thread + restore `counts` with a=7 (copied from
         //     stateful_apply_assignment_restores_store_from_changelog) ---
@@ -1243,10 +1262,14 @@ mod tests {
     /// suppress or fail the matching partition.
     #[tokio::test]
     async fn serve_iq2_gates_partition_active_and_bound() {
-        use crate::runtime::iqv2::dispatch::Iq2Request;
-        use crate::runtime::iqv2::request::{PartitionSel, Position, PositionBound};
-        use crate::runtime::iqv2::result::FailureReason;
-        use crate::store::iq::{Iq2Query, StoreKind};
+        use crate::{
+            runtime::iqv2::{
+                dispatch::Iq2Request,
+                request::{PartitionSel, Position, PositionBound},
+                result::FailureReason,
+            },
+            store::iq::{Iq2Query, StoreKind},
+        };
 
         // active(p0) + standby(p1) over the stateful `counts` KeyValue store.
         // Neither task is fed records, so the store is empty.
@@ -1919,8 +1942,7 @@ mod tests {
 
     /// `source → SuppressingCounter(materializes "counts", cache-marked) → Change<i64> sink`.
     fn cached_counting_built() -> crate::topology::BuiltTopology {
-        use crate::dsl::processors::change::Change;
-        use crate::dsl::processors::tuple_forwarder::TupleForwarder;
+        use crate::dsl::processors::{change::Change, tuple_forwarder::TupleForwarder};
         let mut t = Topology::new();
         let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let c = t.add_processor(

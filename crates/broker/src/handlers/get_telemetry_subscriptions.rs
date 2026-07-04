@@ -4,18 +4,23 @@
 //! id). See `client_metrics::manager`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest,
+        get_telemetry_subscriptions_response::GetTelemetrySubscriptionsResponse,
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
 use uuid::Uuid;
 
-use crabka_protocol::owned::get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest;
-use crabka_protocol::owned::get_telemetry_subscriptions_response::GetTelemetrySubscriptionsResponse;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::client_metrics::manager::{ACCEPTED_COMPRESSION_TYPES, ClientAttributes};
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::context::TelemetryContext;
+use crate::{
+    broker::Broker,
+    client_metrics::manager::{ACCEPTED_COMPRESSION_TYPES, ClientAttributes},
+    codes,
+    error::BrokerError,
+    handlers::context::TelemetryContext,
+};
 
 #[allow(clippy::unused_async)] // signature symmetry with other inline-intercept handlers
 #[tracing::instrument(

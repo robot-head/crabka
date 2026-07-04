@@ -15,11 +15,16 @@
 use std::path::PathBuf;
 
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_ids::{ApiKey, ApiVersion};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{SaslMechanism, ScramClientExchange};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -161,7 +166,15 @@ where
     let mut body = BytesMut::new();
     req.encode(&mut body, 1)
         .map_err(|e| OutboundSaslError::Codec(format!("SaslHandshake encode: {e}")))?;
-    let resp_bytes = round_trip(stream, API_KEY_SASL_HANDSHAKE, 1, *corr_id, false, &body).await?;
+    let resp_bytes = round_trip(
+        stream,
+        ApiKey(API_KEY_SASL_HANDSHAKE),
+        ApiVersion(1),
+        *corr_id,
+        false,
+        &body,
+    )
+    .await?;
     *corr_id += 1;
     let mut cur: &[u8] = &resp_bytes;
     let resp = SaslHandshakeResponse::decode(&mut cur, 1)
@@ -278,8 +291,10 @@ async fn run_gssapi_client<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
 {
-    use crabka_security::gssapi::client::{ClientStep, GssapiClientExchange};
-    use crabka_security::gssapi::provider::SspiInitiator;
+    use crabka_security::gssapi::{
+        client::{ClientStep, GssapiClientExchange},
+        provider::SspiInitiator,
+    };
 
     let target_spn = format!("{service_name}/{server_name}");
     let keytab = keytab_path.to_string_lossy();
@@ -336,8 +351,15 @@ where
     let mut body = BytesMut::new();
     req.encode(&mut body, 2)
         .map_err(|e| OutboundSaslError::Codec(format!("SaslAuthenticate encode: {e}")))?;
-    let resp_bytes =
-        round_trip(stream, API_KEY_SASL_AUTHENTICATE, 2, *corr_id, true, &body).await?;
+    let resp_bytes = round_trip(
+        stream,
+        ApiKey(API_KEY_SASL_AUTHENTICATE),
+        ApiVersion(2),
+        *corr_id,
+        true,
+        &body,
+    )
+    .await?;
     *corr_id += 1;
     let mut cur: &[u8] = &resp_bytes;
     let resp = SaslAuthenticateResponse::decode(&mut cur, 2)
@@ -357,8 +379,8 @@ where
 ///   for every other flexible response.
 async fn round_trip<S>(
     stream: &mut S,
-    api_key: i16,
-    api_version: i16,
+    api_key: ApiKey,
+    api_version: ApiVersion,
     corr_id: i32,
     flexible: bool,
     body: &[u8],
@@ -368,8 +390,8 @@ where
 {
     let mut frame = BytesMut::with_capacity(16 + body.len());
     // RequestHeader: api_key + version + corr_id + client_id (i16 NULLABLE_STRING).
-    frame.put_i16(api_key);
-    frame.put_i16(api_version);
+    frame.put_i16(api_key.0);
+    frame.put_i16(api_version.0);
     frame.put_i32(corr_id);
     frame.put_i16(
         i16::try_from(OUTBOUND_CLIENT_ID.len())
@@ -417,13 +439,18 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
-    use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-    use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
+    use crabka_protocol::owned::{
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_response::SaslHandshakeResponse,
+    };
     use crabka_security::{ScramServerExchange, StepResult, hash_scram_password};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::time::{Duration, timeout};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        time::{Duration, timeout},
+    };
+
+    use super::*;
 
     // Minimal server: read one request frame, reply with a response
     // header (corr_id, plus a 0x00 tagged-fields byte when `flex_header`)
@@ -466,7 +493,13 @@ mod tests {
             .encode(&mut hs, 1)
             .unwrap();
             let hs_req = reply_frame(&mut server, &hs, false).await;
-            assert_request_header(&hs_req, API_KEY_SASL_HANDSHAKE, 1, 1, false);
+            assert_request_header(
+                &hs_req,
+                ApiKey(API_KEY_SASL_HANDSHAKE),
+                ApiVersion(1),
+                1,
+                false,
+            );
             let mut hs_body = request_body(&hs_req, false);
             let hs_decoded = SaslHandshakeRequest::decode(&mut hs_body, 1).unwrap();
             assert!(hs_decoded.mechanism == "PLAIN");
@@ -481,7 +514,13 @@ mod tests {
             .encode(&mut au, 2)
             .unwrap();
             let au_req = reply_frame(&mut server, &au, true).await;
-            assert_request_header(&au_req, API_KEY_SASL_AUTHENTICATE, 2, 2, true);
+            assert_request_header(
+                &au_req,
+                ApiKey(API_KEY_SASL_AUTHENTICATE),
+                ApiVersion(2),
+                2,
+                true,
+            );
             let mut au_body = request_body(&au_req, true);
             let au_decoded = SaslAuthenticateRequest::decode(&mut au_body, 2).unwrap();
             assert!(au_decoded.auth_bytes.as_ref() == b"\0u\0p");
@@ -515,7 +554,13 @@ mod tests {
                 .encode(&mut au, 2)
                 .unwrap();
                 let req = reply_frame(&mut server, &au, true).await;
-                assert_request_header(&req, API_KEY_SASL_AUTHENTICATE, 2, expected_corr, true);
+                assert_request_header(
+                    &req,
+                    ApiKey(API_KEY_SASL_AUTHENTICATE),
+                    ApiVersion(2),
+                    expected_corr,
+                    true,
+                );
                 let mut body = request_body(&req, true);
                 let decoded = SaslAuthenticateRequest::decode(&mut body, 2).unwrap();
                 assert!(decoded.auth_bytes.as_ref() == expected_payload);
@@ -550,7 +595,13 @@ mod tests {
             .encode(&mut hs, 1)
             .unwrap();
             let hs_req = reply_frame(&mut server, &hs, false).await;
-            assert_request_header(&hs_req, API_KEY_SASL_HANDSHAKE, 1, 1, false);
+            assert_request_header(
+                &hs_req,
+                ApiKey(API_KEY_SASL_HANDSHAKE),
+                ApiVersion(1),
+                1,
+                false,
+            );
             let mut hs_body = request_body(&hs_req, false);
             let hs_decoded = SaslHandshakeRequest::decode(&mut hs_body, 1).unwrap();
             assert!(hs_decoded.mechanism == "SCRAM-SHA-256");
@@ -564,7 +615,13 @@ mod tests {
             .encode(&mut au, 2)
             .unwrap();
             let au_req = reply_frame(&mut server, &au, true).await;
-            assert_request_header(&au_req, API_KEY_SASL_AUTHENTICATE, 2, 2, true);
+            assert_request_header(
+                &au_req,
+                ApiKey(API_KEY_SASL_AUTHENTICATE),
+                ApiVersion(2),
+                2,
+                true,
+            );
         });
 
         let creds = SaslCredentials::Scram {
@@ -594,7 +651,13 @@ mod tests {
             .encode(&mut hs, 1)
             .unwrap();
             let hs_req = reply_frame(&mut server, &hs, false).await;
-            assert_request_header(&hs_req, API_KEY_SASL_HANDSHAKE, 1, 1, false);
+            assert_request_header(
+                &hs_req,
+                ApiKey(API_KEY_SASL_HANDSHAKE),
+                ApiVersion(1),
+                1,
+                false,
+            );
 
             let cred = hash_scram_password(b"p", SaslMechanism::ScramSha256, 4096);
             let scram_server = ScramServerExchange::new("u".to_string(), cred);
@@ -602,7 +665,13 @@ mod tests {
             let first_req_len = server.read_u32().await.unwrap();
             let mut first_req = vec![0u8; first_req_len as usize];
             server.read_exact(&mut first_req).await.unwrap();
-            assert_request_header(&first_req, API_KEY_SASL_AUTHENTICATE, 2, 2, true);
+            assert_request_header(
+                &first_req,
+                ApiKey(API_KEY_SASL_AUTHENTICATE),
+                ApiVersion(2),
+                2,
+                true,
+            );
             let mut first_body = request_body(&first_req, true);
             let first_auth = SaslAuthenticateRequest::decode(&mut first_body, 2).unwrap();
             let server_first = match scram_server.step(&first_auth.auth_bytes) {
@@ -629,7 +698,13 @@ mod tests {
             .encode(&mut second_resp, 2)
             .unwrap();
             let second_req = reply_frame(&mut server, &second_resp, true).await;
-            assert_request_header(&second_req, API_KEY_SASL_AUTHENTICATE, 2, 3, true);
+            assert_request_header(
+                &second_req,
+                ApiKey(API_KEY_SASL_AUTHENTICATE),
+                ApiVersion(2),
+                3,
+                true,
+            );
         });
 
         let creds = SaslCredentials::Scram {
@@ -659,9 +734,16 @@ mod tests {
             server.flush().await.unwrap();
         });
 
-        let err = round_trip(&mut client, API_KEY_SASL_HANDSHAKE, 1, 99, false, &[])
-            .await
-            .unwrap_err();
+        let err = round_trip(
+            &mut client,
+            ApiKey(API_KEY_SASL_HANDSHAKE),
+            ApiVersion(1),
+            99,
+            false,
+            &[],
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, OutboundSaslError::Codec(msg) if msg == "response missing corr_id"));
         server_task.await.unwrap();
     }
@@ -678,9 +760,16 @@ mod tests {
             server.flush().await.unwrap();
         });
 
-        let err = round_trip(&mut client, API_KEY_SASL_AUTHENTICATE, 2, 99, true, &[])
-            .await
-            .unwrap_err();
+        let err = round_trip(
+            &mut client,
+            ApiKey(API_KEY_SASL_AUTHENTICATE),
+            ApiVersion(2),
+            99,
+            true,
+            &[],
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(err, OutboundSaslError::Codec(msg) if msg == "flexible response missing tagged-fields byte")
         );
@@ -689,13 +778,13 @@ mod tests {
 
     fn assert_request_header(
         req: &[u8],
-        api_key: i16,
-        api_version: i16,
+        api_key: ApiKey,
+        api_version: ApiVersion,
         corr_id: i32,
         flexible: bool,
     ) {
-        check!(i16::from_be_bytes([req[0], req[1]]) == api_key);
-        check!(i16::from_be_bytes([req[2], req[3]]) == api_version);
+        check!(ApiKey(i16::from_be_bytes([req[0], req[1]])) == api_key);
+        check!(ApiVersion(i16::from_be_bytes([req[2], req[3]])) == api_version);
         check!(i32::from_be_bytes([req[4], req[5], req[6], req[7]]) == corr_id);
         let client_len = i16::from_be_bytes([req[8], req[9]]);
         assert!(client_len == i16::try_from(OUTBOUND_CLIENT_ID.len()).unwrap());

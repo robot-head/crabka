@@ -4,17 +4,14 @@
 //! `MetadataObserver` (true `KRaft` observer) plus a write-forwarding path
 //! to the controller quorum. Handlers depend only on this trait.
 
-use std::collections::BTreeSet;
-use std::net::SocketAddr;
-use std::sync::Arc;
-
-use tokio::sync::watch;
+use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
 use crabka_metadata::{MetadataImage, MetadataRecord};
 use crabka_raft::{
     AddVoter, ControllerHandle, Node, NodeId, OutboundDialer, QuorumState, RaftError,
     ReconfigOutcome, RemoveVoter, SnapshotRange, UpdateVoter,
 };
+use tokio::sync::watch;
 
 use crate::metadata_observer::MetadataObserver;
 
@@ -284,7 +281,7 @@ impl MetadataWriter for QuorumForwarder {
                 Ok(resp) => {
                     last_err = RaftError::NotLeader {
                         current_leader: (resp.leader_hint >= 0)
-                            .then(|| u64::try_from(resp.leader_hint).unwrap_or(0)),
+                            .then(|| NodeId(u64::try_from(resp.leader_hint).unwrap_or(0))),
                     };
                 }
                 Err(e) => last_err = e,
@@ -296,32 +293,42 @@ impl MetadataWriter for QuorumForwarder {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MetadataSource, MetadataWriter, ObserverSource, QuorumForwarder, build_forward_order,
+    use std::{
+        collections::BTreeSet,
+        net::SocketAddr,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
+
     use assert2::assert;
     use bytes::BytesMut;
     use crabka_metadata::{MetadataRecord, TopicRecord};
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_request;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+        },
+    };
     use crabka_raft::{
         BootstrapMode, Controller, ControllerConfig, Node, NodeId, OutboundDialer, RaftError,
         SnapshotRange,
     };
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
     use tokio::sync::watch;
     use uuid::Uuid;
 
+    use super::{
+        MetadataSource, MetadataWriter, ObserverSource, QuorumForwarder, build_forward_order,
+    };
+
     fn voters() -> Vec<(crabka_raft::NodeId, String)> {
         vec![
-            (1, "h1:9093".to_string()),
-            (2, "h2:9093".to_string()),
-            (3, "h3:9093".to_string()),
+            (crabka_audit::NodeId(1), "h1:9093".to_string()),
+            (crabka_audit::NodeId(2), "h2:9093".to_string()),
+            (crabka_audit::NodeId(3), "h3:9093".to_string()),
         ]
     }
 
@@ -390,7 +397,7 @@ mod tests {
     ) -> QuorumForwarder {
         let (_leader_tx, leader_rx) = watch::channel(leader_hint);
         QuorumForwarder {
-            voters: vec![(1, addr.to_string())],
+            voters: vec![(NodeId(1), addr.to_string())],
             dialer: Arc::new(RecordingDialer { client_ids }),
             client_id: "forwarder-client".into(),
             leader: leader_rx,
@@ -449,13 +456,13 @@ mod tests {
         // A flipped `Some(v.0) != hint` (i.e. `== hint`) would re-push only the
         // hinted voter and drop the fallbacks, leaving no peer to retry when the
         // hint is stale.
-        let order = build_forward_order(&voters(), Some(2));
+        let order = build_forward_order(&voters(), Some(crabka_audit::NodeId(2)));
         assert!(
             order
                 == vec![
-                    (2, "h2:9093".to_string()),
-                    (1, "h1:9093".to_string()),
-                    (3, "h3:9093".to_string()),
+                    (crabka_raft::NodeId(2), "h2:9093".to_string()),
+                    (crabka_raft::NodeId(1), "h1:9093".to_string()),
+                    (crabka_raft::NodeId(3), "h3:9093".to_string()),
                 ]
         );
     }
@@ -472,7 +479,7 @@ mod tests {
     fn forward_order_unknown_hint_still_tries_all_voters() {
         // Hint names a voter not in the set → no leader-first entry, but every
         // voter is still tried (hint 9 != each id).
-        let order = build_forward_order(&voters(), Some(9));
+        let order = build_forward_order(&voters(), Some(crabka_audit::NodeId(9)));
         assert!(order == voters());
     }
 
@@ -481,14 +488,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Bootstrap,
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("controller");
         wait_for_controller_leader(&ctrl).await;
         let source: &dyn MetadataSource = &ctrl;
 
         assert!(matches!(
-            source.add_learner(2, Node::default()).await,
+            source.add_learner(NodeId(2), Node::default()).await,
             Err(RaftError::Unsupported(_))
         ));
         source
@@ -540,7 +547,7 @@ mod tests {
         }
 
         not_leader_none(&source.change_membership(BTreeSet::new()).await);
-        not_leader_none(&source.add_learner(2, Node::default()).await);
+        not_leader_none(&source.add_learner(NodeId(2), Node::default()).await);
         not_leader_none(&source.trigger_snapshot().await);
         source.cancel().await;
         assert!(observer.task_drained_for_test().await);
@@ -563,7 +570,7 @@ mod tests {
             })
             .await;
         let client_ids = Arc::new(Mutex::new(Vec::new()));
-        let forwarder = forwarder(mock.addr, client_ids.clone(), Some(1));
+        let forwarder = forwarder(mock.addr, client_ids.clone(), Some(NodeId(1)));
 
         forwarder
             .submit_change(vec![topic_record("applied")])
@@ -594,7 +601,7 @@ mod tests {
                 None
             })
             .await;
-        let forwarder = forwarder(mock.addr, Arc::new(Mutex::new(Vec::new())), Some(1));
+        let forwarder = forwarder(mock.addr, Arc::new(Mutex::new(Vec::new())), Some(NodeId(1)));
 
         let err = forwarder
             .submit_change(vec![topic_record("already-exists")])
@@ -621,7 +628,7 @@ mod tests {
                 None
             })
             .await;
-        let forwarder = forwarder(mock.addr, Arc::new(Mutex::new(Vec::new())), Some(1));
+        let forwarder = forwarder(mock.addr, Arc::new(Mutex::new(Vec::new())), Some(NodeId(1)));
 
         let err = forwarder
             .submit_change(vec![topic_record("redirect")])
@@ -631,7 +638,7 @@ mod tests {
         assert!(matches!(
             err,
             RaftError::NotLeader {
-                current_leader: Some(7)
+                current_leader: Some(NodeId(7))
             }
         ));
         mock.stop();
@@ -650,7 +657,7 @@ mod tests {
                 None
             })
             .await;
-        let forwarder = forwarder(mock.addr, Arc::new(Mutex::new(Vec::new())), Some(1));
+        let forwarder = forwarder(mock.addr, Arc::new(Mutex::new(Vec::new())), Some(NodeId(1)));
 
         let err = forwarder
             .submit_change(vec![topic_record("unknown-leader")])

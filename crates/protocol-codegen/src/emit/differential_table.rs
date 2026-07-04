@@ -11,8 +11,10 @@
 use proc_macro2::{Literal, TokenStream};
 use quote::{format_ident, quote};
 
-use crate::ir::{MessageSpec, MessageType};
-use crate::name_conv;
+use crate::{
+    ir::{MessageSpec, MessageType},
+    name_conv,
+};
 
 /// Maximum version we will ever iterate to. Schemas with open-ended
 /// `validVersions` (e.g. `0+`) would produce `i16::MAX` iterations, which is

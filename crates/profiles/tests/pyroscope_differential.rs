@@ -7,28 +7,31 @@
 
 #![allow(clippy::default_trait_access)]
 
-use std::collections::BTreeSet;
-use std::io::Write;
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeSet,
+    io::Write,
+    sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use crabka_pprof::PprofProfile;
-use crabka_pprof::proto;
-use crabka_profiles::distributor::{self, DistributorState, WalSink};
-use crabka_profiles::hot_store::WalTailProfileStore;
-use crabka_profiles::ingest::TenantLimitConfig;
-use crabka_profiles::limits::OverridesProvider;
-use crabka_profiles::query::{self, QuerierState};
-use crabka_profiles::{ProfileRecord, ProfilesError};
-use flate2::Compression;
-use flate2::write::GzEncoder;
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use crabka_pprof::{PprofProfile, proto};
+use crabka_profiles::{
+    ProfileRecord, ProfilesError,
+    distributor::{self, DistributorState, WalSink},
+    hot_store::WalTailProfileStore,
+    ingest::TenantLimitConfig,
+    limits::OverridesProvider,
+    query::{self, QuerierState},
+};
+use flate2::{Compression, write::GzEncoder};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
-use testcontainers::core::{Host, IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{GenericImage, ImageExt};
+use testcontainers::{
+    GenericImage, ImageExt,
+    core::{Host, IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
 use tokio::sync::oneshot;
 
 const TENANT: &str = "tenant-a";

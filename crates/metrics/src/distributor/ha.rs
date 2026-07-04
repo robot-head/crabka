@@ -1,8 +1,10 @@
 //! HA deduplication for Prometheus replica pairs.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use crate::wire::DecodedSeries;
 
@@ -290,9 +292,8 @@ mod tests {
     use assert2::{assert, check};
     use crabka_blockstore::Labels;
 
-    use crate::wire::DecodedSample;
-
     use super::*;
+    use crate::wire::DecodedSample;
 
     fn series_with(cluster: &str, replica: &str) -> DecodedSeries {
         let mut labels = Labels::new();
@@ -423,9 +424,10 @@ mod tests {
 
     #[test]
     fn concurrent_first_seen_elections_elect_exactly_one() {
-        use std::sync::Arc;
-        use std::sync::Barrier;
-        use std::thread;
+        use std::{
+            sync::{Arc, Barrier},
+            thread,
+        };
 
         let tracker = Arc::new(HaTracker::default());
         let barrier = Arc::new(Barrier::new(2));

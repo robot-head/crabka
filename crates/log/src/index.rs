@@ -6,13 +6,17 @@
 // recovery, and lookup-by-time paths.
 #![allow(dead_code)]
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom, Write},
+    path::Path,
+};
 
 use tracing::instrument;
-use zerocopy::byteorder::{I64, U32};
-use zerocopy::{BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+use zerocopy::{
+    BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned,
+    byteorder::{I64, U32},
+};
 
 use crate::error::LogError;
 
@@ -149,10 +153,10 @@ impl OffsetIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn append_and_lookup() {
@@ -368,10 +372,10 @@ impl TimeIndex {
 
 #[cfg(test)]
 mod time_tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn append_and_lookup_time() {

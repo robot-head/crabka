@@ -8,19 +8,17 @@
 //! The actual compaction runs on the partition's writer actor, so
 //! appends and compaction are serialized.
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
+use crabka_metadata::NodeId;
 use qubit_clock::sleep::{AsyncSleeper, SystemSleeper};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crabka_metadata::NodeId;
-
-use crate::metrics::BrokerMetrics;
-use crate::partition::Partition;
-use crate::partition_registry::PartitionRegistry;
+use crate::{metrics::BrokerMetrics, partition::Partition, partition_registry::PartitionRegistry};
 
 /// Default cadence of the broker-wide compaction sweep.
 const DEFAULT_COMPACTION_INTERVAL: Duration = Duration::from_secs(30);
@@ -103,12 +101,12 @@ pub(crate) async fn tick_all(
         }
         match partition.compact_log().await {
             Ok(()) => {
-                metrics.record_compaction(&partition.topic, partition.partition_id);
+                metrics.record_compaction(&partition.topic, partition.partition_id.get());
             }
             Err(e) => {
                 warn!(
                     topic = %partition.topic,
-                    partition_id = partition.partition_id,
+                    partition_id = partition.partition_id.get(),
                     error = %e,
                     "compaction failed for partition",
                 );
@@ -123,13 +121,16 @@ pub(crate) async fn tick_all(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::atomic::Ordering;
+
     use assert2::assert;
     use bytes::Bytes;
+    use crabka_ids::PartitionIndex;
     use crabka_protocol::records::{Record, RecordBatch};
-    use std::sync::atomic::Ordering;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
+
+    use super::*;
 
     fn keyed_batch(base: i64, key: &[u8], value: &[u8]) -> RecordBatch {
         RecordBatch {
@@ -168,13 +169,13 @@ mod tests {
 
         let part = crate::broker::spawn_partition(
             topic.to_string(),
-            partition_id,
+            PartitionIndex(partition_id),
             root.path().to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        part.current_leader.store(leader, Ordering::Relaxed);
+        part.current_leader.store(leader.0, Ordering::Relaxed);
         part
     }
 
@@ -183,7 +184,7 @@ mod tests {
             .log
             .lock()
             .expect("partition log lock")
-            .read(0, 1 << 20)
+            .read(crabka_log::Offset(0), 1 << 20)
             .expect("read partition log");
         read.batches.iter().map(|batch| batch.records.len()).sum()
     }
@@ -207,15 +208,15 @@ mod tests {
         let cases: Vec<_> = specs
             .into_iter()
             .map(|(topic, leader, policy, expect_compacted)| {
-                let partition = compactable_partition(&dir, topic, 0, leader, policy);
+                let partition = compactable_partition(&dir, topic, 0, NodeId(leader), policy);
                 let before = record_count(&partition);
-                registry.insert(topic.to_string(), 0, Arc::clone(&partition));
+                registry.insert(topic.to_string(), PartitionIndex(0), Arc::clone(&partition));
                 (topic, partition, before, expect_compacted)
             })
             .collect();
 
         let metrics = BrokerMetrics::new();
-        tick_all(&registry, 7, &metrics).await;
+        tick_all(&registry, NodeId(7), &metrics).await;
 
         // A single `tick_all` is exactly one cleaner sweep, so the run counter
         // must advance by one. This pins `record_cleaner_run` against a no-op
@@ -238,8 +239,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_ticks_until_shutdown() {
-        use qubit_clock::MockWaiterKind;
-        use qubit_clock::sleep::MockSleeper;
+        use qubit_clock::{MockWaiterKind, sleep::MockSleeper};
 
         let dir = tempfile::tempdir().expect("log root");
         let registry = Arc::new(PartitionRegistry::new());
@@ -247,11 +247,15 @@ mod tests {
             &dir,
             "run-compact",
             0,
-            7,
+            NodeId(7),
             crabka_log::CleanupPolicy::Compact,
         );
         let before = record_count(&partition);
-        registry.insert("run-compact".to_string(), 0, Arc::clone(&partition));
+        registry.insert(
+            "run-compact".to_string(),
+            PartitionIndex(0),
+            Arc::clone(&partition),
+        );
 
         // Drive the sweep cadence on a mock timeline instead of wall-clock time.
         let interval = Duration::from_secs(30);
@@ -260,7 +264,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(run(
             Arc::clone(&registry),
-            7,
+            NodeId(7),
             CleanerConfig {
                 interval,
                 sleeper: Arc::new(sleeper),

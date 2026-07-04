@@ -69,8 +69,9 @@ impl QuotaBuckets {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn key(user: &str) -> EntityKey {
         vec![("user".into(), Some(user.into()))]

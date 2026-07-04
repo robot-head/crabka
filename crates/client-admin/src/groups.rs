@@ -14,12 +14,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crabka_protocol::owned::{
-    list_groups_request::ListGroupsRequest,
-    metadata_request::MetadataRequest,
-    offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestGroup},
+use crabka_protocol::{
+    owned::{
+        list_groups_request::ListGroupsRequest,
+        metadata_request::MetadataRequest,
+        offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestGroup},
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::{AdminClient, AdminError, kafka_error_name};
 

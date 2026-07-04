@@ -34,8 +34,9 @@ impl<V> Change<V> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn change_update_and_tombstone() {

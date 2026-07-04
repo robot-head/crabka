@@ -10,10 +10,11 @@
 //! ## Authorizing a request
 //!
 //! ```rust
+//! use std::net::SocketAddr;
+//!
 //! use crabka_authz::{AllowAllAuthorizer, AuthorizationRequest, AuthorizationResult, Authorizer};
 //! use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
 //! use crabka_security::{AuthMethod, Principal};
-//! use std::net::SocketAddr;
 //! use uuid::Uuid;
 //!
 //! let image = MetadataImage::new(Uuid::nil());
@@ -45,15 +46,14 @@ mod precedence;
 mod simple;
 mod source;
 
-pub use allow_all::AllowAllAuthorizer;
-pub use cache::AclCache;
-pub use simple::SimpleAclAuthorizer;
-pub use source::AclSource;
-
 use std::net::SocketAddr;
 
+pub use allow_all::AllowAllAuthorizer;
+pub use cache::AclCache;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::Principal;
+pub use simple::SimpleAclAuthorizer;
+pub use source::AclSource;
 
 /// What `authorize` is being asked: which principal wants to do which
 /// operation on which resource, from which host. References are borrowed

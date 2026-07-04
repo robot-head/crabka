@@ -2,22 +2,23 @@
 //! real `mirror.gcr.io/apache/kafka:4.0.0` 3-node controller quorum) through the generated
 //! types and re-encode, asserting the bytes are unchanged.
 
+use std::path::Path;
+
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::owned::begin_quorum_epoch_request::BeginQuorumEpochRequest;
-use crabka_protocol::owned::begin_quorum_epoch_response::BeginQuorumEpochResponse;
-use crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest;
-use crabka_protocol::owned::describe_quorum_response::DescribeQuorumResponse;
-use crabka_protocol::owned::end_quorum_epoch_request::EndQuorumEpochRequest;
-use crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse;
-use crabka_protocol::owned::fetch_request::FetchRequest;
-use crabka_protocol::owned::fetch_response::FetchResponse;
-use crabka_protocol::owned::request_header::RequestHeader;
-use crabka_protocol::owned::response_header::ResponseHeader;
-use crabka_protocol::owned::vote_request::VoteRequest;
-use crabka_protocol::owned::vote_response::VoteResponse;
-use crabka_protocol::{Decode, Encode};
-use std::path::Path;
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        begin_quorum_epoch_request::BeginQuorumEpochRequest,
+        begin_quorum_epoch_response::BeginQuorumEpochResponse,
+        describe_quorum_request::DescribeQuorumRequest,
+        describe_quorum_response::DescribeQuorumResponse,
+        end_quorum_epoch_request::EndQuorumEpochRequest,
+        end_quorum_epoch_response::EndQuorumEpochResponse, fetch_request::FetchRequest,
+        fetch_response::FetchResponse, request_header::RequestHeader,
+        response_header::ResponseHeader, vote_request::VoteRequest, vote_response::VoteResponse,
+    },
+};
 
 /// Header version for a flexible message: `RequestHeader` v2 / `ResponseHeader` v1.
 const FLEX_REQ_HDR: i16 = 2;

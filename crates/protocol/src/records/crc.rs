@@ -15,8 +15,9 @@ pub(crate) fn crc32c_append(seed: u32, data: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     /// Standard CRC-32C reference vectors.
     /// "123456789" -> 0xE3069283 (RFC 3720 / iSCSI).

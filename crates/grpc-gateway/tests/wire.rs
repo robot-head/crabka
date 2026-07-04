@@ -7,23 +7,26 @@
 //! driven through `tower`'s `oneshot` so the `/healthz` and `/readyz` route
 //! closures are exercised.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use axum::Extension;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::{
+    Extension,
+    body::Body,
+    http::{Request, StatusCode},
+};
 use connectrpc_axum::message::{ConnectRequest, ConnectResponse};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::config::GatewayConfig;
-use crabka_grpc_gateway::dedup::DedupEngine;
-use crabka_grpc_gateway::dedup::store::DedupStore;
-use crabka_grpc_gateway::health::{self, Readiness};
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::state::AppState;
-use crabka_grpc_gateway::{handlers, pb};
+use crabka_grpc_gateway::{
+    codec::RawCodec,
+    config::GatewayConfig,
+    dedup::{DedupEngine, store::DedupStore},
+    handlers,
+    health::{self, Readiness},
+    pb,
+    produce::ProduceCore,
+    state::AppState,
+};
 use tempfile::TempDir;
 use tower::ServiceExt;
 

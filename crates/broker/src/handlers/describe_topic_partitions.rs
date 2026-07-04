@@ -27,21 +27,26 @@
 //! always encodes this field (no opt-in flag, unlike Metadata).
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_topic_partitions_request::DescribeTopicPartitionsRequest;
-use crabka_protocol::owned::describe_topic_partitions_response::{
-    Cursor as ResponseCursor, DescribeTopicPartitionsResponse,
-    DescribeTopicPartitionsResponsePartition, DescribeTopicPartitionsResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_topic_partitions_request::DescribeTopicPartitionsRequest,
+        describe_topic_partitions_response::{
+            Cursor as ResponseCursor, DescribeTopicPartitionsResponse,
+            DescribeTopicPartitionsResponsePartition, DescribeTopicPartitionsResponseTopic,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::authorized_operations::authorized_operations_bits;
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::authorized_operations::authorized_operations_bits,
+};
 
 /// Crabka's three internal topics. JVM clients display these with the
 /// `is_internal` flag set so `kafka-topics --list` and friends don't
@@ -191,17 +196,17 @@ pub(crate) async fn handle(
             row_partitions.push(DescribeTopicPartitionsResponsePartition {
                 error_code: codes::NONE,
                 partition_index: p.partition,
-                leader_id: i32::try_from(p.leader).unwrap_or(i32::MAX),
-                leader_epoch: p.leader_epoch,
+                leader_id: i32::try_from(p.leader.0).unwrap_or(i32::MAX),
+                leader_epoch: p.leader_epoch.0,
                 replica_nodes: p
                     .replicas
                     .iter()
-                    .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
+                    .map(|&r| i32::try_from(r.0).unwrap_or(i32::MAX))
                     .collect(),
                 isr_nodes: p
                     .isr
                     .iter()
-                    .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
+                    .map(|&r| i32::try_from(r.0).unwrap_or(i32::MAX))
                     .collect(),
                 // ELR / last-known-ELR: the schema marks both
                 // `nullableVersions: 0+` and `default: null`, but the
@@ -265,8 +270,101 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::assert;
+    use crabka_metadata::{MetadataRecord, NodeId, PartitionRecord, TopicRecord};
+
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{peer, principal},
+    };
+
+    const VERSION: i16 = crabka_protocol::owned::describe_topic_partitions_response::MAX_VERSION;
+
+    crate::test_support::wire_helpers!(
+        DescribeTopicPartitionsRequest,
+        DescribeTopicPartitionsResponse,
+        version = VERSION,
+        client_id = "admin-client"
+    );
+
+    use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
+
+    async fn seed_topic_with_epoch(handle: &BrokerHandle, leader_epoch: i32) {
+        handle
+            .broker_arc_for_test()
+            .controller
+            .submit_change(vec![
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "orders".into(),
+                    topic_id: uuid::Uuid::from_u128(1),
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                MetadataRecord::V1Partition(PartitionRecord {
+                    topic: "orders".into(),
+                    partition: 0,
+                    leader: NodeId(1),
+                    replicas: vec![NodeId(1)],
+                    isr: vec![NodeId(1)],
+                    leader_epoch: crabka_metadata::LeaderEpoch(leader_epoch),
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![uuid::Uuid::nil()],
+                    partition_epoch: 3,
+                }),
+            ])
+            .await
+            .expect("seed topic + partition");
+    }
+
+    /// The response partition echoes the metadata image's `leader_epoch`
+    /// verbatim (KIP-320). A non-zero epoch pins the field against the
+    /// struct-field-deletion mutant, which would default it to 0.
+    #[tokio::test]
+    async fn response_partition_carries_leader_epoch() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        seed_topic_with_epoch(&broker_handle, 9).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let req = encode_request(&DescribeTopicPartitionsRequest {
+            topics: vec![
+                crabka_protocol::owned::describe_topic_partitions_request::TopicRequest {
+                    name: "orders".into(),
+                    ..Default::default()
+                },
+            ],
+            response_partition_limit: 2000,
+            ..Default::default()
+        });
+
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes);
+
+        let topic = resp
+            .topics
+            .iter()
+            .find(|t| t.name.as_deref() == Some("orders"))
+            .expect("orders topic row");
+        let part = topic
+            .partitions
+            .iter()
+            .find(|p| p.partition_index == 0)
+            .expect("partition 0 row");
+        assert!(
+            part.leader_epoch == 9,
+            "response must echo the image leader_epoch (9), got {}",
+            part.leader_epoch
+        );
+        broker_handle.shutdown().await;
+    }
 
     #[test]
     fn is_internal_topic_matches_known_internal_names() {

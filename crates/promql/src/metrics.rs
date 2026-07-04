@@ -12,11 +12,11 @@
 
 use std::sync::Arc;
 
-use prometheus_client::encoding::EncodeLabelSet;
-use prometheus_client::metrics::{
-    counter::Counter, family::Family, gauge::Gauge, histogram::Histogram,
+use prometheus_client::{
+    encoding::EncodeLabelSet,
+    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
+    registry::Registry,
 };
-use prometheus_client::registry::Registry;
 use tokio::sync::Mutex;
 
 /// Shared registry owning every metric this process emits. Wrapped in
@@ -277,11 +277,14 @@ async fn export(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
     use tower::ServiceExt as _;
+
+    use super::*;
 
     #[tokio::test]
     async fn registry_has_metrics_prefix_and_all_metrics() {

@@ -9,9 +9,11 @@
 //! These are Docker-dependent integration tests (run in CI via nextest
 //! `--include-ignored`); they are intentionally NOT `#[ignore]`d.
 
-use std::collections::BTreeMap;
-use std::future::Future;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use assert2::assert;
 use crabka_blockstore::BlockDescriptor;
@@ -24,9 +26,11 @@ use crabka_observability::{
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use testcontainers::core::{Host, IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage, ImageExt};
+use testcontainers::{
+    ContainerAsync, CopyTargetOptions, GenericImage, ImageExt,
+    core::{Host, IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
 use tokio::task::JoinHandle;
 
 const LOKI_PORT: u16 = 3100;
@@ -454,8 +458,7 @@ async fn boot_stack() -> Stack {
 }
 
 async fn push_to_crabka(app: axum::Router, payload: &Value) {
-    use axum::body::Body;
-    use axum::http::Request;
+    use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
     let resp = app

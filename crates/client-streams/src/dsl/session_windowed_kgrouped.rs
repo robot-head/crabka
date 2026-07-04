@@ -1,29 +1,29 @@
-﻿//! `SessionWindowedKGroupedStream<K,V>`: the handle between
+//! `SessionWindowedKGroupedStream<K,V>`: the handle between
 //! `KGroupedStream::windowed_by_session(SessionWindows)` and a terminal session
 //! aggregation (`count`/`reduce`/`aggregate`). The session analogue of
 //! [`crate::dsl::windowed_kgrouped::TimeWindowedKGroupedStream`]: same grouped
 //! lineage + the [`SessionWindows`] spec; terminal ops emit `Windowed<K>` keys and
 //! materialize a **session store** (`add_session_store`). The result is a
 //! `KTable<Windowed<K>, _>` with a changelog-backed session store.
-use std::any::Any;
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
+use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::config::Materialized;
-use crate::dsl::emit::EmitStrategy;
-use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
-use crate::dsl::kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name};
-use crate::dsl::ktable::KTable;
-use crate::dsl::ktable::SuppressStoreFactory;
-use crate::dsl::names;
-use crate::dsl::processors::session_aggregate::{
-    KStreamSessionAggregateProcessor, KStreamSessionReduceProcessor,
+use crate::{
+    dsl::{
+        builder::InternalStreamsBuilder,
+        config::Materialized,
+        emit::EmitStrategy,
+        graph::{GraphNodeKind, LowerState, NodeId},
+        kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name},
+        ktable::{KTable, SuppressStoreFactory},
+        names,
+        processors::session_aggregate::{
+            KStreamSessionAggregateProcessor, KStreamSessionReduceProcessor,
+        },
+        windows::{SessionWindowedSerde, SessionWindows, Windowed},
+    },
+    processor::serde::{DefaultSerde, Serde},
+    topology::NodeHandle,
 };
-use crate::dsl::windows::{SessionWindowedSerde, SessionWindows, Windowed};
-use crate::processor::serde::{DefaultSerde, Serde};
-use crate::topology::NodeHandle;
 
 /// Handle produced by [`KGroupedStream::windowed_by_session`].
 ///
@@ -459,11 +459,15 @@ where
 mod tests {
     use assert2::check;
 
-    use crate::dsl::StreamsBuilder;
-    use crate::dsl::emit::EmitStrategy;
-    use crate::dsl::windows::{SessionWindowedSerde, SessionWindows, Window, Windowed};
-    use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
-    use crate::test_driver::TopologyTestDriver;
+    use crate::{
+        dsl::{
+            StreamsBuilder,
+            emit::EmitStrategy,
+            windows::{SessionWindowedSerde, SessionWindows, Window, Windowed},
+        },
+        processor::serde::{Consumed, I64Serde, Produced, StringSerde},
+        test_driver::TopologyTestDriver,
+    };
 
     /// Sub-task 3d-ii: an emit-on-update (default) session aggregate store is
     /// marked caching, so with a positive cache budget it lands in `cache_owner`.

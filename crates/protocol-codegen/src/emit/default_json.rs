@@ -9,8 +9,7 @@
 //! the requested version, and emits null only for versions where the field is
 //! actually nullable, preventing the JVM converter from rejecting bad input.
 
-use std::fmt::Write as FmtWrite;
-use std::str::FromStr;
+use std::{fmt::Write as FmtWrite, str::FromStr};
 
 use proc_macro2::TokenStream;
 use quote::quote;

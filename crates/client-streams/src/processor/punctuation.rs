@@ -5,15 +5,18 @@
 //! the `Graph`, tagged by node index; the driver fires them positioned at that
 //! node so a punctuator's `forward` flows downstream. Punctuation is invisible in
 //! the wire topology — pure runtime.
-use std::any::Any;
-use std::marker::PhantomData;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    any::Any,
+    marker::PhantomData,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use async_trait::async_trait;
 
-use crate::processor::api::ProcessorContext;
-use crate::processor::erased::Dispatch;
+use crate::processor::{api::ProcessorContext, erased::Dispatch};
 
 /// Which clock drives a punctuation schedule (JVM `PunctuationType`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,8 +105,9 @@ impl ScheduleEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn cancellable_flips_the_flag() {

@@ -3,19 +3,19 @@
 //! (`block`/`rowGroupStart`/`rowGroupEnd`), `X-Scope-OrgID`, and that a 404 by-id
 //! response degrades to an empty partial.
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use assert2::{assert, check};
-use axum::Router;
-use axum::extract::State;
-use axum::routing::get;
-use crabka_traces::frontend::backend::{
-    QuerierBackend, SearchJobRequest, TagValuesJobRequest, TraceByIdJobRequest,
+use axum::{Router, extract::State, routing::get};
+use crabka_traces::frontend::{
+    backend::{QuerierBackend, SearchJobRequest, TagValuesJobRequest, TraceByIdJobRequest},
+    http_backend::HttpQuerier,
+    job::JobShard,
 };
-use crabka_traces::frontend::http_backend::HttpQuerier;
-use crabka_traces::frontend::job::JobShard;
 
 type Log = Arc<Mutex<Vec<String>>>;
 

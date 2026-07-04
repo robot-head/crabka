@@ -19,11 +19,11 @@ use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord};
 use crabka_raft::NodeId;
 use tracing::warn;
 
-use crate::config_keys::{
-    RecoveryStrategy, UNCLEAN_LEADER_ELECTION_ENABLE, resolve_recovery_strategy,
+use crate::{
+    config_keys::{RecoveryStrategy, UNCLEAN_LEADER_ELECTION_ENABLE, resolve_recovery_strategy},
+    error::BrokerError,
+    heartbeat::controller_state::ControllerLivenessState,
 };
-use crate::error::BrokerError;
-use crate::heartbeat::controller_state::ControllerLivenessState;
 
 /// Output of a failover scan: immediate metadata changes plus partitions
 /// that need asynchronous offset-aware recovery via the URM.
@@ -138,7 +138,12 @@ pub(crate) async fn compute_failover_changes(
     let mut recoveries: Vec<(String, i32, RecoveryStrategy)> = Vec::new();
     // Snapshot the alive set once (single lock) rather than taking the
     // liveness lock per ISR/replica entry inside the scan below.
-    let alive = liveness.alive_snapshot().await;
+    let alive: std::collections::HashSet<NodeId> = liveness
+        .alive_snapshot()
+        .await
+        .into_iter()
+        .map(NodeId)
+        .collect();
     // Single O(P) walk over every partition in the image.
     for (_, pr) in image.all_partitions() {
         if !pr.replicas.contains(&dead) && !pr.isr.contains(&dead) {
@@ -154,7 +159,7 @@ pub(crate) async fn compute_failover_changes(
             } => {
                 if unclean {
                     warn!(
-                        topic = %pr.topic, partition = pr.partition, leader,
+                        topic = %pr.topic, partition = pr.partition, leader = leader.0,
                         "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
                     );
                     // KIP-841: account this election so operators can alert on a
@@ -165,16 +170,16 @@ pub(crate) async fn compute_failover_changes(
                 // log line and the emitted record, so the failover tests that
                 // assert the incremented `leader_epoch` also pin the logged
                 // value (no un-killable log-only arithmetic).
-                let new_leader_epoch = pr.leader_epoch + 1;
+                let new_leader_epoch = pr.leader_epoch.next();
                 tracing::info!(
                     topic = %pr.topic,
                     partition = pr.partition,
-                    dead,
-                    old_leader = pr.leader,
-                    new_leader = leader,
+                    dead = dead.0,
+                    old_leader = pr.leader.0,
+                    new_leader = leader.0,
                     old_isr = ?pr.isr,
                     new_isr = ?isr,
-                    new_leader_epoch,
+                    new_leader_epoch = new_leader_epoch.0,
                     unclean,
                     "failover: re-electing partition leader (triggered by dead broker)"
                 );
@@ -248,7 +253,12 @@ pub(crate) async fn compute_offline_dir_failover_changes(
 ) -> FailoverPlan {
     let mut changes: Vec<MetadataRecord> = Vec::new();
     let mut recoveries: Vec<(String, i32, RecoveryStrategy)> = Vec::new();
-    let alive = liveness.alive_snapshot().await;
+    let alive: std::collections::HashSet<NodeId> = liveness
+        .alive_snapshot()
+        .await
+        .into_iter()
+        .map(NodeId)
+        .collect();
     for (_, pr) in image.all_partitions() {
         let Some(slot) = pr.replicas.iter().position(|n| *n == broker) else {
             continue;
@@ -270,7 +280,7 @@ pub(crate) async fn compute_offline_dir_failover_changes(
             } => {
                 if unclean {
                     warn!(
-                        topic = %pr.topic, partition = pr.partition, leader,
+                        topic = %pr.topic, partition = pr.partition, leader = leader.0,
                         "offline-dir unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
                     );
                     metrics.record_unclean_leader_election();
@@ -281,7 +291,7 @@ pub(crate) async fn compute_offline_dir_failover_changes(
                     leader,
                     replicas: pr.replicas.clone(),
                     isr,
-                    leader_epoch: pr.leader_epoch + 1,
+                    leader_epoch: pr.leader_epoch.next(),
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
                     directories: pr.directories.clone(),
@@ -441,7 +451,7 @@ pub(crate) async fn select_replacement_leader_for_shutdown(
         if n == shutting_down {
             continue;
         }
-        if liveness.is_alive(n).await {
+        if liveness.is_alive(n.0).await {
             new_leader = Some(n);
             break;
         }
@@ -455,7 +465,7 @@ pub(crate) async fn select_replacement_leader_for_shutdown(
         leader: new_leader,
         replicas: pr.replicas.clone(),
         isr: pr.isr.clone(),
-        leader_epoch: pr.leader_epoch + 1,
+        leader_epoch: pr.leader_epoch.next(),
         adding_replicas: pr.adding_replicas.clone(),
         removing_replicas: pr.removing_replicas.clone(),
         directories: pr.directories.clone(),
@@ -490,7 +500,7 @@ pub(crate) async fn select_new_leader_for_partition(
             if !pr.isr.contains(&preferred) {
                 return Err(ElectError::PreferredNotInIsr);
             }
-            if !liveness.is_alive(preferred).await {
+            if !liveness.is_alive(preferred.0).await {
                 return Err(ElectError::PreferredNotAlive);
             }
             Ok(PartitionRecord {
@@ -499,7 +509,7 @@ pub(crate) async fn select_new_leader_for_partition(
                 leader: preferred,
                 replicas: pr.replicas.clone(),
                 isr: pr.isr.clone(),
-                leader_epoch: pr.leader_epoch + 1,
+                leader_epoch: pr.leader_epoch.next(),
                 adding_replicas: pr.adding_replicas.clone(),
                 removing_replicas: pr.removing_replicas.clone(),
                 directories: pr.directories.clone(),
@@ -510,20 +520,20 @@ pub(crate) async fn select_new_leader_for_partition(
             // Bail if any ISR member is alive — UNCLEAN is meant for
             // catastrophic ISR loss, not routine rebalances.
             for &n in &pr.isr {
-                if liveness.is_alive(n).await {
+                if liveness.is_alive(n.0).await {
                     return Err(ElectError::ElectionNotNeeded);
                 }
             }
             // Find the first alive replica, in or out of ISR.
             for &n in &pr.replicas {
-                if liveness.is_alive(n).await {
+                if liveness.is_alive(n.0).await {
                     return Ok(PartitionRecord {
                         topic: pr.topic.clone(),
                         partition: pr.partition,
                         leader: n,
                         replicas: pr.replicas.clone(),
                         isr: vec![n],
-                        leader_epoch: pr.leader_epoch + 1,
+                        leader_epoch: pr.leader_epoch.next(),
                         adding_replicas: pr.adding_replicas.clone(),
                         removing_replicas: pr.removing_replicas.clone(),
                         directories: pr.directories.clone(),
@@ -538,13 +548,16 @@ pub(crate) async fn select_new_leader_for_partition(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-    use std::time::Duration;
+    use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
-    use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+    use assert2::{assert, check};
+    use crabka_metadata::{
+        LeaderEpoch, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
+    };
+    use crabka_raft::{
+        AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
+        SnapshotRange, UpdateVoter,
+    };
     use tokio::sync::{Mutex, watch};
     use uuid::Uuid;
 
@@ -552,17 +565,13 @@ mod tests {
         ControllerLivenessState, ElectError, ElectionType, on_broker_dead,
         select_new_leader_for_partition, select_replacement_leader_for_shutdown,
     };
-    use crabka_raft::{
-        AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
-        SnapshotRange, UpdateVoter,
-    };
 
     fn img_with_partition(
         topic: &str,
         partition: i32,
-        leader: NodeId,
-        replicas: &[NodeId],
-        isr: &[NodeId],
+        leader: u64,
+        replicas: &[u64],
+        isr: &[u64],
     ) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());
         img.apply(&MetadataRecord::V1Topic(TopicRecord {
@@ -574,10 +583,10 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: topic.into(),
             partition,
-            leader,
-            replicas: replicas.to_vec(),
-            isr: isr.to_vec(),
-            leader_epoch: 5,
+            leader: NodeId(leader),
+            replicas: replicas.iter().copied().map(NodeId).collect(),
+            isr: isr.iter().copied().map(NodeId).collect(),
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -586,7 +595,7 @@ mod tests {
         img
     }
 
-    async fn liveness_with_alive(alive: &[NodeId]) -> Arc<ControllerLivenessState> {
+    async fn liveness_with_alive(alive: &[u64]) -> Arc<ControllerLivenessState> {
         let l = ControllerLivenessState::new(Duration::from_secs(10));
         for &n in alive {
             l.record_heartbeat(n).await;
@@ -696,10 +705,10 @@ mod tests {
         let expected = PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 2, 3],
-            leader_epoch: 6,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -712,7 +721,7 @@ mod tests {
     async fn preferred_election_error_cases() {
         // Replicas are always [1, 2, 3]; the preferred leader is replica 1.
         // (current_leader, isr, alive, expected)
-        let cases: [(NodeId, &[NodeId], &[NodeId], ElectError); 3] = [
+        let cases: [(u64, &[u64], &[u64], ElectError); 3] = [
             // Preferred replica 1 is already the leader.
             (
                 1,
@@ -749,10 +758,10 @@ mod tests {
         let expected = PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader: 2,
-            replicas: vec![1, 2, 3],
-            isr: vec![2],
-            leader_epoch: 6,
+            leader: NodeId(2),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(2)],
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -786,18 +795,23 @@ mod tests {
         // Broker 1 is leader and wants to shut down. ISR is {1,2,3}, all alive.
         let img = img_with_partition("foo", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
         let l = liveness_with_alive(&[1, 2, 3]).await;
-        let new_pr =
-            select_replacement_leader_for_shutdown(&img, &l, "foo", 0, /*shutting_down*/ 1)
-                .await
-                .expect("should pick replacement");
+        let new_pr = select_replacement_leader_for_shutdown(
+            &img,
+            &l,
+            "foo",
+            0,
+            /*shutting_down*/ NodeId(1),
+        )
+        .await
+        .expect("should pick replacement");
         // ISR untouched — shutting-down broker stays in ISR until dead.
         let expected = PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader: 2,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 2, 3],
-            leader_epoch: 6,
+            leader: NodeId(2),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -812,18 +826,18 @@ mod tests {
         // Replacement should be 3.
         let img = img_with_partition("foo", 0, 1, &[1, 2, 3], &[1, 2, 3]);
         let l = liveness_with_alive(&[1, 3]).await;
-        let new_pr = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, 1)
+        let new_pr = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, NodeId(1))
             .await
             .expect("should pick replacement");
-        assert!(new_pr.leader == 3);
-        assert!(new_pr.leader_epoch == 6);
+        assert!(new_pr.leader == NodeId(3));
+        assert!(new_pr.leader_epoch == LeaderEpoch(6));
     }
 
     #[tokio::test]
     async fn shutdown_replacement_error_cases() {
         // Replicas are always [1, 2, 3]; leader is always broker 1.
         // (isr, alive, shutting_down, expected)
-        let cases: [(&[NodeId], &[NodeId], NodeId, ElectError); 3] = [
+        let cases: [(&[u64], &[u64], u64, ElectError); 3] = [
             // Broker 5 wants to shut down, but leader is 1. No-op.
             (&[1, 2, 3], &[1, 2, 3, 5], 5, ElectError::ElectionNotNeeded),
             // Broker 1 wants to drain. ISR is {1} only (singleton). No
@@ -836,9 +850,10 @@ mod tests {
         for (isr, alive, shutting_down, expected) in cases {
             let img = img_with_partition("foo", 0, 1, &[1, 2, 3], isr);
             let l = liveness_with_alive(alive).await;
-            let err = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, shutting_down)
-                .await
-                .unwrap_err();
+            let err =
+                select_replacement_leader_for_shutdown(&img, &l, "foo", 0, NodeId(shutting_down))
+                    .await
+                    .unwrap_err();
             assert!(
                 err == expected,
                 "isr {isr:?}, alive {alive:?}, shutting_down {shutting_down}"
@@ -850,7 +865,7 @@ mod tests {
     async fn shutdown_replacement_unknown_partition() {
         let img = MetadataImage::new(Uuid::nil());
         let l = liveness_with_alive(&[1]).await;
-        let err = select_replacement_leader_for_shutdown(&img, &l, "ghost", 0, 1)
+        let err = select_replacement_leader_for_shutdown(&img, &l, "ghost", 0, NodeId(1))
             .await
             .unwrap_err();
         assert!(err == ElectError::UnknownTopicOrPartition);
@@ -868,12 +883,14 @@ mod tests {
 
     // ── KIP-841: automatic-failover + unclean.leader.election.enable ────────
 
+    use std::collections::BTreeMap;
+
+    use crabka_metadata::TopicConfigRecord;
+
     use super::compute_failover_changes;
     use crate::config_keys::{
         RecoveryStrategy, UNCLEAN_LEADER_ELECTION_ENABLE, UNCLEAN_RECOVERY_STRATEGY,
     };
-    use crabka_metadata::TopicConfigRecord;
-    use std::collections::BTreeMap;
 
     /// Apply a `V1TopicConfig` override on top of an existing image —
     /// matches the runtime path where `AlterConfigs` writes the record.
@@ -909,7 +926,7 @@ mod tests {
         }
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 1,
+            /*dead=*/ NodeId(1),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
@@ -920,10 +937,10 @@ mod tests {
         let expected = PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 2,
-            replicas: vec![1, 2, 3],
-            isr: vec![2, 3],
-            leader_epoch: 6,
+            leader: NodeId(2),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -944,15 +961,19 @@ mod tests {
 
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 1,
+            /*dead=*/ NodeId(1),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
 
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 2);
-        assert!(pr.isr == vec![2, 3]);
+        assert!(pr.leader == NodeId(2));
+        assert!(pr.isr == vec![NodeId(2), NodeId(3)]);
+        assert!(
+            pr.leader_epoch == LeaderEpoch(6),
+            "leader_epoch must bump on election"
+        );
     }
 
     #[tokio::test]
@@ -967,7 +988,7 @@ mod tests {
 
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 9,
+            /*dead=*/ NodeId(9),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
@@ -989,7 +1010,7 @@ mod tests {
         }
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 1,
+            /*dead=*/ NodeId(1),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
@@ -1014,7 +1035,7 @@ mod tests {
             l.record_heartbeat(n).await;
         }
         let metrics = crate::metrics::BrokerMetrics::new();
-        let plan = compute_failover_changes(&img, /*dead=*/ 1, &l, &metrics).await;
+        let plan = compute_failover_changes(&img, /*dead=*/ NodeId(1), &l, &metrics).await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
         // Must elect the first alive replica (broker 2) with a singleton
@@ -1022,10 +1043,10 @@ mod tests {
         let expected = PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 2,
-            replicas: vec![1, 2, 3],
-            isr: vec![2],
-            leader_epoch: 6,
+            leader: NodeId(2),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(2)],
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1047,7 +1068,7 @@ mod tests {
             l.record_heartbeat(n).await;
         }
         let metrics = crate::metrics::BrokerMetrics::new();
-        let _ = compute_failover_changes(&img, /*dead=*/ 1, &l, &metrics).await;
+        let _ = compute_failover_changes(&img, /*dead=*/ NodeId(1), &l, &metrics).await;
         assert!(metrics.unclean_leader_elections_total.get() == 0);
     }
 
@@ -1060,7 +1081,7 @@ mod tests {
         // No heartbeats — nobody alive.
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 1,
+            /*dead=*/ NodeId(1),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
@@ -1084,7 +1105,7 @@ mod tests {
         }
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 1,
+            /*dead=*/ NodeId(1),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
@@ -1107,15 +1128,15 @@ mod tests {
         l.record_heartbeat(3).await;
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 1,
+            /*dead=*/ NodeId(1),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 3);
-        assert!(pr.isr == vec![3]);
+        assert!(pr.leader == NodeId(3));
+        assert!(pr.isr == vec![NodeId(3)]);
     }
 
     #[tokio::test]
@@ -1131,16 +1152,16 @@ mod tests {
         }
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 1,
+            /*dead=*/ NodeId(1),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 2);
+        assert!(pr.leader == NodeId(2));
         assert!(
-            pr.isr == vec![2],
+            pr.isr == vec![NodeId(2)],
             "clean ISR-only election keeps the surviving ISR member, not a singleton-of-some-other-replica"
         );
     }
@@ -1157,7 +1178,7 @@ mod tests {
         }
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 2,
+            /*dead=*/ NodeId(2),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
@@ -1169,10 +1190,10 @@ mod tests {
         let expected = PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 3],
-            leader_epoch: 5,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(3)],
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1184,15 +1205,15 @@ mod tests {
     #[tokio::test]
     async fn on_broker_dead_submits_failover_when_this_controller_is_leader() {
         let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
-        let source = Arc::new(TestMetadataSource::new(img, Some(7)));
+        let source = Arc::new(TestMetadataSource::new(img, Some(NodeId(7))));
         let controller: Arc<dyn crate::metadata_source::MetadataSource> = source.clone();
         let liveness = liveness_with_alive(&[2, 3]).await;
         let recovery = recovery_handle_for_tests();
 
         on_broker_dead(
             &controller,
-            7,
-            1,
+            NodeId(7),
+            NodeId(1),
             &liveness,
             &crate::metrics::BrokerMetrics::new(),
             &recovery,
@@ -1203,7 +1224,7 @@ mod tests {
         let batches = source.submitted_batches().await;
         assert!(batches.len() == 1);
         let pr = one_partition_change(&batches[0]);
-        assert!(pr.leader == 2);
+        assert!(pr.leader == NodeId(2));
         assert!(pr.partition_epoch == 1);
     }
 
@@ -1211,9 +1232,9 @@ mod tests {
 
     fn img_with_dirs(
         topic: &str,
-        leader: NodeId,
-        replicas: &[NodeId],
-        isr: &[NodeId],
+        leader: u64,
+        replicas: &[u64],
+        isr: &[u64],
         dirs: &[uuid::Uuid],
     ) -> MetadataImage {
         let mut img = MetadataImage::new(uuid::Uuid::nil());
@@ -1226,10 +1247,10 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: topic.into(),
             partition: 0,
-            leader,
-            replicas: replicas.to_vec(),
-            isr: isr.to_vec(),
-            leader_epoch: 5,
+            leader: NodeId(leader),
+            replicas: replicas.iter().copied().map(NodeId).collect(),
+            isr: isr.iter().copied().map(NodeId).collect(),
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: dirs.to_vec(),
@@ -1250,7 +1271,7 @@ mod tests {
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = super::compute_offline_dir_failover_changes(
             &img,
-            1,
+            NodeId(1),
             &offline,
             &l,
             &crate::metrics::BrokerMetrics::new(),
@@ -1262,10 +1283,10 @@ mod tests {
         let expected = PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 2,
-            replicas: vec![1, 2, 3],
-            isr: vec![2, 3],
-            leader_epoch: 6,
+            leader: NodeId(2),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![bad, good, good],
@@ -1286,7 +1307,7 @@ mod tests {
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = super::compute_offline_dir_failover_changes(
             &img,
-            1,
+            NodeId(1),
             &offline,
             &l,
             &crate::metrics::BrokerMetrics::new(),
@@ -1307,7 +1328,7 @@ mod tests {
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = super::compute_offline_dir_failover_changes(
             &img,
-            2,
+            NodeId(2),
             &offline,
             &l,
             &crate::metrics::BrokerMetrics::new(),
@@ -1319,10 +1340,10 @@ mod tests {
         let expected = PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 3],
-            leader_epoch: 5,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(3)],
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![good, bad, good],
@@ -1345,7 +1366,7 @@ mod tests {
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = super::compute_offline_dir_failover_changes(
             &img,
-            1,
+            NodeId(1),
             &offline,
             &l,
             &crate::metrics::BrokerMetrics::new(),
@@ -1374,7 +1395,7 @@ mod tests {
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = compute_offline_dir_failover_changes(
             &img,
-            1,
+            NodeId(1),
             &offline,
             &l,
             &crate::metrics::BrokerMetrics::new(),
@@ -1405,7 +1426,7 @@ mod tests {
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = compute_offline_dir_failover_changes(
             &img,
-            1,
+            NodeId(1),
             &offline,
             &l,
             &crate::metrics::BrokerMetrics::new(),
@@ -1434,7 +1455,8 @@ mod tests {
         l.record_heartbeat(3).await;
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let metrics = crate::metrics::BrokerMetrics::new();
-        let plan = compute_offline_dir_failover_changes(&img, 1, &offline, &l, &metrics).await;
+        let plan =
+            compute_offline_dir_failover_changes(&img, NodeId(1), &offline, &l, &metrics).await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
         // Must elect broker 3 (only alive out-of-ISR) with a singleton
@@ -1442,10 +1464,10 @@ mod tests {
         let expected = PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 3,
-            replicas: vec![1, 2, 3],
-            isr: vec![3],
-            leader_epoch: 6,
+            leader: NodeId(3),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(3)],
+            leader_epoch: LeaderEpoch(6),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![bad, good, good],
@@ -1470,7 +1492,7 @@ mod tests {
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = compute_offline_dir_failover_changes(
             &img,
-            1,
+            NodeId(1),
             &offline,
             &l,
             &crate::metrics::BrokerMetrics::new(),
@@ -1496,7 +1518,8 @@ mod tests {
         // No heartbeats — nobody alive.
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let metrics = crate::metrics::BrokerMetrics::new();
-        let plan = compute_offline_dir_failover_changes(&img, 1, &offline, &l, &metrics).await;
+        let plan =
+            compute_offline_dir_failover_changes(&img, NodeId(1), &offline, &l, &metrics).await;
         check!(
             plan.changes.is_empty(),
             "no alive replica → no election; got {:?}",
@@ -1525,7 +1548,7 @@ mod tests {
         }
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 1,
+            /*dead=*/ NodeId(1),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
@@ -1551,7 +1574,7 @@ mod tests {
         }
         let plan = compute_failover_changes(
             &img,
-            /*dead=*/ 1,
+            /*dead=*/ NodeId(1),
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
@@ -1561,8 +1584,11 @@ mod tests {
             "strategy None must not enqueue an offset-aware recovery",
         );
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 2, "legacy path picks first alive replica");
-        assert!(pr.isr == vec![2]);
+        assert!(
+            pr.leader == NodeId(2),
+            "legacy path picks first alive replica"
+        );
+        assert!(pr.isr == vec![NodeId(2)]);
     }
 }
 

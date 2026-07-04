@@ -1,7 +1,6 @@
 //! Error type for `crabka-client-core`.
 
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{net::SocketAddr, time::Duration};
 
 use thiserror::Error;
 
@@ -46,8 +45,9 @@ pub enum ClientError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn display_is_useful() {

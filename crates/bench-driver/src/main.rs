@@ -5,10 +5,11 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use crabka_bench_driver::{
+    scenario::{Scenario, Stack},
+    workload::{self, DriverConfig},
+};
 use tracing_subscriber::EnvFilter;
-
-use crabka_bench_driver::scenario::{Scenario, Stack};
-use crabka_bench_driver::workload::{self, DriverConfig};
 
 #[derive(Debug, Parser)]
 #[command(name = "crabka-bench-driver", version, about)]
@@ -166,8 +167,10 @@ async fn main() -> Result<()> {
 
 /// Stable, simple hash so producer-stamped magic IDs match across pods.
 fn hash_str(s: &str) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use std::{
+        collections::hash_map::DefaultHasher,
+        hash::{Hash, Hasher},
+    };
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     h.finish()

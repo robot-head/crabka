@@ -167,9 +167,10 @@ pub(crate) fn group_nodes(reg: &NodeRegistry) -> Vec<GroupTopics> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
     use crate::topology::node::{ChangelogKind, NodeRegistry};
-    use assert2::check;
 
     fn ids(groups: &[GroupTopics]) -> Vec<&str> {
         groups.iter().map(|g| g.id.as_str()).collect()

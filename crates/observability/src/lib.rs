@@ -1,31 +1,39 @@
 //! Role-selectable service skeleton for Crabka observability.
 
+pub mod ids;
 pub mod metrics;
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
-use std::convert::Infallible;
-use std::future::{Future, IntoFuture, pending};
-use std::io::ErrorKind;
-use std::io::Read as _;
-use std::net::SocketAddr;
-use std::path::{Path as FsPath, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
-use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+    convert::Infallible,
+    future::{Future, IntoFuture, pending},
+    io::{ErrorKind, Read as _},
+    net::SocketAddr,
+    path::{Path as FsPath, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
-use crate::metrics::ServiceMetrics;
 use async_trait::async_trait;
-use axum::Router;
-use axum::body::Bytes;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, RawQuery, State};
-use axum::http::header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use axum::{
+    Router,
+    body::Bytes,
+    extract::{
+        Path, RawQuery, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
+    http::{
+        HeaderMap, StatusCode,
+        header::{ACCEPT, CONTENT_ENCODING, CONTENT_TYPE},
+    },
+    response::{IntoResponse, Response},
+    routing::{get, post},
+};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use clap::{Parser, ValueEnum};
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex,
@@ -63,29 +71,36 @@ use crabka_logql::{
     parse_metric_query, parse_metric_scalar_arithmetic_query, parse_metric_scalar_comparison_query,
     parse_query, plan_stream_query,
 };
-use datafusion::arrow::array::builder::{MapBuilder, StringBuilder};
-use datafusion::arrow::array::{
-    Array, ArrayRef, Float64Array, Int64Array, MapArray, StringArray, TimestampNanosecondArray,
-    UInt64Array,
+use datafusion::{
+    arrow::{
+        array::{
+            Array, ArrayRef, Float64Array, Int64Array, MapArray, StringArray,
+            TimestampNanosecondArray, UInt64Array,
+            builder::{MapBuilder, StringBuilder},
+        },
+        datatypes::{DataType, Field, Schema, TimeUnit},
+        record_batch::RecordBatch,
+    },
+    error::DataFusionError,
+    prelude::SessionContext,
 };
-use datafusion::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::error::DataFusionError;
-use datafusion::prelude::SessionContext;
 use flate2::read::{DeflateDecoder, GzDecoder};
 use futures_util::{StreamExt as _, TryStreamExt as _};
-use object_store::local::LocalFileSystem;
-use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt, parse_url_opts};
-use opentelemetry_proto::tonic::collector::logs::v1::{
-    ExportLogsServiceRequest as ProtoExportLogsServiceRequest,
-    ExportLogsServiceResponse as ProtoExportLogsServiceResponse,
-    logs_service_server::{LogsService, LogsServiceServer},
+pub use ids::{Offset, PartitionIndex};
+use object_store::{
+    ObjectStore, ObjectStoreExt, local::LocalFileSystem, parse_url_opts, path::Path as ObjectPath,
 };
-use opentelemetry_proto::tonic::common::v1::{
-    AnyValue as ProtoAnyValue, KeyValue as ProtoKeyValue, any_value as proto_any_value,
+use opentelemetry_proto::tonic::{
+    collector::logs::v1::{
+        ExportLogsServiceRequest as ProtoExportLogsServiceRequest,
+        ExportLogsServiceResponse as ProtoExportLogsServiceResponse,
+        logs_service_server::{LogsService, LogsServiceServer},
+    },
+    common::v1::{
+        AnyValue as ProtoAnyValue, KeyValue as ProtoKeyValue, any_value as proto_any_value,
+    },
+    logs::v1::LogRecord as ProtoLogRecord,
 };
-use opentelemetry_proto::tonic::logs::v1::LogRecord as ProtoLogRecord;
 use parquet::arrow::arrow_writer::ArrowWriter;
 use prost::Message as _;
 use regex::Regex;
@@ -93,14 +108,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use snap::raw::Decoder as SnappyDecoder;
 use thiserror::Error;
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
-use tokio::time::{Duration, sleep};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
+use tokio::{
+    net::TcpListener,
+    task::JoinHandle,
+    time::{Duration, sleep},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 use url::Url;
+
+use crate::metrics::ServiceMetrics;
 
 const LOKI_REJECT_OLD_SAMPLES_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const LOKI_CREATION_GRACE_PERIOD: Duration = Duration::from_secs(10 * 60);
@@ -976,8 +994,8 @@ async fn advance_and_persist_compaction_frontier(
     descriptor: &BlockDescriptor,
 ) -> Result<(), CompactorRunError> {
     frontier.advance_partition_offset(WalPosition {
-        partition: descriptor.key.partition,
-        offset: descriptor.key.last_offset,
+        partition: PartitionIndex(descriptor.key.partition),
+        offset: Offset(descriptor.key.last_offset),
     });
     write_compaction_frontier_to_object_store(store, prefix, &frontier.snapshot()).await?;
     Ok(())
@@ -1096,7 +1114,7 @@ async fn compact_polled_kafka_wal_records_inner(
         .map(decode_kafka_wal_record_envelope)
         .collect::<Result<Vec<_>, _>>()?;
     let mut descriptors = Vec::new();
-    let mut commit_positions: BTreeMap<i32, i64> = BTreeMap::new();
+    let mut commit_positions: BTreeMap<PartitionIndex, Offset> = BTreeMap::new();
 
     for chunk in wal_compaction_chunks(decoded) {
         let tenant = chunk
@@ -1777,8 +1795,8 @@ async fn compact_wal_records_to_object_store_with_delete_filters_and_index_outpu
         })?;
         if position.partition != partition {
             return Err(CompactionError::MixedPartition {
-                expected: partition,
-                actual: position.partition,
+                expected: partition.get(),
+                actual: position.partition.get(),
             });
         }
 
@@ -1814,9 +1832,9 @@ async fn compact_wal_records_to_object_store_with_delete_filters_and_index_outpu
 
     let key = BlockKey::new(
         tenant,
-        partition,
-        first_offset,
-        last_offset,
+        partition.get(),
+        first_offset.get(),
+        last_offset.get(),
         TimeRange::new(start_ns, end_ns)?,
     );
     let mut staged_block_index = block_index.clone();
@@ -1843,8 +1861,8 @@ async fn compact_wal_records_to_object_store_with_delete_filters_and_index_outpu
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct WalPosition {
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1860,8 +1878,8 @@ pub struct WalLogRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KafkaWalRecord {
     pub value: Vec<u8>,
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
     pub timestamp_ms: Option<i64>,
     pub headers: Vec<KafkaWalHeader>,
 }
@@ -1875,7 +1893,7 @@ pub struct KafkaWalHeader {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactionFrontier {
     pub compacted_through_ns: i64,
-    partition_offsets: BTreeMap<i32, i64>,
+    partition_offsets: BTreeMap<PartitionIndex, Offset>,
 }
 
 impl CompactionFrontier {
@@ -1888,7 +1906,7 @@ impl CompactionFrontier {
     }
 
     #[must_use]
-    pub fn with_partition_offset(mut self, partition: i32, offset: i64) -> Self {
+    pub fn with_partition_offset(mut self, partition: PartitionIndex, offset: Offset) -> Self {
         self.partition_offsets.insert(partition, offset);
         self
     }
@@ -1960,7 +1978,7 @@ const COMPACTION_FRONTIER_MANIFEST_RELATIVE_PATH: &str = "index/logs/compaction-
 struct CompactionFrontierManifest {
     version: u32,
     compacted_through_ns: i64,
-    partition_offsets: BTreeMap<i32, i64>,
+    partition_offsets: BTreeMap<PartitionIndex, Offset>,
 }
 
 impl From<&CompactionFrontier> for CompactionFrontierManifest {
@@ -2765,8 +2783,8 @@ impl LogWalConsumer for KafkaLogWalConsumer {
                     .to_vec();
                 Ok(KafkaWalRecord {
                     value,
-                    partition: record.partition,
-                    offset: record.offset,
+                    partition: PartitionIndex(record.partition),
+                    offset: Offset(record.offset),
                     timestamp_ms: Some(record.timestamp),
                     headers: record
                         .headers
@@ -2825,8 +2843,8 @@ pub fn build_kafka_wal_record(
 
 pub fn decode_kafka_wal_record(
     value: &[u8],
-    partition: i32,
-    offset: i64,
+    partition: PartitionIndex,
+    offset: Offset,
 ) -> Result<WalLogRecord, WalRecordDecodeError> {
     let mut record: WalLogRecord = serde_json::from_slice(value)?;
     record.position = Some(WalPosition { partition, offset });
@@ -14406,12 +14424,12 @@ fn format_metric_range_aggregation_query(query: &MetricQuery) -> Option<String> 
 }
 
 fn format_metric_range_selector(query: &MetricQuery) -> Option<String> {
-    let range = format_loki_duration_ns(query.range_ns)?;
-    let offset = if query.offset_ns == 0 {
+    let range = format_loki_duration_ns(query.range_ns.0)?;
+    let offset = if query.offset_ns.0 == 0 {
         String::new()
     } else {
-        let sign = if query.offset_ns < 0 { "-" } else { "" };
-        let duration = format_loki_offset_duration_ns(query.offset_ns.checked_abs()?)?;
+        let sign = if query.offset_ns.0 < 0 { "-" } else { "" };
+        let duration = format_loki_offset_duration_ns(query.offset_ns.0.checked_abs()?)?;
         format!(" offset {sign}{duration}")
     };
     Some(format!(
@@ -14555,8 +14573,8 @@ fn format_loki_decimal_unit(duration_ns: i64, unit_ns: i64, width: usize, suffix
 
 fn format_quantile(quantile: Quantile) -> String {
     ScalarSample::new(
-        i128::from(quantile.numerator),
-        u128::from(quantile.denominator),
+        i128::from(quantile.numerator.0),
+        u128::from(quantile.denominator.0),
     )
     .format()
 }
@@ -16643,11 +16661,11 @@ pub fn metric_plan_scan_sql(
 }
 
 fn metric_scan_range(query: &MetricQuery, eval_range: TimeRange) -> Result<TimeRange, QueryError> {
-    let scan_end_ns = eval_range.end_ns.saturating_sub(query.offset_ns);
+    let scan_end_ns = eval_range.end_ns.saturating_sub(query.offset_ns.0);
     let scan_start_ns = eval_range
         .start_ns
-        .saturating_sub(query.offset_ns)
-        .saturating_sub(query.range_ns);
+        .saturating_sub(query.offset_ns.0)
+        .saturating_sub(query.range_ns.0);
     Ok(TimeRange::new(scan_start_ns, scan_end_ns)?)
 }
 
@@ -17286,7 +17304,7 @@ async fn execute_metric_query_range_with_hot_tail_frontier_and_deletes(
             record,
             frontier,
             &eval_times,
-            query.range_ns,
+            query.range_ns.0,
             delete_filters,
         )?;
     }
@@ -17378,7 +17396,7 @@ async fn execute_metric_query_range_from_object_store_with_hot_tail_frontier_and
             record,
             frontier,
             &eval_times,
-            query.range_ns,
+            query.range_ns.0,
             delete_filters,
         )?;
     }
@@ -17494,7 +17512,7 @@ fn metric_samples_from_batches(
                     structured_metadata: &structured_metadata,
                 },
                 eval_times,
-                query.range_ns,
+                query.range_ns.0,
                 delete_filters,
             )?;
         }
@@ -17778,10 +17796,10 @@ fn range_sample_value(value: MetricSampleState, query: &MetricQuery) -> MetricVa
         | RangeAggregation::SumOverTime => value.sum,
         RangeAggregation::PresentOverTime => MetricValue::integer(1),
         RangeAggregation::Rate | RangeAggregation::BytesRate => {
-            rate_metric_value(value.sum, query.range_ns)
+            rate_metric_value(value.sum, query.range_ns.0)
         }
         RangeAggregation::RateCounter => {
-            rate_metric_value(value.counter_increase(), query.range_ns)
+            rate_metric_value(value.counter_increase(), query.range_ns.0)
         }
         RangeAggregation::AvgOverTime => value.average(),
         RangeAggregation::StdvarOverTime => value.stdvar(),
@@ -18094,8 +18112,8 @@ impl MetricSampleState {
         }
 
         let scaled_rank =
-            u128::from(quantile.numerator) * u128::try_from(self.values.len() - 1).unwrap();
-        let denominator = u128::from(quantile.denominator);
+            u128::from(quantile.numerator.0) * u128::try_from(self.values.len() - 1).unwrap();
+        let denominator = u128::from(quantile.denominator.0);
         let lower_index = usize::try_from(scaled_rank / denominator).unwrap();
         let rank_remainder = scaled_rank % denominator;
         if rank_remainder == 0 {
@@ -18596,7 +18614,7 @@ fn append_matching_metric_row(
             | RangeAggregation::LastOverTime => unwrap_sample.unwrap_or_default(),
         };
         for eval_time_ns in eval_times {
-            let window_end_ns = eval_time_ns.saturating_sub(query.offset_ns);
+            let window_end_ns = eval_time_ns.saturating_sub(query.offset_ns.0);
             if row.timestamp_ns > window_end_ns.saturating_sub(range_ns)
                 && row.timestamp_ns <= window_end_ns
             {
@@ -18663,7 +18681,7 @@ fn append_matching_hot_metric_record(
             | RangeAggregation::LastOverTime => unwrap_sample.unwrap_or_default(),
         };
         for eval_time_ns in eval_times {
-            let window_end_ns = eval_time_ns.saturating_sub(query.offset_ns);
+            let window_end_ns = eval_time_ns.saturating_sub(query.offset_ns.0);
             if record.timestamp_ns > window_end_ns.saturating_sub(range_ns)
                 && record.timestamp_ns <= window_end_ns
             {
@@ -19558,7 +19576,7 @@ fn count_loki_metric_result_hot_tail_samples(
             record,
             frontier,
             &eval_times,
-            query.range_ns,
+            query.range_ns.0,
             delete_filters,
         )
         .ok();
@@ -20415,9 +20433,12 @@ mod tests {
     /// every emitted log line silently fails to decode and no logs are ingested.
     #[test]
     fn normalize_otlp_http_logs_decodes_gzip_identically_to_identity() {
-        use opentelemetry_proto::tonic::logs::v1::{ResourceLogs, ScopeLogs};
-        use opentelemetry_proto::tonic::resource::v1::Resource;
         use std::io::Write as _;
+
+        use opentelemetry_proto::tonic::{
+            logs::v1::{ResourceLogs, ScopeLogs},
+            resource::v1::Resource,
+        };
 
         let request = ProtoExportLogsServiceRequest {
             resource_logs: vec![ResourceLogs {
@@ -20615,13 +20636,13 @@ mod tests {
 
         let mut compacted_by_offset = hot_tail_test_record(4 * BUCKET, "offset-old");
         compacted_by_offset.position = Some(WalPosition {
-            partition: 0,
-            offset: 7,
+            partition: PartitionIndex(0),
+            offset: Offset(7),
         });
         let mut kept_by_offset = hot_tail_test_record(3 * BUCKET, "offset-new");
         kept_by_offset.position = Some(WalPosition {
-            partition: 0,
-            offset: 8,
+            partition: PartitionIndex(0),
+            offset: Offset(8),
         });
         let compacted_by_time = hot_tail_test_record(2 * BUCKET, "time-old");
         let kept_by_time = hot_tail_test_record(5 * BUCKET, "time-new");
@@ -20634,7 +20655,8 @@ mod tests {
             kept_by_time,
         ]);
 
-        let frontier = CompactionFrontier::new(2 * BUCKET).with_partition_offset(0, 7);
+        let frontier =
+            CompactionFrontier::new(2 * BUCKET).with_partition_offset(PartitionIndex(0), Offset(7));
 
         assert_eq!(hot_tail.prune_compacted(&frontier), 2);
         assert_eq!(hot_tail.records(), expected);
@@ -21855,5 +21877,78 @@ mod tests {
         assert!(!pattern_value_is_variable("/cortex.Ingester/Push"));
         assert!(!pattern_value_is_variable("cafe"));
         assert!(!pattern_value_is_variable("authenticationToken"));
+    }
+
+    /// A negative range offset MUST render with a leading `-` sign, and a positive
+    /// offset MUST NOT. This pins the `offset_ns.0 < 0` sign branch in
+    /// `format_metric_range_selector`: replacing `<` with `==` (never true here,
+    /// since the `== 0` case is handled by the outer guard) would drop the sign and
+    /// emit a positive offset for a query that asked to look *forward* in time.
+    #[test]
+    fn format_metric_range_selector_signs_negative_offset() {
+        let negative = parse_metric_query("count_over_time({app=\"x\"}[5m] offset -3m)").unwrap();
+        let positive = parse_metric_query("count_over_time({app=\"x\"}[5m] offset 3m)").unwrap();
+
+        let negative_selector =
+            format_metric_range_selector(&negative).expect("negative offset selector");
+        let positive_selector =
+            format_metric_range_selector(&positive).expect("positive offset selector");
+
+        // The negative offset carries the sign; the positive one does not.
+        check!(negative_selector.contains(" offset -"));
+        check!(!positive_selector.contains(" offset -"));
+        // The two differ ONLY by the sign character.
+        check!(negative_selector == positive_selector.replace(" offset ", " offset -"));
+    }
+
+    /// `count_loki_metric_result_hot_tail_samples` counts matched ingester samples and
+    /// returns 0 when there is nothing to match: an `absent_over_time` query short-
+    /// circuits to 0, and a query whose response JSON has no `data.result` array also
+    /// yields 0. Replacing the whole body with a constant `1` (the mutant) would report
+    /// a phantom ingester sample and skew the store/ingester scan-stat split.
+    #[test]
+    fn count_loki_metric_result_hot_tail_samples_returns_zero_when_nothing_matches() {
+        let plan = StreamPlan {
+            tenant: "tenant".to_string(),
+            time_range: TimeRange::new(0, 300_000_000_000).unwrap(),
+            query: StreamQuery {
+                matchers: Vec::new(),
+                pipeline: Vec::new(),
+            },
+            fingerprints: BTreeSet::new(),
+            blocks: Vec::new(),
+        };
+        let frontier = CompactionFrontier::new(0);
+        let eval_range = TimeRange::new(0, 300_000_000_000).unwrap();
+        let step_ns = 60_000_000_000;
+
+        // `absent_over_time` short-circuits to 0 regardless of the response body.
+        let absent_query = parse_metric_query("absent_over_time({app=\"x\"}[5m])").unwrap();
+        let absent = count_loki_metric_result_hot_tail_samples(
+            &json!({ "data": { "result": [] } }),
+            &plan,
+            &absent_query,
+            &[],
+            &frontier,
+            eval_range,
+            step_ns,
+            &[],
+        );
+        check!(absent == 0);
+
+        // A non-absent query with an empty hot tail and a response lacking any
+        // `data.result` array matches nothing and returns 0.
+        let count_query = parse_metric_query("count_over_time({app=\"x\"}[5m])").unwrap();
+        let none = count_loki_metric_result_hot_tail_samples(
+            &json!({}),
+            &plan,
+            &count_query,
+            &[],
+            &frontier,
+            eval_range,
+            step_ns,
+            &[],
+        );
+        check!(none == 0);
     }
 }

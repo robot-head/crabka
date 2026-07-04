@@ -14,9 +14,9 @@
 //! 9092, so it must not run concurrently with `jvm_acceptance` (single test
 //! here keeps it self-contained).
 
-use assert2::assert;
 use std::process::Command;
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_log::LogConfig;
 
@@ -47,9 +47,9 @@ async fn start_host_broker() -> (BrokerHandle, tempfile::TempDir) {
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,

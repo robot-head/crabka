@@ -30,11 +30,14 @@ fn partition_for_is_deterministic_and_bounded() {
 
 #[test]
 fn claim_value_round_trips() {
-    use crabka_grpc_gateway::dedup::store::ClaimValue;
+    use crabka_grpc_gateway::{
+        dedup::store::ClaimValue,
+        ids::{Offset, PartitionIndex},
+    };
     let c = ClaimValue {
         topic: "t".into(),
-        partition: 3,
-        offset: 99,
+        partition: PartitionIndex(3),
+        offset: Offset(99),
     };
     let bytes = serde_json::to_vec(&c).unwrap();
     let back: ClaimValue = serde_json::from_slice(&bytes).unwrap();
@@ -43,11 +46,13 @@ fn claim_value_round_trips() {
 
 #[tokio::test]
 async fn dedup_produce_before_ownership_is_unavailable() {
-    use crabka_grpc_gateway::dedup::DedupEngine;
-    use crabka_grpc_gateway::dedup::store::DedupStore;
-    use crabka_grpc_gateway::error::GatewayError;
-    use crabka_grpc_gateway::types::GatewayRecord;
     use std::sync::Arc;
+
+    use crabka_grpc_gateway::{
+        dedup::{DedupEngine, store::DedupStore},
+        error::GatewayError,
+        types::GatewayRecord,
+    };
 
     // The store is constructed but run_ownership has never run, so owns()
     // returns false for every partition. The engine must refuse keyed produces

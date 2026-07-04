@@ -17,10 +17,9 @@
 // named helpers would obscure the per-test narrative.
 #![allow(clippy::cast_possible_truncation, clippy::default_trait_access)]
 
-use assert2::assert;
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::{sync::OnceLock, time::Duration};
 
+use assert2::assert;
 use crabka_broker::{BrokerConfig, BrokerHandle};
 use tokio::sync::Mutex;
 
@@ -41,8 +40,10 @@ fn cluster_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::metadata_request::MetadataRequest;
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    metadata_request::MetadataRequest,
+};
 use tempfile::TempDir;
 
 /// Await every broker reporting an elected (non-zero) controller leader.
@@ -70,7 +71,7 @@ async fn three_node_cluster_elects_leader() {
         }
     }
     assert!(
-        leaders.len() == 1 && !leaders.contains(&0),
+        leaders.len() == 1 && !leaders.contains(&crabka_broker::NodeId(0)),
         "leader not converged: {leaders:?}"
     );
     for (h, _, _) in cluster {
@@ -152,7 +153,7 @@ async fn leader_kill_recovers() {
         let mut rx = h.watch_leader_for_test();
         tokio::time::timeout(
             Duration::from_secs(30),
-            rx.wait_for(|l| matches!(l, Some(id) if *id != 0 && *id != killed_node_id)),
+            rx.wait_for(|l| matches!(l, Some(id) if *id != crabka_broker::NodeId(0) && *id != killed_node_id)),
         )
         .await
         .expect("no new leader within 30s after kill")
@@ -165,7 +166,9 @@ async fn leader_kill_recovers() {
         }
     }
     assert!(
-        leaders.len() == 1 && !leaders.contains(&0) && !leaders.contains(&killed_node_id),
+        leaders.len() == 1
+            && !leaders.contains(&crabka_broker::NodeId(0))
+            && !leaders.contains(&killed_node_id),
         "no single new leader: {leaders:?}"
     );
 

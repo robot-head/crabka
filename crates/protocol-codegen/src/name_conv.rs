@@ -101,8 +101,9 @@ fn is_reserved_keyword(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn camel_to_snake() {

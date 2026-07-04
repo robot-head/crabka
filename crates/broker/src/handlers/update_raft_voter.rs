@@ -11,18 +11,23 @@
 //! comes back as `ReconfigRejected → INVALID_REQUEST`.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType, Voter, VoterEndpoint};
-use crabka_protocol::owned::update_raft_voter_request::UpdateRaftVoterRequest;
-use crabka_protocol::owned::update_raft_voter_response::UpdateRaftVoterResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        update_raft_voter_request::UpdateRaftVoterRequest,
+        update_raft_voter_response::UpdateRaftVoterResponse,
+    },
+};
 use crabka_raft::reconfig::UpdateVoter;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::add_raft_voter::outcome_to_code;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::add_raft_voter::outcome_to_code,
+};
 
 #[tracing::instrument(
     name = "handle_update_raft_voter",
@@ -74,7 +79,7 @@ pub(crate) async fn handle(
     };
 
     let voter = Voter {
-        id,
+        id: crabka_raft::NodeId(id),
         directory_id: uuid::Uuid::from_bytes(req.voter_directory_id.0),
         endpoints: req
             .listeners
@@ -108,13 +113,14 @@ fn encode_resp(version: i16, resp: &UpdateRaftVoterResponse) -> Result<Bytes, Br
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc};
+
     use assert2::assert;
-    use crabka_protocol::owned::update_raft_voter_request::{KRaftVersionFeature, Listener};
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use crabka_protocol::{
+        owned::update_raft_voter_request::{KRaftVersionFeature, Listener},
+        primitives::uuid::Uuid as ProtoUuid,
+    };
     use crabka_security::{AuthMethod, Principal};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
     use crate::test_support::DenyAll;
 
@@ -145,6 +151,7 @@ mod tests {
         client_id = "admin-client"
     );
 
+    use super::*;
     use crate::test_support::start_broker_with_authorizer as start_broker;
 
     /// Decode→encode round-trip at min and max versions.

@@ -17,20 +17,22 @@
 //! handler dispatch (no SASL framing dance — we drive
 //! `BrokerConfig.authorizer` directly with a `SimpleAclAuthorizer`).
 
-use assert2::assert;
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::authorizer::SimpleAclAuthorizer;
-use crabka_broker::{Broker, BrokerConfig};
+use crabka_broker::{Broker, BrokerConfig, authorizer::SimpleAclAuthorizer};
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest;
-use crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest;
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::metadata_response::MetadataResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        describe_cluster_request::DescribeClusterRequest,
+        describe_groups_request::DescribeGroupsRequest,
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        metadata_response::MetadataResponse,
+    },
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // Bit positions match Kafka's `AclOperation.code()` (verified by the

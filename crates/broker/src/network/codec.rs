@@ -29,13 +29,16 @@ pub fn frame(stream: TcpStream) -> Framed<TcpStream, LengthDelimitedCodec> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use bytes::{BufMut, Bytes, BytesMut};
     use futures_util::{SinkExt, StreamExt};
-    use tokio::io::AsyncWriteExt;
-    use tokio::net::{TcpListener, TcpStream};
+    use tokio::{
+        io::AsyncWriteExt,
+        net::{TcpListener, TcpStream},
+    };
     use tokio_util::codec::Decoder as _;
+
+    use super::*;
 
     #[tokio::test]
     async fn roundtrips_a_frame() {

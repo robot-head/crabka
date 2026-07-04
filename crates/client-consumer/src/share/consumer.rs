@@ -6,21 +6,20 @@
 //! interval / assignment, resolves the assignment's topic ids to names via
 //! Metadata, then spawns the background heartbeat loop.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use crabka_client_core::Client;
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::{
+    owned::{
+        metadata_request::MetadataRequest,
+        share_group_heartbeat_request::ShareGroupHeartbeatRequest,
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
+use tokio::{sync::Mutex, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 
-use super::coordinator::ShareCoordinatorState;
-use super::types::ShareAckMode;
+use super::{coordinator::ShareCoordinatorState, types::ShareAckMode};
 use crate::error::ConsumerError;
 
 fn build_join_heartbeat_request(
@@ -307,9 +306,10 @@ impl ShareConsumer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use crabka_protocol::tagged_fields::UnknownTaggedFields;
+
+    use super::*;
 
     fn id(n: u8) -> WireUuid {
         let mut b = [0u8; 16];

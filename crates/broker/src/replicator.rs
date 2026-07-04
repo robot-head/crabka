@@ -9,31 +9,33 @@
 // is a false positive here.
 #![allow(clippy::struct_field_names)]
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
+use crabka_client_core::{ClientError, Connection, ConnectionOptions};
+use crabka_ids::PartitionIndex;
+use crabka_log::{Log, LogConfig, Offset};
+use crabka_protocol::{
+    owned::{
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic, ReplicaState},
+        fetch_response::FetchResponse,
+        offset_for_leader_epoch_request::{
+            OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::RecordsPayload,
+};
+use crabka_raft::NodeId;
+use crabka_security::ListenerProtocol;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crabka_client_core::{ClientError, Connection, ConnectionOptions};
-use crabka_log::{Log, LogConfig};
-use crabka_protocol::owned::fetch_request::{
-    FetchPartition, FetchRequest, FetchTopic, ReplicaState,
+use crate::{
+    broker::spawn_partition,
+    codes,
+    partition_registry::PartitionRegistry,
+    throttle::{ThrottleState, TopicThrottle},
 };
-use crabka_protocol::owned::fetch_response::FetchResponse;
-use crabka_protocol::owned::offset_for_leader_epoch_request::{
-    OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
-};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::RecordsPayload;
-use crabka_raft::NodeId;
-use crabka_security::ListenerProtocol;
-
-use crate::broker::spawn_partition;
-use crate::codes;
-use crate::partition_registry::PartitionRegistry;
-use crate::throttle::{ThrottleState, TopicThrottle};
 
 const FETCH_MAX_BYTES: i32 = 1 << 20;
 const FETCH_MAX_WAIT_MS: i32 = 500;
@@ -75,7 +77,7 @@ pub(crate) struct Config {
     /// `topic_id`. If we send `WireUuid::ZERO` here the leader returns
     /// `UNKNOWN_TOPIC_OR_PARTITION` for every fetch.
     pub topic_id: WireUuid,
-    pub partition: i32,
+    pub partition: PartitionIndex,
     pub leader_node_id: NodeId,
     /// Leader's `host` portion from the metadata image (the inter-broker
     /// endpoint when available, otherwise the legacy broker host).
@@ -117,24 +119,24 @@ pub(crate) struct Config {
 pub(crate) async fn run(cfg: Config) {
     info!(
         topic = %cfg.topic,
-        partition = cfg.partition,
-        leader_node_id = cfg.leader_node_id,
+        partition = cfg.partition.get(),
+        leader_node_id = cfg.leader_node_id.0,
         "replicator.started"
     );
 
     // First-run materialization of the local on-disk partition.
     if let Err(e) = ensure_local_partition(&cfg) {
-        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
+        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition.get(),
             "replicator failed to open local partition; aborting");
         return;
     }
 
     if let Err(e) = run_inner(&cfg).await {
-        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
+        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition.get(),
             "replicator stopped on unrecoverable error");
     }
 
-    info!(topic = %cfg.topic, partition = cfg.partition, "replicator.stopped");
+    info!(topic = %cfg.topic, partition = cfg.partition.get(), "replicator.stopped");
 }
 
 /// Build (or recover) the on-disk `Partition` for this follower, inserting
@@ -144,7 +146,8 @@ fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
     // concurrent replicators for the same partition can never both build it.
     cfg.partitions
         .materialize_if_vacant(&cfg.topic, cfg.partition, || {
-            let dir = crate::log_dir::place_partition_dir(&cfg.log_dirs, &cfg.topic, cfg.partition);
+            let dir =
+                crate::log_dir::place_partition_dir(&cfg.log_dirs, &cfg.topic, cfg.partition.get());
             std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
             let log =
                 Log::open(&dir, cfg.log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
@@ -195,7 +198,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
             FetchThrottleDecision::Sleep => {
                 tracing::debug!(
                     topic = %cfg.topic,
-                    partition = cfg.partition,
+                    partition = cfg.partition.get(),
                     "follower throttle: skip fetch this round (bucket exhausted)"
                 );
                 // Bucket exhausted — yield and retry next loop iteration.
@@ -236,7 +239,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
         match handle_response(resp, cfg).await {
             LoopAction::Continue => {}
             LoopAction::StopNotLeader => {
-                info!(topic = %cfg.topic, partition = cfg.partition,
+                info!(topic = %cfg.topic, partition = cfg.partition.get(),
                     "replicator.not_leader; supervisor will re-evaluate");
                 return Ok(());
             }
@@ -247,7 +250,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
 fn follower_partition_fetch_cap(cfg: &Config) -> FetchThrottleDecision {
     let image = cfg.controller.current_image();
     let throttle = TopicThrottle::for_topic(&image, &cfg.topic);
-    let throttled = throttle.follower.contains(cfg.partition, cfg.node_id);
+    let throttled = throttle.follower.contains(cfg.partition.get(), cfg.node_id);
     if !throttled || cfg.throttle_state.follower_in.rate() == 0 {
         return FetchThrottleDecision::Fetch(FETCH_MAX_BYTES);
     }
@@ -276,7 +279,7 @@ fn follower_partition_fetch_cap(cfg: &Config) -> FetchThrottleDecision {
 /// `partition_max_bytes`. Pass `FETCH_MAX_BYTES` when unthrottled.
 fn build_fetch_request(
     cfg: &Config,
-    fetch_offset: i64,
+    fetch_offset: Offset,
     partition_max_bytes_cap: i32,
 ) -> FetchRequest {
     let leader_epoch = cfg
@@ -296,12 +299,13 @@ fn build_fetch_request(
             let log = entry.log.lock().expect("log mutex poisoned");
             log.epoch_checkpoint().latest_epoch()
         })
-        .unwrap_or(-1);
+        // Unwrap the log-layer `LeaderEpoch` into the raw wire `last_fetched_epoch`.
+        .map_or(-1, |e| e.0);
     // `replica_id` is the wire field on Fetch v0-14. KIP-903 (Kafka 3.5) moved
     // it into a tagged `replica_state` struct on v15+; the codegen serializes
     // whichever the negotiated version requires. Populate BOTH so the request
     // is correct regardless of which version the leader negotiates.
-    let rid = i32::try_from(cfg.node_id).unwrap_or(-1);
+    let rid = i32::try_from(cfg.node_id.0).unwrap_or(-1);
     FetchRequest {
         replica_id: rid,
         replica_state: ReplicaState {
@@ -315,8 +319,9 @@ fn build_fetch_request(
             topic: cfg.topic.clone(),
             topic_id: cfg.topic_id,
             partitions: vec![FetchPartition {
-                partition: cfg.partition,
-                fetch_offset,
+                partition: cfg.partition.get(),
+                // Unwrap the `Offset` into the wire `i64` field.
+                fetch_offset: fetch_offset.0,
                 current_leader_epoch: leader_epoch,
                 last_fetched_epoch,
                 partition_max_bytes: partition_max_bytes_cap,
@@ -348,7 +353,7 @@ enum LoopAction {
 fn became_partition_leader(cfg: &Config) -> bool {
     cfg.controller
         .current_image()
-        .partition(&cfg.topic, cfg.partition)
+        .partition(&cfg.topic, cfg.partition.get())
         .map(|pr| pr.leader)
         == Some(cfg.node_id)
 }
@@ -390,13 +395,14 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                 // we have since become this partition's leader (see
                 // `became_partition_leader`).
                 if became_partition_leader(cfg) {
-                    warn!(topic = %cfg.topic, partition = cfg.partition,
+                    warn!(topic = %cfg.topic, partition = cfg.partition.get(),
                         "replicator: skipping diverging_epoch truncation — this broker is now the partition leader (stale fetch response)");
                     return LoopAction::StopNotLeader;
                 }
                 let end_offset = part_resp.diverging_epoch.end_offset;
                 if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) {
-                    match part.truncate_to(end_offset).await {
+                    // Wrap the wire `i64` into `Offset` for the log-layer call.
+                    match part.truncate_to(Offset(end_offset)).await {
                         Ok(()) => {
                             // Drop idempotent-producer dedup entries for the
                             // truncated tail, or a retried batch deduplicates
@@ -407,14 +413,14 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                                 .await;
                             info!(
                                 topic = %cfg.topic,
-                                partition = cfg.partition,
+                                partition = cfg.partition.get(),
                                 end_offset,
                                 "replicator: truncated to diverging_epoch (KIP-320 in-band)"
                             );
                         }
                         Err(e) => warn!(
                             topic = %cfg.topic,
-                            partition = cfg.partition,
+                            partition = cfg.partition.get(),
                             end_offset,
                             error = %e,
                             "replicator: truncate_to(diverging_epoch) failed"
@@ -425,7 +431,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             }
 
             let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) else {
-                warn!(topic = %cfg.topic, partition = cfg.partition,
+                warn!(topic = %cfg.topic, partition = cfg.partition.get(),
                     "replicator: local partition vanished between fetches");
                 return LoopAction::Continue;
             };
@@ -445,21 +451,21 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                     // touches the writer API (cross-file) so it's left as-is.
                     let batch_bytes = batch.encoded_len();
                     if let Err(e) = part.replicate_batch(batch).await {
-                        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
+                        warn!(error = %e, topic = %cfg.topic, partition = cfg.partition.get(),
                             "replicator: replicate_batch failed");
                         break;
                     }
                     cfg.metrics.record_replication_in(
                         &cfg.topic,
-                        cfg.partition,
+                        cfg.partition.get(),
                         u64::try_from(batch_bytes).unwrap_or(0),
                     );
                 }
             }
             // KIP-392: record the leader's high watermark so consumer reads
             // served from this follower are bounded correctly. Done on every
-            // successful response, including empty ones.
-            part.set_follower_hw(part_resp.high_watermark).await;
+            // successful response, including empty ones. Wrap the wire `i64`.
+            part.set_follower_hw(Offset(part_resp.high_watermark)).await;
             LoopAction::Continue
         }
         codes::OFFSET_OUT_OF_RANGE => {
@@ -476,19 +482,20 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // Stale-response guard: never reset from a Fetch response if we have
             // since become this partition's leader (see `became_partition_leader`).
             if became_partition_leader(cfg) {
-                warn!(topic = %cfg.topic, partition = cfg.partition,
+                warn!(topic = %cfg.topic, partition = cfg.partition.get(),
                     "replicator: skipping out_of_range reset — this broker is now the partition leader (stale fetch response)");
                 return LoopAction::StopNotLeader;
             }
             let leader_log_start = part_resp.log_start_offset;
             warn!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 leader_log_start,
                 "replicator.out_of_range; resetting local log to leader log_start"
             );
             if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) {
-                match part.reset_to(leader_log_start).await {
+                // Wrap the wire `i64` into `Offset` for the log-layer call.
+                match part.reset_to(Offset(leader_log_start)).await {
                     Ok(()) => {
                         // The log restarts empty at leader_log_start; drop
                         // idempotent-producer dedup entries at/above it so a
@@ -522,13 +529,13 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // cooperative cancellation that would otherwise retire it — the
             // broker then never becomes ready and crashloops.
             if became_partition_leader(cfg) {
-                warn!(topic = %cfg.topic, partition = cfg.partition,
+                warn!(topic = %cfg.topic, partition = cfg.partition.get(),
                     "replicator: stopping on fenced epoch — this broker is now the partition leader");
                 return LoopAction::StopNotLeader;
             }
             warn!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 error_code = part_resp.error_code,
                 "replicator: fenced/unknown leader epoch; calling OffsetForLeaderEpoch"
             );
@@ -561,11 +568,16 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
 /// KIP-101: the follower sends our current `leader_epoch`; the leader
 /// replies with `end_offset` = the first offset of the next epoch,
 /// which is the safe truncation point.
+// The `end_offset >= 0` truncate-vs-reset branch is only reachable after a live
+// leader connection returns an `OffsetForLeaderEpoch` response; the whole
+// function is inter-broker IO (connect, send, then `part.truncate_to` /
+// `part.reset_to`) with no pure seam. Exercised by the live-replication suite.
+#[cfg_attr(test, mutants::skip)]
 #[tracing::instrument(
     name = "replicator_handle_epoch_fence",
     level = "info",
     skip_all,
-    fields(topic = %cfg.topic, partition = cfg.partition),
+    fields(topic = %cfg.topic, partition = cfg.partition.get()),
     err,
 )]
 async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
@@ -616,17 +628,17 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
     // response if we have since become this partition's leader (see
     // `became_partition_leader`).
     if became_partition_leader(cfg) {
-        warn!(topic = %cfg.topic, partition = cfg.partition,
+        warn!(topic = %cfg.topic, partition = cfg.partition.get(),
             "replicator: skipping epoch-fence truncation — this broker is now the partition leader (stale response)");
         return Ok(());
     }
 
     if end_offset >= 0 {
-        // Truncate to the epoch boundary.
-        if let Err(e) = part.truncate_to(end_offset).await {
+        // Truncate to the epoch boundary. Wrap the wire `i64` into `Offset`.
+        if let Err(e) = part.truncate_to(Offset(end_offset)).await {
             warn!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 end_offset,
                 error = %e,
                 "handle_epoch_fence: truncate_to failed"
@@ -637,7 +649,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
                 .await;
             info!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 end_offset,
                 "handle_epoch_fence: truncated to epoch boundary"
             );
@@ -645,10 +657,10 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
     } else {
         // end_offset == -1 (UNDEFINED_OFFSET): no epoch info available;
         // reset to 0 as a safe fallback.
-        if let Err(e) = part.reset_to(0).await {
+        if let Err(e) = part.reset_to(Offset(0)).await {
             warn!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 error = %e,
                 "handle_epoch_fence: reset_to(0) failed"
             );
@@ -658,7 +670,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
                 .await;
             info!(
                 topic = %cfg.topic,
-                partition = cfg.partition,
+                partition = cfg.partition.get(),
                 "handle_epoch_fence: reset to 0 (undefined epoch boundary)"
             );
         }
@@ -679,11 +691,11 @@ fn build_offset_for_leader_epoch_request(
     our_epoch: i32,
 ) -> OffsetForLeaderEpochRequest {
     OffsetForLeaderEpochRequest {
-        replica_id: i32::try_from(cfg.node_id).unwrap_or(-1),
+        replica_id: i32::try_from(cfg.node_id.0).unwrap_or(-1),
         topics: vec![OffsetForLeaderTopic {
             topic: cfg.topic.clone(),
             partitions: vec![OffsetForLeaderPartition {
-                partition: cfg.partition,
+                partition: cfg.partition.get(),
                 current_leader_epoch: our_epoch,
                 leader_epoch: our_epoch,
                 ..OffsetForLeaderPartition::default()
@@ -740,12 +752,12 @@ fn next_reconnect_delay(delay: Duration, cap: Duration) -> Duration {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::net::SocketAddr;
-    use tokio::sync::watch;
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        net::SocketAddr,
+    };
 
+    use assert2::assert;
     use crabka_metadata::{
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
@@ -756,11 +768,14 @@ mod tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
+    use tokio::sync::watch;
+
+    use super::*;
 
     const TOPIC: &str = "orders";
     const PARTITION: i32 = 0;
-    const NODE_ID: NodeId = 2;
-    const LEADER_ID: NodeId = 1;
+    const NODE_ID: NodeId = NodeId(2);
+    const LEADER_ID: NodeId = NodeId(1);
     const WIRE_TOPIC_ID: WireUuid = WireUuid([7; 16]);
 
     struct StaticMetadataSource {
@@ -860,7 +875,7 @@ mod tests {
             leader,
             replicas: vec![LEADER_ID, NODE_ID],
             isr: vec![LEADER_ID, NODE_ID],
-            leader_epoch: 4,
+            leader_epoch: crabka_metadata::LeaderEpoch(4),
             adding_replicas: Vec::new(),
             removing_replicas: Vec::new(),
             directories: Vec::new(),
@@ -889,7 +904,7 @@ mod tests {
             node_id: NODE_ID,
             topic: TOPIC.into(),
             topic_id: WIRE_TOPIC_ID,
-            partition: PARTITION,
+            partition: PartitionIndex(PARTITION),
             leader_node_id: LEADER_ID,
             leader_host: "127.0.0.1".into(),
             leader_port: 9,
@@ -940,9 +955,9 @@ mod tests {
     fn build_fetch_request_populates_replica_and_partition_fields() {
         let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
 
-        let req = build_fetch_request(&cfg, 123, 456);
+        let req = build_fetch_request(&cfg, Offset(123), 456);
 
-        let rid = i32::try_from(NODE_ID).unwrap();
+        let rid = i32::try_from(NODE_ID.0).unwrap();
         let expected = FetchRequest {
             replica_id: rid,
             max_wait_ms: FETCH_MAX_WAIT_MS,
@@ -983,9 +998,9 @@ mod tests {
     #[test]
     fn build_fetch_request_uses_negative_replica_sentinel_when_node_id_overflows() {
         let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
-        cfg.node_id = NodeId::from(i32::MAX as u32) + 1;
+        cfg.node_id = NodeId(i32::MAX as u64 + 1);
 
-        let req = build_fetch_request(&cfg, 0, FETCH_MAX_BYTES);
+        let req = build_fetch_request(&cfg, Offset(0), FETCH_MAX_BYTES);
 
         assert!(req.replica_id == -1);
         assert!(req.replica_state.replica_id == -1);
@@ -999,7 +1014,7 @@ mod tests {
 
         let req = build_offset_for_leader_epoch_request(&cfg, 7);
         let expected = OffsetForLeaderEpochRequest {
-            replica_id: i32::try_from(NODE_ID).unwrap(),
+            replica_id: i32::try_from(NODE_ID.0).unwrap(),
             topics: vec![OffsetForLeaderTopic {
                 topic: TOPIC.into(),
                 partitions: vec![OffsetForLeaderPartition {
@@ -1018,7 +1033,7 @@ mod tests {
     #[test]
     fn offset_epoch_request_uses_negative_replica_sentinel_when_node_id_overflows() {
         let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
-        cfg.node_id = NodeId::from(i32::MAX as u32) + 1;
+        cfg.node_id = NodeId(i32::MAX as u64 + 1);
 
         let req = build_offset_for_leader_epoch_request(&cfg, 7);
 
@@ -1175,7 +1190,7 @@ mod tests {
 
         run(cfg).await;
 
-        assert!(partitions.contains(TOPIC, PARTITION));
+        assert!(partitions.contains(TOPIC, PartitionIndex(PARTITION)));
     }
 
     #[tokio::test]

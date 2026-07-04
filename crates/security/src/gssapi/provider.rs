@@ -6,16 +6,18 @@
 //! [`sspi::KeytabIdentity`]) to drive the AS/TGS exchange with no password.
 use std::sync::Mutex;
 
-use sspi::kerberos::{DEFAULT_ENCRYPTION_TYPE, ServerProperties};
 use sspi::{
     BufferType, ClientRequestFlags, CredentialUse, Credentials, CredentialsBuffers,
     DataRepresentation, EncryptionFlags, Kerberos, KerberosConfig, KeytabIdentity, Secret,
     SecurityBuffer, SecurityBufferRef, SecurityStatus, ServerRequestFlags, Sspi, SspiImpl,
     Username,
+    kerberos::{DEFAULT_ENCRYPTION_TYPE, ServerProperties},
 };
 
-use super::keytab::{ENCTYPE_AES256_CTS_HMAC_SHA1_96, load_service_key, load_service_keys};
-use super::{AcceptStep, GssAcceptor, GssError, GssInitiator, InitStep};
+use super::{
+    AcceptStep, GssAcceptor, GssError, GssInitiator, InitStep,
+    keytab::{ENCTYPE_AES256_CTS_HMAC_SHA1_96, load_service_key, load_service_keys},
+};
 
 /// Default KDC URL used when `SSPI_KDC_URL` is unset. The accept path does not
 /// hit the network, but `KerberosConfig::new` requires a URL string.

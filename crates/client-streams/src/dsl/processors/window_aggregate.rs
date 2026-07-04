@@ -3,11 +3,16 @@ use std::marker::PhantomData;
 
 use async_trait::async_trait;
 
-use crate::dsl::processors::change::Change;
-use crate::dsl::processors::tuple_forwarder::TupleForwarder;
-use crate::dsl::windows::{TimeWindows, Window, Windowed};
-use crate::processor::api::{Processor, ProcessorContext};
-use crate::processor::record::Record;
+use crate::{
+    dsl::{
+        processors::{change::Change, tuple_forwarder::TupleForwarder},
+        windows::{TimeWindows, Window, Windowed},
+    },
+    processor::{
+        api::{Processor, ProcessorContext},
+        record::Record,
+    },
+};
 
 /// Variance-neutral marker for multi-param processor structs.
 type Marker<T> = PhantomData<fn() -> T>;
@@ -309,17 +314,19 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::marker::PhantomData;
+    use std::{collections::VecDeque, marker::PhantomData};
 
     use super::*;
-    use crate::dsl::windows::{TimeWindows, Window, Windowed};
-    use crate::processor::api::ProcessorContext;
-    use crate::processor::erased::{Dispatch, ErasedRecord};
-    use crate::processor::record::{Record, RecordContext};
-    use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::store::registry::StoreRegistry;
-    use crate::store::window::WindowBytesStore;
+    use crate::{
+        dsl::windows::{TimeWindows, Window, Windowed},
+        processor::{
+            api::ProcessorContext,
+            erased::{Dispatch, ErasedRecord},
+            record::{Record, RecordContext},
+            serde::{I64Serde, StringSerde},
+        },
+        store::{registry::StoreRegistry, window::WindowBytesStore},
+    };
 
     #[tokio::test]
     async fn windowed_count_tumbling_emits_per_window() {

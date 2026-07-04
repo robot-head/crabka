@@ -5,10 +5,12 @@
 
 use bytes::Bytes;
 use crabka_metadata::{AclEntry, AclEntryFilter};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::describe_acls_request::DescribeAclsRequest;
-use crabka_protocol::owned::describe_acls_response::{
-    AclDescription, DescribeAclsResource, DescribeAclsResponse,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        describe_acls_request::DescribeAclsRequest,
+        describe_acls_response::{AclDescription, DescribeAclsResource, DescribeAclsResponse},
+    },
 };
 
 use super::acl_wire::{
@@ -16,9 +18,11 @@ use super::acl_wire::{
     pattern_type_filter, pattern_type_to_wire, permission_filter, permission_to_wire,
     resource_type_filter, resource_type_to_wire,
 };
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+};
 
 fn describe_acls_error_response(
     error_code: i16,
@@ -173,16 +177,19 @@ fn encode_response<R: Encode>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_metadata::{
         AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
     };
     use crabka_protocol::UnknownTaggedFields;
-    use std::sync::Arc;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 3;
     const RESOURCE_TYPE_TOPIC: i8 = 2;

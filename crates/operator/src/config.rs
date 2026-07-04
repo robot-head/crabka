@@ -63,9 +63,10 @@ impl OperatorConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use clap::Parser;
+
+    use super::*;
 
     #[derive(Parser)]
     struct Wrap {

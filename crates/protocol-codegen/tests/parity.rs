@@ -1,6 +1,6 @@
-use assert2::assert;
 use std::path::PathBuf;
 
+use assert2::assert;
 use crabka_protocol_codegen::{emit, ir};
 
 fn schemas_dir() -> PathBuf {

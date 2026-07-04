@@ -4,11 +4,9 @@
 
 use std::collections::HashMap;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64STD;
+use base64::{Engine, engine::general_purpose::STANDARD as B64STD};
 use hmac::{Hmac, KeyInit, Mac};
-use jsonpath_rust::parser::model::JpQuery;
-use jsonpath_rust::query::js_path_process;
+use jsonpath_rust::{parser::model::JpQuery, query::js_path_process};
 use serde::Deserialize;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;

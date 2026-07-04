@@ -12,8 +12,10 @@ use std::any::Any;
 
 use async_trait::async_trait;
 
-use crate::processor::api::{Processor, ProcessorContext};
-use crate::processor::record::{Record, RecordContext};
+use crate::processor::{
+    api::{Processor, ProcessorContext},
+    record::{Record, RecordContext},
+};
 
 /// A record whose KEY is immutable. [`with_value`](FixedKeyRecord::with_value)
 /// changes the value (possibly the type), keeping the key and timestamp. Unlike
@@ -170,11 +172,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::processor::erased::{Dispatch, ErasedRecord};
-    use crate::processor::record::{Record, RecordContext};
-    use assert2::check;
     use std::collections::VecDeque;
+
+    use assert2::check;
+
+    use super::*;
+    use crate::processor::{
+        erased::{Dispatch, ErasedRecord},
+        record::{Record, RecordContext},
+    };
 
     #[test]
     fn with_value_keeps_key_and_timestamp() {

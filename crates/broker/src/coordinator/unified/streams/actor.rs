@@ -16,35 +16,41 @@
 //! members still mint a `member_id` and advance their epoch, but no tasks are
 //! assigned.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::Instant;
-
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
-
-use crabka_protocol::owned::common::streams_group_heartbeat_response::status::Status;
-use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds as RespTaskIds;
-use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
-use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
-
-use crate::codes;
-use crate::coordinator::unified::offsets_log::OffsetsLog;
-use crate::metadata_source::MetadataSource;
-
-use super::assignor::{self, AssignorInput, AssignorMember};
-use super::config::StreamsGroupConfig;
-use super::persistence::{
-    PendingStreamsRecords, StreamsEndpoint, StreamsGroupCurrentMemberAssignmentValue,
-    StreamsGroupMemberMetadataValue, StreamsGroupMetadataValue, StreamsGroupPartitionMetadataValue,
-    StreamsGroupTargetAssignmentMemberValue, StreamsGroupTargetAssignmentMetadataValue,
-    StreamsGroupTopologyValue,
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Instant,
 };
-use super::state::{
-    StoredTopologyHandle, StreamsGroupState, StreamsGroupStatePhase, StreamsMemberAssignmentState,
-    StreamsMemberState, StreamsTargetAssignment,
+
+use crabka_log::Offset;
+use crabka_protocol::owned::{
+    common::streams_group_heartbeat_response::{status::Status, task_ids::TaskIds as RespTaskIds},
+    streams_group_heartbeat_request::StreamsGroupHeartbeatRequest,
+    streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
 };
-use super::topology::{self, status as topo_status};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
+
+use super::{
+    assignor::{self, AssignorInput, AssignorMember},
+    config::StreamsGroupConfig,
+    persistence::{
+        PendingStreamsRecords, StreamsEndpoint, StreamsGroupCurrentMemberAssignmentValue,
+        StreamsGroupMemberMetadataValue, StreamsGroupMetadataValue,
+        StreamsGroupPartitionMetadataValue, StreamsGroupTargetAssignmentMemberValue,
+        StreamsGroupTargetAssignmentMetadataValue, StreamsGroupTopologyValue,
+    },
+    state::{
+        StoredTopologyHandle, StreamsGroupState, StreamsGroupStatePhase,
+        StreamsMemberAssignmentState, StreamsMemberState, StreamsTargetAssignment,
+    },
+    topology::{self, status as topo_status},
+};
+use crate::{
+    codes, coordinator::unified::offsets_log::OffsetsLog, metadata_source::MetadataSource,
+};
 
 /// Messages accepted by a [`StreamsGroupActorHandle`].
 // The `Heartbeat` variant carries the full wire request (KIP-1071 heartbeats
@@ -696,7 +702,9 @@ fn task_lag(m: &StreamsMemberState) -> BTreeMap<(String, i32), i64> {
     let mut lag = BTreeMap::new();
     for (key, &end) in &m.task_end_offsets {
         if let Some(&pos) = m.task_offsets.get(key) {
-            lag.insert(key.clone(), end - pos);
+            // Lag is the delta between two offsets — a record count (i64),
+            // compared against `acceptable_recovery_lag`, not an offset.
+            lag.insert(key.clone(), end.0 - pos.0);
         }
     }
     lag
@@ -724,13 +732,14 @@ fn task_ids_to_map(
 }
 
 /// Convert request `TaskOffset` entries into a `(subtopology, partition) ->
-/// offset` map.
+/// offset` map. The wire `o.offset` field stays a raw `i64`; wrap it as an
+/// `Offset` for the in-memory changelog-position map.
 fn task_offsets_to_map(
     offsets: &[crabka_protocol::owned::common::streams_group_heartbeat_request::task_offset::TaskOffset],
-) -> BTreeMap<(String, i32), i64> {
+) -> BTreeMap<(String, i32), Offset> {
     offsets
         .iter()
-        .map(|o| ((o.subtopology_id.clone(), o.partition), o.offset))
+        .map(|o| ((o.subtopology_id.clone(), o.partition), Offset(o.offset)))
         .collect()
 }
 
@@ -1072,15 +1081,14 @@ fn chrono_now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
 
-    use crate::coordinator::unified::GroupCoordinator;
-    use crate::coordinator::unified::actor::MetadataProvider;
-    use crate::coordinator::unified::config::NextGenConfig;
-    use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
-    use crate::coordinator::unified::reconciler::ReconcileInput;
-    use crate::coordinator::unified::share::config::ShareGroupConfig;
+    use super::*;
+    use crate::coordinator::unified::{
+        GroupCoordinator, actor::MetadataProvider, config::NextGenConfig,
+        offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+        share::config::ShareGroupConfig,
+    };
 
     #[derive(Debug)]
     struct EmptyMetadata;
@@ -1344,5 +1352,56 @@ mod tests {
         check!(m.active == BTreeMap::from([("0".to_string(), vec![0, 1])]));
         check!(actor.state.target.active["m1"] == BTreeMap::from([("0".to_string(), vec![0, 1])]));
         check!(actor.state.phase == StreamsGroupStatePhase::Stable);
+    }
+
+    #[test]
+    fn task_lag_is_end_minus_offset_only_when_both_reported() {
+        let mut m = StreamsMemberState::joining("m1", "client", "/127.0.0.1");
+        // Two tasks with both endpoints reported → lag = end - offset.
+        m.task_end_offsets = BTreeMap::from([
+            (("sub-a".to_string(), 0), Offset(10)),
+            (("sub-a".to_string(), 1), Offset(5)),
+            // A task with an end offset but NO reported position is dropped.
+            (("sub-b".to_string(), 0), Offset(99)),
+        ]);
+        m.task_offsets = BTreeMap::from([
+            (("sub-a".to_string(), 0), Offset(3)),
+            (("sub-a".to_string(), 1), Offset(5)),
+        ]);
+        let lag = task_lag(&m);
+        // 10 - 3 = 7 (kills `-`→`+` which is 13, and `-`→`/` which is 3).
+        check!(lag[&("sub-a".to_string(), 0)] == 7);
+        // 5 - 5 = 0 (kills `-`→`/` which would be 1).
+        check!(lag[&("sub-a".to_string(), 1)] == 0);
+        // sub-b has no reported position, so it is absent (pins the filter and
+        // kills the fixed-map replacements that inject sub-b / xyzzy keys).
+        check!(!lag.contains_key(&("sub-b".to_string(), 0)));
+        check!(lag.len() == 2);
+    }
+
+    #[test]
+    fn task_offsets_to_map_wraps_each_wire_entry() {
+        use crabka_protocol::owned::common::streams_group_heartbeat_request::task_offset::TaskOffset;
+        let wire = vec![
+            TaskOffset {
+                subtopology_id: "sub-a".to_string(),
+                partition: 0,
+                offset: 42,
+                ..Default::default()
+            },
+            TaskOffset {
+                subtopology_id: "sub-a".to_string(),
+                partition: 1,
+                offset: 7,
+                ..Default::default()
+            },
+        ];
+        let map = task_offsets_to_map(&wire);
+        check!(
+            map == BTreeMap::from([
+                (("sub-a".to_string(), 0), Offset(42)),
+                (("sub-a".to_string(), 1), Offset(7)),
+            ])
+        );
     }
 }

@@ -5,27 +5,28 @@ use std::collections::BTreeMap;
 use crabka_blockstore::Labels;
 use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint};
 
-use crate::PromqlError;
-use crate::error::Result;
+use crate::{PromqlError, error::Result};
 
 /// Runs parsed `.test` files through the in-memory `PromQL` engine.
 pub mod testkit {
-    use std::collections::BTreeMap;
-    use std::fmt;
-    use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::{
+        collections::BTreeMap,
+        fmt,
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use crabka_blockstore::Labels;
 
-    use crate::conformance::{
-        AnnotationExpect, ExpectLine, RangeExpect, SampleSpec, Statement, TestFile, parse_test_file,
-    };
+    use super::Result;
     use crate::{
         Annotations, EngineOpts, InMemoryMetricStore, PromqlEngine, PromqlError, QueryResult,
         SampleValue,
+        conformance::{
+            AnnotationExpect, ExpectLine, RangeExpect, SampleSpec, Statement, TestFile,
+            parse_test_file,
+        },
     };
-
-    use super::Result;
 
     const TENANT: &str = "test";
     /// Prometheus promqltest's default relative error for sample values.

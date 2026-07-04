@@ -3,9 +3,7 @@
 //! returning a plain `Stream` (unit-testable); the public handler is a thin
 //! wrapper into `ConnectResponse::new(StreamBody::new(inner))`.
 
-use std::net::SocketAddr;
-use std::pin::Pin;
-use std::sync::Arc;
+use std::{net::SocketAddr, pin::Pin, sync::Arc};
 
 use axum::Extension;
 use connectrpc_axum::message::{
@@ -15,15 +13,16 @@ use crabka_authz::AuthorizationResult;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::Principal;
 use futures_util::{Stream, StreamExt};
-use jsonpath_rust::parser::model::JpQuery;
-use jsonpath_rust::query::js_path_process;
+use jsonpath_rust::{parser::model::JpQuery, query::js_path_process};
 use serde_json::Value;
 
-use crate::codec::{SchemaFormat, SchemaMeta};
-use crate::consume::ConsumeSession;
-use crate::handlers::{anonymous_principal, authorize_resource, to_gateway_record, unknown_host};
-use crate::pb;
-use crate::state::AppState;
+use crate::{
+    codec::{SchemaFormat, SchemaMeta},
+    consume::ConsumeSession,
+    handlers::{anonymous_principal, authorize_resource, to_gateway_record, unknown_host},
+    pb,
+    state::AppState,
+};
 
 struct CompiledPredicates(Vec<CompiledPredicate>);
 
@@ -147,12 +146,12 @@ fn schema_meta_to_pb(meta: SchemaMeta) -> pb::SchemaSelector {
 fn inbound_from_decoded_record(record: crate::consume::DecodedConsumerRecord) -> pb::Inbound {
     pb::Inbound {
         topic: record.topic,
-        partition: record.partition,
-        offset: record.offset,
+        partition: record.partition.into(),
+        offset: record.offset.into(),
         key: record.key.map(|b| b.to_vec()),
         value: record.value.to_vec(),
         headers: std::collections::HashMap::new(),
-        timestamp_ms: record.timestamp,
+        timestamp_ms: record.timestamp.into(),
         structured: record.json.map(|json| pb::StructuredValue {
             json: json.to_vec(),
         }),
@@ -198,8 +197,8 @@ pub fn send_stream_inner(
                 }
                 let result = match state.produce.produce(rec, &principal).await {
                     Ok(o) => pb::RecordResult {
-                        partition: o.partition,
-                        offset: o.offset,
+                        partition: o.partition.into(),
+                        offset: o.offset.into(),
                         deduplicated: o.deduplicated,
                         error: None,
                     },
@@ -487,9 +486,9 @@ mod tests {
     fn inbound_carries_structured_json_and_schema_metadata() {
         let record = crate::consume::DecodedConsumerRecord {
             topic: "metadata".to_string(),
-            partition: 2,
-            offset: 9,
-            timestamp: 1234,
+            partition: crate::ids::PartitionIndex(2),
+            offset: crate::ids::Offset(9),
+            timestamp: crate::ids::Timestamp(1234),
             key: Some(Bytes::from_static(b"k")),
             value: Bytes::from_static(b"\x08\x07"),
             schema: Some(SchemaMeta {

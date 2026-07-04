@@ -1,7 +1,9 @@
 //! Recover the audit hash-chain position from this broker's audit partition.
 
-use crabka_audit::chain::{chain_hash, from_hex32};
-use crabka_audit::{EVENT_CLASS_CHECKPOINT, HEADER_PREV_HASH, HEADER_SEQ};
+use crabka_audit::{
+    EVENT_CLASS_CHECKPOINT, HEADER_PREV_HASH, HEADER_SEQ,
+    chain::{chain_hash, from_hex32},
+};
 
 use crate::partition::Partition;
 
@@ -22,7 +24,7 @@ const HEADER_EVENT_CLASS: &str = "event_class";
 #[must_use]
 pub(crate) fn recover_from_partition_tail(partition: &Partition) -> Option<(u64, [u8; 32])> {
     let leo = partition.log_end_offset();
-    if leo <= 0 {
+    if leo <= crabka_log::Offset(0) {
         return None;
     }
     // Read a bounded tail window (audit records are small).
@@ -63,21 +65,26 @@ fn header_str(rec: &crabka_protocol::records::Record, key: &str) -> Option<Strin
     header_bytes(rec, key).and_then(|v| std::str::from_utf8(&v).ok().map(str::to_owned))
 }
 
-fn tail_window_start(log_end_offset: i64) -> i64 {
-    (log_end_offset - TAIL_WINDOW_OFFSETS).max(0)
+fn tail_window_start(log_end_offset: crabka_log::Offset) -> crabka_log::Offset {
+    (log_end_offset - TAIL_WINDOW_OFFSETS).max(crabka_log::Offset(0))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicI32, AtomicU64},
+    };
+
     use assert2::assert;
     use bytes::Bytes;
     use crabka_audit::chain::{GENESIS_HEAD, to_hex};
-    use crabka_log::{Log, LogConfig};
+    use crabka_ids::PartitionIndex;
+    use crabka_log::{Log, LogConfig, Offset};
     use crabka_protocol::records::{Record, RecordBatch, RecordHeader};
-    use std::sync::atomic::{AtomicI32, AtomicU64};
-    use std::sync::{Arc, Mutex};
     use tokio::sync::{Notify, mpsc};
+
+    use super::*;
 
     fn test_partition() -> (Partition, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -86,7 +93,7 @@ mod tests {
         let writer = tokio::spawn(async {});
         let p = Partition {
             topic: "__audit".into(),
-            partition_id: 0,
+            partition_id: PartitionIndex(0),
             log_dir: Arc::new(arc_swap::ArcSwap::from_pointee(dir.path().to_path_buf())),
             log: Arc::new(Mutex::new(log)),
             writer_tx: tx,
@@ -150,7 +157,7 @@ mod tests {
         let cases = [(0, 0), (4096, 0), (4097, 1), (8192, 4096)];
         for (log_end_offset, want) in cases {
             assert!(
-                tail_window_start(log_end_offset) == want,
+                tail_window_start(Offset(log_end_offset)) == Offset(want),
                 "log_end_offset {log_end_offset}"
             );
         }

@@ -3,20 +3,23 @@
 //! This writes one tiny Parquet log block, registers it with `DataFusion`, runs a
 //! LogQL-shaped SQL filter, and emits Loki's `streams` response shape.
 
-use std::fs::File;
-use std::sync::Arc;
+use std::{fs::File, sync::Arc};
 
 use crabka_logql::{LineFilterOp, MatchOp, PipelineStage, parse_query};
-use crabka_observability_spike::Labels;
 use crabka_observability_spike::{
-    LogEntry, LogSelector, labels, loki_streams_response, series_fingerprint,
+    Labels, LogEntry, LogSelector, labels, loki_streams_response, series_fingerprint,
 };
-use datafusion::arrow::array::{
-    Array, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray, UInt64Array,
+use datafusion::{
+    arrow::{
+        array::{
+            Array, Int64Array, LargeStringArray, RecordBatch, StringArray, StringViewArray,
+            UInt64Array,
+        },
+        datatypes::{DataType, Field, Schema},
+    },
+    parquet::arrow::ArrowWriter,
+    prelude::{ParquetReadOptions, SessionContext},
 };
-use datafusion::arrow::datatypes::{DataType, Field, Schema};
-use datafusion::parquet::arrow::ArrowWriter;
-use datafusion::prelude::{ParquetReadOptions, SessionContext};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

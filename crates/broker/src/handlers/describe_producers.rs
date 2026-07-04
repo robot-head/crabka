@@ -22,18 +22,23 @@
 //! the row builder needs to look those up.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::AclOperation;
-use crabka_protocol::owned::describe_producers_request::DescribeProducersRequest;
-use crabka_protocol::owned::describe_producers_response::{
-    DescribeProducersResponse, PartitionResponse, ProducerState, TopicResponse,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_producers_request::DescribeProducersRequest,
+        describe_producers_response::{
+            DescribeProducersResponse, PartitionResponse, ProducerState, TopicResponse,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 #[allow(clippy::unused_async)] // signature symmetry with other inline-intercept handlers
 #[tracing::instrument(
@@ -112,7 +117,7 @@ pub(crate) async fn handle(
 
             let snapshot = broker
                 .producer_state
-                .snapshot(topic_req.name.as_str(), idx)
+                .snapshot(topic_req.name.as_str(), crabka_ids::PartitionIndex(idx))
                 .await;
             let active_producers: Vec<ProducerState> = snapshot
                 .into_iter()

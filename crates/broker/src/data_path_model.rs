@@ -21,19 +21,23 @@
     clippy::cast_sign_loss
 )]
 
-use std::collections::HashSet;
-use std::hash::{Hash, Hasher};
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashSet,
+    hash::{Hash, Hasher},
+    time::{Duration, Instant},
+};
 
-use crabka_log::{EpochEntry, epoch_and_offset_for_entries};
+use crabka_log::{EpochEntry, Offset, epoch_and_offset_for_entries};
 use crabka_metadata::PartitionRecord;
 use stateright::{Checker, Model, Property};
 
-use crate::config_keys::RecoveryStrategy;
-use crate::handlers::fetch::compute_visibility_window;
-use crate::leader_election::{FailoverDecision, failover_one};
-use crate::replica_state::ReplicaState;
-use crate::unclean_recovery::{ReplicaLogInfo, select_best_replica};
+use crate::{
+    config_keys::RecoveryStrategy,
+    handlers::fetch::compute_visibility_window,
+    leader_election::{FailoverDecision, failover_one},
+    replica_state::ReplicaState,
+    unclean_recovery::{ReplicaLogInfo, select_best_replica},
+};
 
 const NB: usize = 3; // brokers 0,1,2
 const MAX_LEN: usize = 4; // max log length (offsets 0..4)
@@ -117,17 +121,34 @@ fn real_hwm(s: &DpState, base: Instant) -> i64 {
     let leader = s.leader;
     let leader_leo = s.leader_leo();
     let leader_log = &s.log[leader as usize];
-    let isr_nodes: Vec<u64> = (0..NB as u8).filter(|&b| has(s.isr, b)).map(node).collect();
-    let replica_nodes: Vec<u64> = (0..NB as u8).map(node).collect();
+    let isr_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
+        .filter(|&b| has(s.isr, b))
+        .map(|b| crabka_audit::NodeId(node(b)))
+        .collect();
+    let replica_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
+        .map(|b| crabka_audit::NodeId(node(b)))
+        .collect();
     let mut rs = ReplicaState::new();
-    rs.install_isr(&isr_nodes, &replica_nodes, node(leader), base);
+    rs.install_isr(
+        &isr_nodes,
+        &replica_nodes,
+        crabka_audit::NodeId(node(leader)),
+        base,
+    );
     for b in 0..NB as u8 {
         if b != leader && has(s.isr, b) {
             let leo = consistent_leo(&s.log[b as usize], leader_log);
-            rs.update_follower_leo(node(b), leo, leader_leo, base);
+            // Wrap this model's `i64` LEOs into `Offset` for the real HWM core.
+            rs.update_follower_leo(
+                crabka_audit::NodeId(node(b)),
+                Offset(leo),
+                Offset(leader_leo),
+                base,
+            );
         }
     }
-    rs.recompute_hw_for_leader_append(leader_leo)
+    // Unwrap the recomputed `Offset` HWM back into this model's `i64` world.
+    rs.recompute_hw_for_leader_append(Offset(leader_leo)).0
 }
 
 /// The leader-epoch entries for a log: one entry per epoch change.
@@ -137,8 +158,8 @@ fn epoch_entries(log: &[u8]) -> Vec<EpochEntry> {
     for (off, &e) in log.iter().enumerate() {
         if last != Some(e) {
             out.push(EpochEntry {
-                epoch: i32::from(e),
-                start_offset: off as i64,
+                epoch: crabka_log::LeaderEpoch(i32::from(e)),
+                start_offset: Offset(off as i64),
             });
             last = Some(e);
         }
@@ -151,9 +172,13 @@ fn epoch_entries(log: &[u8]) -> Vec<EpochEntry> {
 fn real_truncation_offset(follower_log: &[u8], leader_log: &[u8]) -> i64 {
     let leader_entries = epoch_entries(leader_log);
     let follower_latest = follower_log.last().map_or(-1, |&e| i32::from(e));
-    let (_, end) =
-        epoch_and_offset_for_entries(&leader_entries, follower_latest, leader_log.len() as i64);
-    end.min(follower_log.len() as i64)
+    let (_, end) = epoch_and_offset_for_entries(
+        &leader_entries,
+        crabka_log::LeaderEpoch(follower_latest),
+        Offset(leader_log.len() as i64),
+    );
+    // Unwrap the log-layer `Offset` into this model's `i64` world at the seam.
+    end.0.min(follower_log.len() as i64)
 }
 
 /// Whether follower `b` is genuinely in-sync and may be (re)admitted to the
@@ -198,18 +223,23 @@ fn apply_elect(s: &mut DpState, new_leader: u8, isr_mask: u8, unclean: bool) {
 /// in the unclean config — driving the real KIP-966 `select_best_replica` for
 /// the empty-ISR `Recover` path.
 fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
-    let isr_nodes: Vec<u64> = (0..NB as u8).filter(|&b| has(s.isr, b)).map(node).collect();
-    let replica_nodes: Vec<u64> = (0..NB as u8).map(node).collect();
+    let isr_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
+        .filter(|&b| has(s.isr, b))
+        .map(|b| crabka_audit::NodeId(node(b)))
+        .collect();
+    let replica_nodes: Vec<crabka_audit::NodeId> = (0..NB as u8)
+        .map(|b| crabka_audit::NodeId(node(b)))
+        .collect();
     let pr = PartitionRecord {
-        leader: node(s.leader),
+        leader: crabka_audit::NodeId(node(s.leader)),
         replicas: replica_nodes,
         isr: isr_nodes,
-        leader_epoch: i32::from(s.leader_epoch),
+        leader_epoch: crabka_metadata::LeaderEpoch(i32::from(s.leader_epoch)),
         ..Default::default()
     };
-    let alive: HashSet<u64> = (0..NB as u8)
+    let alive: HashSet<crabka_audit::NodeId> = (0..NB as u8)
         .filter(|&b| has(s.live, b))
-        .map(node)
+        .map(|b| crabka_audit::NodeId(node(b)))
         .collect();
     // Clean config: strategy None + unclean disabled → only ISR elections (else
     // Unavailable). Unclean config: Balanced strategy defers an empty-ISR
@@ -219,14 +249,20 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
     } else {
         RecoveryStrategy::None
     };
-    match failover_one(&pr, node(dead), &alive, strategy, unclean) {
+    match failover_one(
+        &pr,
+        crabka_audit::NodeId(node(dead)),
+        &alive,
+        strategy,
+        unclean,
+    ) {
         FailoverDecision::Elect {
             leader,
             isr,
             unclean,
         } => {
-            let isr_mask = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n as u8)));
-            apply_elect(s, leader as u8, isr_mask, unclean);
+            let isr_mask = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n.0 as u8)));
+            apply_elect(s, leader.0 as u8, isr_mask, unclean);
         }
         FailoverDecision::Recover(_) => {
             // KIP-966 unclean recovery: drive the REAL select_best_replica over
@@ -235,7 +271,7 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
             let infos: Vec<ReplicaLogInfo> = (0..NB as u8)
                 .filter(|&b| has(s.live, b))
                 .map(|b| ReplicaLogInfo {
-                    broker_id: node(b),
+                    broker_id: crabka_audit::NodeId(node(b)),
                     last_written_leader_epoch: s.log[b as usize]
                         .last()
                         .map_or(0, |&e| i32::from(e)),
@@ -244,11 +280,11 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
                 })
                 .collect();
             if let Some(winner) = select_best_replica(&infos) {
-                apply_elect(s, winner as u8, 1u8 << (winner as u8), true);
+                apply_elect(s, winner.0 as u8, 1u8 << (winner.0 as u8), true);
             }
         }
         FailoverDecision::ShrinkIsr { isr } => {
-            s.isr = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n as u8)));
+            s.isr = isr.iter().fold(0u8, |m, &n| m | (1u8 << (n.0 as u8)));
         }
         FailoverDecision::Unavailable | FailoverDecision::NoChange => {}
     }
@@ -385,19 +421,19 @@ impl Model for DpModel {
                 let vw = compute_visibility_window(
                     false, // consumer, not follower
                     read_committed,
-                    0, // log_start
-                    s.hwm,
-                    s.hwm, // lso = hwm (no txns in v1)
-                    leader_log_len,
-                    fetch_offset,
+                    Offset(0), // log_start
+                    Offset(s.hwm),
+                    Offset(s.hwm), // lso = hwm (no txns in v1)
+                    Offset(leader_log_len),
+                    Offset(fetch_offset),
                 );
                 assert!(
-                    vw.limit_offset <= s.hwm,
+                    vw.limit_offset <= Offset(s.hwm),
                     "consumer limit {} exceeds HWM {}",
                     vw.limit_offset,
                     s.hwm
                 );
-                assert!(vw.response_hw == s.hwm, "response_hw drift");
+                assert!(vw.response_hw == Offset(s.hwm), "response_hw drift");
             }
             Act::Die(b) => {
                 s.live &= !(1 << b);

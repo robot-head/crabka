@@ -8,32 +8,35 @@
 //! are statically known *inside* the thunk even though the graph is type-erased.
 //!
 //! [`Topology::add_processor`]: crate::topology::Topology::add_processor
-use std::any::Any;
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::{
+    any::Any,
+    cell::RefCell,
+    marker::PhantomData,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
 
 use bytes::Bytes;
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::config::{Grouped, Joined, Materialized, StreamJoined};
-use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
-use crate::dsl::kgrouped::KGroupedStream;
-use crate::dsl::ktable::KTable;
-use crate::dsl::names;
-use crate::dsl::processors::change::Change;
-use crate::dsl::processors::global_join::KStreamGlobalTableJoinProcessor;
-use crate::dsl::processors::join::KStreamKTableJoinProcessor;
-use crate::dsl::processors::ktable_join::JoinKind;
-use crate::dsl::processors::outer_join_store::TimeTracker;
-use crate::dsl::processors::stateless;
-use crate::dsl::processors::stream_join::KStreamKStreamJoinProcessor;
-use crate::dsl::processors::table::KStreamToTableProcessor;
-use crate::dsl::processors::tuple_forwarder::TupleForwarder;
-use crate::dsl::windows::JoinWindows;
-use crate::processor::serde::{BytesSerde, DefaultSerde, Produced, Serde, SerdeAssociate};
-use crate::topology::NodeHandle;
+use crate::{
+    dsl::{
+        builder::InternalStreamsBuilder,
+        config::{Grouped, Joined, Materialized, StreamJoined},
+        graph::{GraphNodeKind, LowerState, NodeId},
+        kgrouped::KGroupedStream,
+        ktable::KTable,
+        names,
+        processors::{
+            change::Change, global_join::KStreamGlobalTableJoinProcessor,
+            join::KStreamKTableJoinProcessor, ktable_join::JoinKind, outer_join_store::TimeTracker,
+            stateless, stream_join::KStreamKStreamJoinProcessor, table::KStreamToTableProcessor,
+            tuple_forwarder::TupleForwarder,
+        },
+        windows::JoinWindows,
+    },
+    processor::serde::{BytesSerde, DefaultSerde, Produced, Serde, SerdeAssociate},
+    topology::NodeHandle,
+};
 
 /// The shared outer-form joiner threaded into a windowed stream-stream join
 /// (`join`/`left_join`/`outer_join` all lift their user joiner to this shape).
@@ -2047,8 +2050,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::dsl::builder::StreamsBuilder;
     use assert2::check;
+
+    use crate::dsl::builder::StreamsBuilder;
 
     #[test]
     fn stateless_chain_records_named_nodes() {
@@ -2088,8 +2092,10 @@ mod tests {
         // table SOURCE(1) + TABLE-SOURCE proc(2) and the stream SOURCE(0) are minted
         // before the join lands at KSTREAM-JOIN-0000000003 (see `dsl_golden_frame`
         // grace golden for the byte-exact node/store layout — this pins the name).
-        use crate::dsl::config::{Joined, Materialized};
-        use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
+        use crate::{
+            dsl::config::{Joined, Materialized},
+            processor::serde::{Consumed, I64Serde, Produced, StringSerde},
+        };
         let b = StreamsBuilder::new();
         let s = b
             .stream_explicit::<StringSerde, I64Serde>(["s"], Consumed::with(StringSerde, I64Serde));
@@ -2122,8 +2128,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "grace requires a versioned table")]
     fn grace_on_unversioned_table_panics() {
-        use crate::dsl::config::{Joined, Materialized};
-        use crate::processor::serde::{Consumed, I64Serde, StringSerde};
+        use crate::{
+            dsl::config::{Joined, Materialized},
+            processor::serde::{Consumed, I64Serde, StringSerde},
+        };
         let b = StreamsBuilder::new();
         let s = b
             .stream_explicit::<StringSerde, I64Serde>(["s"], Consumed::with(StringSerde, I64Serde));
@@ -2142,8 +2150,10 @@ mod tests {
     #[test]
     #[should_panic(expected = "grace_ms must be < history_retention_ms")]
     fn grace_geq_retention_panics() {
-        use crate::dsl::config::{Joined, Materialized};
-        use crate::processor::serde::{Consumed, I64Serde, StringSerde};
+        use crate::{
+            dsl::config::{Joined, Materialized},
+            processor::serde::{Consumed, I64Serde, StringSerde},
+        };
         let b = StreamsBuilder::new();
         let s = b
             .stream_explicit::<StringSerde, I64Serde>(["s"], Consumed::with(StringSerde, I64Serde));
@@ -2164,9 +2174,10 @@ mod tests {
 mod to_table_caching_tests {
     use assert2::check;
 
-    use crate::dsl::StreamsBuilder;
-    use crate::store::backend::StoreBackend;
-    use crate::{I64Serde, Materialized, Produced, StringSerde};
+    use crate::{
+        I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
+        store::backend::StoreBackend,
+    };
 
     /// Caching ON: the `to_table` store is marked cached (`cache_owner` rooted),
     /// two same-key updates are suppressed until flush, and the flush emits a

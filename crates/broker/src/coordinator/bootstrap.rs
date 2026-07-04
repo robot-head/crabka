@@ -2,24 +2,30 @@
 //! startup, then synchronously replay every record into the in-memory
 //! `GroupCoordinator`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
+use crabka_ids::PartitionIndex;
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
 use crabka_protocol::records::RecordBatch;
 use crabka_raft::RaftError;
 
-use crate::broker::spawn_partition;
-use crate::config::BrokerConfig;
-use crate::coordinator::GroupCoordinator;
-use crate::coordinator::persistence::{self, GroupMetadataValue, Key, OffsetCommitValue};
-use crate::coordinator::unified::classic_state::{
-    Group as ClassicState, GroupState as ClassicGroupState, Member, OffsetEntry,
+use crate::{
+    broker::spawn_partition,
+    config::BrokerConfig,
+    coordinator::{
+        GroupCoordinator,
+        persistence::{self, GroupMetadataValue, Key, OffsetCommitValue},
+        unified::{
+            classic_state::{
+                Group as ClassicState, GroupState as ClassicGroupState, Member, OffsetEntry,
+            },
+            group::{Group, GroupKind},
+        },
+    },
+    error::BrokerError,
+    log_dir,
+    partition_registry::PartitionRegistry,
 };
-use crate::coordinator::unified::group::{Group, GroupKind};
-use crate::error::BrokerError;
-use crate::log_dir;
-use crate::partition_registry::PartitionRegistry;
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
 pub const OFFSETS_PARTITION: i32 = 0;
@@ -107,7 +113,7 @@ pub async fn bootstrap_audit_topic(
             leader: replicas[0],
             replicas: replicas.clone(),
             isr: replicas.clone(),
-            leader_epoch: 0,
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -201,7 +207,7 @@ pub async fn bootstrap(
                     leader: config.node_id,
                     replicas: vec![config.node_id],
                     isr: vec![config.node_id],
-                    leader_epoch: 0,
+                    leader_epoch: crabka_metadata::LeaderEpoch(0),
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![],
@@ -250,13 +256,17 @@ pub async fn bootstrap(
     // Spawn a writer + register the partition handle.
     let partition = spawn_partition(
         OFFSETS_TOPIC.to_string(),
-        OFFSETS_PARTITION,
+        PartitionIndex(OFFSETS_PARTITION),
         owning_dir,
         log,
         log_dir_status.clone(),
         producer_state.clone(),
     );
-    partitions.insert(OFFSETS_TOPIC.into(), OFFSETS_PARTITION, partition);
+    partitions.insert(
+        OFFSETS_TOPIC.into(),
+        PartitionIndex(OFFSETS_PARTITION),
+        partition,
+    );
     Ok(())
 }
 
@@ -291,7 +301,10 @@ fn replay_records(
                     }
                 }
             }
-            advanced_to = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
+            // The loop threads the log's `Offset` cursor (`next`/`end` feed
+            // `Log::read`); wrap the batch-derived next offset back into `Offset`.
+            advanced_to =
+                crabka_log::Offset(batch.base_offset + i64::from(batch.last_offset_delta) + 1);
         }
         if advanced_to <= next {
             break;
@@ -639,13 +652,17 @@ fn apply_group_metadata(g: &mut ClassicState, v: GroupMetadataValue, replay_time
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::config::BrokerConfig;
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
     use assert2::{assert, check};
     use crabka_raft::ControllerHandle;
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::config::BrokerConfig;
 
     /// Spin up a controller, wait until it reports a leader, return the handle.
     async fn controller_with_leader(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
@@ -653,7 +670,7 @@ mod tests {
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
-            ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
+            ..crabka_raft::ControllerConfig::for_tests(crabka_raft::NodeId(1), log_dir)
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();
@@ -670,11 +687,12 @@ mod tests {
     /// freshly-spawned actor restores the same membership after a restart.
     #[tokio::test]
     async fn share_group_records_replay_into_seed() {
-        use crate::coordinator::unified::GroupCoordinator;
-        use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
-        use crate::coordinator::unified::reconciler::ReconcileInput;
-        use crate::coordinator::unified::share::persistence as sp;
         use crabka_protocol::primitives::uuid::Uuid;
+
+        use crate::coordinator::unified::{
+            GroupCoordinator, offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+            share::persistence as sp,
+        };
 
         #[derive(Debug)]
         struct EmptyMeta;
@@ -758,11 +776,12 @@ mod tests {
     /// the cached seed; a member tombstone scrubs that member from the seed.
     #[tokio::test]
     async fn streams_group_records_replay_into_seed() {
-        use crate::coordinator::unified::GroupCoordinator;
-        use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
-        use crate::coordinator::unified::reconciler::ReconcileInput;
-        use crate::coordinator::unified::streams::persistence as sp;
         use std::collections::BTreeMap;
+
+        use crate::coordinator::unified::{
+            GroupCoordinator, offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+            streams::persistence as sp,
+        };
 
         #[derive(Debug)]
         struct EmptyMeta;
@@ -892,7 +911,7 @@ mod tests {
         .unwrap();
         let topic_dir = log_dir::partition_dir(&config.log_dir, OFFSETS_TOPIC, OFFSETS_PARTITION);
         check!(topic_dir.exists());
-        check!(partitions.contains(OFFSETS_TOPIC, OFFSETS_PARTITION));
+        check!(partitions.contains(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION)));
         check!(controller.current_image().topic(OFFSETS_TOPIC).is_some());
     }
 
@@ -961,8 +980,9 @@ mod tests {
 
     #[test]
     fn apply_group_metadata_rebuilds_members_and_state() {
-        use crate::coordinator::persistence::MemberMetadata;
         use bytes::Bytes;
+
+        use crate::coordinator::persistence::MemberMetadata;
 
         let mut g = ClassicState::new("g");
         let v = GroupMetadataValue {
@@ -1012,8 +1032,9 @@ mod tests {
     /// same shape the share/streams replay tests use. Suitable for driving the
     /// `apply_record` / `apply_tombstone` / `finalize` replay path directly.
     fn bare_coordinator() -> Arc<GroupCoordinator> {
-        use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
-        use crate::coordinator::unified::reconciler::ReconcileInput;
+        use crate::coordinator::unified::{
+            offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+        };
 
         #[derive(Debug)]
         struct EmptyMeta;
@@ -1066,8 +1087,9 @@ mod tests {
     /// group. Log order wins.
     #[tokio::test]
     async fn downgraded_group_replays_as_classic() {
-        use crate::coordinator::unified::persistence_next_gen as ng;
-        use crate::coordinator::unified::{GroupType, persistence_next_gen};
+        use crate::coordinator::unified::{
+            GroupType, persistence_next_gen as ng, persistence_next_gen,
+        };
 
         let coord = bare_coordinator();
 
@@ -1165,8 +1187,7 @@ mod tests {
     /// post-compaction shape and asserts the group replays CLASSIC.
     #[tokio::test]
     async fn compacted_downgrade_residue_replays_as_classic() {
-        use crate::coordinator::unified::GroupType;
-        use crate::coordinator::unified::persistence_next_gen as ng;
+        use crate::coordinator::unified::{GroupType, persistence_next_gen as ng};
 
         let coord = bare_coordinator();
 
@@ -1275,8 +1296,9 @@ mod tests {
     /// over-eager seed removal.
     #[tokio::test]
     async fn upgraded_group_without_tombstone_replays_as_consumer() {
-        use crate::coordinator::unified::persistence_next_gen as ng;
-        use crate::coordinator::unified::{GroupType, persistence_next_gen};
+        use crate::coordinator::unified::{
+            GroupType, persistence_next_gen as ng, persistence_next_gen,
+        };
 
         let coord = bare_coordinator();
         let stream: Vec<(bytes::Bytes, bytes::Bytes)> = vec![
@@ -1324,11 +1346,12 @@ mod tests {
     /// "m1" must report `is_classic == true` via the next-gen `Describe` view.
     #[tokio::test]
     async fn member_with_classic_block_replays_facade() {
-        use crate::coordinator::unified::actor::GroupActorMessage;
-        use crate::coordinator::unified::actor::GroupKindTag;
-        use crate::coordinator::unified::persistence_next_gen as ng;
-        use crate::coordinator::unified::persistence_next_gen;
         use tokio::sync::oneshot;
+
+        use crate::coordinator::unified::{
+            actor::{GroupActorMessage, GroupKindTag},
+            persistence_next_gen as ng, persistence_next_gen,
+        };
 
         let coord = bare_coordinator();
         let stream: Vec<(bytes::Bytes, bytes::Bytes)> = vec![
@@ -1387,5 +1410,90 @@ mod tests {
             .find(|m| m.member_id == "m1")
             .expect("member m1 present");
         assert!(m1.is_classic, "facade reconstructed from k5 classic block");
+    }
+
+    /// `replay_records` must walk EVERY batch in the log, not just the first.
+    /// The cursor that advances between batches is
+    /// `base_offset + last_offset_delta + 1`; a two-record first batch
+    /// (`last_offset_delta == 1`) followed by a second batch is only fully
+    /// replayed if that arithmetic is exact. Both offset-commit records from
+    /// the first batch AND the commit from the second batch must land in
+    /// `acc.committed`.
+    #[tokio::test]
+    async fn replay_records_walks_all_batches() {
+        use crabka_log::Offset;
+        use crabka_protocol::records::Record;
+
+        use crate::coordinator::unified::{
+            GroupCoordinator, offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+        };
+
+        #[derive(Debug)]
+        struct EmptyMeta;
+        impl crate::coordinator::unified::actor::MetadataProvider for EmptyMeta {
+            fn snapshot(&self) -> ReconcileInput {
+                ReconcileInput::default()
+            }
+        }
+
+        let coord = Arc::new(GroupCoordinator::new(
+            crate::coordinator::unified::config::NextGenConfig::default(),
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            Arc::new(EmptyMeta),
+            Arc::new(InMemoryOffsetsLog::default()),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        ));
+
+        // Build an offset-commit record with a distinct committed offset per
+        // (topic, partition), so we can tell which batches were replayed.
+        let commit_record = |partition: i32, offset: i64| Record {
+            offset_delta: 0,
+            key: Some(OffsetCommitValue::encode_key("g", "t", partition)),
+            value: Some(
+                OffsetCommitValue {
+                    offset: Offset(offset),
+                    leader_epoch: -1,
+                    metadata: String::new(),
+                    commit_timestamp_ms: 0,
+                }
+                .encode_value(),
+            ),
+            ..Default::default()
+        };
+
+        let dir = tempdir().unwrap();
+        let mut log = crabka_log::Log::open(dir.path(), crabka_log::LogConfig::default()).unwrap();
+
+        // First batch spans TWO offsets (last_offset_delta == 1): partitions 0
+        // and 1 commit at offsets 100 and 101.
+        let mut batch1 = RecordBatch {
+            last_offset_delta: 1,
+            ..RecordBatch::default()
+        };
+        batch1.records.push(commit_record(0, 100));
+        batch1.records.push(Record {
+            offset_delta: 1,
+            ..commit_record(1, 101)
+        });
+        log.append(&mut batch1).unwrap();
+
+        // Second batch: partition 2 commits at offset 202. Reaching it requires
+        // the inter-batch cursor to have advanced past the first batch.
+        let mut batch2 = RecordBatch::default();
+        batch2.records.push(commit_record(2, 202));
+        log.append(&mut batch2).unwrap();
+
+        let replayed = replay_records(&log, &coord).unwrap();
+        let committed = replayed
+            .committed
+            .get("g")
+            .expect("group g has committed offsets");
+
+        // All three commits present — the second batch is only reached when the
+        // cursor arithmetic `base_offset + last_offset_delta + 1` is exact.
+        check!(committed.len() == 3);
+        check!(committed[&("t".to_string(), 0)].offset == Offset(100));
+        check!(committed[&("t".to_string(), 1)].offset == Offset(101));
+        check!(committed[&("t".to_string(), 2)].offset == Offset(202));
     }
 }

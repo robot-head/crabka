@@ -14,8 +14,7 @@
 //! the log crate's `read_raw_desc` through `RecordsPayload::FileRegions` to the
 //! broker's sendfile drainer.
 
-use std::fs::File;
-use std::sync::Arc;
+use std::{fs::File, sync::Arc};
 
 /// A `[offset, offset+len)` byte range within a segment `.log` file that holds
 /// one or more complete (or a clipped trailing) v2 record batches — byte-for-

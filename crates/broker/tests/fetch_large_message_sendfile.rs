@@ -14,14 +14,16 @@ use assert2::assert;
 mod support;
 
 use bytes::Bytes;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{Record, RecordBatch};
 
 async fn create_topic(p: &support::InProcess, name: &str) {
     let resp = p

@@ -1,5 +1,6 @@
-use assert2::assert;
 use std::path::Path;
+
+use assert2::assert;
 
 const KNOWN_UNSUPPORTED: &[(&str, &str)] = &[];
 

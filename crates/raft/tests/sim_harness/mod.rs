@@ -26,11 +26,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crabka_raft::kraft::QuorumStateMachine;
-use crabka_raft::kraft::action::{Action, TimerKind};
-use crabka_raft::kraft::event::{Event, LogEnd};
-use crabka_raft::kraft::role::Role;
-use crabka_raft::kraft::types::{LeaderEpoch, LogView, NodeId, QuorumState, SimInstant};
+use crabka_raft::kraft::{
+    QuorumStateMachine,
+    action::{Action, TimerKind},
+    event::{Event, LogEnd},
+    role::Role,
+    types::{Epoch, LogView, NodeId, QuorumState, SimInstant},
+};
 
 // --------------------------------------------------------------------------
 // Pluggable per-node log
@@ -42,7 +44,7 @@ use crabka_raft::kraft::types::{LeaderEpoch, LogView, NodeId, QuorumState, SimIn
 pub trait SimNodeLog: LogView {
     /// Append `count` data records produced in `epoch` (the leader's own
     /// appends and the new-leader `LeaderChange` control record).
-    fn append_in_epoch(&mut self, epoch: LeaderEpoch, count: usize);
+    fn append_in_epoch(&mut self, epoch: Epoch, count: usize);
 
     /// Truncate the log so that exactly `offset` records remain.
     fn truncate_to(&mut self, offset: i64);
@@ -86,7 +88,7 @@ pub trait SimNodeLog: LogView {
 #[derive(Debug, Clone, Default)]
 pub struct SimLog {
     /// `epochs[i]` is the leader epoch of the record at offset `i`.
-    epochs: Vec<LeaderEpoch>,
+    epochs: Vec<Epoch>,
 }
 
 impl LogView for SimLog {
@@ -94,11 +96,11 @@ impl LogView for SimLog {
         i64::try_from(self.epochs.len()).expect("log length fits in i64")
     }
 
-    fn last_epoch(&self) -> LeaderEpoch {
+    fn last_epoch(&self) -> Epoch {
         self.epochs.last().copied().unwrap_or(0)
     }
 
-    fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+    fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64> {
         // Unknown epoch (strictly newer than anything we hold).
         if epoch > self.last_epoch() {
             return None;
@@ -115,7 +117,7 @@ impl LogView for SimLog {
 }
 
 impl SimNodeLog for SimLog {
-    fn append_in_epoch(&mut self, epoch: LeaderEpoch, count: usize) {
+    fn append_in_epoch(&mut self, epoch: Epoch, count: usize) {
         for _ in 0..count {
             self.epochs.push(epoch);
         }
@@ -274,7 +276,7 @@ impl<L: SimNodeLog> Sim<L> {
 
     /// A deterministic snapshot of every node's observable state, used to detect
     /// the steady-state fixed point. Ordered by node id (`BTreeMap`).
-    fn fingerprint(&self) -> Vec<(NodeId, &'static str, LeaderEpoch, usize, i64)> {
+    fn fingerprint(&self) -> Vec<(NodeId, &'static str, Epoch, usize, i64)> {
         self.nodes
             .values()
             .map(|n| {
@@ -319,7 +321,7 @@ impl<L: SimNodeLog> Sim<L> {
     /// Inject a conflicting-epoch tail into `follower`'s log directly (bypassing
     /// the leader) so the next fetch round forces a divergence + truncation. The
     /// `epoch` should differ from what the leader holds at those offsets.
-    pub fn inject_conflicting_tail(&mut self, follower: NodeId, epoch: LeaderEpoch, n: usize) {
+    pub fn inject_conflicting_tail(&mut self, follower: NodeId, epoch: Epoch, n: usize) {
         let node = self.nodes.get_mut(&follower).unwrap();
         node.log.append_in_epoch(epoch, n);
     }
@@ -340,7 +342,7 @@ impl<L: SimNodeLog> Sim<L> {
 
     /// The set of distinct leader epochs across all voters (should be one once
     /// the cluster has converged).
-    pub fn distinct_epochs(&self) -> BTreeSet<LeaderEpoch> {
+    pub fn distinct_epochs(&self) -> BTreeSet<Epoch> {
         self.nodes
             .values()
             .map(|n| n.machine.quorum_state().leader_epoch)
@@ -578,7 +580,7 @@ impl<L: SimNodeLog> Sim<L> {
     }
 
     /// Broadcast a (pre-)vote request from `id` to every other voter.
-    fn broadcast_vote_request(&mut self, id: NodeId, epoch: LeaderEpoch, pre_vote: bool) {
+    fn broadcast_vote_request(&mut self, id: NodeId, epoch: Epoch, pre_vote: bool) {
         let cand_log = self.nodes[&id].log.log_end();
         for peer in self.voter_ids.clone() {
             if peer != id {
@@ -767,7 +769,7 @@ const HEARTBEAT_MS: u64 = 300;
 /// `id`. Staggered by node id so timer ties break deterministically and the
 /// lowest live id tends to win the election race — elections always converge.
 fn election_timeout_ms_of(id: NodeId) -> u64 {
-    1000 + id * 50
+    1000 + id.0 * 50
 }
 
 /// Update `best` to the earliest `(deadline, id, kind)` seen so far. Earlier

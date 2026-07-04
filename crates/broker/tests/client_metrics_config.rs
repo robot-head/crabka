@@ -14,17 +14,16 @@
 use assert2::{assert, check};
 mod support;
 
-use crabka_protocol::owned::describe_configs_request::{
-    DescribeConfigsRequest, DescribeConfigsResource,
+use crabka_protocol::owned::{
+    describe_configs_request::{DescribeConfigsRequest, DescribeConfigsResource},
+    describe_configs_response::DescribeConfigsResponse,
+    incremental_alter_configs_request::{
+        AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
+    },
+    incremental_alter_configs_response::IncrementalAlterConfigsResponse,
+    list_config_resources_request::ListConfigResourcesRequest,
+    list_config_resources_response::ListConfigResourcesResponse,
 };
-use crabka_protocol::owned::describe_configs_response::DescribeConfigsResponse;
-use crabka_protocol::owned::incremental_alter_configs_request::{
-    AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
-};
-use crabka_protocol::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse;
-use crabka_protocol::owned::list_config_resources_request::ListConfigResourcesRequest;
-use crabka_protocol::owned::list_config_resources_response::ListConfigResourcesResponse;
-
 use support::start_n_node;
 
 /// Kafka resource type id for CLIENT_METRICS (KIP-714).

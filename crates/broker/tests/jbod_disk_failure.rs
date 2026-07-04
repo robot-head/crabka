@@ -13,31 +13,34 @@
 //!   2. A Produce to a partition that lives on the still-online `primary` dir
 //!      returns error code 0.
 
-use assert2::{assert, check};
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use crabka_protocol::owned::assign_replicas_to_dirs_request::{
-    AssignReplicasToDirsRequest, DirectoryData as ReqDirData, PartitionData as ReqPartData,
-    TopicData as ReqTopicData,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        assign_replicas_to_dirs_request::{
+            AssignReplicasToDirsRequest, DirectoryData as ReqDirData, PartitionData as ReqPartData,
+            TopicData as ReqTopicData,
+        },
+        assign_replicas_to_dirs_response::AssignReplicasToDirsResponse,
+        broker_heartbeat_request::BrokerHeartbeatRequest,
+        broker_heartbeat_response::BrokerHeartbeatResponse,
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        produce_response::ProduceResponse,
+    },
+    primitives::uuid::Uuid as ProtocolUuid,
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::owned::assign_replicas_to_dirs_response::AssignReplicasToDirsResponse;
-use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
-use crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
-};
-use crabka_protocol::owned::produce_response::ProduceResponse;
-use crabka_protocol::primitives::uuid::Uuid as ProtocolUuid;
-use crabka_protocol::records::{Record, RecordBatch};
-use crabka_protocol::{Decode, Encode};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 const CLIENT_ID: &str = "crabka-jbod-disk-failure-test";
 const PRODUCE_VERSION: i16 = 9; // flexible, acks=1

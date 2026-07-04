@@ -9,22 +9,23 @@
 //! `tests/integration.rs`. The fuller suite (explicit release/reject,
 //! two-consumer sharing, close-leaves-group) is Task E3.
 
-use assert2::assert;
 use std::time::Duration;
 
-use tempfile::TempDir;
-
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_consumer::{ShareAckMode, ShareAckType, ShareConsumer, ShareConsumerRecord};
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        find_coordinator_request::FindCoordinatorRequest,
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        share_group_describe_request::ShareGroupDescribeRequest,
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::owned::share_group_describe_request::ShareGroupDescribeRequest;
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{Record, RecordBatch};
+use tempfile::TempDir;
 
 const SHARE_STATE_TOPIC: &str = "__share_group_state";
 const SHARE_STATE_PARTITIONS: i32 = 50;

@@ -28,25 +28,24 @@
 //! hosted Windows runner causes intermittent `INVALID_TXN_STATE` during
 //! `InitProducerId`.
 
-use assert2::assert;
 use std::time::Duration;
 
+use assert2::assert;
 use bytes::Bytes;
-use tempfile::TempDir;
-
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_core::Client;
 use crabka_client_producer::{Producer, ProducerRecord};
-use crabka_protocol::owned::add_partitions_to_txn_request::{
-    AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction,
+use crabka_protocol::owned::{
+    add_partitions_to_txn_request::{AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction},
+    common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic,
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    end_txn_request::EndTxnRequest,
+    find_coordinator_request::FindCoordinatorRequest,
+    init_producer_id_request::InitProducerIdRequest,
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
 };
-use crabka_protocol::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::end_txn_request::EndTxnRequest;
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+use tempfile::TempDir;
 
 // Kafka error codes asserted below.
 const NONE: i16 = 0;

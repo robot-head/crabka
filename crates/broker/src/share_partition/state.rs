@@ -12,6 +12,8 @@
 
 use std::time::{Duration, Instant};
 
+use crabka_log::Offset;
+
 use crate::share_coordinator::persistence::StateBatch;
 
 /// Saturating `i64 -> i32` for record counts (offset ranges never realistically
@@ -57,8 +59,8 @@ impl AckType {
 /// A contiguous run of offsets acquired by a single `acquire` call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcquiredRange {
-    pub first: i64,
-    pub last: i64,
+    pub first: Offset,
+    pub last: Offset,
     pub delivery_count: i16,
 }
 
@@ -67,8 +69,8 @@ pub struct AcquiredRange {
 /// `state == RecordState::Acquired`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct InFlightBatch {
-    first_offset: i64,
-    last_offset: i64,
+    first_offset: Offset,
+    last_offset: Offset,
     state: RecordState,
     delivery_count: i16,
     acquired_by: Option<String>,
@@ -77,7 +79,7 @@ struct InFlightBatch {
 
 impl InFlightBatch {
     fn len(&self) -> i64 {
-        self.last_offset - self.first_offset + 1
+        self.last_offset.0 - self.first_offset.0 + 1
     }
 }
 
@@ -86,10 +88,10 @@ impl InFlightBatch {
 pub struct AcquisitionState {
     /// Share-partition start offset (SPSO): the lowest offset not yet
     /// terminally acknowledged/archived.
-    pub start_offset: i64,
+    pub start_offset: Offset,
     /// Share-partition end offset (SPEO): one past the highest materialized
     /// offset. Equals `start_offset` when the window is empty.
-    pub end_offset: i64,
+    pub end_offset: Offset,
     pub state_epoch: i32,
     pub leader_epoch: i32,
     pub dirty: bool,
@@ -102,7 +104,7 @@ pub struct AcquisitionState {
 
 impl AcquisitionState {
     #[must_use]
-    pub fn new(start_offset: i64) -> Self {
+    pub fn new(start_offset: Offset) -> Self {
         Self {
             start_offset,
             end_offset: start_offset,
@@ -121,7 +123,7 @@ impl AcquisitionState {
     /// `[end_offset, min(hwm-1, end_offset + max_inflight - 1)]` and advance
     /// `end_offset`. `max_inflight` caps how many records may be in flight at
     /// once (approximated as a record count).
-    pub fn materialize(&mut self, hwm: i64, max_inflight: i32) {
+    pub fn materialize(&mut self, hwm: Offset, max_inflight: i32) {
         let has_available = self
             .batches
             .iter()
@@ -230,8 +232,8 @@ impl AcquisitionState {
     pub fn acknowledge(
         &mut self,
         member: &str,
-        first: i64,
-        last: i64,
+        first: Offset,
+        last: Offset,
         ack: AckType,
         _now: Instant,
     ) -> Result<(), i16> {
@@ -290,8 +292,8 @@ impl AcquisitionState {
     pub fn renew(
         &mut self,
         member: &str,
-        first: i64,
-        last: i64,
+        first: Offset,
+        last: Offset,
         now: Instant,
         lock_dur: Duration,
     ) -> Result<(), i16> {
@@ -343,7 +345,7 @@ impl AcquisitionState {
 
     /// True iff every offset in `[first, last]` is currently Acquired by
     /// `member`.
-    fn range_acquired_by(&self, member: &str, first: i64, last: i64) -> bool {
+    fn range_acquired_by(&self, member: &str, first: Offset, last: Offset) -> bool {
         let mut cursor = first;
         for b in &self.batches {
             if b.last_offset < first || b.first_offset > last {
@@ -366,7 +368,7 @@ impl AcquisitionState {
 
     /// Split the batch at index `i` so that `split` becomes the first offset of
     /// a new trailing batch. No-op if `split` is at a boundary.
-    fn split_at(&mut self, i: usize, split: i64) {
+    fn split_at(&mut self, i: usize, split: Offset) {
         let b = &self.batches[i];
         if split <= b.first_offset || split > b.last_offset {
             return;
@@ -386,12 +388,13 @@ impl AcquisitionState {
     /// Split whichever batch contains the boundary so `offset` is a batch
     /// `first_offset`. No-op when `offset` already lands on a boundary or is
     /// outside the window.
-    fn split_at_offset(&mut self, offset: i64) {
+    fn split_at_offset(&mut self, offset: Offset) {
         if let Some(i) = self.batches.iter().position(|b| {
             b.first_offset
+                .0
                 .checked_add(1)
                 .is_some_and(|first_split_offset| {
-                    (first_split_offset..=b.last_offset).contains(&offset)
+                    (first_split_offset..=b.last_offset.0).contains(&offset.0)
                 })
         }) {
             self.split_at(i, offset);
@@ -448,7 +451,7 @@ impl AcquisitionState {
     /// as `Available(0)` (a leader that crashes and reloads re-offers them).
     /// Acknowledged/Archived batches are emitted with their terminal codes.
     #[must_use]
-    pub fn to_persist_batches(&self) -> (i64, i32, Vec<StateBatch>) {
+    pub fn to_persist_batches(&self) -> (Offset, i32, Vec<StateBatch>) {
         let mut out = Vec::with_capacity(self.batches.len());
         for b in &self.batches {
             let delivery_state = match b.state {
@@ -497,7 +500,7 @@ impl AcquisitionState {
     /// `max(last_offset)+1` or `start_offset` when empty.
     pub fn load_from(
         &mut self,
-        start_offset: i64,
+        start_offset: Offset,
         state_epoch: i32,
         leader_epoch: i32,
         delivery_complete_count: i32,
@@ -541,8 +544,9 @@ impl AcquisitionState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn t0() -> Instant {
         Instant::now()
@@ -552,36 +556,38 @@ mod tests {
 
     #[test]
     fn acquire_then_accept_advances_spso() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(5, 100); // [0,4] Available
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(5), 100); // [0,4] Available
         let acq = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         assert!(
             acq == vec![AcquiredRange {
-                first: 0,
-                last: 4,
+                first: Offset(0),
+                last: Offset(4),
                 delivery_count: 1
             }]
         );
-        s.acknowledge("m1", 0, 4, AckType::Accept, t0()).unwrap();
-        assert!(s.start_offset == 5);
+        s.acknowledge("m1", Offset(0), Offset(4), AckType::Accept, t0())
+            .unwrap();
+        assert!(s.start_offset == Offset(5));
     }
 
     #[test]
     fn release_redelivers_with_incremented_count() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(3, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(3), 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
-        s.acknowledge("m1", 0, 2, AckType::Release, t0()).unwrap();
+        s.acknowledge("m1", Offset(0), Offset(2), AckType::Release, t0())
+            .unwrap();
         let acq2 = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         assert!(acq2[0].delivery_count == 2);
         // Released records stay in the window; SPSO did not advance.
-        assert!(s.start_offset == 0);
+        assert!(s.start_offset == Offset(0));
     }
 
     #[test]
     fn delivery_limit_archives_poison_pill() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(1, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(1), 100);
         for _ in 0..2 {
             // max_attempts = 2
             let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 2);
@@ -589,27 +595,29 @@ mod tests {
         }
         let acq = s.acquire("m1", 10, i32::MAX, t0() + Duration::from_secs(62), LOCK, 2);
         assert!(acq.is_empty()); // archived, not redelivered
-        assert!(s.start_offset == 1); // SPSO advanced past the poison pill
+        assert!(s.start_offset == Offset(1)); // SPSO advanced past the poison pill
     }
 
     #[test]
     fn partial_acknowledge_splits_a_batch() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(10, 100); // [0,9] Available
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(10), 100); // [0,9] Available
         let acq = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         assert!(acq.len() == 1);
         // Accept only [0,3]; [4,9] remain Acquired.
-        s.acknowledge("m1", 0, 3, AckType::Accept, t0()).unwrap();
-        assert!(s.start_offset == 4);
+        s.acknowledge("m1", Offset(0), Offset(3), AckType::Accept, t0())
+            .unwrap();
+        assert!(s.start_offset == Offset(4));
         // The remaining acquired range can still be acknowledged.
-        s.acknowledge("m1", 4, 9, AckType::Accept, t0()).unwrap();
-        assert!(s.start_offset == 10);
+        s.acknowledge("m1", Offset(4), Offset(9), AckType::Accept, t0())
+            .unwrap();
+        assert!(s.start_offset == Offset(10));
     }
 
     #[test]
     fn expire_locks_reverts_to_available() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(4, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(4), 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         // Before expiry: re-acquire finds nothing (all Acquired).
         let none = s.acquire("m2", 10, i32::MAX, t0(), LOCK, 5);
@@ -619,32 +627,34 @@ mod tests {
         let acq = s.acquire("m2", 10, i32::MAX, t0() + Duration::from_secs(31), LOCK, 5);
         assert!(
             acq == vec![AcquiredRange {
-                first: 0,
-                last: 3,
+                first: Offset(0),
+                last: Offset(3),
                 delivery_count: 2
             }]
         );
-        assert!(s.start_offset == 0);
+        assert!(s.start_offset == Offset(0));
     }
 
     #[test]
     fn reject_archives_and_advances_spso() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(3, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(3), 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
-        s.acknowledge("m1", 0, 2, AckType::Reject, t0()).unwrap();
-        assert!(s.start_offset == 3); // archived prefix dropped
+        s.acknowledge("m1", Offset(0), Offset(2), AckType::Reject, t0())
+            .unwrap();
+        assert!(s.start_offset == Offset(3)); // archived prefix dropped
         let acq = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         assert!(acq.is_empty()); // nothing left
     }
 
     #[test]
     fn gap_archives() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(2, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(2), 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
-        s.acknowledge("m1", 0, 1, AckType::Gap, t0()).unwrap();
-        assert!(s.start_offset == 2);
+        s.acknowledge("m1", Offset(0), Offset(1), AckType::Gap, t0())
+            .unwrap();
+        assert!(s.start_offset == Offset(2));
         let (_start, dcc, batches) = s.to_persist_batches();
         assert!(batches.is_empty()); // archived prefix dropped from window
         assert!(dcc == 2); // both offsets reached a terminal state
@@ -652,18 +662,18 @@ mod tests {
 
     #[test]
     fn to_persist_batches_maps_acquired_to_available() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(5, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(5), 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         let (start, dcc, batches) = s.to_persist_batches();
-        check!(start == 0);
+        check!(start == Offset(0));
         check!(dcc == 0); // nothing terminal yet
         // Acquired persists as Available(0) but retains its delivery_count.
         check!(
             batches
                 == vec![StateBatch {
-                    first_offset: 0,
-                    last_offset: 4,
+                    first_offset: Offset(0),
+                    last_offset: Offset(4),
                     delivery_state: DS_AVAILABLE,
                     delivery_count: 1
                 }]
@@ -673,17 +683,18 @@ mod tests {
     #[test]
     fn load_from_round_trip() {
         // Build a state, acquire part of it, persist, reload into a fresh one.
-        let mut s = AcquisitionState::new(0);
-        s.materialize(10, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(10), 100);
         let _ = s.acquire("m1", 4, i32::MAX, t0(), LOCK, 5); // [0,3] Acquired, [4,9] Available
-        s.acknowledge("m1", 0, 3, AckType::Accept, t0()).unwrap(); // SPSO -> 4
+        s.acknowledge("m1", Offset(0), Offset(3), AckType::Accept, t0())
+            .unwrap(); // SPSO -> 4
         let (start, _dcc, batches) = s.to_persist_batches();
-        assert!(start == 4);
+        assert!(start == Offset(4));
 
-        let mut reloaded = AcquisitionState::new(0);
+        let mut reloaded = AcquisitionState::new(Offset(0));
         reloaded.load_from(start, 7, 3, 0, &batches);
-        check!(reloaded.start_offset == 4);
-        check!(reloaded.end_offset == 10);
+        check!(reloaded.start_offset == Offset(4));
+        check!(reloaded.end_offset == Offset(10));
         check!(reloaded.state_epoch == 7);
         check!(reloaded.leader_epoch == 3);
         check!(!reloaded.dirty);
@@ -691,8 +702,8 @@ mod tests {
         let acq = reloaded.acquire("m2", 100, i32::MAX, t0(), LOCK, 5);
         assert!(
             acq == vec![AcquiredRange {
-                first: 4,
-                last: 9,
+                first: Offset(4),
+                last: Offset(9),
                 delivery_count: 1
             }]
         );
@@ -700,41 +711,41 @@ mod tests {
 
     #[test]
     fn acknowledge_wrong_member_is_invalid_record_state() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(3, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(3), 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
-        let err = s.acknowledge("m2", 0, 2, AckType::Accept, t0());
+        let err = s.acknowledge("m2", Offset(0), Offset(2), AckType::Accept, t0());
         assert!(err == Err(crate::codes::INVALID_RECORD_STATE));
     }
 
     #[test]
     fn materialize_respects_max_inflight() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(100, 10); // hwm far ahead, but cap at 10 in flight
-        assert!(s.end_offset == 10);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(100), 10); // hwm far ahead, but cap at 10 in flight
+        assert!(s.end_offset == Offset(10));
         let acq = s.acquire("m1", 100, i32::MAX, t0(), LOCK, 5);
-        assert!(acq[0].first == 0);
-        assert!(acq[0].last == 9);
+        assert!(acq[0].first == Offset(0));
+        assert!(acq[0].last == Offset(9));
     }
 
     #[test]
     fn acquire_splits_at_max_records() {
-        let mut s = AcquisitionState::new(0);
-        s.materialize(10, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(10), 100);
         let acq = s.acquire("m1", 4, i32::MAX, t0(), LOCK, 5);
         assert!(acq.len() == 1);
-        assert!(acq[0].first == 0 && acq[0].last == 3);
+        assert!(acq[0].first == Offset(0) && acq[0].last == Offset(3));
         // The remaining [4,9] is still Available.
         let acq2 = s.acquire("m2", 100, i32::MAX, t0(), LOCK, 5);
-        assert!(acq2[0].first == 4 && acq2[0].last == 9);
+        assert!(acq2[0].first == Offset(4) && acq2[0].last == Offset(9));
     }
 
     #[test]
     fn load_from_restores_delivery_complete_count() {
         // F3: the cumulative delivery-complete count must survive a reload so
         // consumer-lag accounting is preserved across a leader change.
-        let mut s = AcquisitionState::new(4);
-        s.load_from(4, 0, 0, 5, &[]);
+        let mut s = AcquisitionState::new(Offset(4));
+        s.load_from(Offset(4), 0, 0, 5, &[]);
         assert!(s.delivery_complete_count() == 5);
         // It round-trips back out through the persist projection.
         let (_start, dcc, _batches) = s.to_persist_batches();
@@ -749,14 +760,14 @@ mod tests {
         let short = Duration::from_secs(10);
         let long = Duration::from_mins(1);
 
-        let mut s = AcquisitionState::new(0);
-        s.materialize(4, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(4), 100);
         let acq = s.acquire("m1", 10, i32::MAX, t0, short, 5);
         assert!(acq.len() == 1);
         let original_deadline = t0 + short;
 
         // Renew extends the lock well past the original deadline.
-        s.renew("m1", 0, 3, t0, long).unwrap();
+        s.renew("m1", Offset(0), Offset(3), t0, long).unwrap();
         assert!(s.dirty);
 
         // Sweeping at the original deadline must NOT release the renewed lock.
@@ -765,24 +776,31 @@ mod tests {
         let none = s.acquire("m2", 10, i32::MAX, original_deadline, short, 5);
         assert!(none.is_empty());
         // And m1 can still acknowledge it (proves it stayed Acquired by m1).
-        s.acknowledge("m1", 0, 3, AckType::Accept, original_deadline)
-            .unwrap();
-        assert!(s.start_offset == 4);
+        s.acknowledge(
+            "m1",
+            Offset(0),
+            Offset(3),
+            AckType::Accept,
+            original_deadline,
+        )
+        .unwrap();
+        assert!(s.start_offset == Offset(4));
     }
 
     #[test]
     fn renew_on_unacquired_range_is_invalid_record_state() {
         let t0 = Instant::now();
-        let mut s = AcquisitionState::new(0);
-        s.materialize(3, 100);
+        let mut s = AcquisitionState::new(Offset(0));
+        s.materialize(Offset(3), 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0, LOCK, 5);
         // Wrong member.
-        let err = s.renew("m2", 0, 2, t0, LOCK);
+        let err = s.renew("m2", Offset(0), Offset(2), t0, LOCK);
         assert!(err == Err(crate::codes::INVALID_RECORD_STATE));
 
         // Non-Acquired range: release [0,2] back to Available, then renew fails.
-        s.acknowledge("m1", 0, 2, AckType::Release, t0).unwrap();
-        let err2 = s.renew("m1", 0, 2, t0, LOCK);
+        s.acknowledge("m1", Offset(0), Offset(2), AckType::Release, t0)
+            .unwrap();
+        let err2 = s.renew("m1", Offset(0), Offset(2), t0, LOCK);
         assert!(err2 == Err(crate::codes::INVALID_RECORD_STATE));
     }
 }

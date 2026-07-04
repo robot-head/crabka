@@ -49,8 +49,9 @@ pub fn leader_epoch_checkpoint_path(dir: &Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     macro_rules! offset_case {
         ($name:ident, $offset:expr, $expected_filename:expr) => {

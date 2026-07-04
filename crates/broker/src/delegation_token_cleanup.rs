@@ -12,8 +12,7 @@
 //! `delegation_tokens`). This matches Kafka's "every broker sweeps,
 //! idempotent" pattern from KIP-48 §6.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use crabka_metadata::{DeleteDelegationTokenRecord, MetadataImage, MetadataRecord};
@@ -83,13 +82,14 @@ pub(crate) async fn sweep(controller: &dyn DelegationTokenController) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
     use std::sync::Mutex;
 
+    use assert2::assert;
     use crabka_metadata::{DelegationTokenRecord, MetadataImage, MetadataRecord};
     use crabka_security::KafkaPrincipal;
     use uuid::Uuid;
+
+    use super::*;
 
     struct MockController {
         image: Mutex<Arc<MetadataImage>>,

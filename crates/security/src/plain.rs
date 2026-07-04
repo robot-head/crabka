@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::hash::BuildHasher;
+use std::{collections::HashMap, hash::BuildHasher};
 
 use subtle::ConstantTimeEq;
 
@@ -41,8 +40,9 @@ pub fn verify_plain<S: BuildHasher>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn creds() -> HashMap<String, String> {
         let mut m = HashMap::new();

@@ -12,20 +12,23 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use crabka_metadata::{MetadataRecord, ResourceType};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::elect_leaders_request::ElectLeadersRequest;
-use crabka_protocol::owned::elect_leaders_response::{
-    ElectLeadersResponse, PartitionResult, ReplicaElectionResult,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        elect_leaders_request::ElectLeadersRequest,
+        elect_leaders_response::{ElectLeadersResponse, PartitionResult, ReplicaElectionResult},
+    },
 };
-
 use tokio::sync::oneshot;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::config_keys::{RecoveryStrategy, resolve_recovery_strategy};
-use crate::leader_election::{ElectError, ElectionType, select_new_leader_for_partition};
-use crate::unclean_recovery::{RecoveryJob, RecoveryOutcome};
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    config_keys::{RecoveryStrategy, resolve_recovery_strategy},
+    leader_election::{ElectError, ElectionType, select_new_leader_for_partition},
+    unclean_recovery::{RecoveryJob, RecoveryOutcome},
+};
 
 const WIRE_ELECTION_PREFERRED: i8 = 0;
 const WIRE_ELECTION_UNCLEAN: i8 = 1;

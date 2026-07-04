@@ -16,12 +16,13 @@
 //!  11. GET deployments/<gw>                   — read back ready-replica count
 //!  12. PATCH kafkagrpcgateways/<gw>/status    — write final status
 
-use assert2::{assert, check};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use crabka_operator::controller::grpc_gateway::reconcile;
-use crabka_operator::crd::grpc_gateway::{KafkaGrpcGateway, KafkaGrpcGatewaySpec};
+use assert2::{assert, check};
+use crabka_operator::{
+    controller::grpc_gateway::reconcile,
+    crd::grpc_gateway::{KafkaGrpcGateway, KafkaGrpcGatewaySpec},
+};
 use http::{Method, Response};
 
 #[path = "shared/mod.rs"]

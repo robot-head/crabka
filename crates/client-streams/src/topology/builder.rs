@@ -1,9 +1,11 @@
 //! Topology builder: public Processor-API surface.
 
-use std::any::Any;
-use std::borrow::Borrow;
-use std::collections::{BTreeMap, HashMap};
-use std::marker::PhantomData;
+use std::{
+    any::Any,
+    borrow::Borrow,
+    collections::{BTreeMap, HashMap},
+    marker::PhantomData,
+};
 
 /// Factory that builds a fresh erased [`StateStore`] given the store name, pre-derived
 /// changelog topic, and an already-opened byte backend. The factory only owns the serdes.
@@ -19,15 +21,19 @@ pub(crate) type StoreFactory = Box<
 
 use crabka_protocol::owned::streams_group_heartbeat_request::Topology as WireTopology;
 
-use super::grouping::group_nodes;
-use super::node::{NodeKind, NodeRegistry};
-use super::wire::to_wire;
-use crate::processor::api::ProcessorSupplier;
-use crate::processor::erased::ProcessorError;
-use crate::processor::factory::{MakeDeser, NodeFactory};
-use crate::processor::graph::{Graph, GraphSource};
-use crate::processor::node::{ErasedNode, ProcessorNode, SinkNode, SourceNode};
-use crate::processor::serde::{Consumed, DefaultSerde, Produced, Serde};
+use super::{
+    grouping::group_nodes,
+    node::{NodeKind, NodeRegistry},
+    wire::to_wire,
+};
+use crate::processor::{
+    api::ProcessorSupplier,
+    erased::ProcessorError,
+    factory::{MakeDeser, NodeFactory},
+    graph::{Graph, GraphSource},
+    node::{ErasedNode, ProcessorNode, SinkNode, SourceNode},
+    serde::{Consumed, DefaultSerde, Produced, Serde},
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // TopologyError
@@ -1595,12 +1601,15 @@ impl BuiltTopology {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::processor::api::{Processor, ProcessorContext};
-    use crate::processor::record::Record;
-    use crate::processor::serde::StringSerde;
     use assert2::check;
     use async_trait::async_trait;
+
+    use super::*;
+    use crate::processor::{
+        api::{Processor, ProcessorContext},
+        record::Record,
+        serde::StringSerde,
+    };
 
     struct Upper;
     #[async_trait]
@@ -1956,8 +1965,7 @@ mod tests {
     /// Build a `source → CountingMaterializer(materializes "counts") → sink`
     /// topology, optionally marking the "counts" store cache-eligible.
     fn counting_topology(caching: bool) -> BuiltTopology {
-        use crate::dsl::processors::change::Change;
-        use crate::processor::serde::I64Serde;
+        use crate::{dsl::processors::change::Change, processor::serde::I64Serde};
         let mut t = Topology::new();
         let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let c = t.add_processor("c", || CountingMaterializer, [&src]);
@@ -2103,15 +2111,21 @@ mod tests {
         // `start + windowSize`, NOT `start + retentionBasis`. Before the fix the
         // factory fed `size_ms` (the retention basis) to `WindowBytesStore::new`,
         // so the end was doubled (this asserts `end == 10`, which would be `20`).
-        use crate::dsl::processors::change::Change;
-        use crate::dsl::windows::{Window, Windowed};
-        use crate::processor::record::RecordContext;
-        use crate::processor::serde::I64Serde;
-        use crate::store::api::StateStore;
-        use crate::store::byte::InMemoryBytes;
-        use crate::store::cache::named::NamedCache;
-        use crate::store::window::{WindowBytesStore, WindowStore};
         use std::sync::{Arc, Mutex};
+
+        use crate::{
+            dsl::{
+                processors::change::Change,
+                windows::{Window, Windowed},
+            },
+            processor::{record::RecordContext, serde::I64Serde},
+            store::{
+                api::StateStore,
+                byte::InMemoryBytes,
+                cache::named::NamedCache,
+                window::{WindowBytesStore, WindowStore},
+            },
+        };
 
         const D: i64 = 10;
         let mut t = Topology::new();

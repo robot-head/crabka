@@ -3,10 +3,13 @@
 //! protocol-agnostic and live on the unified [`super::group::Group`]
 //! container, not here.
 
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
+use crabka_log::Offset;
 
 /// Five-state machine for a consumer group, matching the Apache Kafka
 /// classic protocol (KIP-62 / KIP-394).
@@ -157,7 +160,7 @@ pub fn select_protocol(members: &HashMap<String, Member>) -> Option<String> {
 /// [`Group::committed_offsets`].
 #[derive(Debug, Clone)]
 pub struct OffsetEntry {
-    pub offset: i64,
+    pub offset: Offset,
     pub leader_epoch: i32,
     pub metadata: String,
     pub commit_timestamp_ms: i64,
@@ -469,8 +472,9 @@ mod classic_state_model;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn sample_member(id: &str) -> Member {
         Member::new(

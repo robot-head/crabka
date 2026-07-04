@@ -10,19 +10,24 @@
 
 use std::sync::Arc;
 
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::routing::post;
-use axum::{Extension, Json, Router};
+use axum::{
+    Extension, Json, Router,
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    routing::post,
+};
 use crabka_authz::{AuthorizationRequest, AuthorizationResult};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
 use serde::{Deserialize, Serialize};
 
-use crate::error::GatewayError;
-use crate::metrics::metrics;
-use crate::state::AppState;
-use crate::types::{GatewayRecord, RecordOutcome};
+use crate::{
+    error::GatewayError,
+    ids::{Offset, PartitionIndex},
+    metrics::metrics,
+    state::AppState,
+    types::{GatewayRecord, RecordOutcome},
+};
 
 /// Wire form of a forwarded record (bytes as JSON arrays — no extra deps).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,8 +149,8 @@ impl ForwardRecord {
 /// Wire form of a forward result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForwardResult {
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
     pub deduplicated: bool,
     /// Present when the owner could not produce; `retriable` ⇒ the origin maps
     /// it back to `Unavailable` and retries / re-resolves.
@@ -290,8 +295,8 @@ async fn forward_handler(
         return (
             StatusCode::FORBIDDEN,
             Json(ForwardResult {
-                partition: -1,
-                offset: -1,
+                partition: PartitionIndex(-1),
+                offset: Offset(-1),
                 deduplicated: false,
                 error: Some(ForwardError {
                     message: "forward requires an authenticated mTLS peer".into(),
@@ -333,8 +338,8 @@ async fn forward_handler(
         return (
             StatusCode::FORBIDDEN,
             Json(ForwardResult {
-                partition: -1,
-                offset: -1,
+                partition: PartitionIndex(-1),
+                offset: Offset(-1),
                 deduplicated: false,
                 error: Some(ForwardError {
                     message: format!("Write Topic:{}", req.topic),
@@ -357,8 +362,8 @@ async fn forward_handler(
         Err(e) => {
             let retriable = matches!(e, GatewayError::Unavailable);
             Json(ForwardResult {
-                partition: -1,
-                offset: -1,
+                partition: PartitionIndex(-1),
+                offset: Offset(-1),
                 deduplicated: false,
                 error: Some(ForwardError {
                     message: e.to_string(),
@@ -367,5 +372,207 @@ async fn forward_handler(
             })
             .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use assert2::check;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use crabka_authz::{
+        AclSource, AllowAllAuthorizer, AuthorizationRequest, AuthorizationResult, Authorizer,
+    };
+    use crabka_broker::{Broker, BrokerConfig};
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::{
+        codec::RawCodec,
+        config::{ClientAuthMode, GatewayConfig, TlsSettings},
+        dedup::{DedupEngine, store::DedupStore},
+        produce::ProduceCore,
+    };
+
+    const N: u32 = 4;
+
+    /// Test double: always denies, driving `forward_handler`'s authz-deny arm.
+    #[derive(Debug)]
+    struct DenyAllAuthorizer;
+
+    impl Authorizer for DenyAllAuthorizer {
+        fn authorize(
+            &self,
+            _source: &dyn AclSource,
+            _req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            AuthorizationResult::Deny
+        }
+    }
+
+    fn config(bootstrap: &str, dedup: &str, tls: Option<TlsSettings>) -> GatewayConfig {
+        GatewayConfig {
+            bootstrap: bootstrap.into(),
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            client_id: "fh".into(),
+            dedup_topic: dedup.into(),
+            dedup_partitions: N,
+            dedup_window_ms: 3_600_000,
+            dedup_txn_id_prefix: "fh-dedup".into(),
+            advertised_addr: "127.0.0.1:0".into(),
+            membership_topic: "__crabka_grpc_gateway_membership_fh".into(),
+            tls,
+            broker_security: None,
+            authz: None,
+            webhooks: std::collections::HashMap::new(),
+            outbound: Vec::new(),
+            schema_registry_url: None,
+        }
+    }
+
+    async fn build_state(
+        bootstrap: &str,
+        dedup: &str,
+        tls: Option<TlsSettings>,
+        authorizer: Arc<dyn Authorizer>,
+    ) -> Arc<AppState> {
+        let store = Arc::new(DedupStore::new(N));
+        let engine = Arc::new(DedupEngine::new(
+            bootstrap,
+            "fh",
+            "fh-dedup",
+            dedup.to_string(),
+            N,
+            store,
+            None,
+        ));
+        let produce = ProduceCore::new(bootstrap, "fh", Arc::new(RawCodec), None)
+            .await
+            .unwrap()
+            .with_dedup(engine);
+        Arc::new(AppState {
+            produce: Arc::new(produce),
+            config: Arc::new(config(bootstrap, dedup, tls)),
+            authz: Arc::new(crate::authz::GatewayAuthz::new(authorizer)),
+            codec: Arc::new(RawCodec),
+        })
+    }
+
+    fn forward_record(topic: &str) -> ForwardRecord {
+        ForwardRecord {
+            topic: topic.into(),
+            key: None,
+            value: vec![1],
+            headers: vec![],
+            partition: None,
+            timestamp_ms: None,
+            idempotency_key: Some("k".into()),
+            principal: Some(ForwardPrincipal {
+                name: "alice".into(),
+                auth_method: "MTls".into(),
+                groups: vec![],
+            }),
+        }
+    }
+
+    async fn post_forward(app: Router, fr: &ForwardRecord) -> (StatusCode, ForwardResult) {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/internal/v1/forward")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(fr).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: ForwardResult = serde_json::from_slice(&bytes).unwrap();
+        (status, result)
+    }
+
+    /// The TLS-required 403 gate reports the `(-1, -1)` sentinel coordinates —
+    /// pins the `PartitionIndex(-1)` / `Offset(-1)` in the mTLS-reject arm.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forward_handler_tls_reject_uses_sentinel_coordinates() {
+        const DEDUP: &str = "__crabka_grpc_dedup_fh_tls_sentinel";
+        let dir = TempDir::new().unwrap();
+        let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        let tls = Some(TlsSettings {
+            cert_chain_path: "/nonexistent/cert.pem".into(),
+            private_key_path: "/nonexistent/key.pem".into(),
+            trust_roots_path: None,
+            client_ca_path: None,
+            client_auth: ClientAuthMode::Disabled,
+            reload_interval_secs: 30,
+        });
+        let state = build_state(&bootstrap, DEDUP, tls, Arc::new(AllowAllAuthorizer)).await;
+
+        // No principal extension on the request => anonymous => TLS gate fires.
+        let (status, result) = post_forward(forward_router(state), &forward_record("t")).await;
+
+        check!(status == StatusCode::FORBIDDEN);
+        check!(result.partition == PartitionIndex(-1));
+        check!(result.offset == Offset(-1));
+        broker.shutdown().await;
+    }
+
+    /// The authz-deny 403 arm reports the `(-1, -1)` sentinel coordinates —
+    /// pins the `PartitionIndex(-1)` / `Offset(-1)` in the deny arm.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forward_handler_authz_deny_uses_sentinel_coordinates() {
+        const DEDUP: &str = "__crabka_grpc_dedup_fh_deny_sentinel";
+        let dir = TempDir::new().unwrap();
+        let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        // tls: None => TLS gate skipped; DenyAllAuthorizer => authz-deny arm.
+        let state = build_state(&bootstrap, DEDUP, None, Arc::new(DenyAllAuthorizer)).await;
+
+        let (status, result) = post_forward(forward_router(state), &forward_record("t")).await;
+
+        check!(status == StatusCode::FORBIDDEN);
+        check!(result.partition == PartitionIndex(-1));
+        check!(result.offset == Offset(-1));
+        // Distinguish the deny arm from the TLS arm by its message shape.
+        check!(result.error.unwrap().message == "Write Topic:t");
+        broker.shutdown().await;
+    }
+
+    /// The produce-local error arm reports the `(-1, -1)` sentinel coordinates —
+    /// pins the `PartitionIndex(-1)` / `Offset(-1)` in the produce-error arm.
+    /// The empty `DedupStore` owns no partition, so `produce_local` returns
+    /// `Unavailable` before any write.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn forward_handler_produce_error_uses_sentinel_coordinates() {
+        const DEDUP: &str = "__crabka_grpc_dedup_fh_prod_sentinel";
+        let dir = TempDir::new().unwrap();
+        let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        // tls: None + AllowAll => request reaches produce_local, which errors.
+        let state = build_state(&bootstrap, DEDUP, None, Arc::new(AllowAllAuthorizer)).await;
+
+        let (status, result) = post_forward(forward_router(state), &forward_record("t")).await;
+
+        check!(status == StatusCode::OK);
+        check!(result.error.is_some());
+        check!(result.partition == PartitionIndex(-1));
+        check!(result.offset == Offset(-1));
+        broker.shutdown().await;
     }
 }

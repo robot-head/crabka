@@ -3,11 +3,9 @@
 //! controller. These are the plain Crabka types the engine and reconfig
 //! coordinator use.
 
-use serde::{Deserialize, Serialize};
-
+pub use crabka_ids::NodeId;
 use crabka_metadata::MetadataRecord;
-
-pub type NodeId = u64;
+use serde::{Deserialize, Serialize};
 
 /// KIP-853 voter node identity used by controller membership.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,8 +63,9 @@ pub struct AppDataResponse {
 
 #[cfg(test)]
 mod node_tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
     #[test]
     fn node_controller_addr_prefers_controller_listener() {
         let n = Node {

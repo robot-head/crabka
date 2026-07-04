@@ -12,21 +12,28 @@ use crabka_connect::{ConnectError, ConnectRecord, Sink};
 use tokio::sync::oneshot::Receiver;
 use tracing::warn;
 
-use crate::config::{NamingPolicy, PolicyConfig};
-use crate::mm2::OffsetSync;
-use crate::naming::{PROVENANCE_HEADER, Renamer};
-use crate::record::ReplicatedRecord;
-use crate::residency::ResidencyGate;
+use crate::{
+    config::{NamingPolicy, PolicyConfig},
+    ids::{DownstreamOffset, PartitionIndex, UpstreamOffset},
+    mm2::OffsetSync,
+    naming::{PROVENANCE_HEADER, Renamer},
+    record::ReplicatedRecord,
+    residency::ResidencyGate,
+};
 
 /// One in-flight produce awaiting its broker ack: the ack receiver plus the
-/// source-side `(topic, partition, upstream offset)` coordinates needed to build
-/// the [`OffsetSync`] once the ack supplies the downstream offset.
-type PendingProduce = (
-    Receiver<Result<RecordMetadata, ProducerError>>,
-    String,
-    i32,
-    i64,
-);
+/// source-side coordinates needed to build the [`OffsetSync`] once the ack
+/// supplies the downstream offset.
+struct PendingProduce {
+    /// Receiver for the broker ack carrying the downstream [`RecordMetadata`].
+    rx: Receiver<Result<RecordMetadata, ProducerError>>,
+    /// Source topic name.
+    topic: String,
+    /// Source partition index.
+    partition: PartitionIndex,
+    /// Source (upstream) offset of the record being produced.
+    upstream: UpstreamOffset,
+}
 
 /// Parameters required to start a [`TargetSink`].
 pub struct SinkParams {
@@ -228,11 +235,17 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
                     key: r.key.clone(),
                     value: r.value.clone(),
                     headers,
-                    timestamp_ms: Some(r.timestamp),
+                    timestamp_ms: Some(r.timestamp.0),
                 })
                 .await;
 
-            self.pending.push((rx, r.topic, r.partition, r.offset));
+            self.pending.push(PendingProduce {
+                rx,
+                topic: r.topic,
+                partition: r.partition,
+                // The record's source offset is the upstream side of the sync.
+                upstream: UpstreamOffset(r.offset.0),
+            });
             accepted += 1;
         }
 
@@ -251,7 +264,13 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
     async fn flush(&mut self) -> Result<(), ConnectError> {
         let pending = std::mem::take(&mut self.pending);
 
-        for (rx, topic, partition, upstream) in pending {
+        for PendingProduce {
+            rx,
+            topic,
+            partition,
+            upstream,
+        } in pending
+        {
             // Await the broker ack for this produce.
             let meta = rx
                 .await
@@ -265,7 +284,7 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
                 topic,
                 partition,
                 upstream,
-                downstream: meta.offset,
+                downstream: DownstreamOffset(meta.offset),
             };
 
             // Write the offset-sync record to the target cluster.
@@ -301,9 +320,10 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_connect::Sink;
 
     use super::*;
-    use crabka_connect::Sink;
+    use crate::ids::{Offset, Timestamp};
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn produces_renamed_and_records_offset_sync_but_blocks_denied() {
@@ -337,9 +357,9 @@ mod tests {
             None,
             Some(ReplicatedRecord {
                 topic: "orders".into(),
-                partition: 0,
-                offset: 5,
-                timestamp: 1,
+                partition: PartitionIndex(0),
+                offset: Offset(5),
+                timestamp: Timestamp(1),
                 key: Some("k".into()),
                 value: Some("v".into()),
                 headers: vec![],
@@ -349,9 +369,9 @@ mod tests {
             None,
             Some(ReplicatedRecord {
                 topic: "secret".into(),
-                partition: 0,
-                offset: 9,
-                timestamp: 1,
+                partition: PartitionIndex(0),
+                offset: Offset(9),
+                timestamp: Timestamp(1),
                 key: None,
                 value: Some("x".into()),
                 headers: vec![],
@@ -365,11 +385,9 @@ mod tests {
         assert!(crate::test_util::topic_record_count(&target, "us-east.secret").await == 0);
 
         let syncs = sink.drain_offset_syncs();
-        assert!(
-            syncs
-                .iter()
-                .any(|s| s.topic == "orders" && s.partition == 0 && s.upstream == 5)
-        );
+        assert!(syncs.iter().any(|s| s.topic == "orders"
+            && s.partition == PartitionIndex(0)
+            && s.upstream == UpstreamOffset(5)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -401,9 +419,9 @@ mod tests {
             None,
             Some(ReplicatedRecord {
                 topic: "orders".into(),
-                partition: 0,
-                offset: 1,
-                timestamp: 1,
+                partition: PartitionIndex(0),
+                offset: Offset(1),
+                timestamp: Timestamp(1),
                 key: Some("a".into()),
                 value: Some("v".into()),
                 headers: vec![(PROVENANCE_HEADER.into(), Some("us-east".into()))],
@@ -414,9 +432,9 @@ mod tests {
             None,
             Some(ReplicatedRecord {
                 topic: "orders".into(),
-                partition: 0,
-                offset: 2,
-                timestamp: 1,
+                partition: PartitionIndex(0),
+                offset: Offset(2),
+                timestamp: Timestamp(1),
                 key: Some("b".into()),
                 value: Some("v".into()),
                 headers: vec![(PROVENANCE_HEADER.into(), Some("eu-west".into()))],
@@ -427,9 +445,9 @@ mod tests {
             None,
             Some(ReplicatedRecord {
                 topic: "orders".into(),
-                partition: 0,
-                offset: 3,
-                timestamp: 1,
+                partition: PartitionIndex(0),
+                offset: Offset(3),
+                timestamp: Timestamp(1),
                 key: Some("c".into()),
                 value: Some("v".into()),
                 headers: vec![("other".into(), Some("us-east".into()))],

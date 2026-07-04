@@ -1,17 +1,19 @@
 //! `Consumer::poll` — issues one `Fetch` covering every assigned partition,
 //! advances next-offsets, and returns the decoded records.
 
-use std::collections::HashMap;
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::list_offsets_request::{
-    ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
+use crabka_ids::LeaderEpoch;
+use crabka_protocol::owned::{
+    fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+    list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
 };
 
-use crate::builder::{AutoOffsetReset, IsolationLevel};
-use crate::consumer::{Consumer, ConsumerRecord, Header};
-use crate::error::ConsumerError;
+use crate::{
+    builder::{AutoOffsetReset, IsolationLevel},
+    consumer::{Consumer, ConsumerRecord, Header},
+    error::ConsumerError,
+};
 
 /// Synthetic leader id meaning "leader unknown → use the bootstrap connection".
 /// Matches `BrokerPool`'s bootstrap slot so a fallback Fetch is sent via
@@ -24,7 +26,7 @@ pub(crate) const DEFAULT_FETCH_MAX_BYTES: i32 = 50 * 1024 * 1024;
 
 /// One fetchable partition's request fields:
 /// `(partition, fetch_offset, current_leader_epoch, last_fetched_epoch)`.
-type FetchSpec = (i32, i64, i32, i32);
+type FetchSpec = (i32, i64, LeaderEpoch, LeaderEpoch);
 
 /// Partitions to fetch, grouped first by leader id, then by topic.
 type FetchByLeader = HashMap<i32, HashMap<String, Vec<FetchSpec>>>;
@@ -98,8 +100,10 @@ fn build_fetch_topic(
                 |(p, off, leader_epoch, last_fetched_epoch)| FetchPartition {
                     partition: p,
                     fetch_offset: off,
-                    current_leader_epoch: leader_epoch,
-                    last_fetched_epoch,
+                    // Unwrap the leader epochs to raw wire `int32` at the
+                    // FetchRequest encode boundary.
+                    current_leader_epoch: leader_epoch.get(),
+                    last_fetched_epoch: last_fetched_epoch.get(),
                     partition_max_bytes,
                     ..Default::default()
                 },
@@ -427,7 +431,9 @@ impl Consumer {
                             // current_leader hint). Adopt it immediately.
                             let p = positions.entry(key.clone()).or_default();
                             p.leader_id = part.current_leader.leader_id;
-                            p.leader_epoch = part.current_leader.leader_epoch;
+                            // Wrap the KIP-320 current-leader hint (raw wire
+                            // `int32`) at the Fetch-response decode boundary.
+                            p.leader_epoch = LeaderEpoch(part.current_leader.leader_epoch);
                         } else {
                             // No hint: force a metadata refresh after this loop
                             // so the next poll learns the new leader. Reset the
@@ -447,13 +453,13 @@ impl Consumer {
                         if let Some(p) = positions.get_mut(&key) {
                             // Force refresh_leader_epochs to re-flag against
                             // fresher metadata next poll (any real epoch >= 0 > -1).
-                            p.leader_epoch = UNKNOWN_LEADER_ID;
+                            p.leader_epoch = LeaderEpoch(UNKNOWN_LEADER_ID);
                             // Only gate on validation when we have a consumed epoch
                             // to validate against. A never-consumed partition
                             // (offset_epoch < 0) has nothing to validate; flagging it
                             // would wedge it — validate_positions skips offset_epoch
                             // < 0, and the fetch builder skips awaiting_validation.
-                            if p.offset_epoch >= 0 {
+                            if p.offset_epoch.is_known() {
                                 p.awaiting_validation = true;
                             }
                         }
@@ -571,7 +577,10 @@ impl Consumer {
                     if let Some(last_epoch) = batches.iter().map(|b| b.partition_leader_epoch).max()
                     {
                         let mut positions = self.positions.lock().await;
-                        positions.entry(key.clone()).or_default().offset_epoch = last_epoch;
+                        // Wrap the batch's raw wire `partition_leader_epoch`
+                        // (`int32`) at the RecordBatch decode boundary.
+                        positions.entry(key.clone()).or_default().offset_epoch =
+                            LeaderEpoch(last_epoch);
                     }
                 }
             }
@@ -698,12 +707,15 @@ impl Consumer {
 mod offset_advance_tests {
     use std::collections::HashMap;
 
-    use super::*;
     use assert2::{assert, check};
-    use crabka_protocol::owned::fetch_request::ReplicaState;
-    use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-    use crabka_protocol::records::{RecordBatch, RecordsPayload};
-    use crabka_protocol::tagged_fields::UnknownTaggedFields;
+    use crabka_protocol::{
+        owned::fetch_request::ReplicaState,
+        primitives::uuid::Uuid as WireUuid,
+        records::{RecordBatch, RecordsPayload},
+        tagged_fields::UnknownTaggedFields,
+    };
+
+    use super::*;
 
     fn id(n: u8) -> WireUuid {
         let mut b = [0u8; 16];
@@ -747,8 +759,7 @@ mod offset_advance_tests {
 
     #[test]
     fn transient_transport_error_classification_is_narrow() {
-        use std::io;
-        use std::time::Duration;
+        use std::{io, time::Duration};
 
         use crabka_client_core::ClientError;
 
@@ -786,7 +797,12 @@ mod offset_advance_tests {
 
     #[test]
     fn build_fetch_request_preserves_topic_partition_and_limits() {
-        let topic = build_fetch_topic("topic-a".into(), id(7), vec![(2, 42, 5, 4)], 128 * 1024);
+        let topic = build_fetch_topic(
+            "topic-a".into(),
+            id(7),
+            vec![(2, 42, LeaderEpoch(5), LeaderEpoch(4))],
+            128 * 1024,
+        );
         assert!(
             topic
                 == FetchTopic {

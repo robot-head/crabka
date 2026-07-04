@@ -7,9 +7,9 @@ use crabka_traces::{
     AttrValue, KeyValue, Span, SpanKind, SpanRecord, StatusCode,
     blockbuilder::build_blocks,
     compactor::{compact_block_keys, compacted_object_key},
+    ids::{MaxOffset, MinOffset, WindowStartNs},
 };
-use object_store::ObjectStore;
-use object_store::memory::InMemory;
+use object_store::{ObjectStore, memory::InMemory};
 
 fn span(trace_id: [u8; 16], span_id: u8, parent: Option<u8>, start_ns: i64) -> Span {
     Span {
@@ -71,7 +71,13 @@ async fn compact_block_keys_merges_late_spans_and_replaces_index_entries() {
     .await
     .unwrap();
     let input_keys = vec![first[0].object_key.clone(), late[0].object_key.clone()];
-    let output_key = compacted_object_key("tenant-a", 7, 10, 20, 100);
+    let output_key = compacted_object_key(
+        "tenant-a",
+        7,
+        MinOffset(10),
+        MaxOffset(20),
+        WindowStartNs(100),
+    );
 
     let meta = compact_block_keys(
         store.clone(),
@@ -134,7 +140,13 @@ async fn compact_block_keys_recomputes_nested_sets_for_late_children() {
     .await
     .unwrap();
     let input_keys = vec![first[0].object_key.clone(), late[0].object_key.clone()];
-    let output_key = compacted_object_key("tenant-a", 7, 10, 20, 100);
+    let output_key = compacted_object_key(
+        "tenant-a",
+        7,
+        MinOffset(10),
+        MaxOffset(20),
+        WindowStartNs(100),
+    );
 
     compact_block_keys(
         store.clone(),

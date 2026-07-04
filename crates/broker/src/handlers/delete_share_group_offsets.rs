@@ -11,20 +11,25 @@
 //! gate (principal + peer `SocketAddr`).
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest;
-use crabka_protocol::owned::delete_share_group_offsets_response::{
-    DeleteShareGroupOffsetsResponse, DeleteShareGroupOffsetsResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest,
+        delete_share_group_offsets_response::{
+            DeleteShareGroupOffsetsResponse, DeleteShareGroupOffsetsResponseTopic,
+        },
+    },
+    primitives::uuid::Uuid,
 };
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::alter_share_group_offsets::group_is_empty;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::alter_share_group_offsets::group_is_empty,
+};
 
 #[tracing::instrument(
     name = "handle_delete_share_group_offsets",
@@ -170,17 +175,20 @@ fn encode_top_level(version: i16, error_code: i16) -> Result<Bytes, BrokerError>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequestTopic;
-    use crabka_protocol::owned::delete_share_group_offsets_response;
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
 
-    use crate::authorizer::Authorizer;
-    use crate::test_support::DenyAll;
+    use assert2::assert;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            delete_share_group_offsets_request::DeleteShareGroupOffsetsRequestTopic,
+            delete_share_group_offsets_response,
+        },
+    };
+    use crabka_security::Principal;
+
+    use super::*;
+    use crate::{authorizer::Authorizer, test_support::DenyAll};
 
     fn request(group_id: &str, topics: &[&str]) -> DeleteShareGroupOffsetsRequest {
         DeleteShareGroupOffsetsRequest {

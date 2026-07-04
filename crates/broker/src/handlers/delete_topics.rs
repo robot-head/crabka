@@ -6,17 +6,23 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use crabka_metadata::{AclOperation, DeleteTopicRecord, MetadataRecord};
-use crabka_protocol::owned::delete_topics_request::DeleteTopicsRequest;
-use crabka_protocol::owned::delete_topics_response::{DeletableTopicResult, DeleteTopicsResponse};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        delete_topics_request::DeleteTopicsRequest,
+        delete_topics_response::{DeletableTopicResult, DeleteTopicsResponse},
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
 use crabka_raft::RaftError;
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::log_dir;
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    log_dir,
+};
 
 fn requested_by_topic_id(name: Option<&String>, id: WireUuid) -> bool {
     name.is_none_or(std::string::String::is_empty) && id != WireUuid::ZERO
@@ -216,7 +222,11 @@ pub(crate) async fn handle(
                                 })
                             })
                             .map(|idx| {
-                                crabka_remote_storage::TopicIdPartition::new(tid, name.clone(), idx)
+                                crabka_remote_storage::TopicIdPartition::new(
+                                    tid,
+                                    name.clone(),
+                                    idx.get(),
+                                )
                             })
                             .collect()
                     })
@@ -238,7 +248,7 @@ pub(crate) async fn handle(
                     partitions.remove(&name, idx);
                     // JBOD: the partition may live in any log dir; resolve
                     // its actual location (existing-location wins).
-                    let dir = log_dir::place_partition_dir(&log_dirs, &name, idx);
+                    let dir = log_dir::place_partition_dir(&log_dirs, &name, idx.get());
                     let _ = std::fs::remove_dir_all(dir);
                 }
                 // Now that the local tear-down is done, fire off
@@ -300,14 +310,13 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use std::{net::SocketAddr, sync::Arc};
+
+    use assert2::{assert, check};
     use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
+    use super::*;
     use crate::test_support::{DenyAll, peer, principal};
 
     const VERSION: i16 = 6;

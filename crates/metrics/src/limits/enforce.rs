@@ -1,5 +1,7 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use crabka_blockstore::Labels;
 use crabka_throttle::TokenBucket;

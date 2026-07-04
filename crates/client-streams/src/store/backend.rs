@@ -1,7 +1,9 @@
 //! Which storage engine backs the state stores. `InMemory` is the test default
 //! and a valid production option; `Turso` persists under a state dir.
-use crate::store::byte::{ByteKeyValueStore, InMemoryBytes};
-use crate::store::turso::TursoBytes;
+use crate::store::{
+    byte::{ByteKeyValueStore, InMemoryBytes},
+    turso::TursoBytes,
+};
 
 #[derive(Clone, Debug, Default)]
 pub enum StoreBackend {

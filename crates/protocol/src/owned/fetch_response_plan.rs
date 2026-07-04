@@ -30,15 +30,18 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crate::ProtocolError;
-use crate::primitives::array::{array_len_prefix_len, put_array_len, put_nullable_array_len};
-use crate::primitives::fixed::{put_i16, put_i32, put_i64};
-use crate::primitives::string_bytes::{put_compact_string, put_string};
-use crate::primitives::uuid::put_uuid;
-use crate::records::RecordsPayload;
-use crate::tagged_fields::{WriteTaggedFields, encode_to_bytes};
-
 use super::{FetchResponse, FetchableTopicResponse, PartitionData};
+use crate::{
+    ProtocolError,
+    primitives::{
+        array::{array_len_prefix_len, put_array_len, put_nullable_array_len},
+        fixed::{put_i16, put_i32, put_i64},
+        string_bytes::{put_compact_string, put_string},
+        uuid::put_uuid,
+    },
+    records::RecordsPayload,
+    tagged_fields::{WriteTaggedFields, encode_to_bytes},
+};
 
 /// One ordered segment of a `FetchResponse` write-plan.
 ///
@@ -300,13 +303,14 @@ fn flush_inline(buf: &mut BytesMut, ops: &mut Vec<FetchWriteOp>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::Encode;
-    use crate::records::RecordsPayload;
     use assert2::assert;
     use bytes::BytesMut;
 
-    use super::super::{AbortedTransaction, FetchableTopicResponse, NodeEndpoint, PartitionData};
+    use super::{
+        super::{AbortedTransaction, FetchableTopicResponse, NodeEndpoint, PartitionData},
+        *,
+    };
+    use crate::{Encode, records::RecordsPayload};
 
     /// Concatenate a write-plan's ops into one byte buffer (resolving
     /// `Records` ops via the payload's own `encode_to`, exactly as the broker

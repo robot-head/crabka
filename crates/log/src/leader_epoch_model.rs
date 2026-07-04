@@ -29,6 +29,7 @@
 
 use std::time::Duration;
 
+use crabka_ids::{LeaderEpoch, Offset};
 use stateright::{Checker, Model, Property};
 
 use super::{EpochEntry, UNDEFINED_EPOCH, epoch_and_offset_for_entries};
@@ -92,8 +93,8 @@ impl Model for EpochModel {
             Some(last) => {
                 for de in 1..=2 {
                     for doff in 1..=2 {
-                        let ne = last.epoch + de;
-                        let no = last.start_offset + doff;
+                        let ne = last.epoch.0 + de;
+                        let no = last.start_offset.0 + doff;
                         if ne <= self.max_epoch && no <= self.max_offset {
                             actions.push(EpochAction::LeaderAppend(ne, no));
                         }
@@ -104,9 +105,12 @@ impl Model for EpochModel {
         // Probe from any non-empty leader history with every requested epoch
         // (UNDEFINED..=future) and a small follower log-end window.
         if let Some(last) = s.leader.last() {
-            for requested in UNDEFINED_EPOCH..=(self.max_epoch + 1) {
+            // Enumerate requested epochs as raw `i32`s (the KIP-320 wire type),
+            // from `UNDEFINED` through one past the max; they are wrapped into
+            // `LeaderEpoch` when a probe is applied.
+            for requested in UNDEFINED_EPOCH.0..=(self.max_epoch + 1) {
                 for dleo in 1..=2 {
-                    actions.push(EpochAction::Probe(requested, last.start_offset + dleo));
+                    actions.push(EpochAction::Probe(requested, last.start_offset.0 + dleo));
                 }
             }
         }
@@ -117,18 +121,22 @@ impl Model for EpochModel {
             EpochAction::LeaderAppend(epoch, off) => {
                 let mut s = last.clone();
                 s.leader.push(EpochEntry {
-                    epoch,
-                    start_offset: off,
+                    epoch: LeaderEpoch(epoch),
+                    start_offset: Offset(off),
                 });
                 Some(s)
             }
             EpochAction::Probe(requested, leo) => {
-                let (found, trunc) = epoch_and_offset_for_entries(&last.leader, requested, leo);
+                // `requested` is enumerated as the raw KIP-320 wire `int32`;
+                // wrap it into the domain newtype for the call and comparisons.
+                let requested = LeaderEpoch(requested);
+                let (found, trunc) =
+                    epoch_and_offset_for_entries(&last.leader, requested, Offset(leo));
                 let latest = last.leader.iter().map(|e| e.epoch).max();
 
                 // Contract: always a valid truncation target.
                 assert!(
-                    trunc >= 0,
+                    trunc >= Offset(0),
                     "truncation target {trunc} < 0 (requested={requested})"
                 );
                 // The resolved epoch never exceeds the requested epoch.
@@ -149,7 +157,7 @@ impl Model for EpochModel {
                     if latest == Some(requested) {
                         // Current epoch → keep up to the follower's log end.
                         assert!(
-                            found == requested && trunc == leo,
+                            found == requested && trunc == Offset(leo),
                             "latest-epoch probe must return (requested, leo): got ({found},{trunc})"
                         );
                     } else {
@@ -169,7 +177,7 @@ impl Model for EpochModel {
                              got ({found},{trunc}) want ({requested},{next_start})"
                         );
                         assert!(
-                            trunc <= leo,
+                            trunc <= Offset(leo),
                             "truncation {trunc} above follower log end {leo}"
                         );
                     }
@@ -178,7 +186,7 @@ impl Model for EpochModel {
                 // Record non-vacuity witnesses.
                 let mut s = last.clone();
                 let mut changed = false;
-                if trunc < leo && !s.saw_truncation {
+                if trunc < Offset(leo) && !s.saw_truncation {
                     s.saw_truncation = true;
                     changed = true;
                 }

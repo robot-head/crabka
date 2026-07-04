@@ -21,9 +21,12 @@
 //!   segmentLeaderEpochs = {0->0, 1->50}
 //!   customMetadata (with-custom case) = [1,2,3,4]
 
-use std::collections::{BTreeMap, HashMap};
-use std::fmt::Write as _;
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt::Write as _,
+};
 
+use crabka_ids::LeaderEpoch;
 use crabka_remote_storage::{
     CustomMetadata, RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate,
     RemoteLogSegmentState, RemotePartitionDeleteMetadata, RemotePartitionDeleteState,
@@ -57,8 +60,8 @@ fn segment_id() -> RemoteLogSegmentId {
     RemoteLogSegmentId::new(topic_id_partition(), Uuid::from_u128(0xFE))
 }
 
-fn epochs() -> BTreeMap<i32, i64> {
-    BTreeMap::from([(0, 0), (1, 50)])
+fn epochs() -> BTreeMap<LeaderEpoch, i64> {
+    BTreeMap::from([(LeaderEpoch(0), 0), (LeaderEpoch(1), 50)])
 }
 
 /// Base add-segment metadata shared by the three add cases:

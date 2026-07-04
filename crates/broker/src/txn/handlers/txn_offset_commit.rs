@@ -23,26 +23,36 @@
 //!   `TOPIC_AUTHORIZATION_FAILED (29)` on the rows of that topic.
 
 use bytes::{Bytes, BytesMut};
-
+use crabka_ids::PartitionIndex;
+use crabka_log::Offset;
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::txn_offset_commit_request::TxnOffsetCommitRequest;
-use crabka_protocol::owned::txn_offset_commit_response::{
-    TxnOffsetCommitResponse, TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        txn_offset_commit_request::TxnOffsetCommitRequest,
+        txn_offset_commit_response::{
+            TxnOffsetCommitResponse, TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic,
+        },
+    },
+    records::{Attributes, Record, RecordBatch},
 };
-use crabka_protocol::records::{Attributes, Record, RecordBatch};
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
-use crate::coordinator::persistence::OffsetCommitValue;
-use crate::coordinator::unified::actor::{GroupKindTag, validate_group_commit};
-use crate::coordinator::unified::classic_state::OffsetEntry;
-use crate::coordinator::unified::streams::actor::validate_streams_group_commit;
-use crate::error::BrokerError;
-use crate::txn::coordinator::OffsetKey;
-use crate::txn::util::now_millis;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    coordinator::{
+        bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC},
+        persistence::OffsetCommitValue,
+        unified::{
+            actor::{GroupKindTag, validate_group_commit},
+            classic_state::OffsetEntry,
+            streams::actor::validate_streams_group_commit,
+        },
+    },
+    error::BrokerError,
+    txn::{coordinator::OffsetKey, util::now_millis},
+};
 
 #[tracing::instrument(
     name = "handle_txn_offset_commit",
@@ -184,9 +194,11 @@ pub(crate) async fn handle(
     //     ABORT. The records are already in `__consumer_offsets` (held under the
     //     LSO) from the append above; this buffer is the in-memory bridge to the
     //     group coordinator that the commit marker has no other way to drive.
-    broker
-        .txn_coordinator
-        .buffer_txn_offsets(req.producer_id, &req.group_id, buffered);
+    broker.txn_coordinator.buffer_txn_offsets(
+        crabka_log::ProducerId(req.producer_id),
+        &req.group_id,
+        buffered,
+    );
 
     // 4. Success — per-(topic, partition) error_code = NONE for allowed,
     //    TOPIC_AUTHORIZATION_FAILED for denied.
@@ -221,7 +233,7 @@ async fn append_txn_batch(
         }
         for part in &topic.partitions {
             let value = OffsetCommitValue {
-                offset: part.committed_offset,
+                offset: Offset(part.committed_offset),
                 leader_epoch: part.committed_leader_epoch,
                 metadata: part.committed_metadata.clone().unwrap_or_default(),
                 commit_timestamp_ms: now_ms,
@@ -257,7 +269,7 @@ async fn append_txn_batch(
 
     batch.last_offset_delta = (delta - 1).max(0);
 
-    let Some(part_handle) = partitions.get(OFFSETS_TOPIC, OFFSETS_PARTITION) else {
+    let Some(part_handle) = partitions.get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION)) else {
         // __consumer_offsets not hosted here — report NOT_COORDINATOR.
         return Err(codes::NOT_COORDINATOR);
     };
@@ -333,16 +345,14 @@ fn encode_err_all(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::{collections::HashSet, path::Path, sync::Arc};
 
     use assert2::{assert, check};
     use crabka_log::{Log, LogConfig};
-    use crabka_protocol::owned::txn_offset_commit_request::{
-        TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+    use crabka_protocol::owned::{
+        txn_offset_commit_request::{TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic},
+        txn_offset_commit_response::TxnOffsetCommitResponse,
     };
-    use crabka_protocol::owned::txn_offset_commit_response::TxnOffsetCommitResponse;
 
     use super::*;
     use crate::partition_registry::PartitionRegistry;
@@ -383,13 +393,17 @@ mod tests {
         let log = Log::open(&part_dir, LogConfig::default()).expect("open offsets log");
         let part = crate::broker::spawn_partition(
             OFFSETS_TOPIC.to_string(),
-            OFFSETS_PARTITION,
+            PartitionIndex(OFFSETS_PARTITION),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        registry.insert(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION, part);
+        registry.insert(
+            OFFSETS_TOPIC.to_string(),
+            PartitionIndex(OFFSETS_PARTITION),
+            part,
+        );
     }
 
     fn decode_response(bytes: &Bytes, version: i16) -> TxnOffsetCommitResponse {
@@ -481,7 +495,7 @@ mod tests {
                 (
                     topic.as_str(),
                     *partition,
-                    e.offset,
+                    e.offset.0,
                     e.leader_epoch,
                     e.metadata.as_str(),
                     e.commit_timestamp_ms,
@@ -496,10 +510,12 @@ mod tests {
         );
 
         let part = registry
-            .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
+            .get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION))
             .expect("offsets partition");
         let log = part.log.lock().expect("lock offsets log");
-        let read = log.read(0, 1024 * 1024).expect("read offsets log");
+        let read = log
+            .read(crabka_log::Offset(0), 1024 * 1024)
+            .expect("read offsets log");
         assert!(read.batches.len() == 1);
         let batch = &read.batches[0];
         check!(batch.attributes.is_transactional());
@@ -536,10 +552,12 @@ mod tests {
 
         assert!(entries.is_empty());
         let part = registry
-            .get(OFFSETS_TOPIC, OFFSETS_PARTITION)
+            .get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION))
             .expect("offsets partition");
         let log = part.log.lock().expect("lock offsets log");
-        let read = log.read(0, 1024 * 1024).expect("read offsets log");
+        let read = log
+            .read(crabka_log::Offset(0), 1024 * 1024)
+            .expect("read offsets log");
         assert!(read.batches.is_empty());
     }
 

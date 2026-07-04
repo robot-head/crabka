@@ -4,15 +4,20 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::Encode;
-use crate::owned::feature_level_record::FeatureLevelRecord;
-use crate::owned::snapshot_footer_record::SnapshotFooterRecord;
-use crate::owned::snapshot_header_record::SnapshotHeaderRecord;
-use crate::records::metadata::control::{
-    ControlRecordType, control_record_key, encode_control_batch,
+use crate::{
+    Encode,
+    owned::{
+        feature_level_record::FeatureLevelRecord, snapshot_footer_record::SnapshotFooterRecord,
+        snapshot_header_record::SnapshotHeaderRecord,
+    },
+    records::{
+        Record, RecordBatch,
+        metadata::{
+            control::{ControlRecordType, control_record_key, encode_control_batch},
+            record::KraftMetadataRecord,
+        },
+    },
 };
-use crate::records::metadata::record::KraftMetadataRecord;
-use crate::records::{Record, RecordBatch};
 
 /// `FeatureLevelRecord`s are always written at apiVersion 0.
 const FEATURE_LEVEL_API_VERSION: i16 = 0;
@@ -84,10 +89,10 @@ pub fn build_bootstrap_checkpoint(features: &[(&str, i16)]) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::Decode;
-    use crate::records::RecordBatch;
     use assert2::{assert, check};
+
+    use super::*;
+    use crate::{Decode, records::RecordBatch};
 
     #[test]
     fn bootstrap_checkpoint_has_header_features_footer() {

@@ -2,8 +2,10 @@
 
 use datafusion::prelude::SessionContext;
 
-use crate::error::Result;
-use crate::result::{ScopedTag, TagScope, TraceSpans, TypedValue};
+use crate::{
+    error::Result,
+    result::{ScopedTag, TagScope, TraceSpans, TypedValue},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatchScope {
@@ -136,9 +138,10 @@ pub fn filter_trace_spans_by_time(mut trace: TraceSpans, start_ns: i64, end_ns: 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use datafusion::prelude::SessionContext;
+
+    use super::*;
 
     struct Empty;
 

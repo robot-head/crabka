@@ -32,13 +32,17 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, DictionaryArray, Float64Array, Float64Builder, Int64Array};
-use arrow::datatypes::{DataType, Int64Type};
-use datafusion::common::{DataFusionError, Result as DfResult, ScalarValue};
-use datafusion::logical_expr::{
-    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+use arrow::{
+    array::{Array, ArrayRef, DictionaryArray, Float64Array, Float64Builder, Int64Array},
+    datatypes::{DataType, Int64Type},
 };
-use datafusion::prelude::SessionContext;
+use datafusion::{
+    common::{DataFusionError, Result as DfResult, ScalarValue},
+    logical_expr::{
+        ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+    },
+    prelude::SessionContext,
+};
 
 use crate::range_array::RangeArray;
 

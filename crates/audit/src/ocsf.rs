@@ -1,8 +1,12 @@
 //! OCSF (Open Cybersecurity Schema Framework) serialization for audit events.
 
+use crabka_ids::NodeId;
 use serde_json::json;
 
-use crate::event::{AuditEvent, AuditOutcome, LifecycleKind};
+use crate::{
+    event::{AuditEvent, AuditOutcome, LifecycleKind},
+    ids::EpochMs,
+};
 
 /// Product identity stamped into every OCSF record's `metadata`.
 #[derive(Debug, Clone)]
@@ -121,8 +125,8 @@ fn ocsf_admin_operation(
 
 fn ocsf_lifecycle(
     kind: LifecycleKind,
-    node_id: i64,
-    time_ms: i64,
+    node_id: NodeId,
+    time_ms: EpochMs,
     product: &ProductInfo,
 ) -> serde_json::Value {
     // class 6002 Application Lifecycle.
@@ -139,9 +143,9 @@ fn ocsf_lifecycle(
         "type_uid": class_uid * 100 + activity_id,
         "activity_id": activity_id,
         "activity_name": activity_name,
-        "time": time_ms,
+        "time": time_ms.0,
         "status_id": 1,
-        "device": { "uid": node_id.to_string(), "type_id": 1 },
+        "device": { "uid": node_id.0.to_string(), "type_id": 1 },
         "metadata": metadata(product),
     })
 }
@@ -196,15 +200,24 @@ pub fn to_ocsf(event: &AuditEvent, product: &ProductInfo) -> serde_json::Value {
             kind,
             node_id,
             time_ms,
-        } => ocsf_lifecycle(*kind, *node_id, *time_ms, product),
+        } => ocsf_lifecycle(
+            *kind,
+            // `node_id` is the Kafka `broker.id` (an `int32` widened to `i64`
+            // at the broker boundary), always non-negative; wrap it into the
+            // canonical `u64` `NodeId`.
+            NodeId(u64::try_from(*node_id).unwrap_or(0)),
+            EpochMs(*time_ms),
+            product,
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
     use crate::event::*;
-    use assert2::check;
 
     fn product() -> ProductInfo {
         ProductInfo {

@@ -60,17 +60,18 @@
 // enforces the full lint gate.
 #![allow(clippy::pedantic)]
 
-use std::net::SocketAddr;
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::{
+    net::SocketAddr,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 
 use base64::Engine as _;
-use tempfile::TempDir;
-use uuid::Uuid;
-
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
 use crabka_log::LogConfig;
-use crabka_metadata::{MetadataRecord, PartitionRecord};
+use crabka_metadata::{LeaderEpoch, MetadataRecord, PartitionRecord};
+use tempfile::TempDir;
+use uuid::Uuid;
 
 mod support;
 
@@ -137,9 +138,12 @@ async fn start_host_broker_on(client_port: u16, controller_port: u16) -> (Broker
         advertised_listener: format!("host.docker.internal:{client_port}"),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: format!("0.0.0.0:{controller_port}").parse().expect("addr"),
-        controller_quorum_voters: vec![(1, format!("127.0.0.1:{controller_port}"))],
+        controller_quorum_voters: vec![(
+            crabka_broker::NodeId(1),
+            format!("127.0.0.1:{controller_port}"),
+        )],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -487,13 +491,16 @@ fn crabka_mixed_config(
 ) -> BrokerConfig {
     let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
     cfg.broker_id = i32::try_from(i + 1).unwrap();
-    cfg.node_id = u64::try_from(i + 1).unwrap();
+    cfg.node_id = crabka_broker::NodeId(u64::try_from(i + 1).unwrap());
     cfg.listen_addr = format!("0.0.0.0:{client_port}").parse().unwrap();
     cfg.advertised_listener = format!("host.docker.internal:{client_port}");
     cfg.controller_listen_addr = own_controller_addr;
-    cfg.directory_id = Uuid::from_u128(u128::from(cfg.node_id));
+    cfg.directory_id = Uuid::from_u128(u128::from(cfg.node_id.0));
     cfg.bootstrap_mode = BootstrapMode::Bootstrap;
-    cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    cfg.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+        .collect();
     cfg.auto_join = false;
     cfg.bootstrap_servers = vec![];
     cfg.cluster_id = Some(cluster_id);
@@ -739,10 +746,10 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
     let forged = MetadataRecord::V1Partition(PartitionRecord {
         topic: TOPIC.to_string(),
         partition: 0,
-        leader: 99,
+        leader: crabka_broker::NodeId(99),
         replicas: pr.replicas.clone(),
-        isr: vec![99],
-        leader_epoch: pr.leader_epoch + 1,
+        isr: vec![crabka_broker::NodeId(99)],
+        leader_epoch: pr.leader_epoch.next(),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
@@ -774,10 +781,10 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
     let restore = MetadataRecord::V1Partition(PartitionRecord {
         topic: TOPIC.to_string(),
         partition: 0,
-        leader: 1,
+        leader: crabka_broker::NodeId(1),
         replicas: pr.replicas.clone(),
-        isr: vec![1],
-        leader_epoch: pr.leader_epoch + 2,
+        isr: vec![crabka_broker::NodeId(1)],
+        leader_epoch: LeaderEpoch(pr.leader_epoch.0 + 2),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],

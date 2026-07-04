@@ -11,9 +11,8 @@
 //! tracks net work directly comparable across codecs.
 
 use bytes::Bytes;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-
 use crabka_compression::{CompressionType, compress, decompress};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 // ---------------------------------------------------------------------------
 // Payload generators — deterministic so codspeed sees the same bytes every run.

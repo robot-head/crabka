@@ -83,9 +83,10 @@ pub fn get_f64<B: Buf>(buf: &mut B) -> Result<f64, ProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use bytes::BytesMut;
+
+    use super::*;
 
     macro_rules! roundtrip {
         ($name:ident, $put:ident, $get:ident, $values:expr) => {

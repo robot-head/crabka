@@ -10,10 +10,9 @@
 //! framing.
 
 use bytes::Bytes;
+use crabka_protocol::records::Record;
 use serde_wincode::SerdeCompat;
 use wincode::{Deserialize as _, Serialize as _};
-
-use crabka_protocol::records::Record;
 
 use crate::records::MetadataRecord;
 
@@ -56,10 +55,11 @@ pub fn from_kafka_record(rec: &Record) -> Result<MetadataRecord, KafkaRecordErro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::records::{MetadataRecord, TopicRecord};
     use assert2::assert;
     use uuid::Uuid;
+
+    use super::*;
+    use crate::records::{MetadataRecord, TopicRecord};
 
     fn sample_topic() -> MetadataRecord {
         MetadataRecord::V1Topic(TopicRecord {

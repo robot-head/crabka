@@ -5,36 +5,43 @@
 //!
 //! `cargo test -p crabka-traces --test tempo_differential -- --ignored --nocapture`
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use assert2::{assert, check};
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use crabka_traceql::{
     AttrValue as TraceqlAttrValue, EngineOpts, InMemorySpanStore, InputSpan, TraceqlEngine,
 };
-use crabka_traces::distributor::{self, DistributorState, WalSink};
-use crabka_traces::metricsgen::{
-    EdgeStore, MetricsGenConfig, RecordOutcome, Series, SeriesSample, SpanKind as MetricsSpanKind,
-    SpanRecord as MetricsSpanRecord, StatusCode as MetricsStatusCode,
+use crabka_traces::{
+    AttrValue, Span, SpanRecord, TracesError,
+    distributor::{self, DistributorState, WalSink},
+    metricsgen::{
+        EdgeStore, MetricsGenConfig, RecordOutcome, Series, SeriesSample,
+        SpanKind as MetricsSpanKind, SpanRecord as MetricsSpanRecord,
+        StatusCode as MetricsStatusCode,
+    },
 };
-use crabka_traces::{AttrValue, Span, SpanRecord, TracesError};
 use http_body_util::BodyExt as _;
-use opentelemetry_proto::tonic::common::v1::{
-    AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue, any_value::Value,
-};
-use opentelemetry_proto::tonic::resource::v1::Resource;
-use opentelemetry_proto::tonic::trace::v1::{
-    ResourceSpans, ScopeSpans, Span as OtlpSpan, Status as OtlpStatus, TracesData,
+use opentelemetry_proto::tonic::{
+    common::v1::{AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue, any_value::Value},
+    resource::v1::Resource,
+    trace::v1::{ResourceSpans, ScopeSpans, Span as OtlpSpan, Status as OtlpStatus, TracesData},
 };
 use prost::Message as _;
 use reqwest::StatusCode as ReqwestStatusCode;
 use serde_json::{Value as JsonValue, json};
-use testcontainers::core::{Host, IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{CopyDataSource, CopyTargetOptions, GenericImage, ImageExt};
+use testcontainers::{
+    CopyDataSource, CopyTargetOptions, GenericImage, ImageExt,
+    core::{Host, IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
 use tower::ServiceExt as _;
 
 const TENANT: &str = "tenant-a";

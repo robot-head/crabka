@@ -35,6 +35,7 @@ crabka-client-core = { version = "0.3.8", path = "../client-core" }
 crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
 crabka-protocol = { version = "0.3.8", path = "../protocol" }
 crabka-security = { version = "0.3.8", path = "../security" }
+derive_more = { workspace = true }
 exponential-backoff = "2.1.0"
 futures = { workspace = true }
 hdrhistogram = { version = "7.5", default-features = false }

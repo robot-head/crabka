@@ -16,18 +16,21 @@
 //! metadata image (see `MetadataImage::client_metrics_subscriptions`).
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::AclOperation;
-use crabka_protocol::owned::list_config_resources_request::ListConfigResourcesRequest;
-use crabka_protocol::owned::list_config_resources_response::{
-    ConfigResource, ListConfigResourcesResponse,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        list_config_resources_request::ListConfigResourcesRequest,
+        list_config_resources_response::{ConfigResource, ListConfigResourcesResponse},
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 /// Kafka wire-level resource-type ids. Match the JVM
 /// `org.apache.kafka.common.config.ConfigResource.Type` enum.
@@ -165,15 +168,18 @@ fn collect_resources(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::UnknownTaggedFields;
-    use std::sync::Arc;
     use uuid::Uuid;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 1;
 
@@ -190,7 +196,7 @@ mod tests {
         for &id in broker_ids {
             img.apply(&MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
-                    node_id: id,
+                    node_id: crabka_audit::NodeId(id),
                     broker_epoch: 0,
                     incarnation_id: uuid::Uuid::nil(),
                     host: "127.0.0.1".into(),

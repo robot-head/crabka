@@ -2,9 +2,12 @@
 //! run the per-format directional check. Format-agnostic (delegates to
 //! `format::check`); knows nothing about Avro/Protobuf/JSON internals.
 
-use crate::error::SrError;
-use crate::format::{self, SchemaType};
-use crate::store::StoreState;
+use crate::{
+    error::SrError,
+    format::{self, SchemaType},
+    ids::SchemaVersion,
+    store::StoreState,
+};
 
 /// Confluent compatibility levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,7 +177,7 @@ pub fn check_against_version(
     ty: SchemaType,
     candidate: &str,
     candidate_refs: &[crate::format::ResolvedReference],
-    version: Option<i32>,
+    version: Option<SchemaVersion>,
 ) -> Result<Verdict, SrError> {
     if snap.versions(subject, false).is_none() {
         return Err(SrError::SubjectNotFound(subject.to_string()));
@@ -216,10 +219,10 @@ pub fn check_against_version(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::format::SchemaType;
-    use crate::store::StoreState;
     use assert2::check;
+
+    use super::*;
+    use crate::{format::SchemaType, store::StoreState};
 
     fn av(fields: &str) -> String {
         format!("{{\"type\":\"record\",\"name\":\"U\",\"fields\":[{fields}]}}")

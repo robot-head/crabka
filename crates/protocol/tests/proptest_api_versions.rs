@@ -1,8 +1,9 @@
 use arbitrary::Arbitrary;
 use bytes::BytesMut;
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse},
+};
 use proptest::prelude::*;
 
 fn arb_request() -> impl Strategy<Value = ApiVersionsRequest> {

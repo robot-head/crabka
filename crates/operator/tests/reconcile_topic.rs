@@ -4,21 +4,23 @@
 //! finalizer patches). Admin-client behavior is covered by the
 //! integration test in `crates/client-admin/tests/round_trip.rs`.
 
-use assert2::{assert, check};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use crabka_operator::controller::topic::reconcile;
-use crabka_operator::crd::{KafkaTopic, KafkaTopicSpec};
+use assert2::{assert, check};
+use crabka_operator::{
+    controller::topic::reconcile,
+    crd::{KafkaTopic, KafkaTopicSpec},
+};
 use http::{Method, Response};
 use kube::runtime::controller::Action;
 
 #[path = "shared/mod.rs"]
 mod shared;
 
-use shared::fake_admin::{FakeAdminClient, RecordedCall, TopicState};
 use shared::{
-    MockRule, MockState, fake_topic_body, fixture_ctx, json_response, mock_client, not_found_body,
+    MockRule, MockState,
+    fake_admin::{FakeAdminClient, RecordedCall, TopicState},
+    fake_topic_body, fixture_ctx, json_response, mock_client, not_found_body,
 };
 
 /// JSON body shaped like a Ready Kafka with a single PLAIN internal

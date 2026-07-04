@@ -1,19 +1,20 @@
 //! Reconcile-level tests for the `KafkaUser` controller.
 
-use assert2::{assert, check};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
+use assert2::{assert, check};
 use crabka_client_admin::{
     AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, QuotaOp, ResourceType,
     UserQuotaConfig,
 };
-use crabka_operator::controller::user::reconcile;
-use crabka_operator::crd::user::TlsAuth;
-use crabka_operator::crd::{
-    AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
-    KafkaUser, KafkaUserAuthorization as Authorization, KafkaUserQuotas,
-    KafkaUserSimpleAuthorization as SimpleAuthorization, KafkaUserSpec, ScramSha512Auth,
+use crabka_operator::{
+    controller::user::reconcile,
+    crd::{
+        AclOp, AclPatternType, AclPermission, AclResource, AclResourceKind, AclRule,
+        Authentication, KafkaUser, KafkaUserAuthorization as Authorization, KafkaUserQuotas,
+        KafkaUserSimpleAuthorization as SimpleAuthorization, KafkaUserSpec, ScramSha512Auth,
+        user::TlsAuth,
+    },
 };
 use crabka_security::ca;
 use http::{Method, Response};
@@ -23,8 +24,11 @@ use serde_json::json;
 #[path = "shared/mod.rs"]
 mod shared;
 
-use shared::fake_admin::{FakeAdminClient, RecordedCall};
-use shared::{MockRule, MockState, fixture_ctx, json_response, mock_client, not_found_body};
+use shared::{
+    MockRule, MockState,
+    fake_admin::{FakeAdminClient, RecordedCall},
+    fixture_ctx, json_response, mock_client, not_found_body,
+};
 
 const CLUSTER: &str = "demo";
 const NS: &str = "y";

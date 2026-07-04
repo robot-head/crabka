@@ -7,12 +7,11 @@
 
 use std::sync::OnceLock;
 
-use prometheus_client::encoding::EncodeLabelSet;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::metrics::histogram::Histogram;
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    encoding::EncodeLabelSet,
+    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
+    registry::Registry,
+};
 
 /// Label for send/webhook result (`"ok"`, `"error"`, `"unauthorized"`, …).
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -409,8 +408,9 @@ async fn render() -> impl axum::response::IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     /// A fresh `GatewayMetrics` (not the global) so each test is isolated.
     fn fresh() -> GatewayMetrics {

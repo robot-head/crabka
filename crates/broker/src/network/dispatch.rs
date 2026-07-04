@@ -17,19 +17,22 @@
 use std::net::SocketAddr;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabka_protocol::api_key::ApiKey;
 use futures_util::{SinkExt, StreamExt};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
+};
 use tokio_util::codec::Framed;
 use tracing::Instrument as _;
 
-use crabka_protocol::api_key::ApiKey;
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::{ApiKeyCode, ApiVersion, CorrelationId};
-use crate::network::codec::{self, MAX_FRAME_BYTES};
+use crate::{
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::{ApiKeyCode, ApiVersion, CorrelationId},
+    network::codec::{self, MAX_FRAME_BYTES},
+};
 
 /// `ApiVersions` wire `api_key`. Named separately because it is the one API
 /// whose response header is always v0 regardless of body flexibility, and
@@ -1074,12 +1077,16 @@ async fn handle_alter_replica_log_dirs_frame(
 ) -> Result<Bytes, BrokerError> {
     use std::collections::BTreeMap;
 
-    use crabka_protocol::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest;
-    use crabka_protocol::owned::alter_replica_log_dirs_response::{
-        AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult,
-        AlterReplicaLogDirsResponse,
+    use crabka_protocol::{
+        Decode, Encode,
+        owned::{
+            alter_replica_log_dirs_request::AlterReplicaLogDirsRequest,
+            alter_replica_log_dirs_response::{
+                AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult,
+                AlterReplicaLogDirsResponse,
+            },
+        },
     };
-    use crabka_protocol::{Decode, Encode};
 
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     debug_assert_eq!(api_key, 34);
@@ -4500,9 +4507,11 @@ fn patch_leading_throttle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
     use std::time::Duration;
+
+    use assert2::{assert, check};
+
+    use super::*;
 
     fn request_frame(
         api_key: i16,
@@ -4846,12 +4855,14 @@ mod tests {
     /// from the fall-through's 35 and so pins the routing.
     #[tokio::test]
     async fn raft_voter_dispatch_arms_route_to_real_handlers() {
-        use crabka_protocol::owned::{
-            add_raft_voter_request as add_req, add_raft_voter_response as add_resp,
-            remove_raft_voter_request as rem_req, remove_raft_voter_response as rem_resp,
-            update_raft_voter_request as upd_req, update_raft_voter_response as upd_resp,
+        use crabka_protocol::{
+            Decode, Encode,
+            owned::{
+                add_raft_voter_request as add_req, add_raft_voter_response as add_resp,
+                remove_raft_voter_request as rem_req, remove_raft_voter_response as rem_resp,
+                update_raft_voter_request as upd_req, update_raft_voter_response as upd_resp,
+            },
         };
-        use crabka_protocol::{Decode, Encode};
 
         use crate::test_support::DenyAll;
 

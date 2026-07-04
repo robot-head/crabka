@@ -72,10 +72,11 @@ impl ShareGroupAssignor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::coordinator::unified::assignor::{MemberSubscription, TopicMetadata};
     use assert2::assert;
     use crabka_protocol::primitives::uuid::Uuid;
+
+    use super::*;
+    use crate::coordinator::unified::assignor::{MemberSubscription, TopicMetadata};
 
     fn topic(p: i32) -> (Uuid, TopicMetadata) {
         let id = Uuid([1; 16]);

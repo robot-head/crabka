@@ -25,6 +25,7 @@ default = []
 test-helpers = []
 
 [dependencies]
+crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
 crabka-compression = { version = "0.3.8", path = "../compression", default-features = false }
 bytes = { workspace = true }
@@ -33,6 +34,7 @@ tracing = { workspace = true }
 zerocopy = { workspace = true }
 
 [dev-dependencies]
+mutants = { workspace = true }
 assert2 = { workspace = true }
 proptest = { workspace = true }
 # Exhaustive enumeration of the leader-epoch truncation core

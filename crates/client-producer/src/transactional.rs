@@ -4,8 +4,7 @@
 
 use std::sync::Arc;
 
-use crate::error::ProducerError;
-use crate::producer::Producer;
+use crate::{error::ProducerError, producer::Producer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
@@ -151,23 +150,24 @@ pub struct EndTransactionError<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicI16, AtomicU16, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicI16, AtomicU16, Ordering},
+    };
 
     use bytes::BytesMut;
     use crabka_client_core::MockBroker;
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_request;
-    use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-    use crabka_protocol::owned::end_txn_request;
-    use crabka_protocol::owned::end_txn_response::EndTxnResponse;
-    use crabka_protocol::owned::find_coordinator_request;
-    use crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse;
-    use crabka_protocol::owned::init_producer_id_request;
-    use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request, api_versions_response::ApiVersionsResponse, end_txn_request,
+            end_txn_response::EndTxnResponse, find_coordinator_request,
+            find_coordinator_response::FindCoordinatorResponse, init_producer_id_request,
+            init_producer_id_response::InitProducerIdResponse,
+        },
+    };
 
-    use crate::error::ProducerError;
-    use crate::producer::Producer;
+    use crate::{error::ProducerError, producer::Producer};
 
     fn encode_v0(resp: &impl Encode) -> Vec<u8> {
         let mut buf = BytesMut::new();

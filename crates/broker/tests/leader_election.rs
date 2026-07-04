@@ -11,21 +11,22 @@
     clippy::too_many_lines
 )]
 
-use assert2::assert;
 use std::time::{Duration, Instant};
 
+use assert2::assert;
 use bytes::Bytes;
-use tempfile::TempDir;
-
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{Record, RecordBatch};
+use tempfile::TempDir;
 
 mod support;
 
@@ -161,7 +162,7 @@ async fn broker_death_elects_new_leader() {
     // cluster[0] is now broker 2 (broker 1 was removed above).
     cluster[0]
         .0
-        .wait_until_partition_leader_changed("elect", 0, 1)
+        .wait_until_partition_leader_changed("elect", 0, crabka_broker::NodeId(1))
         .await;
     let client = Client::builder()
         .bootstrap(cluster[0].1.listen_addr.to_string())
@@ -248,7 +249,11 @@ async fn isr_expand_on_catchup() {
     //    survivors stop replicating to node 3.
     cluster[leader_idx]
         .0
-        .change_membership([1u64, 2u64].into_iter().collect())
+        .change_membership(
+            [crabka_broker::NodeId(1), crabka_broker::NodeId(2)]
+                .into_iter()
+                .collect(),
+        )
         .await
         .expect("remove node 3 from voter set");
 
@@ -272,9 +277,12 @@ async fn isr_expand_on_catchup() {
         advertised_listener: dead_listen_addr.to_string(),
         log_dir: reborn_dir.path().to_path_buf(),
         log_config: Default::default(),
-        node_id: 3,
+        node_id: crabka_broker::NodeId(3),
         controller_listen_addr: dead_controller_addr,
-        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+        controller_quorum_voters: voters
+            .iter()
+            .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+            .collect(),
         heartbeat_interval_ms: 200,
         heartbeat_timeout_ms: 2_000,
         replica_lag_time_max_ms: 2_000,
@@ -294,12 +302,20 @@ async fn isr_expand_on_catchup() {
     //    committed log to it. Then promote it back to a voter.
     cluster[leader_idx]
         .0
-        .add_learner(3, dead_controller_addr)
+        .add_learner(crabka_broker::NodeId(3), dead_controller_addr)
         .await
         .expect("add reborn node 3 as learner");
     cluster[leader_idx]
         .0
-        .change_membership([1u64, 2u64, 3u64].into_iter().collect())
+        .change_membership(
+            [
+                crabka_broker::NodeId(1),
+                crabka_broker::NodeId(2),
+                crabka_broker::NodeId(3),
+            ]
+            .into_iter()
+            .collect(),
+        )
         .await
         .expect("promote reborn node 3 to voter");
 
@@ -335,7 +351,7 @@ async fn produce_during_leader_failover() {
     // Wait for the new leader to be elected (node 1 was killed).
     cluster[0]
         .0
-        .wait_until_partition_leader_changed("failover", 0, 1)
+        .wait_until_partition_leader_changed("failover", 0, crabka_broker::NodeId(1))
         .await;
 
     // Continue producing. The first attempt may hit NOT_LEADER_OR_FOLLOWER;

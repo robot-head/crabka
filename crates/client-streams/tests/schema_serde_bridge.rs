@@ -1,10 +1,11 @@
 use apache_avro::AvroSchema;
 use assert2::check;
-use crabka_client_streams::SchemaSerde;
-use crabka_client_streams::processor::serde::Serde;
-use crabka_schema_serde::RegistryClient;
-use crabka_schema_serde::cache::{CacheConfig, SchemaCache};
-use crabka_schema_serde::format::avro::AvroSerde;
+use crabka_client_streams::{SchemaSerde, processor::serde::Serde};
+use crabka_schema_serde::{
+    RegistryClient,
+    cache::{CacheConfig, SchemaCache},
+    format::avro::AvroSerde,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, AvroSchema)]

@@ -29,26 +29,31 @@
 //! Windows-gated like the other multi-node transactional tests (openraft +
 //! tokio scheduling races on the hosted Windows runner).
 
-use assert2::assert;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
-
-use tempfile::TempDir;
-
-use crabka_broker::config::{InterBrokerCredentials, ListenerSpec};
-use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerError, BrokerHandle};
-use crabka_client_core::Client;
-use crabka_client_core::security::{ClientSecurity, SaslCredentials};
-use crabka_protocol::owned::add_partitions_to_txn_request::{
-    AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction,
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant},
 };
-use crabka_protocol::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::end_txn_request::EndTxnRequest;
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
+
+use assert2::assert;
+use crabka_broker::{
+    BootstrapMode, Broker, BrokerConfig, BrokerError, BrokerHandle,
+    config::{InterBrokerCredentials, ListenerSpec},
+};
+use crabka_client_core::{
+    Client,
+    security::{ClientSecurity, SaslCredentials},
+};
+use crabka_protocol::owned::{
+    add_partitions_to_txn_request::{AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction},
+    common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic,
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    end_txn_request::EndTxnRequest,
+    find_coordinator_request::FindCoordinatorRequest,
+    init_producer_id_request::InitProducerIdRequest,
+    metadata_request::{MetadataRequest, MetadataRequestTopic},
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
+use tempfile::TempDir;
 
 mod support;
 
@@ -134,11 +139,14 @@ async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, 
     let dir0 = TempDir::new().unwrap();
     let mut cfg0 = BrokerConfig::for_tests(dir0.path().to_path_buf());
     cfg0.broker_id = 1;
-    cfg0.node_id = 1;
+    cfg0.node_id = crabka_broker::NodeId(1);
     cfg0.directory_id = uuid::Uuid::from_u128(1);
     cfg0.bootstrap_mode = BootstrapMode::Bootstrap;
     cfg0.controller_listen_addr = controller_addrs[0];
-    cfg0.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    cfg0.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+        .collect();
     cfg0.auto_join = false;
     cfg0.bootstrap_servers = vec![];
     apply_sasl(&mut cfg0, client_addrs[0]);
@@ -146,11 +154,14 @@ async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, 
     let dir1 = TempDir::new().unwrap();
     let mut cfg1 = BrokerConfig::for_tests(dir1.path().to_path_buf());
     cfg1.broker_id = 2;
-    cfg1.node_id = 2;
+    cfg1.node_id = crabka_broker::NodeId(2);
     cfg1.directory_id = uuid::Uuid::from_u128(2);
     cfg1.bootstrap_mode = BootstrapMode::Bootstrap;
     cfg1.controller_listen_addr = controller_addrs[1];
-    cfg1.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    cfg1.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+        .collect();
     cfg1.auto_join = false;
     cfg1.bootstrap_servers = vec![];
     apply_sasl(&mut cfg1, client_addrs[1]);

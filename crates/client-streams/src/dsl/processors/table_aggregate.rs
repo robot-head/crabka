@@ -11,10 +11,13 @@ use std::marker::PhantomData;
 
 use async_trait::async_trait;
 
-use crate::dsl::processors::change::Change;
-use crate::dsl::processors::tuple_forwarder::TupleForwarder;
-use crate::processor::api::{Processor, ProcessorContext};
-use crate::processor::record::Record;
+use crate::{
+    dsl::processors::{change::Change, tuple_forwarder::TupleForwarder},
+    processor::{
+        api::{Processor, ProcessorContext},
+        record::Record,
+    },
+};
 
 type Marker<T> = PhantomData<fn() -> T>;
 
@@ -143,18 +146,20 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::marker::PhantomData;
+    use std::{collections::VecDeque, marker::PhantomData};
 
     use assert2::check;
 
     use super::*;
-    use crate::processor::api::ProcessorContext;
-    use crate::processor::erased::{Dispatch, ErasedRecord};
-    use crate::processor::record::RecordContext;
-    use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::store::kv::KeyValueBytesStore;
-    use crate::store::registry::StoreRegistry;
+    use crate::{
+        processor::{
+            api::ProcessorContext,
+            erased::{Dispatch, ErasedRecord},
+            record::RecordContext,
+            serde::{I64Serde, StringSerde},
+        },
+        store::{kv::KeyValueBytesStore, registry::StoreRegistry},
+    };
 
     fn rc() -> RecordContext {
         RecordContext {

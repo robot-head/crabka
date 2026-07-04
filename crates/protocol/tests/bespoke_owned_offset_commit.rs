@@ -3,13 +3,15 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::owned::offset_commit_request::{
-    MAX_VERSION, MIN_VERSION, OffsetCommitRequest,
+use crabka_protocol::{
+    Decode, Encode, UnknownTaggedFields,
+    owned::{
+        offset_commit_request::{MAX_VERSION, MIN_VERSION, OffsetCommitRequest},
+        offset_commit_response::{
+            MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN, OffsetCommitResponse,
+        },
+    },
 };
-use crabka_protocol::owned::offset_commit_response::{
-    MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN, OffsetCommitResponse,
-};
-use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 
 #[test]
 fn owned_offset_commit_request_min_version_group_id_preserved() {

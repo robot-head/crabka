@@ -2,18 +2,22 @@
 
 use std::sync::Arc;
 
-use arrow::array::{
-    ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int32Builder, Int64Builder,
-    ListBuilder, StringBuilder, StringDictionaryBuilder, StructBuilder,
+use arrow::{
+    array::{
+        ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int32Builder,
+        Int64Builder, ListBuilder, StringBuilder, StringDictionaryBuilder, StructBuilder,
+    },
+    datatypes::{DataType, Field, Fields, Int32Type},
+    record_batch::RecordBatch,
 };
-use arrow::datatypes::{DataType, Field, Fields, Int32Type};
-use arrow::record_batch::RecordBatch;
 
-use crate::error::{BlockStoreError, Result};
-use crate::nested_set::NestedSet;
-use crate::span_schema::{
-    PromotedSpanAttr, PromotedSpanAttrType, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SpanKind, StatusCode,
-    span_block_schema_with_promoted_attrs,
+use crate::{
+    error::{BlockStoreError, Result},
+    nested_set::NestedSet,
+    span_schema::{
+        PromotedSpanAttr, PromotedSpanAttrType, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SpanKind,
+        StatusCode, span_block_schema_with_promoted_attrs,
+    },
 };
 
 /// A generic attribute value list. Scalars are represented as one-element lists.

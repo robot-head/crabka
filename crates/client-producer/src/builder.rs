@@ -1,25 +1,32 @@
 //! `Producer::builder()` — `bon`-generated builder for `Producer::start`.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicUsize};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicUsize},
+    },
+    time::Duration,
+};
 
+use crabka_client_core::{Client, ClientError};
+use crabka_protocol::owned::{
+    init_producer_id_request::InitProducerIdRequest,
+    init_producer_id_response::InitProducerIdResponse,
+};
 use dashmap::DashMap;
 use tokio::sync::{Mutex, Notify, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crabka_client_core::{Client, ClientError};
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
-use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
-
-use crate::compression::Compression;
-use crate::error::ProducerError;
-use crate::partitioner::UniformStickyPartitioner;
-use crate::producer::{Acks, Producer};
-use crate::sender;
-use crate::transactional::TxnState;
-use crate::transport::ClientTransport;
+use crate::{
+    compression::Compression,
+    error::ProducerError,
+    partitioner::UniformStickyPartitioner,
+    producer::{Acks, Producer},
+    sender,
+    transactional::TxnState,
+    transport::ClientTransport,
+};
 
 /// Retriable cold-coordinator error codes for `InitProducerId`. The broker is
 /// loading its coordinator state (`14`), the coordinator is not yet available
@@ -268,11 +275,14 @@ impl Producer {
 
 #[cfg(test)]
 mod security_arg_tests {
-    use super::*;
     use assert2::assert;
-    use crabka_client_core::MockBroker;
-    use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+    use crabka_client_core::{
+        MockBroker,
+        security::{ClientSecurity, SaslCredentials},
+    };
     use crabka_security::ListenerProtocol;
+
+    use super::*;
 
     #[test]
     fn coordinator_retry_classifier_matches_cold_start_codes_only() {

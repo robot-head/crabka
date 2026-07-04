@@ -1,11 +1,16 @@
 //! Aggregate per-run JSON outputs into a single Markdown summary.
 
-use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 
-use crate::scenario::{RunOutput, Stack};
+use crate::{
+    ids::TimeOffsetMs,
+    scenario::{RunOutput, Stack},
+};
 
 /// Walk `input_dir` for `*.json` files, deserialize each into a
 /// `RunOutput`, group by `(scenario name, broker_count)`, average each
@@ -229,9 +234,9 @@ pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
             }
             let recovery: Vec<f64> = dists
                 .iter()
-                .map(|d| d.recovery_at_ms.saturating_sub(d.kill_at_ms) as f64)
+                .map(|d| d.recovery_at_ms.0.saturating_sub(d.kill_at_ms.0) as f64)
                 .collect();
-            let dropped: Vec<f64> = dists.iter().map(|d| d.dropped as f64).collect();
+            let dropped: Vec<f64> = dists.iter().map(|d| d.dropped.0 as f64).collect();
             let spike: Vec<f64> = dists.iter().map(|d| d.latency_spike_max_ms).collect();
             out.push_str(&format!(
                 "**Failover ({label}, n={}):** recovery {:.0} ms, {:.0} drops, max latency spike {:.1} ms.\n\n",
@@ -531,7 +536,7 @@ fn mean_failover_recovery(runs: &[&RunOutput]) -> Option<f64> {
     let vals: Vec<f64> = runs
         .iter()
         .filter_map(|r| r.disturbance.as_ref())
-        .map(|d| d.recovery_at_ms.saturating_sub(d.kill_at_ms) as f64)
+        .map(|d| d.recovery_at_ms.0.saturating_sub(d.kill_at_ms.0) as f64)
         .collect();
     (!vals.is_empty()).then(|| mean(&vals))
 }
@@ -540,7 +545,7 @@ fn mean_failover_dropped(runs: &[&RunOutput]) -> Option<f64> {
     let vals: Vec<f64> = runs
         .iter()
         .filter_map(|r| r.disturbance.as_ref())
-        .map(|d| d.dropped as f64)
+        .map(|d| d.dropped.0 as f64)
         .collect();
     (!vals.is_empty()).then(|| mean(&vals))
 }
@@ -586,10 +591,12 @@ fn rate_recovery_for_run(
     if r.samples.is_empty() {
         return None;
     }
-    let kill_offset_ms = failover
-        .kill_at_s
-        .saturating_sub(r.scenario.warmup_s)
-        .saturating_mul(1000);
+    let kill_offset_ms = TimeOffsetMs(
+        failover
+            .kill_at_s
+            .saturating_sub(r.scenario.warmup_s)
+            .saturating_mul(1000),
+    );
     let baseline: Vec<f64> = r
         .samples
         .iter()
@@ -616,7 +623,7 @@ fn rate_recovery_for_run(
     let recovery_ms = after
         .iter()
         .find(|s| select(s) >= threshold)
-        .map(|s| s.t_offset_ms.saturating_sub(kill_offset_ms));
+        .map(|s| s.t_offset_ms.0.saturating_sub(kill_offset_ms.0));
 
     Some(RateRecovery {
         baseline_mps,
@@ -804,7 +811,10 @@ notes,errors_count\n",
         let mode_tag = format!("{:?}", r.scenario.mode_tag).to_lowercase();
         let (rec, drop, spike) = match &r.disturbance {
             Some(d) => (
-                d.recovery_at_ms.saturating_sub(d.kill_at_ms).to_string(),
+                d.recovery_at_ms
+                    .0
+                    .saturating_sub(d.kill_at_ms.0)
+                    .to_string(),
                 d.dropped.to_string(),
                 format!("{:.3}", d.latency_spike_max_ms),
             ),
@@ -945,12 +955,17 @@ pub fn render_web_fragment(input_dir: &Path, strict: bool) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::scenario::{
-        Acks, Compression, Disturbance, LoadMode, ModeTag, Sample, Scenario, Throughput, Topology,
-    };
     use assert2::{assert, check};
     use tempfile::tempdir;
+
+    use super::*;
+    use crate::{
+        ids::{MessageCount, WallclockMs},
+        scenario::{
+            Acks, Compression, Disturbance, LoadMode, ModeTag, Sample, Scenario, Throughput,
+            Topology,
+        },
+    };
 
     fn fake_run(stack: Stack, msgs: u64) -> RunOutput {
         RunOutput {
@@ -978,11 +993,11 @@ mod tests {
                 replication_factor: 1,
                 broker_count: 1,
             },
-            wallclock_start_unix_ms: 0,
-            wallclock_end_unix_ms: 60_000,
+            wallclock_start_unix_ms: WallclockMs(0),
+            wallclock_end_unix_ms: WallclockMs(60_000),
             throughput: Throughput {
-                msgs_produced: msgs,
-                msgs_consumed: msgs,
+                msgs_produced: MessageCount(msgs),
+                msgs_consumed: MessageCount(msgs),
                 mb_in: 5.0,
                 mb_out: 5.0,
                 producer_msgs_per_sec: msgs as f64 / 60.0,
@@ -1008,32 +1023,32 @@ mod tests {
         r.topology.replication_factor = 3;
         r.topology.broker_count = 3;
         r.disturbance = Some(Disturbance {
-            kill_at_ms: 4_000,
-            recovery_at_ms: 4_000 + recovery_ms,
-            dropped: 0,
+            kill_at_ms: TimeOffsetMs(4_000),
+            recovery_at_ms: TimeOffsetMs(4_000 + recovery_ms),
+            dropped: MessageCount(0),
             latency_spike_max_ms: 42.0,
         });
         r.samples = vec![
             Sample {
-                t_offset_ms: 0,
+                t_offset_ms: TimeOffsetMs(0),
                 producer_msgs_per_sec: 10_000.0,
                 consumer_msgs_per_sec: 9_800.0,
                 ..Sample::default()
             },
             Sample {
-                t_offset_ms: 2_000,
+                t_offset_ms: TimeOffsetMs(2_000),
                 producer_msgs_per_sec: 10_200.0,
                 consumer_msgs_per_sec: 9_900.0,
                 ..Sample::default()
             },
             Sample {
-                t_offset_ms: 4_000,
+                t_offset_ms: TimeOffsetMs(4_000),
                 producer_msgs_per_sec: post_kill_min_mps,
                 consumer_msgs_per_sec: post_kill_min_mps * 0.9,
                 ..Sample::default()
             },
             Sample {
-                t_offset_ms: 6_000,
+                t_offset_ms: TimeOffsetMs(6_000),
                 producer_msgs_per_sec: 9_500.0,
                 consumer_msgs_per_sec: 9_200.0,
                 ..Sample::default()
@@ -1070,8 +1085,8 @@ mod tests {
                     replication_factor: 1,
                     broker_count: 1,
                 },
-                wallclock_start_unix_ms: 0,
-                wallclock_end_unix_ms: 0,
+                wallclock_start_unix_ms: WallclockMs(0),
+                wallclock_end_unix_ms: WallclockMs(0),
                 throughput: Throughput::default(),
                 producer_latency_ms: crate::scenario::LatencyPercentiles::default(),
                 consumer_e2e_latency_ms: crate::scenario::LatencyPercentiles::default(),
@@ -1292,7 +1307,7 @@ mod tests {
         let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
         crabka.samples[3].producer_msgs_per_sec = 8_500.0;
         crabka.samples.push(Sample {
-            t_offset_ms: 8_000,
+            t_offset_ms: TimeOffsetMs(8_000),
             producer_msgs_per_sec: 9_500.0,
             consumer_msgs_per_sec: 9_200.0,
             ..Sample::default()
@@ -1324,7 +1339,7 @@ mod tests {
         for sample in crabka
             .samples
             .iter_mut()
-            .filter(|sample| sample.t_offset_ms >= 4_000)
+            .filter(|sample| sample.t_offset_ms >= TimeOffsetMs(4_000))
         {
             sample.producer_msgs_per_sec = 8_500.0;
         }
@@ -1332,7 +1347,7 @@ mod tests {
         for sample in kafka
             .samples
             .iter_mut()
-            .filter(|sample| sample.t_offset_ms >= 4_000)
+            .filter(|sample| sample.t_offset_ms >= TimeOffsetMs(4_000))
         {
             sample.producer_msgs_per_sec = 8_500.0;
         }
@@ -1363,7 +1378,7 @@ mod tests {
         let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
         crabka.samples[3].consumer_msgs_per_sec = 8_000.0;
         crabka.samples.push(Sample {
-            t_offset_ms: 8_000,
+            t_offset_ms: TimeOffsetMs(8_000),
             producer_msgs_per_sec: 9_500.0,
             consumer_msgs_per_sec: 9_200.0,
             ..Sample::default()
@@ -1392,7 +1407,7 @@ mod tests {
     fn failover_gate_fails_when_crabka_drops_more_messages_than_kafka() {
         let dir = tempdir().unwrap();
         let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
-        crabka.disturbance.as_mut().unwrap().dropped = 5;
+        crabka.disturbance.as_mut().unwrap().dropped = MessageCount(5);
         std::fs::write(
             dir.path().join("crabka-failover-3broker-rf3-run01.json"),
             serde_json::to_string(&crabka).unwrap(),
@@ -1519,7 +1534,7 @@ mod tests {
         let mut r = fake_run(Stack::Crabka, 600_000);
         r.samples = vec![
             Sample {
-                t_offset_ms: 0,
+                t_offset_ms: TimeOffsetMs(0),
                 producer_msgs_per_sec: 1000.0,
                 consumer_msgs_per_sec: 900.0,
                 producer_p50_ms: 1.5,
@@ -1527,7 +1542,7 @@ mod tests {
                 consumer_e2e_p99_ms: 7.0,
             },
             Sample {
-                t_offset_ms: 2000,
+                t_offset_ms: TimeOffsetMs(2000),
                 producer_msgs_per_sec: 1100.0,
                 consumer_msgs_per_sec: 950.0,
                 producer_p50_ms: 1.6,
@@ -1536,7 +1551,7 @@ mod tests {
             },
         ];
         r.broker_samples = vec![BrokerSample {
-            t_offset_ms: 0,
+            t_offset_ms: TimeOffsetMs(0),
             cpu_cores: 2.5,
             mem_working_set_bytes: 1_048_576,
         }];

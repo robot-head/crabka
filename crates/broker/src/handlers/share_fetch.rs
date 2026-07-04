@@ -14,27 +14,35 @@
 //! table) so the handler receives the per-connection principal + peer
 //! `SocketAddr` for the per-topic `Read` ACL gate.
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use bytes::{Bytes, BytesMut};
+use crabka_log::Offset;
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        share_fetch_request::{FetchPartition, ShareFetchRequest},
+        share_fetch_response::{
+            AcquiredRecords, LeaderIdAndEpoch, PartitionData, ShareFetchResponse,
+            ShareFetchableTopicResponse,
+        },
+    },
+    records::RecordsPayload,
+};
 use tokio::sync::Notify;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::share_fetch_request::{FetchPartition, ShareFetchRequest};
-use crabka_protocol::owned::share_fetch_response::{
-    AcquiredRecords, LeaderIdAndEpoch, PartitionData, ShareFetchResponse,
-    ShareFetchableTopicResponse,
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::share::actor::ShareGroupActorMessage,
+    error::BrokerError,
+    share_partition::state::AckType,
 };
-use crabka_protocol::records::RecordsPayload;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::share::actor::ShareGroupActorMessage;
-use crate::error::BrokerError;
-use crate::share_partition::state::AckType;
 
 type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
@@ -312,7 +320,13 @@ async fn acquire_pass(
             let mut ack_err = codes::NONE;
             for (first, last, types) in &p.ack_batches {
                 let res = if is_renew_ack {
-                    st.renew(member, *first, *last, now, cfg.record_lock_duration)
+                    st.renew(
+                        member,
+                        Offset(*first),
+                        Offset(*last),
+                        now,
+                        cfg.record_lock_duration,
+                    )
                 } else {
                     apply_one_ack(&mut st, member, *first, *last, types, now)
                 };
@@ -325,10 +339,11 @@ async fn acquire_pass(
 
         // Expire stale locks, materialize freshly produced records, acquire.
         st.expire_locks(now);
-        let part = p
-            .topic_name
-            .as_deref()
-            .and_then(|name| broker.partitions.get(name, p.partition_index));
+        let part = p.topic_name.as_deref().and_then(|name| {
+            broker
+                .partitions
+                .get(name, crabka_ids::PartitionIndex(p.partition_index))
+        });
         let Some(part) = part else {
             // Lost the partition between the leadership check and here.
             p.out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
@@ -392,13 +407,16 @@ async fn acquire_pass(
             p.out.acquired_records = acquired
                 .iter()
                 .map(|r| AcquiredRecords {
-                    first_offset: r.first,
-                    last_offset: r.last,
+                    first_offset: r.first.0,
+                    last_offset: r.last.0,
                     delivery_count: r.delivery_count,
                     ..Default::default()
                 })
                 .collect();
-            total += acquired.iter().map(|r| r.last - r.first + 1).sum::<i64>();
+            total += acquired
+                .iter()
+                .map(|r| r.last.0 - r.first.0 + 1)
+                .sum::<i64>();
         }
 
         p.out.error_code = codes::NONE;
@@ -423,7 +441,7 @@ pub(crate) fn apply_one_ack(
 ) -> Result<(), i16> {
     if types.is_empty() {
         let ack = AckType::Accept;
-        return st.acknowledge(member, first, last, ack, now);
+        return st.acknowledge(member, Offset(first), Offset(last), ack, now);
     }
     // Walk the per-offset type list, coalescing equal-typed runs.
     let mut result = Ok(());
@@ -438,7 +456,8 @@ pub(crate) fn apply_one_ack(
             j += 1;
         }
         if let Some(ack) = AckType::from_i8(t) {
-            if let Err(code) = st.acknowledge(member, run_start, run_end, ack, now) {
+            if let Err(code) = st.acknowledge(member, Offset(run_start), Offset(run_end), ack, now)
+            {
                 result = Err(code);
             }
         } else {
@@ -455,8 +474,8 @@ pub(crate) fn apply_one_ack(
 /// read.
 async fn read_acquired_bytes(
     part: &crate::partition::Partition,
-    fetch_offset: i64,
-    limit_offset: i64,
+    fetch_offset: Offset,
+    limit_offset: Offset,
     max_bytes: i32,
 ) -> Result<Option<Bytes>, BrokerError> {
     if limit_offset <= fetch_offset {
@@ -491,11 +510,11 @@ async fn long_poll(broker: &Broker, pending: &[PendingPartition], max_wait_ms: i
         if !p.leadable {
             continue;
         }
-        if let Some(part) = p
-            .topic_name
-            .as_deref()
-            .and_then(|name| broker.partitions.get(name, p.partition_index))
-        {
+        if let Some(part) = p.topic_name.as_deref().and_then(|name| {
+            broker
+                .partitions
+                .get(name, crabka_ids::PartitionIndex(p.partition_index))
+        }) {
             notifies.push(part.append_notify.clone());
             notifies.push(part.hw_advance_notify.clone());
         }
@@ -554,12 +573,14 @@ fn encode_error_response(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::share_fetch_request::AcknowledgementBatch;
-    use crabka_protocol::owned::share_fetch_response;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{share_fetch_request::AcknowledgementBatch, share_fetch_response},
+        primitives::uuid::Uuid as ProtoUuid,
+    };
+
+    use super::*;
 
     fn decode_response(bytes: &Bytes) -> ShareFetchResponse {
         crate::test_support::decode_response(bytes, share_fetch_response::MAX_VERSION)

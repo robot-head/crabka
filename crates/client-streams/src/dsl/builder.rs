@@ -1,9 +1,10 @@
 //! `StreamsBuilder` (public) + `InternalStreamsBuilder` (graph + name counter).
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
-use crate::dsl::graph::{GraphNodeKind, LogicalGraph};
-use crate::processor::serde::{Consumed, DefaultSerde, Serde, SerdeAssociate};
+use crate::{
+    dsl::graph::{GraphNodeKind, LogicalGraph},
+    processor::serde::{Consumed, DefaultSerde, Serde, SerdeAssociate},
+};
 
 /// A serde-carrying thunk that registers + connects a DSL-added state store to a
 /// processor by name during lowering. Looked up and invoked by `process` and
@@ -568,8 +569,9 @@ impl Default for StreamsBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn counter_assigns_jvm_names_in_call_order() {

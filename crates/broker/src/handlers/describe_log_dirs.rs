@@ -10,20 +10,26 @@
 use std::collections::BTreeMap;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest;
-use crabka_protocol::owned::describe_log_dirs_response::{
-    DescribeLogDirsPartition, DescribeLogDirsResponse, DescribeLogDirsResult, DescribeLogDirsTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_log_dirs_request::DescribeLogDirsRequest,
+        describe_log_dirs_response::{
+            DescribeLogDirsPartition, DescribeLogDirsResponse, DescribeLogDirsResult,
+            DescribeLogDirsTopic,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::disk_scanner::scan::sum_partition_dir;
-use crate::error::BrokerError;
-use crate::log_dir;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    disk_scanner::scan::sum_partition_dir,
+    error::BrokerError,
+    log_dir,
+};
 
 /// Filter derived from the request `topics` field:
 /// - `None`  → report every partition (admin-client default).
@@ -148,7 +154,12 @@ pub(crate) async fn handle(
                 }
                 let future_path = log_dir::future_partition_dir(dir, &topic, partition);
                 let size = sum_partition_dir(&future_path).unwrap_or(0);
-                let offset_lag = future_offset_lag(&partitions, &future_logs, &topic, partition);
+                let offset_lag = future_offset_lag(
+                    &partitions,
+                    &future_logs,
+                    &topic,
+                    crabka_ids::PartitionIndex(partition),
+                );
                 by_topic
                     .entry(topic)
                     .or_default()
@@ -238,12 +249,13 @@ async fn offset_lag_for(
     topic: &str,
     partition: i32,
 ) -> i64 {
-    let Some(part) = partitions.get(topic, partition) else {
+    let Some(part) = partitions.get(topic, crabka_ids::PartitionIndex(partition)) else {
         return 0;
     };
     let leo = part.log_end_offset();
     let hw = part.high_watermark().await;
-    (leo - hw).max(0)
+    // Lag is a record-count delta between two offsets, not an offset.
+    (leo.0 - hw.0).max(0)
 }
 
 /// `current_log.LEO − future_log.LEO`, clamped to ≥ 0, for an
@@ -254,26 +266,28 @@ async fn offset_lag_for(
 fn future_offset_lag(
     partitions: &crate::partition_registry::PartitionRegistry,
     future_logs: &dashmap::DashMap<
-        (String, i32),
+        (String, crabka_ids::PartitionIndex),
         std::sync::Arc<crate::future_log::FutureLogState>,
     >,
     topic: &str,
-    partition: i32,
+    partition: crabka_ids::PartitionIndex,
 ) -> i64 {
     let Some(part) = partitions.get(topic, partition) else {
         return 0;
     };
     let current_leo = part.log_end_offset();
-    let future_leo = future_logs
-        .get(&(topic.to_string(), partition))
-        .map_or(0, |e| {
-            e.value()
-                .future_log
-                .lock()
-                .expect("future log mutex poisoned")
-                .log_end_offset()
-        });
-    (current_leo - future_leo).max(0)
+    let future_leo =
+        future_logs
+            .get(&(topic.to_string(), partition))
+            .map_or(crabka_log::Offset(0), |e| {
+                e.value()
+                    .future_log
+                    .lock()
+                    .expect("future log mutex poisoned")
+                    .log_end_offset()
+            });
+    // Lag is a record-count delta between two offsets, not an offset.
+    (current_leo.0 - future_leo.0).max(0)
 }
 
 /// Best-effort absolute path string for a log dir, matching Kafka's
@@ -323,8 +337,9 @@ fn disk_stats(_dir: &std::path::Path) -> Option<(i64, i64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn filter_all_allows_everything() {
@@ -392,6 +407,140 @@ mod tests {
     fn log_dir_capacity_returns_minus_one_for_missing_path() {
         let phantom = std::path::Path::new("/nonexistent/crabka/test/dir/should/not/exist");
         assert!(log_dir_capacity(phantom) == (-1, -1));
+    }
+
+    /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>` via the
+    /// real `spawn_partition` path (mirrors the `future_log` / registry test
+    /// fixtures) and append `count` records so its LEO advances to `count`.
+    fn partition_with_leo(
+        log_dir: &std::path::Path,
+        topic: &str,
+        partition: crabka_ids::PartitionIndex,
+        count: i32,
+    ) -> std::sync::Arc<crate::partition::Partition> {
+        let part_dir = log_dir::partition_dir(log_dir, topic, partition.get());
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default()).unwrap();
+        let part = crate::broker::spawn_partition(
+            topic.to_string(),
+            partition,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            std::sync::Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        if count > 0 {
+            append_n(&part.log, count);
+        }
+        part
+    }
+
+    /// Append a single `count`-record batch to a `Log` behind a mutex,
+    /// advancing its LEO by `count`.
+    fn append_n(log: &std::sync::Mutex<crabka_log::Log>, count: i32) {
+        use bytes::Bytes;
+        use crabka_protocol::records::{Attributes, Record, RecordBatch};
+        let mut batch = RecordBatch {
+            base_offset: 0,
+            partition_leader_epoch: -1,
+            attributes: Attributes::default(),
+            last_offset_delta: count - 1,
+            base_timestamp: 1_700_000_000,
+            max_timestamp: 1_700_000_000,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: (0..count)
+                .map(|i| Record {
+                    attributes: 0,
+                    offset_delta: i,
+                    timestamp_delta: 0,
+                    key: None,
+                    value: Some(Bytes::from_static(b"v")),
+                    headers: vec![],
+                })
+                .collect(),
+        };
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .append(&mut batch)
+            .expect("append records");
+    }
+
+    /// A partition that isn't materialized locally reports lag `0`, not the
+    /// `-1` a whole-function replacement mutant would return.
+    #[tokio::test]
+    async fn offset_lag_missing_partition_is_zero() {
+        let reg = crate::partition_registry::PartitionRegistry::new();
+        assert!(offset_lag_for(&reg, "ghost", 0).await == 0);
+    }
+
+    /// A materialized partition with LEO ahead of HW reports `LEO - HW`
+    /// (fresh HW is 0), pinning the real subtraction against the whole-fn
+    /// `-> -1` replacement.
+    #[tokio::test]
+    async fn offset_lag_uses_leo_minus_hw() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = crate::partition_registry::PartitionRegistry::new();
+        let part = partition_with_leo(dir.path(), "t", crabka_ids::PartitionIndex(0), 5);
+        assert!(part.log_end_offset() == crabka_log::Offset(5));
+        reg.insert("t".to_string(), crabka_ids::PartitionIndex(0), part);
+        // Fresh partition HW is 0 → lag == LEO == 5 (not -1, not 0).
+        assert!(offset_lag_for(&reg, "t", 0).await == 5);
+    }
+
+    /// Build a `FutureLogState` whose future log has LEO `future_count`.
+    fn future_state_with_leo(
+        dir: &std::path::Path,
+        future_count: i32,
+    ) -> std::sync::Arc<crate::future_log::FutureLogState> {
+        let future_path = dir.join("future");
+        std::fs::create_dir_all(&future_path).unwrap();
+        let flog = crabka_log::Log::open(&future_path, crabka_log::LogConfig::default()).unwrap();
+        let future_log = std::sync::Arc::new(std::sync::Mutex::new(flog));
+        if future_count > 0 {
+            append_n(&future_log, future_count);
+        }
+        std::sync::Arc::new(crate::future_log::FutureLogState {
+            target_log_dir: dir.to_path_buf(),
+            future_path,
+            future_log,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            task: std::sync::Mutex::new(None::<tokio::task::JoinHandle<()>>),
+        })
+    }
+
+    /// With no local partition, the future-log lag is `0`, not the `1` a
+    /// whole-function `-> 1` replacement mutant would return.
+    #[tokio::test]
+    async fn future_offset_lag_missing_partition_is_zero() {
+        let reg = crate::partition_registry::PartitionRegistry::new();
+        let future_logs = dashmap::DashMap::new();
+        let lag = future_offset_lag(&reg, &future_logs, "ghost", crabka_ids::PartitionIndex(0));
+        assert!(lag == 0);
+    }
+
+    /// `future_offset_lag` is `current_log.LEO − future_log.LEO`, clamped at 0.
+    /// With current LEO 5 and future LEO 2 the answer is 3 — which
+    /// distinguishes the real subtraction from every mutant: `-> 0` (0),
+    /// `-> 1` (1), `-` → `+` (7), and `-` → `/` (2).
+    #[tokio::test]
+    async fn future_offset_lag_is_current_minus_future_leo() {
+        let cur_dir = tempfile::tempdir().unwrap();
+        let fut_dir = tempfile::tempdir().unwrap();
+        let reg = crate::partition_registry::PartitionRegistry::new();
+        let part = partition_with_leo(cur_dir.path(), "t", crabka_ids::PartitionIndex(3), 5);
+        assert!(part.log_end_offset() == crabka_log::Offset(5));
+        reg.insert("t".to_string(), crabka_ids::PartitionIndex(3), part);
+
+        let future_logs = dashmap::DashMap::new();
+        future_logs.insert(
+            ("t".to_string(), crabka_ids::PartitionIndex(3)),
+            future_state_with_leo(fut_dir.path(), 2),
+        );
+
+        let lag = future_offset_lag(&reg, &future_logs, "t", crabka_ids::PartitionIndex(3));
+        assert!(lag == 3, "current LEO 5 − future LEO 2 == 3, got {lag}");
     }
 
     #[test]

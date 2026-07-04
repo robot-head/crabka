@@ -16,6 +16,7 @@ mod planner;
 mod stream;
 mod syntax;
 mod template;
+mod types;
 mod util;
 
 pub use error::ParseError;
@@ -44,6 +45,10 @@ pub use syntax::{
     parse_query,
 };
 pub use template::LineFormat;
+pub use types::{
+    DestinationLabel, DurationNanos, JsonExpressionPath, OffsetNanos, QuantileDenominator,
+    QuantileNumerator, SourceLabel,
+};
 
 pub type Labels = BTreeMap<String, String>;
 pub const UNWRAP_SAMPLE_VALUE_LABEL: &str = "__crabka_unwrap_sample_value__";

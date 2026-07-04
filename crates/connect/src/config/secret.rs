@@ -1,6 +1,4 @@
-use std::env;
-use std::error::Error;
-use std::fmt;
+use std::{env, error::Error, fmt};
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

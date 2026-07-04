@@ -16,18 +16,22 @@
 //! slices 10b/12b (openraft `debug_assert!` races on the hosted
 //! Windows task scheduler are unrelated to the protocol under test).
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
-use std::time::Duration;
+use std::{io, net::SocketAddr, time::Duration};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::BrokerHandle;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
-use crabka_protocol::{Decode, Encode};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    },
+};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 mod support;
 
@@ -138,10 +142,18 @@ async fn force_leadership_for_test(
         let record = MetadataRecord::V1Partition(PartitionRecord {
             topic: topic.to_string(),
             partition: p,
-            leader: target,
-            replicas: replicas.to_vec(),
-            isr: replicas.to_vec(),
-            leader_epoch: pr.leader_epoch + 1,
+            leader: crabka_metadata::NodeId(target),
+            replicas: replicas
+                .iter()
+                .copied()
+                .map(crabka_metadata::NodeId)
+                .collect(),
+            isr: replicas
+                .iter()
+                .copied()
+                .map(crabka_metadata::NodeId)
+                .collect(),
+            leader_epoch: pr.leader_epoch.next(),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -230,7 +242,7 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
         &cluster[raft_leader_idx].0,
         TOPIC,
         PARTITIONS,
-        target_node_id,
+        target_node_id.0,
         &replicas,
     )
     .await;
@@ -242,7 +254,7 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
             &cluster[raft_leader_idx].0,
             TOPIC,
             PARTITIONS,
-            target_node_id
+            target_node_id.0
         ) == PARTITIONS as usize,
         "target should lead all partitions before shutdown"
     );

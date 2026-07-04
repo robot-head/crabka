@@ -2,6 +2,9 @@
 
 use std::collections::HashSet;
 
+use crabka_ids::PartitionIndex;
+use crabka_log::ProducerId;
+
 /// Tx state machine, mirroring Apache Kafka's classic transaction
 /// states (KIP-98) extended for KIP-1319 v2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,22 +80,22 @@ impl TxnState {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct TopicPartition {
     pub topic: String,
-    pub partition: i32,
+    pub partition: PartitionIndex,
 }
 
 #[derive(Debug, Clone)]
 pub struct TxnEntry {
     pub transactional_id: String,
-    pub producer_id: i64,
+    pub producer_id: ProducerId,
     pub producer_epoch: i16,
     pub state: TxnState,
     pub txn_timeout_ms: i32,
     pub partitions: HashSet<TopicPartition>,
     /// KIP-890 epoch bookkeeping (Kafka's `TransactionLogValue.PreviousProducerId`
-    /// / `NextProducerId` tagged fields). `-1` means "none", matching Kafka's
-    /// tagged-field default.
-    pub prev_producer_id: i64,
-    pub next_producer_id: i64,
+    /// / `NextProducerId` tagged fields). `ProducerId(-1)` means "none", matching
+    /// Kafka's tagged-field default.
+    pub prev_producer_id: ProducerId,
+    pub next_producer_id: ProducerId,
     pub last_update_ms: i64,
     pub start_ms: i64,
 }
@@ -101,7 +104,7 @@ impl TxnEntry {
     /// Fresh entry for a tid that's never been seen.
     pub fn new_empty(
         transactional_id: String,
-        producer_id: i64,
+        producer_id: ProducerId,
         producer_epoch: i16,
         txn_timeout_ms: i32,
         now_ms: i64,
@@ -113,8 +116,8 @@ impl TxnEntry {
             state: TxnState::Empty,
             txn_timeout_ms,
             partitions: HashSet::new(),
-            prev_producer_id: -1,
-            next_producer_id: -1,
+            prev_producer_id: ProducerId(-1),
+            next_producer_id: ProducerId(-1),
             last_update_ms: now_ms,
             start_ms: now_ms,
         }

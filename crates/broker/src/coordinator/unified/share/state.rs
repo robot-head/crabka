@@ -4,8 +4,10 @@
 //! offset and revocation machinery. Share-group assignment is non-exclusive,
 //! so members carry no assignment-ack state beyond a member epoch.
 
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use crabka_protocol::primitives::uuid::Uuid;
 
@@ -141,9 +143,11 @@ impl ShareGroupState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
     use std::time::{Duration, Instant};
+
+    use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn add_member_bumps_nothing_until_reconcile() {

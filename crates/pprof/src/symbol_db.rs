@@ -1,14 +1,15 @@
 //! Deduplicated on-block symbol DB artifact.
 
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_wincode::SerdeCompat;
 use wincode::{Deserialize as WincodeDeserialize, Serialize as WincodeSerialize};
 
-use crate::error::ProfileError;
-use crate::frame::{Frame, SymbolSource};
+use crate::{
+    error::ProfileError,
+    frame::{Frame, SymbolSource},
+};
 
 /// Stacktrace id reserved for samples with no frames (e.g. a goroutine profile's
 /// occasional stackless record). It is kept distinct from node `0` — the first

@@ -6,17 +6,18 @@
 //! state — `(transactional_id, producer_id, state)` summary for List,
 //! full per-tid detail (timeout, start time, partitions) for Describe.
 
-use assert2::{assert, check};
 use std::time::Duration;
 
+use assert2::{assert, check};
 use bytes::Bytes;
-use tempfile::TempDir;
-
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_producer::{Producer, ProducerRecord};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::describe_transactions_request::DescribeTransactionsRequest;
-use crabka_protocol::owned::list_transactions_request::ListTransactionsRequest;
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    describe_transactions_request::DescribeTransactionsRequest,
+    list_transactions_request::ListTransactionsRequest,
+};
+use tempfile::TempDir;
 
 async fn boot_single() -> (BrokerHandle, String, TempDir) {
     let dir = TempDir::new().unwrap();

@@ -12,8 +12,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use tracing::warn;
 
-use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{ClusterState, Movement, PartitionView};
+use crate::{
+    goals::{Goal, GoalContext, GoalPriority},
+    model::{ClusterState, Movement, PartitionView},
+};
 
 pub struct RackAware;
 
@@ -225,9 +227,10 @@ fn pick_swap(
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::model::BrokerView;
-    use assert2::{assert, check};
 
     fn ctx() -> GoalContext {
         GoalContext {

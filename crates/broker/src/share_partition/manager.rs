@@ -9,21 +9,22 @@
 //! Locking discipline: the `DashMap` guard is NEVER held across an `.await`.
 //! Callers clone the cell `Arc` out of the map first, then lock and await.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use crabka_ids::PartitionIndex;
+use crabka_log::Offset;
+use crabka_metadata::NodeId;
 use dashmap::DashMap;
 use tokio::sync::Mutex;
 use tracing::warn;
 
-use crabka_metadata::NodeId;
-
-use crate::coordinator::unified::share::config::ShareGroupConfig;
-use crate::metadata_source::MetadataSource;
-use crate::partition_registry::PartitionRegistry;
-use crate::share_coordinator::persister_client::SharePersister;
-use crate::share_partition::session::ShareSessionCache;
-use crate::share_partition::state::AcquisitionState;
+use crate::{
+    coordinator::unified::share::config::ShareGroupConfig,
+    metadata_source::MetadataSource,
+    partition_registry::PartitionRegistry,
+    share_coordinator::persister_client::SharePersister,
+    share_partition::{session::ShareSessionCache, state::AcquisitionState},
+};
 
 /// Live acquisition-state machines keyed by `(group, topic_id, partition)`.
 type LeaderKey = (String, uuid::Uuid, i32);
@@ -99,7 +100,7 @@ impl SharePartitionLeaderManager {
         image
             .partition(&topic.name, partition)
             .map_or((-1, -1), |p| {
-                (i32::try_from(p.leader).unwrap_or(-1), p.leader_epoch)
+                (i32::try_from(p.leader.0).unwrap_or(-1), p.leader_epoch.0)
             })
     }
 
@@ -138,10 +139,12 @@ impl SharePartitionLeaderManager {
         let Some(topic) = image.topics().find(|t| t.topic_id == topic_id) else {
             return 0;
         };
-        self.partitions.get(&topic.name, partition).map_or(0, |p| {
-            p.current_leader_epoch
-                .load(std::sync::atomic::Ordering::Acquire)
-        })
+        self.partitions
+            .get(&topic.name, PartitionIndex(partition))
+            .map_or(0, |p| {
+                p.current_leader_epoch
+                    .load(std::sync::atomic::Ordering::Acquire)
+            })
     }
 
     /// Get (or lazily load) the acquisition-state cell for
@@ -179,7 +182,7 @@ impl SharePartitionLeaderManager {
                 st
             }
             Ok(None) => {
-                let mut st = AcquisitionState::new(0);
+                let mut st = AcquisitionState::new(Offset(0));
                 st.leader_epoch = leader_epoch;
                 st
             }
@@ -189,7 +192,7 @@ impl SharePartitionLeaderManager {
                     %topic_id, partition, error = %e,
                     "share-partition state load failed; starting from empty window"
                 );
-                let mut st = AcquisitionState::new(0);
+                let mut st = AcquisitionState::new(Offset(0));
                 st.leader_epoch = leader_epoch;
                 st
             }
@@ -299,26 +302,27 @@ impl SharePartitionLeaderManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{collections::BTreeSet, net::SocketAddr};
+
     use assert2::assert;
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
+
+    use super::*;
 
     const LOCK: Duration = Duration::from_secs(30);
 
     use async_trait::async_trait;
-    use tokio::sync::watch;
-
     use crabka_metadata::{MetadataImage, MetadataRecord};
     use crabka_raft::{
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
     use crabka_security::ListenerProtocol;
+    use tokio::sync::watch;
 
-    use crate::network::client::InterBrokerClient;
-    use crate::share_coordinator::config::ShareCoordinatorConfig;
-    use crate::share_coordinator::coordinator::ShareCoordinator;
+    use crate::{
+        network::client::InterBrokerClient,
+        share_coordinator::{config::ShareCoordinatorConfig, coordinator::ShareCoordinator},
+    };
 
     /// Minimal `MetadataSource` over a fixed (empty-of-brokers) image. The
     /// share-state topic can't be bootstrapped against it (no brokers), so the
@@ -333,9 +337,13 @@ mod tests {
 
     impl MockSource {
         fn new() -> Self {
-            let (tx, rx) = watch::channel(Some(1));
+            Self::with_image(Arc::new(MetadataImage::new(uuid::Uuid::nil())))
+        }
+
+        fn with_image(image: Arc<MetadataImage>) -> Self {
+            let (tx, rx) = watch::channel(Some(crabka_metadata::NodeId(1)));
             Self {
-                image: Arc::new(MetadataImage::new(uuid::Uuid::nil())),
+                image,
                 leader_rx: rx,
                 _leader_tx: tx,
             }
@@ -390,13 +398,13 @@ mod tests {
         let reg = Arc::new(PartitionRegistry::new());
         let controller: Arc<dyn MetadataSource> = Arc::new(MockSource::new());
         let coord = Arc::new(ShareCoordinator::new(
-            1,
+            crabka_audit::NodeId(1),
             reg.clone(),
             ShareCoordinatorConfig::default(),
         ));
         let client = Arc::new(InterBrokerClient::new(None, None));
         let persister = Arc::new(SharePersister::new(
-            1,
+            crabka_audit::NodeId(1),
             coord,
             controller.clone(),
             client,
@@ -404,7 +412,35 @@ mod tests {
             "INTERNAL".to_string(),
         ));
         Arc::new(SharePartitionLeaderManager::new(
-            1,
+            crabka_audit::NodeId(1),
+            reg,
+            controller,
+            persister,
+            Arc::new(ShareGroupConfig::default()),
+        ))
+    }
+
+    /// A manager whose controller serves `image` (so `current_leader_of` and
+    /// friends resolve real topic/partition leadership).
+    fn manager_with_image(image: Arc<MetadataImage>) -> Arc<SharePartitionLeaderManager> {
+        let reg = Arc::new(PartitionRegistry::new());
+        let controller: Arc<dyn MetadataSource> = Arc::new(MockSource::with_image(image));
+        let coord = Arc::new(ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            reg.clone(),
+            ShareCoordinatorConfig::default(),
+        ));
+        let client = Arc::new(InterBrokerClient::new(None, None));
+        let persister = Arc::new(SharePersister::new(
+            crabka_audit::NodeId(1),
+            coord,
+            controller.clone(),
+            client,
+            ListenerProtocol::Plaintext,
+            "INTERNAL".to_string(),
+        ));
+        Arc::new(SharePartitionLeaderManager::new(
+            crabka_audit::NodeId(1),
             reg,
             controller,
             persister,
@@ -419,7 +455,7 @@ mod tests {
 
         let cell = mgr.get_or_load("g1", tid, 0).await;
         let st = cell.lock().await;
-        assert!(st.start_offset == 0);
+        assert!(st.start_offset == Offset(0));
         assert!(!st.dirty);
         drop(st);
         // A second call returns the same cached cell.
@@ -451,7 +487,7 @@ mod tests {
         let cell = mgr.get_or_load("g1", tid, 0).await;
         let mut st = cell.lock().await;
         // Make the state dirty with persistable content.
-        st.materialize(4, 100);
+        st.materialize(Offset(4), 100);
         let _ = st.acquire("m1", 10, i32::MAX, std::time::Instant::now(), LOCK, 5);
         assert!(st.dirty);
 
@@ -478,5 +514,47 @@ mod tests {
         mgr.invalidate("g1", tid, 0);
         let cell2 = mgr.get_or_load("g1", tid, 0).await;
         assert!(!Arc::ptr_eq(&cell, &cell2));
+    }
+
+    #[tokio::test]
+    async fn current_leader_of_reads_image_leader_and_epoch() {
+        use crabka_ids::LeaderEpoch;
+        use crabka_metadata::{PartitionRecord, TopicRecord};
+
+        let tid = uuid::Uuid::from_bytes([31; 16]);
+        // A topic-partition led by node 2 at leader epoch 5. Both components are
+        // non-default and differ from every fixed-tuple mutant
+        // ((0,0)/(0,1)/(-1,0)/(1,1)).
+        let image = Arc::new(MetadataImage::from_records(
+            uuid::Uuid::nil(),
+            &[
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: tid,
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                MetadataRecord::V1Partition(PartitionRecord {
+                    topic: "t".into(),
+                    partition: 0,
+                    leader: NodeId(2),
+                    replicas: vec![NodeId(2)],
+                    isr: vec![NodeId(2)],
+                    leader_epoch: LeaderEpoch(5),
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![],
+                    partition_epoch: 0,
+                }),
+            ],
+        ));
+        let mgr = manager_with_image(image);
+
+        // Known partition resolves to (leader_id, leader_epoch) from the image.
+        assert!(mgr.current_leader_of(tid, 0) == (2, 5));
+        // Unknown partition of a known topic -> (-1, -1).
+        assert!(mgr.current_leader_of(tid, 9) == (-1, -1));
+        // Unknown topic -> (-1, -1).
+        assert!(mgr.current_leader_of(uuid::Uuid::from_bytes([99; 16]), 0) == (-1, -1));
     }
 }

@@ -8,8 +8,7 @@
 //! - [`send_assignments`] — async sender that mirrors the pattern used by
 //!   `isr_maintenance::send_alter_partition`.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crabka_protocol::owned::assign_replicas_to_dirs_request::{
     AssignReplicasToDirsRequest, DirectoryData, PartitionData, TopicData,
@@ -132,7 +131,8 @@ fn validate_assign_response(error_code: i16) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{collections::BTreeSet, net::SocketAddr};
+
     use assert2::{assert, check};
     use crabka_metadata::MetadataImage;
     use crabka_protocol::{Decode, Encode};
@@ -140,9 +140,10 @@ mod tests {
         AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
         SnapshotRange, UpdateVoter,
     };
-    use std::{collections::BTreeSet, net::SocketAddr};
     use tokio::sync::watch;
     use uuid::Uuid;
+
+    use super::*;
 
     struct MockSource {
         image: Arc<MetadataImage>,
@@ -296,7 +297,7 @@ mod tests {
             // No controller leader elected at all.
             (None, "no controller leader"),
             // Leader elected but its broker record is missing from the image.
-            (Some(42), "controller leader not in image"),
+            (Some(NodeId(42)), "controller leader not in image"),
         ];
         for (leader, expected) in cases {
             let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(MockSource {

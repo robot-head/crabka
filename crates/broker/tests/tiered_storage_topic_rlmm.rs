@@ -28,12 +28,14 @@ use crabka_broker::{
     Broker, BrokerConfig, BrokerHandle, KafkaRlmmConfig, RemoteStorageBackend, RlmmKind,
 };
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{
-    CreatableTopic, CreatableTopicConfig, CreateTopicsRequest,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use tempfile::TempDir;
 
 const METADATA_TOPIC: &str = "__remote_log_metadata";
@@ -60,7 +62,8 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
     cfg.listen_addr = listen;
     cfg.advertised_listener = listen.to_string();
     cfg.controller_listen_addr = controller_addrs[0];
-    cfg.controller_quorum_voters = vec![(1, controller_addrs[0].to_string())];
+    cfg.controller_quorum_voters =
+        vec![(crabka_broker::NodeId(1), controller_addrs[0].to_string())];
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });
@@ -371,7 +374,8 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
     cfg.listen_addr = listen;
     cfg.advertised_listener = listen.to_string();
     cfg.controller_listen_addr = controller_addrs[0];
-    cfg.controller_quorum_voters = vec![(1, controller_addrs[0].to_string())];
+    cfg.controller_quorum_voters =
+        vec![(crabka_broker::NodeId(1), controller_addrs[0].to_string())];
     cfg.listeners = vec![ListenerSpec {
         name: "SASL_PLAINTEXT".to_string(),
         bind_addr: listen,
@@ -442,7 +446,8 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
     cfg.listen_addr = listen;
     cfg.advertised_listener = listen.to_string();
     cfg.controller_listen_addr = controller_addrs[0];
-    cfg.controller_quorum_voters = vec![(1, controller_addrs[0].to_string())];
+    cfg.controller_quorum_voters =
+        vec![(crabka_broker::NodeId(1), controller_addrs[0].to_string())];
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });

@@ -2,19 +2,19 @@
 //! to keep `controller/kafka.rs` and `controller/common.rs` from
 //! growing further.
 
-use std::collections::BTreeMap;
-use std::net::IpAddr;
+use std::{collections::BTreeMap, net::IpAddr};
 
-use k8s_openapi::api::core::v1::{Node, Service};
-use k8s_openapi::api::networking::v1::Ingress;
+use crabka_security::{ListenerProtocol, SaslMechanism, ca::SubjectAltName};
+use k8s_openapi::api::{
+    core::v1::{Node, Service},
+    networking::v1::Ingress,
+};
 use kube::Resource as _;
 
-use crate::controller::common::{APP_LABEL, ReconcileError, owner_ref};
-use crate::crd::{
-    Kafka, Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
+use crate::{
+    controller::common::{APP_LABEL, ReconcileError, owner_ref},
+    crd::{Kafka, Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType},
 };
-use crabka_security::ca::SubjectAltName;
-use crabka_security::{ListenerProtocol, SaslMechanism};
 
 pub(crate) fn listener_protocol(l: &Listener) -> ListenerProtocol {
     use ListenerAuthentication::{Gssapi, OAuth, ScramSha256, ScramSha512, Tls};
@@ -1022,10 +1022,10 @@ pub fn render_bootstrap_route(
 
 #[cfg(test)]
 mod service_rendering_tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::crd::{BootstrapConfig, BrokerOverride, KafkaSpec, ListenerConfiguration};
-    use assert2::assert;
-    use assert2::check;
 
     fn kafka(name: &str) -> Kafka {
         let mut k = Kafka::new(
@@ -1260,9 +1260,10 @@ mod service_rendering_tests {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::crd::{BrokerOverride, ListenerConfiguration};
-    use assert2::assert;
 
     fn internal(name: &str, port: i32) -> Listener {
         Listener {
@@ -2548,13 +2549,15 @@ pub fn compute_advertised(
 
 #[cfg(test)]
 mod advertised_tests {
-    use super::*;
+    use std::collections::HashMap;
+
     use assert2::assert;
     use k8s_openapi::api::core::v1::{
         LoadBalancerIngress, LoadBalancerStatus, Node, NodeAddress, NodeStatus, Service,
         ServicePort, ServiceSpec, ServiceStatus,
     };
-    use std::collections::HashMap;
+
+    use super::*;
 
     fn internal(name: &str, port: i32) -> Listener {
         Listener {
@@ -3486,9 +3489,9 @@ pub fn synthesized_default_listener() -> Listener {
 
 #[cfg(test)]
 mod toml_rendering_tests {
+    use assert2::{assert, check};
+
     use super::*;
-    use assert2::assert;
-    use assert2::check;
 
     #[test]
     fn renders_minimal_broker_toml_and_round_trips() {
@@ -6073,8 +6076,9 @@ pub fn canonical_listener_intent(
 
 #[cfg(test)]
 mod intent_tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn empty_listeners_yields_empty_string() {
@@ -6241,8 +6245,7 @@ pub(crate) async fn observe_listener_addresses(
     listeners: &[Listener],
     broker_ids: &[i32],
 ) -> Result<ListenerObservedAddresses, ReconcileError> {
-    use kube::Api;
-    use kube::api::ListParams;
+    use kube::{Api, api::ListParams};
 
     let mut out = ListenerObservedAddresses::default();
     let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
@@ -6325,8 +6328,9 @@ pub(crate) async fn observe_listener_addresses(
 
 #[cfg(test)]
 mod san_tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn internal_tls(name: &str, port: i32) -> Listener {
         Listener {
@@ -6486,8 +6490,9 @@ mod san_tests {
 
 #[cfg(test)]
 mod weak_auth_tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn weak_auth_warnings_emitted_for_scram_without_tls() {

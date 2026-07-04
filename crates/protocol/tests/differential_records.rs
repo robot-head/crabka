@@ -1,11 +1,10 @@
 mod support;
-use support::oracle;
-
 use bytes::BytesMut;
 use crabka_compression::CompressionType;
 use crabka_protocol::records::{Record, RecordBatch, TimestampType};
 use proptest::prelude::*;
 use serde_json::{Value, json};
+use support::oracle;
 
 fn record_to_json(r: &Record) -> Value {
     let mut headers = Vec::new();

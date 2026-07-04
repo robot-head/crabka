@@ -4,8 +4,10 @@
 
 use std::collections::HashMap;
 
-use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{ClusterState, Movement, PartitionView};
+use crate::{
+    goals::{Goal, GoalContext, GoalPriority},
+    model::{ClusterState, Movement, PartitionView},
+};
 
 pub struct ReplicaDistribution;
 
@@ -141,9 +143,10 @@ impl Goal for ReplicaDistribution {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::model::BrokerView;
-    use assert2::{assert, check};
 
     fn ctx() -> GoalContext {
         GoalContext {

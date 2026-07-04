@@ -26,11 +26,13 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, ArrayRef, DictionaryArray, Float64Array, Int64Array, ListArray};
-use arrow::buffer::{OffsetBuffer, ScalarBuffer};
-use arrow::compute::concat;
-use arrow::datatypes::{Field, Int64Type};
-use arrow::error::ArrowError;
+use arrow::{
+    array::{Array, ArrayRef, DictionaryArray, Float64Array, Int64Array, ListArray},
+    buffer::{OffsetBuffer, ScalarBuffer},
+    compute::concat,
+    datatypes::{Field, Int64Type},
+    error::ArrowError,
+};
 
 /// A view over `values` partitioned into `(offset, len)` windows.
 #[derive(Clone, Debug)]
@@ -269,9 +271,11 @@ impl RangeArray {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Float64Array, Float64Builder, Int64Array};
-    use arrow::datatypes::{Field, Schema};
-    use arrow::record_batch::RecordBatch;
+    use arrow::{
+        array::{Float64Array, Float64Builder, Int64Array},
+        datatypes::{Field, Schema},
+        record_batch::RecordBatch,
+    };
     use assert2::{assert, check};
 
     use super::*;
@@ -463,9 +467,9 @@ mod tests {
 
     #[tokio::test]
     async fn survives_datafusion_projection_as_a_column() {
-        use datafusion::datasource::memory::MemorySourceConfig;
-        use datafusion::physical_plan::collect;
-        use datafusion::prelude::SessionContext;
+        use datafusion::{
+            datasource::memory::MemorySourceConfig, physical_plan::collect, prelude::SessionContext,
+        };
 
         let values = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])) as ArrayRef;
         let timestamps = Arc::new(Int64Array::from(vec![0_i64, 15, 30, 45])) as ArrayRef;

@@ -1,10 +1,9 @@
 //! `GroupTopics` + `application_id` → the byte-exact `StreamsGroupHeartbeat`
 //! wire `Topology`. Every ordering rule here matches the JVM 4.x client.
 
-use crabka_protocol::owned::common::streams_group_heartbeat_request::key_value::KeyValue;
-use crabka_protocol::owned::common::streams_group_heartbeat_request::topic_info::TopicInfo;
-use crabka_protocol::owned::streams_group_heartbeat_request::{
-    CopartitionGroup, Subtopology, Topology,
+use crabka_protocol::owned::{
+    common::streams_group_heartbeat_request::{key_value::KeyValue, topic_info::TopicInfo},
+    streams_group_heartbeat_request::{CopartitionGroup, Subtopology, Topology},
 };
 use serde::Serialize;
 
@@ -353,10 +352,10 @@ pub(crate) fn copartition_group(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::topology::grouping::GroupTopics;
-    use crate::topology::node::ChangelogKind;
     use assert2::check;
+
+    use super::*;
+    use crate::topology::{grouping::GroupTopics, node::ChangelogKind};
 
     #[test]
     fn wire_topology_serializes_to_fixture_shape_with_topic_info() {

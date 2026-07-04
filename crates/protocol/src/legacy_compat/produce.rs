@@ -1,6 +1,7 @@
-use crate::kafka_3_6_2;
-use crate::owned::produce_request::ProduceRequest;
-use crate::owned::produce_response::ProduceResponse;
+use crate::{
+    kafka_3_6_2,
+    owned::{produce_request::ProduceRequest, produce_response::ProduceResponse},
+};
 
 // ── Request: legacy → canonical ──────────────────────────────────────────────
 
@@ -97,11 +98,11 @@ impl From<crate::owned::produce_response::BatchIndexAndErrorMessage>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::UnknownTaggedFields;
-    use crate::records::RecordsPayload;
     use assert2::assert;
     use bytes::Bytes;
+
+    use super::*;
+    use crate::{UnknownTaggedFields, records::RecordsPayload};
 
     #[test]
     fn legacy_produce_request_conversion_preserves_mapped_fields() {

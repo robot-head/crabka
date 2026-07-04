@@ -7,8 +7,10 @@
 
 #![allow(clippy::struct_excessive_bools)]
 
-use std::hash::{Hash, Hasher};
-use std::time::Duration;
+use std::{
+    hash::{Hash, Hasher},
+    time::Duration,
+};
 
 use stateright::{Checker, Model, Property};
 

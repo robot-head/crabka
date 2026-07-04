@@ -51,16 +51,17 @@ impl Authorizer for AuditingAuthorizer {
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
 
     use assert2::check;
-
-    use super::*;
-    use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
-    use crate::test_support::DenyAll;
     use crabka_metadata::{AclOperation, ResourceType};
     use crabka_security::{AuthMethod, Principal};
+
+    use super::*;
+    use crate::{
+        authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer},
+        test_support::DenyAll,
+    };
 
     #[tokio::test]
     async fn deny_decision_emits_audit_record() {

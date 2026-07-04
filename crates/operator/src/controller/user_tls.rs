@@ -10,17 +10,21 @@
 use std::collections::BTreeMap;
 
 use crabka_security::ca::{self, CaMaterial};
-use k8s_openapi::ByteString;
-use k8s_openapi::api::core::v1::Secret;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::api::{Api, Patch, PatchParams};
-use kube::{Resource, ResourceExt as _};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
+use k8s_openapi::{
+    ByteString,
+    api::core::v1::Secret,
+    apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference},
+};
+use kube::{
+    Resource, ResourceExt as _,
+    api::{Api, Patch, PatchParams},
+};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use crate::controller::common::{FIELD_MANAGER, ReconcileError, read_pem_key};
-use crate::crd::KafkaUser;
-use crate::crd::user::TlsAuth;
+use crate::{
+    controller::common::{FIELD_MANAGER, ReconcileError, read_pem_key},
+    crd::{KafkaUser, user::TlsAuth},
+};
 
 /// Default cert lifetime (days) when `TlsAuth::validity_days` is absent.
 pub(crate) const DEFAULT_VALIDITY_DAYS: u32 = 365;
@@ -187,8 +191,9 @@ fn user_owner_ref(obj: &KafkaUser) -> Result<OwnerReference, ReconcileError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn tls_principal_format() {

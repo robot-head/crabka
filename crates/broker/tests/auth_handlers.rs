@@ -8,39 +8,42 @@
 //! this file with SASL/PLAIN, SASL/SCRAM, and `AlterUserScramCredentials`
 //! cases.
 
-use assert2::{assert, check};
-use std::io;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{io, net::SocketAddr, sync::Arc};
 
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::authorizer::SimpleAclAuthorizer;
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerConfig};
+use crabka_broker::{Broker, BrokerConfig, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_client_core::Client;
-use crabka_protocol::owned::alter_user_scram_credentials_request::{
-    AlterUserScramCredentialsRequest, ScramCredentialUpsertion,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        alter_user_scram_credentials_request::{
+            AlterUserScramCredentialsRequest, ScramCredentialUpsertion,
+        },
+        alter_user_scram_credentials_response::AlterUserScramCredentialsResponse,
+        api_versions_request::ApiVersionsRequest,
+        api_versions_response::ApiVersionsResponse,
+        metadata_request::MetadataRequest,
+        metadata_response::MetadataResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
 };
-use crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResponse;
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::metadata_response::MetadataResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
 use crabka_security::{ListenerProtocol, SaslMechanism, TlsConfig};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::client::danger::{
-    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
 };
-use tokio_rustls::rustls::pki_types::pem::PemObject;
-use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use tokio_rustls::rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+use tokio_rustls::{
+    TlsConnector,
+    rustls::{
+        ClientConfig, DigitallySignedStruct, SignatureScheme,
+        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        pki_types::{CertificateDer, ServerName, UnixTime, pem::PemObject},
+    },
+};
 
 const DEV_CERT: &str = include_str!("../../../crates/security/tests/fixtures/dev_cert.pem");
 const DEV_KEY: &str = include_str!("../../../crates/security/tests/fixtures/dev_key.pem");
@@ -262,7 +265,10 @@ async fn metadata_response_carries_listener_endpoints() {
     // own registration record in the committed image carries both endpoints.
     let node_id = handle.node_id();
     handle
-        .wait_for_image(|img| img.broker(node_id).is_some_and(|b| b.endpoints.len() >= 2))
+        .wait_for_image(|img| {
+            img.broker(crabka_broker::NodeId(node_id))
+                .is_some_and(|b| b.endpoints.len() >= 2)
+        })
         .await;
     let endpoints = handle.self_registration_endpoints().await;
     assert!(
@@ -921,8 +927,7 @@ async fn round_trip(
 /// an `exp` (Unix seconds). Empty signature segment — matches what the JVM
 /// `OAuthBearerUnsecuredLoginCallbackHandler` produces.
 fn unsecured_jws(sub: &str, exp_unix_secs: i64) -> String {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
     let header = B64.encode(b"{\"alg\":\"none\"}");
     let claims = B64.encode(format!("{{\"sub\":\"{sub}\",\"exp\":{exp_unix_secs}}}").as_bytes());
     format!("{header}.{claims}.")
@@ -1156,10 +1161,11 @@ async fn sasl_oauthbearer_invalid_token_two_round_failure() {
 /// Generate a fresh ES256 key, returning `(key_pair, jwks_json)` where the
 /// JWKS advertises the matching public key under `kid`.
 fn es256_key(kid: &str) -> (ring::signature::EcdsaKeyPair, String) {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-    use ring::rand::SystemRandom;
-    use ring::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
+    use ring::{
+        rand::SystemRandom,
+        signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair},
+    };
     let rng = SystemRandom::new();
     let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng).unwrap();
     let kp =
@@ -1175,8 +1181,7 @@ fn es256_key(kid: &str) -> (ring::signature::EcdsaKeyPair, String) {
 
 /// Sign an ES256 JWS with `kp`, `kid` in the header and `claims` as the payload.
 fn es256_token(kp: &ring::signature::EcdsaKeyPair, kid: &str, claims: &str) -> String {
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
     let header = B64.encode(format!("{{\"alg\":\"ES256\",\"kid\":\"{kid}\"}}").as_bytes());
     let payload = B64.encode(claims.as_bytes());
     let signing_input = format!("{header}.{payload}");
@@ -2577,16 +2582,18 @@ async fn gssapi_inter_broker_client_authenticates_from_keytab() {
 // ────────────────────────────────────────────────────────────────────────
 
 mod two_broker_sasl {
-    use super::*;
     use assert2::assert;
-    use crabka_broker::config::InterBrokerCredentials;
-    use crabka_broker::{BootstrapMode, Broker, BrokerHandle};
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::produce_request::{
-        PartitionProduceData, ProduceRequest, TopicProduceData,
+    use crabka_broker::{BootstrapMode, Broker, BrokerHandle, config::InterBrokerCredentials};
+    use crabka_protocol::{
+        owned::{
+            create_topics_request::{CreatableTopic, CreateTopicsRequest},
+            produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        },
+        records::{Record, RecordBatch},
     };
-    use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::TempDir;
+
+    use super::*;
 
     /// Reserve `n` ephemeral loopback ports via the bind-and-drop trick.
     async fn reserve_ports(n: usize) -> Vec<SocketAddr> {
@@ -2620,9 +2627,12 @@ mod two_broker_sasl {
         cfg.broker_id = i32::try_from(i + 1).unwrap();
         cfg.listen_addr = listen;
         cfg.advertised_listener = listen.to_string();
-        cfg.node_id = u64::try_from(i + 1).unwrap();
+        cfg.node_id = crabka_broker::NodeId(u64::try_from(i + 1).unwrap());
         cfg.controller_listen_addr = controller_addrs[i];
-        cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+        cfg.controller_quorum_voters = voters
+            .iter()
+            .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+            .collect();
         cfg.bootstrap_mode = mode;
         cfg.listeners = vec![
             ListenerSpec {

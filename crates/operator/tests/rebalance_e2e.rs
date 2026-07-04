@@ -11,10 +11,9 @@
 
 #![allow(clippy::pedantic)]
 
-use assert2::assert;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use assert2::assert;
 use async_trait::async_trait;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
@@ -22,18 +21,21 @@ use crabka_client_core::Client;
 use crabka_operator::rebalancer_client::{
     ConnectRebalancerClient, ProposalStatus, RebalancerClientLike, RebalancerError,
 };
-use crabka_rebalancer::api::GoalRegistry;
-use crabka_rebalancer::api::handlers::AppState;
-use crabka_rebalancer::capacity::BrokerCapacities;
-use crabka_rebalancer::executor::phases::{ClientFacade, ConfigOp, PhaseError};
-use crabka_rebalancer::executor::throttle::ThrottleTargets;
-use crabka_rebalancer::executor::{ExecutorConfig, ExecutorState};
-use crabka_rebalancer::goals::GoalContext;
-use crabka_rebalancer::health::new_registry;
-use crabka_rebalancer::ingest::{SharedSnapshot, new_shared_snapshot, snapshot_once};
-use crabka_rebalancer::metrics::RebalancerMetrics;
-use crabka_rebalancer::model::{Movement, ProposalStore};
-use crabka_rebalancer::scraper::UsageStore;
+use crabka_rebalancer::{
+    api::{GoalRegistry, handlers::AppState},
+    capacity::BrokerCapacities,
+    executor::{
+        ExecutorConfig, ExecutorState,
+        phases::{ClientFacade, ConfigOp, PhaseError},
+        throttle::ThrottleTargets,
+    },
+    goals::GoalContext,
+    health::new_registry,
+    ingest::{SharedSnapshot, new_shared_snapshot, snapshot_once},
+    metrics::RebalancerMetrics,
+    model::{Movement, ProposalStore},
+    scraper::UsageStore,
+};
 
 /// Stand-in for the executor's client facade — these tests only exercise
 /// CreateProposal / GetProposal / (failed) ExecuteProposal, never the

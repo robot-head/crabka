@@ -31,8 +31,9 @@ pub struct NetworkPolicyPeer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn network_policy_spec_empty_round_trips() {

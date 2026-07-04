@@ -23,6 +23,7 @@ default = []
 bon = { workspace = true }
 crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
 crabka-client-core = { version = "0.3.8", path = "../client-core", features = ["mock"] }
+crabka-ids = { version = "0.3.8", path = "../ids" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }

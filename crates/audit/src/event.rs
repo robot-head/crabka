@@ -152,8 +152,9 @@ impl AuditEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn class_tag_round_trips_and_header_maps() {

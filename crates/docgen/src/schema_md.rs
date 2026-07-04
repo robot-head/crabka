@@ -1,8 +1,9 @@
 //! Render a JSON-Schema-shaped value (`OpenAPI` v3 / schemars output) to a
 //! markdown field table. Shared by the CRD and broker-config generators.
 
-use serde_json::Value;
 use std::fmt::Write;
+
+use serde_json::Value;
 
 /// Render the `properties` of an object schema as a markdown table with one
 /// row per (possibly nested) field. Columns: Field, Type, Required, Default,
@@ -257,9 +258,10 @@ fn render_default(v: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use serde_json::json;
+
+    use super::*;
 
     #[test]
     fn renders_nested_object_with_types_and_defaults() {

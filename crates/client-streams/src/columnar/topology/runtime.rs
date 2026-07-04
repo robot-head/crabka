@@ -2,11 +2,11 @@
 //! One `FetchBatch` per (topic, partition) becomes one `DataFrame` batch (= the
 //! commit/transaction boundary); produced records go through `RecordProducer`.
 
-use crate::error::StreamsClientError;
-use crate::runtime::io::{FetchBatch, IsolationLevel, RecordFetcher, RecordProducer};
-
-use super::codec::ConsumedRecord;
-use super::graph::ColumnarTopology;
+use super::{codec::ConsumedRecord, graph::ColumnarTopology};
+use crate::{
+    error::StreamsClientError,
+    runtime::io::{FetchBatch, IsolationLevel, RecordFetcher, RecordProducer},
+};
 
 /// Convert a fetched per-partition batch into codec input records.
 fn to_consumed(partition: i32, batch: &FetchBatch) -> Vec<ConsumedRecord> {
@@ -80,16 +80,21 @@ pub async fn run_partition_once(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::columnar::serde::polars::PolarsIpcSerde;
-    use crate::columnar::topology::codec::BlobCodec;
-    use crate::columnar::topology::operator::BuiltinOp;
-    use crate::processor::serde::Serde;
-    use crate::runtime::io::FetchedRec;
+    use std::sync::Mutex;
+
     use ::polars::prelude::*;
     use assert2::check;
     use bytes::Bytes;
-    use std::sync::Mutex;
+
+    use super::*;
+    use crate::{
+        columnar::{
+            serde::polars::PolarsIpcSerde,
+            topology::{codec::BlobCodec, operator::BuiltinOp},
+        },
+        processor::serde::Serde,
+        runtime::io::FetchedRec,
+    };
 
     struct OneShotFetcher(Mutex<Option<FetchBatch>>);
     #[async_trait::async_trait]

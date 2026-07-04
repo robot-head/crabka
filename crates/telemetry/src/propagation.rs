@@ -13,8 +13,10 @@
 
 use std::collections::HashMap;
 
-use opentelemetry::Context;
-use opentelemetry::propagation::{Extractor, Injector};
+use opentelemetry::{
+    Context,
+    propagation::{Extractor, Injector},
+};
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
 /// The canonical W3C trace-context header keys. Producers should attach these
@@ -100,9 +102,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use opentelemetry::trace::{TraceContextExt as _, TraceId};
+
+    use super::*;
 
     #[test]
     fn extract_context_roundtrips_w3c_traceparent() {

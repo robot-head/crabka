@@ -12,27 +12,27 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crate::owned::access_control_entry_record::AccessControlEntryRecord;
-use crate::owned::begin_transaction_record::BeginTransactionRecord;
-use crate::owned::broker_registration_change_record::BrokerRegistrationChangeRecord;
-use crate::owned::client_quota_record::ClientQuotaRecord;
-use crate::owned::config_record::ConfigRecord;
-use crate::owned::delegation_token_record::DelegationTokenRecord;
-use crate::owned::end_transaction_record::EndTransactionRecord;
-use crate::owned::feature_level_record::FeatureLevelRecord;
-use crate::owned::no_op_record::NoOpRecord;
-use crate::owned::partition_record::PartitionRecord;
-use crate::owned::register_broker_record::RegisterBrokerRecord;
-use crate::owned::register_controller_record::RegisterControllerRecord;
-use crate::owned::remove_access_control_entry_record::RemoveAccessControlEntryRecord;
-use crate::owned::remove_delegation_token_record::RemoveDelegationTokenRecord;
-use crate::owned::remove_topic_record::RemoveTopicRecord;
-use crate::owned::remove_user_scram_credential_record::RemoveUserScramCredentialRecord;
-use crate::owned::topic_record::TopicRecord;
-use crate::owned::unregister_broker_record::UnregisterBrokerRecord;
-use crate::owned::user_scram_credential_record::UserScramCredentialRecord;
-use crate::records::metadata::envelope::{decode_value_header, encode_value};
-use crate::{Decode, Encode, ProtocolError};
+use crate::{
+    Decode, Encode, ProtocolError,
+    owned::{
+        access_control_entry_record::AccessControlEntryRecord,
+        begin_transaction_record::BeginTransactionRecord,
+        broker_registration_change_record::BrokerRegistrationChangeRecord,
+        client_quota_record::ClientQuotaRecord, config_record::ConfigRecord,
+        delegation_token_record::DelegationTokenRecord,
+        end_transaction_record::EndTransactionRecord, feature_level_record::FeatureLevelRecord,
+        no_op_record::NoOpRecord, partition_record::PartitionRecord,
+        register_broker_record::RegisterBrokerRecord,
+        register_controller_record::RegisterControllerRecord,
+        remove_access_control_entry_record::RemoveAccessControlEntryRecord,
+        remove_delegation_token_record::RemoveDelegationTokenRecord,
+        remove_topic_record::RemoveTopicRecord,
+        remove_user_scram_credential_record::RemoveUserScramCredentialRecord,
+        topic_record::TopicRecord, unregister_broker_record::UnregisterBrokerRecord,
+        user_scram_credential_record::UserScramCredentialRecord,
+    },
+    records::metadata::envelope::{decode_value_header, encode_value},
+};
 
 /// A single `KRaft` metadata record (the value of one Kafka `Record`).
 #[derive(Debug, Clone, PartialEq)]
@@ -219,8 +219,9 @@ impl KraftMetadataRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn feature_level_record_value_roundtrips_through_dispatch() {

@@ -23,10 +23,11 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::{DecodeBorrow, Encode};
     use assert2::assert;
     use bytes::BytesMut;
+
+    use super::*;
+    use crate::{DecodeBorrow, Encode};
     fn check(msg_bytes: &bytes::Bytes, v: i16) {
         let mut cur: &[u8] = msg_bytes;
         let decoded = TxnOffsetCommitResponse::decode_borrow(&mut cur, v).unwrap();

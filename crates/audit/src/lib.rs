@@ -5,6 +5,7 @@
 pub mod chain;
 pub mod checkpoint;
 pub mod event;
+pub mod ids;
 pub mod log;
 pub mod ocsf;
 pub mod signing;
@@ -15,10 +16,12 @@ pub mod verify;
 
 pub use chain::{ChainState, GENESIS_HEAD, chain_hash};
 pub use checkpoint::{Checkpoint, EVENT_CLASS_CHECKPOINT};
+pub use crabka_ids::NodeId;
 pub use event::{
     AuditEndpoint, AuditEvent, AuditEventClass, AuditOutcome, AuditPrincipal, AuditResource,
     LifecycleKind,
 };
+pub use ids::{CheckpointCount, EpochMs, MaxSpoolBytes, RecordCount, Seq, SpoolBytes};
 pub use log::{AuditLog, AuditWriter, AuditWriterParams};
 pub use ocsf::{ProductInfo, to_ocsf};
 pub use signing::{

@@ -1,8 +1,10 @@
 //! Success-response helper: serialises with `serde_json` and sets the Confluent
 //! vendor content-type (axum's `Json` would force `application/json`).
 
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+};
 use serde::Serialize;
 
 use crate::error::CONTENT_TYPE;
@@ -24,8 +26,9 @@ pub fn ok_raw(body: String) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use axum::response::IntoResponse;
+
+    use super::*;
 
     #[tokio::test]
     async fn ok_json_sets_vendor_content_type() {

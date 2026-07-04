@@ -6,17 +6,17 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use crabka_audit::{AuditError, AuditRecord, AuditSink};
+use crabka_ids::PartitionIndex;
 use crabka_protocol::records::{Record, RecordBatch, RecordHeader};
 
-use crate::metrics::BrokerMetrics;
-use crate::partition_registry::PartitionRegistry;
+use crate::{metrics::BrokerMetrics, partition_registry::PartitionRegistry};
 
 /// Writes audit records to a single partition of the audit topic that this
 /// broker leads. Slice 1: the partition index is resolved once at construction.
 pub struct KafkaTopicAuditSink {
     partitions: Arc<PartitionRegistry>,
     topic: String,
-    partition_index: i32,
+    partition_index: PartitionIndex,
     metrics: BrokerMetrics,
 }
 
@@ -36,7 +36,7 @@ impl KafkaTopicAuditSink {
     pub(crate) fn new(
         partitions: Arc<PartitionRegistry>,
         topic: String,
-        partition_index: i32,
+        partition_index: PartitionIndex,
         metrics: BrokerMetrics,
     ) -> Self {
         Self {
@@ -93,10 +93,12 @@ impl AuditSink for KafkaTopicAuditSink {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_log::{Log, LogConfig};
     use std::sync::Arc;
+
+    use assert2::assert;
+    use crabka_log::{Log, LogConfig, Offset};
+
+    use super::*;
 
     fn fixture_partition(
         log_dir: &std::path::Path,
@@ -108,7 +110,7 @@ mod tests {
         let log = Log::open(&part_dir, LogConfig::default()).expect("open log");
         crate::broker::spawn_partition(
             topic.to_string(),
-            partition,
+            PartitionIndex(partition),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
@@ -121,9 +123,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let partitions = Arc::new(PartitionRegistry::new());
         let partition = fixture_partition(dir.path(), "__audit", 0);
-        partitions.insert("__audit".to_string(), 0, Arc::clone(&partition));
-        let sink =
-            KafkaTopicAuditSink::new(partitions, "__audit".to_string(), 0, BrokerMetrics::new());
+        partitions.insert(
+            "__audit".to_string(),
+            PartitionIndex(0),
+            Arc::clone(&partition),
+        );
+        let sink = KafkaTopicAuditSink::new(
+            partitions,
+            "__audit".to_string(),
+            PartitionIndex(0),
+            BrokerMetrics::new(),
+        );
 
         sink.write(AuditRecord {
             class: crabka_audit::AuditEventClass::ApiActivity,
@@ -134,7 +144,7 @@ mod tests {
         .expect("write audit record");
 
         let out = partition
-            .read_log(0, 1 << 20)
+            .read_log(Offset(0), 1 << 20)
             .expect("read audit partition");
         let records: Vec<_> = out.batches.iter().flat_map(|b| &b.records).collect();
 

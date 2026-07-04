@@ -103,8 +103,11 @@ impl Attributes {
 }
 
 use std::mem::size_of;
-use zerocopy::byteorder::{I16, I32, I64, U32};
-use zerocopy::{BigEndian, FromBytes, Immutable, KnownLayout, Unaligned};
+
+use zerocopy::{
+    BigEndian, FromBytes, Immutable, KnownLayout, Unaligned,
+    byteorder::{I16, I32, I64, U32},
+};
 
 /// The fixed 61-byte v2 record-batch header, reinterpreted in place from
 /// the wire bytes via `zerocopy`.
@@ -168,9 +171,10 @@ pub fn patch_base_offset_and_leader_epoch(buf: &mut [u8], base_offset: i64, lead
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use crabka_compression::CompressionType;
+
+    use super::*;
 
     macro_rules! attr_case {
         ($name:ident, $bits:expr, $codec:expr, $ts:expr, $txn:expr, $ctrl:expr, $horizon:expr) => {

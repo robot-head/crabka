@@ -1,18 +1,21 @@
 //! Trace-specific block index: sharded trace-id blooms plus tag sets.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+};
 
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use crate::block::BlockMeta;
-use crate::block_index::BlockIndex;
-use crate::bloom::ShardedTraceBloom;
-use crate::error::{BlockStoreError, Result};
-use crate::index_snapshot::{latest_index_snapshot_path, put_index_snapshot};
+use crate::{
+    block::BlockMeta,
+    block_index::BlockIndex,
+    bloom::ShardedTraceBloom,
+    error::{BlockStoreError, Result},
+    index_snapshot::{latest_index_snapshot_path, put_index_snapshot},
+};
 
 /// The per-block trace footprint registered by a block builder.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -416,8 +419,7 @@ mod tests {
 
     #[test]
     fn block_index_trait_add_block_is_idempotent_by_object_key() {
-        use crate::block::BlockMeta;
-        use crate::block_index::BlockIndex;
+        use crate::{block::BlockMeta, block_index::BlockIndex};
 
         let mut idx = TraceIndex::new();
         let meta = BlockMeta {
@@ -441,8 +443,7 @@ mod tests {
 
     #[test]
     fn block_index_trait_add_block_does_not_false_negative_by_id_candidates() {
-        use crate::block::BlockMeta;
-        use crate::block_index::BlockIndex;
+        use crate::{block::BlockMeta, block_index::BlockIndex};
 
         let mut idx = TraceIndex::new();
         let meta = BlockMeta {
@@ -483,8 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_round_trips() {
-        use object_store::ObjectStore;
-        use object_store::memory::InMemory;
+        use object_store::{ObjectStore, memory::InMemory};
 
         let idx = seed();
         let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
@@ -496,8 +496,7 @@ mod tests {
 
     #[tokio::test]
     async fn latest_snapshot_round_trips_without_rewriting_legacy_key() {
-        use object_store::memory::InMemory;
-        use object_store::{ObjectStore, ObjectStoreExt};
+        use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
 
         let idx = seed();
         let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
@@ -523,8 +522,7 @@ mod tests {
     #[tokio::test]
     async fn latest_snapshot_retains_bounded_snapshot_set() {
         use futures::StreamExt as _;
-        use object_store::ObjectStore;
-        use object_store::memory::InMemory;
+        use object_store::{ObjectStore, memory::InMemory};
 
         let idx = seed();
         let store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(InMemory::new());
@@ -550,8 +548,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_rejects_corrupt_bloom_instead_of_panicking() {
-        use object_store::memory::InMemory;
-        use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+        use object_store::{ObjectStore, ObjectStoreExt, PutPayload, memory::InMemory};
 
         // A structurally-valid-but-corrupt snapshot: a shard with num_bits == 0
         // would divide-by-zero on the first `% num_bits` probe. `load` must
@@ -585,8 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_rejects_empty_shards_bloom() {
-        use object_store::memory::InMemory;
-        use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+        use object_store::{ObjectStore, ObjectStoreExt, PutPayload, memory::InMemory};
 
         // Empty `shards` would divide-by-zero on `% shards.len()` in shard_of.
         let snapshot = serde_json::json!({

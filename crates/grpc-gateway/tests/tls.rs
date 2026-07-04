@@ -3,28 +3,35 @@
 //! TLS gateways forward over mutually-authenticated https. Certs are generated
 //! at runtime via `crabka_security::ca` (no fixtures). Pure 127.0.0.1 — no Docker.
 
-use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, Ipv4Addr},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::config::{ClientAuthMode, GatewayConfig, TlsSettings};
-use crabka_grpc_gateway::dedup::membership::{MembershipPublisher, MembershipStore};
-use crabka_grpc_gateway::dedup::store::DedupStore;
-use crabka_grpc_gateway::dedup::topic::{ensure_dedup_topic, ensure_membership_topic};
-use crabka_grpc_gateway::dedup::{DedupEngine, partition_for};
-use crabka_grpc_gateway::forward::{self, Forwarder};
-use crabka_grpc_gateway::health::{self, Readiness};
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::serve;
-use crabka_grpc_gateway::state::AppState;
-use crabka_grpc_gateway::types::GatewayRecord;
+use crabka_grpc_gateway::{
+    codec::RawCodec,
+    config::{ClientAuthMode, GatewayConfig, TlsSettings},
+    dedup::{
+        DedupEngine,
+        membership::{MembershipPublisher, MembershipStore},
+        partition_for,
+        store::DedupStore,
+        topic::{ensure_dedup_topic, ensure_membership_topic},
+    },
+    forward::{self, Forwarder},
+    health::{self, Readiness},
+    produce::ProduceCore,
+    serve,
+    state::AppState,
+    types::GatewayRecord,
+};
 use crabka_security::ca::{
     SubjectAltName, generate_clients_ca, issue_broker_cert, issue_user_cert,
 };

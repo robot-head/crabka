@@ -3,17 +3,21 @@
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
-use datafusion::catalog::MemTable;
-use datafusion::prelude::{ParquetReadOptions, SessionContext};
+use datafusion::{
+    catalog::MemTable,
+    prelude::{ParquetReadOptions, SessionContext},
+};
 use object_store::ObjectStore;
 use tracing::instrument;
 use url::Url;
 
-use crate::error::{BlockStoreError, Result};
-use crate::index::Index;
-use crate::matcher::LabelMatcher;
-use crate::reader::read_block_row_groups;
-use crate::writer::BlockWriter;
+use crate::{
+    error::{BlockStoreError, Result},
+    index::Index,
+    matcher::LabelMatcher,
+    reader::read_block_row_groups,
+    writer::BlockWriter,
+};
 
 const TABLE_NAME: &str = "logs";
 
@@ -223,16 +227,19 @@ impl BlockStore {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Int64Array, LargeStringArray, StringArray, StringViewArray, UInt64Array};
-    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-    use arrow::record_batch::RecordBatch;
+    use arrow::{
+        array::{Int64Array, LargeStringArray, StringArray, StringViewArray, UInt64Array},
+        datatypes::{DataType, Field, Schema, SchemaRef},
+        record_batch::RecordBatch,
+    };
     use assert2::{assert, check};
-    use object_store::ObjectStore;
-    use object_store::memory::InMemory;
+    use object_store::{ObjectStore, memory::InMemory};
 
     use super::*;
-    use crate::labels::Labels;
-    use crate::matcher::{LabelMatcher, MatchOp};
+    use crate::{
+        labels::Labels,
+        matcher::{LabelMatcher, MatchOp},
+    };
 
     fn log_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![

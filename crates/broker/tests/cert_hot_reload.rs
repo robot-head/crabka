@@ -11,22 +11,20 @@
 //! assertion is "the server presented cert X" — there's no way to
 //! satisfy a B-pinned verifier with the A cert (and vice-versa).
 
-use assert2::assert;
-use std::io;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{io, path::PathBuf, sync::Arc};
 
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerConfig};
+use assert2::assert;
+use crabka_broker::{Broker, BrokerConfig, config::ListenerSpec};
 use crabka_security::{ClientAuthMode, ListenerProtocol, TlsConfig};
 use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::client::danger::{
-    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
+use tokio_rustls::{
+    TlsConnector,
+    rustls::{
+        ClientConfig, DigitallySignedStruct, SignatureScheme,
+        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        pki_types::{CertificateDer, ServerName, UnixTime, pem::PemObject},
+    },
 };
-use tokio_rustls::rustls::pki_types::pem::PemObject;
-use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use tokio_rustls::rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 
 const DEV_CERT_A: &str = include_str!("../../../crates/security/tests/fixtures/dev_cert.pem");
 const DEV_KEY_A: &str = include_str!("../../../crates/security/tests/fixtures/dev_key.pem");

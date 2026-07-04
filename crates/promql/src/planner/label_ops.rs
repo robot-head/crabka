@@ -23,9 +23,11 @@ use std::cmp::Ordering;
 use crabka_blockstore::Labels;
 use regex::Regex;
 
-use crate::PromqlError;
-use crate::error::Result;
-use crate::result::{InstantSample, SampleValue};
+use crate::{
+    PromqlError,
+    error::Result,
+    result::{InstantSample, SampleValue},
+};
 
 /// Sort order for the `sort` / `sort_desc` functions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

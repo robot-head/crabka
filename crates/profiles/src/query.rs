@@ -1,16 +1,18 @@
 //! Querier role: Pyroscope `querier.v1` Connect API and legacy flamebearer endpoints.
 
-use std::collections::BTreeMap;
-use std::future::Future;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{collections::BTreeMap, future::Future, net::SocketAddr, sync::Arc};
 
-use arrow::array::{Array, AsArray};
-use arrow::datatypes::{Int64Type, UInt64Type};
-use axum::extract::{Query, RawQuery};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
-use axum::{Extension, Json, Router, routing::get};
+use arrow::{
+    array::{Array, AsArray},
+    datatypes::{Int64Type, UInt64Type},
+};
+use axum::{
+    Extension, Json, Router,
+    extract::{Query, RawQuery},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use connectrpc_axum::message::{Code, ConnectError, ConnectRequest, ConnectResponse};
 use crabka_blockstore::{LABEL_PROFILE_TYPE, LabelMatcher, MatchOp};
 use crabka_pprof::{
@@ -24,10 +26,13 @@ use serde::{Deserialize, Deserializer};
 use serde_json::json;
 use tokio::net::TcpListener;
 
-use crate::limits::{Limits, OverridesProvider};
-use crate::metrics::ServiceMetrics;
-use crate::query_frontend::{FrontendConfig, split_inclusive_range};
-use crate::wire::pb;
+use crate::{
+    ids::{DefaultMs, EndMs, MaxValue, MinValue, NowMs, StartMs},
+    limits::{Limits, OverridesProvider},
+    metrics::ServiceMetrics,
+    query_frontend::{FrontendConfig, split_inclusive_range},
+    wire::pb,
+};
 
 const DEFAULT_HEATMAP_VALUE_BUCKETS: usize = 32;
 const MAX_HEATMAP_TIME_BUCKETS: usize = 4096;
@@ -134,7 +139,7 @@ impl<S: ProfileStore> QuerierState<S> {
     ) -> Result<(), ProfileError> {
         self.overrides
             .for_tenant(tenant)
-            .validate_query_range_ms(start_ms, end_ms)
+            .validate_query_range_ms(StartMs(start_ms), EndMs(end_ms))
             .map_err(|err| ProfileError::Plan(err.message()))
     }
 
@@ -1767,7 +1772,8 @@ where
     state
         .validate_query_range(&tenant, req.start, req.end)
         .map_err(connect_error)?;
-    let time_buckets = heatmap_time_buckets(req.start, req.end, req.step).map_err(connect_error)?;
+    let time_buckets = heatmap_time_buckets(StartMs(req.start), EndMs(req.end), req.step)
+        .map_err(connect_error)?;
     let span_exemplars = match req.exemplar_type {
         exemplar_type if exemplar_type == pb::querier::v1::ExemplarType::Span as i32 => state
             .select_heatmap_span_exemplars(
@@ -2101,12 +2107,12 @@ where
         Ok(parsed) => parsed,
         Err(err) => return profile_error_response(err),
     };
-    let now_ms = unix_now_ms();
-    let start = match parse_render_time_param(query.from.as_deref(), now_ms, 0) {
+    let now_ms = NowMs(unix_now_ms());
+    let start = match parse_render_time_param(query.from.as_deref(), now_ms, DefaultMs(0)) {
         Ok(value) => value,
         Err(err) => return profile_error_response(err),
     };
-    let end = match parse_render_time_param(query.until.as_deref(), now_ms, i64::MAX) {
+    let end = match parse_render_time_param(query.until.as_deref(), now_ms, DefaultMs(i64::MAX)) {
         Ok(value) => value,
         Err(err) => return profile_error_response(err),
     };
@@ -2189,31 +2195,35 @@ where
         Ok(parsed) => parsed,
         Err(err) => return profile_error_response(err),
     };
-    let now_ms = unix_now_ms();
-    let global_start = match query_param_render_time(&params, "from", now_ms, 0) {
+    let now_ms = NowMs(unix_now_ms());
+    let global_start = match query_param_render_time(&params, "from", now_ms, DefaultMs(0)) {
         Ok(value) => value,
         Err(err) => return profile_error_response(err),
     };
-    let global_end = match query_param_render_time(&params, "until", now_ms, i64::MAX) {
+    let global_end = match query_param_render_time(&params, "until", now_ms, DefaultMs(i64::MAX)) {
         Ok(value) => value,
         Err(err) => return profile_error_response(err),
     };
-    let left_start = match query_param_render_time(&params, "leftFrom", now_ms, global_start) {
-        Ok(value) => value,
-        Err(err) => return profile_error_response(err),
-    };
-    let left_end = match query_param_render_time(&params, "leftUntil", now_ms, global_end) {
-        Ok(value) => value,
-        Err(err) => return profile_error_response(err),
-    };
-    let right_start = match query_param_render_time(&params, "rightFrom", now_ms, global_start) {
-        Ok(value) => value,
-        Err(err) => return profile_error_response(err),
-    };
-    let right_end = match query_param_render_time(&params, "rightUntil", now_ms, global_end) {
-        Ok(value) => value,
-        Err(err) => return profile_error_response(err),
-    };
+    let left_start =
+        match query_param_render_time(&params, "leftFrom", now_ms, DefaultMs(global_start)) {
+            Ok(value) => value,
+            Err(err) => return profile_error_response(err),
+        };
+    let left_end =
+        match query_param_render_time(&params, "leftUntil", now_ms, DefaultMs(global_end)) {
+            Ok(value) => value,
+            Err(err) => return profile_error_response(err),
+        };
+    let right_start =
+        match query_param_render_time(&params, "rightFrom", now_ms, DefaultMs(global_start)) {
+            Ok(value) => value,
+            Err(err) => return profile_error_response(err),
+        };
+    let right_end =
+        match query_param_render_time(&params, "rightUntil", now_ms, DefaultMs(global_end)) {
+            Ok(value) => value,
+            Err(err) => return profile_error_response(err),
+        };
     if let Err(err) = state.validate_query_range(&tenant, left_start, left_end) {
         return profile_error_response(err);
     }
@@ -2333,14 +2343,18 @@ fn stack_trace_call_sites_from_json(selector: &str) -> Result<Vec<String>, Profi
         .collect())
 }
 
-fn heatmap_time_buckets(start_ms: i64, end_ms: i64, step_secs: f64) -> Result<usize, ProfileError> {
-    if start_ms >= end_ms {
+fn heatmap_time_buckets(
+    start_ms: StartMs,
+    end_ms: EndMs,
+    step_secs: f64,
+) -> Result<usize, ProfileError> {
+    if start_ms.0 >= end_ms.0 {
         return Err(ProfileError::Plan(
             "heatmap start must be before end".to_string(),
         ));
     }
     let step_ms = step_ms_from_secs(step_secs)? as f64;
-    let span_ms = (end_ms - start_ms) as f64;
+    let span_ms = (end_ms.0 - start_ms.0) as f64;
     Ok(((span_ms / step_ms).ceil().max(1.0) as usize).min(MAX_HEATMAP_TIME_BUCKETS))
 }
 
@@ -2354,8 +2368,8 @@ fn query_param_i64(params: &[(String, String)], name: &str) -> Option<i64> {
 fn query_param_render_time(
     params: &[(String, String)],
     name: &str,
-    now_ms: i64,
-    default: i64,
+    now_ms: NowMs,
+    default: DefaultMs,
 ) -> Result<i64, ProfileError> {
     let value = params
         .iter()
@@ -2366,17 +2380,17 @@ fn query_param_render_time(
 
 fn parse_render_time_param(
     value: Option<&str>,
-    now_ms: i64,
-    default: i64,
+    now_ms: NowMs,
+    default: DefaultMs,
 ) -> Result<i64, ProfileError> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(default);
+        return Ok(default.0);
     };
     if value == "now" {
-        return Ok(now_ms);
+        return Ok(now_ms.0);
     }
     if let Some(offset) = value.strip_prefix("now-") {
-        let resolved = now_ms - parse_render_duration_ms(offset)?;
+        let resolved = now_ms.0 - parse_render_duration_ms(offset)?;
         return reject_negative_render_time(resolved, value);
     }
     let numeric = value
@@ -2747,7 +2761,11 @@ impl From<crabka_pprof::Heatmap> for pb::querier::v1::HeatmapSeries {
             (value.end_ms - value.start_ms)
                 / i64::try_from(value.time_buckets).expect("bucket count fits i64")
         };
-        let y_min = heatmap_y_mins(value.min_value, value.max_value, value.value_buckets);
+        let y_min = heatmap_y_mins(
+            MinValue(value.min_value),
+            MaxValue(value.max_value),
+            value.value_buckets,
+        );
         Self {
             labels: Vec::new(),
             slots: value
@@ -2777,13 +2795,13 @@ impl From<crabka_pprof::LabeledHeatmap> for pb::querier::v1::HeatmapSeries {
     }
 }
 
-fn heatmap_y_mins(min_value: i64, max_value: i64, value_buckets: usize) -> Vec<f64> {
+fn heatmap_y_mins(min_value: MinValue, max_value: MaxValue, value_buckets: usize) -> Vec<f64> {
     if value_buckets == 0 {
         return Vec::new();
     }
-    let span = (max_value - min_value).max(0) as f64;
+    let span = (max_value.0 - min_value.0).max(0) as f64;
     (0..value_buckets)
-        .map(|bucket| min_value as f64 + span * bucket as f64 / value_buckets as f64)
+        .map(|bucket| min_value.0 as f64 + span * bucket as f64 / value_buckets as f64)
         .collect()
 }
 
@@ -4777,44 +4795,45 @@ overrides:
 
     #[test]
     fn render_time_params_accept_now_offsets() {
-        let now_ms = 1_700_000_000_000;
+        let now_ms = NowMs(1_700_000_000_000);
 
         for (input, want) in [
             (None, 0),
-            (Some("now"), now_ms),
-            (Some("now-1h"), now_ms - 3_600_000),
-            (Some("now-15m"), now_ms - 15 * 60_000),
+            (Some("now"), now_ms.0),
+            (Some("now-1h"), now_ms.0 - 3_600_000),
+            (Some("now-15m"), now_ms.0 - 15 * 60_000),
         ] {
-            check!(parse_render_time_param(input, now_ms, 0).unwrap() == want);
+            check!(parse_render_time_param(input, now_ms, DefaultMs(0)).unwrap() == want);
         }
     }
 
     #[test]
     fn render_time_params_accept_unix_seconds_and_millis() {
-        let now_ms = 1_700_000_000_000;
+        let now_ms = NowMs(1_700_000_000_000);
 
         for (input, want) in [
             ("123", 123_000),
             ("1700000000", 1_700_000_000_000),
             ("1700000000000", 1_700_000_000_000),
         ] {
-            check!(parse_render_time_param(Some(input), now_ms, 0).unwrap() == want);
+            check!(parse_render_time_param(Some(input), now_ms, DefaultMs(0)).unwrap() == want);
         }
     }
 
     #[test]
     fn render_time_params_reject_negative_resolved_bounds() {
-        let now_ms = 1_000;
+        let now_ms = NowMs(1_000);
 
         // A `now-<offset>` larger than `now` underflows past the epoch, and a
         // literal negative timestamp (seconds or millis heuristic) is rejected.
         for input in ["now-1h", "-5", "-1700000000000"] {
-            check!(parse_render_time_param(Some(input), now_ms, 0).is_err());
+            check!(parse_render_time_param(Some(input), now_ms, DefaultMs(0)).is_err());
         }
         // A valid millisecond timestamp at/above the seconds-vs-millis cutoff is
         // left untouched (not mangled by the heuristic) and accepted.
         check!(
-            parse_render_time_param(Some("1700000000000"), now_ms, 0).unwrap() == 1_700_000_000_000
+            parse_render_time_param(Some("1700000000000"), now_ms, DefaultMs(0)).unwrap()
+                == 1_700_000_000_000
         );
     }
 
@@ -4965,22 +4984,33 @@ overrides:
 
     #[test]
     fn heatmap_time_buckets_ceil_from_step_seconds() {
-        check!(heatmap_time_buckets(0, 21_000, 10.0).unwrap() == 3);
-        check!(heatmap_time_buckets(0, 1, 0.0).is_err());
-        check!(heatmap_time_buckets(1, 1, 1.0).is_err());
+        check!(heatmap_time_buckets(StartMs(0), EndMs(21_000), 10.0).unwrap() == 3);
+        check!(heatmap_time_buckets(StartMs(0), EndMs(1), 0.0).is_err());
+        check!(heatmap_time_buckets(StartMs(1), EndMs(1), 1.0).is_err());
+    }
+
+    #[test]
+    fn heatmap_time_buckets_span_uses_nonzero_start() {
+        // With a non-zero start, the bucket count depends on `end - start`, not
+        // `end + start`. Here span = 20_000ms / 10_000ms/step = 2 buckets.
+        // A `+` in the span computation would see 80_000ms → 8 buckets.
+        check!(heatmap_time_buckets(StartMs(30_000), EndMs(50_000), 10.0).unwrap() == 2);
     }
 
     #[test]
     fn heatmap_time_buckets_rejects_sub_millisecond_steps() {
         for step in [0.0001, 0.0005, 0.0009999] {
-            check!(heatmap_time_buckets(0, 1, step).is_err());
+            check!(heatmap_time_buckets(StartMs(0), EndMs(1), step).is_err());
         }
-        check!(heatmap_time_buckets(0, 1, 0.001).unwrap() == 1);
+        check!(heatmap_time_buckets(StartMs(0), EndMs(1), 0.001).unwrap() == 1);
     }
 
     #[test]
     fn heatmap_time_buckets_caps_large_ranges() {
-        assert!(heatmap_time_buckets(0, i64::MAX, 10.0).unwrap() == MAX_HEATMAP_TIME_BUCKETS);
+        assert!(
+            heatmap_time_buckets(StartMs(0), EndMs(i64::MAX), 10.0).unwrap()
+                == MAX_HEATMAP_TIME_BUCKETS
+        );
     }
 
     #[test]

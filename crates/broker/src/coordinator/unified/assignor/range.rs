@@ -55,9 +55,10 @@ impl Assignor for RangeAssignor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_protocol::primitives::uuid::Uuid;
+
+    use super::*;
 
     fn tid(b: u8) -> Uuid {
         Uuid([b; 16])

@@ -1,13 +1,20 @@
 #![allow(clippy::unreadable_literal)]
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write as _,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use assert2::{assert, check};
 use async_trait::async_trait;
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogRow, TimeRange, labels,
     series_fingerprint, write_log_block, write_log_block_to_object_store, write_log_index_manifest,
@@ -16,38 +23,43 @@ use crabka_blockstore::{
 };
 use crabka_observability::{
     CompactionFrontier, InMemoryWalSink, IngestLimitError, KafkaWalHeader, KafkaWalRecord,
-    LogIngestLimiter, LogQueryAuthorizer, LogWalConsumer, LogWalSink, QuerierIndexSource,
-    QuerierState, QueryAuthorizationError, Role, ServiceConfig, ServiceDependencies,
-    SharedCompactionFrontier, SharedLogDeleteRequests, WalConsumerError, WalLogRecord, WalPosition,
-    WalSinkError, build_kafka_wal_record, build_querier_state, build_service_router,
-    decode_kafka_wal_record, decode_kafka_wal_record_envelope, distributor_router, loki_router,
-    otlp_grpc_logs_service, otlp_grpc_logs_service_with_limiter, serve_service_listener,
-    write_compaction_frontier_to_object_store,
+    LogIngestLimiter, LogQueryAuthorizer, LogWalConsumer, LogWalSink, Offset, PartitionIndex,
+    QuerierIndexSource, QuerierState, QueryAuthorizationError, Role, ServiceConfig,
+    ServiceDependencies, SharedCompactionFrontier, SharedLogDeleteRequests, WalConsumerError,
+    WalLogRecord, WalPosition, WalSinkError, build_kafka_wal_record, build_querier_state,
+    build_service_router, decode_kafka_wal_record, decode_kafka_wal_record_envelope,
+    distributor_router, loki_router, otlp_grpc_logs_service, otlp_grpc_logs_service_with_limiter,
+    serve_service_listener, write_compaction_frontier_to_object_store,
 };
-use datafusion::arrow::array::{Float64Array, MapArray, StringArray, TimestampNanosecondArray};
-use datafusion::arrow::datatypes::{DataType, TimeUnit};
-use flate2::Compression;
-use flate2::write::DeflateEncoder;
-use flate2::write::GzEncoder;
+use datafusion::arrow::{
+    array::{Float64Array, MapArray, StringArray, TimestampNanosecondArray},
+    datatypes::{DataType, TimeUnit},
+};
+use flate2::{
+    Compression,
+    write::{DeflateEncoder, GzEncoder},
+};
 use futures_util::StreamExt as _;
-use object_store::local::LocalFileSystem;
-use object_store::path::Path as ObjectPath;
-use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-use opentelemetry_proto::tonic::collector::logs::v1::logs_service_client::LogsServiceClient;
-use opentelemetry_proto::tonic::collector::logs::v1::logs_service_server::LogsService;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value};
-use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-use opentelemetry_proto::tonic::resource::v1::Resource;
+use object_store::{local::LocalFileSystem, path::Path as ObjectPath};
+use opentelemetry_proto::tonic::{
+    collector::logs::v1::{
+        ExportLogsServiceRequest, logs_service_client::LogsServiceClient,
+        logs_service_server::LogsService,
+    },
+    common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
+    logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+    resource::v1::Resource,
+};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReader;
 use prost::Message as _;
 use serde_json::{Value, json};
 use snap::raw::Encoder as SnappyEncoder;
-use std::io::Write as _;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::TcpListener;
-use tokio::time::{Duration, timeout};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
+    net::TcpListener,
+    time::{Duration, timeout},
+};
+use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest as _};
 use tower::ServiceExt as _;
 
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1204,8 +1216,8 @@ fn kafka_wal_record_encodes_tenant_series_key_headers_and_json_payload() {
         line: "api error".to_string(),
         structured_metadata: BTreeMap::from([("trace_id".to_string(), "abc".to_string())]),
         position: Some(WalPosition {
-            partition: 3,
-            offset: 42,
+            partition: PartitionIndex(3),
+            offset: Offset(42),
         }),
     };
 
@@ -1262,15 +1274,19 @@ fn kafka_wal_record_decodes_payload_with_consumed_position() {
 
     let producer_record = build_kafka_wal_record("__crabka_observability_logs_wal", &record)
         .expect("producer record");
-    let decoded = decode_kafka_wal_record(producer_record.value.as_deref().unwrap(), 7, 99)
-        .expect("decoded WAL record");
+    let decoded = decode_kafka_wal_record(
+        producer_record.value.as_deref().unwrap(),
+        PartitionIndex(7),
+        Offset(99),
+    )
+    .expect("decoded WAL record");
 
     assert!(
         decoded
             == WalLogRecord {
                 position: Some(WalPosition {
-                    partition: 7,
-                    offset: 99,
+                    partition: PartitionIndex(7),
+                    offset: Offset(99),
                 }),
                 ..record
             }
@@ -1279,7 +1295,7 @@ fn kafka_wal_record_decodes_payload_with_consumed_position() {
 
 #[test]
 fn kafka_wal_record_decode_rejects_invalid_payload() {
-    let error = decode_kafka_wal_record(b"not json", 7, 99).unwrap_err();
+    let error = decode_kafka_wal_record(b"not json", PartitionIndex(7), Offset(99)).unwrap_err();
 
     assert!(
         error
@@ -1292,8 +1308,8 @@ fn kafka_wal_record_decode_rejects_invalid_payload() {
 fn native_kafka_log_record_rejects_invalid_label_header_name() {
     let error = decode_kafka_wal_record_envelope(KafkaWalRecord {
         value: b"api error".to_vec(),
-        partition: 3,
-        offset: 42,
+        partition: PartitionIndex(3),
+        offset: Offset(42),
         timestamp_ms: Some(1),
         headers: vec![
             KafkaWalHeader {
@@ -1319,8 +1335,8 @@ fn native_kafka_log_record_rejects_invalid_label_header_name() {
 fn native_kafka_log_record_rejects_invalid_metadata_header_name() {
     let error = decode_kafka_wal_record_envelope(KafkaWalRecord {
         value: b"api error".to_vec(),
-        partition: 3,
-        offset: 42,
+        partition: PartitionIndex(3),
+        offset: Offset(42),
         timestamp_ms: Some(1),
         headers: vec![
             KafkaWalHeader {
@@ -1350,8 +1366,8 @@ fn native_kafka_log_record_rejects_invalid_metadata_header_name() {
 fn native_kafka_log_record_rejects_duplicate_label_header_name() {
     let error = decode_kafka_wal_record_envelope(KafkaWalRecord {
         value: b"api error".to_vec(),
-        partition: 3,
-        offset: 42,
+        partition: PartitionIndex(3),
+        offset: Offset(42),
         timestamp_ms: Some(1),
         headers: vec![
             KafkaWalHeader {
@@ -1381,8 +1397,8 @@ fn native_kafka_log_record_rejects_duplicate_label_header_name() {
 fn native_kafka_log_record_rejects_duplicate_metadata_header_name() {
     let error = decode_kafka_wal_record_envelope(KafkaWalRecord {
         value: b"api error".to_vec(),
-        partition: 3,
-        offset: 42,
+        partition: PartitionIndex(3),
+        offset: Offset(42),
         timestamp_ms: Some(1),
         headers: vec![
             KafkaWalHeader {
@@ -1420,8 +1436,8 @@ fn native_kafka_log_record_rejects_duplicate_metadata_header_name() {
 fn native_kafka_log_record_rejects_negative_timestamp_header() {
     let error = decode_kafka_wal_record_envelope(KafkaWalRecord {
         value: b"api error".to_vec(),
-        partition: 3,
-        offset: 42,
+        partition: PartitionIndex(3),
+        offset: Offset(42),
         timestamp_ms: Some(1),
         headers: vec![
             KafkaWalHeader {
@@ -1451,8 +1467,8 @@ fn native_kafka_log_record_rejects_negative_timestamp_header() {
 fn native_kafka_log_record_rejects_negative_broker_timestamp() {
     let error = decode_kafka_wal_record_envelope(KafkaWalRecord {
         value: b"api error".to_vec(),
-        partition: 3,
-        offset: 42,
+        partition: PartitionIndex(3),
+        offset: Offset(42),
         timestamp_ms: Some(-1),
         headers: vec![
             KafkaWalHeader {
@@ -1478,8 +1494,8 @@ fn native_kafka_log_record_rejects_negative_broker_timestamp() {
 fn native_kafka_log_record_rejects_broker_timestamp_overflow() {
     let error = decode_kafka_wal_record_envelope(KafkaWalRecord {
         value: b"api error".to_vec(),
-        partition: 3,
-        offset: 42,
+        partition: PartitionIndex(3),
+        offset: Offset(42),
         timestamp_ms: Some(i64::MAX),
         headers: vec![
             KafkaWalHeader {
@@ -10908,8 +10924,8 @@ async fn query_endpoint_uses_updated_shared_compaction_frontier_for_hot_tail() {
             line: "api hot error".to_string(),
             structured_metadata: BTreeMap::new(),
             position: Some(WalPosition {
-                partition: 0,
-                offset: 43,
+                partition: PartitionIndex(0),
+                offset: Offset(43),
             }),
         })
         .await
@@ -10917,8 +10933,8 @@ async fn query_endpoint_uses_updated_shared_compaction_frontier_for_hot_tail() {
     let frontier = SharedCompactionFrontier::new(CompactionFrontier::new(0));
     let state = fixture().with_hot_tail_shared_frontier(hot_tail, frontier.clone());
     frontier.advance_partition_offset(WalPosition {
-        partition: 0,
-        offset: 43,
+        partition: PartitionIndex(0),
+        offset: Offset(43),
     });
     let app = loki_router(state);
 
@@ -13949,8 +13965,8 @@ async fn service_router_builds_querier_role_with_hot_tail_dependency() {
             line: "api error".to_string(),
             structured_metadata: BTreeMap::new(),
             position: Some(WalPosition {
-                partition: 0,
-                offset: 42,
+                partition: PartitionIndex(0),
+                offset: Offset(42),
             }),
         })
         .await
@@ -14273,7 +14289,7 @@ async fn service_router_loads_persisted_frontier_for_configured_querier_hot_tail
     write_compaction_frontier_to_object_store(
         &store,
         &ObjectPath::from("indexes"),
-        &CompactionFrontier::new(i64::MIN).with_partition_offset(0, 43),
+        &CompactionFrontier::new(i64::MIN).with_partition_offset(PartitionIndex(0), Offset(43)),
     )
     .await
     .unwrap();
@@ -19924,8 +19940,8 @@ fn kafka_wal_record(record: &WalLogRecord, partition: i32, offset: i64) -> Kafka
         build_kafka_wal_record("__crabka_observability_logs_wal", record).expect("producer record");
     KafkaWalRecord {
         value: producer_record.value.expect("producer value").to_vec(),
-        partition,
-        offset,
+        partition: PartitionIndex(partition),
+        offset: Offset(offset),
         timestamp_ms: producer_record.timestamp_ms,
         headers: producer_record
             .headers

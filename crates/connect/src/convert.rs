@@ -99,9 +99,10 @@ impl<T: Send + Sync + 'static> Converter<T> for SchemaConverter<T> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
     use crabka_schema_serde::SchemaSerdeError;
+
+    use super::*;
 
     /// A serde whose output encodes its inputs, so a test can prove
     /// [`SchemaConverter`] forwards to it rather than fabricating a value.

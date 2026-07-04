@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 
-use crate::ParseError;
-use crate::template::template_parse_error;
-use crate::util::decode_quoted_escape;
+use crate::{
+    DestinationLabel, JsonExpressionPath, ParseError, SourceLabel, template::template_parse_error,
+    util::decode_quoted_escape,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JsonParserConfig {
@@ -33,22 +34,20 @@ impl JsonParserConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JsonExtraction {
-    destination: String,
-    expression: String,
+    destination: DestinationLabel,
+    expression: JsonExpressionPath,
     path: JsonPath,
 }
 
 impl JsonExtraction {
     pub fn new(
-        destination: impl Into<String>,
-        expression: impl Into<String>,
+        destination: DestinationLabel,
+        expression: JsonExpressionPath,
     ) -> Result<Self, ParseError> {
-        let destination = destination.into();
-        let expression = expression.into();
-        if destination.is_empty() {
+        if destination.0.is_empty() {
             return Err(template_parse_error("expected json label name"));
         }
-        let path = JsonPath::parse(&expression)?;
+        let path = JsonPath::parse(&expression.0)?;
         Ok(Self {
             destination,
             expression,
@@ -58,12 +57,12 @@ impl JsonExtraction {
 
     #[must_use]
     pub fn destination(&self) -> &str {
-        &self.destination
+        &self.destination.0
     }
 
     #[must_use]
     pub fn expression(&self) -> &str {
-        &self.expression
+        &self.expression.0
     }
 
     pub(crate) fn evaluate<'a>(
@@ -218,11 +217,18 @@ fn is_json_path_field_name_char(ch: char) -> bool {
 mod tests {
     use assert2::check;
 
-    use super::{JsonExtraction, JsonPath, JsonPathPart, LogfmtExtraction, LogfmtParserConfig};
+    use super::{
+        DestinationLabel, JsonExpressionPath, JsonExtraction, JsonPath, JsonPathPart,
+        LogfmtExtraction, LogfmtParserConfig, SourceLabel,
+    };
 
     #[test]
     fn json_extraction_expression_returns_source_text() {
-        let extraction = JsonExtraction::new("value", "trace:id.request-id").unwrap();
+        let extraction = JsonExtraction::new(
+            DestinationLabel("value".to_string()),
+            JsonExpressionPath("trace:id.request-id".to_string()),
+        )
+        .unwrap();
 
         assert_eq!(extraction.expression(), "trace:id.request-id");
     }
@@ -311,8 +317,20 @@ mod tests {
     #[test]
     fn logfmt_extractions_reject_empty_destination_or_source() {
         check!(LogfmtExtraction::same("").is_err());
-        check!(LogfmtExtraction::rename("", "source").is_err());
-        check!(LogfmtExtraction::rename("destination", "").is_err());
+        check!(
+            LogfmtExtraction::rename(
+                DestinationLabel(String::new()),
+                SourceLabel("source".into())
+            )
+            .is_err()
+        );
+        check!(
+            LogfmtExtraction::rename(
+                DestinationLabel("destination".into()),
+                SourceLabel(String::new())
+            )
+            .is_err()
+        );
     }
 }
 
@@ -380,23 +398,20 @@ impl LogfmtParserConfig {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LogfmtExtraction {
-    destination: String,
-    source: String,
+    destination: DestinationLabel,
+    source: SourceLabel,
 }
 
 impl LogfmtExtraction {
     pub fn same(name: impl Into<String>) -> Result<Self, ParseError> {
         let name = name.into();
-        Self::rename(name.clone(), name)
+        Self::rename(DestinationLabel(name.clone()), SourceLabel(name))
     }
 
-    pub fn rename(
-        destination: impl Into<String>,
-        source: impl Into<String>,
-    ) -> Result<Self, ParseError> {
+    pub fn rename(destination: DestinationLabel, source: SourceLabel) -> Result<Self, ParseError> {
         let extraction = Self {
-            destination: destination.into(),
-            source: source.into(),
+            destination,
+            source,
         };
         extraction.validate()?;
         Ok(extraction)
@@ -404,16 +419,16 @@ impl LogfmtExtraction {
 
     #[must_use]
     pub fn destination(&self) -> &str {
-        &self.destination
+        &self.destination.0
     }
 
     #[must_use]
     pub fn source(&self) -> &str {
-        &self.source
+        &self.source.0
     }
 
     fn validate(&self) -> Result<(), ParseError> {
-        if self.destination.is_empty() || self.source.is_empty() {
+        if self.destination.0.is_empty() || self.source.0.is_empty() {
             return Err(template_parse_error("expected logfmt label name"));
         }
         Ok(())

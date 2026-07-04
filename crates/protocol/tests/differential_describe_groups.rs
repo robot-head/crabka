@@ -1,12 +1,15 @@
 use assert2::assert;
 mod support;
-use support::oracle;
-
 use bytes::BytesMut;
-use crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest;
-use crabka_protocol::owned::describe_groups_response::DescribeGroupsResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_groups_request::DescribeGroupsRequest,
+        describe_groups_response::DescribeGroupsResponse,
+    },
+};
 use serde_json::json;
+use support::oracle;
 
 fn rust_encode<T: Encode>(t: &T, version: i16) -> Vec<u8> {
     let mut buf = BytesMut::with_capacity(t.encoded_len(version));

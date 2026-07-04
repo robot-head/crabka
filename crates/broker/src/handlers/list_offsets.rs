@@ -12,18 +12,23 @@
 //! local log.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::list_offsets_request::ListOffsetsRequest;
-use crabka_protocol::owned::list_offsets_response::{
-    ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        list_offsets_request::ListOffsetsRequest,
+        list_offsets_response::{
+            ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 /// Request timestamp sentinel (-2): resolve the earliest available offset.
 /// Kafka's `ListOffsetsRequest.EARLIEST_TIMESTAMP`.
@@ -109,7 +114,7 @@ pub(crate) async fn handle(
                     ..Default::default()
                 };
 
-                let Some(p) = partitions.get(&topic.name, idx) else {
+                let Some(p) = partitions.get(&topic.name, crabka_ids::PartitionIndex(idx)) else {
                     out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
                     parts_out.push(out);
                     continue;
@@ -118,9 +123,10 @@ pub(crate) async fn handle(
                 let (local_start, local_end, local_log_start, remote_storage_enable) = {
                     let log = p.log.lock().expect("log mutex poisoned");
                     (
-                        log.log_start_offset(),
-                        log.log_end_offset(),
-                        log.local_log_start_offset(),
+                        // Unwrap the log-layer `Offset`s into broker's `i64` world at the seam.
+                        log.log_start_offset().0,
+                        log.log_end_offset().0,
+                        log.local_log_start_offset().0,
                         log.config_snapshot().remote_storage_enable,
                     )
                 };
@@ -162,9 +168,10 @@ pub(crate) async fn handle(
                     EARLIEST_LOCAL_TIMESTAMP => (local_log_start, UNKNOWN_TIMESTAMP),
                     MAX_TIMESTAMP => {
                         let log = p.log.lock().expect("log mutex poisoned");
+                        // Unwrap the log-layer `Offset`s into broker's `i64` world at the seam.
                         match log.max_timestamp_offset_and_ts() {
-                            Some((offset, ts)) => (offset, ts),
-                            None => (log.offset_of_max_timestamp(), UNKNOWN_TIMESTAMP),
+                            Some((offset, ts)) => (offset.0, ts),
+                            None => (log.offset_of_max_timestamp().0, UNKNOWN_TIMESTAMP),
                         }
                     }
                     ts if ts > 0 => {
@@ -201,8 +208,9 @@ pub(crate) async fn handle(
                                 let log = p.log.lock().expect("log mutex poisoned");
                                 log.offset_for_timestamp(ts)
                             };
+                            // Unwrap the log-layer `Offset` into broker's `i64` world at the seam.
                             local.map_or((UNKNOWN_OFFSET, UNKNOWN_TIMESTAMP), |(o, matched_ts)| {
-                                (o, matched_ts)
+                                (o.0, matched_ts)
                             })
                         }
                     }
@@ -254,10 +262,10 @@ fn topic_describe_denied(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_protocol::owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
-    use std::sync::Arc;
 
     use crate::test_support::{DenyAll, peer, principal};
 
@@ -281,6 +289,8 @@ mod tests {
             assert!(sentinel == want, "{name}");
         }
     }
+
+    use super::*;
 
     #[test]
     fn topic_describe_denied_yields_topic_authorization_failed_rows() {

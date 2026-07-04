@@ -12,9 +12,9 @@
 
 #![allow(clippy::pedantic)]
 
-use assert2::assert;
 use std::time::{Duration, Instant};
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

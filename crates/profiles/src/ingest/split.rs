@@ -1,13 +1,14 @@
 //! Multi-value split: one pprof with N `sample_type[]` becomes N profile series.
 
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crabka_blockstore::Labels;
 use crabka_pprof::ProfileType;
 
-use crate::error::ProfilesError;
-use crate::ingest::{DecodedProfile, DecodedSample, RawProfile};
+use crate::{
+    error::ProfilesError,
+    ingest::{DecodedProfile, DecodedSample, RawProfile},
+};
 
 /// Split one multi-value pprof into one `DecodedProfile` per `sample_type[]`.
 pub fn split_sample_types(raw: &RawProfile) -> Result<Vec<DecodedProfile>, ProfilesError> {
@@ -156,9 +157,8 @@ mod tests {
     use crabka_blockstore::Labels;
     use crabka_pprof::PprofProfile;
 
-    use crate::ingest::RawProfile;
-
     use super::*;
+    use crate::ingest::RawProfile;
 
     fn two_type_profile() -> PprofProfile {
         let profile = crabka_pprof::proto::Profile {

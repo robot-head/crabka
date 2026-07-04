@@ -1,5 +1,12 @@
-use arrow::array::{DictionaryArray, StringArray};
-use arrow::datatypes::Int32Type;
+use std::sync::{
+    Arc, Mutex as StdMutex,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use arrow::{
+    array::{DictionaryArray, StringArray},
+    datatypes::Int32Type,
+};
 use assert2::{assert, check};
 use bytes::Bytes;
 use crabka_blockstore::{BlockWriter, PromotedSpanAttr, TraceIndex, read_block};
@@ -11,19 +18,15 @@ use crabka_traces::{
         build_blocks_with_prefix, build_blocks_with_promoted_attrs, decode_consumer_records,
         flush_partition_windows, group_by_trace, object_key, run,
     },
+    ids::{MaxOffset, MinOffset, WindowStartNs},
     metrics::ServiceMetrics,
 };
 use futures::stream::BoxStream;
-use object_store::memory::InMemory;
-use object_store::path::Path;
 use object_store::{
-    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult, memory::InMemory,
+    path::Path,
 };
-use object_store::{ObjectStore, ObjectStoreExt};
-use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -81,9 +84,27 @@ fn consumer_record(partition: i32, offset: i64, record: &SpanRecord) -> Consumer
 
 #[test]
 fn object_key_is_deterministic_and_offset_scoped() {
-    let a = object_key("tenant-a", 3, 10, 20, 1_000);
-    let b = object_key("tenant-a", 3, 10, 20, 1_000);
-    let c = object_key("tenant-a", 3, 10, 21, 1_000);
+    let a = object_key(
+        "tenant-a",
+        3,
+        MinOffset(10),
+        MaxOffset(20),
+        WindowStartNs(1_000),
+    );
+    let b = object_key(
+        "tenant-a",
+        3,
+        MinOffset(10),
+        MaxOffset(20),
+        WindowStartNs(1_000),
+    );
+    let c = object_key(
+        "tenant-a",
+        3,
+        MinOffset(10),
+        MaxOffset(21),
+        WindowStartNs(1_000),
+    );
 
     check!(a == b);
     check!(a != c);

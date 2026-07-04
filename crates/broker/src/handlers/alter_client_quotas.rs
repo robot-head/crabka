@@ -4,19 +4,24 @@ use std::collections::HashSet;
 
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, ClientQuotaRecord, MetadataRecord, QuotaEntity, ResourceType};
-use crabka_protocol::owned::alter_client_quotas_request::{
-    AlterClientQuotasRequest, EntityData, EntryData,
+use crabka_protocol::{
+    Encode, UnknownTaggedFields,
+    owned::{
+        alter_client_quotas_request::{AlterClientQuotasRequest, EntityData, EntryData},
+        alter_client_quotas_response::{
+            AlterClientQuotasResponse, EntityData as RespEntity, EntryData as RespEntry,
+        },
+    },
 };
-use crabka_protocol::owned::alter_client_quotas_response::{
-    AlterClientQuotasResponse, EntityData as RespEntity, EntryData as RespEntry,
-};
-use crabka_protocol::{Encode, UnknownTaggedFields};
 
 use super::acl_wire::CLUSTER_RESOURCE_NAME;
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes::{
-    CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE, INVALID_CONFIG, INVALID_REQUEST, NONE,
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes::{
+        CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE, INVALID_CONFIG, INVALID_REQUEST,
+        NONE,
+    },
 };
 
 /// Quota key: produce-side bandwidth cap in bytes/sec (KIP-13).
@@ -250,15 +255,14 @@ fn encode_response<R: Encode>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc};
+
     use assert2::assert;
     use crabka_protocol::owned::alter_client_quotas_request::{EntityData, EntryData, OpData};
     use crabka_security::{AuthMethod, Principal};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::DenyAll;
+    use super::*;
+    use crate::{broker::BrokerHandle, test_support::DenyAll};
 
     fn entry(entity: Vec<(&str, Option<&str>)>, ops: Vec<(&str, f64, bool)>) -> EntryData {
         EntryData {

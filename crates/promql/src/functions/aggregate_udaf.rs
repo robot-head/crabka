@@ -26,12 +26,15 @@
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, AsArray};
-use arrow::datatypes::{DataType, Float64Type};
-use datafusion::common::{Result as DfResult, ScalarValue};
-use datafusion::logical_expr::function::AccumulatorArgs;
-use datafusion::logical_expr::{Accumulator, AggregateUDF, Volatility, create_udaf};
-use datafusion::prelude::SessionContext;
+use arrow::{
+    array::{ArrayRef, AsArray},
+    datatypes::{DataType, Float64Type},
+};
+use datafusion::{
+    common::{Result as DfResult, ScalarValue},
+    logical_expr::{Accumulator, AggregateUDF, Volatility, create_udaf, function::AccumulatorArgs},
+    prelude::SessionContext,
+};
 
 /// Registered name of the NaN-ignoring `min` aggregate UDAF.
 pub const PROM_MIN_UDAF_NAME: &str = "prom_min";

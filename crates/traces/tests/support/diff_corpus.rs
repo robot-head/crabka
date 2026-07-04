@@ -1,11 +1,11 @@
 use assert2::assert;
-use opentelemetry_proto::tonic::common::v1::{
-    AnyValue, ArrayValue, InstrumentationScope, KeyValue, any_value::Value,
-};
-use opentelemetry_proto::tonic::resource::v1::Resource;
-use opentelemetry_proto::tonic::trace::v1::{
-    ResourceSpans, ScopeSpans, Span as OtlpSpan, Status, TracesData,
-    span::{Event, Link},
+use opentelemetry_proto::tonic::{
+    common::v1::{AnyValue, ArrayValue, InstrumentationScope, KeyValue, any_value::Value},
+    resource::v1::Resource,
+    trace::v1::{
+        ResourceSpans, ScopeSpans, Span as OtlpSpan, Status, TracesData,
+        span::{Event, Link},
+    },
 };
 use serde_json::Value as JsonValue;
 

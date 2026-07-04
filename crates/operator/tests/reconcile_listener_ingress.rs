@@ -5,13 +5,15 @@
 //! `Ingress`/`Route` objects, a `ConfigMap` whose advertised address is
 //! `<host>:443`, and a `ListenersReady=True` status.
 
-use assert2::{assert, check};
 use std::sync::Arc;
 
-use crabka_operator::controller::kafka::reconcile;
-use crabka_operator::crd::{
-    BootstrapConfig, BrokerOverride, Kafka, KafkaSpec, Listener, ListenerConfiguration,
-    ListenerType,
+use assert2::{assert, check};
+use crabka_operator::{
+    controller::kafka::reconcile,
+    crd::{
+        BootstrapConfig, BrokerOverride, Kafka, KafkaSpec, Listener, ListenerConfiguration,
+        ListenerType,
+    },
 };
 use http::Method;
 

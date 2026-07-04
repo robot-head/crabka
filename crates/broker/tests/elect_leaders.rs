@@ -35,31 +35,37 @@
 //! slices 10b/12b (openraft `debug_assert!` races on the hosted Windows
 //! task scheduler are unrelated to the protocol under test).
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
-
-use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::authorizer::SimpleAclAuthorizer;
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerHandle};
-use crabka_metadata::{
-    AclEntry, AclOperation, MetadataRecord, PartitionRecord, PatternType, PermissionType,
-    ResourceType,
+use std::{
+    io,
+    net::SocketAddr,
+    time::{Duration, Instant},
 };
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::elect_leaders_request::{ElectLeadersRequest, TopicPartitions};
-use crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
+
+use assert2::assert;
+use bytes::{Buf, BufMut, BytesMut};
+use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
+use crabka_metadata::{
+    AclEntry, AclOperation, LeaderEpoch, MetadataRecord, PartitionRecord, PatternType,
+    PermissionType, ResourceType,
+};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        api_versions_response::ApiVersionsResponse,
+        elect_leaders_request::{ElectLeadersRequest, TopicPartitions},
+        elect_leaders_response::ElectLeadersResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 mod support;
 
@@ -188,7 +194,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
 /// Await until `handle` reports `leader` as the leader for `(topic, partition)`.
 async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i32, leader: u64) {
     handle
-        .wait_for_image(|img| img.partition(topic, partition).map(|p| p.leader) == Some(leader))
+        .wait_for_image(|img| img.partition(topic, partition).map(|p| p.leader.0) == Some(leader))
         .await;
 }
 
@@ -197,7 +203,7 @@ async fn wait_isr_contains(handle: &BrokerHandle, topic: &str, partition: i32, n
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .map(|p| p.isr.contains(&node))
+                .map(|p| p.isr.contains(&crabka_broker::NodeId(node)))
                 .unwrap_or(false)
         })
         .await;
@@ -216,7 +222,7 @@ async fn wait_partition_isr_only(
             img.partition(topic, partition)
                 .map(|p| {
                     let actual_set: std::collections::HashSet<u64> =
-                        p.isr.iter().copied().collect();
+                        p.isr.iter().map(|n| n.0).collect();
                     actual_set == expected_set
                 })
                 .unwrap_or(false)
@@ -236,7 +242,7 @@ async fn wait_partition_isr_contains(
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .map(|p| p.isr.contains(&member))
+                .map(|p| p.isr.contains(&crabka_broker::NodeId(member)))
                 .unwrap_or(false)
         })
         .await;
@@ -287,7 +293,7 @@ async fn preferred_election_via_wire_returns_success() {
     // (i.e., not broker 1).
     cluster[0]
         .0
-        .wait_until_partition_leader_changed("foo-preferred", 0, 1)
+        .wait_until_partition_leader_changed("foo-preferred", 0, crabka_broker::NodeId(1))
         .await;
     let new_leader = cluster[0]
         .0
@@ -407,10 +413,10 @@ async fn unclean_election_via_wire_picks_alive_replica() {
     let forged = MetadataRecord::V1Partition(PartitionRecord {
         topic: "foo-unclean".to_string(),
         partition: 0,
-        leader: 99,
+        leader: crabka_broker::NodeId(99),
         replicas: pr_before.replicas.clone(),
-        isr: vec![99],
-        leader_epoch: pr_before.leader_epoch + 1,
+        isr: vec![crabka_broker::NodeId(99)],
+        leader_epoch: pr_before.leader_epoch.next(),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
@@ -460,8 +466,10 @@ async fn create_topic_plaintext(
     partitions: i32,
     replication_factor: i16,
 ) {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    };
 
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {
@@ -508,15 +516,15 @@ async fn wait_partition_record_known(
     PartitionRecord {
         topic: topic.to_string(),
         partition,
-        leader,
+        leader: crabka_broker::NodeId(leader),
         // We don't have a direct `replicas` accessor, but the
         // ISR is enough for our purposes (replicas=[1,2] is
         // well-known from the CreateTopics call with rf=2 on a
         // 3-broker cluster where the first two brokers are the
         // natural assignment).
-        replicas: vec![1, 2],
-        isr,
-        leader_epoch: 0, // bumped by the forged record, not critical
+        replicas: vec![crabka_broker::NodeId(1), crabka_broker::NodeId(2)],
+        isr: isr.into_iter().map(crabka_broker::NodeId).collect(),
+        leader_epoch: LeaderEpoch(0), // bumped by the forged record, not critical
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
@@ -753,7 +761,8 @@ async fn auto_rebalance_restores_preferred_leader() {
     eprintln!("broker 1 shut down; waiting for failover");
 
     // Wait for broker 2 or 3 to report a new leader (not broker 1).
-    h1.wait_until_partition_leader_changed(topic, 0, 1).await;
+    h1.wait_until_partition_leader_changed(topic, 0, crabka_broker::NodeId(1))
+        .await;
     eprintln!(
         "new leader after broker 1 death: {:?}",
         h1.partition_leader_for_test(topic, 0)
@@ -798,8 +807,10 @@ async fn create_topic_sasl_plain(
     partitions: i32,
     replication_factor: i16,
 ) {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    };
 
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {

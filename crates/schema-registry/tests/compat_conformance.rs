@@ -4,10 +4,9 @@
 //! cp 7.4.0). cp is the authority; this gate fails if our engine diverges from a
 //! single verdict.
 
-use crabka_schema_registry::compat;
-use crabka_schema_registry::format::SchemaType;
-use crabka_schema_registry::store::StoreState;
 use std::path::Path;
+
+use crabka_schema_registry::{compat, format::SchemaType, store::StoreState};
 
 #[derive(serde::Deserialize)]
 #[allow(clippy::struct_field_names)]

@@ -18,16 +18,16 @@
 //! "password equivalent" — clients re-authenticate with the hex
 //! `token_id` as the SCRAM username and the HMAC bytes as the password.
 
-use std::collections::HashSet;
-use std::hash::BuildHasher;
+use std::{collections::HashSet, hash::BuildHasher};
 
 use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
-use crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest;
-use crabka_protocol::owned::create_delegation_token_response::CreateDelegationTokenResponse;
+use crabka_protocol::owned::{
+    create_delegation_token_request::CreateDelegationTokenRequest,
+    create_delegation_token_response::CreateDelegationTokenResponse,
+};
 use crabka_security::{KafkaPrincipal, SecretBytes};
 
-use crate::network::auth::ConnectionAuth;
-use crate::time_util::now_ms;
+use crate::{network::auth::ConnectionAuth, time_util::now_ms};
 
 /// A relative span of milliseconds (token lifetime / renew period), as
 /// distinct from an absolute epoch timestamp in milliseconds.
@@ -210,14 +210,14 @@ fn err_response(code: i16) -> CreateDelegationTokenResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{collections::HashSet, sync::Arc, time::Duration};
+
     use assert2::assert;
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, Principal, SaslMechanism};
-    use std::collections::HashSet;
-    use std::sync::Arc;
-    use std::time::Duration;
     use tempfile::TempDir;
+
+    use super::*;
 
     /// Helper: produce an empty super-users set for tests that don't
     /// exercise the act-as path.
@@ -236,7 +236,7 @@ mod tests {
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
-            ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
+            ..crabka_raft::ControllerConfig::for_tests(crabka_raft::NodeId(1), log_dir)
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();
@@ -636,8 +636,10 @@ mod tests {
 
     #[test]
     fn token_gate_uses_delegation_token_level() {
-        use crabka_metadata::metadata_version::DELEGATION_TOKEN_MIN_LEVEL;
-        use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
+        use crabka_metadata::{
+            FeatureLevelRecord, MetadataImage, MetadataRecord,
+            metadata_version::DELEGATION_TOKEN_MIN_LEVEL,
+        };
 
         let gate = |level: Option<i16>| {
             let mut image = MetadataImage::new(uuid::Uuid::nil());

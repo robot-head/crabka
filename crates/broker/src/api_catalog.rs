@@ -177,8 +177,9 @@ fn admin_apis() -> Vec<ApiVersion> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn share_group_apis_are_advertised() {

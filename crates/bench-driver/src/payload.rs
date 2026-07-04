@@ -65,8 +65,9 @@ pub fn read_send_nanos(value: &[u8], scenario_id: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn round_trip_send_nanos() {

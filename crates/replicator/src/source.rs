@@ -1,14 +1,19 @@
 //! Source side: a consumer on the source cluster that emits [`ReplicatedRecord`]s
 //! and snapshots all partition positions as a [`SourceOffset`].
 
-use std::collections::{BTreeMap, VecDeque};
-use std::time::Duration;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
-use crabka_connect::{ConnectError, ConnectRecord, OffsetValue, Source, SourceOffset};
+use crabka_connect::{ConnectError, ConnectRecord, OffsetMap, OffsetValue, Source, SourceOffset};
 
-use crate::record::ReplicatedRecord;
+use crate::{
+    ids::{Offset, PartitionIndex, Timestamp},
+    record::ReplicatedRecord,
+};
 
 /// A [`Source`] implementation backed by a Kafka consumer on the source cluster.
 ///
@@ -118,9 +123,9 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
 
                 self.buf.push_back(ReplicatedRecord {
                     topic: r.topic,
-                    partition: r.partition,
-                    offset: r.offset,
-                    timestamp: r.timestamp,
+                    partition: PartitionIndex(r.partition),
+                    offset: Offset(r.offset),
+                    timestamp: Timestamp(r.timestamp),
                     key: r.key,
                     value: r.value,
                     headers: r.headers.into_iter().map(|h| (h.key, h.value)).collect(),
@@ -141,12 +146,12 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
         if self.positions.is_empty() {
             return None;
         }
-        let position = self
+        let position: OffsetMap = self
             .positions
             .iter()
             .map(|(k, v)| (k.clone(), OffsetValue::Long(*v)))
             .collect();
-        Some(SourceOffset::new(BTreeMap::new(), position))
+        Some(SourceOffset::new(BTreeMap::new().into(), position.into()))
     }
 
     /// Restore the read position from a previously-checkpointed [`SourceOffset`].
@@ -188,7 +193,7 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
             .as_ref()
             .ok_or_else(|| ConnectError::Backend("source consumer is closed".into()))?;
 
-        for (key, value) in &offset.position {
+        for (key, value) in offset.position.iter() {
             let OffsetValue::Long(next) = value else {
                 tracing::warn!(key, "checkpoint position value is not a Long; skipping");
                 continue;
@@ -233,11 +238,10 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
+    use crabka_connect::Source;
 
     use super::*;
-    use crabka_connect::Source;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn source_polls_records_with_topic_and_offset() {
@@ -275,8 +279,8 @@ mod tests {
 
         let payload = rec.value.unwrap();
         check!(payload.topic == "orders");
-        check!(payload.partition == 0);
-        check!(payload.offset == 0);
+        check!(payload.partition == PartitionIndex(0));
+        check!(payload.offset == Offset(0));
         check!(payload.value.as_deref() == Some(b"v".as_slice()));
 
         // The checkpoint position is the NEXT offset to read: `last_offset + 1`.

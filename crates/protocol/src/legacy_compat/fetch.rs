@@ -1,6 +1,7 @@
-use crate::kafka_3_6_2;
-use crate::owned::fetch_request::FetchRequest;
-use crate::owned::fetch_response::FetchResponse;
+use crate::{
+    kafka_3_6_2,
+    owned::{fetch_request::FetchRequest, fetch_response::FetchResponse},
+};
 
 // ── Request: legacy → canonical ──────────────────────────────────────────────
 
@@ -184,12 +185,11 @@ impl From<crate::owned::fetch_response::SnapshotId>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::UnknownTaggedFields;
-    use crate::primitives::uuid::Uuid;
-    use crate::records::RecordsPayload;
     use assert2::assert;
     use bytes::Bytes;
+
+    use super::*;
+    use crate::{UnknownTaggedFields, primitives::uuid::Uuid, records::RecordsPayload};
 
     #[test]
     fn legacy_fetch_request_conversion_preserves_mapped_fields() {

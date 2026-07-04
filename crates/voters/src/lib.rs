@@ -7,13 +7,14 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-voters/0.3.8")]
 
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use uuid::Uuid;
 
-/// A broker/controller node id (Kafka's `int32`, widened to `u64` here because
-/// ids only ever count up from 1).
-pub type NodeId = u64;
+/// A broker/controller node id — the canonical [`crabka_ids::NodeId`] newtype
+/// (a `u64` internally; Kafka's `int32` on the wire). Re-exported here so the
+/// consensus stack keeps naming it `crabka_voters::NodeId`.
+pub use crabka_ids::NodeId;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// A single listener endpoint advertised by a voter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -107,13 +108,14 @@ impl VoterSet {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn sample(id: NodeId) -> Voter {
         Voter {
             id,
-            directory_id: Uuid::from_u128(u128::from(id)),
+            directory_id: Uuid::from_u128(u128::from(id.0)),
             endpoints: vec![VoterEndpoint {
                 name: "CONTROLLER".into(),
                 host: "127.0.0.1".into(),
@@ -125,27 +127,27 @@ mod tests {
 
     #[test]
     fn add_remove_are_immutable_copies() {
-        let base = VoterSet::from_voters([sample(1)]);
-        let added = base.with_voter(sample(2));
-        assert!(base.contains(1) && !base.contains(2));
-        assert!(added.contains(1) && added.contains(2));
-        let removed = added.without_voter(1);
-        assert!(!removed.contains(1) && removed.contains(2));
+        let base = VoterSet::from_voters([sample(NodeId(1))]);
+        let added = base.with_voter(sample(NodeId(2)));
+        assert!(base.contains(NodeId(1)) && !base.contains(NodeId(2)));
+        assert!(added.contains(NodeId(1)) && added.contains(NodeId(2)));
+        let removed = added.without_voter(NodeId(1));
+        assert!(!removed.contains(NodeId(1)) && removed.contains(NodeId(2)));
     }
 
     #[test]
     fn ids_are_sorted() {
-        let set = VoterSet::from_voters([sample(3), sample(1), sample(2)]);
-        assert!(set.ids().into_iter().collect::<Vec<_>>() == vec![1, 2, 3]);
+        let set = VoterSet::from_voters([sample(NodeId(3)), sample(NodeId(1)), sample(NodeId(2))]);
+        assert!(set.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(1), NodeId(2), NodeId(3)]);
     }
 
     #[test]
     fn accessors_reflect_contents() {
-        let set = VoterSet::from_voters([sample(1), sample(2)]);
+        let set = VoterSet::from_voters([sample(NodeId(1)), sample(NodeId(2))]);
         check!(set.len() == 2);
         check!(!set.is_empty());
-        check!(set.get(1) == Some(&sample(1)));
-        check!(set.get(99).is_none());
+        check!(set.get(NodeId(1)) == Some(&sample(NodeId(1))));
+        check!(set.get(NodeId(99)).is_none());
         check!(set.iter().count() == 2);
 
         let empty = VoterSet::default();

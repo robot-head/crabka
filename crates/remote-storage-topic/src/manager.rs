@@ -28,23 +28,23 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use futures_util::StreamExt;
-use tokio::runtime::Handle;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
-use tracing::{instrument, warn};
-
+use crabka_ids::LeaderEpoch;
 use crabka_remote_storage::{
     InmemoryRemoteLogMetadataManager, RemoteLogMetadataManager, RemoteLogSegmentMetadata,
     RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemotePartitionDeleteMetadata,
     RemoteStorageError, TopicIdPartition,
 };
+use futures_util::StreamExt;
+use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
+use tracing::{instrument, warn};
 
-use crate::error::MetadataLogError;
-use crate::log::{AssignmentHandle, MetadataEventLog, MetadataEventStream, PartitionStart};
-use crate::partitioning::metadata_partition_for;
-use crate::serde::MetadataEvent;
+use crate::{
+    error::MetadataLogError,
+    log::{AssignmentHandle, MetadataEventLog, MetadataEventStream, PartitionStart},
+    partitioning::metadata_partition_for,
+    serde::MetadataEvent,
+};
 
 /// Sentinel target HWM meaning "this partition is assigned but its real
 /// high-water mark is not yet known" (the `high_water_marks` RPC failed,
@@ -606,7 +606,7 @@ impl RemoteLogMetadataManager for TopicBasedRemoteLogMetadataManager {
     fn remote_log_segment_metadata(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
         offset: i64,
     ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError> {
         let mp = metadata_partition_for(topic_id_partition, self.log.partition_count());
@@ -626,7 +626,7 @@ impl RemoteLogMetadataManager for TopicBasedRemoteLogMetadataManager {
     fn highest_offset_for_epoch(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
     ) -> Result<Option<i64>, RemoteStorageError> {
         let mp = metadata_partition_for(topic_id_partition, self.log.partition_count());
         match self.metadata_partition_gate(mp) {
@@ -655,7 +655,7 @@ impl RemoteLogMetadataManager for TopicBasedRemoteLogMetadataManager {
     fn list_remote_log_segments_by_epoch(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
     ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
         self.inner
             .list_remote_log_segments_by_epoch(topic_id_partition, leader_epoch)
@@ -723,16 +723,17 @@ async fn pump_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
     use std::collections::BTreeMap;
+
+    use assert2::{assert, check};
+    use crabka_remote_storage::{CustomMetadata, RemoteLogSegmentId, RemotePartitionDeleteState};
     use uuid::Uuid;
 
-    use crabka_remote_storage::{CustomMetadata, RemoteLogSegmentId, RemotePartitionDeleteState};
-
-    use crate::error::MetadataLogError;
-    use crate::log::{AssignmentHandle, InProcessMetadataEventLog, MetadataEventStream};
+    use super::*;
+    use crate::{
+        error::MetadataLogError,
+        log::{AssignmentHandle, InProcessMetadataEventLog, MetadataEventStream},
+    };
 
     /// Test double that delegates to an inner [`InProcessMetadataEventLog`]
     /// but can be told to fail `high_water_marks()` on demand. The
@@ -802,7 +803,7 @@ mod tests {
             100,
             2048,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, start)]),
+            BTreeMap::from([(LeaderEpoch(0), start)]),
         )
         .unwrap()
     }
@@ -831,7 +832,10 @@ mod tests {
     async fn wait_ready(m: &Arc<TopicBasedRemoteLogMetadataManager>, tp: &TopicIdPartition) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            if matches!(m.remote_log_segment_metadata(tp, 0, 42), Ok(Some(_))) {
+            if matches!(
+                m.remote_log_segment_metadata(tp, LeaderEpoch(0), 42),
+                Ok(Some(_))
+            ) {
                 return;
             }
             assert!(
@@ -900,12 +904,12 @@ mod tests {
         on_blocking(move || m2.update_remote_log_segment_metadata(finish(10)).unwrap()).await;
 
         let got = m
-            .remote_log_segment_metadata(&tp(), 0, 42)
+            .remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42)
             .unwrap()
             .expect("segment found");
         check!(got.remote_log_segment_id().id == Uuid::from_u128(10));
         check!(got.custom_metadata() == Some(&CustomMetadata(vec![7])));
-        check!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
+        check!(m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap() == Some(99));
         m.shutdown();
     }
 
@@ -941,16 +945,16 @@ mod tests {
         // `b` must observe `a`'s writes once its pump has applied
         // them. Poll up to 2s for the in-process broadcast to fan out.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-        while b.highest_offset_for_epoch(&tp(), 0).unwrap() != Some(99) {
+        while b.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap() != Some(99) {
             assert!(
                 std::time::Instant::now() < deadline,
                 "manager B did not converge within 2s"
             );
             tokio::task::yield_now().await;
         }
-        assert!(b.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
+        assert!(b.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap() == Some(99));
         let got = b
-            .remote_log_segment_metadata(&tp(), 0, 50)
+            .remote_log_segment_metadata(&tp(), LeaderEpoch(0), 50)
             .unwrap()
             .unwrap();
         assert!(got.remote_log_segment_id().id == Uuid::from_u128(10));
@@ -987,7 +991,12 @@ mod tests {
             .map(|s| (s.start_offset(), s.end_offset()))
             .collect();
         assert!(ranges == [(0, 99), (100, 199), (200, 299)]);
-        assert!(fresh.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(299));
+        assert!(
+            fresh
+                .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
+                .unwrap()
+                == Some(299)
+        );
         fresh.shutdown();
     }
 
@@ -1147,7 +1156,12 @@ mod tests {
             post_cache == pre_cache,
             "post-load cache equals pre-restart cache"
         );
-        assert!(fresh.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(299));
+        assert!(
+            fresh
+                .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
+                .unwrap()
+                == Some(299)
+        );
         fresh.shutdown();
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1176,7 +1190,7 @@ mod tests {
 
         // Before assignment: the partition is not consumed → genuine miss.
         assert!(matches!(
-            m.remote_log_segment_metadata(&tp(), 0, 42),
+            m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42),
             Ok(None)
         ));
 
@@ -1187,7 +1201,7 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            match m.remote_log_segment_metadata(&tp(), 0, 42) {
+            match m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42) {
                 Ok(Some(md)) => {
                     assert!(md.remote_log_segment_id().id == Uuid::from_u128(10));
                     break;
@@ -1209,7 +1223,7 @@ mod tests {
         m.reconcile_assignment(&[]).await;
         assert!(m.assigned_metadata_partitions().is_empty());
         assert!(matches!(
-            m.remote_log_segment_metadata(&tp(), 0, 42),
+            m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42),
             Ok(None)
         ));
         m.shutdown();
@@ -1220,8 +1234,12 @@ mod tests {
         let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(2);
         let m = start_manager(log).await;
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
-        check!(m.remote_log_segment_metadata(&other, 0, 0).unwrap() == None);
-        check!(m.highest_offset_for_epoch(&other, 0).unwrap() == None);
+        check!(
+            m.remote_log_segment_metadata(&other, LeaderEpoch(0), 0)
+                .unwrap()
+                == None
+        );
+        check!(m.highest_offset_for_epoch(&other, LeaderEpoch(0)).unwrap() == None);
         check!(m.list_remote_log_segments(&other).unwrap().is_empty());
         m.shutdown();
     }
@@ -1258,7 +1276,7 @@ mod tests {
                 100,
                 2048,
                 RemoteLogSegmentState::CopySegmentStarted,
-                BTreeMap::from([(0, 0)]),
+                BTreeMap::from([(LeaderEpoch(0), 0)]),
             )
             .unwrap();
             let w2 = w.clone();
@@ -1294,8 +1312,8 @@ mod tests {
         // Poll until each is caught up and serves its own partition.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            let a_own = a.remote_log_segment_metadata(&tp_a, 0, 42);
-            let b_own = b.remote_log_segment_metadata(&tp_b, 0, 42);
+            let a_own = a.remote_log_segment_metadata(&tp_a, LeaderEpoch(0), 42);
+            let b_own = b.remote_log_segment_metadata(&tp_b, LeaderEpoch(0), 42);
             if matches!(a_own, Ok(Some(_))) && matches!(b_own, Ok(Some(_))) {
                 break;
             }
@@ -1309,11 +1327,17 @@ mod tests {
         // Cross reads (partition the broker does NOT consume) are a genuine
         // miss, not NotReady.
         assert!(
-            matches!(a.remote_log_segment_metadata(&tp_b, 0, 42), Ok(None)),
+            matches!(
+                a.remote_log_segment_metadata(&tp_b, LeaderEpoch(0), 42),
+                Ok(None)
+            ),
             "A does not consume mp_b → genuine miss"
         );
         assert!(
-            matches!(b.remote_log_segment_metadata(&tp_a, 0, 42), Ok(None)),
+            matches!(
+                b.remote_log_segment_metadata(&tp_a, LeaderEpoch(0), 42),
+                Ok(None)
+            ),
             "B does not consume mp_a → genuine miss"
         );
 
@@ -1373,7 +1397,7 @@ mod tests {
         );
         check!(listed[0].remote_log_segment_id().id == Uuid::from_u128(10));
         // The finished state survived (no half-applied duplicate update).
-        check!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
+        check!(m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap() == Some(99));
 
         m.shutdown();
     }
@@ -1423,7 +1447,7 @@ mod tests {
         // it must NEVER collapse to Ok(None).
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
         while std::time::Instant::now() < deadline {
-            match m.remote_log_segment_metadata(&tp(), 0, 42) {
+            match m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42) {
                 Err(RemoteStorageError::NotReady { partition }) => assert!(partition == mp),
                 other => panic!("HWM-unknown partition must read NotReady, got {other:?}"),
             }
@@ -1443,7 +1467,7 @@ mod tests {
         m.reconcile_assignment(&[mp]).await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            match m.remote_log_segment_metadata(&tp(), 0, 42) {
+            match m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42) {
                 Ok(Some(md)) => {
                     assert!(md.remote_log_segment_id().id == Uuid::from_u128(10));
                     break;
@@ -1461,7 +1485,7 @@ mod tests {
         }
         // The list path is now Ready too.
         assert!(m.list_remote_log_segments(&tp()).unwrap().len() == 1);
-        assert!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
+        assert!(m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap() == Some(99));
 
         m.shutdown();
     }

@@ -27,34 +27,43 @@
 //! broker-client cert with the cluster CA would be rejected by the broker's
 //! `client_ca_path`; the child-KafkaUser path sidesteps that by construction.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use crabka_security::ca::{SubjectAltName, issue_broker_cert};
 use futures::StreamExt as _;
-use k8s_openapi::ByteString;
-use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{Secret, Service};
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::Api;
-use kube::runtime::controller::{Action, Controller};
-use kube::runtime::watcher;
-use kube::{Resource, ResourceExt as _};
+use k8s_openapi::{
+    ByteString,
+    api::{
+        apps::v1::Deployment,
+        core::v1::{Secret, Service},
+    },
+    apimachinery::pkg::apis::meta::v1::ObjectMeta,
+};
+use kube::{
+    Resource, ResourceExt as _,
+    api::Api,
+    runtime::{
+        controller::{Action, Controller},
+        watcher,
+    },
+};
 use serde_json::json;
 use time::OffsetDateTime;
 
-use crabka_security::ca::{SubjectAltName, issue_broker_cert};
-
-use crate::context::Context;
-use crate::controller::cluster_ca::{cluster_ca_cert_name, cluster_ca_key_name, renew_if_expiring};
-use crate::controller::common::{
-    ReconcileError, apply_object, condition, owner_ref, patch_status, read_pem_key,
+use crate::{
+    context::Context,
+    controller::{
+        cluster_ca::{cluster_ca_cert_name, cluster_ca_key_name, renew_if_expiring},
+        common::{ReconcileError, apply_object, condition, owner_ref, patch_status, read_pem_key},
+    },
+    crd::{
+        Kafka, KafkaCondition, KafkaGrpcGateway, KafkaGrpcGatewayStatus,
+        user::{
+            AclOp, AclPermission, AclResource, AclResourceKind, AclRule, Authentication,
+            Authorization, KafkaUser, KafkaUserSpec, SimpleAuthorization, TlsAuth,
+        },
+    },
 };
-use crate::crd::user::{
-    AclOp, AclPermission, AclResource, AclResourceKind, AclRule, Authentication, Authorization,
-    KafkaUser, KafkaUserSpec, SimpleAuthorization, TlsAuth,
-};
-use crate::crd::{Kafka, KafkaCondition, KafkaGrpcGateway, KafkaGrpcGatewayStatus};
 
 /// Container / Service port the gateway binds for Connect-RPC + health +
 /// webhooks + metrics. Matches the gateway binary's `--listen-addr` default
@@ -1205,15 +1214,15 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+
     use super::*;
     use crate::crd::grpc_gateway::{
         AllowedTargetSpec, DedupSpec, GatewayAuthzSpec, GatewayBearerSpec, GatewayTlsSpec,
         InboundWebhookSpec, KafkaGrpcGatewaySpec, OutboundSubscriptionSpec, SecretKeyRef,
         TelemetrySpec,
     };
-    use assert2::assert;
-    use assert2::check;
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 
     fn empty_spec() -> KafkaGrpcGatewaySpec {
         KafkaGrpcGatewaySpec {

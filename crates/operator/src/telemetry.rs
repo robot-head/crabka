@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use prometheus_client::encoding::EncodeLabelSet;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::metrics::histogram::Histogram;
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    encoding::EncodeLabelSet,
+    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
+    registry::Registry,
+};
 use tokio::sync::Mutex;
 
 /// Shared Prometheus registry. Wrap in `Arc<Mutex<…>>` because
@@ -148,9 +147,11 @@ impl ControllerMetrics {
 /// Initialise the global `tracing` subscriber. Idempotent: silently
 /// no-ops if a global subscriber is already installed (e.g., in tests
 /// that call this more than once across a process).
+// cargo-mutants: installs a process-global subscriber via idempotent try_init;
+// no return value or per-call observable effect to assert.
+#[cfg_attr(test, mutants::skip)]
 pub fn init_tracing(filter: &str) {
-    use tracing_subscriber::layer::SubscriberExt as _;
-    use tracing_subscriber::util::SubscriberInitExt as _;
+    use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
     let env = tracing_subscriber::EnvFilter::try_new(filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -178,8 +179,9 @@ pub fn new_registry_with_metrics() -> (Registry, ControllerMetrics) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn registry_has_prefix() {

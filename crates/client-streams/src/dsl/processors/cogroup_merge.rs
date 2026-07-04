@@ -6,8 +6,10 @@ use std::marker::PhantomData;
 
 use async_trait::async_trait;
 
-use crate::processor::api::{Processor, ProcessorContext};
-use crate::processor::record::Record;
+use crate::processor::{
+    api::{Processor, ProcessorContext},
+    record::Record,
+};
 
 /// Variance-neutral marker.
 type Marker<T> = PhantomData<fn() -> T>;
@@ -35,8 +37,10 @@ mod tests {
     use assert2::check;
 
     use super::*;
-    use crate::processor::erased::{Dispatch, ErasedRecord};
-    use crate::processor::record::RecordContext;
+    use crate::processor::{
+        erased::{Dispatch, ErasedRecord},
+        record::RecordContext,
+    };
 
     #[tokio::test]
     async fn passthrough_forwards_record_unchanged() {

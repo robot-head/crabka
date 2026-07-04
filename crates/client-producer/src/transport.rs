@@ -12,11 +12,11 @@
 //! [`ClientTransport`] is the thin production adapter over a real `Client`.
 
 use async_trait::async_trait;
-
 use crabka_client_core::{Client, ClientError};
-use crabka_protocol::owned::metadata_response::MetadataResponse;
-use crabka_protocol::owned::produce_request::ProduceRequest;
-use crabka_protocol::owned::produce_response::ProduceResponse;
+use crabka_protocol::owned::{
+    metadata_response::MetadataResponse, produce_request::ProduceRequest,
+    produce_response::ProduceResponse,
+};
 
 /// The broker-facing operations the sender performs.
 ///
@@ -90,25 +90,31 @@ impl ProduceTransport for ClientTransport {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU16, AtomicUsize, Ordering},
+    };
 
     use bytes::BytesMut;
     use crabka_client_core::{Client, MockBroker};
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_request;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-    use crabka_protocol::owned::metadata_request;
-    use crabka_protocol::owned::metadata_response::{
-        FLEXIBLE_MIN as META_FLEXIBLE_MIN, MetadataResponse, MetadataResponseBroker,
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            metadata_request,
+            metadata_response::{
+                FLEXIBLE_MIN as META_FLEXIBLE_MIN, MetadataResponse, MetadataResponseBroker,
+            },
+            produce_request::ProduceRequest,
+            produce_response::{
+                self, FLEXIBLE_MIN as PROD_FLEXIBLE_MIN, PartitionProduceResponse, ProduceResponse,
+                TopicProduceResponse,
+            },
+        },
     };
-    use crabka_protocol::owned::produce_request::ProduceRequest;
-    use crabka_protocol::owned::produce_response::{
-        self, FLEXIBLE_MIN as PROD_FLEXIBLE_MIN, PartitionProduceResponse, ProduceResponse,
-        TopicProduceResponse,
-    };
+
+    use super::*;
 
     /// `ApiVersionsResponse` (header v0) advertising `ApiVersions`, `Metadata`,
     /// and Produce so the client can negotiate all three against the mock.

@@ -3,9 +3,11 @@
 //! on a bounded background task; overflow is dropped + counted so the request
 //! path never blocks on a slow collector.
 
-use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value::Value};
-use opentelemetry_proto::tonic::metrics::v1::MetricsData;
+use opentelemetry_proto::tonic::{
+    collector::metrics::v1::ExportMetricsServiceRequest,
+    common::v1::{AnyValue, KeyValue, any_value::Value},
+    metrics::v1::MetricsData,
+};
 use tokio::sync::mpsc;
 
 /// Build an OTLP export request from decoded metrics, tagging every resource
@@ -84,8 +86,9 @@ impl OtlpForwarder {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use opentelemetry_proto::tonic::metrics::v1::{MetricsData, ResourceMetrics};
+
+    use super::*;
 
     #[test]
     fn wraps_and_injects_instance_id() {

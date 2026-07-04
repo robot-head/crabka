@@ -16,6 +16,7 @@ categories = ["development-tools::debugging"]
 workspace = true
 
 [dependencies]
+derive_more = { workspace = true }
 ring = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -27,6 +28,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
 crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
+crabka-ids = { version = "0.3.8", path = "../ids" }
 clap = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]

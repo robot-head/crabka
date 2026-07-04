@@ -8,8 +8,7 @@ use crabka_blockstore::{
     SpanEvent, SpanKind, SpanLink, SpanRow, StatusCode, encode_span_rows_with_promoted_attrs,
 };
 
-use super::nested_set::assign_nested_set;
-use super::{AttrValue, KeyValue, Span};
+use super::{AttrValue, KeyValue, Span, nested_set::assign_nested_set};
 use crate::error::TracesError;
 
 pub const RESOURCE_ATTR_PREFIX: &str = "__resource.";

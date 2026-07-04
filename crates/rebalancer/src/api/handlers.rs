@@ -13,18 +13,19 @@
 use std::sync::Arc;
 
 use axum::Extension;
-use connectrpc_axum::message::error::Code;
-use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
+use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse, error::Code};
 use tokio_util::sync::CancellationToken;
 
-use crate::executor::state::{InFlightFile, Phase};
-use crate::executor::{Execution, ExecutionHandle};
-use crate::ingest::SharedSnapshot;
-use crate::metrics::RebalancerMetrics;
-use crate::model::proposal::ProposalStatus;
-use crate::model::{ClusterState, ProposalStore};
-use crate::optimizer;
-use crate::pb;
+use crate::{
+    executor::{
+        Execution, ExecutionHandle,
+        state::{InFlightFile, Phase},
+    },
+    ingest::SharedSnapshot,
+    metrics::RebalancerMetrics,
+    model::{ClusterState, ProposalStore, proposal::ProposalStatus},
+    optimizer, pb,
+};
 
 /// State shared across all RPC handlers. Wired into axum via an
 /// `Extension(Arc<AppState>)` layer applied to the generated router.
@@ -507,20 +508,25 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::capacity::BrokerCapacities;
-    use crate::executor::phases::{ClientFacade, ConfigOp, PhaseError};
-    use crate::executor::throttle::ThrottleTargets;
-    use crate::executor::{ExecutorConfig, ExecutorState};
-    use crate::goals::GoalContext;
-    use crate::ingest::new_shared_snapshot;
-    use crate::metrics::RebalancerMetrics;
-    use crate::model::proposal::{Movement, Proposal, ProposalSummary};
-    use crate::scraper::UsageStore;
+    use std::{sync::Arc, time::Duration};
+
     use assert2::{assert, check};
     use async_trait::async_trait;
-    use std::sync::Arc;
-    use std::time::Duration;
+
+    use super::*;
+    use crate::{
+        capacity::BrokerCapacities,
+        executor::{
+            ExecutorConfig, ExecutorState,
+            phases::{ClientFacade, ConfigOp, PhaseError},
+            throttle::ThrottleTargets,
+        },
+        goals::GoalContext,
+        ingest::new_shared_snapshot,
+        metrics::RebalancerMetrics,
+        model::proposal::{Movement, Proposal, ProposalSummary},
+        scraper::UsageStore,
+    };
 
     /// Local no-op `ClientFacade` for handler-level unit tests. We don't
     /// actually run the executor here — the handler tests only need a
@@ -859,8 +865,9 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_execution_id_mismatch_returns_failed_precondition() {
-        use crate::executor::ExecutionHandle;
         use tokio_util::sync::CancellationToken;
+
+        use crate::executor::ExecutionHandle;
 
         let dir = tempfile::tempdir().unwrap();
         let state = build_app_state(dir.path());

@@ -108,9 +108,10 @@ pub fn lookup_ip_quota_with_key(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
+
+    use super::*;
 
     fn img_with(records: Vec<ClientQuotaRecord>) -> MetadataImage {
         let mut img = MetadataImage::new(uuid::Uuid::nil());

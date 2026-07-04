@@ -12,10 +12,14 @@ use std::marker::PhantomData;
 
 use async_trait::async_trait;
 
-use crate::dsl::processors::change::Change;
-use crate::processor::api::{Processor, ProcessorContext};
-use crate::processor::record::Record;
-use crate::store::suppress_bufval::SuppressRecordCtx;
+use crate::{
+    dsl::processors::change::Change,
+    processor::{
+        api::{Processor, ProcessorContext},
+        record::Record,
+    },
+    store::suppress_bufval::SuppressRecordCtx,
+};
 
 type Marker<T> = PhantomData<fn() -> T>;
 
@@ -164,13 +168,16 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use crate::dsl::windows::{TimeWindowedSerde, Window, Windowed};
-    use crate::processor::api::ProcessorContext;
-    use crate::processor::erased::{Dispatch, ErasedRecord};
-    use crate::processor::record::{Record, RecordContext};
-    use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::store::registry::StoreRegistry;
-    use crate::store::suppress_store::SuppressBytesStore;
+    use crate::{
+        dsl::windows::{TimeWindowedSerde, Window, Windowed},
+        processor::{
+            api::ProcessorContext,
+            erased::{Dispatch, ErasedRecord},
+            record::{Record, RecordContext},
+            serde::{I64Serde, StringSerde},
+        },
+        store::{registry::StoreRegistry, suppress_store::SuppressBytesStore},
+    };
 
     fn windowed(key: &str, start: i64, end: i64) -> Windowed<String> {
         Windowed {

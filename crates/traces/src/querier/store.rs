@@ -1,19 +1,22 @@
 //! `SpanStore` implementation over cold span blocks plus the live tier.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use arc_swap::ArcSwap;
-
-use arrow::array::DictionaryArray;
-use arrow::array::{
-    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, FixedSizeBinaryBuilder, Float64Array,
-    Int32Array, Int64Array, Int64Builder, LargeStringArray, ListArray, StringArray, StringBuilder,
-    StringViewArray, StructArray, UInt32Array,
+use arrow::{
+    array::{
+        Array, ArrayRef, BooleanArray, DictionaryArray, FixedSizeBinaryArray,
+        FixedSizeBinaryBuilder, Float64Array, Int32Array, Int64Array, Int64Builder,
+        LargeStringArray, ListArray, StringArray, StringBuilder, StringViewArray, StructArray,
+        UInt32Array,
+    },
+    compute::{cast, concat_batches, filter_record_batch, take},
+    datatypes::{DataType, Field, Int32Type, Schema, SchemaRef},
+    record_batch::RecordBatch,
 };
-use arrow::compute::{cast, concat_batches, filter_record_batch, take};
-use arrow::datatypes::{DataType, Field, Int32Type, Schema, SchemaRef};
-use arrow::record_batch::RecordBatch;
 use crabka_blockstore::{
     BlockIndex, BlockStore, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
     SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_EVENTS, SCOL_LINKS, TraceIndex,
@@ -29,11 +32,9 @@ use crabka_traceql::{
     ScanResult, ScopedTag, SpanMatcher, SpanRef, SpanStore, TagScope, TraceSpans, TraceqlError,
     TypedValue, span_schema,
 };
-use datafusion::catalog::MemTable;
-use datafusion::prelude::SessionContext;
+use datafusion::{catalog::MemTable, prelude::SessionContext};
 
-use crate::querier::live::LiveTier;
-use crate::span::batch::RESOURCE_ATTR_PREFIX;
+use crate::{querier::live::LiveTier, span::batch::RESOURCE_ATTR_PREFIX};
 
 const INTRINSIC_TAGS: &[&str] = &[
     "span:childCount",
@@ -2565,11 +2566,14 @@ fn block_err(err: &crabka_blockstore::BlockStoreError) -> TraceqlError {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use arrow::array::{
-        ArrayRef, FixedSizeBinaryBuilder, Int32Array, Int64Array, StringArray,
-        StringDictionaryBuilder,
+    use arc_swap::ArcSwap;
+    use arrow::{
+        array::{
+            ArrayRef, FixedSizeBinaryBuilder, Int32Array, Int64Array, StringArray,
+            StringDictionaryBuilder,
+        },
+        datatypes::{DataType, Field, Int32Type, Schema, SchemaRef},
     };
-    use arrow::datatypes::{DataType, Field, Int32Type, Schema, SchemaRef};
     use assert2::{assert, check};
     use crabka_blockstore::{
         AttrValue as BlockAttrValue, BlockWriter, NestedSet as BlockNestedSet, PromotedSpanAttr,
@@ -2581,22 +2585,22 @@ mod tests {
         COL_CHILD_COUNT, COL_INSTRUMENTATION_NAME, COL_INSTRUMENTATION_VERSION, EngineOpts,
         EventRef, LinkRef, ScanJob, ScanOptions, TraceqlEngine,
     };
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use parquet::arrow::AsyncArrowWriter;
-    use parquet::arrow::async_writer::ParquetObjectWriter;
-    use parquet::file::properties::WriterProperties;
+    use object_store::{memory::InMemory, path::Path};
+    use parquet::{
+        arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter},
+        file::properties::WriterProperties,
+    };
     use url::Url;
 
-    use crate::querier::live::LiveSource;
-    use crate::span::{
-        AttrValue as SpanAttrValue, EventRecord, KeyValue, LinkRecord, Span, SpanKind, StatusCode,
-        batch::{span_batch, span_batch_with_promoted_attrs},
-    };
-
-    use arc_swap::ArcSwap;
-
     use super::*;
+    use crate::{
+        querier::live::LiveSource,
+        span::{
+            AttrValue as SpanAttrValue, EventRecord, KeyValue, LinkRecord, Span, SpanKind,
+            StatusCode,
+            batch::{span_batch, span_batch_with_promoted_attrs},
+        },
+    };
 
     fn shared(index: TraceIndex) -> SharedTraceIndex {
         Arc::new(ArcSwap::from_pointee(index))

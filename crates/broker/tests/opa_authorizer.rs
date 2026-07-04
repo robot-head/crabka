@@ -27,34 +27,36 @@
 //! tests (the listener bring-up works on Windows, but keeping the gate
 //! uniform avoids one-off CI matrix surprises).
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::authorizer::opa::OpaAuthorizer;
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_broker::{
+    Broker, BrokerConfig, BrokerHandle, authorizer::opa::OpaAuthorizer, config::ListenerSpec,
 };
-use crabka_protocol::owned::produce_response::ProduceResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::records::{Record, RecordBatch};
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        api_versions_response::ApiVersionsResponse,
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        produce_response::ProduceResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+    records::{Record, RecordBatch},
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use wiremock::matchers::method;
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
+use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
 // Local mirror of `crabka_broker::codes::TOPIC_AUTHORIZATION_FAILED`,
 // kept inline because the `codes` module is crate-private. The value

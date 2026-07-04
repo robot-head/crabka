@@ -3,8 +3,7 @@
 //! Mirrors the broker's inter-broker credential + TLS shapes so the
 //! public clients and the inter-broker dialer negotiate the same way.
 
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use crabka_security::ListenerProtocol;
 use rustls_pki_types::pem::PemObject;
@@ -126,9 +125,10 @@ impl ClientSecurity {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_security::ListenerProtocol;
+
+    use super::*;
 
     #[test]
     fn plaintext_security_has_no_tls_or_sasl() {

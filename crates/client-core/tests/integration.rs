@@ -44,16 +44,15 @@
 // Skip compilation on Windows runners where testcontainers + Docker reliability
 // is poor. On Linux CI the tests run via the `client-core-integration` job.
 
-use assert2::{assert, check};
 use std::time::Duration;
 
+use assert2::{assert, check};
+use crabka_client_core::{Client, ClientError};
+use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 use testcontainers::runners::AsyncRunner;
 // `testcontainers_modules::kafka` re-exports `confluent::*`, so the bare
 // `Kafka` here is the Confluent module's container type.
 use testcontainers_modules::kafka::{KAFKA_PORT, Kafka};
-
-use crabka_client_core::{Client, ClientError};
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 
 /// Maximum attempts for the initial `ApiVersions` round-trip while the broker
 /// is still warming up. With a 1s pause between attempts this gives ~15s of
@@ -189,8 +188,10 @@ async fn metadata_against_real_broker() {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn create_then_delete_topic() {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        delete_topics_request::{DeleteTopicState, DeleteTopicsRequest},
+    };
 
     init_tracing();
     let (kafka, bootstrap) = start_kafka().await;

@@ -3,16 +3,17 @@
 
 use std::sync::Arc;
 
-use arrow::array::{DictionaryArray, FixedSizeBinaryArray, Int64Array, StringArray};
-use arrow::datatypes::{DataType, Int32Type};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{DictionaryArray, FixedSizeBinaryArray, Int64Array, StringArray},
+    datatypes::{DataType, Int32Type},
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::{
     AttrValue, BlockWriter, NestedSet, PromotedSpanAttr, SpanAttr, SpanKind, SpanRow, StatusCode,
     SummaryColumns, encode_span_rows, encode_span_rows_with_promoted_attrs, read_block,
     span_block_decl, span_block_schema, span_block_schema_with_promoted_attrs, validate_against,
 };
-use object_store::ObjectStore;
-use object_store::memory::InMemory;
+use object_store::{ObjectStore, memory::InMemory};
 
 fn row(trace: u8, span: u8, left: i32) -> SpanRow {
     SpanRow {

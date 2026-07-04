@@ -3,22 +3,25 @@
 //! Boots a Crabka broker + multiple Rust consumers using
 //! `Assignor::CooperativeSticky` and exercises phase-1/phase-2 rebalances.
 
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
+
 use assert2::assert;
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
-
 use bytes::Bytes;
-use tempfile::TempDir;
-
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{Assignor, AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::records::{Record, RecordBatch};
+use tempfile::TempDir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cooperative_three_member_partial_revocation() {

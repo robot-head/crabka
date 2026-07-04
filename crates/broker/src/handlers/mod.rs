@@ -10,7 +10,6 @@
 #![allow(dead_code)] // handler modules are registered as each API is enabled.
 
 use bytes::Bytes;
-
 use crabka_protocol::api_key::ApiKey;
 
 use crate::error::BrokerError;
@@ -60,8 +59,7 @@ impl HandlerTable {
 }
 
 pub(crate) mod context;
-pub(crate) use context::RequestContext;
-pub(crate) use context::TelemetryContext;
+pub(crate) use context::{RequestContext, TelemetryContext};
 
 pub(crate) mod acl_wire;
 // KIP-853 dynamic-quorum reconfiguration (api_keys 80/81/82).

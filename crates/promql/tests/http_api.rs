@@ -1,7 +1,9 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
 use crabka_blockstore::Labels;
 use crabka_metrics::{BucketSpan, Limits, NativeHistogram, OverridesProvider, ResetHint, wire::pb};
 use crabka_promql::{

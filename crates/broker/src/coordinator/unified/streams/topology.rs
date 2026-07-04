@@ -19,25 +19,24 @@
 //! not-yet-satisfied conditions as a status list ([`validate_topology`] plus
 //! the still-missing internal topics).
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use crabka_metadata::{
-    MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
+    MetadataImage, MetadataRecord, NodeId, PartitionRecord, TopicConfigRecord, TopicRecord,
 };
+// Alias the request wire module for readability.
+use crabka_protocol::owned::streams_group_heartbeat_request as wire;
 use crabka_raft::RaftError;
 use uuid::Uuid;
-
-use crate::error::BrokerError;
-use crate::metadata_source::MetadataSource;
 
 use super::persistence::{
     StoredCopartitionGroup, StoredSubtopology, StoredTopicInfo, StreamsGroupPartitionMetadataValue,
     StreamsGroupTopologyValue, StreamsTopicMeta,
 };
-
-// Alias the request wire module for readability.
-use crabka_protocol::owned::streams_group_heartbeat_request as wire;
+use crate::{error::BrokerError, metadata_source::MetadataSource};
 
 // ---------------------------------------------------------------------------
 // A. Request -> stored topology conversion
@@ -417,7 +416,7 @@ pub async fn ensure_internal_topics(
     let image = controller.current_image();
 
     // Round-robin replica assignment needs the registered broker set.
-    let mut brokers: Vec<u64> = image.brokers().map(|b| b.node_id).collect();
+    let mut brokers: Vec<NodeId> = image.brokers().map(|b| b.node_id).collect();
     brokers.sort_unstable();
 
     for spec in specs {
@@ -465,7 +464,7 @@ pub async fn ensure_internal_topics(
                 leader: replicas[0],
                 replicas: replicas.clone(),
                 isr: replicas,
-                leader_epoch: 0,
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -504,8 +503,9 @@ pub async fn ensure_internal_topics(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn topic_record(name: &str, id: u8, partitions: i32) -> TopicRecord {
         TopicRecord {
@@ -526,10 +526,10 @@ mod tests {
                 image.apply(&MetadataRecord::V1Partition(PartitionRecord {
                     topic: name.to_string(),
                     partition: p,
-                    leader: 1,
-                    replicas: vec![1],
-                    isr: vec![1],
-                    leader_epoch: 0,
+                    leader: crabka_audit::NodeId(1),
+                    replicas: vec![crabka_audit::NodeId(1)],
+                    isr: vec![crabka_audit::NodeId(1)],
+                    leader_epoch: crabka_metadata::LeaderEpoch(0),
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![],
@@ -554,8 +554,9 @@ mod tests {
 
     #[test]
     fn to_stored_topology_maps_all_fields() {
-        use crabka_protocol::owned::common::streams_group_heartbeat_request::key_value::KeyValue;
-        use crabka_protocol::owned::common::streams_group_heartbeat_request::topic_info::TopicInfo;
+        use crabka_protocol::owned::common::streams_group_heartbeat_request::{
+            key_value::KeyValue, topic_info::TopicInfo,
+        };
 
         let wire_topology = wire::Topology {
             epoch: 9,

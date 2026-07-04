@@ -13,14 +13,17 @@ use assert2::assert;
 mod support;
 
 use bytes::{Bytes, BytesMut};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_ids::Offset;
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    primitives::uuid::Uuid,
+    records::RecordsPayload,
 };
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::records::RecordsPayload;
 use crabka_records_legacy::{Magic, ParsedRecord, encode_flat_message_set};
 
 async fn create_topic(p: &support::InProcess, name: &str) {
@@ -67,7 +70,7 @@ fn build_v1_message_set(values: &[&[u8]]) -> Bytes {
         .iter()
         .enumerate()
         .map(|(i, v)| ParsedRecord {
-            offset: i64::try_from(i).expect("offset fits in i64"),
+            offset: Offset(i64::try_from(i).expect("offset fits in i64")),
             timestamp: Some(1_700_000_000 + i64::try_from(i).expect("ts offset fits in i64")),
             key: None,
             value: Some(Bytes::copy_from_slice(v)),

@@ -10,18 +10,24 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use datafusion::error::Result as DfResult;
-use datafusion::execution::context::{QueryPlanner, SessionState};
-use datafusion::execution::session_state::SessionStateBuilder;
-use datafusion::logical_expr::{LogicalPlan, UserDefinedLogicalNode};
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner};
-use datafusion::prelude::SessionContext;
+use datafusion::{
+    error::Result as DfResult,
+    execution::{
+        context::{QueryPlanner, SessionState},
+        session_state::SessionStateBuilder,
+    },
+    logical_expr::{LogicalPlan, UserDefinedLogicalNode},
+    physical_plan::ExecutionPlan,
+    physical_planner::{DefaultPhysicalPlanner, ExtensionPlanner, PhysicalPlanner},
+    prelude::SessionContext,
+};
 
-use super::instant_manipulate::{InstantManipulate, InstantManipulateExec};
-use super::normalize::{SeriesNormalize, SeriesNormalizeExec};
-use super::range_manipulate::{RangeManipulate, RangeManipulateExec};
-use super::series_divide::{SeriesDivide, SeriesDivideExec};
+use super::{
+    instant_manipulate::{InstantManipulate, InstantManipulateExec},
+    normalize::{SeriesNormalize, SeriesNormalizeExec},
+    range_manipulate::{RangeManipulate, RangeManipulateExec},
+    series_divide::{SeriesDivide, SeriesDivideExec},
+};
 use crate::functions::{
     register_aggregate_udafs, register_over_time_udfs, register_rate_udfs,
     register_scalar_math_udfs,
@@ -153,17 +159,22 @@ pub fn prom_session_context() -> SessionContext {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Array, Float64Array, Int64Array, StringArray};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
+    use arrow::{
+        array::{Array, Float64Array, Int64Array, StringArray},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
     use assert2::assert;
-    use datafusion::catalog::MemTable;
-    use datafusion::logical_expr::{Extension, LogicalPlan};
+    use datafusion::{
+        catalog::MemTable,
+        logical_expr::{Extension, LogicalPlan},
+    };
 
     use super::*;
-    use crate::extension::instant_manipulate::InstantManipulate;
-    use crate::extension::normalize::SeriesNormalize;
-    use crate::extension::series_divide::SeriesDivide;
+    use crate::extension::{
+        instant_manipulate::InstantManipulate, normalize::SeriesNormalize,
+        series_divide::SeriesDivide,
+    };
 
     #[tokio::test]
     async fn execute_logical_plan_runs_divide_normalize_instant_chain() {

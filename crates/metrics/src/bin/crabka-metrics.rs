@@ -2,24 +2,28 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
 use clap::{Parser, ValueEnum};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
-use crabka_metrics::distributor::{
-    DistributorState, HA_TRACKER_TOPIC, KafkaHaElectionSink, KafkaSink,
-    run_ha_election_consumer_loop, serve,
+use crabka_metrics::{
+    MetricsCompactorConfig,
+    distributor::{
+        DistributorState, HA_TRACKER_TOPIC, KafkaHaElectionSink, KafkaSink,
+        run_ha_election_consumer_loop, serve,
+    },
+    metrics::ServiceMetrics,
+    run_compactor_consumer_loop,
 };
-use crabka_metrics::metrics::ServiceMetrics;
-use crabka_metrics::{MetricsCompactorConfig, run_compactor_consumer_loop};
 use crabka_telemetry::OtlpConfig;
 use object_store::ObjectStore;
 use serde_json::json;
@@ -407,8 +411,7 @@ fn unix_time_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
-    use axum::body::Body;
-    use axum::http::Request;
+    use axum::{body::Body, http::Request};
     use clap::Parser;
     use tower::ServiceExt;
 

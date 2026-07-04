@@ -12,9 +12,8 @@
 //! reverse-`From` projections; the by-id edge model is a minimal typed OTLP-JSON
 //! mirror (`TraceByIdResponseJson`) shaped to the querier's v2 body.
 
-use serde::{Deserialize, Serialize};
-
 use crabka_traceql::{AttrValue, SpanRef, SpanSet, TraceResult};
+use serde::{Deserialize, Serialize};
 
 /// The `/api/search` response: matched traces + the job-accounting metrics.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

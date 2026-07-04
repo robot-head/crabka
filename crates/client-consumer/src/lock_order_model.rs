@@ -414,8 +414,9 @@ fn run_model(programs: Vec<(&'static str, Vec<Op>)>) -> stateright::CheckerBuild
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     /// MAIN RESULT: the real classic-consumer lock protocol (poll task +
     /// coordinator task + commit task, each running its extracted acquire/

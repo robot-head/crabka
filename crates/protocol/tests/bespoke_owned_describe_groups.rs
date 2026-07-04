@@ -4,13 +4,15 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::owned::describe_groups_request::{
-    DescribeGroupsRequest, MAX_VERSION, MIN_VERSION,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_groups_request::{DescribeGroupsRequest, MAX_VERSION, MIN_VERSION},
+        describe_groups_response::{
+            DescribeGroupsResponse, MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN,
+        },
+    },
 };
-use crabka_protocol::owned::describe_groups_response::{
-    DescribeGroupsResponse, MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN,
-};
-use crabka_protocol::{Decode, Encode};
 
 #[test]
 fn owned_describe_groups_request_roundtrip_default_min_version() {

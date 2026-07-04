@@ -1,4 +1,4 @@
-use crate::PgLsn;
+use crate::{PgLsn, ids::TransactionId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityKey {
@@ -21,7 +21,7 @@ pub struct EntityDifference {
     pub before: Vec<ColumnValue>,
     pub after: Vec<ColumnValue>,
     pub lsn: PgLsn,
-    pub txid: Option<i64>,
+    pub txid: Option<TransactionId>,
     pub commit_timestamp_ms: Option<i64>,
     pub schema: TableSchema,
 }

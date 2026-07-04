@@ -49,33 +49,33 @@
 //! tuple). No public test-support surface was added — the helpers are
 //! inline so they don't leak into other tests.
 
-use assert2::{assert, check};
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use assert2::{assert, check};
 use base64::Engine;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::create_delegation_token_request::{
-    CreatableRenewers, CreateDelegationTokenRequest,
+use crabka_broker::{Broker, BrokerConfig, BrokerHandle, config::ListenerSpec};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        api_versions_response::ApiVersionsResponse,
+        create_delegation_token_request::{CreatableRenewers, CreateDelegationTokenRequest},
+        create_delegation_token_response::CreateDelegationTokenResponse,
+        describe_delegation_token_request::{
+            DescribeDelegationTokenOwner, DescribeDelegationTokenRequest,
+        },
+        describe_delegation_token_response::DescribeDelegationTokenResponse,
+        expire_delegation_token_request::ExpireDelegationTokenRequest,
+        expire_delegation_token_response::ExpireDelegationTokenResponse,
+        renew_delegation_token_request::RenewDelegationTokenRequest,
+        renew_delegation_token_response::RenewDelegationTokenResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
 };
-use crabka_protocol::owned::create_delegation_token_response::CreateDelegationTokenResponse;
-use crabka_protocol::owned::describe_delegation_token_request::{
-    DescribeDelegationTokenOwner, DescribeDelegationTokenRequest,
-};
-use crabka_protocol::owned::describe_delegation_token_response::DescribeDelegationTokenResponse;
-use crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest;
-use crabka_protocol::owned::expire_delegation_token_response::ExpireDelegationTokenResponse;
-use crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest;
-use crabka_protocol::owned::renew_delegation_token_response::RenewDelegationTokenResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
 use crabka_security::{ListenerProtocol, SaslMechanism, SecretBytes};
 
 /// Canonical Kafka error code mirroring `crabka_broker::codes::
@@ -87,8 +87,10 @@ const DELEGATION_TOKEN_REQUEST_NOT_ALLOWED: i16 = 64;
 /// DELEGATION_TOKEN_AUTHORIZATION_FAILED`. Same kept-in-sync rule.
 const DELEGATION_TOKEN_AUTHORIZATION_FAILED: i16 = 65;
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire framing (length-prefixed request/response). Same shape as

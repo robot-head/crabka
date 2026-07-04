@@ -14,12 +14,15 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crabka_ids::LeaderEpoch;
 use uuid::Uuid;
 
-use crate::error::RemoteStorageError;
-use crate::metadata::{
-    RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState,
-    RemotePartitionDeleteState,
+use crate::{
+    error::RemoteStorageError,
+    metadata::{
+        RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState,
+        RemotePartitionDeleteState,
+    },
 };
 
 #[derive(Debug, Default)]
@@ -29,7 +32,7 @@ pub(crate) struct RemoteLogMetadataCache {
     /// For each leader epoch, a navigable map from the offset that epoch
     /// starts contributing → the finished segment id. Only finished
     /// (readable) segments appear here.
-    epoch_to_offset_to_id: HashMap<i32, BTreeMap<i64, Uuid>>,
+    epoch_to_offset_to_id: HashMap<LeaderEpoch, BTreeMap<i64, Uuid>>,
     /// Partition-delete lifecycle state, once marked.
     delete_state: Option<RemotePartitionDeleteState>,
 }
@@ -114,7 +117,7 @@ impl RemoteLogMetadataCache {
 
     pub(crate) fn segment_for(
         &self,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
         offset: i64,
     ) -> Option<RemoteLogSegmentMetadata> {
         let map = self.epoch_to_offset_to_id.get(&leader_epoch)?;
@@ -129,7 +132,7 @@ impl RemoteLogMetadataCache {
         }
     }
 
-    pub(crate) fn highest_offset_for_epoch(&self, leader_epoch: i32) -> Option<i64> {
+    pub(crate) fn highest_offset_for_epoch(&self, leader_epoch: LeaderEpoch) -> Option<i64> {
         let map = self.epoch_to_offset_to_id.get(&leader_epoch)?;
         map.values()
             .filter_map(|id| self.id_to_metadata.get(id))
@@ -144,7 +147,7 @@ impl RemoteLogMetadataCache {
         out
     }
 
-    pub(crate) fn list_by_epoch(&self, leader_epoch: i32) -> Vec<RemoteLogSegmentMetadata> {
+    pub(crate) fn list_by_epoch(&self, leader_epoch: LeaderEpoch) -> Vec<RemoteLogSegmentMetadata> {
         let mut out: Vec<RemoteLogSegmentMetadata> = self
             .id_to_metadata
             .values()
@@ -209,10 +212,10 @@ fn sort_by_start_offset(segments: &mut [RemoteLogSegmentMetadata]) {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::metadata::{CustomMetadata, RemoteLogSegmentId, TopicIdPartition};
-    use assert2::assert;
-    use assert2::check;
 
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "t", 0)
@@ -228,7 +231,10 @@ mod tests {
             100,
             1024,
             RemoteLogSegmentState::CopySegmentStarted,
-            epochs.iter().copied().collect(),
+            epochs
+                .iter()
+                .map(|&(epoch, start)| (LeaderEpoch(epoch), start))
+                .collect(),
         )
         .unwrap()
     }
@@ -257,9 +263,14 @@ mod tests {
     fn started_segment_is_invisible_until_finished() {
         let mut c = RemoteLogMetadataCache::default();
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
-        assert!(c.segment_for(0, 50).is_none(), "started not yet readable");
+        assert!(
+            c.segment_for(LeaderEpoch(0), 50).is_none(),
+            "started not yet readable"
+        );
         c.update(&finish(10)).unwrap();
-        let got = c.segment_for(0, 50).expect("finished is readable");
+        let got = c
+            .segment_for(LeaderEpoch(0), 50)
+            .expect("finished is readable");
         assert!(got.remote_log_segment_id().id == Uuid::from_u128(10));
     }
 
@@ -279,7 +290,7 @@ mod tests {
             (200, None),
         ] {
             check!(
-                c.segment_for(0, offset)
+                c.segment_for(LeaderEpoch(0), offset)
                     .map(|s| s.remote_log_segment_id().id)
                     == want,
                 "offset={offset}"
@@ -293,12 +304,15 @@ mod tests {
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
         c.update(&finish(10)).unwrap();
         let listed_ids: Vec<Uuid> = c
-            .list_by_epoch(0)
+            .list_by_epoch(LeaderEpoch(0))
             .iter()
             .map(|s| s.remote_log_segment_id().id)
             .collect();
         assert!(listed_ids == [Uuid::from_u128(10)]);
-        assert!(c.list_by_epoch(7).is_empty(), "unknown epoch -> empty");
+        assert!(
+            c.list_by_epoch(LeaderEpoch(7)).is_empty(),
+            "unknown epoch -> empty"
+        );
     }
 
     #[test]
@@ -306,13 +320,13 @@ mod tests {
         let mut c = RemoteLogMetadataCache::default();
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
         c.update(&finish(10)).unwrap();
-        assert!(c.highest_offset_for_epoch(0) == Some(99));
+        assert!(c.highest_offset_for_epoch(LeaderEpoch(0)) == Some(99));
         // DeleteSegmentStarted deindexes the epoch slot (but the metadata is
         // still present until DeleteSegmentFinished). highest_offset_for_epoch
         // reads the epoch index directly, so it must now miss.
         c.update(&transition(10, RemoteLogSegmentState::DeleteSegmentStarted))
             .unwrap();
-        assert!(c.highest_offset_for_epoch(0).is_none());
+        assert!(c.highest_offset_for_epoch(LeaderEpoch(0)).is_none());
     }
 
     #[test]
@@ -327,18 +341,18 @@ mod tests {
 
         for (epoch, offset, want) in [
             // Epoch 0 lookups only see the first segment.
-            (0, 10, Some(Uuid::from_u128(10))),
+            (LeaderEpoch(0), 10, Some(Uuid::from_u128(10))),
             // Epoch 0 has no segment at 150.
-            (0, 150, None),
+            (LeaderEpoch(0), 150, None),
             // Epoch 1 floor lookup picks the right segment.
-            (1, 60, Some(Uuid::from_u128(10))),
-            (1, 150, Some(Uuid::from_u128(11))),
+            (LeaderEpoch(1), 60, Some(Uuid::from_u128(10))),
+            (LeaderEpoch(1), 150, Some(Uuid::from_u128(11))),
         ] {
             check!(
                 c.segment_for(epoch, offset)
                     .map(|s| s.remote_log_segment_id().id)
                     == want,
-                "epoch={epoch} offset={offset}"
+                "epoch={epoch:?} offset={offset}"
             );
         }
     }
@@ -350,8 +364,8 @@ mod tests {
         c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
         c.update(&finish(10)).unwrap();
         c.update(&finish(11)).unwrap();
-        assert!(c.highest_offset_for_epoch(0) == Some(199));
-        assert!(c.highest_offset_for_epoch(7) == None);
+        assert!(c.highest_offset_for_epoch(LeaderEpoch(0)) == Some(199));
+        assert!(c.highest_offset_for_epoch(LeaderEpoch(7)) == None);
     }
 
     #[test]
@@ -359,11 +373,14 @@ mod tests {
         let mut c = RemoteLogMetadataCache::default();
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
         c.update(&finish(10)).unwrap();
-        assert!(c.segment_for(0, 50).is_some());
+        assert!(c.segment_for(LeaderEpoch(0), 50).is_some());
 
         c.update(&transition(10, RemoteLogSegmentState::DeleteSegmentStarted))
             .unwrap();
-        assert!(c.segment_for(0, 50).is_none(), "delete-started hides it");
+        assert!(
+            c.segment_for(LeaderEpoch(0), 50).is_none(),
+            "delete-started hides it"
+        );
         assert!(
             c.list().len() == 1,
             "still tracked while delete in progress"
@@ -424,13 +441,13 @@ mod tests {
         // but still listed; delete_state survives.
         check!(
             seeded
-                .segment_for(0, 50)
+                .segment_for(LeaderEpoch(0), 50)
                 .unwrap()
                 .remote_log_segment_id()
                 .id
                 == Uuid::from_u128(10)
         );
-        check!(seeded.segment_for(0, 150).is_none());
+        check!(seeded.segment_for(LeaderEpoch(0), 150).is_none());
         check!(seeded.list().len() == 2);
         check!(seeded.delete_state() == Some(RemotePartitionDeleteState::DeletePartitionMarked));
     }

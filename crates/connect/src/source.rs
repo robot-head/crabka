@@ -3,8 +3,10 @@
 
 use async_trait::async_trait;
 
-use crate::error::ConnectError;
-use crate::record::{ConnectRecord, SourceOffset};
+use crate::{
+    error::ConnectError,
+    record::{ConnectRecord, SourceOffset},
+};
 
 /// A connector that pulls records out of an external system (a database change
 /// stream, a file tail, a queue) for production into Kafka.

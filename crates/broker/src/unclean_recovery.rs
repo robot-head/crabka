@@ -45,9 +45,7 @@ pub(crate) fn has_newer_leader(responses: &[ReplicaLogInfo], known_leader_epoch:
 // Unclean Recovery Manager (URM): the controller-side orchestrator.
 // ---------------------------------------------------------------------------
 
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use crabka_metadata::{MetadataRecord, PartitionRecord};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
@@ -55,9 +53,10 @@ use futures_util::FutureExt as _;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::warn;
 
-use crate::config_keys::RecoveryStrategy;
-use crate::heartbeat::controller_state::ControllerLivenessState;
-use crate::network::client::InterBrokerClient;
+use crate::{
+    config_keys::RecoveryStrategy, heartbeat::controller_state::ControllerLivenessState,
+    network::client::InterBrokerClient,
+};
 
 /// Aggressive recovery takes whatever responses arrive within this short
 /// window — it does not wait for slow/unreachable replicas.
@@ -207,7 +206,7 @@ impl UncleanRecoveryManager {
             return RecoveryOutcome::NotNeeded;
         };
         // If the current leader is alive, there's nothing to recover.
-        if self.liveness.is_alive(pr.leader).await {
+        if self.liveness.is_alive(pr.leader.0).await {
             return RecoveryOutcome::NotNeeded;
         }
         let known_epoch = pr.leader_epoch;
@@ -218,7 +217,7 @@ impl UncleanRecoveryManager {
         // Gather the surviving (alive) replicas to query.
         let mut alive: Vec<NodeId> = Vec::new();
         for &r in &pr.replicas {
-            if self.liveness.is_alive(r).await {
+            if self.liveness.is_alive(r.0).await {
                 alive.push(r);
             }
         }
@@ -233,7 +232,7 @@ impl UncleanRecoveryManager {
             let client = self.inter_broker_client.clone();
             let proto = self.listener_protocol;
             let partition = job.partition;
-            let my_id = i32::try_from(self.node_id).unwrap_or(-1);
+            let my_id = i32::try_from(self.node_id.0).unwrap_or(-1);
             futs.push(
                 async move {
                     query_replica(&client, proto, &host, port, my_id, topic_id, partition, r).await
@@ -248,7 +247,7 @@ impl UncleanRecoveryManager {
         };
         let collected: Vec<ReplicaLogInfo> = gather_responses(futs, deadline).await;
 
-        if has_newer_leader(&collected, known_epoch) {
+        if has_newer_leader(&collected, known_epoch.0) {
             return RecoveryOutcome::Stale;
         }
         let Some(winner) = select_best_replica(&collected) else {
@@ -262,7 +261,7 @@ impl UncleanRecoveryManager {
         let Some(pr) = image.partition(&job.topic, job.partition) else {
             return RecoveryOutcome::NotNeeded;
         };
-        if self.liveness.is_alive(pr.leader).await {
+        if self.liveness.is_alive(pr.leader.0).await {
             return RecoveryOutcome::NotNeeded;
         }
 
@@ -283,7 +282,7 @@ impl UncleanRecoveryManager {
             leader: winner,
             replicas: pr.replicas.clone(),
             isr: vec![winner],
-            leader_epoch: pr.leader_epoch + 1,
+            leader_epoch: pr.leader_epoch.next(),
             adding_replicas: pr.adding_replicas.clone(),
             removing_replicas: pr.removing_replicas.clone(),
             directories: pr.directories.clone(),
@@ -292,7 +291,7 @@ impl UncleanRecoveryManager {
         warn!(
             topic = %job.topic,
             partition = job.partition,
-            leader = winner,
+            leader = winner.0,
             "unclean recovery: elected most-complete-log replica (possible data loss)"
         );
         if let Err(e) = self
@@ -389,12 +388,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
 
-    fn ri(broker_id: NodeId, epoch: i32, leo: i64) -> ReplicaLogInfo {
+    use super::*;
+
+    fn ri(broker_id: u64, epoch: i32, leo: i64) -> ReplicaLogInfo {
         ReplicaLogInfo {
-            broker_id,
+            broker_id: NodeId(broker_id),
             last_written_leader_epoch: epoch,
             log_end_offset: leo,
             current_leader_epoch: epoch,
@@ -405,19 +405,19 @@ mod tests {
     fn picks_highest_epoch_then_offset() {
         // Broker 3 has a higher epoch even though broker 2 has a longer log.
         let r = [ri(2, 4, 100), ri(3, 5, 10)];
-        assert!(select_best_replica(&r) == Some(3));
+        assert!(select_best_replica(&r) == Some(NodeId(3)));
     }
 
     #[test]
     fn ties_on_epoch_break_by_offset() {
         let r = [ri(2, 5, 90), ri(3, 5, 120)];
-        assert!(select_best_replica(&r) == Some(3));
+        assert!(select_best_replica(&r) == Some(NodeId(3)));
     }
 
     #[test]
     fn ties_on_epoch_and_offset_break_by_lowest_broker_id() {
         let r = [ri(3, 5, 100), ri(1, 5, 100), ri(2, 5, 100)];
-        assert!(select_best_replica(&r) == Some(1));
+        assert!(select_best_replica(&r) == Some(NodeId(1)));
     }
 
     #[test]
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn newer_leader_detected() {
         let r = [ReplicaLogInfo {
-            broker_id: 2,
+            broker_id: NodeId(2),
             last_written_leader_epoch: 5,
             log_end_offset: 10,
             current_leader_epoch: 7,
@@ -440,13 +440,15 @@ mod tests {
 
 #[cfg(test)]
 mod urm_tests {
-    use super::*;
-    use assert2::assert;
     use std::time::Duration;
 
-    fn info(id: NodeId, leo: i64) -> ReplicaLogInfo {
+    use assert2::assert;
+
+    use super::*;
+
+    fn info(id: u64, leo: i64) -> ReplicaLogInfo {
         ReplicaLogInfo {
-            broker_id: id,
+            broker_id: NodeId(id),
             last_written_leader_epoch: 1,
             log_end_offset: leo,
             current_leader_epoch: 1,
@@ -462,7 +464,7 @@ mod urm_tests {
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_secs(5)).await;
         assert!(got.len() == 2);
-        assert!(select_best_replica(&got) == Some(2));
+        assert!(select_best_replica(&got) == Some(NodeId(2)));
     }
 
     #[tokio::test]
@@ -474,7 +476,7 @@ mod urm_tests {
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_millis(50)).await;
         assert!(got.len() == 1, "must return what arrived before the cap");
-        assert!(got[0].broker_id == 1);
+        assert!(got[0].broker_id == crabka_audit::NodeId(1));
     }
 
     #[tokio::test]
@@ -491,9 +493,8 @@ mod urm_tests {
 
 #[cfg(test)]
 mod run_recovery_tests {
-    use super::*;
-    use crate::heartbeat::controller_state::ControllerLivenessState;
-    use crate::metadata_source::MetadataSource;
+    use std::{collections::BTreeSet, net::SocketAddr};
+
     use assert2::assert;
     use crabka_metadata::{
         BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
@@ -502,10 +503,13 @@ mod run_recovery_tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
     use tokio::sync::watch;
     use uuid::Uuid;
+
+    use super::*;
+    use crate::{
+        heartbeat::controller_state::ControllerLivenessState, metadata_source::MetadataSource,
+    };
 
     /// Minimal `MetadataSource` for driving `run_recovery`'s control flow. Only
     /// `watch_leader`, `current_image`, and `submit_change` are exercised; the
@@ -517,8 +521,8 @@ mod run_recovery_tests {
     }
 
     impl MockSource {
-        fn new(leader: Option<NodeId>, image: MetadataImage) -> Self {
-            let (tx, rx) = watch::channel(leader);
+        fn new(leader: Option<u64>, image: MetadataImage) -> Self {
+            let (tx, rx) = watch::channel(leader.map(NodeId));
             Self {
                 leader_rx: rx,
                 _leader_tx: tx,
@@ -573,9 +577,9 @@ mod run_recovery_tests {
         }
     }
 
-    const NODE: NodeId = 10;
+    const NODE: u64 = 10;
 
-    fn image_with_partition(leader: NodeId, replicas: &[NodeId]) -> MetadataImage {
+    fn image_with_partition(leader: u64, replicas: &[u64]) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());
         img.apply(&MetadataRecord::V1Topic(TopicRecord {
             name: "t".into(),
@@ -586,10 +590,10 @@ mod run_recovery_tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader,
-            replicas: replicas.to_vec(),
-            isr: replicas.to_vec(),
-            leader_epoch: 5,
+            leader: NodeId(leader),
+            replicas: replicas.iter().copied().map(NodeId).collect(),
+            isr: replicas.iter().copied().map(NodeId).collect(),
+            leader_epoch: crabka_metadata::LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -598,10 +602,10 @@ mod run_recovery_tests {
         img
     }
 
-    fn register_broker(img: &mut MetadataImage, node_id: NodeId, host: &str, port: u16) {
+    fn register_broker(img: &mut MetadataImage, node_id: u64, host: &str, port: u16) {
         img.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
-                node_id,
+                node_id: NodeId(node_id),
                 broker_epoch: 0,
                 incarnation_id: uuid::Uuid::nil(),
                 host: host.into(),
@@ -612,7 +616,7 @@ mod run_recovery_tests {
         ));
     }
 
-    async fn liveness_with_alive(alive: &[NodeId]) -> Arc<ControllerLivenessState> {
+    async fn liveness_with_alive(alive: &[u64]) -> Arc<ControllerLivenessState> {
         let l = ControllerLivenessState::new(Duration::from_secs(10));
         for &n in alive {
             l.record_heartbeat(n).await;
@@ -627,7 +631,7 @@ mod run_recovery_tests {
         UncleanRecoveryManager {
             controller: Arc::new(source),
             liveness,
-            node_id: NODE,
+            node_id: NodeId(NODE),
             inter_broker_client: Arc::new(InterBrokerClient::new(None, None)),
             listener_protocol: crabka_security::ListenerProtocol::Plaintext,
             metrics: crate::metrics::BrokerMetrics::new(),

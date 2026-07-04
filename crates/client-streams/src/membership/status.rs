@@ -20,10 +20,11 @@ pub(crate) fn map_status(s: &Status) -> StreamsStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::membership::types::StreamsStatus;
     use assert2::check;
     use crabka_protocol::owned::common::streams_group_heartbeat_response::status::Status;
+
+    use super::*;
+    use crate::membership::types::StreamsStatus;
 
     fn s(code: i8, detail: &str) -> Status {
         Status {

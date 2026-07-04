@@ -1,17 +1,21 @@
 //! Metrics-generator service loop.
 
-use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::metricsgen::checkpoint::EdgeCheckpointStore;
-use crate::metricsgen::clock::Clock;
-use crate::metricsgen::config::MetricsGenConfig;
-use crate::metricsgen::processor::MetricsGenerator;
-use crate::metricsgen::series::SeriesPayload;
-use crate::metricsgen::sink::{RemoteWriteSink, SinkError, SpanSource};
+use crate::metricsgen::{
+    checkpoint::EdgeCheckpointStore,
+    clock::Clock,
+    config::MetricsGenConfig,
+    processor::MetricsGenerator,
+    series::SeriesPayload,
+    sink::{RemoteWriteSink, SinkError, SpanSource},
+};
 
 /// Wires the source, processors, sink, and clock for the metrics-generator role.
 pub struct MetricsGenService<Src, Snk>
@@ -253,11 +257,13 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
-    use crate::metricsgen::checkpoint::{EdgeCheckpointStore, InMemoryCheckpointStore};
-    use crate::metricsgen::clock::MockClock;
-    use crate::metricsgen::config::MetricsGenConfig;
-    use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
-    use crate::metricsgen::sink::{MockRemoteWriteSink, MockSpanSource};
+    use crate::metricsgen::{
+        checkpoint::{EdgeCheckpointStore, InMemoryCheckpointStore},
+        clock::MockClock,
+        config::MetricsGenConfig,
+        contract::{SpanKind, SpanRecord, StatusCode},
+        sink::{MockRemoteWriteSink, MockSpanSource},
+    };
 
     fn span(tenant: &str, kind: SpanKind, span_id: [u8; 8], parent: [u8; 8]) -> SpanRecord {
         SpanRecord {

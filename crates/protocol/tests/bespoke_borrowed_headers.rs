@@ -4,11 +4,13 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::borrowed::request_header::{MAX_VERSION, MIN_VERSION, RequestHeader};
-use crabka_protocol::borrowed::response_header::{
-    MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN, ResponseHeader,
+use crabka_protocol::{
+    DecodeBorrow, Encode, UnknownTaggedFields,
+    borrowed::{
+        request_header::{MAX_VERSION, MIN_VERSION, RequestHeader},
+        response_header::{MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN, ResponseHeader},
+    },
 };
-use crabka_protocol::{DecodeBorrow, Encode, UnknownTaggedFields};
 
 #[test]
 fn borrowed_request_header_min_version_specific_values() {

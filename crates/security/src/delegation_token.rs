@@ -43,8 +43,9 @@ pub fn compute_token_hmac(secret_key: &[u8], token_id: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn secret_bytes_accessors() {

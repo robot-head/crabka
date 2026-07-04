@@ -5,11 +5,11 @@
 
 use assert2::assert;
 use bytes::{Bytes, BytesMut};
-use crabka_protocol::owned::fetch_response::{
-    FetchResponse, FetchableTopicResponse, PartitionData,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::fetch_response::{FetchResponse, FetchableTopicResponse, PartitionData},
+    records::{Record, RecordBatch, RecordsPayload},
 };
-use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
-use crabka_protocol::{Decode, Encode};
 
 fn batch(base_offset: i64, value: &[u8]) -> RecordBatch {
     RecordBatch {

@@ -16,12 +16,11 @@
 
 use std::sync::Arc;
 
-use prometheus_client::encoding::EncodeLabelSet;
-use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
-use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::metrics::histogram::Histogram;
-use prometheus_client::registry::Registry;
+use prometheus_client::{
+    encoding::EncodeLabelSet,
+    metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
+    registry::Registry,
+};
 use tokio::sync::Mutex;
 
 /// Latency buckets (seconds) for the per-API `request_duration_seconds`
@@ -1093,8 +1092,9 @@ fn api_key_label_name(api_key: crate::handlers::ApiKeyCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[tokio::test]
     async fn registry_has_broker_prefix_and_all_metrics() {

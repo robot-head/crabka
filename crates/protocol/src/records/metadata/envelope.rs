@@ -56,8 +56,9 @@ pub fn decode_value_header<B: Buf>(buf: &mut B) -> Result<ValueHeader, EnvelopeE
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn frame_zero_apikey_apiversion_roundtrip() {

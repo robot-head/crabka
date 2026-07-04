@@ -4,16 +4,14 @@
 //! reloadable (`DynamicServerConfig`); the plaintext path is unchanged from
 //! pre-P4 so existing tests are unaffected.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use axum::Router;
+use crabka_security::{AuthMethod, DynamicServerConfig, Principal, TlsConfig};
 use hyper_util::rt::TokioIo;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
-
-use crabka_security::{AuthMethod, DynamicServerConfig, Principal, TlsConfig};
 
 /// Serve `app` on `listener`. With `tls = Some(..)`, terminate rustls per
 /// connection; otherwise serve plaintext. Returns when `shutdown` is cancelled.

@@ -2,13 +2,15 @@
 
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int8Array,
-    Int8Builder, Int32Array, Int32Builder, Int64Array, Int64Builder, ListArray, ListBuilder,
-    StructArray, StructBuilder, UInt32Array, UInt32Builder, UInt64Array, UInt64Builder,
+use arrow::{
+    array::{
+        Array, ArrayRef, BooleanArray, BooleanBuilder, Float64Array, Float64Builder, Int8Array,
+        Int8Builder, Int32Array, Int32Builder, Int64Array, Int64Builder, ListArray, ListBuilder,
+        StructArray, StructBuilder, UInt32Array, UInt32Builder, UInt64Array, UInt64Builder,
+    },
+    datatypes::{DataType, Field, Fields},
+    record_batch::RecordBatch,
 };
-use arrow::datatypes::{DataType, Field, Fields};
-use arrow::record_batch::RecordBatch;
 use serde::{Deserialize, Serialize};
 
 use crate::schema::{

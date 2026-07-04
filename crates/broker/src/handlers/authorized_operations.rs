@@ -108,9 +108,9 @@ pub fn authorized_operations_bits(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
     use std::collections::HashSet;
 
+    use assert2::assert;
     use crabka_metadata::{AclEntry, MetadataRecord, PatternType, PermissionType, ResourceType};
     use crabka_security::{AuthMethod, Principal};
     use uuid::Uuid;

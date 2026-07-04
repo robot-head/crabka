@@ -1,8 +1,6 @@
 //! Streaming Connect handlers: `SendStream` (produce) and `Subscribe` (consume).
 
-use std::collections::BTreeMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
 use assert2::check;
 use bytes::Bytes;
@@ -10,11 +8,9 @@ use connectrpc_axum::message::Streaming;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::config::GatewayConfig;
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::state::AppState;
-use crabka_grpc_gateway::{pb, streaming};
+use crabka_grpc_gateway::{
+    codec::RawCodec, config::GatewayConfig, pb, produce::ProduceCore, state::AppState, streaming,
+};
 use futures_util::StreamExt;
 use tempfile::TempDir;
 
@@ -244,8 +240,7 @@ async fn subscribe_streams_records_then_commits() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn streaming_wrappers_and_router_build() {
-    use connectrpc_axum::message::ConnectError as CErr;
-    use connectrpc_axum::message::ConnectRequest;
+    use connectrpc_axum::message::{ConnectError as CErr, ConnectRequest};
 
     let (broker, bootstrap, _dir) = boot().await;
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
@@ -295,9 +290,10 @@ async fn streaming_wrappers_and_router_build() {
 /// `invalid content-type: "application/json"; expecting "application/proto"`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn send_echoes_proto_content_type() {
-    use axum::body::Body;
-    use axum::http::header::CONTENT_TYPE;
-    use axum::http::{Method, Request};
+    use axum::{
+        body::Body,
+        http::{Method, Request, header::CONTENT_TYPE},
+    };
     use tower::ServiceExt as _;
 
     let (broker, bootstrap, _dir) = boot().await;

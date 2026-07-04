@@ -1,16 +1,20 @@
 //! Live WAL-tail backed profile store.
 
-use std::collections::VecDeque;
-use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::{
+    collections::VecDeque,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
 use crabka_blockstore::LabelMatcher;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_pprof::{InMemoryProfileStore, ProfileError, ProfileScan, ProfileStats, ProfileStore};
 
-use crate::blockbuilder::{intern_record, profile_timestamp_ms};
-use crate::error::ProfilesError;
-use crate::wal::{PROFILES_WAL_TOPIC, ProfileRecord};
+use crate::{
+    blockbuilder::{intern_record, profile_timestamp_ms},
+    error::ProfilesError,
+    wal::{PROFILES_WAL_TOPIC, ProfileRecord},
+};
 
 /// Default retention horizon for the in-memory WAL tail: samples older than this
 /// (relative to the newest sample seen) are dropped so the hot store cannot grow

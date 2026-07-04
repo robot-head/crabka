@@ -15,3 +15,4 @@ name = "kafka-tap"
 path = "src/main.rs"
 
 [dependencies]
+crabka-ids = { version = "0.3.8", path = "../ids" }

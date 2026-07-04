@@ -11,13 +11,12 @@
 //! [`KStream::join_global`]: crate::dsl::kstream::KStream::join_global
 //! [`KStream::left_join_global`]: crate::dsl::kstream::KStream::left_join_global
 //! [`Topology::add_global_store`]: crate::topology::Topology::add_global_store
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
+use std::{cell::RefCell, marker::PhantomData, rc::Rc};
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::graph::NodeId;
-use crate::processor::serde::DefaultSerde;
+use crate::{
+    dsl::{builder::InternalStreamsBuilder, graph::NodeId},
+    processor::serde::DefaultSerde,
+};
 
 /// A handle to a fully-replicated `GlobalKTable`. Only usable as a join target.
 ///

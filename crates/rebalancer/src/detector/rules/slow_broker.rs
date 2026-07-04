@@ -4,14 +4,11 @@
 
 use std::collections::HashMap;
 
-use crate::detector::AnomalyKey;
-use crate::detector::AnomalyKind;
-use crate::detector::AnomalySeverity;
-use crate::scraper::Window;
-
-use super::Rule;
-use super::RuleCtx;
-use super::RuleHit;
+use super::{Rule, RuleCtx, RuleHit};
+use crate::{
+    detector::{AnomalyKey, AnomalyKind, AnomalySeverity},
+    scraper::Window,
+};
 
 pub struct SlowBroker;
 
@@ -81,16 +78,17 @@ impl Rule for SlowBroker {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Duration};
+
     use assert2::{assert, check};
-    use std::sync::Arc;
-    use std::time::Duration;
 
     use super::*;
-    use crate::capacity::BrokerCapacities;
-    use crate::detector::{DetectorConfig, SnapshotHistory};
-    use crate::model::{BrokerView, ClusterState, PartitionView};
-    use crate::scraper::parse::ParsedSample;
-    use crate::scraper::{MetricKind, UsageStore, WindowConfig};
+    use crate::{
+        capacity::BrokerCapacities,
+        detector::{DetectorConfig, SnapshotHistory},
+        model::{BrokerView, ClusterState, PartitionView},
+        scraper::{MetricKind, UsageStore, WindowConfig, parse::ParsedSample},
+    };
 
     fn state(brokers: &[i32], parts: Vec<PartitionView>) -> ClusterState {
         ClusterState {

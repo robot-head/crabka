@@ -9,19 +9,24 @@
 //! (KIP-1071 early access) AND the `streams_group.enable` config kill-switch.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        streams_group_heartbeat_request::StreamsGroupHeartbeatRequest,
+        streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
+    },
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
-use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::streams::actor::StreamsGroupActorMessage;
-use crate::error::BrokerError;
-use crate::time_util::now_ms;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::streams::actor::StreamsGroupActorMessage,
+    error::BrokerError,
+    time_util::now_ms,
+};
 
 #[tracing::instrument(
     name = "handle_streams_group_heartbeat",
@@ -150,13 +155,12 @@ fn encode(version: i16, resp: &StreamsGroupHeartbeatResponse) -> Result<Bytes, B
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc};
+
     use assert2::assert;
     use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
     use crabka_protocol::owned::streams_group_heartbeat_response;
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
     fn request(group_id: &str) -> StreamsGroupHeartbeatRequest {
         StreamsGroupHeartbeatRequest {
@@ -261,6 +265,8 @@ mod tests {
         assert!(resp.error_code == codes::UNSUPPORTED_VERSION, "{resp:?}");
         broker_handle.shutdown().await;
     }
+
+    use super::*;
 
     #[test]
     fn disabled_feature_yields_unsupported_version() {

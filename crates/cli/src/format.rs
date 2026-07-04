@@ -17,21 +17,21 @@
 //!   as length-prefixed `serde_wincode<SerdeCompat<MetadataRecord>>`
 //!   payloads, so the broker can stream them without touching JSON.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use clap::Args;
 use crabka_metadata::{
     AclEntry, KRaftVersionRange, KRaftVersionRecord, MetadataRecord, ScramCredentialRecord, Voter,
     VoterEndpoint, VoterSet, VotersRecord,
 };
-use crabka_security::SaslMechanism;
-use crabka_security::scram::hash_scram_password_with_salt;
+use crabka_security::{SaslMechanism, scram::hash_scram_password_with_salt};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::Serialize;
 use serde_wincode::SerdeCompat;
 use uuid::Uuid;
 use wincode::Serialize as _;
+
+use crate::ids::{ClusterId, DirectoryId};
 
 /// Exit codes:
 /// - 0: success
@@ -79,7 +79,7 @@ pub struct FormatArgs {
     add_acl: Vec<AclEntry>,
     /// This node's raft id. Required with `--standalone` (KIP-853 needs
     /// to know which voter this node *is* when seeding the singleton set).
-    #[arg(long)]
+    #[arg(long, value_parser = parse_node_id)]
     node_id: Option<crabka_metadata::NodeId>,
     /// Format this node as the sole initial controller voter.
     #[arg(long, conflicts_with = "initial_controllers")]
@@ -113,6 +113,12 @@ fn resolve_release_level(s: &str) -> Result<i16, String> {
         ));
     }
     Ok(level)
+}
+
+/// Parse a node id: a bare `u64` wrapped in the `NodeId` newtype.
+fn parse_node_id(s: &str) -> Result<crabka_metadata::NodeId, String> {
+    let id: u64 = s.trim().parse().map_err(|e| format!("node id: {e}"))?;
+    Ok(crabka_metadata::NodeId(id))
 }
 
 /// Parse one `--feature NAME=LEVEL` spec into `(name, level)`.
@@ -323,7 +329,7 @@ fn parse_acl_spec(spec: &str) -> Result<AclEntry, String> {
 /// it off the right first, then peel `host:port` off the remainder.
 fn parse_initial_controller(spec: &str) -> Result<Voter, String> {
     let (id_part, rest) = spec.split_once('@').ok_or("missing '@'")?;
-    let id: crabka_metadata::NodeId = id_part.parse().map_err(|_| "bad id")?;
+    let id = crabka_metadata::NodeId(id_part.parse::<u64>().map_err(|_| "bad id")?);
     let (host_port, dir_part) = rest.rsplit_once(':').ok_or("missing directory uuid")?;
     let dir: Uuid = dir_part.parse().map_err(|_| "bad directory uuid")?;
     let (host, port) = host_port.rsplit_once(':').ok_or("missing host:port")?;
@@ -347,7 +353,7 @@ fn parse_initial_controller(spec: &str) -> Result<Voter, String> {
 /// - `--initial-controllers`: the explicitly-listed voters.
 /// - neither: an empty set — this node is a joiner that relies on auto-join
 ///   to enter an already-bootstrapped cluster.
-fn build_initial_voters(args: &FormatArgs, directory_id: Uuid) -> Result<VoterSet, String> {
+fn build_initial_voters(args: &FormatArgs, directory_id: DirectoryId) -> Result<VoterSet, String> {
     if args.standalone {
         let id = args.node_id.ok_or("--standalone requires --node-id")?;
         let listener = args
@@ -360,7 +366,9 @@ fn build_initial_voters(args: &FormatArgs, directory_id: Uuid) -> Result<VoterSe
         let port: u16 = port.parse().map_err(|_| "bad --controller-listener port")?;
         Ok(VoterSet::from_voters([Voter {
             id,
-            directory_id,
+            // `Voter.directory_id` is a raw `Uuid` (owned by `crabka_voters`);
+            // unwrap the newtype at this crate boundary.
+            directory_id: directory_id.into(),
             endpoints: vec![VoterEndpoint {
                 name: "CONTROLLER".into(),
                 host: host.to_string(),
@@ -391,8 +399,8 @@ fn build_initial_voters(args: &FormatArgs, directory_id: Uuid) -> Result<VoterSe
 )]
 fn write_meta_properties(
     log_dir: &std::path::Path,
-    cluster_id: Uuid,
-    directory_id: Uuid,
+    cluster_id: ClusterId,
+    directory_id: DirectoryId,
 ) -> Result<(), String> {
     let meta = serde_json::json!({
         "cluster_id": cluster_id.to_string(),
@@ -411,7 +419,9 @@ struct BootstrapManifest {
     /// Schema version of this bootstrap manifest. Bumped if the layout
     /// changes; the broker's future consumer will reject unknown values.
     schema: u32,
-    cluster_id: Uuid,
+    // `ClusterId` is `#[serde(transparent)]`, so this serializes as the bare
+    // UUID string exactly as the previous `Uuid` field did.
+    cluster_id: ClusterId,
     record_count: usize,
     /// Base64-encoded `SerdeCompat<MetadataRecord>` payloads, one per
     /// seed record. Mirrors the contents of `bootstrap.records.bin` so
@@ -462,12 +472,12 @@ pub async fn run(args: FormatArgs) -> i32 {
         return EXIT_BOOTSTRAP_FAIL;
     }
 
-    let cluster_id = args.cluster_id.unwrap_or_else(Uuid::new_v4);
+    let cluster_id = ClusterId(args.cluster_id.unwrap_or_else(Uuid::new_v4));
 
     // KIP-853: generate + persist this replica's stable directory id. The
     // broker reads it back from `meta.properties.json` on every boot; it is
     // the identity component of every `Voter` this node ever appears as.
-    let directory_id = Uuid::new_v4();
+    let directory_id = DirectoryId(Uuid::new_v4());
     if let Err(e) = write_meta_properties(&args.log_dir, cluster_id, directory_id) {
         eprintln!("crabka format: {e}");
         return EXIT_BOOTSTRAP_FAIL;
@@ -575,7 +585,7 @@ pub async fn run(args: FormatArgs) -> i32 {
 )]
 fn write_bootstrap_files(
     log_dir: &std::path::Path,
-    cluster_id: Uuid,
+    cluster_id: ClusterId,
     records: &[MetadataRecord],
 ) -> Result<(), String> {
     // 1. Per-record `SerdeCompat<MetadataRecord>` payloads.
@@ -652,8 +662,9 @@ fn base64_encode(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn release_version_maps_to_feature_level() {
@@ -884,7 +895,7 @@ mod tests {
             parse_initial_controller("3@host:9093:00000000-0000-0000-0000-000000000003").unwrap();
         assert!(
             v == Voter {
-                id: 3,
+                id: crabka_metadata::NodeId(3),
                 directory_id: Uuid::from_u128(3),
                 endpoints: vec![VoterEndpoint {
                     name: "CONTROLLER".to_string(),

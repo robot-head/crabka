@@ -1,14 +1,10 @@
 //! Construction-time config for `Controller::start`.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use uuid::Uuid;
 
-use crate::network::OutboundDialer;
-use crate::types::NodeId;
+use crate::{network::OutboundDialer, types::NodeId};
 
 /// Bootstrap orchestration for a freshly-formatted controller node.
 ///
@@ -93,7 +89,7 @@ pub struct ControllerConfig {
 impl std::fmt::Debug for ControllerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControllerConfig")
-            .field("node_id", &self.node_id)
+            .field("node_id", &self.node_id.0)
             .field("bootstrap_servers", &self.bootstrap_servers)
             .field("directory_id", &self.directory_id)
             .field("auto_join", &self.auto_join)
@@ -122,7 +118,7 @@ impl ControllerConfig {
     #[must_use]
     pub fn for_tests(node_id: NodeId, log_dir: PathBuf) -> Self {
         let listen: SocketAddr = "127.0.0.1:0".parse().expect("static");
-        let directory_id = Uuid::from_u128(u128::from(node_id));
+        let directory_id = Uuid::from_u128(u128::from(node_id.0));
         Self {
             node_id,
             bootstrap_servers: vec![],
@@ -157,12 +153,13 @@ impl ControllerConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn for_tests_uses_expected_snapshot_defaults() {
-        let cfg = ControllerConfig::for_tests(7, PathBuf::from("/tmp/raft-test"));
+        let cfg = ControllerConfig::for_tests(NodeId(7), PathBuf::from("/tmp/raft-test"));
 
         check!(cfg.max_bytes_between_snapshots == 20 * 1024 * 1024);
         check!(cfg.max_snapshot_interval == Duration::from_hours(1));
@@ -171,7 +168,7 @@ mod tests {
 
     #[test]
     fn debug_reports_configuration_fields_and_optional_hooks() {
-        let cfg = ControllerConfig::for_tests(7, PathBuf::from("/tmp/raft-test"));
+        let cfg = ControllerConfig::for_tests(NodeId(7), PathBuf::from("/tmp/raft-test"));
         let rendered = format!("{cfg:?}");
 
         for needle in [

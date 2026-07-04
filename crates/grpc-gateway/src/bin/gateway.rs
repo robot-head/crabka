@@ -3,28 +3,27 @@
 //! Parses CLI flags, builds the Connect-RPC router and a minimal health
 //! router, then serves both on the configured listen address.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Context as _;
 use clap::Parser;
-use tracing::info;
-
+use crabka_grpc_gateway::{
+    codec::{RawCodec, RecordCodec},
+    config::{AuthzSettings, BearerSettings, GatewayConfig, TlsSettings},
+    dedup::{
+        DedupEngine,
+        membership::{MembershipPublisher, MembershipStore},
+        store::DedupStore,
+        topic::{ensure_dedup_topic, ensure_membership_topic},
+    },
+    forward::{self, Forwarder},
+    health::{self, Readiness},
+    produce::ProduceCore,
+    schema::{client::SchemaRegistryClient, codec::SchemaRegistryCodec},
+    state::AppState,
+};
 use tokio_util::sync::CancellationToken;
-
-use crabka_grpc_gateway::codec::{RawCodec, RecordCodec};
-use crabka_grpc_gateway::config::{AuthzSettings, BearerSettings, GatewayConfig, TlsSettings};
-use crabka_grpc_gateway::dedup::DedupEngine;
-use crabka_grpc_gateway::dedup::membership::{MembershipPublisher, MembershipStore};
-use crabka_grpc_gateway::dedup::store::DedupStore;
-use crabka_grpc_gateway::dedup::topic::{ensure_dedup_topic, ensure_membership_topic};
-use crabka_grpc_gateway::forward::{self, Forwarder};
-use crabka_grpc_gateway::health::{self, Readiness};
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::schema::client::SchemaRegistryClient;
-use crabka_grpc_gateway::schema::codec::SchemaRegistryCodec;
-use crabka_grpc_gateway::state::AppState;
+use tracing::info;
 
 // ── CLI ────────────────────────────────────────────────────────────────────────
 
@@ -674,8 +673,9 @@ fn spawn_outbound_delivery(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crabka_security::ListenerProtocol;
+
+    use super::*;
 
     #[test]
     fn build_broker_security_some_with_cert_and_key_and_sni() {

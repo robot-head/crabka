@@ -1,13 +1,17 @@
 //! `BrokerPool`: a `DashMap<broker_id, Arc<Connection>>` with lazy
 //! connect on first use.
 
-use std::net::SocketAddr;
-use std::sync::{Arc, RwLock};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, RwLock},
+};
 
 use dashmap::DashMap;
 
-use crate::connection::{Connection, ConnectionOptions};
-use crate::error::ClientError;
+use crate::{
+    connection::{Connection, ConnectionOptions},
+    error::ClientError,
+};
 
 /// Information about a single Kafka broker, as reported by a `MetadataResponse`.
 #[derive(Debug, Clone)]
@@ -235,9 +239,11 @@ impl<C: BrokerConnector> BrokerPool<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use assert2::{assert, check};
+
+    use super::*;
 
     #[tokio::test]
     async fn refresh_inserts_addresses() {

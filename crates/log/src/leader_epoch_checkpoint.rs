@@ -13,19 +13,17 @@
 
 #![allow(dead_code)]
 
-use std::fmt::Write as _;
-use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
+use std::{fmt::Write as _, fs, io::Write, path::PathBuf};
 
+use crabka_ids::{LeaderEpoch, Offset};
 use tracing::instrument;
 
 use crate::error::LogError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EpochEntry {
-    pub epoch: i32,
-    pub start_offset: i64,
+    pub epoch: LeaderEpoch,
+    pub start_offset: Offset,
 }
 
 #[derive(Debug)]
@@ -35,9 +33,9 @@ pub struct LeaderEpochCheckpoint {
 }
 
 /// Kafka sentinel: "no leader epoch information".
-pub const UNDEFINED_EPOCH: i32 = -1;
+pub const UNDEFINED_EPOCH: LeaderEpoch = LeaderEpoch(-1);
 /// Kafka sentinel: "no offset".
-pub const UNDEFINED_OFFSET: i64 = -1;
+pub const UNDEFINED_OFFSET: Offset = Offset(-1);
 
 impl LeaderEpochCheckpoint {
     /// Open (or recover) the checkpoint at `path`. Missing file → empty.
@@ -73,17 +71,17 @@ impl LeaderEpochCheckpoint {
         let mut out = Vec::new();
         for line in lines.take(count) {
             let mut parts = line.split_whitespace();
-            let epoch = parts
+            let epoch: i32 = parts
                 .next()
                 .and_then(|t| t.parse().ok())
                 .ok_or_else(|| LogError::Corrupt(format!("bad checkpoint row: {line:?}")))?;
-            let start_offset = parts
+            let start_offset: i64 = parts
                 .next()
                 .and_then(|t| t.parse().ok())
                 .ok_or_else(|| LogError::Corrupt(format!("bad checkpoint row: {line:?}")))?;
             out.push(EpochEntry {
-                epoch,
-                start_offset,
+                epoch: LeaderEpoch(epoch),
+                start_offset: Offset(start_offset),
             });
         }
         Ok(out)
@@ -92,8 +90,8 @@ impl LeaderEpochCheckpoint {
     /// Append `(epoch, start_offset)`. Idempotent: re-appending an entry
     /// with the same epoch is a no-op (keeps the earliest recorded
     /// `start_offset`). Rewrites the file atomically.
-    #[instrument(level = "debug", skip(self), fields(epoch, start_offset), err)]
-    pub fn append(&mut self, epoch: i32, start_offset: i64) -> Result<(), LogError> {
+    #[instrument(level = "debug", skip(self), fields(epoch = epoch.0, start_offset = start_offset.0), err)]
+    pub fn append(&mut self, epoch: LeaderEpoch, start_offset: Offset) -> Result<(), LogError> {
         if append_to(&mut self.entries, epoch, start_offset) {
             self.flush()?;
         }
@@ -102,8 +100,8 @@ impl LeaderEpochCheckpoint {
 
     /// Remove epoch entries that begin at or after `end_offset` (mirrors Kafka's
     /// LeaderEpochFileCache.truncateFromEnd). Persists if anything changed.
-    #[instrument(level = "debug", skip(self), fields(end_offset), err)]
-    pub fn truncate_from_end(&mut self, end_offset: i64) -> Result<(), LogError> {
+    #[instrument(level = "debug", skip(self), fields(end_offset = end_offset.0), err)]
+    pub fn truncate_from_end(&mut self, end_offset: Offset) -> Result<(), LogError> {
         let before = self.entries.len();
         truncate_to(&mut self.entries, end_offset);
         if self.entries.len() != before {
@@ -131,7 +129,7 @@ impl LeaderEpochCheckpoint {
         s.push_str("0\n");
         let _ = writeln!(s, "{}", self.entries.len());
         for e in &self.entries {
-            let _ = writeln!(s, "{} {}", e.epoch, e.start_offset);
+            let _ = writeln!(s, "{} {}", e.epoch.0, e.start_offset.0);
         }
         let tmp = self.path.with_extension("tmp");
         {
@@ -147,9 +145,9 @@ impl LeaderEpochCheckpoint {
     /// epoch, or `log_end_offset` if `epoch` is the current epoch.
     /// Returns -1 (`UNDEFINED_OFFSET`) if `epoch` is unknown.
     #[must_use]
-    pub fn end_offset_for_epoch(&self, epoch: i32, log_end_offset: i64) -> i64 {
+    pub fn end_offset_for_epoch(&self, epoch: LeaderEpoch, log_end_offset: Offset) -> Offset {
         if !self.entries.iter().any(|e| e.epoch == epoch) {
-            return -1;
+            return UNDEFINED_OFFSET;
         }
         // End of `epoch` is the start of the next-larger epoch. Higher
         // epochs always carry higher start offsets, so the minimum start
@@ -177,7 +175,7 @@ impl LeaderEpochCheckpoint {
     /// scan from the back — equivalent to finding the last entry with
     /// `start_offset <= offset`.
     #[must_use]
-    pub fn epoch_for_offset(&self, offset: i64) -> Option<i32> {
+    pub fn epoch_for_offset(&self, offset: Offset) -> Option<LeaderEpoch> {
         self.entries
             .iter()
             .filter(|e| e.start_offset <= offset)
@@ -199,12 +197,16 @@ impl LeaderEpochCheckpoint {
     /// where `floor_epoch` is the largest recorded epoch `<= requested`.
     /// `end_offset` is always a valid truncation target (`>= 0`).
     #[must_use]
-    pub fn epoch_and_offset_for(&self, requested_epoch: i32, log_end_offset: i64) -> (i32, i64) {
+    pub fn epoch_and_offset_for(
+        &self,
+        requested_epoch: LeaderEpoch,
+        log_end_offset: Offset,
+    ) -> (LeaderEpoch, Offset) {
         epoch_and_offset_for_entries(&self.entries, requested_epoch, log_end_offset)
     }
 
     #[must_use]
-    pub fn latest_epoch(&self) -> Option<i32> {
+    pub fn latest_epoch(&self) -> Option<LeaderEpoch> {
         self.entries.iter().map(|e| e.epoch).max()
     }
 
@@ -220,9 +222,9 @@ impl LeaderEpochCheckpoint {
 #[must_use]
 pub fn epoch_and_offset_for_entries(
     entries: &[EpochEntry],
-    requested_epoch: i32,
-    log_end_offset: i64,
-) -> (i32, i64) {
+    requested_epoch: LeaderEpoch,
+    log_end_offset: Offset,
+) -> (LeaderEpoch, Offset) {
     if requested_epoch == UNDEFINED_EPOCH {
         return (UNDEFINED_EPOCH, log_end_offset);
     }
@@ -255,7 +257,11 @@ pub fn epoch_and_offset_for_entries(
 
 /// Pure core of [`LeaderEpochCheckpoint::append`]: idempotent push-if-absent.
 /// Returns `true` if a new entry was added (so the caller knows to flush).
-pub(crate) fn append_to(entries: &mut Vec<EpochEntry>, epoch: i32, start_offset: i64) -> bool {
+pub(crate) fn append_to(
+    entries: &mut Vec<EpochEntry>,
+    epoch: LeaderEpoch,
+    start_offset: Offset,
+) -> bool {
     if entries.iter().any(|e| e.epoch == epoch) {
         return false;
     }
@@ -268,7 +274,7 @@ pub(crate) fn append_to(entries: &mut Vec<EpochEntry>, epoch: i32, start_offset:
 
 /// Pure core of [`LeaderEpochCheckpoint::truncate_from_end`]: drop entries that
 /// begin at or after `end_offset`.
-pub(crate) fn truncate_to(entries: &mut Vec<EpochEntry>, end_offset: i64) {
+pub(crate) fn truncate_to(entries: &mut Vec<EpochEntry>, end_offset: Offset) {
     entries.retain(|e| e.start_offset < end_offset);
 }
 
@@ -278,10 +284,11 @@ mod leader_epoch_model;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
+    use crabka_ids::{LeaderEpoch, Offset};
     use tempfile::TempDir;
+
+    use super::*;
 
     fn fresh() -> (TempDir, PathBuf) {
         let dir = TempDir::new().unwrap();
@@ -293,9 +300,9 @@ mod tests {
     fn round_trip_byte_compat_format() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path.clone()).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(1, 50).unwrap();
-        c.append(2, 100).unwrap();
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(1), Offset(50)).unwrap();
+        c.append(LeaderEpoch(2), Offset(100)).unwrap();
 
         let s = std::fs::read_to_string(&path).unwrap();
         assert!(s == "0\n3\n0 0\n1 50\n2 100\n");
@@ -306,10 +313,10 @@ mod tests {
         let (_d, path) = fresh();
         {
             let mut c = LeaderEpochCheckpoint::open(path.clone()).unwrap();
-            c.append(0, 0).unwrap();
+            c.append(LeaderEpoch(0), Offset(0)).unwrap();
         }
         let mut c2 = LeaderEpochCheckpoint::open(path).unwrap();
-        c2.append(1, 50).unwrap();
+        c2.append(LeaderEpoch(1), Offset(50)).unwrap();
         assert!(c2.entries().len() == 2);
     }
 
@@ -317,13 +324,13 @@ mod tests {
     fn append_idempotent_for_same_epoch() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(0, 999).unwrap(); // ignored; epoch 0 already recorded
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(0), Offset(999)).unwrap(); // ignored; epoch 0 already recorded
         assert!(
             c.entries()
                 == &[EpochEntry {
-                    epoch: 0,
-                    start_offset: 0
+                    epoch: LeaderEpoch(0),
+                    start_offset: Offset(0)
                 }]
         );
     }
@@ -332,50 +339,50 @@ mod tests {
     fn end_offset_for_current_epoch_returns_log_end_offset() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(1, 50).unwrap();
-        assert!(c.end_offset_for_epoch(1, 100) == 100);
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(1), Offset(50)).unwrap();
+        assert!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(100)) == Offset(100));
     }
 
     #[test]
     fn end_offset_for_older_epoch_returns_next_start() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(1, 50).unwrap();
-        c.append(2, 100).unwrap();
-        assert!(c.end_offset_for_epoch(0, 200) == 50);
-        assert!(c.end_offset_for_epoch(1, 200) == 100);
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(1), Offset(50)).unwrap();
+        c.append(LeaderEpoch(2), Offset(100)).unwrap();
+        assert!(c.end_offset_for_epoch(LeaderEpoch(0), Offset(200)) == Offset(50));
+        assert!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(200)) == Offset(100));
     }
 
     #[test]
     fn end_offset_for_unknown_epoch_returns_undefined() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        assert!(c.end_offset_for_epoch(7, 200) == -1);
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        assert!(c.end_offset_for_epoch(LeaderEpoch(7), Offset(200)) == Offset(-1));
     }
 
     #[test]
     fn truncate_from_end_removes_entries_at_or_after_end_offset() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(1, 0).unwrap();
-        c.append(7, 4).unwrap();
-        c.truncate_from_end(4).unwrap();
-        check!(c.latest_epoch() == Some(1));
+        c.append(LeaderEpoch(1), Offset(0)).unwrap();
+        c.append(LeaderEpoch(7), Offset(4)).unwrap();
+        c.truncate_from_end(Offset(4)).unwrap();
+        check!(c.latest_epoch() == Some(LeaderEpoch(1)));
         // Epoch 7 began at offset 4 (>= end_offset), so it is gone.
-        check!(c.end_offset_for_epoch(7, 4) == -1);
+        check!(c.end_offset_for_epoch(LeaderEpoch(7), Offset(4)) == Offset(-1));
         // Epoch 1 survives; its end is now the log end (4).
-        check!(c.end_offset_for_epoch(1, 4) == 4);
+        check!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(4)) == Offset(4));
     }
 
     #[test]
     fn clear_removes_all_entries_and_persists_empty() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path.clone()).unwrap();
-        c.append(1, 0).unwrap();
-        c.append(2, 50).unwrap();
+        c.append(LeaderEpoch(1), Offset(0)).unwrap();
+        c.append(LeaderEpoch(2), Offset(50)).unwrap();
         c.clear().unwrap();
         assert!(c.entries().is_empty());
         assert!(c.latest_epoch() == None);
@@ -414,8 +421,8 @@ mod tests {
         assert!(
             entries
                 == [EpochEntry {
-                    epoch: 3,
-                    start_offset: 42,
+                    epoch: LeaderEpoch(3),
+                    start_offset: Offset(42),
                 }],
             "only the one real row is parsed despite the absurd declared count"
         );
@@ -430,8 +437,14 @@ mod tests {
     fn epoch_for_offset_empty_returns_none() {
         let (_d, path) = fresh();
         let c = LeaderEpochCheckpoint::open(path).unwrap();
-        assert!(c.epoch_for_offset(0) == None, "empty checkpoint → None");
-        assert!(c.epoch_for_offset(100) == None, "empty checkpoint → None");
+        assert!(
+            c.epoch_for_offset(Offset(0)) == None,
+            "empty checkpoint → None"
+        );
+        assert!(
+            c.epoch_for_offset(Offset(100)) == None,
+            "empty checkpoint → None"
+        );
     }
 
     #[test]
@@ -439,10 +452,10 @@ mod tests {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
         // Epoch 0 starts at offset 10 (first entry does not start at 0).
-        c.append(0, 10).unwrap();
-        c.append(1, 50).unwrap();
+        c.append(LeaderEpoch(0), Offset(10)).unwrap();
+        c.append(LeaderEpoch(1), Offset(50)).unwrap();
         assert!(
-            c.epoch_for_offset(9) == None,
+            c.epoch_for_offset(Offset(9)) == None,
             "offset before first entry's start_offset → None"
         );
     }
@@ -451,21 +464,21 @@ mod tests {
     fn epoch_for_offset_within_epoch_range() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(1, 50).unwrap();
-        c.append(2, 100).unwrap();
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(1), Offset(50)).unwrap();
+        c.append(LeaderEpoch(2), Offset(100)).unwrap();
         for (offset, want, why) in [
             // Offsets 0–49 belong to epoch 0.
-            (0, Some(0), "start of epoch 0"),
-            (25, Some(0), "middle of epoch 0"),
-            (49, Some(0), "last offset before epoch 1"),
+            (0, Some(LeaderEpoch(0)), "start of epoch 0"),
+            (25, Some(LeaderEpoch(0)), "middle of epoch 0"),
+            (49, Some(LeaderEpoch(0)), "last offset before epoch 1"),
             // Offsets 50–99 belong to epoch 1.
-            (50, Some(1), "start of epoch 1"),
-            (75, Some(1), "middle of epoch 1"),
-            (99, Some(1), "last offset before epoch 2"),
+            (50, Some(LeaderEpoch(1)), "start of epoch 1"),
+            (75, Some(LeaderEpoch(1)), "middle of epoch 1"),
+            (99, Some(LeaderEpoch(1)), "last offset before epoch 2"),
         ] {
             check!(
-                c.epoch_for_offset(offset) == want,
+                c.epoch_for_offset(Offset(offset)) == want,
                 "{why} (offset={offset})"
             );
         }
@@ -475,11 +488,11 @@ mod tests {
     fn epoch_for_offset_at_epoch_boundary() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(1, 50).unwrap();
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(1), Offset(50)).unwrap();
         // Offset exactly at epoch 1's start_offset → belongs to epoch 1.
         assert!(
-            c.epoch_for_offset(50) == Some(1),
+            c.epoch_for_offset(Offset(50)) == Some(LeaderEpoch(1)),
             "boundary offset belongs to the epoch that starts there"
         );
     }
@@ -488,16 +501,16 @@ mod tests {
     fn epoch_for_offset_past_last_entry() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(1, 50).unwrap();
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(1), Offset(50)).unwrap();
         // Any offset >= 50 that extends beyond the last known epoch → epoch 1
         // (the current / latest epoch owns all subsequent offsets).
         assert!(
-            c.epoch_for_offset(100) == Some(1),
+            c.epoch_for_offset(Offset(100)) == Some(LeaderEpoch(1)),
             "offset past last entry → last epoch"
         );
         assert!(
-            c.epoch_for_offset(999) == Some(1),
+            c.epoch_for_offset(Offset(999)) == Some(LeaderEpoch(1)),
             "far past last entry → last epoch"
         );
     }
@@ -506,9 +519,9 @@ mod tests {
     fn epoch_for_offset_single_entry_at_zero() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        assert!(c.epoch_for_offset(0) == Some(0));
-        assert!(c.epoch_for_offset(1000) == Some(0));
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        assert!(c.epoch_for_offset(Offset(0)) == Some(LeaderEpoch(0)));
+        assert!(c.epoch_for_offset(Offset(1000)) == Some(LeaderEpoch(0)));
     }
 
     // ── epoch_and_offset_for (KIP-320) ────────────────────────────────────────
@@ -517,64 +530,77 @@ mod tests {
     fn epoch_and_offset_latest_returns_pair_at_log_end() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(1, 50).unwrap();
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(1), Offset(50)).unwrap();
         // Requested == latest recorded epoch → (epoch, log_end_offset).
-        assert!(c.epoch_and_offset_for(1, 100) == (1, 100));
+        assert!(
+            c.epoch_and_offset_for(LeaderEpoch(1), Offset(100)) == (LeaderEpoch(1), Offset(100))
+        );
     }
 
     #[test]
     fn epoch_and_offset_older_returns_floor_epoch_and_next_start() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(1, 50).unwrap();
-        c.append(2, 100).unwrap();
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(1), Offset(50)).unwrap();
+        c.append(LeaderEpoch(2), Offset(100)).unwrap();
         // Recorded older epoch → (epoch, start of next epoch).
-        assert!(c.epoch_and_offset_for(0, 200) == (0, 50));
-        assert!(c.epoch_and_offset_for(1, 200) == (1, 100));
+        assert!(
+            c.epoch_and_offset_for(LeaderEpoch(0), Offset(200)) == (LeaderEpoch(0), Offset(50))
+        );
+        assert!(
+            c.epoch_and_offset_for(LeaderEpoch(1), Offset(200)) == (LeaderEpoch(1), Offset(100))
+        );
     }
 
     #[test]
     fn epoch_and_offset_gap_uses_floor_epoch() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(5, 100).unwrap();
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(5), Offset(100)).unwrap();
         // Requested epoch 3 is not recorded; floor is epoch 0, next start 100.
-        assert!(c.epoch_and_offset_for(3, 200) == (0, 100));
+        assert!(
+            c.epoch_and_offset_for(LeaderEpoch(3), Offset(200)) == (LeaderEpoch(0), Offset(100))
+        );
     }
 
     #[test]
     fn epoch_and_offset_future_epoch_is_undefined_at_log_end() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(0, 0).unwrap();
-        c.append(1, 50).unwrap();
+        c.append(LeaderEpoch(0), Offset(0)).unwrap();
+        c.append(LeaderEpoch(1), Offset(50)).unwrap();
         // Requested epoch above everything recorded → (UNDEFINED, log_end).
-        assert!(c.epoch_and_offset_for(7, 100) == (UNDEFINED_EPOCH, 100));
+        assert!(
+            c.epoch_and_offset_for(LeaderEpoch(7), Offset(100)) == (UNDEFINED_EPOCH, Offset(100))
+        );
     }
 
     #[test]
     fn epoch_and_offset_below_all_returns_requested_and_first_start() {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
-        c.append(3, 30).unwrap();
-        c.append(4, 40).unwrap();
+        c.append(LeaderEpoch(3), Offset(30)).unwrap();
+        c.append(LeaderEpoch(4), Offset(40)).unwrap();
         // Requested epoch below the first recorded epoch.
-        assert!(c.epoch_and_offset_for(1, 100) == (1, 30));
+        assert!(
+            c.epoch_and_offset_for(LeaderEpoch(1), Offset(100)) == (LeaderEpoch(1), Offset(30))
+        );
     }
 
     #[test]
     fn epoch_and_offset_empty_cache_is_undefined_at_log_end() {
         let (_d, path) = fresh();
         let c = LeaderEpochCheckpoint::open(path).unwrap();
-        assert!(c.epoch_and_offset_for(0, 9) == (UNDEFINED_EPOCH, 9));
+        assert!(c.epoch_and_offset_for(LeaderEpoch(0), Offset(9)) == (UNDEFINED_EPOCH, Offset(9)));
     }
 }
 
 #[cfg(test)]
 mod fuzz {
+    use crabka_ids::{LeaderEpoch, Offset};
     use proptest::prelude::*;
 
     use super::{EpochEntry, UNDEFINED_EPOCH, append_to, epoch_and_offset_for_entries};
@@ -587,7 +613,7 @@ mod fuzz {
         for &(de, doff) in steps {
             let e = le + 1 + de.rem_euclid(3); // epoch gap 1..=3
             let o = lo + 1 + doff.rem_euclid(1000); // offset jump 1..=1000
-            append_to(&mut v, e, o);
+            append_to(&mut v, LeaderEpoch(e), Offset(o));
             le = e;
             lo = o;
         }
@@ -605,11 +631,14 @@ mod fuzz {
             requested in -1i32..70,
             dleo in 0i64..2000,
         ) {
+            // `requested` is generated as a raw `i32` (the KIP-320 wire type);
+            // wrap it into the domain newtype for the call and every comparison.
+            let requested = LeaderEpoch(requested);
             let leader = leader_history(&steps);
-            let last_off = leader.last().map_or(0, |e| e.start_offset);
+            let last_off: i64 = leader.last().map_or(0, |e| e.start_offset.0);
             // Follower log end is at or past the last epoch boundary.
             let leo = last_off + 1 + dleo;
-            let (found, trunc) = epoch_and_offset_for_entries(&leader, requested, leo);
+            let (found, trunc) = epoch_and_offset_for_entries(&leader, requested, Offset(leo));
             let latest = leader.iter().map(|e| e.epoch).max();
 
             // Always a valid truncation target.
@@ -635,7 +664,7 @@ mod fuzz {
                 if latest == Some(requested) {
                     // Current epoch → keep up to the follower's log end.
                     prop_assert_eq!(found, requested);
-                    prop_assert_eq!(trunc, leo, "latest epoch keeps up to log end");
+                    prop_assert_eq!(trunc, Offset(leo), "latest epoch keeps up to log end");
                 } else {
                     // Older agreed epoch → truncate to the next leader epoch's
                     // start, dropping the divergent higher-epoch suffix.
@@ -651,12 +680,12 @@ mod fuzz {
                         next_start,
                         "older epoch truncates to next epoch start"
                     );
-                    prop_assert!(trunc <= leo, "truncation {} above log end {}", trunc, leo);
+                    prop_assert!(trunc <= Offset(leo), "truncation {} above log end {}", trunc, leo);
                 }
             } else if requested == UNDEFINED_EPOCH {
                 // No last epoch → no truncation this round.
                 prop_assert_eq!(found, UNDEFINED_EPOCH);
-                prop_assert_eq!(trunc, leo);
+                prop_assert_eq!(trunc, Offset(leo));
             }
         }
     }

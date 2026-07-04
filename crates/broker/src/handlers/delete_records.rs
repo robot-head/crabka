@@ -4,18 +4,24 @@
 //! Apache Kafka model.
 
 use bytes::{Bytes, BytesMut};
-
+use crabka_log::Offset;
 use crabka_metadata::AclOperation;
-use crabka_protocol::owned::delete_records_request::DeleteRecordsRequest;
-use crabka_protocol::owned::delete_records_response::{
-    DeleteRecordsPartitionResult, DeleteRecordsResponse, DeleteRecordsTopicResult,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        delete_records_request::DeleteRecordsRequest,
+        delete_records_response::{
+            DeleteRecordsPartitionResult, DeleteRecordsResponse, DeleteRecordsTopicResult,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 fn denied_topic_names(
     acl_results: &std::collections::HashMap<&str, AuthorizationResult>,
@@ -137,7 +143,8 @@ pub(crate) async fn handle(
             Vec::with_capacity(topic.partitions.len());
 
         for fp in topic.partitions {
-            let part_opt = partitions.get(&topic.name, fp.partition_index);
+            let part_opt =
+                partitions.get(&topic.name, crabka_ids::PartitionIndex(fp.partition_index));
             let Some(part) = part_opt else {
                 part_results.push(error_partition_result(
                     fp.partition_index,
@@ -160,9 +167,12 @@ pub(crate) async fn handle(
             // Translate offset == -1 → high_watermark per Kafka semantics.
             let leo = part.log_end_offset();
             let hw = part.high_watermark().await;
-            let target = target_offset(fp.offset, hw);
+            // `hw`/`leo` are `Offset`; the boundary helpers work in raw
+            // `i64`, so unwrap at the seam and re-wrap `target` for the
+            // `Offset`-typed `trim_to_offset` call below.
+            let target = Offset(target_offset(fp.offset, hw.0));
 
-            if offset_out_of_range(target, leo) {
+            if offset_out_of_range(target.0, leo.0) {
                 part_results.push(error_partition_result(
                     fp.partition_index,
                     codes::OFFSET_OUT_OF_RANGE,
@@ -172,7 +182,12 @@ pub(crate) async fn handle(
 
             match part.trim_to_offset(target).await {
                 Ok(new_start) => {
-                    part_results.push(partition_result(fp.partition_index, new_start, codes::NONE));
+                    // Unwrap the `Offset` into the wire `i64` `low_watermark`.
+                    part_results.push(partition_result(
+                        fp.partition_index,
+                        new_start.0,
+                        codes::NONE,
+                    ));
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -198,18 +213,19 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use std::{net::SocketAddr, sync::Arc};
+
+    use assert2::{assert, check};
     use crabka_protocol::owned::delete_records_request::{
         DeleteRecordsPartition, DeleteRecordsTopic,
     };
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use crate::broker::Broker;
-    use crate::test_support::{DenyAll, peer, principal};
+    use super::*;
+    use crate::{
+        broker::Broker,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 2;
 

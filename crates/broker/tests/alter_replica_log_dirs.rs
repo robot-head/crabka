@@ -13,25 +13,33 @@
 //!   3. invalid target / missing replica return the right Kafka
 //!      error codes.
 
-use assert2::{assert, check};
-use std::io;
-use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::{
+    io,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
-use crabka_protocol::owned::alter_replica_log_dirs_request::{
-    AlterReplicaLogDir, AlterReplicaLogDirTopic, AlterReplicaLogDirsRequest,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        alter_replica_log_dirs_request::{
+            AlterReplicaLogDir, AlterReplicaLogDirTopic, AlterReplicaLogDirsRequest,
+        },
+        alter_replica_log_dirs_response::AlterReplicaLogDirsResponse,
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+        describe_log_dirs_request::DescribeLogDirsRequest,
+        describe_log_dirs_response::DescribeLogDirsResponse,
+    },
 };
-use crabka_protocol::owned::alter_replica_log_dirs_response::AlterReplicaLogDirsResponse;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
-use crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest;
-use crabka_protocol::owned::describe_log_dirs_response::DescribeLogDirsResponse;
-use crabka_protocol::{Decode, Encode};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 const CLIENT_ID: &str = "crabka-arld-test";
 const ALTER_VERSION: i16 = 2;

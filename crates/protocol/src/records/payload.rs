@@ -18,9 +18,9 @@
 
 use bytes::{Buf, BufMut, Bytes};
 
-use crate::records::RecordsError;
-use crate::records::borrowed::RecordBatch as RecordBatchBorrowed;
-use crate::records::owned::RecordBatch;
+use crate::records::{
+    RecordsError, borrowed::RecordBatch as RecordBatchBorrowed, owned::RecordBatch,
+};
 
 /// Owned form of a records-field payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -383,10 +383,11 @@ fn looks_like_v2(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::records::{Record, RecordBatch};
     use assert2::assert;
     use bytes::BytesMut;
+
+    use super::*;
+    use crate::records::{Record, RecordBatch};
 
     fn sample_v2() -> RecordBatch {
         RecordBatch {

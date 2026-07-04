@@ -6,11 +6,13 @@
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::dsl::windows::{Window, Windowed};
-use crate::error::StreamsClientError;
-use crate::processor::serde::Serde;
-use crate::runtime::iq::{IqError, IqOp, IqPayload, IqRequest};
-use crate::store::iq::StoreKind;
+use crate::{
+    dsl::windows::{Window, Windowed},
+    error::StreamsClientError,
+    processor::serde::Serde,
+    runtime::iq::{IqError, IqOp, IqPayload, IqRequest},
+    store::iq::StoreKind,
+};
 
 /// Round-trip one op to the supervisor. Shared by all three views.
 async fn query(
@@ -255,11 +257,11 @@ impl<K: 'static, V: 'static> ReadOnlySessionStore<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::runtime::iq::answer_iq;
-    use crate::store::api::KeyValueStore;
-    use crate::store::kv::KeyValueBytesStore;
-    use crate::store::registry::StoreRegistry;
+    use crate::{
+        processor::serde::{I64Serde, StringSerde},
+        runtime::iq::answer_iq,
+        store::{api::KeyValueStore, kv::KeyValueBytesStore, registry::StoreRegistry},
+    };
 
     /// Spawn a tiny servicer over one registry; returns the sender the views use.
     pub(super) fn servicer(reg: StoreRegistry) -> mpsc::Sender<IqRequest> {

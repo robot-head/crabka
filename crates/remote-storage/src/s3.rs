@@ -26,18 +26,20 @@
 //! Keys mirror [`LocalTieredStorage`](crate::LocalTieredStorage)'s
 //! directory layout so the two backends are observationally equivalent.
 
-use std::io::Read;
-use std::path::Path;
-use std::sync::Arc;
+use std::{io::Read, path::Path, sync::Arc};
 
 use bytes::Bytes;
-use object_store::path::Path as ObjectPath;
-use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart};
+use object_store::{
+    GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart,
+    path::Path as ObjectPath,
+};
 use tracing::instrument;
 
-use crate::error::RemoteStorageError;
-use crate::metadata::{CustomMetadata, RemoteLogSegmentMetadata};
-use crate::storage_manager::{IndexType, LogSegmentData, RemoteStorageManager};
+use crate::{
+    error::RemoteStorageError,
+    metadata::{CustomMetadata, RemoteLogSegmentMetadata},
+    storage_manager::{IndexType, LogSegmentData, RemoteStorageManager},
+};
 
 /// Default threshold above which `S3RemoteStorage::put_path` switches
 /// from a single PUT to a streaming multipart upload. 100 MiB. AWS's hard
@@ -487,17 +489,15 @@ impl RemoteStorageManager for S3RemoteStorage {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
-    use std::collections::BTreeMap;
-    use std::io::Write;
-    use std::path::PathBuf;
+    use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
+    use assert2::{assert, check};
+    use crabka_ids::LeaderEpoch;
     use object_store::memory::InMemory;
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use super::*;
     use crate::metadata::{
         RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentState, TopicIdPartition,
     };
@@ -553,7 +553,7 @@ mod tests {
             456,
             8,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, 0)]),
+            BTreeMap::from([(LeaderEpoch(0), 0)]),
         )
         .unwrap()
     }

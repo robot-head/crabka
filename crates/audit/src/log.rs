@@ -1,21 +1,28 @@
 //! The `AuditLog` handle (synchronous, non-blocking emit) and the background
 //! `AuditWriter` that drains events into a sink.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use qubit_clock::sleep::AsyncSleeper;
 use tokio::sync::mpsc;
 
-use crate::chain::ChainState;
-use crate::checkpoint::Checkpoint;
-use crate::event::AuditEvent;
-use crate::ocsf::ProductInfo;
-use crate::signing::SigningKeyProvider;
-use crate::sink::{AuditRecord, AuditSink};
-use crate::spool::Spool;
-use crate::stats::AuditStats;
+use crate::{
+    chain::ChainState,
+    checkpoint::Checkpoint,
+    event::AuditEvent,
+    ids::{EpochMs, Seq},
+    ocsf::ProductInfo,
+    signing::SigningKeyProvider,
+    sink::{AuditRecord, AuditSink},
+    spool::Spool,
+    stats::AuditStats,
+};
 
 /// Cloneable, cheap handle that broker code calls to record events.
 ///
@@ -207,10 +214,10 @@ impl AuditWriter {
             self.since_checkpoint = 0;
             return;
         };
-        let seq_high = self.chain.next_seq().saturating_sub(1);
-        tracing::Span::current().record("seq_high", seq_high);
+        let seq_high = Seq(self.chain.next_seq().saturating_sub(1));
+        tracing::Span::current().record("seq_high", seq_high.0);
         let head = self.chain.head();
-        let cp = Checkpoint::signed(signer.as_ref(), seq_high, &head, now_ms());
+        let cp = Checkpoint::signed(signer.as_ref(), seq_high, &head, EpochMs(now_ms()));
         self.write_or_spool(cp.to_record()).await;
         self.since_checkpoint = 0;
     }
@@ -318,23 +325,27 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering::SeqCst;
-    use std::sync::atomic::{AtomicBool, AtomicI64};
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicI64, Ordering::SeqCst},
+        },
+        time::Duration,
+    };
 
     use assert2::check;
-    use qubit_clock::MockTimeline;
-    use qubit_clock::sleep::MockSleeper;
+    use qubit_clock::{MockTimeline, sleep::MockSleeper};
 
     use super::*;
-    use crate::checkpoint::Checkpoint;
-    use crate::event::*;
-    use crate::ocsf::ProductInfo;
-    use crate::signing::FileEd25519Signer;
-    use crate::sink::{AuditRecord, AuditSink, MemorySink};
-    use crate::spool::Spool;
-    use crate::stats::AuditStats;
+    use crate::{
+        checkpoint::Checkpoint,
+        event::*,
+        ocsf::ProductInfo,
+        signing::FileEd25519Signer,
+        sink::{AuditRecord, AuditSink, MemorySink},
+        spool::Spool,
+        stats::AuditStats,
+    };
 
     fn product() -> ProductInfo {
         ProductInfo {
@@ -622,7 +633,7 @@ mod tests {
                 let cp = Checkpoint::from_value(&v).expect("cp");
                 check!(cp.verify(&pubkey));
                 check!(cp.chain_head == head);
-                check!(cp.seq_high == seq - 1);
+                check!(cp.seq_high == Seq(seq - 1));
             } else {
                 head = crate::chain::chain_hash(&head, seq, &r.value);
                 seq += 1;
@@ -669,7 +680,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&cps[0].value).unwrap();
         let cp = Checkpoint::from_value(&v).unwrap();
         check!(cp.verify(&pubkey));
-        check!(cp.seq_high == 2); // last chained seq (records 0,1,2)
+        check!(cp.seq_high == Seq(2)); // last chained seq (records 0,1,2)
     }
 
     #[tokio::test]
@@ -790,7 +801,7 @@ mod tests {
         sink.set_fail(true); // stay in spool mode (no replay), so drops accumulate
         let stats = Arc::new(AuditStats::new());
         let (log, rx) = AuditLog::new(64);
-        let spool = Spool::open(dir.path(), one).unwrap();
+        let spool = Spool::open(dir.path(), one.0).unwrap();
         let writer = AuditWriter::new(rx, params(sink.clone(), spool, stats.clone()));
         let h = tokio::spawn(writer.run());
         for i in 0..6 {

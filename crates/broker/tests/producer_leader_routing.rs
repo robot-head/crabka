@@ -22,12 +22,13 @@
 
 #![allow(clippy::too_many_lines)]
 
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
+
 use assert2::assert;
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
-
 use bytes::Bytes;
-
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
@@ -36,6 +37,7 @@ use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopics
 mod support;
 
 use std::sync::OnceLock;
+
 use tokio::sync::Mutex;
 
 /// Serialize the multi-broker tests in this binary: each boots a 3-node

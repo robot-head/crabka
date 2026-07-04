@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use dashmap::DashMap;
+use rate_bucket::RateBucket;
 
 use super::{LimitError, Limits};
-use rate_bucket::RateBucket;
 
 #[derive(Debug, Default)]
 pub struct IngestEnforcer {
@@ -136,8 +136,7 @@ fn f64_from_u64(value: u64) -> f64 {
 }
 
 mod rate_bucket {
-    use std::sync::Mutex;
-    use std::time::Instant;
+    use std::{sync::Mutex, time::Instant};
 
     /// Token bucket with separately-configured refill rate and burst capacity
     /// and all-or-nothing consumption.

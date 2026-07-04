@@ -13,8 +13,10 @@ use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_producer::{Producer, ProducerRecord};
 use crabka_client_streams::{GlobalKTable, KafkaStreams, StreamsBuilder};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+};
 
 // ─── broker helpers ───────────────────────────────────────────────────────────
 

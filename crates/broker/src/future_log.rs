@@ -15,21 +15,25 @@
 //! crash mid-move leaves it behind; broker startup re-discovers it via
 //! `log_dir::scan_future` and re-spawns the replicator.
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
-use crabka_log::{Log, LogConfig};
+use crabka_ids::PartitionIndex;
+use crabka_log::{Log, LogConfig, Offset};
 use dashmap::DashMap;
-use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
+use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::error::BrokerError;
-use crate::log_dir;
-use crate::partition::{Partition, SwapOutcome, WriterMessage};
-use crate::partition_registry::PartitionRegistry;
+use crate::{
+    error::BrokerError,
+    log_dir,
+    partition::{Partition, SwapOutcome, WriterMessage},
+    partition_registry::PartitionRegistry,
+};
 
 /// One in-progress intra-broker log-dir move. Inserted into
 /// `Broker.future_logs` keyed by `(topic, partition)`.
@@ -119,11 +123,11 @@ const MOVE_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 /// *different* target returns `Err(MoveError::AlreadyMoving)`.
 pub fn start_move(
     partitions: &Arc<PartitionRegistry>,
-    future_logs: &Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
+    future_logs: &Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
     all_log_dirs: &[PathBuf],
     log_config: &LogConfig,
     topic: &str,
-    partition: i32,
+    partition: PartitionIndex,
     target_log_dir: &Path,
 ) -> Result<(), MoveError> {
     // (1) Validate the target is a configured log.dir. Path comparison
@@ -159,7 +163,7 @@ pub fn start_move(
     }
 
     // (5) Open the future log at <target>/<topic>-<partition>-future.
-    let future_path = log_dir::future_partition_dir(&target_log_dir, topic, partition);
+    let future_path = log_dir::future_partition_dir(&target_log_dir, topic, partition.get());
     std::fs::create_dir_all(&future_path)?;
     let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
 
@@ -183,16 +187,16 @@ pub fn start_move(
 /// future log already holds.
 pub fn resume_move(
     partitions: &Arc<PartitionRegistry>,
-    future_logs: &Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
+    future_logs: &Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
     target_log_dir: &Path,
     log_config: &LogConfig,
     topic: &str,
-    partition: i32,
+    partition: PartitionIndex,
 ) -> Result<(), MoveError> {
     let part = partitions
         .get(topic, partition)
         .ok_or(MoveError::ReplicaNotAvailable)?;
-    let future_path = log_dir::future_partition_dir(target_log_dir, topic, partition);
+    let future_path = log_dir::future_partition_dir(target_log_dir, topic, partition.get());
     let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
     spawn_move(
         partitions,
@@ -213,16 +217,16 @@ pub fn resume_move(
 #[allow(clippy::too_many_arguments)]
 fn spawn_move(
     partitions: &Arc<PartitionRegistry>,
-    future_logs: &Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
+    future_logs: &Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
     target_log_dir: &Path,
     future_path: PathBuf,
     future_log: Arc<Mutex<Log>>,
     topic: &str,
-    partition: i32,
+    partition: PartitionIndex,
     part: &Arc<Partition>,
 ) {
     let cancel = CancellationToken::new();
-    let target_partition_path = log_dir::partition_dir(target_log_dir, topic, partition);
+    let target_partition_path = log_dir::partition_dir(target_log_dir, topic, partition.get());
     let task = tokio::spawn(replicator_loop(
         part.clone(),
         future_log.clone(),
@@ -256,12 +260,12 @@ async fn replicator_loop(
     target_log_dir: PathBuf,
     cancel: CancellationToken,
     _partitions: Arc<PartitionRegistry>,
-    future_logs: Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
+    future_logs: Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
     topic: String,
-    partition: i32,
+    partition: PartitionIndex,
 ) {
     debug!(
-        topic = %topic, partition,
+        topic = %topic, partition = partition.get(),
         target = %target_log_dir.display(),
         "future-log replicator started"
     );
@@ -275,7 +279,7 @@ async fn replicator_loop(
             Ok(v) => v,
             Err(e) => {
                 warn!(
-                    topic = %topic, partition,
+                    topic = %topic, partition = partition.get(),
                     error = %e,
                     "future-log replicator catch-up failed; retrying"
                 );
@@ -307,14 +311,14 @@ async fn replicator_loop(
             .await;
         if send.is_err() {
             warn!(
-                topic = %topic, partition,
+                topic = %topic, partition = partition.get(),
                 "future-log replicator: partition writer is dead; aborting move"
             );
             break;
         }
         match ack_rx.await {
             Ok(Ok(SwapOutcome::Swapped)) => {
-                debug!(topic = %topic, partition, "future-log swap complete");
+                debug!(topic = %topic, partition = partition.get(), "future-log swap complete");
                 break;
             }
             Ok(Ok(SwapOutcome::NotCaughtUp)) => {
@@ -323,14 +327,14 @@ async fn replicator_loop(
             }
             Ok(Err(e)) => {
                 warn!(
-                    topic = %topic, partition,
+                    topic = %topic, partition = partition.get(),
                     error = %e,
                     "future-log swap failed; aborting move (partition continues on source dir)"
                 );
                 break;
             }
             Err(_) => {
-                warn!(topic = %topic, partition, "future-log swap ack dropped");
+                warn!(topic = %topic, partition = partition.get(), "future-log swap ack dropped");
                 break;
             }
         }
@@ -394,7 +398,7 @@ fn catch_up(
     for mut batch in read.batches {
         let base = batch.base_offset;
         future
-            .append_at(&mut batch, base)
+            .append_at(&mut batch, Offset(base))
             .map_err(BrokerError::from)?;
     }
     Ok(CatchUpProgress { caught_up: false })
@@ -410,9 +414,10 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn move_read_chunk_size_is_one_mib() {
@@ -434,7 +439,7 @@ mod tests {
             &log_dirs,
             &LogConfig::default(),
             "t",
-            0,
+            PartitionIndex(0),
             bogus.path(),
         )
         .expect_err("expected LogDirNotFound");
@@ -452,7 +457,7 @@ mod tests {
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
             "t",
-            0,
+            PartitionIndex(0),
             dir.path(),
         )
         .expect_err("expected ReplicaNotAvailable");
@@ -462,8 +467,8 @@ mod tests {
     /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>`
     /// without going through `Broker::start`. Returns the parent dir
     /// and the `Arc<Partition>`.
-    fn fixture_partition(log_dir: &Path, topic: &str, partition: i32) -> Arc<Partition> {
-        let part_dir = log_dir::partition_dir(log_dir, topic, partition);
+    fn fixture_partition(log_dir: &Path, topic: &str, partition: PartitionIndex) -> Arc<Partition> {
+        let part_dir = log_dir::partition_dir(log_dir, topic, partition.get());
         std::fs::create_dir_all(&part_dir).unwrap();
         let log = Log::open(&part_dir, LogConfig::default()).unwrap();
         crate::broker::spawn_partition(
@@ -547,8 +552,8 @@ mod tests {
         let log_dirs = vec![primary.path().to_path_buf(), extra.path().to_path_buf()];
         let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
-        let part = fixture_partition(primary.path(), "t", 0);
-        partitions.insert("t".to_string(), 0, part);
+        let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
+        partitions.insert("t".to_string(), PartitionIndex(0), part);
 
         start_move(
             &partitions,
@@ -556,7 +561,7 @@ mod tests {
             &log_dirs,
             &LogConfig::default(),
             "t",
-            0,
+            PartitionIndex(0),
             primary.path(),
         )
         .expect("noop should succeed");
@@ -578,7 +583,7 @@ mod tests {
             target.path(),
             &LogConfig::default(),
             "missing",
-            0,
+            PartitionIndex(0),
         )
         .expect_err("missing partition must reject resume");
 
@@ -592,9 +597,9 @@ mod tests {
         let target = tempdir().unwrap();
         let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
-        let part = fixture_partition(primary.path(), "t", 0);
+        let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
         append_records(&part, 3);
-        partitions.insert("t".to_string(), 0, part.clone());
+        partitions.insert("t".to_string(), PartitionIndex(0), part.clone());
 
         let future_path = log_dir::future_partition_dir(target.path(), "t", 0);
         std::fs::create_dir_all(&future_path).unwrap();
@@ -605,7 +610,7 @@ mod tests {
             target.path(),
             &LogConfig::default(),
             "t",
-            0,
+            PartitionIndex(0),
         )
         .expect("resume should spawn a future-log move");
 
@@ -622,7 +627,7 @@ mod tests {
         .await
         .expect("future log should catch up and swap");
 
-        assert!(part.log_end_offset() == 3);
+        assert!(part.log_end_offset() == Offset(3));
         assert!(
             canonicalize_or_self(&part.log_dir.load_full()) == canonicalize_or_self(target.path())
         );
@@ -634,11 +639,11 @@ mod tests {
         let target = tempdir().unwrap();
         let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
-        let part = fixture_partition(primary.path(), "t", 0);
+        let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
         for _ in 0..4 {
             append_value_batch(&part, 400 * 1024);
         }
-        partitions.insert("t".to_string(), 0, part.clone());
+        partitions.insert("t".to_string(), PartitionIndex(0), part.clone());
 
         let future_path = log_dir::future_partition_dir(target.path(), "t", 0);
         std::fs::create_dir_all(&future_path).unwrap();
@@ -649,7 +654,7 @@ mod tests {
             target.path(),
             &LogConfig::default(),
             "t",
-            0,
+            PartitionIndex(0),
         )
         .expect("resume should spawn a future-log move");
 
@@ -666,7 +671,7 @@ mod tests {
         .await
         .expect("future log should keep copying after a partial catch-up pass");
 
-        assert!(part.log_end_offset() == 4);
+        assert!(part.log_end_offset() == Offset(4));
     }
 
     #[tokio::test]
@@ -679,8 +684,8 @@ mod tests {
         let log_dirs = vec![primary.path().to_path_buf(), extra.path().to_path_buf()];
         let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
-        let part = fixture_partition(primary.path(), "t", 0);
-        partitions.insert("t".to_string(), 0, part);
+        let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
+        partitions.insert("t".to_string(), PartitionIndex(0), part);
 
         // Plant a registry entry as if a prior ARLD already kicked off
         // a move — exercises the "already moving, same target" branch
@@ -691,7 +696,7 @@ mod tests {
             Log::open(&future_path, LogConfig::default()).unwrap(),
         ));
         future_logs.insert(
-            ("t".to_string(), 0),
+            ("t".to_string(), PartitionIndex(0)),
             Arc::new(FutureLogState {
                 target_log_dir: extra.path().to_path_buf(),
                 future_path: future_path.clone(),
@@ -707,7 +712,7 @@ mod tests {
             &log_dirs,
             &LogConfig::default(),
             "t",
-            0,
+            PartitionIndex(0),
             extra.path(),
         )
         .expect("same-target alter must be idempotent");
@@ -728,8 +733,8 @@ mod tests {
         ];
         let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
-        let part = fixture_partition(primary.path(), "t", 0);
-        partitions.insert("t".to_string(), 0, part);
+        let part = fixture_partition(primary.path(), "t", PartitionIndex(0));
+        partitions.insert("t".to_string(), PartitionIndex(0), part);
 
         // Plant a registry entry pointing at `extra`.
         let future_path = log_dir::future_partition_dir(extra.path(), "t", 0);
@@ -738,7 +743,7 @@ mod tests {
             Log::open(&future_path, LogConfig::default()).unwrap(),
         ));
         future_logs.insert(
-            ("t".to_string(), 0),
+            ("t".to_string(), PartitionIndex(0)),
             Arc::new(FutureLogState {
                 target_log_dir: extra.path().to_path_buf(),
                 future_path,
@@ -754,7 +759,7 @@ mod tests {
             &log_dirs,
             &LogConfig::default(),
             "t",
-            0,
+            PartitionIndex(0),
             third.path(),
         )
         .expect_err("conflicting-target alter must reject");

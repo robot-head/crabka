@@ -4,20 +4,26 @@
 //! quorum-replicated snapshot — rather than a local in-memory struct.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::metadata_response::{
-    MetadataResponse, MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        metadata_request::MetadataRequest,
+        metadata_response::{
+            MetadataResponse, MetadataResponseBroker, MetadataResponsePartition,
+            MetadataResponseTopic,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::authorized_operations::authorized_operations_bits;
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::authorized_operations::authorized_operations_bits,
+};
 
 #[allow(clippy::too_many_lines)] // ACL preamble + asymmetric loop
 #[allow(clippy::unused_async)]
@@ -136,17 +142,17 @@ pub(crate) async fn handle(
             .map(|p| MetadataResponsePartition {
                 error_code: codes::NONE,
                 partition_index: p.partition,
-                leader_id: i32::try_from(p.leader).unwrap_or(i32::MAX),
-                leader_epoch: p.leader_epoch,
+                leader_id: i32::try_from(p.leader.0).unwrap_or(i32::MAX),
+                leader_epoch: p.leader_epoch.0,
                 replica_nodes: p
                     .replicas
                     .iter()
-                    .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
+                    .map(|&r| i32::try_from(r.0).unwrap_or(i32::MAX))
                     .collect(),
                 isr_nodes: p
                     .isr
                     .iter()
-                    .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
+                    .map(|&r| i32::try_from(r.0).unwrap_or(i32::MAX))
                     .collect(),
                 ..Default::default()
             })
@@ -248,7 +254,7 @@ pub(crate) async fn handle(
     let controller_id: i32 = controller
         .watch_leader()
         .borrow()
-        .and_then(|id| i32::try_from(id).ok())
+        .and_then(|id| i32::try_from(id.0).ok())
         .unwrap_or(-1);
 
     // KIP-430: the cluster-level field only exists on the wire for v8-10;
@@ -317,7 +323,7 @@ fn project_broker(
 ) -> MetadataResponseBroker {
     let (host, port) = pick_endpoint_host_port(b, connection_listener_name, inter_broker_name);
     MetadataResponseBroker {
-        node_id: i32::try_from(b.node_id).unwrap_or(i32::MAX),
+        node_id: i32::try_from(b.node_id.0).unwrap_or(i32::MAX),
         host,
         port,
         rack: b.rack.clone(),
@@ -366,8 +372,9 @@ fn parse_host_port(addr: &str) -> (String, i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn parse_host_port_ok() {
@@ -392,7 +399,7 @@ mod tests {
         endpoints: Vec<crabka_metadata::BrokerEndpoint>,
     ) -> crabka_metadata::BrokerRegistrationRecord {
         crabka_metadata::BrokerRegistrationRecord {
-            node_id: 7,
+            node_id: crabka_metadata::NodeId(7),
             broker_epoch: 0,
             incarnation_id: uuid::Uuid::nil(),
             host: "legacy-host".to_string(),

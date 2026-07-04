@@ -31,8 +31,9 @@ pub enum ProtocolError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn display_is_useful() {

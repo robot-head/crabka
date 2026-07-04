@@ -9,15 +9,16 @@ pub(crate) mod producer;
 pub(crate) mod serde_format;
 pub mod topic_admin;
 
-pub use error::StateTopicError;
-pub use loader::StateTopicLoader;
-
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use crabka_client_core::Client;
+pub use error::StateTopicError;
+pub use loader::StateTopicLoader;
 
 use crate::executor::state::InFlightFile;
 
@@ -134,13 +135,17 @@ pub mod fake {
     //! In-memory `StateBackend` for executor unit tests and integration
     //! tests. Doesn't touch a broker.
 
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use async_trait::async_trait;
 
-    use crate::executor::state::InFlightFile;
-    use crate::state_topic::{StateBackend, StateTopicError};
+    use crate::{
+        executor::state::InFlightFile,
+        state_topic::{StateBackend, StateTopicError},
+    };
 
     #[derive(Default)]
     pub struct InMemoryBackend {
@@ -184,8 +189,10 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executor::state::{InFlightFile, Phase};
-    use crate::model::proposal::ProposalStatus;
+    use crate::{
+        executor::state::{InFlightFile, Phase},
+        model::proposal::ProposalStatus,
+    };
 
     fn in_flight(id: &str, phase: Phase) -> InFlightFile {
         InFlightFile::new(id.to_string(), phase, 42, 50_000_000)

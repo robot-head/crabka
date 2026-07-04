@@ -14,17 +14,22 @@
 //! enough to be the debugging anchor when the TCP integration (Task 10)
 //! misbehaves.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use assert2::assert;
 use bytes::Bytes;
+use crabka_raft::{
+    RaftError,
+    kraft::{
+        KraftConfig, KraftController, KraftLog, NodeId, PeerSender, QuorumState,
+        transport::{Inbound, api_key},
+    },
+};
 use tokio::sync::oneshot;
-
-use crabka_raft::RaftError;
-use crabka_raft::kraft::transport::{Inbound, api_key};
-use crabka_raft::kraft::{KraftConfig, KraftController, KraftLog, NodeId, PeerSender, QuorumState};
 
 /// Shared registry of in-process engines, keyed by node id. Each engine holds a
 /// clone of one of these (via [`SimNet`]) so its outbound peer sends can reach
@@ -217,7 +222,7 @@ async fn await_single_leader(net: &SimNet, ids: &[NodeId], timeout: Duration) ->
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_engines_elect_one_leader() {
     let net = SimNet::new();
-    let ids = [1u64, 2, 3];
+    let ids = [NodeId(1), NodeId(2), NodeId(3)];
     let cid = uuid::Uuid::from_u128(100);
 
     // Staggered election timeouts so one node reliably wins the first round.
@@ -263,7 +268,7 @@ async fn three_engines_elect_one_leader() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bare_majority_two_of_three_elects_with_uniform_timeouts() {
     let net = SimNet::new();
-    let ids = [1u64, 2, 3];
+    let ids = [NodeId(1), NodeId(2), NodeId(3)];
     let cid = uuid::Uuid::from_u128(150);
 
     // UNIFORM timeout for both live voters (no manual stagger) — the production
@@ -271,7 +276,7 @@ async fn bare_majority_two_of_three_elects_with_uniform_timeouts() {
     // voters 1 and 2 are started; voter 3 stays down, so {1,2} is the bare
     // majority of the 3-voter set.
     let mut dirs = Vec::new();
-    for &id in &[1u64, 2] {
+    for &id in &[NodeId(1), NodeId(2)] {
         let (ctrl, dir) = build_engine(id, &ids, cid, 200, &net);
         net.register(id, ctrl);
         dirs.push(dir);
@@ -279,11 +284,15 @@ async fn bare_majority_two_of_three_elects_with_uniform_timeouts() {
 
     // Must converge quickly via self-staggering; without the jitter fix this
     // livelocks well past the deadline.
-    let (leader, epoch) = await_single_leader(&net, &[1u64, 2], Duration::from_secs(8)).await;
+    let (leader, epoch) =
+        await_single_leader(&net, &[NodeId(1), NodeId(2)], Duration::from_secs(8)).await;
     assert!(epoch >= 1);
-    assert!(leader == 1 || leader == 2, "leader must be a live voter");
+    assert!(
+        leader == NodeId(1) || leader == NodeId(2),
+        "leader must be a live voter"
+    );
 
-    for &id in &[1u64, 2] {
+    for &id in &[NodeId(1), NodeId(2)] {
         net.get(id).unwrap().shutdown().await;
     }
 }
@@ -293,7 +302,7 @@ async fn bare_majority_two_of_three_elects_with_uniform_timeouts() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn follower_submit_change_propagates() {
     let net = SimNet::new();
-    let ids = [1u64, 2, 3];
+    let ids = [NodeId(1), NodeId(2), NodeId(3)];
     let cid = uuid::Uuid::from_u128(200);
 
     let timeouts = [150u64, 300, 450];
@@ -356,7 +365,7 @@ async fn follower_submit_change_propagates() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn leader_failure_reelects() {
     let net = SimNet::new();
-    let ids = [1u64, 2, 3];
+    let ids = [NodeId(1), NodeId(2), NodeId(3)];
     let cid = uuid::Uuid::from_u128(300);
 
     let timeouts = [150u64, 300, 450];
@@ -409,7 +418,7 @@ async fn leader_failure_reelects() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_recovers_image() {
     let net = SimNet::new();
-    let ids = [1u64, 2, 3];
+    let ids = [NodeId(1), NodeId(2), NodeId(3)];
     let cid = uuid::Uuid::from_u128(400);
 
     let timeouts = [150u64, 300, 450];
@@ -461,7 +470,7 @@ async fn restart_recovers_image() {
         victim,
         cid,
         voter_set(&ids),
-        timeouts[usize::try_from(victim - 1).unwrap()],
+        timeouts[usize::try_from(victim.0 - 1).unwrap()],
         Arc::new(net.clone()),
         0,
     )
@@ -497,7 +506,7 @@ async fn restart_recovers_image() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lagging_follower_catches_up_via_snapshot() {
     let net = SimNet::new();
-    let ids = [1u64, 2, 3];
+    let ids = [NodeId(1), NodeId(2), NodeId(3)];
     let cid = uuid::Uuid::from_u128(500);
     // Snapshot after every 5 committed records past the last checkpoint.
     let interval = 5u64;
@@ -507,8 +516,8 @@ async fn lagging_follower_catches_up_via_snapshot() {
     // node 1 reliably wins. Node 3 is the lagging node, started later.
     let timeouts = [150u64, 300, 450];
     let mut dirs: HashMap<NodeId, tempfile::TempDir> = HashMap::new();
-    for &id in &[1u64, 2] {
-        let idx = usize::try_from(id - 1).unwrap();
+    for &id in &[NodeId(1), NodeId(2)] {
+        let idx = usize::try_from(id.0 - 1).unwrap();
         let (ctrl, dir) = build_engine_with_snapshot_interval(
             id,
             &ids, // full voter set: the quorum is three even though one is down
@@ -523,7 +532,7 @@ async fn lagging_follower_catches_up_via_snapshot() {
 
     // The two live voters elect a leader among themselves (two of three is a
     // majority). The lagging node 3 is down, so only poll the live pair.
-    let live = [1u64, 2];
+    let live = [NodeId(1), NodeId(2)];
     let (leader, _epoch) = await_single_leader(&net, &live, Duration::from_secs(10)).await;
 
     // Commit MORE than `interval` distinct topics so the leader snapshots and
@@ -570,14 +579,14 @@ async fn lagging_follower_catches_up_via_snapshot() {
     // far below the leader's pruned log_start, so it can ONLY catch up by
     // fetching the snapshot.
     let (lag_ctrl, lag_dir) =
-        build_engine_with_snapshot_interval(3, &ids, cid, timeouts[2], &net, interval);
-    net.register(3, lag_ctrl);
-    dirs.insert(3, lag_dir);
+        build_engine_with_snapshot_interval(NodeId(3), &ids, cid, timeouts[2], &net, interval);
+    net.register(NodeId(3), lag_ctrl);
+    dirs.insert(NodeId(3), lag_dir);
 
     // Wait until the lagging follower's image equals the leader's. Catch-up runs
     // through the FetchSnapshot path (its LEO 0 < leader.log_start), reassembling
     // and installing the snapshot, then resuming normal fetch.
-    let lag = net.get(3).unwrap();
+    let lag = net.get(NodeId(3)).unwrap();
     let want = leader_image.clone();
     await_until(Duration::from_secs(10), || {
         (*lag.current_image() == *want).then_some(())

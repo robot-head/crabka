@@ -15,6 +15,7 @@ mod model;
 
 use std::time::Duration;
 
+use crabka_ids::NodeId;
 use model::ConsensusModel;
 use stateright::{Checker, Model};
 
@@ -61,7 +62,7 @@ fn run(model: ConsensusModel, label: &str) {
 #[test]
 fn three_voters_election_safety() {
     run(
-        ConsensusModel::elections(&[1, 2, 3]),
+        ConsensusModel::elections(&[NodeId(1), NodeId(2), NodeId(3)]),
         "three_voters_election_safety",
     );
 }
@@ -69,7 +70,7 @@ fn three_voters_election_safety() {
 #[test]
 fn two_voters_linearizable() {
     run(
-        ConsensusModel::linearizable(&[1, 2], 2),
+        ConsensusModel::linearizable(&[NodeId(1), NodeId(2)], 2),
         "two_voters_linearizable",
     );
 }
@@ -79,5 +80,8 @@ fn three_voters_faults() {
     // Election + log-matching safety under an adversarial network: message
     // loss, duplication, and a single crash/recover. 3 voters so a crash leaves
     // a majority that can still make progress.
-    run(ConsensusModel::faults(&[1, 2, 3]), "three_voters_faults");
+    run(
+        ConsensusModel::faults(&[NodeId(1), NodeId(2), NodeId(3)]),
+        "three_voters_faults",
+    );
 }

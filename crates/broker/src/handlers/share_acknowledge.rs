@@ -16,19 +16,26 @@
 use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
-
+use crabka_log::Offset;
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::share_acknowledge_request::ShareAcknowledgeRequest;
-use crabka_protocol::owned::share_acknowledge_response::{
-    LeaderIdAndEpoch, PartitionData, ShareAcknowledgeResponse, ShareAcknowledgeTopicResponse,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        share_acknowledge_request::ShareAcknowledgeRequest,
+        share_acknowledge_response::{
+            LeaderIdAndEpoch, PartitionData, ShareAcknowledgeResponse,
+            ShareAcknowledgeTopicResponse,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::share_fetch::apply_one_ack;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::share_fetch::apply_one_ack,
+};
 
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
@@ -128,8 +135,8 @@ pub(crate) async fn handle(
                 let res = if req.is_renew_ack {
                     st.renew(
                         &member,
-                        batch.first_offset,
-                        batch.last_offset,
+                        Offset(batch.first_offset),
+                        Offset(batch.last_offset),
                         now,
                         cfg.record_lock_duration,
                     )
@@ -195,16 +202,20 @@ fn encode_error_response(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::share_acknowledge_request::{
-        AcknowledgePartition, AcknowledgeTopic,
-    };
-    use crabka_protocol::owned::share_acknowledge_response;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
-    use crabka_security::Principal;
     use std::net::SocketAddr;
+
+    use assert2::assert;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            share_acknowledge_request::{AcknowledgePartition, AcknowledgeTopic},
+            share_acknowledge_response,
+        },
+        primitives::uuid::Uuid as ProtoUuid,
+    };
+    use crabka_security::Principal;
+
+    use super::*;
 
     crate::test_support::wire_helpers!(
         ShareAcknowledgeRequest,

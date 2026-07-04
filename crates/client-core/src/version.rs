@@ -3,8 +3,7 @@
 
 use std::collections::HashMap;
 
-use crate::error::ClientError;
-use crate::request::ProtocolRequest;
+use crate::{error::ClientError, request::ProtocolRequest};
 
 #[derive(Debug, Clone, Default)]
 pub struct ApiVersionTable {
@@ -59,9 +58,10 @@ impl ApiVersionTable {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+
+    use super::*;
 
     // `ApiVersionsRequest` acts as a sample `ProtocolRequest`. We only
     // need the trait's constants here; the impl comes from codegen.

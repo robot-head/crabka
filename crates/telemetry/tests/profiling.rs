@@ -1,11 +1,13 @@
 #[cfg(unix)]
 mod unix_only {
-    use axum::Router;
-    use axum::body::Body;
-    use axum::http::{Request, StatusCode};
-    use axum::routing::get;
-    use std::io::Read as _;
-    use std::net::SocketAddr;
+    use std::{io::Read as _, net::SocketAddr};
+
+    use axum::{
+        Router,
+        body::Body,
+        http::{Request, StatusCode},
+        routing::get,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tower::ServiceExt; // for `oneshot`
 

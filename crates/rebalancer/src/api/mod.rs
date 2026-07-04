@@ -16,8 +16,7 @@ pub mod handlers;
 
 use std::sync::Arc;
 
-use crate::goals::Goal;
-use crate::pb::rebalancer_connect::RebalancerServiceBuilder;
+use crate::{goals::Goal, pb::rebalancer_connect::RebalancerServiceBuilder};
 
 /// Registry of `Goal` trait objects, name-keyed. Maps the
 /// `CreateProposalRequest::goals` strings to concrete implementations.
@@ -106,8 +105,9 @@ pub fn router(state: Arc<handlers::AppState>) -> axum::Router {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn default_registry_has_sixteen_goals() {

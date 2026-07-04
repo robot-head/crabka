@@ -59,7 +59,7 @@ fn validate_target(
     // Every node id must be a registered broker.
     for &n in target {
         #[allow(clippy::cast_sign_loss)] // replica IDs are always non-negative
-        if image.broker(n as NodeId).is_none() {
+        if image.broker(NodeId(n as u64)).is_none() {
             return Err((INVALID_REPLICA_ASSIGNMENT, format!("unknown broker {n}")));
         }
     }
@@ -122,7 +122,7 @@ fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, RowError
         leader,
         replicas: reverted_replicas,
         isr: reverted_isr,
-        leader_epoch: pr.leader_epoch + epoch_bump,
+        leader_epoch: crabka_metadata::LeaderEpoch(pr.leader_epoch.0 + epoch_bump),
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: new_directories,
@@ -132,7 +132,7 @@ fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, RowError
 
 fn start_path(pr: &PartitionRecord, target: &[i32]) -> Option<PartitionRecord> {
     #[allow(clippy::cast_sign_loss)] // replica IDs are always non-negative
-    let target_set: Vec<NodeId> = target.iter().map(|&x| x as NodeId).collect();
+    let target_set: Vec<NodeId> = target.iter().map(|&x| NodeId(x as u64)).collect();
     let current_target: Vec<NodeId> = pr
         .replicas
         .iter()
@@ -177,15 +177,22 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use crabka_metadata::ResourceType;
-use crabka_protocol::Encode;
-use crabka_protocol::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest;
-use crabka_protocol::owned::alter_partition_reassignments_response::{
-    AlterPartitionReassignmentsResponse, ReassignablePartitionResponse, ReassignableTopicResponse,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        alter_partition_reassignments_request::AlterPartitionReassignmentsRequest,
+        alter_partition_reassignments_response::{
+            AlterPartitionReassignmentsResponse, ReassignablePartitionResponse,
+            ReassignableTopicResponse,
+        },
+    },
 };
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE};
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes::{CLUSTER_AUTHORIZATION_FAILED, COORDINATOR_NOT_AVAILABLE},
+};
 
 #[tracing::instrument(
     name = "handle_alter_partition_reassignments",
@@ -338,39 +345,42 @@ fn encode_response<R: Encode>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
+
     use assert2::assert;
-    use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord, PartitionRecord, TopicRecord};
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::alter_partition_reassignments_request::{
-        AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
+    use crabka_metadata::{
+        BrokerRegistrationRecord, LeaderEpoch, MetadataRecord, PartitionRecord, TopicRecord,
+    };
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::alter_partition_reassignments_request::{
+            AlterPartitionReassignmentsRequest, ReassignablePartition, ReassignableTopic,
+        },
     };
     use crabka_security::{AuthMethod, Principal};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-    use std::time::Duration;
     use uuid::Uuid;
 
+    use super::*;
     use crate::test_support::DenyAll;
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn img_with(
-        replicas: &[NodeId],
-        isr: &[NodeId],
-        adding: &[NodeId],
-        removing: &[NodeId],
-        leader: NodeId,
+        replicas: &[u64],
+        isr: &[u64],
+        adding: &[u64],
+        removing: &[u64],
+        leader: u64,
     ) -> MetadataImage {
         img_with_epoch(replicas, isr, adding, removing, leader, 0)
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     fn img_with_epoch(
-        replicas: &[NodeId],
-        isr: &[NodeId],
-        adding: &[NodeId],
-        removing: &[NodeId],
-        leader: NodeId,
+        replicas: &[u64],
+        isr: &[u64],
+        adding: &[u64],
+        removing: &[u64],
+        leader: u64,
         partition_epoch: i32,
     ) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());
@@ -378,7 +388,7 @@ mod tests {
         for n in 1u64..=6 {
             img.apply(&MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
-                    node_id: n,
+                    node_id: NodeId(n),
                     broker_epoch: 0,
                     incarnation_id: uuid::Uuid::nil(),
                     host: "localhost".into(),
@@ -397,12 +407,12 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader,
-            replicas: replicas.to_vec(),
-            isr: isr.to_vec(),
-            leader_epoch: 5,
-            adding_replicas: adding.to_vec(),
-            removing_replicas: removing.to_vec(),
+            leader: NodeId(leader),
+            replicas: replicas.iter().copied().map(NodeId).collect(),
+            isr: isr.iter().copied().map(NodeId).collect(),
+            leader_epoch: crabka_metadata::LeaderEpoch(5),
+            adding_replicas: adding.iter().copied().map(NodeId).collect(),
+            removing_replicas: removing.iter().copied().map(NodeId).collect(),
             directories: vec![],
             partition_epoch,
         }));
@@ -462,7 +472,7 @@ mod tests {
             .controller
             .submit_change(vec![
                 MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-                    node_id: 1,
+                    node_id: NodeId(1),
                     broker_epoch: 1,
                     incarnation_id: uuid::Uuid::nil(),
                     host: "localhost".into(),
@@ -471,7 +481,7 @@ mod tests {
                     endpoints: vec![],
                 }),
                 MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-                    node_id: 2,
+                    node_id: NodeId(2),
                     broker_epoch: 1,
                     incarnation_id: uuid::Uuid::nil(),
                     host: "localhost".into(),
@@ -488,10 +498,10 @@ mod tests {
                 MetadataRecord::V1Partition(PartitionRecord {
                     topic: "orders".into(),
                     partition: 7,
-                    leader: 1,
-                    replicas: vec![1],
-                    isr: vec![1],
-                    leader_epoch: 3,
+                    leader: NodeId(1),
+                    replicas: vec![NodeId(1)],
+                    isr: vec![NodeId(1)],
+                    leader_epoch: LeaderEpoch(3),
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![],
@@ -518,12 +528,12 @@ mod tests {
         let expected = PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3, 4],
-            isr: vec![1, 2, 3],
-            leader_epoch: 5, // unchanged on start
-            adding_replicas: vec![4],
-            removing_replicas: vec![2, 3],
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+            isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(5), // unchanged on start
+            adding_replicas: vec![NodeId(4)],
+            removing_replicas: vec![NodeId(2), NodeId(3)],
             directories: vec![Uuid::nil(); 4],
             partition_epoch: 12,
         };
@@ -747,7 +757,7 @@ mod tests {
 
         let image = broker.controller.current_image();
         let partition = image.partition("orders", 7).expect("partition committed");
-        assert!(partition.adding_replicas == vec![2]);
+        assert!(partition.adding_replicas == vec![NodeId(2)]);
         assert!(partition.partition_epoch == 12);
         broker_handle.shutdown().await;
     }
@@ -764,12 +774,12 @@ mod tests {
         let expected = PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 4, 5, 6],
-            isr: vec![1, 2, 3],
-            leader_epoch: 5,
-            adding_replicas: vec![5, 6],
-            removing_replicas: vec![1, 4],
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(4), NodeId(5), NodeId(6)],
+            isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(5),
+            adding_replicas: vec![NodeId(5), NodeId(6)],
+            removing_replicas: vec![NodeId(1), NodeId(4)],
             directories: vec![Uuid::nil(); 4],
             partition_epoch: 1,
         };
@@ -789,7 +799,7 @@ mod tests {
         let res = process_one_partition(&img, "foo", 0, Some(&[1, 2]), true)
             .expect("ok")
             .expect("Some");
-        assert!(res.removing_replicas == vec![3]);
+        assert!(res.removing_replicas == vec![NodeId(3)]);
     }
 
     #[test]
@@ -812,10 +822,10 @@ mod tests {
         let expected = PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader: 1, // reverted replicas ∩ isr = [1]
-            replicas: vec![1, 2, 3],
-            isr: vec![1],
-            leader_epoch: 6, // bumped
+            leader: NodeId(1), // reverted replicas ∩ isr = [1]
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1)],
+            leader_epoch: LeaderEpoch(6), // bumped
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![Uuid::nil(); 3],
@@ -834,10 +844,10 @@ mod tests {
         let expected = PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 2, 3],
-            leader_epoch: 5,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(5),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![Uuid::nil(); 3],

@@ -13,8 +13,10 @@
 //! network partition) doesn't keep producing stable results from its
 //! last few samples forever.
 
-use std::collections::{HashMap, VecDeque};
-use std::time::Duration;
+use std::{
+    collections::{HashMap, VecDeque},
+    time::Duration,
+};
 
 use parking_lot::RwLock;
 
@@ -262,8 +264,9 @@ impl UsageStore {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn sample(metric: MetricKind, topic: &str, partition: i32, value: f64) -> ParsedSample {
         ParsedSample {

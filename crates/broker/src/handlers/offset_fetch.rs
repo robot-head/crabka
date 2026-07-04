@@ -8,22 +8,27 @@
 //! boundary and echoed back on the response.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        offset_fetch_request::OffsetFetchRequest,
+        offset_fetch_response::{
+            OffsetFetchResponse, OffsetFetchResponseGroup, OffsetFetchResponsePartition,
+            OffsetFetchResponsePartitions, OffsetFetchResponseTopic, OffsetFetchResponseTopics,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::offset_fetch_request::OffsetFetchRequest;
-use crabka_protocol::owned::offset_fetch_response::{
-    OffsetFetchResponse, OffsetFetchResponseGroup, OffsetFetchResponsePartition,
-    OffsetFetchResponsePartitions, OffsetFetchResponseTopic, OffsetFetchResponseTopics,
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    coordinator::unified::actor::{GroupActorMessage, GroupKindTag},
+    error::BrokerError,
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
-use crate::error::BrokerError;
 
 #[allow(clippy::too_many_lines)]
 // ACL preamble (group + per-topic) + fetch-all vs named-topic branches; splitting hurts readability
@@ -114,7 +119,7 @@ pub(crate) async fn handle(
                 .or_default()
                 .push(OffsetFetchResponsePartition {
                     partition_index: *pid,
-                    committed_offset: entry.offset,
+                    committed_offset: entry.offset.0,
                     committed_leader_epoch: entry.leader_epoch,
                     metadata: Some(entry.metadata.clone()),
                     error_code: codes::NONE,
@@ -224,7 +229,7 @@ pub(crate) async fn handle(
                         .map(|&pid| match committed.get(&(t.name.clone(), pid)) {
                             Some(entry) => OffsetFetchResponsePartition {
                                 partition_index: pid,
-                                committed_offset: entry.offset,
+                                committed_offset: entry.offset.0,
                                 committed_leader_epoch: entry.leader_epoch,
                                 metadata: Some(entry.metadata.clone()),
                                 error_code: codes::NONE,
@@ -404,7 +409,7 @@ async fn handle_groups(
                                 match committed.get(&(name.clone(), pid)) {
                                     Some(entry) => OffsetFetchResponsePartitions {
                                         partition_index: pid,
-                                        committed_offset: entry.offset,
+                                        committed_offset: entry.offset.0,
                                         committed_leader_epoch: entry.leader_epoch,
                                         metadata: Some(entry.metadata.clone()),
                                         error_code: codes::NONE,
@@ -442,7 +447,7 @@ async fn handle_groups(
                     by_topic.entry(topic.clone()).or_default().push(
                         OffsetFetchResponsePartitions {
                             partition_index: *pid,
-                            committed_offset: entry.offset,
+                            committed_offset: entry.offset.0,
                             committed_leader_epoch: entry.leader_epoch,
                             metadata: Some(entry.metadata.clone()),
                             error_code: codes::NONE,
@@ -519,4 +524,99 @@ async fn handle_groups(
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use assert2::assert;
+    use crabka_log::Offset;
+
+    use super::*;
+    use crate::{
+        coordinator::unified::classic_state::OffsetEntry,
+        test_support::{peer, principal, start_broker_with_authorizer_no_audit as start_broker},
+    };
+
+    // Seed a committed offset for (group, topic, partition) directly on the
+    // group actor via UpdateCommitted.
+    async fn seed_committed_offset(
+        broker: &Broker,
+        group: &str,
+        topic: &str,
+        partition: i32,
+        offset: i64,
+    ) {
+        let h = broker
+            .group_coordinator
+            .get_or_create_group(group, GroupKindTag::Classic);
+        let (tx, rx) = oneshot::channel();
+        h.tx.send(GroupActorMessage::UpdateCommitted {
+            entries: vec![(
+                (topic.to_string(), partition),
+                OffsetEntry {
+                    offset: Offset(offset),
+                    leader_epoch: 5,
+                    metadata: String::new(),
+                    commit_timestamp_ms: 0,
+                },
+            )],
+            reply: tx,
+        })
+        .await
+        .expect("send UpdateCommitted");
+        rx.await.expect("UpdateCommitted ack");
+    }
+
+    // A named-topic OffsetFetch (v0–v7 path) returns the group's committed
+    // offset for the requested partition. A non-zero committed offset pins
+    // the committed_offset field against the struct-field-deletion mutant,
+    // which would default it to 0.
+    #[tokio::test]
+    async fn named_topic_fetch_returns_committed_offset() {
+        const VERSION: i16 = 7; // legacy single-group path (< 8)
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        seed_committed_offset(&broker, "grp", "orders", 0, 42).await;
+
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = crate::test_support::request_context(&p, &peer, "consumer");
+        let req = OffsetFetchRequest {
+            group_id: "grp".into(),
+            topics: Some(vec![
+                crabka_protocol::owned::offset_fetch_request::OffsetFetchRequestTopic {
+                    name: "orders".into(),
+                    partition_indexes: vec![0],
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        };
+        let req_bytes = crate::test_support::encode_request(&req, VERSION);
+
+        let bytes = handle(&broker, VERSION, 123, &req_bytes, &ctx)
+            .await
+            .expect("handle");
+        let resp: OffsetFetchResponse = crate::test_support::decode_response(&bytes, VERSION);
+
+        let topic = resp
+            .topics
+            .iter()
+            .find(|t| t.name == "orders")
+            .expect("orders topic row");
+        let part = topic
+            .partitions
+            .iter()
+            .find(|p| p.partition_index == 0)
+            .expect("partition 0 row");
+        assert!(
+            part.committed_offset == 42,
+            "committed_offset must echo the seeded value (42), got {}",
+            part.committed_offset
+        );
+        broker_handle.shutdown().await;
+    }
 }

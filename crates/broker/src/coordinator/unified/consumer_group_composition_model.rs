@@ -30,25 +30,32 @@
 //!
 //! Memory safety: run under the host memory watchdog while bounds are tuned.
 
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::time::{Duration, Instant};
-
-use crabka_protocol::owned::consumer_group_heartbeat_request::{
-    ConsumerGroupHeartbeatRequest, TopicPartitions,
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    time::{Duration, Instant},
 };
-use crabka_protocol::primitives::uuid::Uuid;
+
+use crabka_log::Offset;
+use crabka_protocol::{
+    owned::consumer_group_heartbeat_request::{ConsumerGroupHeartbeatRequest, TopicPartitions},
+    primitives::uuid::Uuid,
+};
 use stateright::{Checker, Model, Property};
 
-use super::super::config::NextGenConfig;
-use super::super::consumer_state::{GroupState, MemberState};
-use super::super::persistence_next_gen::MemberAssignmentState;
-use super::super::reconciler::ReconcileInput;
-use super::{HeartbeatStep, MetadataProvider, step_heartbeat};
+use super::{
+    super::{
+        config::NextGenConfig,
+        consumer_state::{GroupState, MemberState},
+        persistence_next_gen::MemberAssignmentState,
+        reconciler::ReconcileInput,
+    },
+    HeartbeatStep, MetadataProvider, step_heartbeat,
+};
 
 const TOPIC: Uuid = Uuid([7; 16]);
 const TOPIC_NAME: &str = "t";
-const MAX_OFFSET: i64 = 2; // bound the committed offset so the state space stays finite
+const MAX_OFFSET: Offset = Offset(2); // bound the committed offset so the state space stays finite
 
 const MAX_STATES: usize = 2_000_000;
 const MAX_DEPTH: usize = 80;
@@ -78,7 +85,7 @@ struct CgcState {
     members: Vec<MemberProj>,              // sorted by id
     client_owned: Vec<(String, Vec<i32>)>, // ground-truth ownership ledger
     advertised: Vec<(String, Vec<i32>)>,   // last advertised to each member
-    committed: Vec<(i32, i64)>,            // MODELED per-partition committed offset, sorted
+    committed: Vec<(i32, Offset)>,         // MODELED per-partition committed offset, sorted
 }
 
 /// Which epoch a member presents on an `OffsetCommit`: its current epoch (the
@@ -198,7 +205,7 @@ fn project(
     g: &GroupState,
     owned: &BTreeMap<String, BTreeSet<i32>>,
     advertised: &BTreeMap<String, Vec<i32>>,
-    committed: &BTreeMap<i32, i64>,
+    committed: &BTreeMap<i32, Offset>,
 ) -> CgcState {
     let mut members: Vec<MemberProj> = g
         .members
@@ -242,7 +249,7 @@ fn advertised_map(s: &CgcState) -> BTreeMap<String, Vec<i32>> {
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
-fn committed_map(s: &CgcState) -> BTreeMap<i32, i64> {
+fn committed_map(s: &CgcState) -> BTreeMap<i32, Offset> {
     s.committed.iter().copied().collect()
 }
 fn owned_to_vec(owned: &BTreeMap<String, BTreeSet<i32>>) -> Vec<(String, Vec<i32>)> {
@@ -261,11 +268,11 @@ fn advertised_for(s: &CgcState, id: &str) -> Vec<i32> {
         .map(|(_, v)| v.clone())
         .unwrap_or_default()
 }
-fn committed_of(s: &CgcState, part: i32) -> i64 {
+fn committed_of(s: &CgcState, part: i32) -> Offset {
     s.committed
         .iter()
         .find(|(p, _)| *p == part)
-        .map_or(0, |(_, o)| *o)
+        .map_or(Offset(0), |(_, o)| *o)
 }
 /// INDEPENDENT oracle for the `OffsetCommit` fence: the expected decision for a
 /// member presenting `epoch`. Deliberately a different structure (`Ordering`)
@@ -358,7 +365,7 @@ fn do_commit(last: &CgcState, id: &str, part: i32, kind: EpochKind) -> Option<Cg
         return None; // fenced (stale/forward/unknown) — cannot touch the offset
     }
     let mut committed = committed_map(last);
-    let off = committed.entry(part).or_insert(0);
+    let off = committed.entry(part).or_insert(Offset(0));
     if *off >= MAX_OFFSET {
         return None;
     }
@@ -556,7 +563,7 @@ impl Model for CgcModel {
             // ----- non-vacuity witnesses -----
             // A current-epoch commit was accepted (the fence's accept path fires).
             Property::sometimes("offset_advanced", |_, s: &CgcState| {
-                s.committed.iter().any(|&(_, o)| o > 0)
+                s.committed.iter().any(|&(_, o)| o > Offset(0))
             }),
             // The reconciliation actually advanced a member's epoch past its first
             // generation — so `Stale`/`Forward` commits are genuinely distinct from

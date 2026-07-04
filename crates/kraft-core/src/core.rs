@@ -2,11 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::action::{Action, TimerKind};
-use crate::event::{Event, LogEnd};
-use crate::role::{ReplicaProgress, Role};
-use crate::types::{
-    LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant,
+use crate::{
+    action::{Action, TimerKind},
+    event::{Event, LogEnd},
+    role::{ReplicaProgress, Role},
+    types::{Epoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant},
 };
 
 /// Deterministic per-`(node, epoch)` election-timeout jitter in
@@ -17,13 +17,13 @@ use crate::types::{
 /// pure core and the async engine's initial timer arm so production self-staggers
 /// without per-node config.
 #[must_use]
-pub fn election_jitter_ms(me: NodeId, epoch: LeaderEpoch, base_ms: u64) -> u64 {
+pub fn election_jitter_ms(me: NodeId, epoch: Epoch, base_ms: u64) -> u64 {
     if base_ms == 0 {
         return 0;
     }
     // Cheap integer hash of (node id, epoch); avoids any RNG so the sims stay
     // deterministic.
-    let mix = me.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    let mix = me.0.wrapping_mul(0x9E37_79B9_7F4A_7C15)
         ^ u64::from(epoch).wrapping_mul(0xD1B5_4A32_D192_ED03);
     mix % base_ms
 }
@@ -81,7 +81,7 @@ impl QuorumStateMachine {
     }
 
     #[cfg(test)]
-    pub(crate) fn force_epoch(&mut self, e: LeaderEpoch) {
+    pub(crate) fn force_epoch(&mut self, e: Epoch) {
         self.state.leader_epoch = e;
     }
 
@@ -114,7 +114,7 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch, role = self.role.name())
+        fields(node = self.me.0, epoch = self.state.leader_epoch, role = self.role.name())
     )]
     pub fn on_event(&mut self, event: Event, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         match event {
@@ -170,13 +170,13 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch, from, fetch_epoch, fetch_offset)
+        fields(node = self.me.0, epoch = self.state.leader_epoch, from = from.0, fetch_epoch, fetch_offset)
     )]
     fn handle_fetch(
         &mut self,
         log: &dyn LogView,
         from: NodeId,
-        fetch_epoch: LeaderEpoch,
+        fetch_epoch: Epoch,
         fetch_offset: i64,
     ) -> Vec<Action> {
         // Only a leader tracks follower progress / serves divergence hints.
@@ -264,12 +264,12 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch, leader_id, diverging = diverging.is_some())
+        fields(node = self.me.0, epoch = self.state.leader_epoch, leader_id = leader_id.0, diverging = diverging.is_some())
     )]
     fn handle_fetch_response(
         &mut self,
         leader_id: NodeId,
-        _leader_epoch: LeaderEpoch,
+        _leader_epoch: Epoch,
         diverging: Option<LogOffsetMetadata>,
         now: SimInstant,
     ) -> Vec<Action> {
@@ -291,7 +291,7 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch, is_voter = self.is_voter())
+        fields(node = self.me.0, epoch = self.state.leader_epoch, is_voter = self.is_voter())
     )]
     fn handle_fetch_timeout(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         if self.is_voter() {
@@ -307,12 +307,12 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch, leader_id, leader_epoch)
+        fields(node = self.me.0, epoch = self.state.leader_epoch, leader_id = leader_id.0, leader_epoch)
     )]
     fn handle_begin_quorum_epoch(
         &mut self,
         leader_id: NodeId,
-        leader_epoch: LeaderEpoch,
+        leader_epoch: Epoch,
         now: SimInstant,
     ) -> Vec<Action> {
         // KIP-595 / leadership-hijack defense: only adopt a leader that belongs
@@ -325,7 +325,7 @@ impl QuorumStateMachine {
         // voter set rather than a stale view.
         if !self.state.voters.is_empty() && !self.state.voters.contains(leader_id) {
             tracing::warn!(
-                rejected_leader = leader_id,
+                rejected_leader = leader_id.0,
                 leader_epoch,
                 "rejecting BeginQuorumEpoch from non-voter leader (not in current voter set)"
             );
@@ -370,13 +370,13 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch, leader_epoch)
+        fields(node = self.me.0, epoch = self.state.leader_epoch, leader_epoch)
     )]
     fn handle_end_quorum_epoch(
         &mut self,
         log: &dyn LogView,
         _leader_id: NodeId,
-        leader_epoch: LeaderEpoch,
+        leader_epoch: Epoch,
         now: SimInstant,
     ) -> Vec<Action> {
         if leader_epoch < self.state.leader_epoch {
@@ -396,7 +396,7 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch, is_voter = self.is_voter())
+        fields(node = self.me.0, epoch = self.state.leader_epoch, is_voter = self.is_voter())
     )]
     fn handle_election_timeout(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         if !self.is_voter() {
@@ -412,7 +412,7 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch)
+        fields(node = self.me.0, epoch = self.state.leader_epoch)
     )]
     fn start_election(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         // Starting a pre-vote round means we have given up on the current leader
@@ -454,13 +454,13 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch, from, resp_epoch = epoch, vote_granted, role = self.role.name())
+        fields(node = self.me.0, epoch = self.state.leader_epoch, from = from.0, resp_epoch = epoch, vote_granted, role = self.role.name())
     )]
     fn handle_vote_response(
         &mut self,
         log: &dyn LogView,
         from: NodeId,
-        epoch: LeaderEpoch,
+        epoch: Epoch,
         vote_granted: bool,
         now: SimInstant,
     ) -> Vec<Action> {
@@ -519,7 +519,7 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch)
+        fields(node = self.me.0, epoch = self.state.leader_epoch)
     )]
     fn promote_to_candidate(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         self.state.leader_epoch = self.state.leader_epoch.saturating_add(1);
@@ -562,7 +562,7 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch)
+        fields(node = self.me.0, epoch = self.state.leader_epoch)
     )]
     fn promote_to_leader_inner(&mut self, log: &dyn LogView) -> Vec<Action> {
         let epoch = self.state.leader_epoch;
@@ -593,14 +593,14 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me, epoch = self.state.leader_epoch, from, voter_id, candidate, candidate_epoch, pre_vote)
+        fields(node = self.me.0, epoch = self.state.leader_epoch, from = from.0, voter_id = voter_id.0, candidate = candidate.0, candidate_epoch, pre_vote)
     )]
     fn handle_vote_request(
         &mut self,
         log: &dyn LogView,
         from: NodeId,
         voter_id: NodeId,
-        candidate_epoch: LeaderEpoch,
+        candidate_epoch: Epoch,
         candidate: NodeId,
         cand_log: LogEnd,
         pre_vote: bool,
@@ -613,10 +613,10 @@ impl QuorumStateMachine {
         // reply, exactly as the JVM does. Only enforce once the addressing field
         // is meaningful: a `-1`/unset `voter_id` (decoded as 0) and the
         // bootstrap case where we have no voter set yet are not rejected here.
-        if voter_id != self.me && voter_id != 0 {
+        if voter_id != self.me && voter_id != NodeId(0) {
             tracing::warn!(
-                addressed_to = voter_id,
-                me = self.me,
+                addressed_to = voter_id.0,
+                me = self.me.0,
                 "ignoring Vote addressed to a different voter"
             );
             return Vec::new();
@@ -629,7 +629,7 @@ impl QuorumStateMachine {
         // it does not recognize as voters.
         if !self.state.voters.is_empty() && !self.state.voters.contains(candidate) {
             tracing::warn!(
-                candidate,
+                candidate = candidate.0,
                 candidate_epoch,
                 "ignoring Vote from non-voter candidate (not in current voter set)"
             );
@@ -691,11 +691,11 @@ impl QuorumStateMachine {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = self.me, from_epoch = self.state.leader_epoch, to_epoch = epoch)
+        fields(node = self.me.0, from_epoch = self.state.leader_epoch, to_epoch = epoch)
     )]
     fn transition_to_unattached(
         &mut self,
-        epoch: LeaderEpoch,
+        epoch: Epoch,
         deadline: SimInstant,
         actions: &mut Vec<Action>,
     ) {
@@ -718,23 +718,26 @@ impl QuorumStateMachine {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::event::{Event, LogEnd};
-    use crate::types::*;
     use assert2::{assert, check};
+
+    use super::*;
+    use crate::{
+        event::{Event, LogEnd},
+        types::*,
+    };
 
     struct FakeLog {
         end: i64,
-        last_epoch: LeaderEpoch,
+        last_epoch: Epoch,
     }
     impl LogView for FakeLog {
         fn end_offset(&self) -> i64 {
             self.end
         }
-        fn last_epoch(&self) -> LeaderEpoch {
+        fn last_epoch(&self) -> Epoch {
             self.last_epoch
         }
-        fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+        fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64> {
             if epoch <= self.last_epoch {
                 Some(self.end)
             } else {
@@ -747,16 +750,16 @@ mod tests {
     /// and then growing before followers fetch.
     struct CellLog {
         end: std::cell::Cell<i64>,
-        last_epoch: LeaderEpoch,
+        last_epoch: Epoch,
     }
     impl LogView for CellLog {
         fn end_offset(&self) -> i64 {
             self.end.get()
         }
-        fn last_epoch(&self) -> LeaderEpoch {
+        fn last_epoch(&self) -> Epoch {
             self.last_epoch
         }
-        fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+        fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64> {
             if epoch <= self.last_epoch {
                 Some(self.end.get())
             } else {
@@ -782,17 +785,17 @@ mod tests {
 
     #[test]
     fn grants_standard_vote_when_log_up_to_date_and_not_voted() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
         };
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
-                from: 2,
-                voter_id: 1,
+                from: NodeId(2),
+                voter_id: NodeId(1),
                 candidate_epoch: 1,
-                candidate: 2,
+                candidate: NodeId(2),
                 candidate_log_end: LogEnd {
                     last_epoch: 1,
                     last_offset: 5,
@@ -805,27 +808,27 @@ mod tests {
         assert!(actions.iter().any(|a| matches!(
             a,
             Action::ReplyVote {
-                to: 2,
+                to: NodeId(2),
                 granted: true,
                 ..
             }
         )));
-        assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(2)); // binding
+        assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(NodeId(2))); // binding
     }
 
     #[test]
     fn denies_standard_vote_when_candidate_log_behind() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 10,
             last_epoch: 2,
         };
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
-                from: 2,
-                voter_id: 1,
+                from: NodeId(2),
+                voter_id: NodeId(1),
                 candidate_epoch: 2,
-                candidate: 2,
+                candidate: NodeId(2),
                 candidate_log_end: LogEnd {
                     last_epoch: 1,
                     last_offset: 3,
@@ -844,17 +847,17 @@ mod tests {
 
     #[test]
     fn pre_vote_grant_is_non_binding() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
         };
         m.on_event(
             Event::ReceiveVoteRequest {
-                from: 2,
-                voter_id: 1,
+                from: NodeId(2),
+                voter_id: NodeId(1),
                 candidate_epoch: 1,
-                candidate: 2,
+                candidate: NodeId(2),
                 candidate_log_end: LogEnd {
                     last_epoch: 1,
                     last_offset: 5,
@@ -870,7 +873,7 @@ mod tests {
 
     #[test]
     fn denies_standard_vote_when_already_voted_for_other() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
@@ -878,10 +881,10 @@ mod tests {
         // vote for 2 first
         m.on_event(
             Event::ReceiveVoteRequest {
-                from: 2,
-                voter_id: 1,
+                from: NodeId(2),
+                voter_id: NodeId(1),
                 candidate_epoch: 1,
-                candidate: 2,
+                candidate: NodeId(2),
                 candidate_log_end: LogEnd {
                     last_epoch: 1,
                     last_offset: 5,
@@ -894,10 +897,10 @@ mod tests {
         // now 3 asks in the same epoch
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
-                from: 3,
-                voter_id: 1,
+                from: NodeId(3),
+                voter_id: NodeId(1),
                 candidate_epoch: 1,
-                candidate: 3,
+                candidate: NodeId(3),
                 candidate_log_end: LogEnd {
                     last_epoch: 1,
                     last_offset: 5,
@@ -910,7 +913,7 @@ mod tests {
         assert!(actions.iter().any(|a| matches!(
             a,
             Action::ReplyVote {
-                to: 3,
+                to: NodeId(3),
                 granted: false,
                 ..
             }
@@ -919,7 +922,7 @@ mod tests {
 
     #[test]
     fn fenced_when_candidate_epoch_below_current() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         m.force_epoch(5); // test helper
         let log = FakeLog {
             end: 5,
@@ -927,10 +930,10 @@ mod tests {
         };
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
-                from: 2,
-                voter_id: 1,
+                from: NodeId(2),
+                voter_id: NodeId(1),
                 candidate_epoch: 3,
-                candidate: 2,
+                candidate: NodeId(2),
                 candidate_log_end: LogEnd {
                     last_epoch: 5,
                     last_offset: 5,
@@ -949,7 +952,7 @@ mod tests {
 
     #[test]
     fn election_timeout_starts_prevote_prospective() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
@@ -966,7 +969,7 @@ mod tests {
 
     #[test]
     fn prevote_majority_promotes_to_candidate_and_bumps_epoch() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
@@ -975,7 +978,7 @@ mod tests {
         // 1 (self) + grant from 2 = majority of 3
         let actions = m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 0,
                 vote_granted: true,
             },
@@ -984,7 +987,7 @@ mod tests {
         );
         assert!(matches!(m.role(), Role::Candidate { .. }));
         check!(m.quorum_state().leader_epoch == 1);
-        check!(m.quorum_state().voted_key.map(|k| k.id) == Some(1)); // self-vote
+        check!(m.quorum_state().voted_key.map(|k| k.id) == Some(NodeId(1))); // self-vote
         assert!(actions.iter().any(|a| matches!(
             a,
             Action::SendVoteRequest {
@@ -996,7 +999,7 @@ mod tests {
 
     #[test]
     fn real_majority_promotes_to_leader_and_appends_leader_change() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
@@ -1004,7 +1007,7 @@ mod tests {
         m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
         m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 0,
                 vote_granted: true,
             },
@@ -1013,7 +1016,7 @@ mod tests {
         );
         let actions = m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 1,
                 vote_granted: true,
             },
@@ -1021,7 +1024,7 @@ mod tests {
             SimInstant(2002),
         );
         check!(m.role().is_leader());
-        check!(m.quorum_state().leader_id == Some(1));
+        check!(m.quorum_state().leader_id == Some(NodeId(1)));
         assert!(
             actions
                 .iter()
@@ -1036,7 +1039,7 @@ mod tests {
 
     #[test]
     fn observer_never_starts_election() {
-        let mut m = machine(99, &[1, 2, 3]); // 99 is not a voter
+        let mut m = machine(NodeId(99), &[NodeId(1), NodeId(2), NodeId(3)]); // 99 is not a voter
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
@@ -1052,27 +1055,34 @@ mod tests {
 
     #[test]
     fn begin_quorum_epoch_makes_us_follower() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
         };
         let actions = m.on_event(
             Event::ReceiveBeginQuorumEpoch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 4,
             },
             &log,
             SimInstant(10),
         );
-        assert!(matches!(m.role(), Role::Follower { leader_id: 2, .. }));
+        assert!(matches!(
+            m.role(),
+            Role::Follower {
+                leader_id: NodeId(2),
+                ..
+            }
+        ));
         check!(m.quorum_state().leader_epoch == 4);
-        check!(m.quorum_state().leader_id == Some(2));
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, Action::SendFetch { leader_id: 2 }))
-        );
+        check!(m.quorum_state().leader_id == Some(NodeId(2)));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::SendFetch {
+                leader_id: NodeId(2)
+            }
+        )));
         assert!(
             actions
                 .iter()
@@ -1082,7 +1092,7 @@ mod tests {
 
     #[test]
     fn end_quorum_epoch_triggers_immediate_election() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         // follow leader 2 @ epoch 4 first
         let log = FakeLog {
             end: 5,
@@ -1090,7 +1100,7 @@ mod tests {
         };
         m.on_event(
             Event::ReceiveBeginQuorumEpoch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 4,
             },
             &log,
@@ -1098,7 +1108,7 @@ mod tests {
         );
         let actions = m.on_event(
             Event::ReceiveEndQuorumEpoch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 4,
             },
             &log,
@@ -1115,7 +1125,7 @@ mod tests {
 
     #[test]
     fn stale_begin_quorum_epoch_ignored() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         m.force_epoch(7);
         let log = FakeLog {
             end: 5,
@@ -1123,7 +1133,7 @@ mod tests {
         };
         let actions = m.on_event(
             Event::ReceiveBeginQuorumEpoch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 4,
             },
             &log,
@@ -1135,7 +1145,7 @@ mod tests {
 
     #[test]
     fn leader_advances_hwm_at_majority_fetch_offset() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         // The log end is 0 at promotion so the leader's `epoch_start_offset` is
         // 0; the leader-completeness gate then permits advancing the HWM to any
         // majority offset > 0. After promotion the log grows to end 10, which is
@@ -1148,7 +1158,7 @@ mod tests {
         m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
         m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 0,
                 vote_granted: true,
             },
@@ -1157,7 +1167,7 @@ mod tests {
         );
         m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 1,
                 vote_granted: true,
             },
@@ -1175,7 +1185,7 @@ mod tests {
         log.end.set(10);
         let a2 = m.on_event(
             Event::ReceiveFetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 8,
             },
@@ -1189,7 +1199,7 @@ mod tests {
         );
         let _ = m.on_event(
             Event::ReceiveFetch {
-                from: 3,
+                from: NodeId(3),
                 fetch_epoch: 1,
                 fetch_offset: 4,
             },
@@ -1211,7 +1221,7 @@ mod tests {
         // match offset below the current HWM. `recompute_high_watermark` must
         // clamp to the existing HWM (never regress) rather than return a lower
         // value — historically a lower return tripped a debug-only assertion.
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = CellLog {
             end: std::cell::Cell::new(0),
             last_epoch: 0,
@@ -1219,7 +1229,7 @@ mod tests {
         m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
         m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 0,
                 vote_granted: true,
             },
@@ -1228,7 +1238,7 @@ mod tests {
         );
         m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 1,
                 vote_granted: true,
             },
@@ -1239,7 +1249,7 @@ mod tests {
         log.end.set(10);
         m.on_event(
             Event::ReceiveFetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 8,
             },
@@ -1257,7 +1267,7 @@ mod tests {
         // AdvanceHighWatermark may be emitted. (Pre-clamp this panicked.)
         let a = m.on_event(
             Event::ReceiveFetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 2,
             },
@@ -1280,7 +1290,7 @@ mod tests {
         // Leader-completeness (Raft Fig.8): a leader promoted at log end 10
         // (epoch_start_offset = 10) must NOT advance the HWM to a majority
         // offset that only covers prior-epoch entries (8 < 10).
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 10,
             last_epoch: 1,
@@ -1288,7 +1298,7 @@ mod tests {
         m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
         m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 0,
                 vote_granted: true,
             },
@@ -1297,7 +1307,7 @@ mod tests {
         );
         m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 1,
                 vote_granted: true,
             },
@@ -1314,7 +1324,7 @@ mod tests {
         // follower 2 fetches at 8: majority of {10, 8} = 8, but 8 <= 10 → hold.
         let a2 = m.on_event(
             Event::ReceiveFetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 8,
             },
@@ -1340,10 +1350,10 @@ mod tests {
             fn end_offset(&self) -> i64 {
                 10
             }
-            fn last_epoch(&self) -> LeaderEpoch {
+            fn last_epoch(&self) -> Epoch {
                 2
             }
-            fn end_offset_for_epoch(&self, e: LeaderEpoch) -> Option<i64> {
+            fn end_offset_for_epoch(&self, e: Epoch) -> Option<i64> {
                 match e {
                     0 => Some(0),
                     1 => Some(5),
@@ -1352,12 +1362,12 @@ mod tests {
                 }
             }
         }
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = L;
         m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
         m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 0,
                 vote_granted: true,
             },
@@ -1366,7 +1376,7 @@ mod tests {
         );
         m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 1,
                 vote_granted: true,
             },
@@ -1376,7 +1386,7 @@ mod tests {
         // follower claims it fetched epoch 1 at offset 8, but epoch 1 ended at 5 → diverged.
         let actions = m.on_event(
             Event::ReceiveFetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 8,
             },
@@ -1397,7 +1407,7 @@ mod tests {
         // A JVM voter's `VoteResponse` carries no pre-vote flag. The candidate
         // must still count the grant as a PRE-VOTE because it is Prospective —
         // this is the KIP-996 interop fix (was dropped by the old echo-tag path).
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
@@ -1406,7 +1416,7 @@ mod tests {
         assert!(matches!(m.role(), Role::Prospective { .. }));
         let actions = m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 0,
                 vote_granted: true,
             },
@@ -1429,7 +1439,7 @@ mod tests {
     fn stale_prevote_grant_ignored_after_promotion() {
         // A late pre-vote grant at the old epoch must not be miscounted toward
         // the real election once we have promoted to Candidate at epoch+1.
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
@@ -1437,7 +1447,7 @@ mod tests {
         m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
         m.on_event(
             Event::ReceiveVoteResponse {
-                from: 2,
+                from: NodeId(2),
                 epoch: 0,
                 vote_granted: true,
             },
@@ -1448,7 +1458,7 @@ mod tests {
         // A duplicate/late pre-vote grant still tagged epoch 0 arrives.
         let actions = m.on_event(
             Event::ReceiveVoteResponse {
-                from: 3,
+                from: NodeId(3),
                 epoch: 0,
                 vote_granted: true,
             },
@@ -1463,7 +1473,7 @@ mod tests {
         // after promotion the Candidate's grant set holds only our self-vote.
         if let Role::Candidate { granted, .. } = m.role() {
             assert!(granted.len() == 1);
-            assert!(!granted.contains(&3));
+            assert!(!granted.contains(&NodeId(3)));
         } else {
             panic!("expected Candidate");
         }
@@ -1474,14 +1484,14 @@ mod tests {
         // C-2: a BeginQuorumEpoch claiming a leader_id that is not in our
         // (non-empty) voter set must NOT be adopted — no leader installed, no
         // role transition, no actions.
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
         };
         let actions = m.on_event(
             Event::ReceiveBeginQuorumEpoch {
-                leader_id: 99, // not a voter
+                leader_id: NodeId(99), // not a voter
                 leader_epoch: 4,
             },
             &log,
@@ -1496,43 +1506,50 @@ mod tests {
     #[test]
     fn begin_quorum_epoch_from_voter_leader_still_accepted() {
         // C-2 must not break the legitimate path: a voter leader is adopted.
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
         };
         let actions = m.on_event(
             Event::ReceiveBeginQuorumEpoch {
-                leader_id: 2, // a real voter
+                leader_id: NodeId(2), // a real voter
                 leader_epoch: 4,
             },
             &log,
             SimInstant(10),
         );
-        assert!(matches!(m.role(), Role::Follower { leader_id: 2, .. }));
-        check!(m.quorum_state().leader_id == Some(2));
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, Action::SendFetch { leader_id: 2 }))
-        );
+        assert!(matches!(
+            m.role(),
+            Role::Follower {
+                leader_id: NodeId(2),
+                ..
+            }
+        ));
+        check!(m.quorum_state().leader_id == Some(NodeId(2)));
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::SendFetch {
+                leader_id: NodeId(2)
+            }
+        )));
     }
 
     #[test]
     fn vote_from_non_voter_candidate_not_granted() {
         // C-2: a Vote whose candidate is not in our (non-empty) voter set is
         // ignored — no reply, no vote recorded.
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
         };
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
-                from: 99,
-                voter_id: 1, // addressed to us
+                from: NodeId(99),
+                voter_id: NodeId(1), // addressed to us
                 candidate_epoch: 1,
-                candidate: 99, // not a voter
+                candidate: NodeId(99), // not a voter
                 candidate_log_end: LogEnd {
                     last_epoch: 1,
                     last_offset: 5,
@@ -1550,17 +1567,17 @@ mod tests {
     fn vote_addressed_to_other_voter_rejected() {
         // C-2: a Vote addressed (voter_id) to a different node than us is
         // ignored, even if the candidate is a legitimate voter.
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
         };
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
-                from: 2,
-                voter_id: 3, // addressed to node 3, not us (node 1)
+                from: NodeId(2),
+                voter_id: NodeId(3), // addressed to node 3, not us (node 1)
                 candidate_epoch: 1,
-                candidate: 2,
+                candidate: NodeId(2),
                 candidate_log_end: LogEnd {
                     last_epoch: 1,
                     last_offset: 5,
@@ -1578,17 +1595,17 @@ mod tests {
     fn vote_from_voter_addressed_to_us_still_granted() {
         // C-2 must not break the legitimate path: a voter candidate addressing
         // us is still granted.
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 5,
             last_epoch: 1,
         };
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
-                from: 2,
-                voter_id: 1, // addressed to us
+                from: NodeId(2),
+                voter_id: NodeId(1), // addressed to us
                 candidate_epoch: 1,
-                candidate: 2,
+                candidate: NodeId(2),
                 candidate_log_end: LogEnd {
                     last_epoch: 1,
                     last_offset: 5,
@@ -1601,24 +1618,24 @@ mod tests {
         assert!(actions.iter().any(|a| matches!(
             a,
             Action::ReplyVote {
-                to: 2,
+                to: NodeId(2),
                 granted: true,
                 ..
             }
         )));
-        assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(2));
+        assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(NodeId(2)));
     }
 
     #[test]
     fn follower_truncates_on_diverging_fetch_response() {
-        let mut m = machine(1, &[1, 2, 3]);
+        let mut m = machine(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         let log = FakeLog {
             end: 10,
             last_epoch: 2,
         };
         m.on_event(
             Event::ReceiveBeginQuorumEpoch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 3,
             },
             &log,
@@ -1626,7 +1643,7 @@ mod tests {
         );
         let actions = m.on_event(
             Event::ReceiveFetchResponse {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 3,
                 diverging: Some(LogOffsetMetadata {
                     offset: 5,
@@ -1643,5 +1660,20 @@ mod tests {
                 epoch: 1
             })
         )));
+    }
+
+    #[test]
+    fn election_jitter_is_deterministic_hash_in_range() {
+        // Pin the exact deterministic jitter so a constant-return regression
+        // (no jitter at all → split-vote livelock) is caught. The values are the
+        // integer hash of (node, epoch) mod base_ms; they are non-zero and
+        // node-dependent, so both "always 0" and "always 1" are distinguished.
+        check!(election_jitter_ms(NodeId(1), 0, 1000) == 485);
+        check!(election_jitter_ms(NodeId(2), 0, 1000) == 354); // different node → different spread
+        check!(election_jitter_ms(NodeId(1), 1, 1000) == 446); // same node, next epoch → re-spread
+        // Jitter must always stay strictly inside [0, base_ms).
+        check!(election_jitter_ms(NodeId(1), 0, 1000) < 1000);
+        // A zero base disables jitter entirely (guard branch): returns 0, not 1.
+        check!(election_jitter_ms(NodeId(1), 0, 0) == 0);
     }
 }

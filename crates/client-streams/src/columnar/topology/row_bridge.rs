@@ -2,9 +2,10 @@
 //! impl goes through `serde_json` so it works for any `Serialize + DeserializeOwned`
 //! row type.
 
-use super::codec::BatchError;
 use ::polars::prelude::*;
 use serde::{Serialize, de::DeserializeOwned};
+
+use super::codec::BatchError;
 
 /// Convert decoded rows ↔ a payload `DataFrame` (no reserved columns).
 pub trait RowBridge<R>: Send + Sync + 'static {
@@ -53,9 +54,10 @@ impl<R: Serialize + DeserializeOwned + Send + Sync + 'static> RowBridge<R> for J
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
     use serde::Deserialize;
+
+    use super::*;
 
     #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
     struct Txn {

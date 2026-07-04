@@ -7,20 +7,23 @@
 //! per-group `Describe` ACL gate.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        share_group_describe_request::ShareGroupDescribeRequest,
+        share_group_describe_response::{DescribedGroup, ShareGroupDescribeResponse},
+    },
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::share_group_describe_request::ShareGroupDescribeRequest;
-use crabka_protocol::owned::share_group_describe_response::{
-    DescribedGroup, ShareGroupDescribeResponse,
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::share::actor::ShareGroupActorMessage,
+    error::BrokerError,
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::share::actor::ShareGroupActorMessage;
-use crate::error::BrokerError;
 
 #[tracing::instrument(
     name = "handle_share_group_describe",
@@ -118,16 +121,14 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::share_group_describe_response;
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
 
-    use crate::authorizer::Authorizer;
-    use crate::test_support::DenyAll;
+    use assert2::assert;
+    use crabka_protocol::{UnknownTaggedFields, owned::share_group_describe_response};
+    use crabka_security::Principal;
+
+    use super::*;
+    use crate::{authorizer::Authorizer, test_support::DenyAll};
 
     fn request(group_ids: &[&str]) -> ShareGroupDescribeRequest {
         ShareGroupDescribeRequest {

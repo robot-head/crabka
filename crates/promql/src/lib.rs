@@ -14,6 +14,7 @@ mod error;
 mod extension;
 mod functions;
 mod http_api;
+mod ids;
 mod in_memory;
 mod merged_store;
 pub mod metrics;
@@ -27,23 +28,24 @@ mod store;
 mod test_support;
 
 pub use block_store::MetricBlockStore;
-pub use conformance::testkit;
-pub use conformance::testkit::{run_test_file, run_test_path};
 pub use conformance::{
     AnnotationExpect, ExpectLine, LoadSeries, SampleSpec, Statement, TestFile, parse_test_file,
+    testkit,
+    testkit::{run_test_file, run_test_path},
 };
 pub use engine::{EngineOpts, PromqlEngine};
 pub use error::PromqlError;
-pub use extension::instant_manipulate::{InstantManipulate, InstantManipulateExec};
-pub use extension::normalize::{SeriesNormalize, SeriesNormalizeExec};
-pub use extension::range_manipulate::{
-    RangeManipulate, RangeManipulateExec, build_extended_range_schema,
+pub use extension::{
+    instant_manipulate::{InstantManipulate, InstantManipulateExec},
+    normalize::{SeriesNormalize, SeriesNormalizeExec},
+    range_manipulate::{RangeManipulate, RangeManipulateExec, build_extended_range_schema},
+    series_divide::{SeriesDivide, SeriesDivideExec},
 };
-pub use extension::series_divide::{SeriesDivide, SeriesDivideExec};
 pub use functions::{
     delta_udf, idelta_udf, increase_udf, irate_udf, rate_family_udfs, rate_udf, register_rate_udfs,
 };
 pub use http_api::{PrometheusApiState, prometheus_router};
+pub use ids::{Offset, PartitionIndex};
 pub use in_memory::{
     DEFAULT_RETENTION_MS, InMemoryMetricStore, PartitionWatermark, PruneStats, WalHead,
 };

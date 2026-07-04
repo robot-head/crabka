@@ -10,23 +10,23 @@
 //! the receiver dedups. Head-of-line: a failing record blocks ONLY its own
 //! partition (partitions deliver concurrently) until 2xx or DLQ.
 
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64STD;
+use base64::{Engine, engine::general_purpose::STANDARD as B64STD};
 use bytes::Bytes;
 use crabka_client_consumer::{Assignor, AutoOffsetReset, Consumer, ConsumerRecord, IsolationLevel};
 use crabka_client_producer::{Header, Producer, ProducerRecord};
-use jsonpath_rust::parser::model::JpQuery;
-use jsonpath_rust::query::js_path_process;
+use jsonpath_rust::{parser::model::JpQuery, query::js_path_process};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
-use crate::codec::RecordCodec;
-use crate::error::GatewayError;
-use crate::metrics::metrics;
-use crate::outbound_config::CompiledSubscription;
+use crate::{
+    codec::RecordCodec, error::GatewayError, metrics::metrics,
+    outbound_config::CompiledSubscription,
+};
 
 /// RAII guard that decrements the active-subscriptions gauge exactly once on
 /// drop, regardless of how `run_subscription` exits (normal shutdown, poll

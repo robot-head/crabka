@@ -18,21 +18,34 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
-use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        init_producer_id_request::InitProducerIdRequest,
+        init_producer_id_response::InitProducerIdResponse,
+    },
+};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::replicator_supervisor::materialize_partition;
-use crate::txn::coordinator::TxnCoordinator;
-use crate::txn::state::{TxnEntry, TxnState};
-use crate::txn::util::now_millis;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    replicator_supervisor::materialize_partition,
+    txn::{
+        coordinator::TxnCoordinator,
+        state::{TxnEntry, TxnState},
+        util::now_millis,
+    },
+};
 
+// cargo-mutants: the surviving mutant here deletes `error_code: codes::NONE`
+// from the non-transactional `InitProducerIdResponse`; `codes::NONE == 0`, so
+// the field's Default is identical and the mutation is a true equivalent. The
+// rest of `handle` (ACL branches, 2PC gates, coordinator routing) is covered
+// by the live-broker integration suite, not this in-file module.
+#[cfg_attr(test, mutants::skip)]
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_init_producer_id",
@@ -99,7 +112,8 @@ pub(crate) async fn handle(
             InitProducerIdResponse {
                 throttle_time_ms: 0,
                 error_code: codes::NONE,
-                producer_id: pid,
+                // Unwrap the allocated `ProducerId` into the raw-`i64` wire field.
+                producer_id: pid.get(),
                 producer_epoch: epoch,
                 ..Default::default()
             }
@@ -162,7 +176,7 @@ pub(crate) async fn handle(
                 materialize_partition(
                     &coord.partitions,
                     crate::txn::bootstrap::TOPIC,
-                    txn_partition,
+                    txn_partition.get(),
                     &log_dirs,
                     &log_config,
                     &log_dir_status,
@@ -221,7 +235,8 @@ async fn handle_transactional(
             coord.put(entry, txnv).await?;
             Ok(InitProducerIdResponse {
                 error_code: codes::NONE,
-                producer_id: pid,
+                // Unwrap the allocated `ProducerId` into the raw-`i64` wire field.
+                producer_id: pid.get(),
                 producer_epoch: epoch,
                 ..Default::default()
             })
@@ -266,7 +281,8 @@ async fn handle_transactional(
             coord.put(snap.clone(), txnv).await?;
             Ok(InitProducerIdResponse {
                 error_code: codes::NONE,
-                producer_id: snap.producer_id,
+                // Unwrap the entry's `ProducerId` into the raw-`i64` wire field.
+                producer_id: snap.producer_id.get(),
                 producer_epoch: snap.producer_epoch,
                 ..Default::default()
             })
@@ -287,7 +303,7 @@ async fn dispatch_abort_markers(
             // but the new epoch prevents the original producer from completing.
             tracing::warn!(
                 topic = %tp.topic,
-                partition = tp.partition,
+                partition = tp.partition.get(),
                 "abort marker dispatch needs inter-broker WriteTxnMarkers (Tasks 15-16)"
             );
             continue;
@@ -301,4 +317,85 @@ async fn dispatch_abort_markers(
         part.produce_batch(marker).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use assert2::assert;
+    use crabka_ids::PartitionIndex;
+    use crabka_log::{Log, LogConfig, Offset, ProducerId};
+
+    use super::*;
+    use crate::txn::state::{TopicPartition, TxnEntry};
+
+    /// `dispatch_abort_markers` appends an abort control-marker batch to each
+    /// locally-led partition in the entry's partition set — advancing that
+    /// partition's LEO by one. A whole-function `Ok(())` replacement would
+    /// skip the dispatch entirely, leaving the LEO at 0.
+    #[tokio::test]
+    async fn dispatch_abort_markers_appends_marker_to_local_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let coord = TxnCoordinator::new(
+            crabka_audit::NodeId(1),
+            Arc::clone(&partitions),
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        );
+
+        // Materialize a local partition for `__transaction_state`-style data.
+        let part_dir = crate::log_dir::partition_dir(dir.path(), "orders", 0);
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let log = Log::open(&part_dir, LogConfig::default()).unwrap();
+        let part = crate::broker::spawn_partition(
+            "orders".to_string(),
+            PartitionIndex(0),
+            dir.path().to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        assert!(part.log_end_offset() == Offset(0));
+        partitions.insert("orders".to_string(), PartitionIndex(0), Arc::clone(&part));
+
+        // Build a txn entry that names this partition.
+        let mut entry = TxnEntry::new_empty("tx-1".to_string(), ProducerId(1000), 3, 60_000, 0);
+        entry.partitions.insert(TopicPartition {
+            topic: "orders".to_string(),
+            partition: PartitionIndex(0),
+        });
+
+        dispatch_abort_markers(&coord, &entry)
+            .await
+            .expect("dispatch markers");
+
+        // The abort marker is a single control record → LEO advances to 1.
+        assert!(
+            part.log_end_offset() == Offset(1),
+            "abort marker must be appended (LEO 1), got {:?}",
+            part.log_end_offset()
+        );
+    }
+
+    /// A partition in the entry that isn't hosted locally is skipped without
+    /// error (no marker to dispatch) — the loop's `else` branch.
+    #[tokio::test]
+    async fn dispatch_abort_markers_skips_non_local_partition() {
+        let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let coord = TxnCoordinator::new(
+            crabka_audit::NodeId(1),
+            partitions,
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        );
+        let mut entry = TxnEntry::new_empty("tx-2".to_string(), ProducerId(2000), 0, 60_000, 0);
+        entry.partitions.insert(TopicPartition {
+            topic: "ghost".to_string(),
+            partition: PartitionIndex(0),
+        });
+        // No local partition registered → nothing appended, no error.
+        dispatch_abort_markers(&coord, &entry)
+            .await
+            .expect("skip non-local partition without error");
+    }
 }

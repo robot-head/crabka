@@ -1,15 +1,12 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use assert2::check;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::consume::ConsumeSession;
-use crabka_grpc_gateway::produce::ProduceCore;
-use crabka_grpc_gateway::types::GatewayRecord;
+use crabka_grpc_gateway::{
+    codec::RawCodec, consume::ConsumeSession, produce::ProduceCore, types::GatewayRecord,
+};
 use tempfile::TempDir;
 
 async fn boot() -> (BrokerHandle, String, TempDir) {

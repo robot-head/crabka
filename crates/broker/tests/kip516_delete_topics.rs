@@ -2,8 +2,10 @@
 use assert2::assert;
 mod support;
 
-use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::{
+    owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest},
+    primitives::uuid::Uuid as WireUuid,
+};
 
 #[tokio::test]
 async fn delete_topics_by_unknown_id_returns_unknown_topic_id() {

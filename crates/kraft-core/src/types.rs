@@ -1,10 +1,9 @@
 //! Core data types for the `KRaft` consensus state machine (KIP-595/996).
 //! Pure, sans-IO: no clock, no wire, no log bytes.
 
+pub use crabka_voters::NodeId;
 use crabka_voters::VoterSet;
 use uuid::Uuid;
-
-pub use crabka_voters::NodeId;
 
 /// A simulated/logical instant in milliseconds. Time is always injected, never
 /// read from the system clock (keeps the state machine deterministic).
@@ -18,9 +17,9 @@ impl SimInstant {
     }
 }
 
-/// `KRaft` leader epoch (the `i32` "leaderEpoch" on the wire; `u32` internally is
-/// fine because epochs only ever increase from 0).
-pub type LeaderEpoch = u32;
+/// Consensus epoch (always non-negative); the wire leader epoch is
+/// `crabka_ids::LeaderEpoch`.
+pub type Epoch = u32;
 
 /// Identifies a voter by node id + directory id (Kafka's `ReplicaKey`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -33,7 +32,7 @@ pub struct ReplicaKey {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LogOffsetMetadata {
     pub offset: i64,
-    pub epoch: LeaderEpoch,
+    pub epoch: Epoch,
 }
 
 /// Read-only view of the local replicated log the state machine reasons about.
@@ -42,11 +41,11 @@ pub trait LogView {
     /// Offset one past the last appended record (the log end offset).
     fn end_offset(&self) -> i64;
     /// Leader epoch of the last appended record (0 for an empty log).
-    fn last_epoch(&self) -> LeaderEpoch;
+    fn last_epoch(&self) -> Epoch;
     /// The end offset for `epoch`: the offset of the first record with a
     /// strictly greater epoch, or `end_offset()` if none. Used to compute the
     /// diverging-epoch hint. Returns `None` if `epoch` is unknown (> last).
-    fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64>;
+    fn end_offset_for_epoch(&self, epoch: Epoch) -> Option<i64>;
 }
 
 /// The durable quorum state — the logical content of the `quorum-state` file.
@@ -54,7 +53,7 @@ pub trait LogView {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QuorumState {
     pub cluster_id: Uuid,
-    pub leader_epoch: LeaderEpoch,
+    pub leader_epoch: Epoch,
     pub leader_id: Option<NodeId>,
     pub voted_key: Option<ReplicaKey>,
     pub voters: VoterSet,
@@ -81,12 +80,13 @@ impl QuorumState {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn quorum_state_starts_unattached_at_epoch_zero() {
-        let voters = test_voter_set(&[1, 2, 3]);
+        let voters = test_voter_set(&[NodeId(1), NodeId(2), NodeId(3)]);
         let qs = QuorumState::bootstrap(uuid::Uuid::nil(), voters.clone());
         assert!(
             qs == QuorumState {
@@ -97,6 +97,7 @@ mod tests {
                 voters,
             }
         );
+        assert!(qs.voters.contains(NodeId(2)));
     }
 
     pub(crate) fn test_voter_set(ids: &[NodeId]) -> crabka_voters::VoterSet {

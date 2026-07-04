@@ -9,22 +9,28 @@
 //! param. By-id has no block scoping — it targets one querier by index and
 //! unions across the pool. `start`/`end` are epoch **seconds** on every endpoint.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::frontend::backend::{
-    BackendError, MetricsJobRequest, MetricsPartial, QuerierBackend, SearchJobRequest,
-    SearchPartial, TagNamesJobRequest, TagNamesPartial, TagValuesJobRequest, TagValuesPartial,
-    TraceByIdJobRequest, TracePartial,
+use crate::frontend::{
+    backend::{
+        BackendError, MetricsJobRequest, MetricsPartial, QuerierBackend, SearchJobRequest,
+        SearchPartial, TagNamesJobRequest, TagNamesPartial, TagValuesJobRequest, TagValuesPartial,
+        TraceByIdJobRequest, TracePartial,
+    },
+    config::FrontendConfig,
+    job::{JobShard, TraceIndexCatalog},
+    metrics_merge::MetricsResponseJson,
+    wire::{SearchResponseJson, TraceByIdResponseJson},
 };
-use crate::frontend::config::FrontendConfig;
-use crate::frontend::job::{JobShard, TraceIndexCatalog};
-use crate::frontend::metrics_merge::MetricsResponseJson;
-use crate::frontend::wire::{SearchResponseJson, TraceByIdResponseJson};
 
 const TENANT_HEADER: &str = "X-Scope-OrgID";
 

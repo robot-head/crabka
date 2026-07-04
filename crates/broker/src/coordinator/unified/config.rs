@@ -1,8 +1,6 @@
 //! Static broker config for the KIP-848 next-gen consumer group protocol.
 
-use std::str::FromStr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{str::FromStr, sync::Arc, time::Duration};
 
 use qubit_clock::sleep::{AsyncSleeper, SystemSleeper};
 
@@ -209,8 +207,9 @@ impl NextGenConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
     use std::collections::HashMap;
+
+    use assert2::assert;
 
     use super::*;
     use crate::coordinator::unified::assignor::{Assignment, MemberSubscription, TopicMetadata};

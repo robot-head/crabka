@@ -8,13 +8,13 @@
 //! Byte layout matches Apache Kafka's `TransactionIndex`, so
 //! `kafka-dump-log --offsets-decoder` can dump it.
 
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
+use std::{fs::OpenOptions, io::Write, path::PathBuf};
 
+use crabka_ids::{Offset, ProducerId};
 use tracing::instrument;
-use zerocopy::byteorder::I64;
-use zerocopy::{BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned};
+use zerocopy::{
+    BigEndian, FromBytes, Immutable, IntoBytes, KnownLayout, Unaligned, byteorder::I64,
+};
 
 use crate::error::LogError;
 
@@ -22,9 +22,9 @@ const ENTRY_BYTES: usize = 24;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AbortedTxn {
-    pub start_offset: i64,
-    pub last_offset: i64,
-    pub producer_id: i64,
+    pub start_offset: Offset,
+    pub last_offset: Offset,
+    pub producer_id: ProducerId,
 }
 
 /// On-disk byte layout of one `AbortedTxn` entry. Reinterpreted in place
@@ -72,9 +72,9 @@ impl TxnIndex {
                 entries.reserve(raws.len());
                 for raw in raws {
                     entries.push(AbortedTxn {
-                        start_offset: raw.start_offset.get(),
-                        last_offset: raw.last_offset.get(),
-                        producer_id: raw.producer_id.get(),
+                        start_offset: Offset(raw.start_offset.get()),
+                        last_offset: Offset(raw.last_offset.get()),
+                        producer_id: ProducerId(raw.producer_id.get()),
                     });
                 }
             }
@@ -89,7 +89,7 @@ impl TxnIndex {
     #[instrument(
         level = "debug",
         skip(self),
-        fields(producer_id = entry.producer_id),
+        fields(producer_id = entry.producer_id.0),
         err,
     )]
     pub fn append(&mut self, entry: AbortedTxn) -> Result<(), LogError> {
@@ -99,9 +99,9 @@ impl TxnIndex {
             .open(&self.path)
             .map_err(LogError::Io)?;
         let raw = AbortedTxnRaw {
-            start_offset: I64::new(entry.start_offset),
-            last_offset: I64::new(entry.last_offset),
-            producer_id: I64::new(entry.producer_id),
+            start_offset: I64::new(entry.start_offset.0),
+            last_offset: I64::new(entry.last_offset.0),
+            producer_id: I64::new(entry.producer_id.0),
         };
         f.write_all(raw.as_bytes()).map_err(LogError::Io)?;
         f.sync_data().map_err(LogError::Io)?;
@@ -115,7 +115,11 @@ impl TxnIndex {
     }
 
     /// Aborted transactions whose offset range overlaps `[start, end)`.
-    pub fn aborted_in_range(&self, start: i64, end: i64) -> impl Iterator<Item = &AbortedTxn> {
+    pub fn aborted_in_range(
+        &self,
+        start: Offset,
+        end: Offset,
+    ) -> impl Iterator<Item = &AbortedTxn> {
         self.entries.iter().filter(move |e| {
             // Overlap test: [e.start, e.last] intersects [start, end-1]?
             e.start_offset < end && e.last_offset >= start
@@ -125,9 +129,10 @@ impl TxnIndex {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use tempfile::TempDir;
+
+    use super::*;
 
     #[test]
     fn empty_file_yields_empty_entries() {
@@ -143,15 +148,15 @@ mod tests {
         let path = dir.path().join("00.txnindex");
         let mut idx = TxnIndex::open(path.clone()).unwrap();
         idx.append(AbortedTxn {
-            start_offset: 5,
-            last_offset: 7,
-            producer_id: 1000,
+            start_offset: Offset(5),
+            last_offset: Offset(7),
+            producer_id: ProducerId(1000),
         })
         .unwrap();
         idx.append(AbortedTxn {
-            start_offset: 10,
-            last_offset: 12,
-            producer_id: 1000,
+            start_offset: Offset(10),
+            last_offset: Offset(12),
+            producer_id: ProducerId(1000),
         })
         .unwrap();
 
@@ -160,14 +165,14 @@ mod tests {
             idx2.entries()
                 == &[
                     AbortedTxn {
-                        start_offset: 5,
-                        last_offset: 7,
-                        producer_id: 1000
+                        start_offset: Offset(5),
+                        last_offset: Offset(7),
+                        producer_id: ProducerId(1000)
                     },
                     AbortedTxn {
-                        start_offset: 10,
-                        last_offset: 12,
-                        producer_id: 1000
+                        start_offset: Offset(10),
+                        last_offset: Offset(12),
+                        producer_id: ProducerId(1000)
                     },
                 ]
         );
@@ -179,22 +184,22 @@ mod tests {
         let path = dir.path().join("00.txnindex");
         let mut idx = TxnIndex::open(path).unwrap();
         idx.append(AbortedTxn {
-            start_offset: 0,
-            last_offset: 4,
-            producer_id: 1,
+            start_offset: Offset(0),
+            last_offset: Offset(4),
+            producer_id: ProducerId(1),
         })
         .unwrap();
         idx.append(AbortedTxn {
-            start_offset: 10,
-            last_offset: 14,
-            producer_id: 2,
+            start_offset: Offset(10),
+            last_offset: Offset(14),
+            producer_id: ProducerId(2),
         })
         .unwrap();
 
-        let in_3_to_12: Vec<_> = idx.aborted_in_range(3, 12).collect();
+        let in_3_to_12: Vec<_> = idx.aborted_in_range(Offset(3), Offset(12)).collect();
         assert!(in_3_to_12.len() == 2);
 
-        let in_5_to_9: Vec<_> = idx.aborted_in_range(5, 9).collect();
+        let in_5_to_9: Vec<_> = idx.aborted_in_range(Offset(5), Offset(9)).collect();
         assert!(in_5_to_9.len() == 0);
     }
 }

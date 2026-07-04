@@ -14,8 +14,10 @@
 //! forwards each fired timestamp downstream so it is independently observable via
 //! `read_output`.
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use crabka_client_streams::{

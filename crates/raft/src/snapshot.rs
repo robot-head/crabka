@@ -7,15 +7,17 @@
 //! [`SnapshotReader::read_records`].
 
 use bytes::{BufMut, Bytes, BytesMut};
-
 use crabka_metadata::{MetadataImage, MetadataRecord, from_kraft_value, to_kraft_values};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::snapshot_footer_record::SnapshotFooterRecord;
-use crabka_protocol::owned::snapshot_header_record::SnapshotHeaderRecord;
-use crabka_protocol::records::metadata::control::{
-    ControlRecordType, control_record_key, encode_control_batch,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        snapshot_footer_record::SnapshotFooterRecord, snapshot_header_record::SnapshotHeaderRecord,
+    },
+    records::{
+        Record, RecordBatch,
+        metadata::control::{ControlRecordType, control_record_key, encode_control_batch},
+    },
 };
-use crabka_protocol::records::{Record, RecordBatch};
 use uuid::Uuid;
 
 use crate::error::RaftError;
@@ -179,14 +181,15 @@ impl SnapshotReader {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
-    use crabka_protocol::Decode;
-
     use crabka_metadata::{
-        FeatureLevelRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
+        FeatureLevelRecord, LeaderEpoch, MetadataImage, MetadataRecord, NodeId, PartitionRecord,
+        TopicRecord,
     };
+    use crabka_protocol::Decode;
     use uuid::Uuid;
+
+    use super::*;
 
     #[test]
     fn writer_reader_round_trips_image() {
@@ -207,10 +210,10 @@ mod tests {
             image.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: "orders".into(),
                 partition: p,
-                leader: 1,
-                replicas: vec![1, 2],
-                isr: vec![1, 2],
-                leader_epoch: 0,
+                leader: NodeId(1),
+                replicas: vec![NodeId(1), NodeId(2)],
+                isr: vec![NodeId(1), NodeId(2)],
+                leader_epoch: LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -237,10 +240,10 @@ mod tests {
             image.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: "orders".into(),
                 partition: p,
-                leader: 1,
-                replicas: vec![1],
-                isr: vec![1],
-                leader_epoch: 0,
+                leader: NodeId(1),
+                replicas: vec![NodeId(1)],
+                isr: vec![NodeId(1)],
+                leader_epoch: LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -399,16 +402,16 @@ mod tests {
     #[test]
     #[ignore = "requires Docker"]
     fn jvm_dump_log_parses_engine_snapshot() {
+        use std::{io::Write as _, process::Command};
+
         use crabka_metadata::{BrokerConfigRecord, BrokerRegistrationRecord, TopicConfigRecord};
-        use std::io::Write as _;
-        use std::process::Command;
 
         let cid = Uuid::new_v4();
         let mut image = MetadataImage::new(cid);
         // RegisterBroker (apiKey 0).
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
-                node_id: 1,
+                node_id: NodeId(1),
                 broker_epoch: 0,
                 incarnation_id: uuid::Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10),
                 host: "broker-1".into(),
@@ -419,7 +422,7 @@ mod tests {
         ));
         // Config (apiKey 4), broker scope.
         image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("1048576".into()),
         }));
@@ -434,10 +437,10 @@ mod tests {
             image.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: "orders".into(),
                 partition: p,
-                leader: 1,
-                replicas: vec![1],
-                isr: vec![1],
-                leader_epoch: 0,
+                leader: NodeId(1),
+                replicas: vec![NodeId(1)],
+                isr: vec![NodeId(1)],
+                leader_epoch: LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],

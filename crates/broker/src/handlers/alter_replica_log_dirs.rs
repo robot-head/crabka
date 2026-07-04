@@ -16,22 +16,27 @@
 //! [`crate::network::dispatch::handle_alter_replica_log_dirs_frame`] —
 //! this handler runs only after the principal has been authorized.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        alter_replica_log_dirs_request::AlterReplicaLogDirsRequest,
+        alter_replica_log_dirs_response::{
+            AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult,
+            AlterReplicaLogDirsResponse,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest;
-use crabka_protocol::owned::alter_replica_log_dirs_response::{
-    AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult, AlterReplicaLogDirsResponse,
+use crate::{
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    future_log::{self, MoveError},
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::future_log::{self, MoveError};
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -64,7 +69,7 @@ pub(crate) fn handle(
                         &all_log_dirs,
                         &log_config,
                         &topic.name,
-                        partition_index,
+                        crabka_ids::PartitionIndex(partition_index),
                         &target_path,
                     ) {
                         Ok(()) => codes::NONE,
@@ -115,11 +120,12 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_protocol::owned::alter_replica_log_dirs_request::{
         AlterReplicaLogDir, AlterReplicaLogDirTopic,
     };
+
+    use super::*;
 
     crate::test_support::codec_helpers!(AlterReplicaLogDirsRequest, AlterReplicaLogDirsResponse);
 

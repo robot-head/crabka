@@ -8,11 +8,7 @@
 
 use std::net::SocketAddr;
 
-use axum::Router;
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use tokio_util::sync::CancellationToken;
 
 use crate::metrics::SharedRegistry;
@@ -69,12 +65,12 @@ async fn metrics(State(registry): State<SharedRegistry>) -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt as _;
+
     use super::*;
     use crate::metrics::BrokerMetrics;
-    use assert2::assert;
-    use axum::body::Body;
-    use axum::http::Request;
-    use tower::ServiceExt as _;
 
     #[tokio::test]
     async fn metrics_route_returns_openmetrics() {

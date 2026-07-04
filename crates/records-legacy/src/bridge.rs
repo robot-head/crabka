@@ -14,12 +14,15 @@
 
 use bytes::{Bytes, BytesMut};
 use crabka_compression::CompressionType;
+use crabka_ids::Offset;
 use crabka_protocol::records::{Attributes, Record, RecordBatch, RecordsError};
 
-use crate::error::LegacyRecordsError;
-use crate::message::Magic;
-use crate::set::{
-    ParsedRecord, decode_message_set, encode_compressed_message_set, encode_flat_message_set,
+use crate::{
+    error::LegacyRecordsError,
+    message::Magic,
+    set::{
+        ParsedRecord, decode_message_set, encode_compressed_message_set, encode_flat_message_set,
+    },
 };
 
 /// Iterate the v2 batch's records, dropping control batches entirely.
@@ -36,7 +39,7 @@ pub fn parsed_from_v2(batch: &RecordBatch, target: Magic) -> Vec<ParsedRecord> {
         .records
         .iter()
         .map(|r| ParsedRecord {
-            offset: batch.base_offset + i64::from(r.offset_delta),
+            offset: Offset(batch.base_offset + i64::from(r.offset_delta)),
             timestamp: match target {
                 Magic::V0 => None,
                 Magic::V1 => Some(batch.base_timestamp + r.timestamp_delta),
@@ -109,14 +112,14 @@ pub fn legacy_to_v2(set_bytes: &[u8]) -> Result<RecordBatch, LegacyRecordsError>
         .filter_map(|r| r.timestamp)
         .max()
         .unwrap_or(-1);
-    let last_offset_delta = (records.last().unwrap().offset - base_offset) as i32;
+    let last_offset_delta = (records.last().unwrap().offset.0 - base_offset.0) as i32;
 
     let out_records: Vec<Record> = records
         .iter()
         .map(|r| Record {
             attributes: 0,
             timestamp_delta: r.timestamp.map_or(0, |ts| ts - base_timestamp),
-            offset_delta: (r.offset - base_offset) as i32,
+            offset_delta: (r.offset.0 - base_offset.0) as i32,
             key: r.key.clone(),
             value: r.value.clone(),
             headers: Vec::new(),
@@ -124,7 +127,7 @@ pub fn legacy_to_v2(set_bytes: &[u8]) -> Result<RecordBatch, LegacyRecordsError>
         .collect();
 
     Ok(RecordBatch {
-        base_offset,
+        base_offset: base_offset.0,
         partition_leader_epoch: -1,
         attributes: Attributes::default(),
         last_offset_delta,
@@ -145,11 +148,11 @@ impl From<RecordsError> for LegacyRecordsError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_protocol::records::{Record, RecordBatch};
+
+    use super::*;
 
     fn v2_batch(codec: CompressionType) -> RecordBatch {
         RecordBatch {

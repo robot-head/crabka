@@ -1,12 +1,14 @@
 //! End-to-end relay test against a fake upstream "broker" that echoes a
 //! canned response. Verifies bytes pass through unmodified and frames are
 //! recorded with correct classification.
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::sync::{Arc, Mutex};
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    sync::{Arc, Mutex},
+};
 
-use crabka_kafka_tap::frame::CapturedFrame;
-use crabka_kafka_tap::{Recorder, spawn};
+use crabka_ids::{ApiKey, ApiVersion};
+use crabka_kafka_tap::{Recorder, frame::CapturedFrame, spawn};
 
 fn framed(body: &[u8]) -> Vec<u8> {
     let mut v = (body.len() as i32).to_be_bytes().to_vec();
@@ -57,10 +59,10 @@ fn relays_and_records() {
         let frames = recorder.lock().unwrap().clone();
         let req = frames
             .iter()
-            .any(|f| f.is_request && f.api_key == 3 && f.version == 12);
+            .any(|f| f.is_request && f.api_key == ApiKey(3) && f.version == ApiVersion(12));
         let resp = frames
             .iter()
-            .any(|f| !f.is_request && f.api_key == 3 && f.version == 12);
+            .any(|f| !f.is_request && f.api_key == ApiKey(3) && f.version == ApiVersion(12));
         if (req && resp) || std::time::Instant::now() >= deadline {
             break;
         }
@@ -74,11 +76,11 @@ fn relays_and_records() {
     assert!(
         frames
             .iter()
-            .any(|f| f.is_request && f.api_key == 3 && f.version == 12)
+            .any(|f| f.is_request && f.api_key == ApiKey(3) && f.version == ApiVersion(12))
     );
     assert!(
         frames
             .iter()
-            .any(|f| !f.is_request && f.api_key == 3 && f.version == 12)
+            .any(|f| !f.is_request && f.api_key == ApiKey(3) && f.version == ApiVersion(12))
     );
 }

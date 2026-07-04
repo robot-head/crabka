@@ -9,12 +9,12 @@
 //! broker-config `ConfigMap` PATCH (`<cluster>-broker-config`, data key
 //! `broker-<id>.toml`) on a real reconcile.
 
-use assert2::assert;
 use std::sync::Arc;
 
-use crabka_operator::controller::kafka::reconcile;
-use crabka_operator::crd::{
-    Authorization, Kafka, KafkaSpec, OpaAuthorization, SimpleAuthorization,
+use assert2::assert;
+use crabka_operator::{
+    controller::kafka::reconcile,
+    crd::{Authorization, Kafka, KafkaSpec, OpaAuthorization, SimpleAuthorization},
 };
 use http::Method;
 

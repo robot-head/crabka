@@ -6,10 +6,11 @@ use crabka_blockstore::{
     read_log_block_from_object_store, series_fingerprint, write_log_block,
     write_log_block_to_object_store,
 };
-use datafusion::arrow::datatypes::{DataType, Fields};
-use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use object_store::local::LocalFileSystem;
-use object_store::path::Path as ObjectPath;
+use datafusion::{
+    arrow::datatypes::{DataType, Fields},
+    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder,
+};
+use object_store::{local::LocalFileSystem, path::Path as ObjectPath};
 
 #[test]
 fn parquet_log_block_round_trips_rows_sorted_by_series_and_timestamp() {

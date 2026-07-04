@@ -12,19 +12,22 @@
 //! Peer addresses are resolved from the static voter set's CONTROLLER
 //! endpoints.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crabka_client_core::{ClientError, Connection, ConnectionOptions};
+use crabka_ids::{ApiKey, ApiVersion};
+use crabka_metadata::voters::VoterSet;
 use dashmap::DashMap;
 
-use crabka_client_core::{ClientError, Connection, ConnectionOptions};
-use crabka_metadata::voters::VoterSet;
-
-use crate::error::RaftError;
-use crate::kraft::transport::{PeerSender, api_key};
-use crate::kraft::types::NodeId;
+use crate::{
+    error::RaftError,
+    kraft::{
+        transport::{PeerSender, api_key},
+        types::NodeId,
+    },
+};
 
 /// Outbound dialer the controller hands to the peer sender.
 ///
@@ -53,7 +56,7 @@ pub struct PlaintextDialer;
 
 #[async_trait]
 impl OutboundDialer for PlaintextDialer {
-    #[tracing::instrument(level = "debug", skip_all, fields(target = _target, addr), err)]
+    #[tracing::instrument(level = "debug", skip_all, fields(target = _target.0, addr), err)]
     async fn dial(
         &self,
         _target: NodeId,
@@ -93,13 +96,15 @@ fn controller_addr(voters: &VoterSet, id: NodeId) -> Option<String> {
 
 /// KIP-595 api version per api key, matching the bodies the engine's transport
 /// codec produces (Vote v2, Begin/End `QuorumEpoch` v1, Fetch v17).
-fn api_version_for(key: i16) -> i16 {
-    match key {
-        api_key::VOTE => 2,
-        api_key::BEGIN_QUORUM_EPOCH | api_key::END_QUORUM_EPOCH | api_key::FETCH_SNAPSHOT => 1,
-        api_key::FETCH => 17,
+fn api_version_for(key: ApiKey) -> ApiVersion {
+    ApiVersion(match key {
+        ApiKey(api_key::VOTE) => 2,
+        ApiKey(
+            api_key::BEGIN_QUORUM_EPOCH | api_key::END_QUORUM_EPOCH | api_key::FETCH_SNAPSHOT,
+        ) => 1,
+        ApiKey(api_key::FETCH) => 17,
         _ => 0,
-    }
+    })
 }
 
 /// Real [`PeerSender`]: dials each voter's controller listener and issues the
@@ -151,8 +156,12 @@ impl PeerSender for RealPeerSender {
     #[tracing::instrument(level = "debug", skip_all, fields(peer, api_key = key), err)]
     async fn send(&self, peer: NodeId, key: i16, body: Bytes) -> Result<Bytes, RaftError> {
         let conn = self.connect(peer).await?;
-        let version = api_version_for(key);
-        match conn.raw_request(key, version, body).await {
+        // The transport seam and `raw_request` speak the raw wire `int16`s; the
+        // `(api_key, api_version)` pairing is done through the newtypes so the
+        // two adjacent `i16`s cannot be transposed, then unwrapped at the wire
+        // boundary below.
+        let version = api_version_for(ApiKey(key));
+        match conn.raw_request(key, version.get(), body).await {
             Ok(resp) => Ok(resp),
             Err(e) => {
                 // Drop the cached connection on any transport error so the next
@@ -166,12 +175,18 @@ impl PeerSender for RealPeerSender {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use bytes::BufMut;
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+    use crabka_protocol::{
+        Encode,
+        // The generated `ApiVersion` message struct is aliased so the
+        // `crabka_ids::ApiVersion` newtype (via `super::*`) keeps the bare name
+        // this module's header assertions use.
+        owned::api_versions_response::{ApiVersion as WireApiVersion, ApiVersionsResponse},
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    use super::*;
 
     fn voter_set_with_controller(id: NodeId, host: &str, port: u16) -> VoterSet {
         VoterSet::from_voters([crabka_metadata::Voter {
@@ -190,13 +205,13 @@ mod tests {
         let resp = ApiVersionsResponse {
             error_code: 0,
             api_keys: vec![
-                ApiVersion {
+                WireApiVersion {
                     api_key: 18,
                     min_version: 0,
                     max_version: 4,
                     ..Default::default()
                 },
-                ApiVersion {
+                WireApiVersion {
                     api_key: api_key::VOTE,
                     min_version: 0,
                     max_version: 2,
@@ -239,10 +254,10 @@ mod tests {
         stream.flush().await.unwrap();
     }
 
-    fn parse_request_header(frame: &[u8]) -> (i16, i16, i32, String, &[u8]) {
+    fn parse_request_header(frame: &[u8]) -> (ApiKey, ApiVersion, i32, String, &[u8]) {
         assert!(frame.len() >= 10);
-        let api_key = i16::from_be_bytes([frame[0], frame[1]]);
-        let version = i16::from_be_bytes([frame[2], frame[3]]);
+        let api_key = ApiKey(i16::from_be_bytes([frame[0], frame[1]]));
+        let version = ApiVersion(i16::from_be_bytes([frame[2], frame[3]]));
         let correlation_id = i32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
         let client_len = i16::from_be_bytes([frame[8], frame[9]]);
         assert!(client_len >= 0);
@@ -268,7 +283,7 @@ mod tests {
     #[test]
     fn controller_addr_prefers_controller_endpoint_and_reports_unknown_voter() {
         let voters = VoterSet::from_voters([crabka_metadata::Voter {
-            id: 7,
+            id: NodeId(7),
             directory_id: uuid::Uuid::nil(),
             endpoints: vec![
                 crabka_metadata::VoterEndpoint {
@@ -285,14 +300,14 @@ mod tests {
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
 
-        assert!(controller_addr(&voters, 7) == Some("controller-host:9093".to_string()));
-        assert!(controller_addr(&voters, 8).is_none());
+        assert!(controller_addr(&voters, NodeId(7)) == Some("controller-host:9093".to_string()));
+        assert!(controller_addr(&voters, NodeId(8)).is_none());
     }
 
     #[test]
     fn controller_addr_falls_back_to_first_endpoint() {
         let voters = VoterSet::from_voters([crabka_metadata::Voter {
-            id: 7,
+            id: NodeId(7),
             directory_id: uuid::Uuid::nil(),
             endpoints: vec![crabka_metadata::VoterEndpoint {
                 name: "PLAINTEXT".into(),
@@ -302,7 +317,7 @@ mod tests {
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
 
-        assert!(controller_addr(&voters, 7) == Some("only-host:9094".to_string()));
+        assert!(controller_addr(&voters, NodeId(7)) == Some("only-host:9094".to_string()));
     }
 
     #[test]
@@ -315,7 +330,10 @@ mod tests {
             (api_key::FETCH, 17),
             (-123, 0),
         ] {
-            assert!(api_version_for(key) == want, "api_key {key}");
+            assert!(
+                api_version_for(ApiKey(key)) == ApiVersion(want),
+                "api_key {key}"
+            );
         }
     }
 
@@ -330,7 +348,7 @@ mod tests {
 
             let api_versions = read_frame(&mut stream).await;
             let (key, _version, corr, client_id, _body) = parse_request_header(&api_versions);
-            assert!(key == 18);
+            assert!(key == ApiKey(18));
             assert!(client_id == "raft-client");
             write_response_frame(&mut stream, corr, false, &api_versions_response_v0()).await;
 
@@ -343,10 +361,10 @@ mod tests {
             write_response_frame(&mut stream, corr, true, b"raft-response").await;
         });
 
-        let voters = voter_set_with_controller(2, &addr.ip().to_string(), addr.port());
+        let voters = voter_set_with_controller(NodeId(2), &addr.ip().to_string(), addr.port());
         let sender = RealPeerSender::new(voters, "raft-client".into(), Arc::new(PlaintextDialer));
         let response = sender
-            .send(2, api_key::VOTE, Bytes::from_static(b"vote-body"))
+            .send(NodeId(2), api_key::VOTE, Bytes::from_static(b"vote-body"))
             .await
             .expect("send");
 
@@ -358,8 +376,8 @@ mod tests {
         assert!(
             observed
                 == (
-                    api_key::VOTE,
-                    2,
+                    ApiKey(api_key::VOTE),
+                    ApiVersion(2),
                     "raft-client".to_string(),
                     Bytes::from_static(b"vote-body"),
                 )

@@ -9,10 +9,14 @@
 //!
 //! [`SignedJwsValidator`]: crabka_security::SignedJwsValidator
 
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::time::Duration;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::Duration,
+};
 
 use crabka_security::{Jwks, JwksHandle};
 use qubit_clock::sleep::AsyncSleeper;
@@ -226,11 +230,15 @@ fn current_epoch_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
-    use qubit_clock::MockWaiterKind;
-    use qubit_clock::sleep::{MockSleeper, SystemSleeper};
     use std::net::SocketAddr;
+
+    use assert2::{assert, check};
+    use qubit_clock::{
+        MockWaiterKind,
+        sleep::{MockSleeper, SystemSleeper},
+    };
+
+    use super::*;
 
     /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
     /// stall fails the test deterministically instead of spinning forever.
@@ -350,8 +358,9 @@ mod tests {
     async fn serve_jwks_https(
         body: &'static str,
     ) -> (std::net::SocketAddr, CancellationToken, std::path::PathBuf) {
-        use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
         use std::sync::Arc;
+
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
         use tokio::io::AsyncWriteExt as _;
         use tokio_rustls::TlsAcceptor;
 

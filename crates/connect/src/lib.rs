@@ -34,6 +34,7 @@
 pub mod config;
 pub mod convert;
 pub mod error;
+pub mod ids;
 pub mod record;
 pub mod runtime;
 pub mod sink;
@@ -48,6 +49,7 @@ pub use convert::{ByteIdentity, Converter, SchemaConverter};
 #[cfg(feature = "derive")]
 pub use crabka_connect_derive::ConnectorConfig;
 pub use error::ConnectError;
+pub use ids::{PartitionMap, PositionMap};
 pub use record::{ConnectRecord, Header, OffsetMap, OffsetValue, SourceOffset};
 pub use runtime::{
     CheckpointStore, ConnectorHandle, ConnectorRuntime, HasSink, HasSource,
@@ -92,7 +94,7 @@ mod tests {
             let mut position = OffsetMap::new();
             #[allow(clippy::cast_possible_wrap)]
             position.insert("index".into(), OffsetValue::Long(self.pos as i64));
-            Some(SourceOffset::new(OffsetMap::new(), position))
+            Some(SourceOffset::new(OffsetMap::new().into(), position.into()))
         }
 
         async fn seek(&mut self, offset: SourceOffset) -> Result<(), ConnectError> {
@@ -236,7 +238,7 @@ mod tests {
         let mut position = OffsetMap::new();
         position.insert("index".into(), OffsetValue::Long(-1));
         check!(
-            src.seek(SourceOffset::new(OffsetMap::new(), position))
+            src.seek(SourceOffset::new(OffsetMap::new().into(), position.into()))
                 .await
                 .is_err()
         );

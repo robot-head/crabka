@@ -6,14 +6,18 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::owned::get_replica_log_info_request::{
-    GetReplicaLogInfoRequest, MAX_VERSION, MIN_VERSION, TopicPartitions,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        get_replica_log_info_request::{
+            GetReplicaLogInfoRequest, MAX_VERSION, MIN_VERSION, TopicPartitions,
+        },
+        get_replica_log_info_response::{
+            GetReplicaLogInfoResponse, PartitionLogInfo, TopicPartitionLogInfo,
+        },
+    },
+    primitives::uuid::Uuid,
 };
-use crabka_protocol::owned::get_replica_log_info_response::{
-    GetReplicaLogInfoResponse, PartitionLogInfo, TopicPartitionLogInfo,
-};
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::{Decode, Encode};
 
 fn populated_request() -> GetReplicaLogInfoRequest {
     GetReplicaLogInfoRequest {

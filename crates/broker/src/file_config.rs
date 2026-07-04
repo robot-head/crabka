@@ -7,10 +7,9 @@
 
 use std::net::SocketAddr;
 
+use crabka_security::ListenerProtocol;
 use schemars::JsonSchema;
 use serde::Deserialize;
-
-use crabka_security::ListenerProtocol;
 
 use crate::config::ListenerSpec;
 
@@ -1436,11 +1435,11 @@ impl FileConfig {
                 "{entry:?}: expected `<node_id>@<host>:<port>` (missing `@`)"
             ))
         })?;
-        let node_id: crabka_raft::NodeId = id_str.parse().map_err(|e| {
+        let node_id = crabka_raft::NodeId(id_str.parse::<u64>().map_err(|e| {
             FileConfigError::InvalidQuorumVoter(format!(
                 "{entry:?}: invalid node id {id_str:?}: {e}"
             ))
-        })?;
+        })?);
         // Validate the `<host>:<port>` shape without resolving. Split on the
         // LAST ':' so the port is taken from the end (the dialer splits the
         // same way), then carry `<host>:<port>` verbatim for per-dial lookup.
@@ -1490,8 +1489,9 @@ impl FileListener {
 
 #[cfg(test)]
 mod listener_auth_tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn file_listener_parses_per_listener_tls_config_inline() {
@@ -1575,9 +1575,11 @@ client_auth = "Required"
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
     use std::sync::{Mutex, OnceLock};
+
+    use assert2::{assert, check};
+
+    use super::*;
 
     /// Serializes any test that mutates process-wide env vars. Tests in
     /// the same `cargo test` process run on multiple threads by default,
@@ -1898,9 +1900,9 @@ controller_quorum_voters = ["0@127.0.0.1:9093", "1@127.0.0.2:9093", "2@127.0.0.3
         // Host:port carried verbatim (parsed, NOT DNS-resolved) so the dialer
         // re-resolves each peer per connect.
         let expected: Vec<(crabka_raft::NodeId, String)> = vec![
-            (0, "127.0.0.1:9093".to_string()),
-            (1, "127.0.0.2:9093".to_string()),
-            (2, "127.0.0.3:9093".to_string()),
+            (crabka_audit::NodeId(0), "127.0.0.1:9093".to_string()),
+            (crabka_audit::NodeId(1), "127.0.0.2:9093".to_string()),
+            (crabka_audit::NodeId(2), "127.0.0.3:9093".to_string()),
         ];
         assert!(cfg.controller_quorum_voters == expected);
     }
@@ -1922,7 +1924,7 @@ controller_quorum_voters = ["0@demo-broker-0-0.demo-broker-headless.default.svc.
         file.apply_to(&mut cfg).unwrap();
 
         let expected: Vec<(crabka_raft::NodeId, String)> = vec![(
-            0,
+            crabka_audit::NodeId(0),
             "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local:9093".to_string(),
         )];
         assert!(cfg.controller_quorum_voters == expected);
@@ -1959,7 +1961,8 @@ controller_quorum_voters = ["0@demo-broker-0-0.demo-broker-headless.default.svc.
         assert!(file.controller_quorum_voters.is_empty());
 
         // Seed a pre-existing single self-voter as the binary would.
-        let seeded: Vec<(crabka_raft::NodeId, String)> = vec![(7, "127.0.0.1:9093".to_string())];
+        let seeded: Vec<(crabka_raft::NodeId, String)> =
+            vec![(crabka_audit::NodeId(7), "127.0.0.1:9093".to_string())];
         let mut cfg = BrokerConfig {
             controller_quorum_voters: seeded.clone(),
             ..BrokerConfig::default()
@@ -2782,8 +2785,9 @@ super_users = ["ANONYMOUS", "admin"]
 
     #[test]
     fn authorization_section_simple_builds_simple_acl_authorizer() {
-        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
         use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 
         let toml = r#"
 [authorization]
@@ -2833,8 +2837,9 @@ super_users = ["admin"]
 
     #[test]
     fn authorization_section_opa_builds_opa_authorizer() {
-        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
         use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 
         // `OpaAuthorizer::new` captures `Handle::try_current()` — needs
         // an active tokio runtime. `Runtime::new()` defaults to
@@ -2894,8 +2899,9 @@ expire_after_ms = 60000
         // And the built authorizer must Deny on OPA error (fail-closed).
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
             use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+            use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
 
             let auth = crate::authorizer::opa::OpaAuthorizer::new(
                 std::collections::HashSet::new(),
@@ -2936,8 +2942,9 @@ url = "http://opa.invalid:8181/v1/data/k/a"
 
     #[test]
     fn authorization_section_absent_defaults_to_allow_all() {
-        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
         use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 
         let file: FileConfig = toml::from_str("").unwrap();
         let mut cfg = crate::config::BrokerConfig::default();

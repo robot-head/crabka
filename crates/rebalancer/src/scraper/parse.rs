@@ -82,8 +82,9 @@ fn parse_line(line: &str) -> Option<ParsedSample> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn empty_input_returns_empty() {

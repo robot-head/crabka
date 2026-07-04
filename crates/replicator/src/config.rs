@@ -153,8 +153,7 @@ impl ReplicatorConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 

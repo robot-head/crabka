@@ -3,34 +3,38 @@
 //! phases, optionally triggers a failover mid-measurement, and merges
 //! per-task histograms into the public `LatencyPercentiles` shape.
 
-use std::future::Future;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use futures::stream::FuturesUnordered;
-use futures::{FutureExt, StreamExt};
-use hdrhistogram::Histogram;
-use tokio::task::JoinSet;
-use tokio::time::Instant;
-use tracing::{info, warn};
-
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::security::{ClientSecurity, TlsConnectorConfig};
 use crabka_client_producer::{Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_security::ListenerProtocol;
+use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
+use hdrhistogram::Histogram;
+use tokio::{task::JoinSet, time::Instant};
+use tracing::{info, warn};
 
-use crate::hist;
-use crate::payload;
-use crate::prom::PromClient;
-use crate::rate::Pacer;
-use crate::scenario::{
-    BrokerSample, Disturbance, LoadMode, ModeTag, Resource, RunOutput, Sample, Scenario, Stack,
-    Throughput, Topology,
+use crate::{
+    hist,
+    ids::{DurationSeconds, MessageCount, TimeOffsetMs, WallclockMs},
+    payload,
+    prom::PromClient,
+    rate::Pacer,
+    scenario::{
+        BrokerSample, Disturbance, LoadMode, ModeTag, Resource, RunOutput, Sample, Scenario, Stack,
+        Throughput, Topology,
+    },
 };
 
 /// Width of one time-series sample bucket. The measurement window is split
@@ -353,7 +357,7 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     };
     let samples: Vec<Sample> = (0..n_intervals)
         .map(|iv| Sample {
-            t_offset_ms: iv as u64 * interval_ms,
+            t_offset_ms: TimeOffsetMs(iv as u64 * interval_ms),
             producer_msgs_per_sec: prod_iv_msgs[iv] as f64 / interval_s,
             consumer_msgs_per_sec: cons_iv_msgs[iv] as f64 / interval_s,
             producer_p50_ms: pctl(&prod_iv_hist[iv], 0.50),
@@ -369,7 +373,12 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
     let resource = if let Some(url) = &cfg.prometheus_url {
         match PromClient::new(url) {
             Ok(c) => match c
-                .capture_resource(cfg.stack, &cfg.namespace, scenario.duration_s, prod_msgs)
+                .capture_resource(
+                    cfg.stack,
+                    &cfg.namespace,
+                    DurationSeconds(scenario.duration_s),
+                    MessageCount(prod_msgs),
+                )
                 .await
             {
                 Ok(r) => r,
@@ -413,9 +422,9 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
 
     let disturbance = if failover_active {
         Some(Disturbance {
-            kill_at_ms: kill_at_ms.load(Ordering::SeqCst),
-            recovery_at_ms: earliest_recovery_ms,
-            dropped: prod_dropped,
+            kill_at_ms: TimeOffsetMs(kill_at_ms.load(Ordering::SeqCst)),
+            recovery_at_ms: TimeOffsetMs(earliest_recovery_ms),
+            dropped: MessageCount(prod_dropped),
             latency_spike_max_ms: max_spike_us as f64 / 1000.0,
         })
     } else {
@@ -437,11 +446,11 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             replication_factor: scenario.replication_factor,
             broker_count: cfg.broker_count,
         },
-        wallclock_start_unix_ms: wallclock_start,
-        wallclock_end_unix_ms: wallclock_end,
+        wallclock_start_unix_ms: WallclockMs(wallclock_start),
+        wallclock_end_unix_ms: WallclockMs(wallclock_end),
         throughput: Throughput {
-            msgs_produced: prod_msgs,
-            msgs_consumed: cons_msgs,
+            msgs_produced: MessageCount(prod_msgs),
+            msgs_consumed: MessageCount(cons_msgs),
             mb_in: bytes_to_mb(prod_bytes),
             mb_out: bytes_to_mb(cons_bytes),
             producer_msgs_per_sec: prod_msgs as f64 / duration_s,
@@ -506,8 +515,8 @@ fn empty_output(
             replication_factor: scenario.replication_factor,
             broker_count: cfg.broker_count,
         },
-        wallclock_start_unix_ms: start,
-        wallclock_end_unix_ms: start,
+        wallclock_start_unix_ms: WallclockMs(start),
+        wallclock_end_unix_ms: WallclockMs(start),
         throughput: Throughput::default(),
         producer_latency_ms: crate::scenario::LatencyPercentiles::default(),
         consumer_e2e_latency_ms: crate::scenario::LatencyPercentiles::default(),
@@ -900,9 +909,10 @@ async fn build_consumer_with_retry(
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::scenario::{Acks, Compression, FailoverSpec, LoadMode, ModeTag};
-    use assert2::{assert, check};
 
     fn cfg(broker_count: u32) -> DriverConfig {
         DriverConfig {
@@ -1007,8 +1017,8 @@ mod tests {
         let s = scenario(1);
         let c = cfg(1);
         let out = empty_output(&s, &c, 42, vec!["a-note".into()], vec!["an-error".into()]);
-        check!(out.wallclock_start_unix_ms == 42);
-        check!(out.wallclock_end_unix_ms == 42);
+        check!(out.wallclock_start_unix_ms == WallclockMs(42));
+        check!(out.wallclock_end_unix_ms == WallclockMs(42));
         check!(out.topology.broker_count == 1);
         check!(out.notes == vec!["a-note"]);
         check!(out.errors == vec!["an-error"]);
@@ -1031,7 +1041,7 @@ mod tests {
         let mut s = scenario(3);
         s.mode_tag = ModeTag::Cluster;
         let out = run(s, cfg(1)).await.expect("run returned");
-        assert!(out.throughput.msgs_produced == 0);
+        assert!(out.throughput.msgs_produced == MessageCount(0));
         assert!(out.notes.iter().any(|n| n.contains("topology-mismatch")));
     }
 

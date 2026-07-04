@@ -4,8 +4,7 @@
 
 use bytes::Bytes;
 
-use crate::executor::state::InFlightFile;
-use crate::state_topic::error::StateTopicError;
+use crate::{executor::state::InFlightFile, state_topic::error::StateTopicError};
 
 pub(crate) fn encode(f: &InFlightFile) -> Result<Bytes, StateTopicError> {
     let v = serde_json::to_vec(f)?;
@@ -19,9 +18,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<InFlightFile, StateTopicError> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::executor::state::Phase;
-    use assert2::assert;
 
     #[test]
     fn round_trip_preserves_all_fields() {

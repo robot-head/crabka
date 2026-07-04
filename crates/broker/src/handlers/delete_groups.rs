@@ -2,17 +2,22 @@
 //! registry. Non-empty groups are rejected with `NON_EMPTY_GROUP`.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::delete_groups_request::DeleteGroupsRequest;
-use crabka_protocol::owned::delete_groups_response::{DeletableGroupResult, DeleteGroupsResponse};
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        delete_groups_request::DeleteGroupsRequest,
+        delete_groups_response::{DeletableGroupResult, DeleteGroupsResponse},
+    },
+};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::DeleteGroupError;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::DeleteGroupError,
+    error::BrokerError,
+};
 
 #[tracing::instrument(
     name = "handle_delete_groups",
@@ -78,12 +83,12 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc};
+
     use assert2::assert;
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
+    use super::*;
     use crate::test_support::{DenyAll, peer, principal};
 
     const VERSION: i16 = 2;

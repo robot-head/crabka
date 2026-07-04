@@ -1,12 +1,12 @@
 //! `ArrowIpcSerde` round-trip for an arrow-rs `RecordBatch`.
 //! Run: `cargo run -p crabka-client-streams --example format_arrow --features arrow`
-use crabka_client_streams::columnar::serde::arrow::ArrowIpcSerde;
-use crabka_client_streams::processor::serde::Serde;
 use std::sync::Arc;
 
-use ::arrow::array::RecordBatch;
-use ::arrow::array::{Int64Array, StringArray};
-use ::arrow::datatypes::{DataType, Field, Schema};
+use ::arrow::{
+    array::{Int64Array, RecordBatch, StringArray},
+    datatypes::{DataType, Field, Schema},
+};
+use crabka_client_streams::{columnar::serde::arrow::ArrowIpcSerde, processor::serde::Serde};
 
 fn main() {
     // docs:begin arrow-roundtrip

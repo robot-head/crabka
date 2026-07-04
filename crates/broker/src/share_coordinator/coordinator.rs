@@ -16,28 +16,32 @@
 // The state-machine methods are consumed by the persister RPC handlers and
 // the group-lifecycle hook.
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use bytes::Bytes;
+use crabka_ids::PartitionIndex;
+use crabka_log::Offset;
+use crabka_metadata::MetadataImage;
+use crabka_protocol::records::{Record, RecordBatch};
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
-use crabka_metadata::MetadataImage;
-use crabka_protocol::records::{Record, RecordBatch};
-
-use crate::error::BrokerError;
-use crate::partition_registry::PartitionRegistry;
-use crate::share_coordinator::bootstrap;
-use crate::share_coordinator::config::ShareCoordinatorConfig;
-use crate::share_coordinator::partitioner::partition_for_share_key;
-use crate::share_coordinator::persistence::{
-    KEY_SHARE_SNAPSHOT, KEY_SHARE_UPDATE, ShareSnapshotValue, ShareStateKey, ShareUpdateValue,
-    StateBatch, encode_state_key, parse_state_key,
+use crate::{
+    error::BrokerError,
+    partition_registry::PartitionRegistry,
+    share_coordinator::{
+        bootstrap,
+        config::ShareCoordinatorConfig,
+        partitioner::partition_for_share_key,
+        persistence::{
+            KEY_SHARE_SNAPSHOT, KEY_SHARE_UPDATE, ShareSnapshotValue, ShareStateKey,
+            ShareUpdateValue, StateBatch, encode_state_key, parse_state_key,
+        },
+        pruning::redundant_offset,
+        state::SharePartitionState,
+    },
 };
-use crate::share_coordinator::pruning::redundant_offset;
-use crate::share_coordinator::state::SharePartitionState;
 
 /// In-memory map key: `(group_id, topic_id, partition)`.
 type ShareStateKey3 = (String, uuid::Uuid, i32);
@@ -51,17 +55,13 @@ pub(crate) type StateEpoch = i32;
 /// stale value is fenced with `FENCED_LEADER_EPOCH`.
 pub(crate) type LeaderEpoch = i32;
 
-/// Index of a `__share_group_state` partition (the coordinator-topic partition
-/// a share key hashes to) — distinct from the data-topic partition index.
-pub(crate) type StatePartitionIndex = i32;
-
 /// Kafka wire error code (see [`crate::codes`]) returned per partition when a
 /// state-machine operation fails.
 pub(crate) type ShareErrorCode = i16;
 
 /// `(state_epoch, leader_epoch, start_offset, delivery_complete_count)` as
 /// returned by [`ShareCoordinator::read_summary`].
-pub(crate) type ShareStateSummary = (StateEpoch, LeaderEpoch, i64, i32);
+pub(crate) type ShareStateSummary = (StateEpoch, LeaderEpoch, Offset, i32);
 
 /// `start_offset` sentinel meaning "no persisted share state": tells the
 /// share-partition leader to initialize delivery from scratch (KIP-932).
@@ -79,7 +79,7 @@ pub(crate) struct ShareCoordinator {
     /// Live in-memory state: `(group, topicId, partition)` → locked state.
     state: DashMap<ShareStateKey3, Arc<Mutex<SharePartitionState>>>,
     /// Set of `__share_group_state` partition indices this broker leads.
-    leader_partitions: RwLock<HashSet<StatePartitionIndex>>,
+    leader_partitions: RwLock<HashSet<PartitionIndex>>,
     config: ShareCoordinatorConfig,
 }
 
@@ -105,14 +105,14 @@ impl ShareCoordinator {
         let mut set = HashSet::new();
         for p in image.partitions_of(bootstrap::TOPIC) {
             if p.leader == self.node_id {
-                set.insert(p.partition);
+                set.insert(PartitionIndex(p.partition));
             }
         }
         *self.leader_partitions.write().await = set;
     }
 
     /// Returns `true` if this broker leads `__share_group_state`-`state_partition`.
-    pub(crate) async fn is_leader(&self, state_partition: StatePartitionIndex) -> bool {
+    pub(crate) async fn is_leader(&self, state_partition: PartitionIndex) -> bool {
         self.leader_partitions
             .read()
             .await
@@ -123,7 +123,7 @@ impl ShareCoordinator {
     pub(crate) async fn lead_all_partitions_for_test(&self) {
         let mut set = HashSet::new();
         for p in 0..bootstrap::NUM_PARTITIONS {
-            set.insert(p);
+            set.insert(PartitionIndex(p));
         }
         *self.leader_partitions.write().await = set;
     }
@@ -136,13 +136,13 @@ impl ShareCoordinator {
         group: &str,
         topic_id: &uuid::Uuid,
         partition: i32,
-    ) -> StatePartitionIndex {
-        partition_for_share_key(
+    ) -> PartitionIndex {
+        PartitionIndex(partition_for_share_key(
             group,
             topic_id,
             partition,
             self.config.state_topic_num_partitions,
-        )
+        ))
     }
 
     /// Initialize the share state for `(group, topic_id, partition)` at
@@ -160,7 +160,7 @@ impl ShareCoordinator {
         topic_id: uuid::Uuid,
         partition: i32,
         state_epoch: StateEpoch,
-        start_offset: i64,
+        start_offset: Offset,
     ) -> Result<(), ShareErrorCode> {
         let map_key = (group.to_string(), topic_id, partition);
         let state_partition = self.state_partition_for(group, &topic_id, partition);
@@ -220,7 +220,7 @@ impl ShareCoordinator {
         partition: i32,
         state_epoch: StateEpoch,
         leader_epoch: LeaderEpoch,
-        start_offset: i64,
+        start_offset: Offset,
         delivery_complete_count: i32,
         batches: Vec<StateBatch>,
     ) -> Result<(), ShareErrorCode> {
@@ -370,10 +370,10 @@ impl ShareCoordinator {
     /// locally, or the underlying append error if `produce_batch` fails.
     async fn persist_record(
         &self,
-        state_partition: StatePartitionIndex,
+        state_partition: PartitionIndex,
         key: ShareStateKey,
         value: Option<Bytes>,
-    ) -> Result<i64, BrokerError> {
+    ) -> Result<Offset, BrokerError> {
         let part = self
             .partitions
             .get(bootstrap::TOPIC, state_partition)
@@ -399,7 +399,7 @@ impl ShareCoordinator {
     /// current `log_start_offset`, trims the log up to it. Every retained key
     /// keeps its latest snapshot, so the trim is safe. Errors are logged and
     /// swallowed — pruning never fails a write.
-    async fn maybe_prune(&self, state_partition: StatePartitionIndex) {
+    async fn maybe_prune(&self, state_partition: PartitionIndex) {
         let Some(part) = self.partitions.get(bootstrap::TOPIC, state_partition) else {
             return;
         };
@@ -427,7 +427,7 @@ impl ShareCoordinator {
             && let Err(e) = part.trim_to_offset(redundant).await
         {
             warn!(
-                partition = state_partition,
+                partition = state_partition.get(),
                 error = %e,
                 "share-state log prune failed; continuing"
             );
@@ -455,7 +455,7 @@ impl ShareCoordinator {
     /// the in-memory state map. Assumes `leader_partitions` is already
     /// populated (via `refresh_leader_partitions`).
     async fn replay_led_partitions(&self) {
-        let local_partitions: Vec<StatePartitionIndex> = self
+        let local_partitions: Vec<PartitionIndex> = self
             .leader_partitions
             .read()
             .await
@@ -474,7 +474,7 @@ impl ShareCoordinator {
                     Ok(o) => o,
                     Err(e) => {
                         warn!(
-                            partition = p,
+                            partition = p.get(),
                             error = %e,
                             "read error during __share_group_state recovery; skipping partition"
                         );
@@ -488,7 +488,7 @@ impl ShareCoordinator {
 
                 for batch in &out.batches {
                     for rec in &batch.records {
-                        let rec_offset = batch.base_offset + i64::from(rec.offset_delta);
+                        let rec_offset = Offset(batch.base_offset + i64::from(rec.offset_delta));
                         let Some(key_bytes) = rec.key.as_ref() else {
                             continue;
                         };
@@ -496,7 +496,7 @@ impl ShareCoordinator {
                             Ok(k) => k,
                             Err(e) => {
                                 warn!(
-                                    partition = p,
+                                    partition = p.get(),
                                     error = %e,
                                     "invalid share-state key; skipping record"
                                 );
@@ -513,7 +513,7 @@ impl ShareCoordinator {
 
                         self.replay_value(&key, &map_key, value, rec_offset, p);
                     }
-                    offset = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
+                    offset = Offset(batch.base_offset + i64::from(batch.last_offset_delta) + 1);
                 }
             }
         }
@@ -527,8 +527,8 @@ impl ShareCoordinator {
         key: &ShareStateKey,
         map_key: &ShareStateKey3,
         value: &Bytes,
-        rec_offset: i64,
-        partition: i32,
+        rec_offset: Offset,
+        partition: PartitionIndex,
     ) {
         let entry = self
             .state
@@ -549,7 +549,7 @@ impl ShareCoordinator {
                     st.last_snapshot_offset = rec_offset;
                 }
                 Err(e) => warn!(
-                    partition = partition,
+                    partition = partition.get(),
                     error = %e,
                     "invalid ShareSnapshot value; skipping record"
                 ),
@@ -557,13 +557,13 @@ impl ShareCoordinator {
             KEY_SHARE_UPDATE => match ShareUpdateValue::decode(value) {
                 Ok(upd) => st.apply_update(&upd),
                 Err(e) => warn!(
-                    partition = partition,
+                    partition = partition.get(),
                     error = %e,
                     "invalid ShareUpdate value; skipping record"
                 ),
             },
             other => warn!(
-                partition = partition,
+                partition = partition.get(),
                 record_type = other,
                 "unknown share-state record type"
             ),
@@ -573,17 +573,18 @@ impl ShareCoordinator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
     use std::path::Path;
+
+    use assert2::{assert, check};
+    use crabka_log::{Log, LogConfig};
     use tempfile::tempdir;
 
-    use crabka_log::{Log, LogConfig};
+    use super::*;
 
     fn batch(first: i64, last: i64) -> StateBatch {
         StateBatch {
-            first_offset: first,
-            last_offset: last,
+            first_offset: Offset(first),
+            last_offset: Offset(last),
             delivery_state: 0,
             delivery_count: 1,
         }
@@ -597,13 +598,13 @@ mod tests {
         let log = Log::open(&part_dir, LogConfig::default()).unwrap();
         let part = crate::broker::spawn_partition(
             bootstrap::TOPIC.to_string(),
-            p,
+            PartitionIndex(p),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        reg.insert(bootstrap::TOPIC.to_string(), p, part);
+        reg.insert(bootstrap::TOPIC.to_string(), PartitionIndex(p), part);
     }
 
     /// A coordinator that leads every state partition it touches, with all
@@ -613,14 +614,18 @@ mod tests {
         for p in 0..bootstrap::NUM_PARTITIONS {
             open_state_partition(&reg, dir, p);
         }
-        let coord = ShareCoordinator::new(1, reg.clone(), ShareCoordinatorConfig::default());
+        let coord = ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            reg.clone(),
+            ShareCoordinatorConfig::default(),
+        );
         (coord, reg)
     }
 
     async fn lead_all(coord: &ShareCoordinator) {
         let mut set = HashSet::new();
         for p in 0..bootstrap::NUM_PARTITIONS {
-            set.insert(p);
+            set.insert(PartitionIndex(p));
         }
         *coord.leader_partitions.write().await = set;
     }
@@ -632,13 +637,13 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([3; 16]);
 
-        coord.initialize("g", tid, 0, 5, 100).await.unwrap();
+        coord.initialize("g", tid, 0, 5, Offset(100)).await.unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
         assert!(st.state_epoch == 5);
-        assert!(st.start_offset == 100);
+        assert!(st.start_offset == Offset(100));
         let summary = coord.read_summary("g", tid, 0).await.expect("present");
-        assert!(summary == (5, 0, 100, 0));
+        assert!(summary == (5, 0, Offset(100), 0));
     }
 
     #[tokio::test]
@@ -648,8 +653,11 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([4; 16]);
 
-        coord.initialize("g", tid, 0, 5, 0).await.unwrap();
-        let err = coord.initialize("g", tid, 0, 5, 0).await.unwrap_err();
+        coord.initialize("g", tid, 0, 5, Offset(0)).await.unwrap();
+        let err = coord
+            .initialize("g", tid, 0, 5, Offset(0))
+            .await
+            .unwrap_err();
         assert!(err == crate::codes::FENCED_STATE_EPOCH);
     }
 
@@ -660,21 +668,21 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([5; 16]);
 
-        coord.initialize("g", tid, 0, 1, 0).await.unwrap();
+        coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
         coord
-            .write("g", tid, 0, 1, 2, 50, 7, vec![batch(50, 59)])
+            .write("g", tid, 0, 1, 2, Offset(50), 7, vec![batch(50, 59)])
             .await
             .unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
         check!(st.state_epoch == 1);
         check!(st.leader_epoch == 2);
-        check!(st.start_offset == 50);
+        check!(st.start_offset == Offset(50));
         check!(st.delivery_complete_count == 7);
         check!(st.state_batches == vec![batch(50, 59)]);
 
         let summary = coord.read_summary("g", tid, 0).await.expect("present");
-        assert!(summary == (1, 2, 50, 7));
+        assert!(summary == (1, 2, Offset(50), 7));
     }
 
     #[tokio::test]
@@ -684,9 +692,9 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([6; 16]);
 
-        coord.initialize("g", tid, 0, 5, 0).await.unwrap();
+        coord.initialize("g", tid, 0, 5, Offset(0)).await.unwrap();
         let err = coord
-            .write("g", tid, 0, 4, 0, 0, 0, vec![])
+            .write("g", tid, 0, 4, 0, Offset(0), 0, vec![])
             .await
             .unwrap_err();
         assert!(err == crate::codes::FENCED_STATE_EPOCH);
@@ -699,10 +707,13 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([7; 16]);
 
-        coord.initialize("g", tid, 0, 1, 0).await.unwrap();
-        coord.write("g", tid, 0, 1, 5, 0, 0, vec![]).await.unwrap();
+        coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
+        coord
+            .write("g", tid, 0, 1, 5, Offset(0), 0, vec![])
+            .await
+            .unwrap();
         let err = coord
-            .write("g", tid, 0, 1, 4, 0, 0, vec![])
+            .write("g", tid, 0, 1, 4, Offset(0), 0, vec![])
             .await
             .unwrap_err();
         assert!(err == crate::codes::FENCED_LEADER_EPOCH);
@@ -715,7 +726,7 @@ mod tests {
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([8; 16]);
 
-        coord.initialize("g", tid, 0, 1, 0).await.unwrap();
+        coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
         assert!(coord.read("g", tid, 0).await.is_some());
         coord.delete("g", tid, 0).await.unwrap();
         assert!(coord.read("g", tid, 0).await.is_none());
@@ -733,15 +744,15 @@ mod tests {
             snapshot_update_records_per_snapshot: 3,
             ..ShareCoordinatorConfig::default()
         };
-        let coord = ShareCoordinator::new(1, reg.clone(), cfg);
+        let coord = ShareCoordinator::new(crabka_audit::NodeId(1), reg.clone(), cfg);
         lead_all(&coord).await;
         let tid = uuid::Uuid::from_bytes([9; 16]);
 
-        coord.initialize("g", tid, 0, 1, 0).await.unwrap();
+        coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
         for i in 0..3 {
             let base = i64::from(i) * 10;
             coord
-                .write("g", tid, 0, 1, 1, 0, 0, vec![batch(base, base + 9)])
+                .write("g", tid, 0, 1, 1, Offset(0), 0, vec![batch(base, base + 9)])
                 .await
                 .unwrap();
         }
@@ -762,18 +773,26 @@ mod tests {
         }
         let tid = uuid::Uuid::from_bytes([10; 16]);
         {
-            let coord = ShareCoordinator::new(1, reg.clone(), ShareCoordinatorConfig::default());
+            let coord = ShareCoordinator::new(
+                crabka_audit::NodeId(1),
+                reg.clone(),
+                ShareCoordinatorConfig::default(),
+            );
             lead_all(&coord).await;
-            coord.initialize("g", tid, 0, 2, 0).await.unwrap();
+            coord.initialize("g", tid, 0, 2, Offset(0)).await.unwrap();
             coord
-                .write("g", tid, 0, 2, 3, 20, 4, vec![batch(20, 29)])
+                .write("g", tid, 0, 2, 3, Offset(20), 4, vec![batch(20, 29)])
                 .await
                 .unwrap();
         }
 
         // New coordinator over the SAME registry (same open logs); recover
         // replays the records written above.
-        let recovered = ShareCoordinator::new(1, reg.clone(), ShareCoordinatorConfig::default());
+        let recovered = ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            reg.clone(),
+            ShareCoordinatorConfig::default(),
+        );
         lead_all(&recovered).await;
         // `recover` re-derives leadership from a MetadataImage; here we seed
         // the leadership set directly (lead_all) and replay the open logs.
@@ -782,8 +801,233 @@ mod tests {
         let st = recovered.read("g", tid, 0).await.expect("recovered");
         check!(st.state_epoch == 2);
         check!(st.leader_epoch == 3);
-        check!(st.start_offset == 20);
+        check!(st.start_offset == Offset(20));
         check!(st.delivery_complete_count == 4);
         check!(st.state_batches == vec![batch(20, 29)]);
+    }
+
+    // `replay_led_partitions` must derive each record's offset as
+    // `base_offset + offset_delta` and advance the inter-batch cursor as
+    // `base_offset + last_offset_delta + 1`. A hand-crafted TWO-record batch
+    // (an update at offset_delta 0, then a snapshot at offset_delta 1) pins
+    // both: after replay, the snapshot's recorded `last_snapshot_offset` must
+    // be `base_offset + 1`, and a second batch appended after it must also be
+    // replayed (only reachable when the cursor advances by
+    // `last_offset_delta + 1`).
+    #[tokio::test]
+    async fn replay_uses_per_record_and_inter_batch_offsets() {
+        let dir = tempdir().unwrap();
+        let (coord, reg) = coordinator(dir.path());
+        lead_all(&coord).await;
+        let tid = uuid::Uuid::from_bytes([11; 16]);
+        let state_partition = coord.state_partition_for("g", &tid, 0);
+        let part = reg
+            .get(bootstrap::TOPIC, state_partition)
+            .expect("state partition open");
+
+        let snap_key = encode_state_key(&ShareStateKey {
+            record_type: KEY_SHARE_SNAPSHOT,
+            group_id: "g".to_string(),
+            topic_id: tid,
+            partition: 0,
+        });
+        let upd_key = encode_state_key(&ShareStateKey {
+            record_type: KEY_SHARE_UPDATE,
+            group_id: "g".to_string(),
+            topic_id: tid,
+            partition: 0,
+        });
+
+        // Batch A (base_offset 0): an UPDATE at delta 0, then a SNAPSHOT at
+        // delta 1 (last_offset_delta = 1). The snapshot's rec_offset is
+        // `base_offset + 1 == 1`.
+        let mut batch_a = RecordBatch {
+            last_offset_delta: 1,
+            ..RecordBatch::default()
+        };
+        batch_a.records.push(Record {
+            offset_delta: 0,
+            key: Some(upd_key.clone()),
+            value: Some(
+                ShareUpdateValue {
+                    snapshot_epoch: 0,
+                    leader_epoch: 1,
+                    start_offset: Offset(0),
+                    delivery_complete_count: 0,
+                    state_batches: vec![],
+                }
+                .encode(),
+            ),
+            ..Default::default()
+        });
+        batch_a.records.push(Record {
+            offset_delta: 1,
+            key: Some(snap_key.clone()),
+            value: Some(
+                ShareSnapshotValue {
+                    snapshot_epoch: 5,
+                    state_epoch: 2,
+                    leader_epoch: 3,
+                    start_offset: Offset(20),
+                    delivery_complete_count: 4,
+                    state_batches: vec![batch(20, 29)],
+                }
+                .encode(),
+            ),
+            ..Default::default()
+        });
+        part.produce_batch(batch_a).await.unwrap();
+
+        // Batch B (base_offset 2): a later SNAPSHOT. Only reached if the cursor
+        // advanced past batch A by `last_offset_delta + 1`.
+        let mut batch_b = RecordBatch::default();
+        batch_b.records.push(Record {
+            offset_delta: 0,
+            key: Some(snap_key.clone()),
+            value: Some(
+                ShareSnapshotValue {
+                    snapshot_epoch: 6,
+                    state_epoch: 2,
+                    leader_epoch: 9,
+                    start_offset: Offset(50),
+                    delivery_complete_count: 8,
+                    state_batches: vec![batch(50, 59)],
+                }
+                .encode(),
+            ),
+            ..Default::default()
+        });
+        part.produce_batch(batch_b).await.unwrap();
+
+        coord.replay_led_partitions().await;
+
+        let st = coord.read("g", tid, 0).await.expect("recovered");
+        // Batch B is the final snapshot — proves the inter-batch cursor advanced
+        // past batch A (base_offset + last_offset_delta + 1 == 2).
+        check!(st.leader_epoch == 9);
+        check!(st.start_offset == Offset(50));
+        check!(st.delivery_complete_count == 8);
+        check!(st.state_batches == vec![batch(50, 59)]);
+        // Batch B's snapshot sits at base_offset 2 (single record, delta 0).
+        check!(st.last_snapshot_offset == Offset(2));
+    }
+
+    /// Replaying ONLY batch A pins the per-record offset arithmetic in
+    /// isolation: the snapshot at `offset_delta 1` over `base_offset 0` records
+    /// `last_snapshot_offset == Offset(1)`, not `Offset(-1)`.
+    #[tokio::test]
+    async fn replay_snapshot_offset_is_base_plus_delta() {
+        let dir = tempdir().unwrap();
+        let (coord, reg) = coordinator(dir.path());
+        lead_all(&coord).await;
+        let tid = uuid::Uuid::from_bytes([12; 16]);
+        let state_partition = coord.state_partition_for("g", &tid, 0);
+        let part = reg
+            .get(bootstrap::TOPIC, state_partition)
+            .expect("state partition open");
+
+        let snap_key = encode_state_key(&ShareStateKey {
+            record_type: KEY_SHARE_SNAPSHOT,
+            group_id: "g".to_string(),
+            topic_id: tid,
+            partition: 0,
+        });
+        let upd_key = encode_state_key(&ShareStateKey {
+            record_type: KEY_SHARE_UPDATE,
+            group_id: "g".to_string(),
+            topic_id: tid,
+            partition: 0,
+        });
+
+        // Single batch, base_offset 0: an UPDATE at delta 0 then a SNAPSHOT at
+        // delta 1. The snapshot's rec_offset is `0 + 1 == 1`.
+        let mut batch_a = RecordBatch {
+            last_offset_delta: 1,
+            ..RecordBatch::default()
+        };
+        batch_a.records.push(Record {
+            offset_delta: 0,
+            key: Some(upd_key),
+            value: Some(
+                ShareUpdateValue {
+                    snapshot_epoch: 0,
+                    leader_epoch: 1,
+                    start_offset: Offset(0),
+                    delivery_complete_count: 0,
+                    state_batches: vec![],
+                }
+                .encode(),
+            ),
+            ..Default::default()
+        });
+        batch_a.records.push(Record {
+            offset_delta: 1,
+            key: Some(snap_key),
+            value: Some(
+                ShareSnapshotValue {
+                    snapshot_epoch: 5,
+                    state_epoch: 2,
+                    leader_epoch: 3,
+                    start_offset: Offset(20),
+                    delivery_complete_count: 4,
+                    state_batches: vec![batch(20, 29)],
+                }
+                .encode(),
+            ),
+            ..Default::default()
+        });
+        part.produce_batch(batch_a).await.unwrap();
+
+        coord.replay_led_partitions().await;
+
+        let st = coord.read("g", tid, 0).await.expect("recovered");
+        check!(st.leader_epoch == 3);
+        check!(st.start_offset == Offset(20));
+        // The snapshot record sits at base_offset(0) + offset_delta(1) == 1.
+        check!(st.last_snapshot_offset == Offset(1));
+    }
+
+    /// After a snapshot fold, `maybe_prune` must trim the state-partition log
+    /// prefix up to the redundant offset (the folded snapshot's offset). The
+    /// partition's `log_start_offset` advances past 0; if pruning is skipped it
+    /// stays at 0.
+    #[tokio::test]
+    async fn snapshot_fold_prunes_log_prefix() {
+        let dir = tempdir().unwrap();
+        let reg = Arc::new(PartitionRegistry::new());
+        for p in 0..bootstrap::NUM_PARTITIONS {
+            open_state_partition(&reg, dir.path(), p);
+        }
+        // Fold after 2 updates so a snapshot lands a few records in.
+        let cfg = ShareCoordinatorConfig {
+            snapshot_update_records_per_snapshot: 2,
+            ..ShareCoordinatorConfig::default()
+        };
+        let coord = ShareCoordinator::new(crabka_audit::NodeId(1), reg.clone(), cfg);
+        lead_all(&coord).await;
+        let tid = uuid::Uuid::from_bytes([13; 16]);
+        let state_partition = coord.state_partition_for("g", &tid, 0);
+        let part = reg
+            .get(bootstrap::TOPIC, state_partition)
+            .expect("state partition open");
+
+        // record 0: initialize snapshot.
+        coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
+        // records 1,2: updates; the 2nd crosses the threshold and folds a
+        // snapshot at record 3, then prunes up to it.
+        coord
+            .write("g", tid, 0, 1, 1, Offset(0), 0, vec![batch(0, 9)])
+            .await
+            .unwrap();
+        coord
+            .write("g", tid, 0, 1, 1, Offset(0), 0, vec![batch(10, 19)])
+            .await
+            .unwrap();
+
+        // The folded snapshot's offset is the sole key's last-snapshot offset,
+        // which is > 0 and exceeds the log's initial start (0), so the prune
+        // advanced the prefix. Without pruning the start stays at 0.
+        let start = part.log_start_offset();
+        check!(start > Offset(0));
     }
 }

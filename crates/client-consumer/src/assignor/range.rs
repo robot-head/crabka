@@ -58,8 +58,9 @@ pub fn assign(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn one_member_takes_everything() {

@@ -14,12 +14,10 @@
 //! dependency surface small and the temporal checks (`exp` / `iat` / `nbf`)
 //! injectable for deterministic tests.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
 use ring::signature;
 use serde_json::Value;
 
@@ -339,10 +337,13 @@ pub(crate) use tests::{mint_es256, mint_rs256, mint_rs256_with_header};
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
-    use ring::rand::SystemRandom;
-    use ring::signature::{EcdsaKeyPair, KeyPair, RsaKeyPair};
+    use ring::{
+        rand::SystemRandom,
+        signature::{EcdsaKeyPair, KeyPair, RsaKeyPair},
+    };
+
+    use super::*;
 
     /// A static RSA-2048 PKCS#8 key (generated with `openssl genpkey`). `ring`
     /// cannot generate RSA keys, so tests mint RS256 tokens from this fixed

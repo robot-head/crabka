@@ -117,6 +117,7 @@ mod tests {
     use assert2::assert;
 
     use super::*;
+    use crate::ids::{DownstreamOffset, PartitionIndex, UpstreamOffset};
 
     #[test]
     fn heartbeat_key_value_bytes_exact() {
@@ -137,9 +138,9 @@ mod tests {
     fn offset_sync_bytes_roundtrip() {
         let os = OffsetSync {
             topic: "orders".into(),
-            partition: 7,
-            upstream: 1000,
-            downstream: 742,
+            partition: PartitionIndex(7),
+            upstream: UpstreamOffset(1000),
+            downstream: DownstreamOffset(742),
         };
         assert!(OffsetSync::from_bytes(&os.key_bytes(), &os.value_bytes()).unwrap() == os);
         // Key is versionless (JVM MM2 serializeKey writes no version header).
@@ -158,9 +159,9 @@ mod tests {
         let c = Checkpoint {
             group: "analytics".into(),
             topic: "orders".into(),
-            partition: 7,
-            upstream: 1000,
-            downstream: 742,
+            partition: PartitionIndex(7),
+            upstream: UpstreamOffset(1000),
+            downstream: DownstreamOffset(742),
             metadata: String::new(),
         };
         assert!(Checkpoint::from_bytes(&c.key_bytes(), &c.value_bytes()).unwrap() == c);

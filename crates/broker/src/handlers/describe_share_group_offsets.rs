@@ -8,21 +8,26 @@
 //! ACL gate.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest;
-use crabka_protocol::owned::describe_share_group_offsets_response::{
-    DescribeShareGroupOffsetsResponse, DescribeShareGroupOffsetsResponseGroup,
-    DescribeShareGroupOffsetsResponsePartition, DescribeShareGroupOffsetsResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest,
+        describe_share_group_offsets_response::{
+            DescribeShareGroupOffsetsResponse, DescribeShareGroupOffsetsResponseGroup,
+            DescribeShareGroupOffsetsResponsePartition, DescribeShareGroupOffsetsResponseTopic,
+        },
+    },
+    primitives::uuid::Uuid,
 };
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::share_coordinator::coordinator::UNINITIALIZED_START_OFFSET;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    share_coordinator::coordinator::UNINITIALIZED_START_OFFSET,
+};
 
 #[tracing::instrument(
     name = "handle_describe_share_group_offsets",
@@ -209,17 +214,20 @@ async fn describe_partition(
     p: i32,
 ) -> DescribeShareGroupOffsetsResponsePartition {
     let (start_offset, error_code) = match persister.read_state(gid, topic_id, p).await {
-        Ok(Some(state)) => (state.start_offset, codes::NONE),
+        Ok(Some(state)) => (state.start_offset.0, codes::NONE),
         Ok(None) => (UNINITIALIZED_START_OFFSET, codes::NONE),
         Err(_) => (UNINITIALIZED_START_OFFSET, codes::COORDINATOR_NOT_AVAILABLE),
     };
-    let (leader_epoch, lag) = if let Some(part) = broker.partitions.get(topic_name, p) {
+    let (leader_epoch, lag) = if let Some(part) = broker
+        .partitions
+        .get(topic_name, crabka_ids::PartitionIndex(p))
+    {
         let hwm = part.high_watermark().await;
         let le = part
             .current_leader_epoch
             .load(std::sync::atomic::Ordering::Acquire);
         let lag = if start_offset >= 0 {
-            (hwm - start_offset).max(0)
+            (hwm.0 - start_offset).max(0)
         } else {
             -1
         };
@@ -239,20 +247,24 @@ async fn describe_partition(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::describe_share_group_offsets_request::{
-        DescribeShareGroupOffsetsRequestGroup, DescribeShareGroupOffsetsRequestTopic,
-    };
-    use crabka_protocol::owned::describe_share_group_offsets_response;
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
 
-    use crate::authorizer::Authorizer;
-    use crate::test_support::DenyAll;
+    use assert2::assert;
+    use crabka_log::Offset;
+    use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            describe_share_group_offsets_request::{
+                DescribeShareGroupOffsetsRequestGroup, DescribeShareGroupOffsetsRequestTopic,
+            },
+            describe_share_group_offsets_response,
+        },
+    };
+    use crabka_security::Principal;
+
+    use super::*;
+    use crate::{authorizer::Authorizer, test_support::DenyAll};
 
     type RequestTopic<'a> = (&'a str, Vec<i32>);
     type RequestGroup<'a> = (&'a str, Vec<RequestTopic<'a>>);
@@ -443,7 +455,7 @@ mod tests {
         let topic_id = uuid::Uuid::from_u128(0xD5C0);
         let image = image_with_topic("orders", topic_id);
         persister
-            .initialize("g-desc", topic_id, 0, 1, 33)
+            .initialize("g-desc", topic_id, 0, 1, Offset(33))
             .await
             .expect("seed state");
 

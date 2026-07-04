@@ -120,8 +120,9 @@ reach the two-vote majority, so it cannot elect itself.
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn renders_sequence_diagrams_and_split_brain() {

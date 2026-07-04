@@ -6,8 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use crabka_metadata::EntityKey;
-use crabka_metadata::MetadataImage;
+use crabka_metadata::{EntityKey, MetadataImage};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -77,9 +76,10 @@ fn persisted_quota_entity_key(entity_key: &EntityKey) -> EntityKey {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{ClientQuotaRecord, EntityKey, MetadataRecord, QuotaEntity};
+
+    use super::*;
 
     fn img_with_quota(
         entity: Vec<(&str, Option<&str>)>,

@@ -13,9 +13,11 @@ use std::collections::BTreeMap;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::Api;
 
-use crate::context::Context;
-use crate::controller::common::{ReconcileError, condition};
-use crate::crd::{Kafka, KafkaCondition, LoggingType};
+use crate::{
+    context::Context,
+    controller::common::{ReconcileError, condition},
+    crd::{Kafka, KafkaCondition, LoggingType},
+};
 
 /// Canonicalize a level string to a `tracing` env-filter level. Accepts the
 /// `tracing` set (`trace|debug|info|warn|error|off`) case-insensitively, plus
@@ -214,9 +216,9 @@ pub fn condition_for(outcome: &LoggingOutcome) -> KafkaCondition {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
-    use assert2::assert;
-    use assert2::check;
 
     fn loggers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs

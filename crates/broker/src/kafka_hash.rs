@@ -59,8 +59,9 @@ pub(crate) fn murmur2_partition(data: &[u8], num_partitions: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn murmur2_matches_kafka_vectors_for_remainder_lengths() {

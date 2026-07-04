@@ -67,8 +67,9 @@ impl ByteKeyValueStore for InMemoryBytes {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[tokio::test]
     async fn inmemory_put_get_delete_range_ordered() {

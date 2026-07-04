@@ -2,22 +2,23 @@
 //! by `CogroupedKStream::windowed_by(TimeWindows)`. Terminal `aggregate_explicit`
 //! produces `KTable<Windowed<K>, VOut>` over a shared window store.
 
-use std::any::Any;
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::cogrouped::{
-    CogroupInput, CogroupKind, CogroupSpec, CogroupedKStream, StoreRegistrarFn, lower_cogroup,
+use crate::{
+    dsl::{
+        builder::InternalStreamsBuilder,
+        cogrouped::{
+            CogroupInput, CogroupKind, CogroupSpec, CogroupedKStream, StoreRegistrarFn,
+            lower_cogroup,
+        },
+        config::Materialized,
+        kgrouped::mint_store_name,
+        ktable::KTable,
+        names,
+        windows::{TimeWindowedSerde, TimeWindows, Windowed},
+    },
+    processor::serde::Serde,
 };
-use crate::dsl::config::Materialized;
-use crate::dsl::kgrouped::mint_store_name;
-use crate::dsl::ktable::KTable;
-use crate::dsl::names;
-use crate::dsl::windows::{TimeWindowedSerde, TimeWindows, Windowed};
-use crate::processor::serde::Serde;
 
 impl<K, VOut> CogroupedKStream<K, VOut>
 where
@@ -122,10 +123,11 @@ where
 mod caching_tests {
     use assert2::check;
 
-    use crate::dsl::StreamsBuilder;
-    use crate::dsl::windows::TimeWindowedSerde;
-    use crate::store::backend::StoreBackend;
-    use crate::{I64Serde, Materialized, Produced, StringSerde, TimeWindows};
+    use crate::{
+        I64Serde, Materialized, Produced, StringSerde, TimeWindows,
+        dsl::{StreamsBuilder, windows::TimeWindowedSerde},
+        store::backend::StoreBackend,
+    };
 
     #[test]
     fn time_windowed_cogroup_marks_store_cached() {

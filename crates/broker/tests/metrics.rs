@@ -13,25 +13,26 @@
 //! Linux/macOS-only by convention (matches the other integration
 //! tests' ``).
 
-use assert2::{assert, check};
-use std::io;
-use std::time::Duration;
+use std::{io, time::Duration};
 
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::metrics::PartitionLabel;
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_broker::{Broker, BrokerConfig, config::ListenerSpec, metrics::PartitionLabel};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        produce_response::ProduceResponse,
+    },
 };
-use crabka_protocol::owned::produce_response::ProduceResponse;
-use crabka_protocol::{Decode, Encode};
 use crabka_security::ListenerProtocol;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 const TOPIC: &str = "metrics-it";
 const FETCH_VERSION: i16 = 12;

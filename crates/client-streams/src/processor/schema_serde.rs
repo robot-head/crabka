@@ -3,12 +3,16 @@
 //! `SchemaCache`. Gated by the `schema-serde` feature.
 
 use bytes::Bytes;
-use crabka_schema_serde::SchemaCache;
-use crabka_schema_serde::format::{SchemaDeserializer, SchemaSerializer, SchemaSubject};
+use crabka_schema_serde::{
+    SchemaCache,
+    format::{SchemaDeserializer, SchemaSerializer, SchemaSubject},
+};
 
-use crate::error::StreamsClientError;
-use crate::membership::SchemaPrewarm;
-use crate::processor::serde::{Serde, SerdeAssociate, SerdeError, SerdeRole};
+use crate::{
+    error::StreamsClientError,
+    membership::SchemaPrewarm,
+    processor::serde::{Serde, SerdeAssociate, SerdeError, SerdeRole},
+};
 
 /// Wraps a schema-serde serializer+deserializer pair as a Streams `Serde<T>`.
 pub struct SchemaSerde<T, S> {

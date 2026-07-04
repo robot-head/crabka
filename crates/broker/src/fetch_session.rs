@@ -36,14 +36,19 @@
 //! `try_allocate` returns `INVALID_SESSION_ID` and the caller falls back
 //! to a sessionless response — matching Apache Kafka's behavior.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering},
+    },
+};
 
+use crabka_protocol::{
+    owned::fetch_request::{FetchRequest, FetchTopic, ForgottenTopic},
+    primitives::uuid::Uuid as WireUuid,
+};
 use qubit_clock::{NanoClock, NanoMonotonicClock};
-
-use crabka_protocol::owned::fetch_request::{FetchRequest, FetchTopic, ForgottenTopic};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::codes;
 
@@ -526,11 +531,11 @@ mod fetch_session_model;
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+    use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic};
     use qubit_clock::MockTime;
 
     use super::*;
-    use assert2::{assert, check};
-    use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic};
 
     /// Builds a cache whose LRU clock is a mock timeline anchored at the Unix
     /// epoch. Returns the [`MockTime`] handle so a test can make successive
@@ -1250,11 +1255,15 @@ mod tests {
 /// after every step.
 #[cfg(test)]
 mod fuzz {
-    use super::{CachedPartitionState, FetchSessionKey, apply_incremental};
-    use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic};
-    use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-    use proptest::prelude::*;
     use std::collections::HashMap;
+
+    use crabka_protocol::{
+        owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic},
+        primitives::uuid::Uuid as WireUuid,
+    };
+    use proptest::prelude::*;
+
+    use super::{CachedPartitionState, FetchSessionKey, apply_incremental};
 
     // name index 0 = empty (id-only wire form), 1 = "A", 2 = "B".
     fn name_of(i: u8) -> String {

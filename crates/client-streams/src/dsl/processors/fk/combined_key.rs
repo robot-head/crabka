@@ -44,8 +44,9 @@ pub(crate) fn range_upper(fk: &[u8]) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use bytes::Bytes;
+
+    use super::*;
 
     #[test]
     fn round_trip_and_prefix() {

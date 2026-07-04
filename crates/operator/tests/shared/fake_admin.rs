@@ -9,8 +9,10 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Mutex as StdMutex;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Mutex as StdMutex,
+};
 
 use crabka_client_admin::{
     AclEntry, AclEntryFilter, AdminClientLike, AdminError, AlterConfigsOutcome, CreateAclOutcome,

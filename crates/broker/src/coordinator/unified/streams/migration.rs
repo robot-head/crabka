@@ -12,13 +12,12 @@
 use bytes::Bytes;
 use crabka_protocol::records::{Record, RecordBatch};
 
-use crate::coordinator::unified::actor::PendingRecords;
-
 use super::persistence::{
     encode_current_member_assignment_key, encode_group_metadata_key, encode_member_metadata_key,
     encode_partition_metadata_key, encode_target_assignment_member_key,
     encode_target_assignment_metadata_key, encode_topology_key,
 };
+use crate::coordinator::unified::actor::PendingRecords;
 
 /// Result of inspecting a `group_id` for classic→streams conversion.
 #[derive(Debug, PartialEq, Eq)]

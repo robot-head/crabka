@@ -14,6 +14,7 @@
 //! `__consumer_offsets` records are NOT flexible).
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabka_log::Offset;
 
 use crate::error::BrokerError;
 
@@ -94,7 +95,7 @@ pub fn encode_key(key: &Key) -> Bytes {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetCommitValue {
-    pub offset: i64,
+    pub offset: Offset,
     pub leader_epoch: i32,
     pub metadata: String,
     pub commit_timestamp_ms: i64,
@@ -117,7 +118,7 @@ impl OffsetCommitValue {
     pub fn encode_value(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(3); // value version
-        buf.put_i64(self.offset);
+        buf.put_i64(self.offset.0);
         buf.put_i32(self.leader_epoch);
         put_string(&mut buf, &self.metadata);
         buf.put_i64(self.commit_timestamp_ms);
@@ -131,7 +132,7 @@ impl OffsetCommitValue {
                 crabka_protocol::ProtocolError::InvalidValue("unknown OffsetCommitValue version"),
             ));
         }
-        let offset = get_i64(&mut buf)?;
+        let offset = Offset(get_i64(&mut buf)?);
         let leader_epoch = if version >= 3 { get_i32(&mut buf)? } else { -1 };
         let metadata = get_string(&mut buf)?;
         let commit_timestamp_ms = get_i64(&mut buf)?;
@@ -369,13 +370,14 @@ pub(crate) fn put_bytes<B: BufMut>(buf: &mut B, b: &Bytes) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn offset_commit_round_trip() {
         let v = OffsetCommitValue {
-            offset: 42,
+            offset: Offset(42),
             leader_epoch: 0,
             metadata: "meta".into(),
             commit_timestamp_ms: 1_000_000,
@@ -383,6 +385,10 @@ mod tests {
         let encoded = v.encode_value();
         let decoded = OffsetCommitValue::decode_value(&encoded).unwrap();
         assert!(decoded == v);
+        assert!(decoded.offset == Offset(42));
+        assert!(decoded.leader_epoch == 0);
+        assert!(decoded.metadata == "meta");
+        assert!(decoded.commit_timestamp_ms == 1_000_000);
     }
 
     #[test]

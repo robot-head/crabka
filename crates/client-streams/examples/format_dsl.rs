@@ -4,8 +4,7 @@
 //! builds the topology. Run: `cargo run -p crabka-client-streams --example format_dsl`
 #![allow(clippy::cast_possible_truncation)]
 use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsApp};
-use crabka_schema_serde::format::json::JsonSerde;
-use crabka_schema_serde::format::protobuf::ProtobufSerde;
+use crabka_schema_serde::format::{json::JsonSerde, protobuf::ProtobufSerde};
 use serde::{Deserialize, Serialize};
 
 pub const FILE_DESCRIPTOR_SET_BYTES: &[u8] = include_bytes!("gen/file_descriptor_set.bin");

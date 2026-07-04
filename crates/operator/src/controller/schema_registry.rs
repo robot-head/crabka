@@ -2,28 +2,35 @@
 //! Service + `ClusterIP` Service for the `crabka-schema-registry` binary,
 //! associated with a managed `Kafka` via the `crabka.io/cluster` label.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use futures::StreamExt as _;
-use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{Secret, Service};
-use kube::api::{Api, DynamicObject, Patch, PatchParams};
-use kube::core::{ApiResource, GroupVersionKind};
-use kube::runtime::controller::{Action, Controller};
-use kube::runtime::reflector::ObjectRef;
-use kube::runtime::watcher;
-use kube::{Resource, ResourceExt as _};
+use k8s_openapi::api::{
+    apps::v1::Deployment,
+    core::v1::{Secret, Service},
+};
+use kube::{
+    Resource, ResourceExt as _,
+    api::{Api, DynamicObject, Patch, PatchParams},
+    core::{ApiResource, GroupVersionKind},
+    runtime::{
+        controller::{Action, Controller},
+        reflector::ObjectRef,
+        watcher,
+    },
+};
 use serde_json::json;
 
-use crate::context::Context;
-use crate::controller::common::{
-    FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref, patch_status,
-};
-use crate::controller::topic::internal_listener_bootstrap;
-use crate::crd::{
-    BearerMode, CertManagerIssuerRef, Kafka, SchemaRegistry, SchemaRegistryStatus, TlsClientAuth,
+use crate::{
+    context::Context,
+    controller::{
+        common::{FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref, patch_status},
+        topic::internal_listener_bootstrap,
+    },
+    crd::{
+        BearerMode, CertManagerIssuerRef, Kafka, SchemaRegistry, SchemaRegistryStatus,
+        TlsClientAuth,
+    },
 };
 
 const APP_NAME: &str = "crabka-schema-registry";

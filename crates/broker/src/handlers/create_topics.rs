@@ -8,18 +8,24 @@ use bytes::{Bytes, BytesMut};
 use crabka_metadata::{
     AclOperation, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
 };
-use crabka_protocol::owned::create_topics_request::CreateTopicsRequest;
-use crabka_protocol::owned::create_topics_response::{CreatableTopicResult, CreateTopicsResponse};
-use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_topics_request::CreateTopicsRequest,
+        create_topics_response::{CreatableTopicResult, CreateTopicsResponse},
+    },
+    primitives::uuid::Uuid as ProtoUuid,
+};
 use crabka_raft::RaftError;
 use uuid::Uuid;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::replicator_supervisor::materialize_partition;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    replicator_supervisor::materialize_partition,
+};
 
 /// Leader epoch a freshly created partition starts at; the committed
 /// `PartitionRecord` and the handler-side leader-cache install must agree.
@@ -260,7 +266,7 @@ pub(crate) async fn handle(
                     leader: replicas[0],
                     replicas: replicas.clone(),
                     isr: replicas.clone(),
-                    leader_epoch: INITIAL_LEADER_EPOCH,
+                    leader_epoch: crabka_metadata::LeaderEpoch(INITIAL_LEADER_EPOCH),
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![],
@@ -334,9 +340,11 @@ pub(crate) async fn handle(
                             // metadata-watch fires sees `isr.is_empty()`, falls
                             // into `compute_hw == leader_leo`, and acks=-1 returns
                             // instantly without waiting for followers.
-                            if let Some(part) = partitions_map.get(&name, p_i32) {
+                            if let Some(part) =
+                                partitions_map.get(&name, crabka_ids::PartitionIndex(p_i32))
+                            {
                                 let leader = replicas[0];
-                                part.install_leader_change(leader, INITIAL_LEADER_EPOCH)
+                                part.install_leader_change(leader.0, INITIAL_LEADER_EPOCH)
                                     .await;
                                 if is_local_leader(leader, node_id) {
                                     // At creation the ISR equals the full replica set.
@@ -411,45 +419,47 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod replica_assignment_tests {
-    use super::round_robin_replicas;
     use assert2::assert;
+    use crabka_raft::NodeId;
+
+    use super::round_robin_replicas;
 
     #[test]
     fn three_brokers_three_partitions_rf_three() {
-        let bs = vec![1u64, 2, 3];
+        let bs = vec![NodeId(1), NodeId(2), NodeId(3)];
         let out = round_robin_replicas(&bs, 3, 3);
         // Every broker should lead exactly one partition.
         let leaders: Vec<_> = out.iter().map(|r| r[0]).collect();
         let mut sorted = leaders.clone();
         sorted.sort_unstable();
-        assert!(sorted == vec![1, 2, 3]);
+        assert!(sorted == vec![NodeId(1), NodeId(2), NodeId(3)]);
         // Each partition has all three brokers as replicas.
         for replicas in &out {
             let mut s = replicas.clone();
             s.sort_unstable();
-            assert!(s == vec![1, 2, 3]);
+            assert!(s == vec![NodeId(1), NodeId(2), NodeId(3)]);
         }
     }
 
     #[test]
     fn offset_per_partition_means_distinct_leaders() {
-        let bs = vec![1u64, 2, 3];
+        let bs = vec![NodeId(1), NodeId(2), NodeId(3)];
         let out = round_robin_replicas(&bs, 3, 1);
-        assert!(out == vec![vec![1u64], vec![2], vec![3]]);
+        assert!(out == vec![vec![NodeId(1)], vec![NodeId(2)], vec![NodeId(3)]]);
     }
 
     #[test]
     fn rf_too_high_returns_empty() {
-        let bs = vec![1u64, 2, 3];
+        let bs = vec![NodeId(1), NodeId(2), NodeId(3)];
         let out = round_robin_replicas(&bs, 1, 5);
         assert!(out.is_empty());
     }
 
     #[test]
     fn rf_one_single_broker_preserves_replica_shape() {
-        let bs = vec![1u64];
+        let bs = vec![NodeId(1)];
         let out = round_robin_replicas(&bs, 2, 1);
-        assert!(out == vec![vec![1u64], vec![1u64]]);
+        assert!(out == vec![vec![NodeId(1)], vec![NodeId(1)]]);
     }
 
     #[test]
@@ -491,19 +501,21 @@ mod replica_assignment_tests {
 
 #[cfg(test)]
 mod handler_tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::create_topics_request::{
-        CreatableTopic, CreatableTopicConfig, CreateTopicsRequest,
-    };
-    use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc};
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use assert2::{assert, check};
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
+    };
+    use crabka_raft::NodeId;
+    use crabka_security::Principal;
+
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 7;
 
@@ -651,8 +663,11 @@ mod handler_tests {
 
     #[test]
     fn local_materialization_predicates_track_replica_membership_and_leader() {
-        let materialize_cases: [(&[crabka_raft::NodeId], crabka_raft::NodeId, bool); 3] =
-            [(&[1, 2], 1, true), (&[1, 2], 2, true), (&[1, 2], 3, false)];
+        let materialize_cases: [(&[crabka_raft::NodeId], crabka_raft::NodeId, bool); 3] = [
+            (&[NodeId(1), NodeId(2)], NodeId(1), true),
+            (&[NodeId(1), NodeId(2)], NodeId(2), true),
+            (&[NodeId(1), NodeId(2)], NodeId(3), false),
+        ];
         for (replicas, node_id, want) in materialize_cases {
             assert!(
                 should_materialize_locally(replicas, node_id) == want,
@@ -661,7 +676,7 @@ mod handler_tests {
         }
 
         let leader_cases: [(crabka_raft::NodeId, crabka_raft::NodeId, bool); 2] =
-            [(1, 1, true), (2, 1, false)];
+            [(NodeId(1), NodeId(1), true), (NodeId(2), NodeId(1), false)];
         for (leader, node_id, want) in leader_cases {
             assert!(
                 is_local_leader(leader, node_id) == want,

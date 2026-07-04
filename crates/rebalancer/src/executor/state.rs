@@ -2,9 +2,10 @@
 //! when an execution is in flight; its absence is the "idle" signal on
 //! startup. Written atomically; deleted on terminal.
 
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -112,8 +113,9 @@ fn path_of(data_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn round_trip_write_load() {

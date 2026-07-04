@@ -24,8 +24,10 @@
 //! path end-to-end against a real KDC.
 
 use assert2::assert;
-use crabka_security::gssapi::provider::{SspiAcceptor, SspiInitiator};
-use crabka_security::gssapi::{AcceptStep, GssAcceptor, GssInitiator, InitStep};
+use crabka_security::gssapi::{
+    AcceptStep, GssAcceptor, GssInitiator, InitStep,
+    provider::{SspiAcceptor, SspiInitiator},
+};
 
 const KEYTAB_PATH: &str = "tests/fixtures/kdc/kafka.keytab";
 const SERVICE_NAME: &str = "kafka";

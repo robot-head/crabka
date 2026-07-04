@@ -4,8 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use crabka_client_admin::AdminClient;
-use crabka_client_admin::CreateTopicSpec;
+use crabka_client_admin::{AdminClient, CreateTopicSpec};
 
 use crate::error::GatewayError;
 

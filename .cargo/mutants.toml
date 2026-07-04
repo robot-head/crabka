@@ -87,6 +87,19 @@ exclude_globs = [
 # under `#[cfg(not(feature = ...))]` gets mutated even though the active build
 # never compiles it — the mutation is a no-op that always "survives".
 exclude_re = [
+    # Equivalent mutant: `if bytes > 0 { counter.inc_by(bytes) }` vs `>= 0`. The
+    # two differ only at the value 0, where the mutant runs `inc_by(0)` — a no-op
+    # on a prometheus counter — so the observable metric state is identical and no
+    # test can distinguish them. (`> with <` / `> with ==` ARE caught.)
+    "profiles/src/metrics\\.rs.*replace > with >= in ServiceMetrics::record_ingest",
+    # ListPartitionReassignments `removing_replicas` echo: only populated for a
+    # partition with an *in-flight* removal, which the controller cannot hold from a
+    # directly-seeded `PartitionRecord` — apply auto-completes the removal (verified:
+    # seeding replicas=[1,2,3] + removing=[3] applies as replicas=[1,2] + removing=[]).
+    # A genuine pending removal exists only mid-flight in the live
+    # AlterPartitionReassignments state machine (integration suite). The sibling
+    # `adding_replicas` field is pinned by `filtered_success_response_...`.
+    "(crates/)?broker/src/handlers/list_partition_reassignments\\.rs.*delete field removing_replicas from struct OngoingPartitionReassignment",
     # crabka-compression's feature-disabled codec stubs (`#[cfg(not(feature =
     # "gzip"))] fn gzip_compress -> Err(FeatureDisabled(..))`, etc.). They are
     # only reachable — and only killable — with the codec feature turned off.
@@ -359,6 +372,29 @@ exclude_re = [
     # The offset is the human-facing VerifyBreak.offset diagnostic (standard Kafka
     # base_offset + offset_delta), not the tamper verdict.
     "audit/src/verify\\.rs.*replace \\+ with (-|\\*) in verify_partition_dir",
+    # `scan_from_floor_windowed` computes `last_read` (the last offset in the
+    # window just read) as `last.base_offset + last.last_offset_delta`, then sets
+    # `cursor = last_read + 1` to advance. Mutating this `+` makes `last_read`
+    # regress below `cursor`, so the cursor never advances and the windowed scan
+    # loops forever — cargo-mutants reports a TIMEOUT rather than an assertion
+    # gap. (Line-anchored so the sibling `+` on line 437 — the *returned* match
+    # offset — stays mutation-tested; it is killed by
+    # `scan_returns_absolute_offset_of_matching_record`.)
+    "log/src/segment\\.rs:445:.*replace \\+ with (-|\\*) in Segment::scan_from_floor_windowed",
+    # `Segment::read`'s `batch_last = base_offset + last_offset_delta` gates which
+    # batches pass the `batch_last >= offset` include filter. The `+ with *`
+    # mutation zeroes `batch_last` for single-record batches (`base * 0`), so the
+    # batch covering `offset` is dropped and `read` returns empty; the windowed
+    # scan caller then grows its window and retries the same cursor forever —
+    # cargo-mutants reports a TIMEOUT, not an assertion gap. (`+ with -` on the
+    # same line IS caught, so this excludes only the `*` variant.)
+    "log/src/segment\\.rs.*replace \\+ with \\* in Segment::read$",
+    # Equivalent mutant: `format_metric_range_selector`'s sign test (`offset_ns <
+    # 0`) runs only inside the `offset_ns != 0` branch (the outer `== 0` guard
+    # already returns the no-offset form), so `< 0` and `<= 0` pick the same sign
+    # for every reachable (non-zero) offset. The negative/positive sign paths are
+    # asserted by `format_metric_range_selector_signs_negative_offset`.
+    "observability/src/lib\\.rs.*replace < with <= in format_metric_range_selector",
     # `run_produce_append_batch` dispatches the blocking group append by runtime
     # flavor: the `MultiThread` arm uses `block_in_place`, the `_` fallback uses
     # `spawn_blocking`. They differ only in scheduling — same append result, same

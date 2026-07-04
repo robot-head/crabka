@@ -6,11 +6,13 @@
 use std::sync::Arc;
 
 use assert2::{assert, check};
-use crabka_traces::frontend::QueryFrontend;
-use crabka_traces::frontend::backend::{MockQuerier, SearchPartial};
-use crabka_traces::frontend::config::FrontendConfig;
-use crabka_traces::frontend::job::{BlockMetaInfo, MockCatalog, RowGroupInfo};
-use crabka_traces::frontend::wire::{Metrics, SpanJson, SpanSetJson, TraceJson};
+use crabka_traces::frontend::{
+    QueryFrontend,
+    backend::{MockQuerier, SearchPartial},
+    config::FrontendConfig,
+    job::{BlockMetaInfo, MockCatalog, RowGroupInfo},
+    wire::{Metrics, SpanJson, SpanSetJson, TraceJson},
+};
 
 fn block(id: &str, start: i64, end: i64, rgs: &[u64]) -> BlockMetaInfo {
     let row_groups = rgs

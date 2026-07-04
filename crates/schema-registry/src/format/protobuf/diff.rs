@@ -4,11 +4,10 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use prost_reflect::prost_types::descriptor_proto::ReservedRange;
-use prost_reflect::prost_types::field_descriptor_proto::Type as FieldType;
 use prost_reflect::prost_types::{
     DescriptorProto, EnumDescriptorProto, FieldDescriptorProto, FileDescriptorProto,
-    OneofDescriptorProto,
+    OneofDescriptorProto, descriptor_proto::ReservedRange,
+    field_descriptor_proto::Type as FieldType,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

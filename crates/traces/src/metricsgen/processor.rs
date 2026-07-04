@@ -1,15 +1,11 @@
 //! Metrics-generator processor orchestration.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
-use crate::metricsgen::checkpoint::CheckpointCodecError;
-use crate::metricsgen::clock::Clock;
-use crate::metricsgen::config::MetricsGenConfig;
-use crate::metricsgen::contract::SpanRecord;
-use crate::metricsgen::series::SeriesPayload;
-use crate::metricsgen::servicegraph::EdgeStore;
-use crate::metricsgen::spanmetrics::SpanMetricsRegistry;
+use crate::metricsgen::{
+    checkpoint::CheckpointCodecError, clock::Clock, config::MetricsGenConfig, contract::SpanRecord,
+    series::SeriesPayload, servicegraph::EdgeStore, spanmetrics::SpanMetricsRegistry,
+};
 
 #[derive(Debug)]
 struct TenantState {
@@ -107,9 +103,11 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::metricsgen::clock::MockClock;
-    use crate::metricsgen::config::MetricsGenConfig;
-    use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
+    use crate::metricsgen::{
+        clock::MockClock,
+        config::MetricsGenConfig,
+        contract::{SpanKind, SpanRecord, StatusCode},
+    };
 
     fn span(
         tenant: &str,

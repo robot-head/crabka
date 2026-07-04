@@ -23,24 +23,34 @@
 use std::net::SocketAddr;
 
 use bytes::{Bytes, BytesMut};
-
+use crabka_ids::PartitionIndex;
 use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
-use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest;
-use crabka_protocol::owned::add_partitions_to_txn_response::{
-    AddPartitionsToTxnResponse, AddPartitionsToTxnResult,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        add_partitions_to_txn_request::AddPartitionsToTxnRequest,
+        add_partitions_to_txn_response::{AddPartitionsToTxnResponse, AddPartitionsToTxnResult},
+        common::{
+            add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic,
+            add_partitions_to_txn_response::{
+                add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult,
+                add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult,
+            },
+        },
+    },
 };
-use crabka_protocol::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult;
-use crabka_protocol::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
-use crabka_protocol::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult;
-use crabka_protocol::{Decode, Encode};
 use crabka_security::Principal;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::txn::state::{TopicPartition, TxnState};
-use crate::txn::util::now_millis;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    txn::{
+        state::{TopicPartition, TxnState},
+        util::now_millis,
+    },
+};
 
 #[tracing::instrument(
     name = "handle_add_partitions_to_txn",
@@ -128,7 +138,7 @@ async fn handle_v4(
             process_one_txn(
                 coord,
                 txn.transactional_id.as_str(),
-                txn.producer_id,
+                crabka_log::ProducerId(txn.producer_id),
                 txn.producer_epoch,
                 &txn.topics,
                 &denied,
@@ -182,7 +192,7 @@ async fn handle_v3(
         process_one_txn(
             coord,
             req.v3_and_below_transactional_id.as_str(),
-            req.v3_and_below_producer_id,
+            crabka_log::ProducerId(req.v3_and_below_producer_id),
             req.v3_and_below_producer_epoch,
             &req.v3_and_below_topics,
             &denied,
@@ -242,7 +252,7 @@ fn denied_topics(
 async fn process_one_txn(
     coord: &crate::txn::coordinator::TxnCoordinator,
     tid: &str,
-    producer_id: i64,
+    producer_id: crabka_log::ProducerId,
     producer_epoch: i16,
     topics: &[AddPartitionsToTxnTopic],
     denied: &std::collections::HashSet<String>,
@@ -314,7 +324,7 @@ async fn process_one_txn(
         for &p in &t.partitions {
             entry.partitions.insert(TopicPartition {
                 topic: t.name.clone(),
-                partition: p,
+                partition: PartitionIndex(p),
             });
         }
     }
@@ -373,7 +383,7 @@ fn verify_partitions(
                                 entry,
                                 &TopicPartition {
                                     topic: t.name.clone(),
-                                    partition: p,
+                                    partition: PartitionIndex(p),
                                 },
                             )
                         };
@@ -455,28 +465,29 @@ fn encode_response(resp: &AddPartitionsToTxnResponse, version: i16) -> Result<By
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc};
 
     use assert2::assert;
     use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnTransaction;
     use crabka_security::Principal;
 
     use super::*;
-    use crate::test_support::{DenyAll, peer};
-    use crate::txn::state::TxnEntry;
+    use crate::{
+        test_support::{DenyAll, peer},
+        txn::state::TxnEntry,
+    };
 
     #[test]
     fn verify_only_codes_present_vs_absent() {
-        let mut e = TxnEntry::new_empty("t".into(), 1, 0, 30_000, 0);
+        let mut e = TxnEntry::new_empty("t".into(), crabka_log::ProducerId(1), 0, 30_000, 0);
         let present = TopicPartition {
             topic: "a".into(),
-            partition: 0,
+            partition: PartitionIndex(0),
         };
         e.partitions.insert(present.clone());
         let absent = TopicPartition {
             topic: "b".into(),
-            partition: 0,
+            partition: PartitionIndex(0),
         };
         assert!(verify_partition_code(&e, &present) == codes::NONE);
         assert!(verify_partition_code(&e, &absent) == codes::TRANSACTION_ABORTABLE);
@@ -511,10 +522,10 @@ mod tests {
 
     #[test]
     fn verify_partitions_preserves_topic_and_partition_rows() {
-        let mut e = TxnEntry::new_empty("t".into(), 1, 0, 30_000, 0);
+        let mut e = TxnEntry::new_empty("t".into(), crabka_log::ProducerId(1), 0, 30_000, 0);
         e.partitions.insert(TopicPartition {
             topic: "alpha".into(),
-            partition: 1,
+            partition: PartitionIndex(1),
         });
         let topics = vec![topic("alpha", &[1, 2]), topic("denied", &[3])];
         let denied = HashSet::from(["denied".to_string()]);

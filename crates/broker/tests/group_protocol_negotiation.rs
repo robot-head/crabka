@@ -6,14 +6,16 @@
 
 //! KIP-429 batch-4 T4A: broker-side JoinGroup protocol-set negotiation tests.
 
-use assert2::assert;
 use std::time::Duration;
 
+use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
-use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-use crabka_protocol::owned::join_group_response::JoinGroupResponse;
+use crabka_protocol::owned::{
+    join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+    join_group_response::JoinGroupResponse,
+};
 
 // Kafka error codes consumed by these tests.
 const ERR_NONE: i16 = 0;

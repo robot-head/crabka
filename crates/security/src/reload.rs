@@ -83,12 +83,11 @@ impl DynamicServerConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use std::fs::File;
-    use std::io::Write;
-    use std::path::PathBuf;
+    use std::{fs::File, io::Write, path::PathBuf};
 
+    use assert2::assert;
+
+    use super::*;
     use crate::tls::ClientAuthMode;
 
     fn install_provider() {

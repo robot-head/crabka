@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::codec::RecordCodec;
-use crate::config::GatewayConfig;
-use crate::produce::ProduceCore;
+use crate::{codec::RecordCodec, config::GatewayConfig, produce::ProduceCore};
 
 #[derive(Clone)]
 pub struct AppState {

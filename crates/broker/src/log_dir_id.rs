@@ -7,8 +7,10 @@
 //! `AssignReplicasToDirs` and `offline_log_dirs` with stable ids that the
 //! controller can map back to partitions.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use uuid::Uuid;
 
@@ -84,9 +86,10 @@ fn read_or_mint(dir: &Path) -> Uuid {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn mints_and_persists_for_dir_without_meta() {

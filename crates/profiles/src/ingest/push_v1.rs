@@ -6,9 +6,7 @@ use std::io::Read;
 use crabka_blockstore::Labels;
 use crabka_pprof::PprofProfile;
 
-use crate::error::ProfilesError;
-use crate::ingest::RawProfile;
-use crate::wire::pb;
+use crate::{error::ProfilesError, ingest::RawProfile, wire::pb};
 
 /// Gunzip a gzipped body with an output-size cap.
 pub fn gunzip(body: &[u8], max_output: usize) -> Result<Vec<u8>, ProfilesError> {

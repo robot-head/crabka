@@ -33,6 +33,7 @@ pub mod compactor;
 pub mod distributor;
 pub mod error;
 pub mod hot_store;
+pub mod ids;
 pub mod ingest;
 pub mod limits;
 pub mod metrics;
@@ -45,6 +46,10 @@ pub mod wire;
 
 pub use blockbuilder::{BuiltSample, build_block, intern_record, object_key, run, samples_batch};
 pub use error::ProfilesError;
+pub use ids::{
+    DefaultMs, EndMs, ExternalPartition, IngestBytes, IngestItems, LocalPartition, MaxValue,
+    MinValue, NowMs, StartMs,
+};
 pub use limits::{LimitError, Limits, OverridesError, OverridesProvider};
 pub use wal::{
     PROFILES_WAL_TOPIC, ProfileRecord, WalFunction, WalLocation, WalMapping, WalSample,

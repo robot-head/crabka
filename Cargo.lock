@@ -1858,7 +1858,7 @@ version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ea9686d543111c0fd06c3d1276f3e5918714be2af8deb72d61c52fa35098274"
 dependencies = [
- "convert_case",
+ "convert_case 0.11.0",
  "pbjson-build",
  "proc-macro2",
  "prost 0.14.4",
@@ -1926,6 +1926,15 @@ checksum = "3d52eff69cd5e647efe296129160853a42795992097e8af39800e1060caeea9b"
 
 [[package]]
 name = "convert_case"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "convert_case"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "affbf0190ed2caf063e3def54ff444b449371d55c58e513a95ab98eca50adb49"
@@ -1990,8 +1999,10 @@ dependencies = [
  "async-trait",
  "bytes",
  "clap",
+ "crabka-ids",
  "crabka-log",
  "crabka-protocol",
+ "derive_more",
  "mutants",
  "qubit-clock",
  "ring",
@@ -2031,6 +2042,7 @@ dependencies = [
  "crabka-client-producer",
  "crabka-protocol",
  "crabka-security",
+ "derive_more",
  "exponential-backoff",
  "futures",
  "hdrhistogram",
@@ -2090,6 +2102,7 @@ dependencies = [
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-compression",
+ "crabka-ids",
  "crabka-log",
  "crabka-metadata",
  "crabka-protocol",
@@ -2163,6 +2176,7 @@ dependencies = [
  "clap",
  "crabka-metadata",
  "crabka-security",
+ "derive_more",
  "ring",
  "serde",
  "serde-wincode",
@@ -2187,6 +2201,7 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-ids",
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
@@ -2211,6 +2226,7 @@ dependencies = [
  "crabka-broker",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-ids",
  "crabka-protocol",
  "crabka-security",
  "futures-util",
@@ -2233,6 +2249,7 @@ dependencies = [
  "async-trait",
  "bon",
  "bytes",
+ "crabka-ids",
  "crabka-protocol",
  "crabka-security",
  "dashmap",
@@ -2346,6 +2363,7 @@ dependencies = [
  "bytes",
  "crabka-connect-derive",
  "crabka-schema-serde",
+ "derive_more",
  "qubit-clock",
  "serde",
  "serde_json",
@@ -2377,6 +2395,7 @@ dependencies = [
  "bytes",
  "crabka-connect",
  "crabka-schema-serde",
+ "derive_more",
  "futures-util",
  "mockall",
  "mutants",
@@ -2430,11 +2449,13 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-ids",
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
  "crabka-telemetry",
  "dashmap",
+ "derive_more",
  "futures-util",
  "hex",
  "hmac",
@@ -2466,6 +2487,16 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "crabka-ids"
+version = "0.3.8"
+dependencies = [
+ "assert2",
+ "derive_more",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2508,6 +2539,9 @@ dependencies = [
 [[package]]
 name = "crabka-kafka-tap"
 version = "0.3.8"
+dependencies = [
+ "crabka-ids",
+]
 
 [[package]]
 name = "crabka-kraft-core"
@@ -2529,8 +2563,10 @@ dependencies = [
  "bytes",
  "codspeed-criterion-compat",
  "crabka-compression",
+ "crabka-ids",
  "crabka-protocol",
  "hex",
+ "mutants",
  "proptest",
  "stateright",
  "tempfile",
@@ -2573,6 +2609,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "crabka-blockstore",
+ "derive_more",
  "regex",
  "serde_json",
  "thiserror 2.0.18",
@@ -2587,6 +2624,7 @@ dependencies = [
  "assert2",
  "bytes",
  "codspeed-criterion-compat",
+ "crabka-ids",
  "crabka-protocol",
  "crabka-security",
  "crabka-voters",
@@ -2615,6 +2653,7 @@ dependencies = [
  "crabka-client-admin",
  "crabka-client-consumer",
  "crabka-client-producer",
+ "crabka-ids",
  "crabka-telemetry",
  "crabka-throttle",
  "dashmap",
@@ -2657,6 +2696,7 @@ dependencies = [
  "crabka-blockstore",
  "crabka-client-consumer",
  "crabka-client-producer",
+ "crabka-ids",
  "crabka-metrics",
  "crabka-promql",
  "crabka-telemetry",
@@ -2691,6 +2731,7 @@ dependencies = [
  "crabka-client-admin",
  "crabka-client-consumer",
  "crabka-client-producer",
+ "crabka-ids",
  "crabka-logql",
  "crabka-telemetry",
  "datafusion",
@@ -2752,12 +2793,14 @@ dependencies = [
  "crabka-metadata",
  "crabka-rebalancer",
  "crabka-security",
+ "derive_more",
  "futures",
  "http",
  "http-body-util",
  "hyper",
  "k8s-openapi",
  "kube",
+ "mutants",
  "prometheus-client",
  "reqwest 0.13.4",
  "ring",
@@ -2840,6 +2883,7 @@ dependencies = [
  "crabka-pprof",
  "crabka-telemetry",
  "datafusion",
+ "derive_more",
  "flate2",
  "futures",
  "jfrs",
@@ -2878,6 +2922,7 @@ dependencies = [
  "async-trait",
  "axum",
  "crabka-blockstore",
+ "crabka-ids",
  "crabka-metrics",
  "datafusion",
  "datatest-stable",
@@ -2946,6 +2991,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "crabka-client-core",
+ "crabka-ids",
  "crabka-kraft-core",
  "crabka-log",
  "crabka-metadata",
@@ -3012,6 +3058,7 @@ dependencies = [
  "assert2",
  "bytes",
  "crabka-compression",
+ "crabka-ids",
  "crabka-protocol",
  "crc32fast",
  "hex",
@@ -3025,6 +3072,7 @@ version = "0.3.8"
 dependencies = [
  "assert2",
  "bytes",
+ "crabka-ids",
  "object_store",
  "tempfile",
  "thiserror 2.0.18",
@@ -3043,10 +3091,12 @@ dependencies = [
  "crabka-client-admin",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-ids",
  "crabka-protocol",
  "crabka-remote-storage",
  "crabka-security",
  "futures-util",
+ "mutants",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -3070,8 +3120,10 @@ dependencies = [
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-connect",
+ "crabka-ids",
  "crabka-logfmt",
  "crabka-security",
+ "derive_more",
  "mutants",
  "qubit-clock",
  "regex",
@@ -3111,6 +3163,7 @@ dependencies = [
  "crabka-security",
  "crabka-telemetry",
  "datatest-stable",
+ "derive_more",
  "hex",
  "hyper",
  "hyper-util",
@@ -3221,6 +3274,7 @@ name = "crabka-throttle"
 version = "0.3.8"
 dependencies = [
  "assert2",
+ "derive_more",
  "proptest",
  "qubit-clock",
  "stateright",
@@ -3236,6 +3290,7 @@ dependencies = [
  "crabka-blockstore",
  "datafusion",
  "datatest-stable",
+ "derive_more",
  "futures",
  "proptest",
  "regex",
@@ -3267,6 +3322,7 @@ dependencies = [
  "dashmap",
  "datafusion",
  "datatest-stable",
+ "derive_more",
  "flate2",
  "futures",
  "hex",
@@ -3309,6 +3365,7 @@ name = "crabka-voters"
 version = "0.3.8"
 dependencies = [
  "assert2",
+ "crabka-ids",
  "serde",
  "uuid",
 ]
@@ -4354,10 +4411,12 @@ version = "2.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "799a97264921d8623a957f6c3b9011f3b5492f557bbb7a5a19b7fa6d06ba8dcb"
 dependencies = [
+ "convert_case 0.10.0",
  "proc-macro2",
  "quote",
  "rustc_version",
  "syn 2.0.118",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -11977,6 +12036,12 @@ name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
+name = "unicode-xid"
+version = "0.2.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
 name = "universal-hash"

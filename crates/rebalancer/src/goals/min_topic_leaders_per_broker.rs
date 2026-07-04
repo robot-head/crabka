@@ -12,8 +12,10 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{ClusterState, Movement, PartitionView};
+use crate::{
+    goals::{Goal, GoalContext, GoalPriority},
+    model::{ClusterState, Movement, PartitionView},
+};
 
 pub struct MinTopicLeadersPerBroker;
 
@@ -127,9 +129,10 @@ impl Goal for MinTopicLeadersPerBroker {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::model::BrokerView;
-    use assert2::assert;
 
     fn ctx_with(min: u32) -> GoalContext {
         GoalContext {

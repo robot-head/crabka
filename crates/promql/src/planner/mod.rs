@@ -7,18 +7,16 @@ pub mod over_time_range;
 pub mod rate_range;
 pub mod scalar_math;
 
-use std::any::Any;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{any::Any, sync::Arc, time::Duration};
 
-use promql_parser::parser::ast::ExtensionExpr;
-use promql_parser::parser::value::ValueType;
-use promql_parser::parser::{Call, Function, FunctionArgs};
-use promql_parser::parser::{Expr, Extension, parse};
-use promql_parser::util::display_duration;
+use promql_parser::{
+    parser::{
+        Call, Expr, Extension, Function, FunctionArgs, ast::ExtensionExpr, parse, value::ValueType,
+    },
+    util::display_duration,
+};
 
-use crate::PromqlError;
-use crate::error::Result;
+use crate::{PromqlError, error::Result};
 
 /// Query-range values available to Prometheus duration expressions.
 #[allow(clippy::struct_field_names)]
@@ -806,9 +804,8 @@ mod tests {
     use assert2::assert;
     use promql_parser::parser::Expr;
 
-    use crate::PromqlError;
-
     use super::*;
+    use crate::PromqlError;
 
     #[test]
     fn parse_promql_wraps_parser_success() {

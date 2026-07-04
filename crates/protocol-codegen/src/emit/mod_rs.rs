@@ -2,10 +2,11 @@
 
 use quote::{format_ident, quote};
 
-use crate::emit::common::banner;
-use crate::emit::wrappers::Flavor;
-use crate::ir::MessageSpec;
-use crate::name_conv;
+use crate::{
+    emit::{common::banner, wrappers::Flavor},
+    ir::MessageSpec,
+    name_conv,
+};
 
 /// Emit a `mod.rs` that declares one `pub mod` per active spec, sorted
 /// alphabetically by snake-case module name.
@@ -58,9 +59,10 @@ pub fn emit(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::ir::{MessageSpec, MessageType, VersionRange};
-    use assert2::assert;
 
     fn make_spec(name: &str, min: i16, max: i16, ty: MessageType) -> MessageSpec {
         MessageSpec {

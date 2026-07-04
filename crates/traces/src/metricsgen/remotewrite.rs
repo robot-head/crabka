@@ -3,9 +3,11 @@
 use async_trait::async_trait;
 use prost::Message as _;
 
-use crate::metricsgen::series::{Exemplar, Series, SeriesPayload, SeriesSample};
-use crate::metricsgen::sink::{RemoteWriteSink, SinkError};
-use crate::metricsgen::{BucketSpan, NativeHistogram};
+use crate::metricsgen::{
+    BucketSpan, NativeHistogram,
+    series::{Exemplar, Series, SeriesPayload, SeriesSample},
+    sink::{RemoteWriteSink, SinkError},
+};
 
 /// Encoder-neutral flat `remote_write` row.
 #[derive(Clone, Debug, PartialEq)]
@@ -345,8 +347,10 @@ mod tests {
     use prost::Message as _;
 
     use super::*;
-    use crate::metricsgen::series::{Exemplar, Series, SeriesSample};
-    use crate::metricsgen::{BucketSpan, NativeHistogram};
+    use crate::metricsgen::{
+        BucketSpan, NativeHistogram,
+        series::{Exemplar, Series, SeriesSample},
+    };
 
     #[derive(Clone, PartialEq, prost::Message)]
     struct TestWriteRequest {

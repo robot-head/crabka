@@ -3,12 +3,12 @@
 //! triggers a controller snapshot, then fetches the `__cluster_metadata`
 //! snapshot byte range over the wire and asserts the page is served.
 
-use assert2::{assert, check};
 use std::time::{Duration, Instant};
 
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::fetch_snapshot_request::{
-    FetchSnapshotRequest, PartitionSnapshot, SnapshotId, TopicSnapshot,
+use assert2::{assert, check};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    fetch_snapshot_request::{FetchSnapshotRequest, PartitionSnapshot, SnapshotId, TopicSnapshot},
 };
 
 mod support;

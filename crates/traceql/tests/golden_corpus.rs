@@ -1,5 +1,6 @@
-use assert2::assert;
 use std::path::Path;
+
+use assert2::assert;
 
 #[allow(clippy::unnecessary_wraps)]
 fn golden_case_file(path: &Path) -> datatest_stable::Result<()> {

@@ -50,13 +50,16 @@
 //! and a `#[should_panic]` test proves the control-not-deduped assert fires
 //! against it (RED witness).
 
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use stateright::{Checker, Model, Property};
 
 use super::{
-    BatchMeta, RecordMeta, RetainDecision, TxnDataState, retain_decision, should_index_key,
+    BatchMeta, ProducerId, RecordMeta, RetainDecision, TxnDataState, retain_decision,
+    should_index_key,
 };
 
 // The `Compact` action converges many append/tick paths onto shared logs, so the
@@ -394,7 +397,7 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
                     },
                     BatchMeta {
                         is_control: false,
-                        producer_id: -1,
+                        producer_id: ProducerId(-1),
                         existing_horizon: entry.horizon,
                     },
                     is_newest,
@@ -414,7 +417,7 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
                     },
                     BatchMeta {
                         is_control: true,
-                        producer_id: i64::from(*producer_id),
+                        producer_id: ProducerId(i64::from(*producer_id)),
                         existing_horizon: entry.horizon,
                     },
                     false,
@@ -666,7 +669,7 @@ fn legacy_compact_fixed() -> Vec<Entry> {
                     },
                     BatchMeta {
                         is_control: false,
-                        producer_id: -1,
+                        producer_id: ProducerId(-1),
                         existing_horizon: entry.horizon,
                     },
                     is_newest,
@@ -694,7 +697,7 @@ fn legacy_compact_fixed() -> Vec<Entry> {
                     },
                     BatchMeta {
                         is_control: true,
-                        producer_id: i64::from(*producer_id),
+                        producer_id: ProducerId(i64::from(*producer_id)),
                         existing_horizon: entry.horizon,
                     },
                     is_newest,

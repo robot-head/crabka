@@ -4,12 +4,16 @@
 //! Crabka querier listener, then queries through Grafana's datasource proxy and
 //! backend datasource execution path.
 
-use std::net::SocketAddr;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    net::SocketAddr,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use assert2::assert;
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_observability::{
@@ -19,9 +23,11 @@ use crabka_observability::{
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use testcontainers::core::{Host, IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
+use testcontainers::{
+    ContainerAsync, GenericImage, ImageExt,
+    core::{Host, IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
 use tokio::net::TcpListener;
 use tower::ServiceExt;
 

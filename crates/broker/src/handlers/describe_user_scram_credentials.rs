@@ -2,16 +2,23 @@
 
 use bytes::Bytes;
 use crabka_metadata::{MetadataImage, ResourceType};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest;
-use crabka_protocol::owned::describe_user_scram_credentials_response::{
-    CredentialInfo, DescribeUserScramCredentialsResponse, DescribeUserScramCredentialsResult,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest,
+        describe_user_scram_credentials_response::{
+            CredentialInfo, DescribeUserScramCredentialsResponse,
+            DescribeUserScramCredentialsResult,
+        },
+    },
 };
 use crabka_security::SaslMechanism;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, RESOURCE_NOT_FOUND_USER};
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes::{CLUSTER_AUTHORIZATION_FAILED, RESOURCE_NOT_FOUND_USER},
+};
 
 #[allow(clippy::unused_async)]
 #[tracing::instrument(
@@ -135,10 +142,11 @@ fn encode_response<R: Encode>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{MetadataRecord, ScramCredentialRecord};
     use crabka_protocol::UnknownTaggedFields;
+
+    use super::*;
 
     fn img_with_scram(users: &[(&str, SaslMechanism, u32)]) -> MetadataImage {
         let mut img = MetadataImage::new(uuid::Uuid::nil());

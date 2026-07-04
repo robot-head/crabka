@@ -15,8 +15,10 @@
 // (the classic file keeps its internal `Group`/`GroupState` names).
 use std::collections::HashMap;
 
-pub(crate) use crate::coordinator::unified::classic_state::{Group as ClassicState, OffsetEntry};
-pub(crate) use crate::coordinator::unified::consumer_state::GroupState as ConsumerState;
+pub(crate) use crate::coordinator::unified::{
+    classic_state::{Group as ClassicState, OffsetEntry},
+    consumer_state::GroupState as ConsumerState,
+};
 
 /// Which protocol a [`Group`]'s members speak. The variant carries that
 /// protocol's full state machine.
@@ -110,8 +112,9 @@ impl Group {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn classic_container_exposes_classic_state_only() {

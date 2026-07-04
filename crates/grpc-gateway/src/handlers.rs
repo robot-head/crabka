@@ -1,8 +1,7 @@
 //! Connect-RPC handlers — thin adapters: proto in, `GatewayRecord` to the
 //! core, `RecordOutcome` back to proto.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
 use axum::Extension;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
@@ -10,9 +9,7 @@ use crabka_authz::{AuthorizationRequest, AuthorizationResult};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
 
-use crate::metrics::metrics;
-use crate::pb;
-use crate::state::AppState;
+use crate::{metrics::metrics, pb, state::AppState};
 
 /// The principal used when no authenticated identity is present on the request
 /// (plaintext listener, or no proxy-injected identity). Mirrors Kafka's
@@ -77,8 +74,7 @@ pub(crate) fn authorize_resource(
 /// retriable (the registry may recover), while `Serialize`/`Validate`/`Framing`
 /// faults are non-retriable (the same bytes will fail identically).
 pub(crate) fn error_result(e: &crate::error::GatewayError) -> crate::pb::RecordResult {
-    use crate::codec::CodecError;
-    use crate::error::GatewayError;
+    use crate::{codec::CodecError, error::GatewayError};
     let retriable = matches!(e, GatewayError::Unavailable)
         || matches!(e, GatewayError::Codec(CodecError::Registry(_)));
     let code = match e {
@@ -218,8 +214,8 @@ pub async fn send(
             Ok(ref o) if o.deduplicated => {
                 metrics().record_send("deduplicated");
                 pb::RecordResult {
-                    partition: o.partition,
-                    offset: o.offset,
+                    partition: o.partition.into(),
+                    offset: o.offset.into(),
                     deduplicated: o.deduplicated,
                     error: None,
                 }
@@ -227,8 +223,8 @@ pub async fn send(
             Ok(o) => {
                 metrics().record_send("ok");
                 pb::RecordResult {
-                    partition: o.partition,
-                    offset: o.offset,
+                    partition: o.partition.into(),
+                    offset: o.offset.into(),
                     deduplicated: o.deduplicated,
                     error: None,
                 }

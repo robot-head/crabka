@@ -3,9 +3,11 @@
 //! `allow_zones` list means "only these zones are allowed" (deny-by-default for
 //! the matched topic).
 
-use crate::config::{PolicyConfig, Residency};
-use crate::error::ReplicatorError;
-use crate::selector::Selector;
+use crate::{
+    config::{PolicyConfig, Residency},
+    error::ReplicatorError,
+    selector::Selector,
+};
 
 struct Rule {
     topics: Selector,

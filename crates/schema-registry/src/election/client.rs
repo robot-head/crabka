@@ -7,18 +7,22 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use crabka_client_core::{Client, ClientSecurity};
-use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
-use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
-use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-use crabka_protocol::owned::leave_group_request::{LeaveGroupRequest, MemberIdentity};
-use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
+use crabka_protocol::owned::{
+    find_coordinator_request::FindCoordinatorRequest,
+    heartbeat_request::HeartbeatRequest,
+    join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+    leave_group_request::{LeaveGroupRequest, MemberIdentity},
+    sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
+};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use super::PrimaryState;
-use super::protocol::{
-    SR_PROTOCOL_NAME, SR_PROTOCOL_TYPE, SR_VERSION, SchemaRegistryGroupAssignment,
-    SchemaRegistryIdentity, select_master,
+use super::{
+    PrimaryState,
+    protocol::{
+        SR_PROTOCOL_NAME, SR_PROTOCOL_TYPE, SR_VERSION, SchemaRegistryGroupAssignment,
+        SchemaRegistryIdentity, select_master,
+    },
 };
 
 // Kafka group error codes (defined locally to avoid a crabka-broker dependency).

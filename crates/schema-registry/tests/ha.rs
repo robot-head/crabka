@@ -1,12 +1,13 @@
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use axum::Router;
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
-use crabka_schema_registry::election::{Election, PrimaryState};
-use crabka_schema_registry::kafkastore::KafkaStore;
-use crabka_schema_registry::rest::{self, AppState, forward::ForwardState};
+use crabka_schema_registry::{
+    config::{RegistryConfig, SecurityConfig},
+    election::{Election, PrimaryState},
+    kafkastore::KafkaStore,
+    rest::{self, AppState, forward::ForwardState},
+};
 use tokio_util::sync::CancellationToken;
 
 fn cfg(bootstrap: &str, port: i32) -> RegistryConfig {

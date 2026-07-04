@@ -9,18 +9,22 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::{Json, Router};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode, Uri},
+    response::{IntoResponse, Response},
+    routing::get,
+};
 use serde_json::json;
 
-use crate::frontend::QueryFrontend;
-use crate::frontend::backend::{BackendError, QuerierBackend};
-use crate::frontend::job::BlockCatalog;
-use crate::frontend::merge::TraceStatus;
-use crate::frontend::wire::parse_hex16;
+use crate::frontend::{
+    QueryFrontend,
+    backend::{BackendError, QuerierBackend},
+    job::BlockCatalog,
+    merge::TraceStatus,
+    wire::parse_hex16,
+};
 
 const TENANT_HEADER: &str = "x-scope-orgid";
 

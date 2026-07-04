@@ -15,15 +15,18 @@
 //! end-to-end, plus the integration-level pod-template mount via the
 //! pool reconciler.
 
-use assert2::assert;
 use std::sync::Arc;
 
+use assert2::assert;
 use base64::Engine as _;
-use crabka_operator::controller::kafka::reconcile as reconcile_kafka;
-use crabka_operator::controller::kafka_node_pool::reconcile as reconcile_pool;
-use crabka_operator::crd::{
-    Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
-    OauthClientSecretRef,
+use crabka_operator::{
+    controller::{
+        kafka::reconcile as reconcile_kafka, kafka_node_pool::reconcile as reconcile_pool,
+    },
+    crd::{
+        Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerAuthenticationOAuth,
+        ListenerType, OauthClientSecretRef,
+    },
 };
 use http::Method;
 

@@ -16,6 +16,7 @@ categories = ["concurrency"]
 workspace = true
 
 [dependencies]
+derive_more = { workspace = true }
 qubit-clock = { workspace = true }
 
 [dev-dependencies]

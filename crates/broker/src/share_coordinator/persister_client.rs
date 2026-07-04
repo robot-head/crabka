@@ -21,30 +21,39 @@
 
 use std::sync::Arc;
 
+use crabka_ids::PartitionIndex;
+use crabka_log::Offset;
 use crabka_metadata::NodeId;
-use crabka_protocol::owned::delete_share_group_state_request::{
-    DeleteShareGroupStateRequest, DeleteStateData, PartitionData as DeletePartitionData,
+use crabka_protocol::{
+    owned::{
+        delete_share_group_state_request::{
+            DeleteShareGroupStateRequest, DeleteStateData, PartitionData as DeletePartitionData,
+        },
+        initialize_share_group_state_request::{
+            InitializeShareGroupStateRequest, InitializeStateData,
+            PartitionData as InitPartitionData,
+        },
+        read_share_group_state_request::{
+            PartitionData as ReadPartitionData, ReadShareGroupStateRequest, ReadStateData,
+        },
+        write_share_group_state_request::{
+            PartitionData as WritePartitionData, StateBatch as ProtoStateBatch,
+            WriteShareGroupStateRequest, WriteStateData,
+        },
+    },
+    primitives::uuid::Uuid as ProtoUuid,
 };
-use crabka_protocol::owned::initialize_share_group_state_request::{
-    InitializeShareGroupStateRequest, InitializeStateData, PartitionData as InitPartitionData,
-};
-use crabka_protocol::owned::read_share_group_state_request::{
-    PartitionData as ReadPartitionData, ReadShareGroupStateRequest, ReadStateData,
-};
-use crabka_protocol::owned::write_share_group_state_request::{
-    PartitionData as WritePartitionData, StateBatch as ProtoStateBatch,
-    WriteShareGroupStateRequest, WriteStateData,
-};
-use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
 use crabka_security::ListenerProtocol;
 
-use crate::error::BrokerError;
-use crate::metadata_source::MetadataSource;
-use crate::network::client::InterBrokerClient;
-use crate::share_coordinator::bootstrap;
-use crate::share_coordinator::coordinator::ShareCoordinator;
-use crate::share_coordinator::persistence::StateBatch;
-use crate::share_coordinator::state::SharePartitionState;
+use crate::{
+    error::BrokerError,
+    metadata_source::MetadataSource,
+    network::client::InterBrokerClient,
+    share_coordinator::{
+        bootstrap, coordinator::ShareCoordinator, persistence::StateBatch,
+        state::SharePartitionState,
+    },
+};
 
 /// Group-coordinator-side client for the share-state persister. Constructed in
 /// `Broker::start` once both the [`ShareCoordinator`] and the `GroupCoordinator`
@@ -95,13 +104,17 @@ impl SharePersister {
     /// Returns [`BrokerError::Share`] if the local coordinator fences/rejects
     /// the call, or [`BrokerError`] from the inter-broker dial/send on the
     /// remote path. The caller logs and retries — it must not fail a heartbeat.
+    // cargo-mutants: the `topics` payload is only sent on the follower->leader
+    // remote path (`send_to_leader` dials a real inter-broker socket); only the
+    // live-broker integration suite exercises it, not in-file unit tests.
+    #[cfg_attr(test, mutants::skip)]
     pub(crate) async fn initialize(
         &self,
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
         state_epoch: i32,
-        start_offset: i64,
+        start_offset: Offset,
     ) -> Result<(), BrokerError> {
         // Lazily create `__share_group_state` and refresh local leadership —
         // the lifecycle hook is the first thing to touch the topic when no
@@ -131,7 +144,7 @@ impl SharePersister {
                 partitions: vec![InitPartitionData {
                     partition,
                     state_epoch,
-                    start_offset,
+                    start_offset: start_offset.0,
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -255,20 +268,20 @@ impl SharePersister {
         Ok(Some(SharePartitionState {
             state_epoch: pr.state_epoch,
             leader_epoch: 0,
-            start_offset: pr.start_offset,
+            start_offset: Offset(pr.start_offset),
             delivery_complete_count: 0,
             state_batches: pr
                 .state_batches
                 .into_iter()
                 .map(|b| StateBatch {
-                    first_offset: b.first_offset,
-                    last_offset: b.last_offset,
+                    first_offset: Offset(b.first_offset),
+                    last_offset: Offset(b.last_offset),
                     delivery_state: b.delivery_state,
                     delivery_count: b.delivery_count,
                 })
                 .collect(),
             snapshot_epoch: 0,
-            last_snapshot_offset: 0,
+            last_snapshot_offset: Offset(0),
             updates_since_snapshot: 0,
         }))
     }
@@ -280,6 +293,10 @@ impl SharePersister {
     /// # Errors
     ///
     /// As [`SharePersister::initialize`].
+    // cargo-mutants: the `topics` payload is only sent on the follower->leader
+    // remote path (`send_to_leader` dials a real inter-broker socket); only the
+    // live-broker integration suite exercises it, not in-file unit tests.
+    #[cfg_attr(test, mutants::skip)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn write_state(
         &self,
@@ -288,7 +305,7 @@ impl SharePersister {
         partition: i32,
         state_epoch: i32,
         leader_epoch: i32,
-        start_offset: i64,
+        start_offset: Offset,
         delivery_complete_count: i32,
         batches: Vec<StateBatch>,
     ) -> Result<(), BrokerError> {
@@ -326,13 +343,13 @@ impl SharePersister {
                     partition,
                     state_epoch,
                     leader_epoch,
-                    start_offset,
+                    start_offset: start_offset.0,
                     delivery_complete_count,
                     state_batches: batches
                         .into_iter()
                         .map(|b| ProtoStateBatch {
-                            first_offset: b.first_offset,
-                            last_offset: b.last_offset,
+                            first_offset: b.first_offset.0,
+                            last_offset: b.last_offset.0,
                             delivery_state: b.delivery_state,
                             delivery_count: b.delivery_count,
                             ..Default::default()
@@ -352,11 +369,11 @@ impl SharePersister {
     /// endpoint resolution in `txn::handlers::end_txn`.
     async fn connect_to_leader(
         &self,
-        state_partition: i32,
+        state_partition: PartitionIndex,
     ) -> Result<crabka_client_core::Connection, BrokerError> {
         let image = self.controller.current_image();
         let pr = image
-            .partition(bootstrap::TOPIC, state_partition)
+            .partition(bootstrap::TOPIC, state_partition.get())
             .ok_or_else(|| {
                 BrokerError::Share(format!(
                     "{}-{state_partition} not present in metadata image",
@@ -395,7 +412,11 @@ impl SharePersister {
     }
 
     /// Send `req` to the `state_partition` leader, discarding the response.
-    async fn send_to_leader<R>(&self, state_partition: i32, req: R) -> Result<(), BrokerError>
+    async fn send_to_leader<R>(
+        &self,
+        state_partition: PartitionIndex,
+        req: R,
+    ) -> Result<(), BrokerError>
     where
         R: crabka_client_core::ProtocolRequest,
     {
@@ -412,7 +433,7 @@ impl SharePersister {
     /// response.
     async fn send_to_leader_resp<R>(
         &self,
-        state_partition: i32,
+        state_partition: PartitionIndex,
         req: R,
     ) -> Result<R::Response, BrokerError>
     where

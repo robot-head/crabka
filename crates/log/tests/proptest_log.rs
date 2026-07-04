@@ -2,6 +2,7 @@
 
 mod support;
 
+use crabka_ids::Offset;
 use crabka_log::{Log, LogConfig};
 use proptest::prelude::*;
 use support::strategies::arb_batches;
@@ -19,7 +20,7 @@ proptest! {
             expected_record_count += b.records.len();
             log.append(&mut b).unwrap();
         }
-        let out = log.read(0, usize::MAX).unwrap();
+        let out = log.read(Offset(0), usize::MAX).unwrap();
         let actual_record_count: usize = out.batches.iter().map(|b| b.records.len()).sum();
         prop_assert_eq!(actual_record_count, expected_record_count);
     }
@@ -43,8 +44,8 @@ proptest! {
         let log_end = log.log_end_offset();
         // `arb_batches(1, 6)` guarantees at least one batch with >= 1
         // record, so `log_end >= 1`.
-        prop_assume!(log_end >= 1);
-        let trunc_to = i64::try_from(seed).unwrap_or(i64::MAX) % log_end;
+        prop_assume!(log_end >= Offset(1));
+        let trunc_to = Offset(i64::try_from(seed).unwrap_or(i64::MAX) % log_end.0);
         log.truncate_to(trunc_to).unwrap();
         let after = log.log_end_offset();
         prop_assert!(

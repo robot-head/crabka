@@ -25,10 +25,12 @@
 // and its span computation ICEs in annotate-snippets on Rust 1.95.
 #![allow(clippy::unnecessary_unwrap)]
 
-use assert2::{assert, check};
-use std::io::Write;
-use std::process::{Command, Stdio};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
+use assert2::{assert, check};
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_log::LogConfig;
 
@@ -80,9 +82,9 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -614,11 +616,14 @@ async fn three_node_jvm_round_trip() {
         advertised_listener: format!("host.docker.internal:{}", client_ports[0]),
         log_dir: dir0.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0])
             .parse()
             .expect("static addr"),
-        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+        controller_quorum_voters: voters
+            .iter()
+            .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+            .collect(),
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -641,11 +646,14 @@ async fn three_node_jvm_round_trip() {
             advertised_listener: format!("host.docker.internal:{}", client_ports[i]),
             log_dir: dir.path().to_path_buf(),
             log_config: LogConfig::default(),
-            node_id: u64::try_from(i + 1).unwrap(),
+            node_id: crabka_broker::NodeId(u64::try_from(i + 1).unwrap()),
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i])
                 .parse()
                 .expect("static addr"),
-            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+            controller_quorum_voters: voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -755,7 +763,7 @@ async fn three_node_jvm_round_trip() {
     let mut leader_idx = None;
     for (i, (h, _)) in cluster.iter().enumerate() {
         let want = u64::try_from(i + 1).unwrap();
-        if h.controller_leader_id().await == Some(want) {
+        if h.controller_leader_id().await == Some(crabka_broker::NodeId(want)) {
             leader_idx = Some(i);
             break;
         }
@@ -863,11 +871,14 @@ async fn three_node_replication_byte_compare() {
         advertised_listener: format!("host.docker.internal:{}", client_ports[0]),
         log_dir: dir0.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0])
             .parse()
             .expect("static addr"),
-        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+        controller_quorum_voters: voters
+            .iter()
+            .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+            .collect(),
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -890,11 +901,14 @@ async fn three_node_replication_byte_compare() {
             advertised_listener: format!("host.docker.internal:{}", client_ports[i]),
             log_dir: dir.path().to_path_buf(),
             log_config: LogConfig::default(),
-            node_id: u64::try_from(i + 1).unwrap(),
+            node_id: crabka_broker::NodeId(u64::try_from(i + 1).unwrap()),
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i])
                 .parse()
                 .expect("static addr"),
-            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+            controller_quorum_voters: voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -1104,11 +1118,14 @@ async fn transactional_console_producer_eos() {
             advertised_listener: format!("host.docker.internal:{}", client_ports[i]),
             log_dir: dir.path().to_path_buf(),
             log_config: LogConfig::default(),
-            node_id: u64::try_from(i + 1).unwrap(),
+            node_id: crabka_broker::NodeId(u64::try_from(i + 1).unwrap()),
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i])
                 .parse()
                 .expect("static addr"),
-            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+            controller_quorum_voters: voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -1276,9 +1293,12 @@ async fn acks_all_durability() {
         advertised_listener: format!("host.docker.internal:{}", client_ports[0]),
         log_dir: dir0.path().to_path_buf(),
         log_config: crabka_log::LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0]).parse().unwrap(),
-        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+        controller_quorum_voters: voters
+            .iter()
+            .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+            .collect(),
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -1303,9 +1323,12 @@ async fn acks_all_durability() {
             advertised_listener: format!("host.docker.internal:{}", client_ports[i]),
             log_dir: dir.path().to_path_buf(),
             log_config: crabka_log::LogConfig::default(),
-            node_id: u64::try_from(i + 1).unwrap(),
+            node_id: crabka_broker::NodeId(u64::try_from(i + 1).unwrap()),
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i]).parse().unwrap(),
-            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+            controller_quorum_voters: voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -1472,9 +1495,12 @@ async fn acks_all_survives_leader_crash() {
         advertised_listener: format!("host.docker.internal:{}", client_ports[0]),
         log_dir: dir0.path().to_path_buf(),
         log_config: crabka_log::LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: format!("0.0.0.0:{}", controller_ports[0]).parse().unwrap(),
-        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+        controller_quorum_voters: voters
+            .iter()
+            .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+            .collect(),
         heartbeat_interval_ms: 200,
         heartbeat_timeout_ms: 2_000,
         replica_lag_time_max_ms: 2_000,
@@ -1499,9 +1525,12 @@ async fn acks_all_survives_leader_crash() {
             advertised_listener: format!("host.docker.internal:{}", client_ports[i]),
             log_dir: dir.path().to_path_buf(),
             log_config: crabka_log::LogConfig::default(),
-            node_id: u64::try_from(i + 1).unwrap(),
+            node_id: crabka_broker::NodeId(u64::try_from(i + 1).unwrap()),
             controller_listen_addr: format!("0.0.0.0:{}", controller_ports[i]).parse().unwrap(),
-            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+            controller_quorum_voters: voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect(),
             heartbeat_interval_ms: 200,
             heartbeat_timeout_ms: 2_000,
             replica_lag_time_max_ms: 2_000,
@@ -2222,9 +2251,9 @@ async fn start_sasl_plaintext_broker(
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -2291,9 +2320,9 @@ async fn start_dual_mech_broker(
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -2560,9 +2589,9 @@ async fn start_oauthbearer_broker() -> (crabka_broker::BrokerHandle, tempfile::T
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -3119,9 +3148,9 @@ async fn start_ssl_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) 
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -3379,9 +3408,9 @@ async fn start_sasl_ssl_broker(
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -3673,9 +3702,12 @@ async fn start_two_sasl_brokers(
             advertised_listener: advertised.to_string(),
             log_dir,
             log_config: LogConfig::default(),
-            node_id: idx,
+            node_id: crabka_broker::NodeId(idx),
             controller_listen_addr: ctrl,
-            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+            controller_quorum_voters: voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -3960,9 +3992,12 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
             advertised_listener: advertised.to_string(),
             log_dir,
             log_config: LogConfig::default(),
-            node_id: idx,
+            node_id: crabka_broker::NodeId(idx),
             controller_listen_addr: ctrl,
-            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+            controller_quorum_voters: voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -4276,9 +4311,9 @@ async fn start_sasl_plaintext_broker_with_super_user(
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -5221,9 +5256,12 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster(
             advertised_listener: advertised.to_string(),
             log_dir,
             log_config: LogConfig::default(),
-            node_id: idx,
+            node_id: crabka_broker::NodeId(idx),
             controller_listen_addr: ctrl,
-            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+            controller_quorum_voters: voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -5348,7 +5386,7 @@ async fn wait_jvm_isr_contains(
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .is_some_and(|p| p.isr.contains(&node))
+                .is_some_and(|p| p.isr.contains(&crabka_metadata::NodeId(node)))
         })
         .await;
 }
@@ -5485,10 +5523,10 @@ async fn jvm_kafka_leader_election_preferred() {
             partition: 0,
             // Make broker 2 the current leader — so broker 1 (replicas[0])
             // is no longer the leader but is still alive and in the ISR.
-            leader: 2,
-            replicas: vec![1, 2],
-            isr: vec![2, 1],
-            leader_epoch: 1,
+            leader: crabka_broker::NodeId(2),
+            replicas: vec![crabka_broker::NodeId(1), crabka_broker::NodeId(2)],
+            isr: vec![crabka_broker::NodeId(2), crabka_broker::NodeId(1)],
+            leader_epoch: crabka_metadata::LeaderEpoch(1),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -5644,9 +5682,9 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
     let initial = pr.replicas.clone();
     // node IDs are 1-3; find the one not in the initial replica set.
     let new_node: u64 = (1u64..=3)
-        .find(|n| !initial.contains(n))
+        .find(|n| !initial.contains(&crabka_metadata::NodeId(*n)))
         .expect("free broker");
-    let staying: u64 = *initial.first().unwrap();
+    let staying: u64 = initial.first().unwrap().0;
     eprintln!("CRABKA[test] initial replicas={initial:?} staying={staying} new_node={new_node}");
 
     // Write reassignment JSON: move partition 0 to [staying, new_node].
@@ -5701,9 +5739,18 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
         .removing_replicas
         .first()
         .copied()
-        .unwrap_or_else(|| initial.last().copied().unwrap_or(0));
+        .unwrap_or_else(|| {
+            initial
+                .last()
+                .copied()
+                .unwrap_or(crabka_metadata::NodeId(0))
+        });
     let injected = crabka_metadata::PartitionRecord {
-        isr: vec![staying, new_node, removing_replica],
+        isr: vec![
+            crabka_metadata::NodeId(staying),
+            crabka_metadata::NodeId(new_node),
+            removing_replica,
+        ],
         ..pr_after.clone()
     };
     h1.submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Partition(injected))
@@ -5721,7 +5768,7 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
     let pr = h1
         .partition_record_for_test(TOPIC, 0)
         .expect("partition record after reassignment");
-    let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
+    let got: std::collections::HashSet<u64> = pr.replicas.iter().map(|n| n.0).collect();
     let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
     assert!(
         got == want,
@@ -5827,9 +5874,9 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
         .expect("partition record");
     let initial = pr.replicas.clone();
     let new_node: u64 = (1u64..=3)
-        .find(|n| !initial.contains(n))
+        .find(|n| !initial.contains(&crabka_metadata::NodeId(*n)))
         .expect("free broker");
-    let staying: u64 = *initial.first().unwrap();
+    let staying: u64 = initial.first().unwrap().0;
     eprintln!("CRABKA[test] initial replicas={initial:?} staying={staying} new_node={new_node}");
 
     // Write reassignment JSON.
@@ -5920,9 +5967,18 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
         .removing_replicas
         .first()
         .copied()
-        .unwrap_or_else(|| initial.last().copied().unwrap_or(0));
+        .unwrap_or_else(|| {
+            initial
+                .last()
+                .copied()
+                .unwrap_or(crabka_metadata::NodeId(0))
+        });
     let injected = crabka_metadata::PartitionRecord {
-        isr: vec![staying, new_node, removing_replica],
+        isr: vec![
+            crabka_metadata::NodeId(staying),
+            crabka_metadata::NodeId(new_node),
+            removing_replica,
+        ],
         ..pr_after.clone()
     };
     h1.submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Partition(injected))
@@ -5940,7 +5996,7 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
     let pr = h1
         .partition_record_for_test(TOPIC, 0)
         .expect("partition record after reassignment");
-    let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
+    let got: std::collections::HashSet<u64> = pr.replicas.iter().map(|n| n.0).collect();
     let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
     assert!(
         got == want,
@@ -5985,8 +6041,11 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
 
     // Confirm throttle configs were cleared from the metadata image after --verify.
     h1.wait_for_image(|img| {
-        img.broker_throttle_rate(1, crabka_metadata::ThrottleKind::Leader)
-            .is_none()
+        img.broker_throttle_rate(
+            crabka_metadata::NodeId(1),
+            crabka_metadata::ThrottleKind::Leader,
+        )
+        .is_none()
     })
     .await;
 
@@ -6055,9 +6114,12 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_users(
             advertised_listener: advertised.to_string(),
             log_dir,
             log_config: LogConfig::default(),
-            node_id: idx,
+            node_id: crabka_broker::NodeId(idx),
             controller_listen_addr: ctrl,
-            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+            controller_quorum_voters: voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -6678,9 +6740,9 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: crabka_log::LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -6882,9 +6944,9 @@ async fn start_host_broker_jbod() -> (
         log_dir: primary.path().to_path_buf(),
         extra_log_dirs: vec![extra.path().to_path_buf()],
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -7034,9 +7096,12 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
             advertised_listener: advertised.to_string(),
             log_dir,
             log_config: LogConfig::default(),
-            node_id: idx,
+            node_id: crabka_broker::NodeId(idx),
             controller_listen_addr: ctrl,
-            controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+            controller_quorum_voters: voters
+                .iter()
+                .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+                .collect(),
             heartbeat_interval_ms: 3_000,
             heartbeat_timeout_ms: 9_000,
             replica_lag_time_max_ms: 30_000,
@@ -7696,9 +7761,9 @@ async fn start_host_broker_with_minio_tier(
         advertised_listener: BOOTSTRAP.into(),
         log_dir: dir.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,
@@ -8722,9 +8787,12 @@ async fn start_two_brokers_with_minio_tier(
         advertised_listener: BOOTSTRAP.to_string(),
         log_dir: dir0.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: ctrl0,
-        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+        controller_quorum_voters: voters
+            .iter()
+            .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+            .collect(),
         // Accelerated timers for fast failover — matches acks_all_survives_leader_crash.
         heartbeat_interval_ms: 200,
         heartbeat_timeout_ms: 2_000,
@@ -8744,9 +8812,12 @@ async fn start_two_brokers_with_minio_tier(
         advertised_listener: BOOTSTRAP_B1.to_string(),
         log_dir: dir1.path().to_path_buf(),
         log_config: LogConfig::default(),
-        node_id: 2,
+        node_id: crabka_broker::NodeId(2),
         controller_listen_addr: ctrl1,
-        controller_quorum_voters: voters.iter().map(|(id, a)| (*id, a.to_string())).collect(),
+        controller_quorum_voters: voters
+            .iter()
+            .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
+            .collect(),
         heartbeat_interval_ms: 200,
         heartbeat_timeout_ms: 2_000,
         replica_lag_time_max_ms: 2_000,

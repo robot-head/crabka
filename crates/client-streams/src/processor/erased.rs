@@ -2,8 +2,7 @@
 //! each node. Records flow erased (`Box<dyn Any + Send>`) between nodes; only
 //! source/sink boundaries (de)serialize.
 
-use std::any::Any;
-use std::collections::VecDeque;
+use std::{any::Any, collections::VecDeque};
 
 use bytes::Bytes;
 
@@ -79,8 +78,9 @@ pub(crate) struct Dispatch<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn erase_then_downcast_roundtrips_value_and_key() {

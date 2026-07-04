@@ -9,12 +9,15 @@ use crabka_client_admin::AdminClient;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use tracing::warn;
 
-use crate::config::NamingPolicy;
-use crate::error::ReplicatorError;
-use crate::mm2::{Checkpoint, OffsetSync};
-use crate::naming::Renamer;
-use crate::offset_sync_store::OffsetSyncStore;
-use crate::selector::Selector;
+use crate::{
+    config::NamingPolicy,
+    error::ReplicatorError,
+    ids::{CommittedOffset, PartitionIndex, UpstreamOffset},
+    mm2::{Checkpoint, OffsetSync},
+    naming::Renamer,
+    offset_sync_store::OffsetSyncStore,
+    selector::Selector,
+};
 
 /// Parameters required to run the checkpoint task.
 pub struct CheckpointParams {
@@ -101,6 +104,11 @@ pub async fn run_once(
         };
 
         for ((topic, partition), committed) in offsets {
+            // `offsets` comes from the cross-crate admin client as raw
+            // `(i32, i64)`; wrap at this boundary so the translation call and
+            // the checkpoint fields are type-checked.
+            let partition = PartitionIndex(partition);
+            let committed = CommittedOffset(committed);
             let Some(downstream) = store.translate(&topic, partition, committed) else {
                 continue;
             };
@@ -109,7 +117,9 @@ pub async fn run_once(
                 group: group.clone(),
                 topic: renamer.target_name(&topic),
                 partition,
-                upstream: committed,
+                // A group's committed source offset is the upstream side of the
+                // checkpoint; the translated target offset is the downstream.
+                upstream: UpstreamOffset(committed.0),
                 downstream,
                 metadata: String::new(),
             };
@@ -250,8 +260,11 @@ mod tests {
     use assert2::assert;
 
     use super::*;
-    use crate::mm2::{Checkpoint, OffsetSync};
-    use crate::offset_sync_store::OffsetSyncStore;
+    use crate::{
+        ids::DownstreamOffset,
+        mm2::{Checkpoint, OffsetSync},
+        offset_sync_store::OffsetSyncStore,
+    };
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn writes_translated_checkpoints() {
@@ -279,15 +292,15 @@ mod tests {
         let mut syncs = OffsetSyncStore::default();
         syncs.ingest(OffsetSync {
             topic: "orders".into(),
-            partition: 0,
-            upstream: 0,
-            downstream: 0,
+            partition: PartitionIndex(0),
+            upstream: UpstreamOffset(0),
+            downstream: DownstreamOffset(0),
         });
         syncs.ingest(OffsetSync {
             topic: "orders".into(),
-            partition: 0,
-            upstream: 200,
-            downstream: 165,
+            partition: PartitionIndex(0),
+            upstream: UpstreamOffset(200),
+            downstream: DownstreamOffset(165),
         });
 
         run_once(

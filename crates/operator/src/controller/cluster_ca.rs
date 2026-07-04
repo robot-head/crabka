@@ -11,22 +11,25 @@
 //!   `ca-renewal-check` `CronJob` subcommand),
 //! - the `run_renewal_check` entrypoint for the `CronJob`.
 
-use std::collections::BTreeMap;
-use std::net::IpAddr;
+use std::{collections::BTreeMap, net::IpAddr};
 
 use crabka_security::ca::{
     CaMaterial, SubjectAltName, generate_clients_ca, generate_cluster_ca, issue_broker_cert,
 };
-use k8s_openapi::ByteString;
-use k8s_openapi::api::core::v1::Secret;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Api, Patch, PatchParams};
-use kube::{Resource, ResourceExt as _};
-use time::OffsetDateTime;
-use time::format_description::well_known::Rfc3339;
+use k8s_openapi::{
+    ByteString, api::core::v1::Secret, apimachinery::pkg::apis::meta::v1::ObjectMeta,
+};
+use kube::{
+    Resource, ResourceExt as _,
+    api::{Api, Patch, PatchParams},
+};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-use crate::controller::common::{FIELD_MANAGER, ReconcileError, owner_ref, read_pem_key};
-use crate::crd::{CertificateAuthority, Kafka};
+use crate::{
+    controller::common::{FIELD_MANAGER, ReconcileError, owner_ref, read_pem_key},
+    crd::{CertificateAuthority, Kafka},
+    ids::{CertGeneration, KeyGeneration},
+};
 
 pub(crate) const CLUSTER_CA_KEY_SUFFIX: &str = "-cluster-ca";
 pub(crate) const CLUSTER_CA_CERT_SUFFIX: &str = "-cluster-ca-cert";
@@ -169,8 +172,8 @@ pub(crate) struct CaState {
     pub pending_key_pem: Option<String>,
     /// Staged new cert during `KeyReplaceTrust`.
     pub pending_cert_pem: Option<String>,
-    pub cert_generation: u64,
-    pub key_generation: u64,
+    pub cert_generation: CertGeneration,
+    pub key_generation: KeyGeneration,
     pub phase: CaPhase,
 }
 
@@ -300,10 +303,8 @@ const SECRET_TYPE_CA_CERT: &str = "ca-cert";
 const SECRET_TYPE_BROKER_KEYSTORE: &str = "broker-keystore";
 
 pub(crate) fn cert_not_after(pem: &str) -> Result<OffsetDateTime, ReconcileError> {
-    use rustls::pki_types::CertificateDer;
-    use rustls::pki_types::pem::PemObject;
-    use x509_parser::prelude::FromDer;
-    use x509_parser::prelude::X509Certificate;
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+    use x509_parser::prelude::{FromDer, X509Certificate};
     let der = CertificateDer::pem_slice_iter(pem.as_bytes())
         .next()
         .ok_or_else(|| ReconcileError::CertParse("no PEM block".into()))?
@@ -324,8 +325,8 @@ pub(crate) struct CaReconcileOutcome {
     /// RFC3339 `notAfter` of the signing cert.
     pub not_after: String,
     pub generated: bool,
-    pub cert_generation: u64,
-    pub key_generation: u64,
+    pub cert_generation: CertGeneration,
+    pub key_generation: KeyGeneration,
     pub phase: CaPhase,
     pub trust_anchors: usize,
     /// Cluster CA only: every broker leaf must be reissued with the new key.
@@ -388,8 +389,8 @@ pub(crate) async fn reconcile_ca(
             key_pem,
             pending_key_pem: read_pem_key(k, NEXT_KEY),
             pending_cert_pem: read_pem_key(k, NEXT_CERT),
-            cert_generation: read_generation(c, ANN_CERT_GENERATION),
-            key_generation: read_generation(k, ANN_KEY_GENERATION),
+            cert_generation: CertGeneration(read_generation(c, ANN_CERT_GENERATION)),
+            key_generation: KeyGeneration(read_generation(k, ANN_KEY_GENERATION)),
             phase: read_phase(c),
         };
         let inp = RotationInputs {
@@ -461,8 +462,8 @@ pub(crate) async fn reconcile_ca(
         trust_bundle_pem: material.cert_pem,
         not_after,
         generated: true,
-        cert_generation: 0,
-        key_generation: 0,
+        cert_generation: CertGeneration(0),
+        key_generation: KeyGeneration(0),
         phase: CaPhase::Idle,
         trust_anchors: 1,
         force_reissue_leafs: false,
@@ -536,7 +537,7 @@ async fn apply_ca_rotation(
             let mut blocks = vec![normalize_block(&new_cert)];
             blocks.extend(prune_expired(&state.bundle, now));
             bundle = dedup_blocks(&blocks);
-            cert_gen += 1;
+            cert_gen += CertGeneration(1);
             phase = CaPhase::Idle;
             patch_cert_bundle(secret_api, kafka, cert_name, &bundle, cert_gen, phase).await?;
             raw_override = None;
@@ -587,8 +588,8 @@ async fn apply_ca_rotation(
             blocks.extend(remaining);
             bundle = prune_expired(&dedup_blocks(&blocks), now);
             key_pem = new_key.clone();
-            cert_gen += 1;
-            key_gen += 1;
+            cert_gen += CertGeneration(1);
+            key_gen += KeyGeneration(1);
             phase = CaPhase::KeyReplacePromote;
             force_reissue = matches!(which, WhichCa::Cluster);
             // Promote the key + drop the staged material.
@@ -658,7 +659,7 @@ async fn patch_cert_bundle(
     kafka: &Kafka,
     cert_name: &str,
     bundle: &[String],
-    cert_gen: u64,
+    cert_gen: CertGeneration,
     phase: CaPhase,
 ) -> Result<(), ReconcileError> {
     patch_secret(
@@ -949,8 +950,9 @@ pub(crate) async fn ensure_broker_keystore(
 /// cert currently stored in the Secret, triggering a reissue.
 #[must_use]
 pub fn compute_san_digest(base_sans: &[SubjectAltName], extras: &[SubjectAltName]) -> String {
-    use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
+
+    use sha2::{Digest, Sha256};
     let mut all: Vec<&SubjectAltName> = base_sans.iter().chain(extras.iter()).collect();
     all.sort();
     all.dedup();
@@ -1177,10 +1179,11 @@ async fn flag_ca_if_expiring(
 fn read_existing_cn_and_sans(
     cert_pem: &str,
 ) -> Result<(String, Vec<SubjectAltName>), ReconcileError> {
-    use rustls::pki_types::CertificateDer;
-    use rustls::pki_types::pem::PemObject;
-    use x509_parser::extensions::GeneralName;
-    use x509_parser::prelude::{FromDer, X509Certificate};
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+    use x509_parser::{
+        extensions::GeneralName,
+        prelude::{FromDer, X509Certificate},
+    };
 
     let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
         .next()
@@ -1346,8 +1349,7 @@ pub(crate) async fn emit_event(
     action: &str,
     reporting_component: &str,
 ) -> Result<(), ReconcileError> {
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
-    use k8s_openapi::jiff::Timestamp;
+    use k8s_openapi::{apimachinery::pkg::apis::meta::v1::MicroTime, jiff::Timestamp};
     let now = Timestamp::now();
     let event = Event {
         metadata: ObjectMeta {
@@ -1385,16 +1387,16 @@ pub(crate) async fn emit_event(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_security::ca::{generate_clients_ca, generate_cluster_ca, issue_user_cert};
+
+    use super::*;
 
     /// A CA generated with `validity_days = 30` must have `notAfter` within
     /// [29, 31] days of now (allowing for a second of clock skew in CI).
     #[test]
     fn ca_validity_days_is_honored() {
-        use rustls::pki_types::CertificateDer;
-        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
         use x509_parser::prelude::{FromDer, X509Certificate};
 
         let ca = generate_cluster_ca("test-cluster-ca", 30).expect("CA");
@@ -1440,9 +1442,10 @@ mod tests {
 
 #[cfg(test)]
 mod reissue_tests {
-    use super::compute_san_digest;
     use assert2::assert;
     use crabka_security::ca::SubjectAltName;
+
+    use super::compute_san_digest;
 
     #[test]
     fn san_digest_changes_when_extras_differ() {
@@ -1483,10 +1486,11 @@ mod reissue_tests {
 mod san_tests {
     use assert2::assert;
     use crabka_security::ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert};
-    use rustls::pki_types::CertificateDer;
-    use rustls::pki_types::pem::PemObject;
-    use x509_parser::extensions::GeneralName;
-    use x509_parser::prelude::{FromDer, X509Certificate};
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+    use x509_parser::{
+        extensions::GeneralName,
+        prelude::{FromDer, X509Certificate},
+    };
 
     fn parse_cert_sans(cert_pem: &str) -> Vec<String> {
         let der = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
@@ -1568,13 +1572,49 @@ mod san_tests {
         assert!(parsed.len() == 1);
         assert!(parsed[0] == "DNS:internal.svc");
     }
+
+    // Round-trip: issue a leaf with a known CN and mixed DNS/IP SANs, then pull
+    // them back out with `read_existing_cn_and_sans`. Pins the actual parsed CN
+    // and SAN list so a body-stub mutant (Ok(("", vec![])) / Ok(("xyzzy", vec![])))
+    // is caught — the CN must equal the issued name and the SANs must be preserved.
+    #[test]
+    fn read_existing_cn_and_sans_round_trips_cn_and_sans() {
+        use super::read_existing_cn_and_sans;
+
+        let cluster_ca = generate_cluster_ca("test-san-ca", 365).expect("test CA");
+        let internal_sans = vec![SubjectAltName::Dns("internal.svc".into())];
+        let extra = vec![
+            SubjectAltName::Dns("broker-0.example.com".into()),
+            SubjectAltName::Ip("203.0.113.10".parse().unwrap()),
+        ];
+        let leaf = issue_broker_cert(
+            &cluster_ca.cert_pem,
+            &cluster_ca.key_pem,
+            "broker-0",
+            &internal_sans,
+            &extra,
+            365,
+        )
+        .unwrap();
+
+        let (cn, sans) = read_existing_cn_and_sans(&leaf.cert_pem).expect("parse leaf");
+        assert!(cn == "broker-0");
+        for want in [
+            SubjectAltName::Dns("internal.svc".into()),
+            SubjectAltName::Dns("broker-0.example.com".into()),
+            SubjectAltName::Ip("203.0.113.10".parse().unwrap()),
+        ] {
+            assert!(sans.contains(&want), "missing {want:?} in {sans:?}");
+        }
+    }
 }
 
 #[cfg(test)]
 mod rotation_tests {
-    use super::*;
     use assert2::assert;
     use crabka_security::ca::{generate_cluster_ca, renew_cluster_ca};
+
+    use super::*;
 
     fn ca_cert(cn: &str, days: u32) -> String {
         generate_cluster_ca(cn, days).expect("CA").cert_pem
@@ -1586,8 +1626,8 @@ mod rotation_tests {
             key_pem: key.to_string(),
             pending_key_pem: None,
             pending_cert_pem: None,
-            cert_generation: 0,
-            key_generation: 0,
+            cert_generation: CertGeneration(0),
+            key_generation: KeyGeneration(0),
             phase,
         }
     }
@@ -1799,8 +1839,7 @@ mod rotation_tests {
 
     #[test]
     fn renew_same_key_keeps_leaf_chaining() {
-        use rustls::pki_types::CertificateDer;
-        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, pem::PemObject};
         use x509_parser::prelude::{FromDer, X509Certificate};
 
         let ca = generate_cluster_ca("c1-cluster-ca", 20).expect("CA");

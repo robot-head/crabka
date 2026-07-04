@@ -12,24 +12,23 @@ pub mod metrics;
 pub mod rules;
 pub mod store;
 
+use std::{collections::VecDeque, sync::Arc, time::Duration};
+
 pub use anomaly::{Anomaly, AnomalyKey, AnomalyKind, AnomalySeverity};
 pub use auto_trigger::{AutoTriggerError, goals_for_kind, maybe_trigger};
 pub use metrics::DetectorMetrics;
 pub use store::{AnomalyStore, StoreError};
-
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::time::Duration;
-
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::capacity::BrokerCapacities;
-use crate::executor::ExecutorState;
-use crate::ingest::SharedSnapshot;
-use crate::model::{ClusterState, ProposalStore};
-use crate::scraper::UsageStore;
+use crate::{
+    capacity::BrokerCapacities,
+    executor::ExecutorState,
+    ingest::SharedSnapshot,
+    model::{ClusterState, ProposalStore},
+    scraper::UsageStore,
+};
 
 #[derive(Debug, Clone)]
 pub struct DetectorConfig {
@@ -206,11 +205,12 @@ impl Detector {
     /// anomalies (mark resolved + upsert new), updates per-kind open
     /// gauges, and fires auto-trigger on freshly-detected anomalies.
     pub async fn tick_once(&self, now_ms: i64) {
+        use std::collections::HashMap;
+
         use crate::detector::rules::{
             BrokerDeath, DiskPressure, Rule, RuleCtx, RuleHit, SlowBroker,
             UnderReplicatedPartitions,
         };
-        use std::collections::HashMap;
 
         let g = self.snapshot.load();
         let Some(state) = (*g).as_ref() else {
@@ -330,16 +330,19 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::capacity::BrokerCapacities;
-    use crate::executor::{ExecutorConfig, ExecutorState};
-    use crate::goals::GoalContext;
-    use crate::model::ProposalStore;
-    use crate::model::{BrokerView, PartitionView};
-    use crate::scraper::UsageStore;
-    use assert2::{assert, check};
     use std::sync::Arc;
+
+    use assert2::{assert, check};
     use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::{
+        capacity::BrokerCapacities,
+        executor::{ExecutorConfig, ExecutorState},
+        goals::GoalContext,
+        model::{BrokerView, PartitionView, ProposalStore},
+        scraper::UsageStore,
+    };
 
     fn make_state(snapshot_at_ms: i64, broker_ids: &[i32]) -> ClusterState {
         ClusterState {

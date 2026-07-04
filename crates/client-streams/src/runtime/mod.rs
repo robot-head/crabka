@@ -14,6 +14,4 @@ mod thread;
 
 pub use app::KafkaStreams;
 pub use io::{FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer};
-pub use iq_view::ReadOnlyKeyValueStore;
-pub use iq_view::ReadOnlySessionStore;
-pub use iq_view::ReadOnlyWindowStore;
+pub use iq_view::{ReadOnlyKeyValueStore, ReadOnlySessionStore, ReadOnlyWindowStore};

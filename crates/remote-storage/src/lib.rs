@@ -38,13 +38,14 @@
 //! ## Filesystem-backed remote tier
 //!
 //! ```no_run
+//! use std::{collections::BTreeMap, path::PathBuf};
+//!
 //! use bytes::Bytes;
+//! use crabka_ids::LeaderEpoch;
 //! use crabka_remote_storage::{
 //!     IndexType, LocalTieredStorage, LogSegmentData, RemoteLogSegmentId,
 //!     RemoteLogSegmentMetadata, RemoteLogSegmentState, RemoteStorageManager, TopicIdPartition,
 //! };
-//! use std::collections::BTreeMap;
-//! use std::path::PathBuf;
 //! use uuid::Uuid;
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -52,7 +53,7 @@
 //! let topic_partition = TopicIdPartition::new(Uuid::new_v4(), "orders", 0);
 //! let segment_id = RemoteLogSegmentId::new(topic_partition, Uuid::new_v4());
 //! let mut leader_epochs = BTreeMap::new();
-//! leader_epochs.insert(0, 0);
+//! leader_epochs.insert(LeaderEpoch(0), 0);
 //! let metadata = RemoteLogSegmentMetadata::new(
 //!     segment_id,
 //!     0,

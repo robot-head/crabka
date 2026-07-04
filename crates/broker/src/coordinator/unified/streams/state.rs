@@ -26,8 +26,12 @@
 //! [`StreamsMemberAssignmentState`] are provided here so the actor can persist
 //! the state without coupling the two files.
 
-use std::collections::{BTreeMap, HashMap};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::{Duration, Instant},
+};
+
+use crabka_log::Offset;
 
 /// The reconciliation state of a single streams-group member's **active** task
 /// set, mirroring KIP-848's `MemberAssignmentState`. Standby/warmup tasks do
@@ -115,10 +119,10 @@ pub struct StreamsMemberState {
     // --- reported catch-up progress (for warmup -> active promotion) ---
     /// `(subtopology, partition)` -> the changelog position the member last
     /// reported for that task.
-    pub task_offsets: BTreeMap<(String, i32), i64>,
+    pub task_offsets: BTreeMap<(String, i32), Offset>,
     /// `(subtopology, partition)` -> the changelog end offset the member last
     /// reported for that task.
-    pub task_end_offsets: BTreeMap<(String, i32), i64>,
+    pub task_end_offsets: BTreeMap<(String, i32), Offset>,
 
     pub last_seen: Instant,
 }
@@ -423,8 +427,9 @@ fn compute_active_revoke_split(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn task_map(entries: &[(&str, &[i32])]) -> BTreeMap<String, Vec<i32>> {
         entries

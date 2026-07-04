@@ -3,11 +3,13 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::borrowed::produce_request::{MAX_VERSION, MIN_VERSION, ProduceRequest};
-use crabka_protocol::borrowed::produce_response::{
-    MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN, ProduceResponse,
+use crabka_protocol::{
+    DecodeBorrow, Encode, UnknownTaggedFields,
+    borrowed::{
+        produce_request::{MAX_VERSION, MIN_VERSION, ProduceRequest},
+        produce_response::{MAX_VERSION as RESP_MAX, MIN_VERSION as RESP_MIN, ProduceResponse},
+    },
 };
-use crabka_protocol::{DecodeBorrow, Encode, UnknownTaggedFields};
 
 #[test]
 fn borrowed_produce_request_min_version_empty_topics() {

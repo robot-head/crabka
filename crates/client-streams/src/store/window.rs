@@ -1,20 +1,22 @@
 //! Window store over the byte backend: composite `WindowKeySchema` keys +
 //! `ValueAndTimestamp` values. A second typed store beside `KeyValueBytesStore`.
-use std::any::Any;
-use std::sync::{Arc, Mutex};
+use std::{
+    any::Any,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::processor::record::RecordContext;
-use crate::processor::serde::Serde;
-use crate::store::api::StateStore;
-use crate::store::byte::{ByteKeyValueStore, InMemoryBytes};
-use crate::store::cache::named::NamedCache;
-use crate::store::cache::window::CachingWindowStore;
-use crate::store::window_schema::{
-    key_bytes_of, store_key, unwrap_value, window_start_of, wrap_value,
+use crate::{
+    processor::{record::RecordContext, serde::Serde},
+    store::{
+        api::StateStore,
+        byte::{ByteKeyValueStore, InMemoryBytes},
+        cache::{named::NamedCache, window::CachingWindowStore},
+        window_schema::{key_bytes_of, store_key, unwrap_value, window_start_of, wrap_value},
+    },
 };
 
 /// The window store's backing: either a plain boxed byte store or a record-cache
@@ -236,9 +238,13 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for WindowBytesStore<K, V>
         buffer: &mut std::collections::VecDeque<(usize, crate::processor::erased::ErasedRecord)>,
         children: &[usize],
     ) {
-        use crate::dsl::processors::change::Change;
-        use crate::dsl::windows::{Window, Windowed};
-        use crate::processor::erased::ErasedRecord;
+        use crate::{
+            dsl::{
+                processors::change::Change,
+                windows::{Window, Windowed},
+            },
+            processor::erased::ErasedRecord,
+        };
         let Backing::Cached(cache) = &self.backing else {
             return;
         };
@@ -724,8 +730,10 @@ mod tests {
 
     #[tokio::test]
     async fn flush_cache_into_emits_deduped_windowed_change() {
-        use crate::dsl::processors::change::Change;
-        use crate::dsl::windows::{Window, Windowed};
+        use crate::dsl::{
+            processors::change::Change,
+            windows::{Window, Windowed},
+        };
         let mut s = cached_store(10);
         // Seed a committed value (flush it through + clear the changelog buffer).
         s.set_record_context(ctx_at(0));
@@ -789,8 +797,10 @@ mod tests {
         // `start + timeDifferenceMs`, NOT `start + 2*timeDifferenceMs`. Before the
         // fix the store was constructed with the retention span as its window size,
         // so the end was doubled (this assertion would see `end == 20`).
-        use crate::dsl::processors::change::Change;
-        use crate::dsl::windows::{Window, Windowed};
+        use crate::dsl::{
+            processors::change::Change,
+            windows::{Window, Windowed},
+        };
 
         // D = 10 (the real sliding window size = time_difference_ms); the retention
         // basis a sliding aggregate passes is 2*D = 20. The store's window_size_ms

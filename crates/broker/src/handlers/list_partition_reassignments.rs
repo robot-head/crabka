@@ -4,15 +4,22 @@
 
 use bytes::Bytes;
 use crabka_metadata::{PartitionRecord, ResourceType};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest;
-use crabka_protocol::owned::list_partition_reassignments_response::{
-    ListPartitionReassignmentsResponse, OngoingPartitionReassignment, OngoingTopicReassignment,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        list_partition_reassignments_request::ListPartitionReassignmentsRequest,
+        list_partition_reassignments_response::{
+            ListPartitionReassignmentsResponse, OngoingPartitionReassignment,
+            OngoingTopicReassignment,
+        },
+    },
 };
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, NONE};
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes::{CLUSTER_AUTHORIZATION_FAILED, NONE},
+};
 
 #[tracing::instrument(
     name = "handle_list_partition_reassignments",
@@ -77,9 +84,9 @@ pub(crate) async fn handle(
             .or_default()
             .push(OngoingPartitionReassignment {
                 partition_index: pr.partition,
-                replicas: pr.replicas.iter().map(|n| *n as i32).collect(),
-                adding_replicas: pr.adding_replicas.iter().map(|n| *n as i32).collect(),
-                removing_replicas: pr.removing_replicas.iter().map(|n| *n as i32).collect(),
+                replicas: pr.replicas.iter().map(|n| n.0 as i32).collect(),
+                adding_replicas: pr.adding_replicas.iter().map(|n| n.0 as i32).collect(),
+                removing_replicas: pr.removing_replicas.iter().map(|n| n.0 as i32).collect(),
                 ..Default::default()
             });
     }
@@ -114,15 +121,18 @@ fn encode_response<R: Encode>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_metadata::{MetadataRecord, TopicRecord};
-    use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsTopics;
     use std::sync::Arc;
+
+    use assert2::assert;
+    use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
+    use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsTopics;
     use uuid::Uuid;
 
-    use crate::broker::BrokerHandle;
-    use crate::test_support::{DenyAll, peer, principal};
+    use super::*;
+    use crate::{
+        broker::BrokerHandle,
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = crabka_protocol::owned::list_partition_reassignments_response::MAX_VERSION;
 
@@ -148,11 +158,11 @@ mod tests {
                 MetadataRecord::V1Partition(PartitionRecord {
                     topic: "orders-add".into(),
                     partition: 0,
-                    leader: 1,
-                    replicas: vec![1, 2, 3],
-                    isr: vec![1, 2],
-                    leader_epoch: 4,
-                    adding_replicas: vec![3],
+                    leader: NodeId(1),
+                    replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+                    isr: vec![NodeId(1), NodeId(2)],
+                    leader_epoch: crabka_metadata::LeaderEpoch(4),
+                    adding_replicas: vec![NodeId(3)],
                     removing_replicas: vec![],
                     directories: vec![Uuid::nil(), Uuid::nil(), Uuid::nil()],
                     partition_epoch: 8,

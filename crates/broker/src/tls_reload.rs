@@ -11,9 +11,11 @@
 //! stays in place — better to keep serving with the old cert than to
 //! drop connections.
 
-use std::path::Path;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::{
+    path::Path,
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
 use crabka_security::{DynamicServerConfig, TlsConfig};
 use tokio_util::sync::CancellationToken;
@@ -84,11 +86,15 @@ pub(crate) async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
     use assert2::assert;
     use crabka_security::ClientAuthMode;
-    use std::fs;
-    use std::path::{Path, PathBuf};
+
+    use super::*;
 
     fn install_provider() {
         let _ = rustls::crypto::ring::default_provider().install_default();

@@ -4,8 +4,9 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::borrowed::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::{DecodeBorrow, Encode, UnknownTaggedFields};
+use crabka_protocol::{
+    DecodeBorrow, Encode, UnknownTaggedFields, borrowed::api_versions_request::ApiVersionsRequest,
+};
 
 #[test]
 fn borrowed_api_versions_request_v3_roundtrip() {

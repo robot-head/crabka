@@ -72,8 +72,9 @@ pub fn decode_offer_layers(bytes: &[u8]) -> Result<SecurityLayer, LayerError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn encode_offer_auth_only() {

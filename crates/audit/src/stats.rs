@@ -3,6 +3,8 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::ids::{RecordCount, SpoolBytes};
+
 /// Cumulative + current spool statistics.
 #[derive(Debug, Default)]
 pub struct AuditStats {
@@ -28,9 +30,9 @@ impl AuditStats {
     pub(crate) fn inc_dropped(&self) {
         self.dropped.fetch_add(1, Ordering::Relaxed);
     }
-    pub(crate) fn set_depth(&self, count: u64, bytes: u64) {
-        self.depth.store(count, Ordering::Relaxed);
-        self.spool_bytes.store(bytes, Ordering::Relaxed);
+    pub(crate) fn set_depth(&self, count: RecordCount, bytes: SpoolBytes) {
+        self.depth.store(count.0, Ordering::Relaxed);
+        self.spool_bytes.store(bytes.0, Ordering::Relaxed);
     }
 
     #[must_use]

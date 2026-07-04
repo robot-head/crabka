@@ -14,6 +14,8 @@ use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::ids::{LeaderMovementCount, MaxLeadersCount, MaxReplicasCount, ReplicaMovementCount};
+
 #[derive(CustomResource, Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[kube(
     group = "crabka.io",
@@ -57,22 +59,22 @@ pub struct KafkaRebalanceSpec {
 pub struct OptimizationResult {
     /// Number of partition replica reassignments in the proposal.
     #[serde(default)]
-    pub replica_movements: i32,
+    pub replica_movements: ReplicaMovementCount,
     /// Number of leadership changes in the proposal.
     #[serde(default)]
-    pub leader_movements: i32,
+    pub leader_movements: LeaderMovementCount,
     /// Max replicas on any one broker before the proposal applies.
     #[serde(default)]
-    pub max_replicas_before: i32,
+    pub max_replicas_before: MaxReplicasCount,
     /// Max replicas on any one broker after the proposal applies.
     #[serde(default)]
-    pub max_replicas_after: i32,
+    pub max_replicas_after: MaxReplicasCount,
     /// Max partitions led by any one broker before the proposal applies.
     #[serde(default)]
-    pub max_leaders_before: i32,
+    pub max_leaders_before: MaxLeadersCount,
     /// Max partitions led by any one broker after the proposal applies.
     #[serde(default)]
-    pub max_leaders_after: i32,
+    pub max_leaders_after: MaxLeadersCount,
     /// The goals the rebalancer actually applied (post-selection).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub goals: Vec<String>,
@@ -104,9 +106,10 @@ pub struct KafkaRebalanceStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use kube::CustomResourceExt as _;
+
+    use super::*;
 
     #[test]
     fn crd_metadata_is_correct() {
@@ -179,16 +182,6 @@ mod tests {
     #[test]
     fn optimization_result_defaults_to_zeroes() {
         let r: OptimizationResult = serde_json::from_str("{}").unwrap();
-        assert!(
-            r == OptimizationResult {
-                replica_movements: 0,
-                leader_movements: 0,
-                max_replicas_before: 0,
-                max_replicas_after: 0,
-                max_leaders_before: 0,
-                max_leaders_after: 0,
-                goals: vec![],
-            }
-        );
+        assert!(r == OptimizationResult::default());
     }
 }

@@ -20,9 +20,13 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::sync::oneshot;
 
-use crate::error::RaftError;
-use crate::kraft::event::Event;
-use crate::kraft::types::{LeaderEpoch, LogOffsetMetadata, NodeId};
+use crate::{
+    error::RaftError,
+    kraft::{
+        event::Event,
+        types::{Epoch, LogOffsetMetadata, NodeId},
+    },
+};
 
 /// A decoded inbound KIP-595 RPC plus a oneshot to reply on. The event loop
 /// decodes the body into a core [`Event`], runs it, and encodes the produced
@@ -141,7 +145,7 @@ pub enum TimerTick {
 #[derive(Debug, Clone)]
 pub struct QuorumStateSnapshot {
     pub leader_id: Option<NodeId>,
-    pub leader_epoch: LeaderEpoch,
+    pub leader_epoch: Epoch,
     pub high_watermark: i64,
     pub log_end_offset: i64,
     /// Log-start offset (rises past 0 once the log has been pruned below a
@@ -185,20 +189,21 @@ impl PeerSender for NullPeerSender {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[tokio::test]
     async fn null_peer_sender_reports_target_as_current_leader() {
         let err = NullPeerSender
-            .send(7, api_key::FETCH, Bytes::new())
+            .send(NodeId(7), api_key::FETCH, Bytes::new())
             .await
             .expect_err("null sender should reject peer sends");
 
         assert!(matches!(
             err,
             RaftError::NotLeader {
-                current_leader: Some(7)
+                current_leader: Some(NodeId(7))
             }
         ));
     }
@@ -228,27 +233,25 @@ pub mod api_key {
 /// byte-faithful `VoteResponse` and the core infers the round itself (KIP-996).
 pub mod wire {
     use bytes::{Buf, Bytes, BytesMut};
-
-    use crabka_protocol::owned::begin_quorum_epoch_request::{
-        self as bqe_req, BeginQuorumEpochRequest,
+    use crabka_protocol::{
+        Decode, Encode,
+        owned::{
+            begin_quorum_epoch_request::{self as bqe_req, BeginQuorumEpochRequest},
+            begin_quorum_epoch_response::BeginQuorumEpochResponse,
+            end_quorum_epoch_request::{self as eqe_req, EndQuorumEpochRequest},
+            end_quorum_epoch_response::EndQuorumEpochResponse,
+            fetch_request::{self as fetch_req, FetchRequest},
+            fetch_response::{self as fetch_resp, FetchResponse},
+            fetch_snapshot_request::{self as fs_req, FetchSnapshotRequest},
+            fetch_snapshot_response::{self as fs_resp, FetchSnapshotResponse},
+            vote_request::{self as vote_req, VoteRequest},
+            vote_response::{self as vote_resp, VoteResponse},
+        },
+        primitives::uuid::Uuid as MetaUuid,
+        records::RecordsPayload,
     };
-    use crabka_protocol::owned::begin_quorum_epoch_response::BeginQuorumEpochResponse;
-    use crabka_protocol::owned::end_quorum_epoch_request::{
-        self as eqe_req, EndQuorumEpochRequest,
-    };
-    use crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse;
-    use crabka_protocol::owned::fetch_request::{self as fetch_req, FetchRequest};
-    use crabka_protocol::owned::fetch_response::{self as fetch_resp, FetchResponse};
-    use crabka_protocol::owned::fetch_snapshot_request::{self as fs_req, FetchSnapshotRequest};
-    use crabka_protocol::owned::fetch_snapshot_response::{self as fs_resp, FetchSnapshotResponse};
-    use crabka_protocol::owned::vote_request::{self as vote_req, VoteRequest};
-    use crabka_protocol::owned::vote_response::{self as vote_resp, VoteResponse};
-    use crabka_protocol::records::RecordsPayload;
-    use crabka_protocol::{Decode, Encode};
 
-    use super::{LeaderEpoch, LogOffsetMetadata, NodeId};
-
-    use crabka_protocol::primitives::uuid::Uuid as MetaUuid;
+    use super::{Epoch, LogOffsetMetadata, NodeId};
 
     /// `KRaft` metadata log topic name.
     const METADATA_TOPIC: &str = "__cluster_metadata";
@@ -275,23 +278,23 @@ pub mod wire {
             /// `voterId` is silently rejected. Built per-recipient in
             /// `broadcast_vote`.
             voter_id: NodeId,
-            candidate_epoch: LeaderEpoch,
+            candidate_epoch: Epoch,
             candidate: NodeId,
-            last_epoch: LeaderEpoch,
+            last_epoch: Epoch,
             last_offset: i64,
             pre_vote: bool,
         },
         BeginQuorumEpoch {
             leader_id: NodeId,
-            leader_epoch: LeaderEpoch,
+            leader_epoch: Epoch,
         },
         EndQuorumEpoch {
             leader_id: NodeId,
-            leader_epoch: LeaderEpoch,
+            leader_epoch: Epoch,
         },
         Fetch {
             from: NodeId,
-            fetch_epoch: LeaderEpoch,
+            fetch_epoch: Epoch,
             fetch_offset: i64,
         },
         FetchSnapshot {
@@ -307,16 +310,16 @@ pub mod wire {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum PeerResponse {
         Vote {
-            epoch: LeaderEpoch,
+            epoch: Epoch,
             granted: bool,
         },
         /// Begin/End acks carry the responder's epoch; no core event is produced.
         Ack {
-            epoch: LeaderEpoch,
+            epoch: Epoch,
         },
         Fetch {
             leader_id: NodeId,
-            leader_epoch: LeaderEpoch,
+            leader_epoch: Epoch,
             diverging: Option<LogOffsetMetadata>,
             /// When set, the follower's fetch offset is below the leader's pruned
             /// log-start; it must `FetchSnapshot` this snapshot instead. `(end_offset, epoch)`.
@@ -335,22 +338,24 @@ pub mod wire {
         },
     }
 
-    /// `LeaderEpoch` (u32) <-> wire `i32` (`KRaft` uses an i32 `leaderEpoch`).
+    /// Consensus `Epoch` (u32) <-> wire `i32` (`KRaft` uses an i32 `leaderEpoch`).
+    /// The KIP-595 wire carries the leader epoch as a raw `int32` and stays raw
+    /// here; the consensus epoch is always non-negative.
     #[allow(clippy::cast_possible_wrap)]
-    fn epoch_to_wire(e: LeaderEpoch) -> i32 {
+    fn epoch_to_wire(e: Epoch) -> i32 {
         i32::try_from(e).unwrap_or(i32::MAX)
     }
     #[allow(clippy::cast_sign_loss)]
-    fn epoch_from_wire(e: i32) -> LeaderEpoch {
+    fn epoch_from_wire(e: i32) -> Epoch {
         u32::try_from(e).unwrap_or(0)
     }
     /// `NodeId` (u64) <-> wire `i32` replica id.
     fn node_to_wire(n: NodeId) -> i32 {
-        i32::try_from(n).unwrap_or(i32::MAX)
+        i32::try_from(n.0).unwrap_or(i32::MAX)
     }
     #[allow(clippy::cast_sign_loss)]
     fn node_from_wire(n: i32) -> NodeId {
-        u64::try_from(n).unwrap_or(0)
+        NodeId(u64::try_from(n).unwrap_or(0))
     }
 
     fn encode_body<T: Encode>(msg: &T, version: i16) -> Bytes {
@@ -822,15 +827,16 @@ pub mod wire {
 
     #[cfg(test)]
     mod tests {
-        use super::*;
         use assert2::{assert, check};
+
+        use super::*;
 
         #[test]
         fn vote_request_round_trips() {
             let req = PeerRequest::Vote {
-                voter_id: 9,
+                voter_id: NodeId(9),
                 candidate_epoch: 3,
-                candidate: 7,
+                candidate: NodeId(7),
                 last_epoch: 2,
                 last_offset: 42,
                 pre_vote: true,
@@ -841,9 +847,9 @@ pub mod wire {
         #[test]
         fn generic_request_decode_accepts_vote_request() {
             let req = PeerRequest::Vote {
-                voter_id: 9,
+                voter_id: NodeId(9),
                 candidate_epoch: 3,
-                candidate: 7,
+                candidate: NodeId(7),
                 last_epoch: 2,
                 last_offset: 42,
                 pre_vote: true,
@@ -856,9 +862,9 @@ pub mod wire {
             use crabka_protocol::Decode;
 
             let req = PeerRequest::Vote {
-                voter_id: 9,
+                voter_id: NodeId(9),
                 candidate_epoch: 3,
-                candidate: 7,
+                candidate: NodeId(7),
                 last_epoch: 2,
                 last_offset: 42,
                 pre_vote: true,
@@ -878,12 +884,12 @@ pub mod wire {
         #[test]
         fn begin_end_round_trip() {
             let begin = PeerRequest::BeginQuorumEpoch {
-                leader_id: 5,
+                leader_id: NodeId(5),
                 leader_epoch: 9,
             };
             assert!(decode_begin(&begin.encode()) == Some(begin));
             let end = PeerRequest::EndQuorumEpoch {
-                leader_id: 1,
+                leader_id: NodeId(1),
                 leader_epoch: 4,
             };
             assert!(decode_end(&end.encode()) == Some(end));
@@ -894,7 +900,7 @@ pub mod wire {
             use crabka_protocol::Decode;
 
             let begin = PeerRequest::BeginQuorumEpoch {
-                leader_id: 5,
+                leader_id: NodeId(5),
                 leader_epoch: 9,
             };
             let mut begin_cur = &begin.encode()[..];
@@ -907,7 +913,7 @@ pub mod wire {
             assert!(begin_partition.leader_epoch == 9);
 
             let end = PeerRequest::EndQuorumEpoch {
-                leader_id: 1,
+                leader_id: NodeId(1),
                 leader_epoch: 4,
             };
             let mut end_cur = &end.encode()[..];
@@ -922,7 +928,7 @@ pub mod wire {
         #[test]
         fn fetch_request_round_trips() {
             let req = PeerRequest::Fetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 11,
             };
@@ -931,11 +937,10 @@ pub mod wire {
 
         #[test]
         fn encoded_fetch_request_carries_replica_state_epoch_sentinel() {
-            use crabka_protocol::Decode;
-            use crabka_protocol::owned::fetch_request::FetchRequest;
+            use crabka_protocol::{Decode, owned::fetch_request::FetchRequest};
 
             let req = PeerRequest::Fetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 11,
             };
@@ -1035,7 +1040,7 @@ pub mod wire {
         #[test]
         fn fetch_response_carries_snapshot_id() {
             let resp = PeerResponse::Fetch {
-                leader_id: 1,
+                leader_id: NodeId(1),
                 leader_epoch: 4,
                 diverging: None,
                 snapshot_id: Some((42, 3)),
@@ -1048,7 +1053,7 @@ pub mod wire {
         #[test]
         fn fetch_snapshot_request_round_trips() {
             let req = PeerRequest::FetchSnapshot {
-                from: 2,
+                from: NodeId(2),
                 snapshot_id: (42, 3),
                 position: 128,
                 max_bytes: 4096,
@@ -1061,7 +1066,7 @@ pub mod wire {
             use crabka_protocol::Decode;
 
             let req = PeerRequest::FetchSnapshot {
-                from: 2,
+                from: NodeId(2),
                 snapshot_id: (42, 3),
                 position: 128,
                 max_bytes: 4096,
@@ -1094,7 +1099,7 @@ pub mod wire {
         #[test]
         fn fetch_response_round_trips() {
             let with_records = PeerResponse::Fetch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 5,
                 diverging: None,
                 snapshot_id: None,
@@ -1104,7 +1109,7 @@ pub mod wire {
             assert!(PeerResponse::decode_fetch(&with_records.encode()) == Some(with_records));
 
             let diverged = PeerResponse::Fetch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 5,
                 diverging: Some(LogOffsetMetadata {
                     offset: 5,
@@ -1119,11 +1124,10 @@ pub mod wire {
 
         #[test]
         fn encoded_fetch_response_carries_partition_success_fields() {
-            use crabka_protocol::Decode;
-            use crabka_protocol::owned::fetch_response::FetchResponse;
+            use crabka_protocol::{Decode, owned::fetch_response::FetchResponse};
 
             let resp = PeerResponse::Fetch {
-                leader_id: 2,
+                leader_id: NodeId(2),
                 leader_epoch: 5,
                 diverging: None,
                 snapshot_id: None,
@@ -1143,11 +1147,12 @@ pub mod wire {
 
         #[test]
         fn fetch_wire_carries_metadata_topic_id() {
-            use crabka_protocol::Decode;
-            use crabka_protocol::owned::fetch_request::FetchRequest;
-            use crabka_protocol::owned::fetch_response::FetchResponse;
+            use crabka_protocol::{
+                Decode,
+                owned::{fetch_request::FetchRequest, fetch_response::FetchResponse},
+            };
             let req = PeerRequest::Fetch {
-                from: 2,
+                from: NodeId(2),
                 fetch_epoch: 1,
                 fetch_offset: 5,
             };
@@ -1156,7 +1161,7 @@ pub mod wire {
             assert!(dreq.topics[0].topic_id == METADATA_TOPIC_ID);
 
             let resp = PeerResponse::Fetch {
-                leader_id: 1,
+                leader_id: NodeId(1),
                 leader_epoch: 4,
                 diverging: None,
                 snapshot_id: None,

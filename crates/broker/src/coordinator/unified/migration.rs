@@ -4,22 +4,27 @@
 //! convertibility predicates, and the state translation helpers used by live
 //! migration.
 
-use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use bytes::{BufMut, Bytes, BytesMut};
-
-use crabka_protocol::owned::consumer_protocol_assignment::{
-    ConsumerProtocolAssignment, TopicPartition,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        consumer_protocol_assignment::{ConsumerProtocolAssignment, TopicPartition},
+        consumer_protocol_subscription::ConsumerProtocolSubscription,
+    },
+    primitives::uuid::Uuid,
 };
-use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::{Decode, Encode};
 
-use super::classic_state::{Group as ClassicState, Member as ClassicMember, select_protocol};
-use super::consumer_state::{ClassicMemberFacade, GroupState as ConsumerState, MemberState};
-use super::persistence_next_gen::MemberAssignmentState;
-use super::reconciler::ReconcileInput;
+use super::{
+    classic_state::{Group as ClassicState, Member as ClassicMember, select_protocol},
+    consumer_state::{ClassicMemberFacade, GroupState as ConsumerState, MemberState},
+    persistence_next_gen::MemberAssignmentState,
+    reconciler::ReconcileInput,
+};
 
 /// Decode a classic member's `protocol_metadata` blob as a
 /// `ConsumerProtocolSubscription`. The blob carries a leading `i16` version
@@ -435,14 +440,16 @@ pub(crate) fn build_hosted_classic_join_result(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
-    use bytes::{Buf, BufMut, Bytes, BytesMut};
-    use crabka_protocol::Encode;
-    use crabka_protocol::primitives::uuid::Uuid;
     use std::time::Duration;
 
-    use super::super::classic_state::{Group, Member};
+    use assert2::{assert, check};
+    use bytes::{Buf, BufMut, Bytes, BytesMut};
+    use crabka_protocol::{Encode, primitives::uuid::Uuid};
+
+    use super::{
+        super::classic_state::{Group, Member},
+        *,
+    };
 
     /// Encode a `ConsumerProtocolSubscription` with the leading version prefix,
     /// as a real classic consumer client sends in its `JoinGroup` protocol
@@ -602,12 +609,13 @@ mod tests {
 
     #[test]
     fn downgrade_re_expresses_members_as_classic() {
-        use crate::coordinator::unified::classic_state::GroupState as ClassicGroupState;
-        use crate::coordinator::unified::consumer_state::{
-            ClassicMemberFacade, GroupState, MemberState,
-        };
-        use crate::coordinator::unified::persistence_next_gen::MemberAssignmentState;
         use std::time::{Duration, Instant};
+
+        use crate::coordinator::unified::{
+            classic_state::GroupState as ClassicGroupState,
+            consumer_state::{ClassicMemberFacade, GroupState, MemberState},
+            persistence_next_gen::MemberAssignmentState,
+        };
 
         let t1 = Uuid([1; 16]);
         let image = ReconcileInput {

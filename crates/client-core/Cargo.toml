@@ -23,6 +23,7 @@ mock = []
 [dependencies]
 crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
 crabka-security = { version = "0.3.8", path = "../security" }
+crabka-ids = { version = "0.3.8", path = "../ids" }
 async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }

@@ -3,13 +3,11 @@
 use crabka_blockstore::Labels;
 use prost::Message;
 
-use crate::SymbolTable;
-
-use super::histogram::v2_histogram_to_native;
 use super::{
-    DecodedExemplar, DecodedMetadata, DecodedSample, DecodedSeries, WireError, pb,
-    snappy_block_decode,
+    DecodedExemplar, DecodedMetadata, DecodedSample, DecodedSeries, WireError,
+    histogram::v2_histogram_to_native, pb, snappy_block_decode,
 };
+use crate::SymbolTable;
 
 /// Written sample tallies for the v2 response headers.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]

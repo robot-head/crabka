@@ -5,18 +5,22 @@
 //! rolling. Intentionally exercises both the active-segment hot path and the
 //! sealed-segment scan path.
 
-use bytes::Bytes;
-use crabka_log::{Log, LogConfig, VerbatimBatch};
-use crabka_protocol::records::{Record, RecordBatch};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
 #[cfg(unix)]
 use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::io::{IoSlice, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
+use bytes::Bytes;
+use crabka_ids::{LeaderEpoch, Offset, ProducerId};
+use crabka_log::{Log, LogConfig, VerbatimBatch};
+use crabka_protocol::records::{Record, RecordBatch};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use tempfile::tempdir;
 
 fn make_batch(n: i32, payload_size: usize) -> RecordBatch {
@@ -46,8 +50,8 @@ fn make_verbatim_from_batch(batch: &RecordBatch) -> VerbatimBatch {
         bytes: buf.freeze(),
         last_offset_delta: batch.last_offset_delta,
         max_timestamp: batch.max_timestamp,
-        leader_epoch: batch.partition_leader_epoch,
-        producer_id: batch.producer_id,
+        leader_epoch: LeaderEpoch(batch.partition_leader_epoch),
+        producer_id: ProducerId(batch.producer_id),
         is_transactional: batch.attributes.is_transactional(),
     }
 }
@@ -266,20 +270,20 @@ fn bench_read(c: &mut Criterion) {
 
     group.bench_function("from_start_1MiB", |b| {
         b.iter(|| {
-            let out = log.read(black_box(0), 1024 * 1024).unwrap();
+            let out = log.read(black_box(Offset(0)), 1024 * 1024).unwrap();
             black_box(out);
         });
     });
 
     group.bench_function("from_start_unbounded", |b| {
         b.iter(|| {
-            let out = log.read(black_box(0), usize::MAX).unwrap();
+            let out = log.read(black_box(Offset(0)), usize::MAX).unwrap();
             black_box(out);
         });
     });
 
     group.bench_function("from_middle_1MiB", |b| {
-        let mid = end / 2;
+        let mid = Offset(end.0 / 2);
         b.iter(|| {
             let out = log.read(black_box(mid), 1024 * 1024).unwrap();
             black_box(out);
@@ -287,7 +291,7 @@ fn bench_read(c: &mut Criterion) {
     });
 
     group.bench_function("from_end_minus_100_1MiB", |b| {
-        let near_end = (end - 100).max(0);
+        let near_end = (end - 100).max(Offset(0));
         b.iter(|| {
             let out = log.read(black_box(near_end), 1024 * 1024).unwrap();
             black_box(out);

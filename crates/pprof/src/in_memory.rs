@@ -1,20 +1,25 @@
 //! Test in-memory profile store.
 
-use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
-use arrow::array::{ArrayRef, BinaryBuilder, Int64Builder, StringDictionaryBuilder, UInt64Builder};
-use arrow::datatypes::Int32Type;
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{ArrayRef, BinaryBuilder, Int64Builder, StringDictionaryBuilder, UInt64Builder},
+    datatypes::Int32Type,
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
-use datafusion::catalog::MemTable;
-use datafusion::prelude::SessionContext;
+use datafusion::{catalog::MemTable, prelude::SessionContext};
 use regex::Regex;
 
-use crate::error::ProfileError;
-use crate::samples::profile_samples_schema;
-use crate::store::{ProfileScan, ProfileStats, ProfileStore};
-use crate::symbol_db::SymbolDb;
+use crate::{
+    error::ProfileError,
+    samples::profile_samples_schema,
+    store::{ProfileScan, ProfileStats, ProfileStore},
+    symbol_db::SymbolDb,
+};
 
 #[derive(Clone, Debug)]
 struct SampleRow {
@@ -435,8 +440,10 @@ fn label_value<'a>(row: &'a SampleRow, name: &str) -> Option<&'a str> {
 mod tests {
     use assert2::assert;
     use crabka_blockstore::{LabelMatcher, MatchOp};
-    use datafusion::arrow::array::AsArray;
-    use datafusion::arrow::datatypes::{Int64Type, UInt64Type};
+    use datafusion::arrow::{
+        array::AsArray,
+        datatypes::{Int64Type, UInt64Type},
+    };
 
     use super::*;
     use crate::{FunctionRec, LineRec, LocationRec};

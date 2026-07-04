@@ -4,12 +4,12 @@ mod client;
 mod server;
 
 pub use client::ScramClientExchange;
-pub use server::{ScramServerExchange, StepResult};
-
-use crate::SaslMechanism;
 use hmac::{Hmac, KeyInit, Mac};
 use ring::rand::{SecureRandom, SystemRandom};
+pub use server::{ScramServerExchange, StepResult};
 use sha2::{Digest, Sha256, Sha512};
+
+use crate::SaslMechanism;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScramCredential {
@@ -165,11 +165,11 @@ fn derive_keys_sha256(salted: &[u8]) -> (Vec<u8>, Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
-    use base64::Engine;
-    use base64::engine::general_purpose::STANDARD as B64;
+    use base64::{Engine, engine::general_purpose::STANDARD as B64};
     use sha2::{Digest, Sha512};
+
+    use super::*;
 
     /// SHA-512 PBKDF2 vector + verify `stored_key = H(client_key)`.
     #[test]
@@ -223,9 +223,13 @@ mod tests {
         assert!(a.salt != b.salt, "fresh salt each call");
     }
 
-    use crate::AuthError;
-    use crate::scram::client::ScramClientExchange;
-    use crate::scram::server::{ScramServerExchange, StepResult};
+    use crate::{
+        AuthError,
+        scram::{
+            client::ScramClientExchange,
+            server::{ScramServerExchange, StepResult},
+        },
+    };
 
     #[test]
     fn scram_server_and_client_round_trip() {

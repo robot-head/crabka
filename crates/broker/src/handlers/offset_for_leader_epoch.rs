@@ -12,20 +12,26 @@
 //! Reference: KIP-101 (Alter Replication Protocol to use Leader Epoch
 //! rather than High Watermark for Truncation).
 
-use bytes::{Bytes, BytesMut};
 use std::sync::atomic::Ordering;
 
+use bytes::{Bytes, BytesMut};
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest;
-use crabka_protocol::owned::offset_for_leader_epoch_response::{
-    EpochEndOffset, OffsetForLeaderEpochResponse, OffsetForLeaderTopicResult,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        offset_for_leader_epoch_request::OffsetForLeaderEpochRequest,
+        offset_for_leader_epoch_response::{
+            EpochEndOffset, OffsetForLeaderEpochResponse, OffsetForLeaderTopicResult,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 #[allow(clippy::unused_async)] // async to match the inline-intercept handler shape.
 #[tracing::instrument(
@@ -99,7 +105,9 @@ pub(crate) async fn handle(
                     ..Default::default()
                 };
 
-                let Some(p) = partitions.get(&topic.topic, part.partition) else {
+                let Some(p) =
+                    partitions.get(&topic.topic, crabka_ids::PartitionIndex(part.partition))
+                else {
                     out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
                     parts_out.push(out);
                     continue;
@@ -119,12 +127,14 @@ pub(crate) async fn handle(
                     // is the truncation point) for older epochs.
                     let log = p.log.lock().expect("log mutex poisoned");
                     let leo = log.log_end_offset();
+                    // Wrap the raw wire `requested_epoch` for the log-crate seam.
                     let end_offset = log
                         .epoch_checkpoint()
-                        .end_offset_for_epoch(part.leader_epoch, leo);
+                        .end_offset_for_epoch(crabka_log::LeaderEpoch(part.leader_epoch), leo);
                     drop(log);
                     out.error_code = codes::NONE;
-                    out.end_offset = end_offset;
+                    // Unwrap the log-layer `Offset` into the wire `i64` field.
+                    out.end_offset = end_offset.0;
                     // Report the leader's view of the epoch (same as
                     // requested unless our checkpoint doesn't know the
                     // exact epoch, in which case end_offset == -1).
@@ -174,8 +184,9 @@ fn topic_describe_denied(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn topic_describe_denied_yields_topic_authorization_failed_rows() {

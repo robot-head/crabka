@@ -14,11 +14,13 @@
 //! errors become `Deny`, which is the safe behavior for a brief OPA
 //! outage; entries expire on TTL so OPA recovery is observable.
 
-use std::collections::HashSet;
-use std::net::IpAddr;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::{
+    collections::HashSet,
+    net::IpAddr,
+    num::NonZeroUsize,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use crabka_authz::{AclSource, AuthorizationRequest, AuthorizationResult, Authorizer};
 use crabka_metadata::{AclOperation, ResourceType};
@@ -355,14 +357,15 @@ fn resource_type_str(t: ResourceType) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::net::SocketAddr;
+
     use assert2::assert;
     use crabka_metadata::MetadataImage;
     use crabka_security::{AuthMethod, Principal};
-    use std::net::SocketAddr;
     use uuid::Uuid;
-    use wiremock::matchers::method;
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    use super::*;
 
     fn test_principal(name: &str) -> Principal {
         Principal {

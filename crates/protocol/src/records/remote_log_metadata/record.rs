@@ -8,12 +8,16 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crate::owned::remote_log_segment_metadata_record::RemoteLogSegmentMetadataRecord;
-use crate::owned::remote_log_segment_metadata_snapshot_record::RemoteLogSegmentMetadataSnapshotRecord;
-use crate::owned::remote_log_segment_metadata_update_record::RemoteLogSegmentMetadataUpdateRecord;
-use crate::owned::remote_partition_delete_metadata_record::RemotePartitionDeleteMetadataRecord;
-use crate::records::metadata::envelope::{decode_value_header, encode_value};
-use crate::{Decode, Encode, ProtocolError};
+use crate::{
+    Decode, Encode, ProtocolError,
+    owned::{
+        remote_log_segment_metadata_record::RemoteLogSegmentMetadataRecord,
+        remote_log_segment_metadata_snapshot_record::RemoteLogSegmentMetadataSnapshotRecord,
+        remote_log_segment_metadata_update_record::RemoteLogSegmentMetadataUpdateRecord,
+        remote_partition_delete_metadata_record::RemotePartitionDeleteMetadataRecord,
+    },
+    records::metadata::envelope::{decode_value_header, encode_value},
+};
 
 /// One `__remote_log_metadata` record (the value of a Kafka `Record`). All four
 /// record schemas are version 0, so the apiVersion is always written as 0.
@@ -122,8 +126,9 @@ impl RemoteLogMetadataRecord {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn segment_record_roundtrips_through_dispatch() {

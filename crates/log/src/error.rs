@@ -1,5 +1,6 @@
 //! Errors returned by `Log` and `Segment`.
 
+use crabka_ids::Offset;
 use thiserror::Error;
 
 /// Errors returned by [`Log`](crate::Log) and [`Segment`](crate::Segment).
@@ -15,7 +16,7 @@ pub enum LogError {
     #[error("partial batch at offset {file_offset} in segment {segment}: truncating")]
     PartialBatch {
         /// Absolute base offset of the segment containing the partial batch.
-        segment: i64,
+        segment: Offset,
         /// Byte position within the `.log` file where the partial batch starts.
         file_offset: u64,
     },
@@ -27,7 +28,7 @@ pub enum LogError {
     )]
     CrcMismatch {
         /// Absolute base offset of the segment.
-        segment: i64,
+        segment: Offset,
         /// Byte position within the `.log` file where the corrupt batch starts.
         file_offset: u64,
         /// CRC value embedded in the batch header.
@@ -40,9 +41,9 @@ pub enum LogError {
     #[error("offset {requested} below log start {log_start}")]
     OffsetTooLow {
         /// Offset the caller asked for.
-        requested: i64,
+        requested: Offset,
         /// Current log start.
-        log_start: i64,
+        log_start: Offset,
     },
 
     /// Encoding/decoding of a `RecordBatch` failed.
@@ -60,9 +61,9 @@ pub enum LogError {
     #[error("offset mismatch: expected {expected}, got {actual}")]
     OffsetMismatch {
         /// The offset the log expected — i.e. its current end offset.
-        expected: i64,
+        expected: Offset,
         /// The offset the caller actually supplied.
-        actual: i64,
+        actual: Offset,
     },
 
     /// A log file (e.g., `.txnindex`) is corrupt: wrong size, bad checksum, etc.
@@ -76,13 +77,14 @@ pub enum LogError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn display_partial_batch() {
         let e = LogError::PartialBatch {
-            segment: 0,
+            segment: Offset(0),
             file_offset: 1024,
         };
         assert!(e.to_string().contains("offset 1024"));

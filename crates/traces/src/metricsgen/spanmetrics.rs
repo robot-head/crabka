@@ -2,9 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::metricsgen::config::MetricsGenConfig;
-use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
-use crate::metricsgen::series::{Exemplar, Series, SeriesSample, sorted_labels};
+use crate::metricsgen::{
+    config::MetricsGenConfig,
+    contract::{SpanKind, SpanRecord, StatusCode},
+    series::{Exemplar, Series, SeriesSample, sorted_labels},
+};
 
 const NS_PER_SEC: f64 = 1_000_000_000.0;
 
@@ -259,9 +261,11 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
-    use crate::metricsgen::config::MetricsGenConfig;
-    use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
-    use crate::metricsgen::series::{Series, SeriesSample};
+    use crate::metricsgen::{
+        config::MetricsGenConfig,
+        contract::{SpanKind, SpanRecord, StatusCode},
+        series::{Series, SeriesSample},
+    };
 
     fn span(
         service: &str,

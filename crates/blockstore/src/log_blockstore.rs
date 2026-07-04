@@ -1,34 +1,41 @@
 //! Shared columnar block-store primitives for Crabka observability signals.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
-use std::io::{self, Cursor};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File},
+    io::{self, Cursor},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
-use datafusion::arrow::array::{
-    Array, Int64Array, MapArray, MapBuilder, RecordBatch, StringArray, StringBuilder, UInt64Array,
+use datafusion::{
+    arrow::{
+        array::{
+            Array, Int64Array, MapArray, MapBuilder, RecordBatch, StringArray, StringBuilder,
+            UInt64Array,
+        },
+        datatypes::{DataType, Field, Fields, Schema},
+        error::ArrowError,
+    },
+    catalog::Session,
+    datasource::{
+        MemTable, TableProvider,
+        file_format::parquet::ParquetFormat,
+        listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
+        provider::TableProviderFilterPushDown,
+    },
+    error::DataFusionError,
+    logical_expr::{Expr, TableType},
+    parquet::{
+        arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder},
+        errors::ParquetError,
+    },
+    physical_plan::ExecutionPlan,
+    prelude::SessionContext,
 };
-use datafusion::arrow::datatypes::{DataType, Field, Fields, Schema};
-use datafusion::arrow::error::ArrowError;
-use datafusion::catalog::Session;
-use datafusion::datasource::MemTable;
-use datafusion::datasource::TableProvider;
-use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::datasource::listing::ListingTableUrl;
-use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig};
-use datafusion::datasource::provider::TableProviderFilterPushDown;
-use datafusion::error::DataFusionError;
-use datafusion::logical_expr::{Expr, TableType};
-use datafusion::parquet::arrow::ArrowWriter;
-use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use datafusion::parquet::errors::ParquetError;
-use datafusion::physical_plan::ExecutionPlan;
-use datafusion::prelude::SessionContext;
 use futures::StreamExt as _;
-use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectStoreExt};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path as ObjectPath};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

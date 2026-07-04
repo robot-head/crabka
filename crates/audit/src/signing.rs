@@ -7,7 +7,10 @@ use std::path::Path;
 
 use ring::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
-use crate::sink::AuditError;
+use crate::{
+    ids::{EpochMs, Seq},
+    sink::AuditError,
+};
 
 /// Domain-separation prefix for checkpoint signatures (versioned).
 pub const CHECKPOINT_DOMAIN: &[u8] = b"crabka-audit-ckpt-v1\0";
@@ -84,9 +87,9 @@ impl SigningKeyProvider for FileEd25519Signer {
 #[must_use]
 pub fn checkpoint_signing_bytes(
     key_id: &str,
-    seq_high: u64,
+    seq_high: Seq,
     head: &[u8; 32],
-    time_ms: i64,
+    time_ms: EpochMs,
 ) -> Vec<u8> {
     let kid = key_id.as_bytes();
     #[allow(clippy::cast_possible_truncation)]
@@ -95,9 +98,9 @@ pub fn checkpoint_signing_bytes(
     v.extend_from_slice(CHECKPOINT_DOMAIN);
     v.extend_from_slice(&kid_len.to_be_bytes());
     v.extend_from_slice(kid);
-    v.extend_from_slice(&seq_high.to_be_bytes());
+    v.extend_from_slice(&seq_high.0.to_be_bytes());
     v.extend_from_slice(head);
-    v.extend_from_slice(&time_ms.to_be_bytes());
+    v.extend_from_slice(&time_ms.0.to_be_bytes());
     v
 }
 
@@ -111,10 +114,13 @@ pub fn verify_signature(public_key: &[u8], msg: &[u8], sig: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
-    use ring::rand::SystemRandom;
-    use ring::signature::{Ed25519KeyPair, KeyPair};
+    use ring::{
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+
+    use super::*;
 
     fn fresh_signer(key_id: &str) -> (FileEd25519Signer, Vec<u8>) {
         let rng = SystemRandom::new();
@@ -144,14 +150,16 @@ mod tests {
     #[test]
     fn checkpoint_bytes_are_canonical_and_field_sensitive() {
         let head = [9u8; 32];
-        let base = checkpoint_signing_bytes("k1", 42, &head, 1_700_000_000_000);
-        check!(base == checkpoint_signing_bytes("k1", 42, &head, 1_700_000_000_000));
+        let base = checkpoint_signing_bytes("k1", Seq(42), &head, EpochMs(1_700_000_000_000));
+        check!(base == checkpoint_signing_bytes("k1", Seq(42), &head, EpochMs(1_700_000_000_000)));
         check!(base.starts_with(CHECKPOINT_DOMAIN));
         // any field change changes the bytes
-        check!(checkpoint_signing_bytes("k2", 42, &head, 1_700_000_000_000) != base);
-        check!(checkpoint_signing_bytes("k1", 43, &head, 1_700_000_000_000) != base);
-        check!(checkpoint_signing_bytes("k1", 42, &[8u8; 32], 1_700_000_000_000) != base);
-        check!(checkpoint_signing_bytes("k1", 42, &head, 1) != base);
+        check!(checkpoint_signing_bytes("k2", Seq(42), &head, EpochMs(1_700_000_000_000)) != base);
+        check!(checkpoint_signing_bytes("k1", Seq(43), &head, EpochMs(1_700_000_000_000)) != base);
+        check!(
+            checkpoint_signing_bytes("k1", Seq(42), &[8u8; 32], EpochMs(1_700_000_000_000)) != base
+        );
+        check!(checkpoint_signing_bytes("k1", Seq(42), &head, EpochMs(1)) != base);
     }
 
     #[test]

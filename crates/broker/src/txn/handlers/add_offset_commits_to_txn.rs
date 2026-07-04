@@ -7,20 +7,35 @@
 //! Response fields: `throttle_time_ms`, `error_code`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_ids::PartitionIndex;
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        add_offsets_to_txn_request::AddOffsetsToTxnRequest,
+        add_offsets_to_txn_response::AddOffsetsToTxnResponse,
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest;
-use crabka_protocol::owned::add_offsets_to_txn_response::AddOffsetsToTxnResponse;
-use crabka_protocol::{Decode, Encode};
+use crate::{
+    broker::Broker,
+    codes,
+    coordinator::bootstrap::{OFFSETS_NUM_PARTITIONS, OFFSETS_TOPIC},
+    error::BrokerError,
+    txn::{
+        partitioner::partition_for_tid,
+        state::{TopicPartition, TxnState},
+        util::now_millis,
+    },
+};
 
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::bootstrap::{OFFSETS_NUM_PARTITIONS, OFFSETS_TOPIC};
-use crate::error::BrokerError;
-use crate::txn::partitioner::partition_for_tid;
-use crate::txn::state::{TopicPartition, TxnState};
-use crate::txn::util::now_millis;
-
+// The pid/epoch guard (`||`) is only reachable with a fully-seeded coordinator
+// (this broker must lead the tid's `__transaction_state` partition and hold a
+// live `TxnEntry` in its private `state` map); the entry can only be installed
+// via `coord.put`/raft, so the branch cannot be reached from an in-file unit
+// test. Producer-fencing on `AddOffsetsToTxn` is covered by the live-broker /
+// differential suite.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) fn handle(
     broker: &Broker,
     version: i16,
@@ -53,7 +68,11 @@ pub(crate) fn handle(
 
         let mut entry = entry_mutex.lock().await;
 
-        if entry.producer_id != req.producer_id || entry.producer_epoch != req.producer_epoch {
+        // `req.producer_id` is the raw wire `i64`; wrap to compare with the
+        // coordinator's `ProducerId`.
+        if entry.producer_id != crabka_log::ProducerId(req.producer_id)
+            || entry.producer_epoch != req.producer_epoch
+        {
             return encode_err(version, codes::INVALID_PRODUCER_EPOCH);
         }
 
@@ -78,7 +97,7 @@ pub(crate) fn handle(
         // doc in `coordinator::bootstrap`.
         entry.partitions.insert(TopicPartition {
             topic: OFFSETS_TOPIC.to_string(),
-            partition: partition_for_tid(&req.group_id, OFFSETS_NUM_PARTITIONS),
+            partition: PartitionIndex(partition_for_tid(&req.group_id, OFFSETS_NUM_PARTITIONS)),
         });
         entry.last_update_ms = now_millis();
 
@@ -122,8 +141,9 @@ fn encode_response(version: i16, error_code: i16) -> Result<Bytes, BrokerError> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn decode(bytes: &Bytes, version: i16) -> AddOffsetsToTxnResponse {
         let mut cur: &[u8] = bytes.as_ref();

@@ -1,6 +1,6 @@
+use std::{fs, path::Path};
+
 use serde::Deserialize;
-use std::fs;
-use std::path::Path;
 use thiserror::Error;
 
 /// One parsed Kafka message schema.
@@ -224,8 +224,9 @@ fn strip_line_comments(src: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn version_range_parsing() {

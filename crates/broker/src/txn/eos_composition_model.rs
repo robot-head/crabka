@@ -38,13 +38,15 @@
 
 use std::time::Duration;
 
+use crabka_log::{Offset, ProducerId};
 use stateright::{Checker, Model, Property};
 
-use super::decision::{CompletionDecision, decide_end_txn_completion, decide_phase1_transition};
-use super::state::{TxnEntry, TxnState};
-use super::version::TxnVersion;
-use crate::handlers::fetch::compute_visibility_window;
-use crate::producer_id_manager::ProducerIdManager;
+use super::{
+    decision::{CompletionDecision, decide_end_txn_completion, decide_phase1_transition},
+    state::{TxnEntry, TxnState},
+    version::TxnVersion,
+};
+use crate::{handlers::fetch::compute_visibility_window, producer_id_manager::ProducerIdManager};
 
 const TARGET_STATE_COUNT: usize = 20_000_000;
 const MAX_UNIQUE_STATES: usize = 2_000_000;
@@ -84,7 +86,7 @@ struct EosState {
     /// advanced by `Ack`. An OPEN transaction's not-yet-replicated records can
     /// push the LSO ABOVE the HWM, so the real `compute_visibility_window`
     /// clamp `effective_lso = lso.min(hw)` genuinely bites (returns `hw`).
-    hw: i64,
+    hw: Offset,
 }
 
 struct EosModel {
@@ -101,7 +103,14 @@ fn tstate(id: i8) -> TxnState {
 /// Rebuild a real `TxnEntry` for producer `p` so the real decision cores behave
 /// exactly as in a live run (partitions/timestamps don't affect the decision).
 fn rebuild(p: usize, pr: Prod) -> TxnEntry {
-    let mut e = TxnEntry::new_empty("tid".to_string(), PID0 + p as i64, pr.epoch, 60_000, 1);
+    // Per-producer pid = PID0 + index; wrap into `ProducerId` at the seam.
+    let mut e = TxnEntry::new_empty(
+        "tid".to_string(),
+        ProducerId(PID0 + p as i64),
+        pr.epoch,
+        60_000,
+        1,
+    );
     e.state = tstate(pr.state);
     e
 }
@@ -123,7 +132,7 @@ fn txn_outcome(log: &[Batch], producer: u8, generation: u8) -> Option<Kind> {
 /// else the log end. Kafka's first-unstable-offset rule. Derived from the log
 /// alone (the txn universe is whatever (producer, generation) pairs appear), so
 /// the property closures stay non-capturing.
-fn lso(log: &[Batch]) -> i64 {
+fn lso(log: &[Batch]) -> Offset {
     let mut min_open: Option<i64> = None;
     let mut seen: Vec<(u8, u8)> = Vec::new();
     for (off, b) in log.iter().enumerate() {
@@ -135,31 +144,31 @@ fn lso(log: &[Batch]) -> i64 {
             }
         }
     }
-    min_open.unwrap_or(log.len() as i64)
+    Offset(min_open.unwrap_or(log.len() as i64))
 }
 
 /// The exclusive offset a `read_committed` consumer may see, driving the REAL
 /// `compute_visibility_window` (read-committed branch: `effective_lso =
 /// lso.min(hw)`). When an open txn's records sit above the HWM, `lso > hw` and
 /// the clamp returns `hw` — the consumer never reads above the watermark.
-fn effective_lso(log: &[Batch], hw: i64) -> i64 {
-    let log_end = log.len() as i64;
+fn effective_lso(log: &[Batch], hw: Offset) -> Offset {
+    let log_end = Offset(log.len() as i64);
     let l = lso(log);
     let vw = compute_visibility_window(
-        false,   // consumer, not follower
-        true,    // read_committed
-        0,       // log_start
-        hw,      // hw (may be < log_end: replication lag)
-        l,       // lso
-        log_end, // log_end
-        0,       // fetch_offset
+        false,     // consumer, not follower
+        true,      // read_committed
+        Offset(0), // log_start
+        hw,        // hw (may be < log_end: replication lag)
+        l,         // lso
+        log_end,   // log_end
+        Offset(0), // fetch_offset
     );
     vw.effective_lso // = lso.min(hw)
 }
 
 /// The `read_committed` visible set: `Data` batch offsets below `effective_lso`
 /// whose txn did NOT abort.
-fn visible(log: &[Batch], hw: i64) -> Vec<i64> {
+fn visible(log: &[Batch], hw: Offset) -> Vec<i64> {
     let eff = effective_lso(log, hw);
     (0..log.len() as i64)
         .filter(|&off| off < eff)
@@ -194,7 +203,7 @@ impl Model for EosModel {
                     generation: 0,
                 })
                 .collect(),
-            hw: 0,
+            hw: Offset(0),
         }]
     }
 
@@ -259,7 +268,7 @@ impl Model for EosModel {
                 let ids = ProducerIdManager::new();
                 match decide_end_txn_completion(
                     &entry,
-                    PID0 + i64::from(p),
+                    ProducerId(PID0 + i64::from(p)),
                     pr.epoch,
                     prepare,
                     complete,

@@ -7,8 +7,7 @@
 //! as the principal name. Operators and `KafkaUser` mTLS provisioning
 //! pin ACLs by that DN, so we match it byte-for-byte.
 
-use x509_parser::prelude::FromDer;
-use x509_parser::prelude::X509Certificate;
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 /// Parse `cert_der` and return the Subject DN in RFC 2253 format.
 /// Returns `None` if the bytes don't parse as a valid X.509 cert.
@@ -30,10 +29,10 @@ pub fn extract_principal_from_cert(cert_der: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use rustls::pki_types::CertificateDer;
-    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+
+    use super::*;
 
     #[test]
     fn extracts_subject_dn_from_fixture_client_cert() {

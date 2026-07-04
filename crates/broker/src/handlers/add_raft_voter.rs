@@ -17,18 +17,24 @@
 //! - any other raft error → `UNKNOWN_SERVER_ERROR (-1)`
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType, Voter, VoterEndpoint};
-use crabka_protocol::owned::add_raft_voter_request::AddRaftVoterRequest;
-use crabka_protocol::owned::add_raft_voter_response::AddRaftVoterResponse;
-use crabka_protocol::{Decode, Encode};
-use crabka_raft::RaftError;
-use crabka_raft::reconfig::{AddVoter, ReconfigOutcome};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        add_raft_voter_request::AddRaftVoterRequest, add_raft_voter_response::AddRaftVoterResponse,
+    },
+};
+use crabka_raft::{
+    RaftError,
+    reconfig::{AddVoter, ReconfigOutcome},
+};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 #[tracing::instrument(
     name = "handle_add_raft_voter",
@@ -88,7 +94,7 @@ pub(crate) async fn handle(
     };
 
     let voter = Voter {
-        id,
+        id: crabka_raft::NodeId(id),
         directory_id: uuid::Uuid::from_bytes(req.voter_directory_id.0),
         endpoints: req
             .listeners
@@ -151,13 +157,13 @@ fn encode_resp(version: i16, resp: &AddRaftVoterResponse) -> Result<Bytes, Broke
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc};
+
     use assert2::assert;
-    use crabka_protocol::owned::add_raft_voter_request::Listener;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use crabka_protocol::{
+        owned::add_raft_voter_request::Listener, primitives::uuid::Uuid as ProtoUuid,
+    };
     use crabka_security::{AuthMethod, Principal};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
     use crate::test_support::DenyAll;
 
@@ -184,6 +190,7 @@ mod tests {
         client_id = "admin-client"
     );
 
+    use super::*;
     use crate::test_support::start_broker_with_authorizer as start_broker;
 
     #[test]
@@ -195,14 +202,19 @@ mod tests {
 
     #[test]
     fn not_leader_maps_to_not_leader_or_follower() {
-        let (code, msg) = outcome_to_code(Ok(ReconfigOutcome::NotLeader { leader: Some(3) }));
+        let (code, msg) = outcome_to_code(Ok(ReconfigOutcome::NotLeader {
+            leader: Some(crabka_audit::NodeId(3)),
+        }));
         assert!(code == codes::NOT_LEADER_OR_FOLLOWER);
         assert!(msg.unwrap().contains('3'));
     }
 
     #[test]
     fn not_caught_up_maps_to_invalid_request() {
-        let (code, _) = outcome_to_code(Err(RaftError::VoterNotCaughtUp { id: 7, lag: 99 }));
+        let (code, _) = outcome_to_code(Err(RaftError::VoterNotCaughtUp {
+            id: crabka_audit::NodeId(7),
+            lag: 99,
+        }));
         assert!(code == codes::INVALID_REQUEST);
     }
 

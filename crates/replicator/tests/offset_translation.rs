@@ -5,17 +5,17 @@
 
 mod common;
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
-use crabka_replicator::config::{
-    ClusterConfig, Delivery, FlowConfig, NamingPolicy, ReplicatorConfig, Selectors,
+use crabka_replicator::{
+    config::{ClusterConfig, Delivery, FlowConfig, NamingPolicy, ReplicatorConfig, Selectors},
+    ids::{CommittedOffset, DownstreamOffset, PartitionIndex, UpstreamOffset},
+    mm2::{Checkpoint, OffsetSync},
+    offset_sync_store::OffsetSyncStore,
+    selector::Selector,
+    supervisor::FlowSupervisor,
+    tasks::checkpoint::{CheckpointParams, run_once},
 };
-use crabka_replicator::mm2::{Checkpoint, OffsetSync};
-use crabka_replicator::offset_sync_store::OffsetSyncStore;
-use crabka_replicator::selector::Selector;
-use crabka_replicator::supervisor::FlowSupervisor;
-use crabka_replicator::tasks::checkpoint::{CheckpointParams, run_once};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::too_many_lines)]
@@ -156,7 +156,11 @@ async fn offset_translation_never_skips_unreplicated_data() {
         })
         // MM2 parity: the checkpoint stores the RENAMED (remote) topic that a
         // failed-over consumer reads on the target — `us-east.orders`, not `orders`.
-        .filter(|c| c.group == "analytics" && c.topic == "us-east.orders" && c.partition == 0)
+        .filter(|c| {
+            c.group == "analytics"
+                && c.topic == "us-east.orders"
+                && c.partition == PartitionIndex(0)
+        })
         .last()
         .expect("no checkpoint found for (analytics, us-east.orders, 0)");
 
@@ -173,7 +177,8 @@ async fn offset_translation_never_skips_unreplicated_data() {
 
     // a) The upstream offset equals the committed source offset (50).
     assert_eq!(
-        checkpoint.upstream, 50,
+        checkpoint.upstream,
+        UpstreamOffset(50),
         "upstream committed offset must be 50 (all records consumed); got {}",
         checkpoint.upstream
     );
@@ -181,19 +186,19 @@ async fn offset_translation_never_skips_unreplicated_data() {
     // b) The downstream offset is non-negative and does not exceed what has
     //    actually been replicated — this is the core never-skip invariant.
     assert!(
-        checkpoint.downstream >= 0,
+        checkpoint.downstream >= DownstreamOffset(0),
         "downstream offset must be >= 0; got {}",
         checkpoint.downstream
     );
     assert!(
-        checkpoint.downstream <= replicated_count,
+        checkpoint.downstream <= DownstreamOffset(replicated_count),
         "NEVER-SKIP VIOLATED: downstream={} exceeds replicated_count={}",
         checkpoint.downstream,
         replicated_count
     );
 
     // c) The store's translate() output is consistent with what was written.
-    let translated = store.translate("orders", 0, 50);
+    let translated = store.translate("orders", PartitionIndex(0), CommittedOffset(50));
     assert_eq!(
         translated,
         Some(checkpoint.downstream),

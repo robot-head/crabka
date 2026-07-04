@@ -29,14 +29,18 @@
 use std::net::SocketAddr;
 
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenRequest;
-use crabka_protocol::owned::describe_delegation_token_response::{
-    DescribeDelegationTokenResponse, DescribedDelegationToken, DescribedDelegationTokenRenewer,
+use crabka_protocol::owned::{
+    describe_delegation_token_request::DescribeDelegationTokenRequest,
+    describe_delegation_token_response::{
+        DescribeDelegationTokenResponse, DescribedDelegationToken, DescribedDelegationTokenRenewer,
+    },
 };
 use crabka_security::{KafkaPrincipal, SecretBytes};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
-use crate::network::auth::ConnectionAuth;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer},
+    network::auth::ConnectionAuth,
+};
 
 // `async` matches the call-site shape used by every other
 // `crate::handlers::*::handle`; today the body is purely synchronous.
@@ -198,16 +202,16 @@ fn err_response(code: i16) -> DescribeDelegationTokenResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
+
     use assert2::assert;
     use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
     use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenOwner;
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, Principal, SaslMechanism};
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-    use std::time::Duration;
     use tempfile::TempDir;
+
+    use super::*;
 
     /// Spin up a single-voter `Controller` for tests, wait for leader.
     async fn test_controller(log_dir: std::path::PathBuf) -> Arc<ControllerHandle> {
@@ -215,7 +219,7 @@ mod tests {
             election_timeout: Duration::from_millis(200),
             heartbeat_interval: Duration::from_millis(50),
             client_id: "test".into(),
-            ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
+            ..crabka_raft::ControllerConfig::for_tests(crabka_raft::NodeId(1), log_dir)
         };
         let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
         let mut rx = handle.watch_leader();

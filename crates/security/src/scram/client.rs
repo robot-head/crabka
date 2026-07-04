@@ -2,8 +2,7 @@
 //! Supports SCRAM-SHA-256 and SCRAM-SHA-512; the mechanism is fixed at
 //! construction.
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as B64;
+use base64::{Engine, engine::general_purpose::STANDARD as B64};
 use hmac::{Hmac, KeyInit, Mac};
 use ring::rand::{SecureRandom, SystemRandom};
 use sha2::{Digest, Sha256, Sha512};

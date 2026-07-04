@@ -15,19 +15,24 @@
 use std::collections::BTreeMap;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::describe_transactions_request::DescribeTransactionsRequest;
-use crabka_protocol::owned::describe_transactions_response::{
-    DescribeTransactionsResponse, TopicData, TransactionState,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        describe_transactions_request::DescribeTransactionsRequest,
+        describe_transactions_response::{
+            DescribeTransactionsResponse, TopicData, TransactionState,
+        },
+    },
 };
-use crabka_protocol::{Decode, Encode};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::txn::state::{TxnEntry, TxnState};
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    txn::state::{TxnEntry, TxnState},
+};
 
 const TRANSACTIONAL_ID_NOT_FOUND: i16 = 75;
 
@@ -53,7 +58,7 @@ fn topics_for(entry: &TxnEntry) -> Vec<TopicData> {
         by_topic
             .entry(tp.topic.clone())
             .or_default()
-            .push(tp.partition);
+            .push(tp.partition.get());
     }
     by_topic
         .into_iter()
@@ -126,7 +131,8 @@ pub(crate) async fn handle(
             transaction_state: txn_state_str(entry.state).to_string(),
             transaction_timeout_ms: entry.txn_timeout_ms,
             transaction_start_time_ms: entry.start_ms,
-            producer_id: entry.producer_id,
+            // Unwrap into the raw-`i64` wire field.
+            producer_id: entry.producer_id.get(),
             producer_epoch: entry.producer_epoch,
             topics: topics_for(&entry),
             ..Default::default()
@@ -147,23 +153,24 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::txn::state::TopicPartition;
     use assert2::assert;
 
+    use super::*;
+    use crate::txn::state::TopicPartition;
+
     fn entry() -> TxnEntry {
-        let mut e = TxnEntry::new_empty("tx".into(), 100, 0, 60_000, 1_000);
+        let mut e = TxnEntry::new_empty("tx".into(), crabka_log::ProducerId(100), 0, 60_000, 1_000);
         e.partitions.insert(TopicPartition {
             topic: "b".into(),
-            partition: 2,
+            partition: crabka_ids::PartitionIndex(2),
         });
         e.partitions.insert(TopicPartition {
             topic: "b".into(),
-            partition: 0,
+            partition: crabka_ids::PartitionIndex(0),
         });
         e.partitions.insert(TopicPartition {
             topic: "a".into(),
-            partition: 1,
+            partition: crabka_ids::PartitionIndex(1),
         });
         e
     }

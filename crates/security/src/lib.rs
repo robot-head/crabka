@@ -10,8 +10,9 @@
 //! ## SASL/PLAIN verification
 //!
 //! ```rust
-//! use crabka_security::{AuthMethod, verify_plain};
 //! use std::collections::HashMap;
+//!
+//! use crabka_security::{AuthMethod, verify_plain};
 //!
 //! let mut users = HashMap::new();
 //! users.insert("alice".to_string(), "wonderland".to_string());

@@ -1,8 +1,7 @@
 mod support;
-use support::oracle;
-
 use crabka_compression::{CompressionType, compress, decompress};
 use proptest::prelude::*;
+use support::oracle;
 
 fn arb_payload() -> impl Strategy<Value = Vec<u8>> {
     prop_oneof![

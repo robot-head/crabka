@@ -103,8 +103,9 @@ pub fn from_hex32(s: &str) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn genesis_is_zero() {

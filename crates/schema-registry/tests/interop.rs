@@ -19,19 +19,21 @@
 
 #![allow(clippy::pedantic)]
 
-use std::net::SocketAddr;
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::{
+    net::SocketAddr,
+    process::Command,
+    time::{Duration, Instant},
+};
 
-use axum::body::Body;
-use axum::http::Request;
-use tower::ServiceExt;
-
+use axum::{body::Body, http::Request};
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
-use crabka_schema_registry::kafkastore::KafkaStore;
-use crabka_schema_registry::rest::{self, AppState};
+use crabka_schema_registry::{
+    config::{RegistryConfig, SecurityConfig},
+    kafkastore::KafkaStore,
+    rest::{self, AppState},
+};
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 
 // ── network constants (mirrors capture_fixtures.rs) ──────────────────────────
 
@@ -61,9 +63,9 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         listen_addr,
         advertised_listener: ADVERTISED.into(),
         log_dir: dir.path().to_path_buf(),
-        node_id: 1,
+        node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
-        controller_quorum_voters: vec![(1, controller_addr.to_string())],
+        controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
         heartbeat_interval_ms: 3_000,
         heartbeat_timeout_ms: 9_000,
         replica_lag_time_max_ms: 30_000,

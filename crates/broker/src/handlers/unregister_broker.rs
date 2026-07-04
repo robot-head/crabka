@@ -16,16 +16,21 @@
 //! `INVALID_REQUEST`).
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, MetadataRecord, ResourceType, UnregisterBrokerRecord};
-use crabka_protocol::owned::unregister_broker_request::UnregisterBrokerRequest;
-use crabka_protocol::owned::unregister_broker_response::UnregisterBrokerResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        unregister_broker_request::UnregisterBrokerRequest,
+        unregister_broker_response::UnregisterBrokerResponse,
+    },
+};
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 #[tracing::instrument(
     name = "handle_unregister_broker",
@@ -78,7 +83,7 @@ pub(crate) async fn handle(
         return encode_resp(version, &resp);
     }
 
-    let node_id = u64::try_from(req.broker_id).expect("non-negative");
+    let node_id = crabka_metadata::NodeId(u64::try_from(req.broker_id).expect("non-negative"));
 
     // Existence check. Unknown id → INVALID_REQUEST with a clear message,
     // matching JVM's `BrokerIdNotRegisteredException → INVALID_REQUEST`
@@ -122,16 +127,14 @@ fn encode_resp(version: i16, resp: &UnregisterBrokerResponse) -> Result<Bytes, B
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{net::SocketAddr, sync::Arc};
+
     use assert2::assert;
     use crabka_protocol::owned::unregister_broker_response::{self, UnregisterBrokerResponse};
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use crate::authorizer::Authorizer;
-    use crate::broker::BrokerHandle;
-    use crate::test_support::DenyAll;
+    use super::*;
+    use crate::{authorizer::Authorizer, broker::BrokerHandle, test_support::DenyAll};
 
     fn encode_request(req: &UnregisterBrokerRequest, version: i16) -> Bytes {
         crate::test_support::encode_request(req, version)

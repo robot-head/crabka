@@ -9,25 +9,30 @@
 //! under test.
 
 use bytes::{Bytes, BytesMut};
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-
 use crabka_compression::CompressionType;
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::metadata_response::{
-    MetadataResponse, MetadataResponseBroker, MetadataResponsePartition, MetadataResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        api_versions_response::{ApiVersion, ApiVersionsResponse},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        metadata_response::{
+            MetadataResponse, MetadataResponseBroker, MetadataResponsePartition,
+            MetadataResponseTopic,
+        },
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    primitives::{
+        array, fixed, string_bytes,
+        uuid::{Uuid, get_uuid, put_uuid},
+        varint,
+    },
+    records::{Attributes, Record, RecordBatch, produce_framing},
+    tagged_fields::{
+        UnknownTaggedField, UnknownTaggedFields, WriteTaggedFields, tagged_fields_len,
+    },
 };
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
-};
-use crabka_protocol::primitives::uuid::{Uuid, get_uuid, put_uuid};
-use crabka_protocol::primitives::{array, fixed, string_bytes, varint};
-use crabka_protocol::records::{Attributes, Record, RecordBatch, produce_framing};
-use crabka_protocol::tagged_fields::{
-    UnknownTaggedField, UnknownTaggedFields, WriteTaggedFields, tagged_fields_len,
-};
-use crabka_protocol::{Decode, Encode};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 // ---------------------------------------------------------------------------
 // Helpers

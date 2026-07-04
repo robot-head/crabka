@@ -11,14 +11,17 @@
 
 use std::sync::Arc;
 
+use crabka_ids::LeaderEpoch;
 use crabka_protocol::records::RecordBatch;
 use crabka_remote_storage::{
     IndexType, RemoteLogMetadataManager, RemoteLogSegmentMetadata, RemoteLogSegmentState,
     RemoteStorageError, RemoteStorageManager, TopicIdPartition,
 };
 use tracing::warn;
-use zerocopy::byteorder::{I64, U32};
-use zerocopy::{BigEndian, FromBytes, Immutable, KnownLayout, Unaligned};
+use zerocopy::{
+    BigEndian, FromBytes, Immutable, KnownLayout, Unaligned,
+    byteorder::{I64, U32},
+};
 
 /// Absolute (partition-level) log offset.
 pub(crate) type LogOffset = i64;
@@ -108,7 +111,7 @@ impl RemoteReader {
     pub(crate) async fn fetch_batch(
         &self,
         tp: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
         offset: LogOffset,
         max_bytes: usize,
     ) -> Result<Option<RecordBatch>, RemoteStorageError> {
@@ -196,7 +199,7 @@ impl RemoteReader {
     pub(crate) async fn aborted_transactions(
         &self,
         tp: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
         from_offset: LogOffset,
         to_offset: LogOffset,
     ) -> Result<Vec<AbortedTxnEntry>, RemoteStorageError> {
@@ -442,8 +445,9 @@ fn first_batch_at_or_after(data: &[u8], floor: LogOffset) -> Option<RecordBatch>
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn parse_offset_index_round_trips_known_entries() {
@@ -705,14 +709,14 @@ mod tests {
     // ── helpers), using the copy path's `copy_eligible` to populate the
     // ── tier from a real `Log`.
 
+    use std::{collections::BTreeMap, fmt::Write as _};
+
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::records::Record;
     use crabka_remote_storage::{
         InmemoryRemoteLogMetadataManager, LocalTieredStorage, RemoteLogMetadataManager,
         RemoteStorageManager,
     };
-    use std::collections::BTreeMap;
-    use std::fmt::Write as _;
     use uuid::Uuid;
 
     fn tp() -> TopicIdPartition {
@@ -819,7 +823,7 @@ mod tests {
             2_000,
             i32::try_from(log_bytes.len()).unwrap_or(i32::MAX),
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0_i32, 10_i64)]),
+            BTreeMap::from([(LeaderEpoch(0_i32), 10_i64)]),
         )
         .unwrap();
 
@@ -878,15 +882,20 @@ mod tests {
         // without the broker-side dependencies).
         for ex in &exports {
             let id = crabka_remote_storage::RemoteLogSegmentId::new(tp(), Uuid::new_v4());
-            let epochs: BTreeMap<i32, i64> = if ex.leader_epochs.is_empty() {
-                BTreeMap::from([(0, ex.base_offset)])
+            // Unwrap the log-layer `Offset`s into the remote-storage metadata's
+            // `i64` world at the seam.
+            let epochs: BTreeMap<LeaderEpoch, i64> = if ex.leader_epochs.is_empty() {
+                BTreeMap::from([(LeaderEpoch(0), ex.base_offset.0)])
             } else {
-                ex.leader_epochs.iter().copied().collect()
+                ex.leader_epochs
+                    .iter()
+                    .map(|&(epoch, off)| (epoch, off.0))
+                    .collect()
             };
             let md = RemoteLogSegmentMetadata::new(
                 id.clone(),
-                ex.base_offset,
-                ex.last_offset,
+                ex.base_offset.0,
+                ex.last_offset.0,
                 ex.max_timestamp,
                 1,
                 ex.max_timestamp,
@@ -954,7 +963,8 @@ mod tests {
         // Write a `.txnindex` next to the first sealed segment's `.log` so the
         // export below picks it up. The abort covers the whole first segment.
         let first = &exports[0];
-        let abort = (first.base_offset, first.last_offset, 7777_i64);
+        // Unwrap the log-layer `Offset`s into this helper's `i64` tuple at the seam.
+        let abort = (first.base_offset.0, first.last_offset.0, 7777_i64);
         let mut txn_bytes = Vec::new();
         txn_bytes.extend_from_slice(&abort.0.to_be_bytes());
         txn_bytes.extend_from_slice(&abort.1.to_be_bytes());
@@ -974,15 +984,20 @@ mod tests {
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         for ex in &exports {
             let id = crabka_remote_storage::RemoteLogSegmentId::new(tp(), Uuid::new_v4());
-            let epochs: BTreeMap<i32, i64> = if ex.leader_epochs.is_empty() {
-                BTreeMap::from([(0, ex.base_offset)])
+            // Unwrap the log-layer `Offset`s into the remote-storage metadata's
+            // `i64` world at the seam.
+            let epochs: BTreeMap<LeaderEpoch, i64> = if ex.leader_epochs.is_empty() {
+                BTreeMap::from([(LeaderEpoch(0), ex.base_offset.0)])
             } else {
-                ex.leader_epochs.iter().copied().collect()
+                ex.leader_epochs
+                    .iter()
+                    .map(|&(epoch, off)| (epoch, off.0))
+                    .collect()
             };
             let md = RemoteLogSegmentMetadata::new(
                 id.clone(),
-                ex.base_offset,
-                ex.last_offset,
+                ex.base_offset.0,
+                ex.last_offset.0,
                 ex.max_timestamp,
                 1,
                 ex.max_timestamp,
@@ -1030,7 +1045,7 @@ mod tests {
 
         // Query the first segment's offset range → the abort overlaps.
         let got = reader
-            .aborted_transactions(&tp(), 0, start, last)
+            .aborted_transactions(&tp(), LeaderEpoch(0), start, last)
             .await
             .expect("ok");
         let expected = vec![AbortedTxnEntry {
@@ -1051,7 +1066,7 @@ mod tests {
         let seg = &exports[0];
 
         let got = reader
-            .aborted_transactions(&tp(), 0, seg.base_offset, seg.last_offset)
+            .aborted_transactions(&tp(), LeaderEpoch(0), seg.base_offset.0, seg.last_offset.0)
             .await
             .expect("ok");
         assert!(
@@ -1069,10 +1084,11 @@ mod tests {
         // Pick an offset inside the second sealed segment. Each batch covers
         // two records, so base_offset=2 lives in segment[1] (base=2).
         let exports = log.tierable_segments();
-        let target_offset = exports[1].base_offset;
+        // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
+        let target_offset = exports[1].base_offset.0;
 
         let got = reader
-            .fetch_batch(&tp(), 0, target_offset, 4096)
+            .fetch_batch(&tp(), LeaderEpoch(0), target_offset, 4096)
             .await
             .expect("ok")
             .expect("found a batch");
@@ -1092,7 +1108,7 @@ mod tests {
         let (reader, _remote_dir) = sparse_remote_segment_reader();
 
         let got = reader
-            .fetch_batch(&tp(), 0, 12, 4096)
+            .fetch_batch(&tp(), LeaderEpoch(0), 12, 4096)
             .await
             .expect("ok")
             .expect("offset 12 is in the synthetic remote segment");
@@ -1113,7 +1129,10 @@ mod tests {
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         let reader = RemoteReader::new(rsm, rlmm);
         // RLMM is empty → no segment for `tp` at epoch 0.
-        let got = reader.fetch_batch(&tp(), 0, 0, 4096).await.unwrap();
+        let got = reader
+            .fetch_batch(&tp(), LeaderEpoch(0), 0, 4096)
+            .await
+            .unwrap();
         assert!(got.is_none());
     }
 
@@ -1127,7 +1146,7 @@ mod tests {
         let reader = RemoteReader::new(rsm, rlmm);
         // RLMM is empty → no covering segment → empty list, not an error.
         let got = reader
-            .aborted_transactions(&tp(), 0, 0, 100)
+            .aborted_transactions(&tp(), LeaderEpoch(0), 0, 100)
             .await
             .expect("ok");
         assert!(got.is_empty());
@@ -1150,12 +1169,15 @@ mod tests {
             100,
             1024,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0_i32, 0_i64)]),
+            BTreeMap::from([(LeaderEpoch(0), 0_i64)]),
         )
         .unwrap();
         rlmm.add_remote_log_segment_metadata(md).unwrap();
         let reader = RemoteReader::new(rsm, rlmm);
-        let got = reader.fetch_batch(&tp(), 0, 50, 4096).await.unwrap();
+        let got = reader
+            .fetch_batch(&tp(), LeaderEpoch(0), 50, 4096)
+            .await
+            .unwrap();
         assert!(
             got.is_none(),
             "started (not finished) segment must be invisible"
@@ -1168,7 +1190,8 @@ mod tests {
         let remote_dir = tempfile::tempdir().unwrap();
         let (reader, log) = populated_reader(log_dir.path(), remote_dir.path());
         let exports = log.tierable_segments();
-        let expected = exports.iter().map(|e| e.base_offset).min().unwrap();
+        // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
+        let expected = exports.iter().map(|e| e.base_offset.0).min().unwrap();
         let got = reader.earliest_offset(&tp()).unwrap();
         assert!(got == Some(expected));
     }
@@ -1201,7 +1224,8 @@ mod tests {
             .unwrap()
             .expect("first segment matches ts=0");
         // The first finished segment is the lowest-base one.
-        let expected = exports.iter().map(|e| e.base_offset).min().unwrap();
+        // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
+        let expected = exports.iter().map(|e| e.base_offset.0).min().unwrap();
         assert!(got == expected);
     }
 
@@ -1250,7 +1274,7 @@ mod tests {
         fn remote_log_segment_metadata(
             &self,
             _tp: &TopicIdPartition,
-            _epoch: i32,
+            _epoch: LeaderEpoch,
             _offset: i64,
         ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError> {
             Err(RemoteStorageError::NotReady { partition: 3 })
@@ -1258,7 +1282,7 @@ mod tests {
         fn highest_offset_for_epoch(
             &self,
             _tp: &TopicIdPartition,
-            _epoch: i32,
+            _epoch: LeaderEpoch,
         ) -> Result<Option<i64>, RemoteStorageError> {
             Ok(None)
         }
@@ -1271,7 +1295,7 @@ mod tests {
         fn list_remote_log_segments_by_epoch(
             &self,
             _tp: &TopicIdPartition,
-            _epoch: i32,
+            _epoch: LeaderEpoch,
         ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
             Ok(Vec::new())
         }
@@ -1290,7 +1314,10 @@ mod tests {
             Arc::new(LocalTieredStorage::new(remote_dir.path()));
         let rlmm: Arc<dyn RemoteLogMetadataManager> = Arc::new(NotReadyRlmm);
         let reader = RemoteReader::new(rsm, rlmm);
-        let err = reader.fetch_batch(&tp(), 0, 0, 4096).await.unwrap_err();
+        let err = reader
+            .fetch_batch(&tp(), LeaderEpoch(0), 0, 4096)
+            .await
+            .unwrap_err();
         assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
     }
 
@@ -1386,7 +1413,7 @@ mod tests {
                 100,
                 2048,
                 RemoteLogSegmentState::CopySegmentStarted,
-                BTreeMap::from([(0, 0)]),
+                BTreeMap::from([(LeaderEpoch(0), 0)]),
             )
             .unwrap();
             let w2 = writer.clone();
@@ -1479,14 +1506,15 @@ mod tests {
 
         // Pick an offset inside the first sealed segment.
         let exports = log.tierable_segments();
-        let target_offset = exports[0].base_offset;
+        // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
+        let target_offset = exports[0].base_offset.0;
 
         // Query with epoch 1 — the RLMM epoch-indexed primary path returns
         // None because the segment's `segment_leader_epochs` only contains
         // epoch 0.  The lineage-unmatched defensive fallback must find it via
         // `list_remote_log_segments` and return the batch.
         let got = reader
-            .fetch_batch(&tp(), 1, target_offset, 4096)
+            .fetch_batch(&tp(), LeaderEpoch(1), target_offset, 4096)
             .await
             .expect("ok")
             .expect("defensive fallback must resolve the segment despite epoch mismatch");

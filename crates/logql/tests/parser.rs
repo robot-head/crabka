@@ -1,17 +1,20 @@
-use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use assert2::check;
 use crabka_logql::{
-    ComparisonOp, FieldFilter, FieldValue, JsonExtraction, JsonParserConfig, LabelFormat,
-    LabelFormatAssignment, LabelMatcher, LabelSelection, LabelSelectionSet, LineFilter,
-    LineFilterOp, LineFormat, LogfmtExtraction, LogfmtParserConfig, MatchOp, MetricQuery,
-    ParserStage, PatternParser, PipelineStage, Quantile, RangeAggregation, RegexpParser,
-    StreamQuery, UnwrapExpression, VectorAggregation, VectorAggregationOp, VectorGrouping,
-    parse_metric_binary_arithmetic_query, parse_metric_binary_comparison_query,
-    parse_metric_binary_set_query, parse_metric_label_join_query, parse_metric_label_replace_query,
-    parse_metric_query, parse_metric_scalar_arithmetic_query, parse_metric_scalar_comparison_query,
-    parse_query,
+    ComparisonOp, DestinationLabel, DurationNanos, FieldFilter, FieldValue, JsonExpressionPath,
+    JsonExtraction, JsonParserConfig, LabelFormat, LabelFormatAssignment, LabelMatcher,
+    LabelSelection, LabelSelectionSet, LineFilter, LineFilterOp, LineFormat, LogfmtExtraction,
+    LogfmtParserConfig, MatchOp, MetricQuery, OffsetNanos, ParserStage, PatternParser,
+    PipelineStage, Quantile, QuantileDenominator, QuantileNumerator, RangeAggregation,
+    RegexpParser, SourceLabel, StreamQuery, UnwrapExpression, VectorAggregation,
+    VectorAggregationOp, VectorGrouping, parse_metric_binary_arithmetic_query,
+    parse_metric_binary_comparison_query, parse_metric_binary_set_query,
+    parse_metric_label_join_query, parse_metric_label_replace_query, parse_metric_query,
+    parse_metric_scalar_arithmetic_query, parse_metric_scalar_comparison_query, parse_query,
 };
 
 #[test]
@@ -385,8 +388,16 @@ fn parses_selected_json_parser_stage() {
             == vec![
                 PipelineStage::Parser(ParserStage::JsonSelected(
                     JsonParserConfig::new(vec![
-                        JsonExtraction::new("first_server", "servers[0]").unwrap(),
-                        JsonExtraction::new("ua", r#"request.headers["User-Agent"]"#).unwrap(),
+                        JsonExtraction::new(
+                            DestinationLabel("first_server".into()),
+                            JsonExpressionPath("servers[0]".into())
+                        )
+                        .unwrap(),
+                        JsonExtraction::new(
+                            DestinationLabel("ua".into()),
+                            JsonExpressionPath(r#"request.headers["User-Agent"]"#.into())
+                        )
+                        .unwrap(),
                     ])
                     .unwrap()
                 )),
@@ -1381,7 +1392,11 @@ fn parses_parameterized_logfmt_parser_stage() {
                 PipelineStage::Parser(ParserStage::LogfmtSelected(
                     LogfmtParserConfig::new(vec![
                         LogfmtExtraction::same("host").unwrap(),
-                        LogfmtExtraction::rename("fwd_ip", "fwd").unwrap(),
+                        LogfmtExtraction::rename(
+                            DestinationLabel("fwd_ip".into()),
+                            SourceLabel("fwd".into())
+                        )
+                        .unwrap(),
                     ])
                     .unwrap()
                 )),
@@ -2220,8 +2235,8 @@ fn parses_count_over_time_metric_query() {
                 vector_aggregation: None,
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"} |= "error""#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -2240,8 +2255,8 @@ fn parses_metric_range_selector_before_pipeline() {
                 vector_aggregation: None,
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"} |= "error" | logfmt | status >= 500"#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -2258,7 +2273,7 @@ fn parses_label_replace_metric_query() {
     check!(query.source_label == "app");
     check!(query.pattern == "(.*)");
     check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == 30_000_000_000);
+    check!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2272,7 +2287,7 @@ fn parses_label_join_metric_query() {
     check!(query.separator == "/");
     check!(query.source_labels == vec!["app", "env", "missing"]);
     check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == 30_000_000_000);
+    check!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2286,7 +2301,7 @@ fn parses_metric_scalar_comparison_query() {
     check!(query.bool_modifier);
     check!(query.scalar == "1.5e0");
     check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == 30_000_000_000);
+    check!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2301,7 +2316,7 @@ fn parses_scalar_metric_comparison_query() {
     check!(query.scalar == "2");
     check!(query.scalar_on_left);
     check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == 30_000_000_000);
+    check!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2314,7 +2329,7 @@ fn parses_metric_scalar_arithmetic_query() {
     check!(query.op == crabka_logql::MetricScalarArithmeticOp::Multiply);
     check!(query.scalar == "2.5");
     check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == 30_000_000_000);
+    check!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2328,7 +2343,7 @@ fn parses_scalar_metric_arithmetic_query() {
     check!(query.scalar == "2");
     check!(query.scalar_on_left);
     check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == 30_000_000_000);
+    check!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2342,34 +2357,34 @@ fn parses_parenthesized_metric_expression_operands() {
         parse_metric_scalar_comparison_query(r#"2 > bool ((count_over_time({app="api"}[30s])))"#)
             .unwrap();
     check!(scalar_metric.scalar_on_left);
-    check!(scalar_metric.query.range_ns == 30_000_000_000);
+    check!(scalar_metric.query.range_ns == DurationNanos(30_000_000_000));
 
     let binary = parse_metric_binary_arithmetic_query(
         r#"(count_over_time({app="api"}[30s])) / (count_over_time({app="worker"}[15s]))"#,
     )
     .unwrap();
-    check!(binary.left.range_ns == 30_000_000_000);
-    check!(binary.right.range_ns == 15_000_000_000);
+    check!(binary.left.range_ns == DurationNanos(30_000_000_000));
+    check!(binary.right.range_ns == DurationNanos(15_000_000_000));
 
     let set = parse_metric_binary_set_query(
         r#"(count_over_time({app="api"}[30s])) or (count_over_time({app="worker"}[15s]))"#,
     )
     .unwrap();
     check!(set.op == crabka_logql::MetricBinarySetOp::Or);
-    check!(set.left.range_ns == 30_000_000_000);
-    check!(set.right.range_ns == 15_000_000_000);
+    check!(set.left.range_ns == DurationNanos(30_000_000_000));
+    check!(set.right.range_ns == DurationNanos(15_000_000_000));
 
     let label_replace = parse_metric_label_replace_query(
         r#"label_replace((count_over_time({app="api"}[30s])), "service", "$1", "app", "(.*)")"#,
     )
     .unwrap();
-    check!(label_replace.query.range_ns == 30_000_000_000);
+    check!(label_replace.query.range_ns == DurationNanos(30_000_000_000));
 
     let label_join = parse_metric_label_join_query(
         r#"label_join((count_over_time({app="api"}[30s])), "service", "-", "app")"#,
     )
     .unwrap();
-    check!(label_join.query.range_ns == 30_000_000_000);
+    check!(label_join.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2450,9 +2465,9 @@ fn parses_metric_binary_arithmetic_query() {
 
     check!(query.op == crabka_logql::MetricScalarArithmeticOp::Divide);
     check!(query.left.aggregation == RangeAggregation::CountOverTime);
-    check!(query.left.range_ns == 30_000_000_000);
+    check!(query.left.range_ns == DurationNanos(30_000_000_000));
     check!(query.right.aggregation == RangeAggregation::CountOverTime);
-    check!(query.right.range_ns == 30_000_000_000);
+    check!(query.right.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2496,21 +2511,21 @@ fn parses_metric_binary_arguments_with_nested_operator_characters() {
     )
     .unwrap();
     check!(comparison.op == ComparisonOp::Greater);
-    check!(comparison.left.range_ns == 30_000_000_000);
+    check!(comparison.left.range_ns == DurationNanos(30_000_000_000));
 
     let arithmetic = parse_metric_binary_arithmetic_query(
         r#"count_over_time({app="api"} |= "+" [30s]) + count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
     check!(arithmetic.op == crabka_logql::MetricScalarArithmeticOp::Add);
-    check!(arithmetic.right.range_ns == 15_000_000_000);
+    check!(arithmetic.right.range_ns == DurationNanos(15_000_000_000));
 
     let set = parse_metric_binary_set_query(
         r#"count_over_time({app="origin"} |= "or" [30s]) or count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
     check!(set.op == crabka_logql::MetricBinarySetOp::Or);
-    check!(set.left.range_ns == 30_000_000_000);
+    check!(set.left.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2519,15 +2534,15 @@ fn parses_metric_binary_arguments_with_quoted_parentheses_and_nested_keywords() 
         r#"count_over_time({app="api"} |= ")" [30s]) > bool count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
-    check!(comparison.left.range_ns == 30_000_000_000);
-    check!(comparison.right.range_ns == 15_000_000_000);
+    check!(comparison.left.range_ns == DurationNanos(30_000_000_000));
+    check!(comparison.right.range_ns == DurationNanos(15_000_000_000));
 
     let arithmetic = parse_metric_binary_arithmetic_query(
         r#"count_over_time({app="api"} |= ")" [30s] offset -5m) + count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
     check!(arithmetic.op == crabka_logql::MetricScalarArithmeticOp::Add);
-    check!(arithmetic.left.offset_ns == -300_000_000_000);
+    check!(arithmetic.left.offset_ns == OffsetNanos(-300_000_000_000));
 
     let set = parse_metric_binary_set_query(
         r#"sum by (or) (count_over_time({app="api"} |= ")" [30s])) and count_over_time({app="worker"}[15s])"#,
@@ -2574,9 +2589,9 @@ fn parses_metric_binary_comparison_query() {
     check!(query.op == ComparisonOp::Greater);
     check!(query.bool_modifier);
     check!(query.left.aggregation == RangeAggregation::CountOverTime);
-    check!(query.left.range_ns == 30_000_000_000);
+    check!(query.left.range_ns == DurationNanos(30_000_000_000));
     check!(query.right.aggregation == RangeAggregation::CountOverTime);
-    check!(query.right.range_ns == 30_000_000_000);
+    check!(query.right.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2588,9 +2603,9 @@ fn parses_metric_binary_set_query() {
 
     check!(query.op == crabka_logql::MetricBinarySetOp::And);
     check!(query.left.aggregation == RangeAggregation::CountOverTime);
-    check!(query.left.range_ns == 30_000_000_000);
+    check!(query.left.range_ns == DurationNanos(30_000_000_000));
     check!(query.right.aggregation == RangeAggregation::CountOverTime);
-    check!(query.right.range_ns == 30_000_000_000);
+    check!(query.right.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2614,8 +2629,8 @@ fn parses_rate_metric_query() {
                 vector_aggregation: None,
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"} |= "error""#).unwrap(),
-                range_ns: 120_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(120_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -2632,7 +2647,7 @@ fn parses_rate_counter_unwrap_metric_query() {
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap requests | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2646,8 +2661,8 @@ fn parses_bytes_over_time_metric_query() {
                 vector_aggregation: None,
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"} |= "error""#).unwrap(),
-                range_ns: 3_600_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(3_600_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -2658,7 +2673,7 @@ fn parses_bytes_rate_metric_query() {
 
     check!(format!("{:?}", query.aggregation) == "BytesRate");
     check!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
-    check!(query.range_ns == 120_000_000_000);
+    check!(query.range_ns == DurationNanos(120_000_000_000));
 }
 
 #[test]
@@ -2686,8 +2701,8 @@ fn parses_sum_over_time_unwrap_metric_query() {
                         )),
                     ],
                 },
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -2717,8 +2732,8 @@ fn parses_sum_over_time_unwrap_bytes_metric_query() {
                         )),
                     ],
                 },
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -2748,8 +2763,8 @@ fn parses_sum_over_time_unwrap_duration_metric_query() {
                         )),
                     ],
                 },
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -2779,8 +2794,8 @@ fn parses_sum_over_time_unwrap_duration_seconds_metric_query() {
                         )),
                     ],
                 },
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -2797,7 +2812,7 @@ fn parses_avg_over_time_unwrap_metric_query() {
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2812,7 +2827,7 @@ fn parses_avg_over_time_unwrap_metric_query_with_range_grouping() {
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
     check!(query.range_grouping == Some(VectorGrouping::By(vec!["app".to_string()])));
 }
 
@@ -2828,7 +2843,7 @@ fn parses_stdvar_over_time_unwrap_metric_query() {
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2843,7 +2858,7 @@ fn parses_stddev_over_time_unwrap_metric_query() {
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2856,15 +2871,15 @@ fn parses_quantile_over_time_unwrap_metric_query() {
     check!(
         query.aggregation
             == RangeAggregation::QuantileOverTime(Quantile {
-                numerator: 3,
-                denominator: 4,
+                numerator: QuantileNumerator(3),
+                denominator: QuantileDenominator(4),
             })
     );
     check!(
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2877,8 +2892,8 @@ fn parses_fraction_only_quantile_over_time_metric_query() {
     check!(
         query.aggregation
             == RangeAggregation::QuantileOverTime(Quantile {
-                numerator: 3,
-                denominator: 4,
+                numerator: QuantileNumerator(3),
+                denominator: QuantileDenominator(4),
             })
     );
     check!(query.range_grouping == Some(VectorGrouping::By(vec!["app".to_string()])));
@@ -2897,7 +2912,7 @@ fn parses_absent_over_time_metric_query() {
 
     check!(query.aggregation == RangeAggregation::AbsentOverTime);
     check!(query.stream == parse_query(r#"{app="api",env="prod"}"#).unwrap());
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2906,7 +2921,7 @@ fn parses_present_over_time_metric_query() {
 
     check!(query.aggregation == RangeAggregation::PresentOverTime);
     check!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2921,7 +2936,7 @@ fn parses_min_over_time_unwrap_metric_query() {
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2936,7 +2951,7 @@ fn parses_max_over_time_unwrap_metric_query() {
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2951,7 +2966,7 @@ fn parses_first_over_time_unwrap_metric_query() {
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2966,7 +2981,7 @@ fn parses_last_over_time_unwrap_metric_query() {
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == 30_000_000_000);
+    check!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2981,8 +2996,8 @@ fn parses_compound_prometheus_duration_metric_query() {
                 vector_aggregation: None,
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"} |= "error""#).unwrap(),
-                range_ns: 5_415_250_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(5_415_250_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -2994,8 +3009,8 @@ fn parses_metric_query_with_range_offset() {
 
     check!(query.aggregation == RangeAggregation::CountOverTime);
     check!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
-    check!(query.range_ns == 10_000_000_000);
-    check!(query.offset_ns == 300_000_000_000);
+    check!(query.range_ns == DurationNanos(10_000_000_000));
+    check!(query.offset_ns == OffsetNanos(300_000_000_000));
 }
 
 #[test]
@@ -3005,8 +3020,8 @@ fn parses_metric_query_with_negative_range_offset() {
 
     check!(query.aggregation == RangeAggregation::CountOverTime);
     check!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
-    check!(query.range_ns == 10_000_000_000);
-    check!(query.offset_ns == -300_000_000_000);
+    check!(query.range_ns == DurationNanos(10_000_000_000));
+    check!(query.offset_ns == OffsetNanos(-300_000_000_000));
 }
 
 #[test]
@@ -3073,8 +3088,8 @@ fn parses_vector_aggregation_metric_query() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"} |= "error""#).unwrap(),
-                range_ns: 300_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(300_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -3097,8 +3112,8 @@ fn parses_vector_aggregation_metric_query_with_trailing_grouping() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"} |= "error""#).unwrap(),
-                range_ns: 300_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(300_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -3119,8 +3134,8 @@ fn parses_vector_aggregation_without_metric_query() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api", env="prod"}"#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -3140,8 +3155,8 @@ fn parses_stddev_vector_aggregation_metric_query() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"}"#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -3161,8 +3176,8 @@ fn parses_stdvar_vector_aggregation_metric_query() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"}"#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -3184,8 +3199,8 @@ fn parses_count_values_vector_aggregation_metric_query() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"}"#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -3205,8 +3220,8 @@ fn parses_topk_vector_aggregation_metric_query() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"}"#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -3226,8 +3241,8 @@ fn parses_approx_topk_metric_query() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"}"#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -3256,8 +3271,8 @@ fn parses_bottomk_vector_aggregation_metric_query() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"}"#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -3276,8 +3291,8 @@ fn parses_sort_vector_aggregation_metric_query() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"}"#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }
@@ -3296,8 +3311,8 @@ fn parses_sort_desc_vector_aggregation_metric_query() {
                 }),
                 range_grouping: None,
                 stream: parse_query(r#"{app="api"}"#).unwrap(),
-                range_ns: 30_000_000_000,
-                offset_ns: 0,
+                range_ns: DurationNanos(30_000_000_000),
+                offset_ns: OffsetNanos(0),
             }
     );
 }

@@ -5,11 +5,12 @@
 //! "replace" semantic — webpki-roots are not consulted when this is
 //! used).
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use rustls::pki_types::CertificateDer;
-use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -53,10 +54,11 @@ pub fn build_client_config_from_pem(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{fs::File, io::Write};
+
     use assert2::assert;
-    use std::fs::File;
-    use std::io::Write;
+
+    use super::*;
 
     fn install_provider() {
         // rustls requires an explicit CryptoProvider when no default feature

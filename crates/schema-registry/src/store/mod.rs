@@ -6,15 +6,18 @@
 
 use std::collections::BTreeMap;
 
-use crate::error::SrError;
-use crate::format::{self, SchemaType};
-use crate::kafkastore::record::{SchemaKey, SchemaReference, SchemaValue};
+use crate::{
+    error::SrError,
+    format::{self, SchemaType},
+    ids::{SchemaId, SchemaVersion},
+    kafkastore::record::{SchemaKey, SchemaReference, SchemaValue},
+};
 
 /// Result of a registration: the global id and the per-subject version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Registered {
-    pub id: i32,
-    pub version: i32,
+    pub id: SchemaId,
+    pub version: SchemaVersion,
 }
 
 /// A registered schema's stored form: type + text + its references (references
@@ -27,10 +30,13 @@ pub struct RegisteredSchema {
     pub message_type: Option<String>,
 }
 
+/// A single subject-version's stored schema (the domain view returned by
+/// [`StoreState::version`]). Named to avoid colliding with the
+/// [`SchemaVersion`](crate::ids::SchemaVersion) version-number newtype.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SchemaVersion {
-    pub id: i32,
-    pub version: i32,
+pub struct VersionedSchema {
+    pub id: SchemaId,
+    pub version: SchemaVersion,
     pub ty: SchemaType,
     pub schema: String,
     pub references: Vec<SchemaReference>,
@@ -40,8 +46,8 @@ pub struct SchemaVersion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListedSchema {
     pub subject: String,
-    pub version: i32,
-    pub id: i32,
+    pub version: SchemaVersion,
+    pub id: SchemaId,
     pub ty: SchemaType,
     pub schema: String,
     pub references: Vec<SchemaReference>,
@@ -50,21 +56,21 @@ pub struct ListedSchema {
 
 #[derive(Debug, Clone)]
 struct VersionEntry {
-    version: i32,
-    id: i32,
+    version: SchemaVersion,
+    id: SchemaId,
     deleted: bool,
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct StoreState {
     subjects: BTreeMap<String, Vec<VersionEntry>>,
-    by_id: BTreeMap<i32, RegisteredSchema>,
-    by_canonical: BTreeMap<String, i32>,
+    by_id: BTreeMap<SchemaId, RegisteredSchema>,
+    by_canonical: BTreeMap<String, SchemaId>,
     global_compat: Option<String>,
     subject_compat: BTreeMap<String, String>,
     global_mode: Option<String>,
     subject_mode: BTreeMap<String, String>,
-    max_id: i32,
+    max_id: SchemaId,
 }
 
 impl StoreState {
@@ -94,7 +100,7 @@ impl StoreState {
         let id = if let Some(&id) = self.by_canonical.get(&key) {
             id
         } else {
-            let id = self.max_id + 1;
+            let id = SchemaId(self.max_id.0 + 1);
             self.max_id = id;
             self.by_canonical.insert(key, id);
             self.by_id.insert(
@@ -108,10 +114,11 @@ impl StoreState {
             );
             id
         };
-        let next_version = self
-            .subjects
-            .get(subject)
-            .map_or(1, |v| i32::try_from(v.len()).unwrap_or(i32::MAX) + 1);
+        let next_version = SchemaVersion(
+            self.subjects
+                .get(subject)
+                .map_or(1, |v| i32::try_from(v.len()).unwrap_or(i32::MAX) + 1),
+        );
         self.subjects
             .entry(subject.to_string())
             .or_default()
@@ -169,7 +176,7 @@ impl StoreState {
         references: &[SchemaReference],
         out: &mut Vec<crate::format::ResolvedReference>,
         seen_names: &mut std::collections::BTreeSet<String>,
-        visited: &mut std::collections::BTreeSet<(String, i32)>,
+        visited: &mut std::collections::BTreeSet<(String, SchemaVersion)>,
     ) -> Result<(), SrError> {
         for r in references {
             let key = (r.subject.clone(), r.version);
@@ -200,7 +207,7 @@ impl StoreState {
 
     /// The id of a concrete `(subject, version)`, or `None` (considers deleted
     /// versions — a reference can name a soft-deleted version's content).
-    fn id_of(&self, subject: &str, version: i32) -> Option<i32> {
+    fn id_of(&self, subject: &str, version: SchemaVersion) -> Option<SchemaId> {
         self.subjects
             .get(subject)?
             .iter()
@@ -210,7 +217,12 @@ impl StoreState {
 
     /// Ids of (qualifying) schemas whose references include `(subject, version)`.
     #[must_use]
-    pub fn referenced_by(&self, subject: &str, version: i32, include_deleted: bool) -> Vec<i32> {
+    pub fn referenced_by(
+        &self,
+        subject: &str,
+        version: SchemaVersion,
+        include_deleted: bool,
+    ) -> Vec<SchemaId> {
         let mut ids = Vec::new();
         for vs in self.subjects.values() {
             for entry in vs {
@@ -322,9 +334,9 @@ impl StoreState {
     /// Live (or, with `include_deleted`, all) version numbers. `None` when the
     /// subject has no qualifying versions (→ 404).
     #[must_use]
-    pub fn versions(&self, subject: &str, include_deleted: bool) -> Option<Vec<i32>> {
+    pub fn versions(&self, subject: &str, include_deleted: bool) -> Option<Vec<SchemaVersion>> {
         let vs = self.subjects.get(subject)?;
-        let out: Vec<i32> = vs
+        let out: Vec<SchemaVersion> = vs
             .iter()
             .filter(|v| include_deleted || !v.deleted)
             .map(|v| v.version)
@@ -338,9 +350,9 @@ impl StoreState {
     pub fn version(
         &self,
         subject: &str,
-        version: Option<i32>,
+        version: Option<SchemaVersion>,
         include_deleted: bool,
-    ) -> Option<SchemaVersion> {
+    ) -> Option<VersionedSchema> {
         let vs = self.subjects.get(subject)?;
         let entry = match version {
             Some(v) => vs
@@ -349,7 +361,7 @@ impl StoreState {
             None => vs.iter().rfind(|e| include_deleted || !e.deleted)?,
         };
         let reg = self.by_id.get(&entry.id)?;
-        Some(SchemaVersion {
+        Some(VersionedSchema {
             id: entry.id,
             version: entry.version,
             ty: reg.ty,
@@ -365,7 +377,7 @@ impl StoreState {
     #[must_use]
     pub fn schema_by_id(
         &self,
-        id: i32,
+        id: SchemaId,
         include_deleted: bool,
     ) -> Option<(SchemaType, String, Vec<SchemaReference>, Option<String>)> {
         let reg = self.by_id.get(&id)?;
@@ -388,7 +400,11 @@ impl StoreState {
 
     /// `(subject, version)` pairs referencing a global id (GET /schemas/ids/{id}/versions).
     #[must_use]
-    pub fn schema_id_subject_versions(&self, id: i32, include_deleted: bool) -> Vec<(String, i32)> {
+    pub fn schema_id_subject_versions(
+        &self,
+        id: SchemaId,
+        include_deleted: bool,
+    ) -> Vec<(String, SchemaVersion)> {
         let mut out = Vec::new();
         for (subject, vs) in &self.subjects {
             for v in vs {
@@ -448,7 +464,7 @@ impl StoreState {
     }
 
     /// Flag every version of a subject deleted; returns the version numbers.
-    pub fn soft_delete_subject(&mut self, subject: &str) -> Option<Vec<i32>> {
+    pub fn soft_delete_subject(&mut self, subject: &str) -> Option<Vec<SchemaVersion>> {
         let vs = self.subjects.get_mut(subject)?;
         if vs.is_empty() {
             return None;
@@ -462,7 +478,11 @@ impl StoreState {
 
     /// Remove a single version (permanent). Drops the subject if it becomes
     /// empty. Returns `None` if nothing was removed (idempotent replay).
-    pub fn permanent_delete_version(&mut self, subject: &str, version: i32) -> Option<i32> {
+    pub fn permanent_delete_version(
+        &mut self,
+        subject: &str,
+        version: SchemaVersion,
+    ) -> Option<SchemaVersion> {
         let vs = self.subjects.get_mut(subject)?;
         let before = vs.len();
         vs.retain(|v| v.version != version);
@@ -528,18 +548,26 @@ impl StoreState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::SchemaType;
-    use crate::kafkastore::record::SchemaReference;
+    use crate::{format::SchemaType, kafkastore::record::SchemaReference};
 
     fn av(n: &str) -> String {
         format!("{{\"type\":\"record\",\"name\":\"{n}\",\"fields\":[]}}")
+    }
+
+    /// Wrap a raw `i32` version so test literals read as `sv(1)`.
+    fn sv(n: i32) -> SchemaVersion {
+        SchemaVersion(n)
+    }
+    /// Wrap a raw `i32` id so test literals read as `sid(1)`.
+    fn sid(n: i32) -> SchemaId {
+        SchemaId(n)
     }
 
     fn sref(name: &str, subject: &str, version: i32) -> SchemaReference {
         SchemaReference {
             name: name.into(),
             subject: subject.into(),
-            version,
+            version: sv(version),
         }
     }
 
@@ -625,8 +653,8 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(s.referenced_by("base", 1, false), vec![r.id]);
-        assert!(s.referenced_by("base", 99, false).is_empty());
+        assert_eq!(s.referenced_by("base", sv(1), false), vec![r.id]);
+        assert!(s.referenced_by("base", sv(99), false).is_empty());
     }
 
     #[test]
@@ -635,7 +663,7 @@ mod tests {
         let r = s
             .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
-        assert_eq!((r.id, r.version), (1, 1));
+        assert_eq!((r.id, r.version), (sid(1), sv(1)));
     }
 
     #[test]
@@ -648,7 +676,7 @@ mod tests {
             .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
         assert_eq!(r1, r2);
-        assert_eq!(s.versions("av-value", false).unwrap(), vec![1]);
+        assert_eq!(s.versions("av-value", false).unwrap(), vec![sv(1)]);
     }
 
     #[test]
@@ -661,7 +689,7 @@ mod tests {
             .register("other-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
         assert_eq!(r1.id, r2.id);
-        assert_eq!(r2.version, 1);
+        assert_eq!(r2.version, sv(1));
     }
 
     #[test]
@@ -673,9 +701,9 @@ mod tests {
         let r2 = s
             .register("av-value", SchemaType::Avro, &av("B"), &[], None)
             .unwrap();
-        assert_eq!(r2.id, r1.id + 1);
-        assert_eq!(r2.version, 2);
-        assert_eq!(s.versions("av-value", false).unwrap(), vec![1, 2]);
+        assert_eq!(r2.id, SchemaId(r1.id.0 + 1));
+        assert_eq!(r2.version, sv(2));
+        assert_eq!(s.versions("av-value", false).unwrap(), vec![sv(1), sv(2)]);
     }
 
     #[test]
@@ -693,24 +721,24 @@ mod tests {
         let mut s = StoreState::default();
         let v = SchemaValue {
             subject: "av-value".into(),
-            version: 1,
-            id: 1,
+            version: sv(1),
+            id: sid(1),
             schema_type: None,
             message_type: None,
             references: vec![],
             schema: av("A"),
             deleted: false,
         };
-        let k = SchemaKey::new("av-value", 1);
+        let k = SchemaKey::new("av-value", sv(1));
         s.apply_schema(&k, &v);
         s.apply_schema(&k, &v); // second apply is a no-op
-        assert_eq!(s.versions("av-value", false).unwrap(), vec![1]);
-        assert_eq!(s.schema_by_id(1, false).unwrap().1, av("A"));
+        assert_eq!(s.versions("av-value", false).unwrap(), vec![sv(1)]);
+        assert_eq!(s.schema_by_id(sid(1), false).unwrap().1, av("A"));
         // a fresh register of the same schema is now idempotent against replayed state
         let r = s
             .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
-        assert_eq!((r.id, r.version), (1, 1));
+        assert_eq!((r.id, r.version), (sid(1), sv(1)));
     }
 
     #[test]
@@ -750,16 +778,16 @@ mod tests {
         s.register("av", SchemaType::Avro, &av("B"), &[], None)
             .unwrap();
         apply_deleted(&mut s, "av", 1, 1, &av("A"));
-        assert_eq!(s.versions("av", false).unwrap(), vec![2]);
-        assert_eq!(s.versions("av", true).unwrap(), vec![1, 2]);
-        assert!(s.version("av", Some(1), false).is_none());
-        assert!(s.version("av", Some(1), true).is_some());
-        assert_eq!(s.permanent_delete_version("av", 1), Some(1));
-        assert!(s.version("av", Some(1), true).is_none());
-        assert_eq!(s.versions("av", true).unwrap(), vec![2]);
+        assert_eq!(s.versions("av", false).unwrap(), vec![sv(2)]);
+        assert_eq!(s.versions("av", true).unwrap(), vec![sv(1), sv(2)]);
+        assert!(s.version("av", Some(sv(1)), false).is_none());
+        assert!(s.version("av", Some(sv(1)), true).is_some());
+        assert_eq!(s.permanent_delete_version("av", sv(1)), Some(sv(1)));
+        assert!(s.version("av", Some(sv(1)), true).is_none());
+        assert_eq!(s.versions("av", true).unwrap(), vec![sv(2)]);
         // idempotent replay: deleting a missing subject/version is a no-op
-        assert_eq!(s.permanent_delete_version("nope", 9), None);
-        assert_eq!(s.permanent_delete_version("av", 99), None);
+        assert_eq!(s.permanent_delete_version("nope", sv(9)), None);
+        assert_eq!(s.permanent_delete_version("av", sv(99)), None);
     }
 
     #[test]
@@ -771,8 +799,8 @@ mod tests {
             .unwrap(); // id2 / v2
         apply_deleted(&mut s, "av", 2, 2, &av("B"));
         // latest LIVE version is v1; latest incl. deleted is v2
-        assert_eq!(s.version("av", None, false).unwrap().version, 1);
-        assert_eq!(s.version("av", None, true).unwrap().version, 2);
+        assert_eq!(s.version("av", None, false).unwrap().version, sv(1));
+        assert_eq!(s.version("av", None, true).unwrap().version, sv(2));
     }
 
     #[test]
@@ -782,7 +810,7 @@ mod tests {
             .unwrap();
         s.register("av", SchemaType::Avro, &av("B"), &[], None)
             .unwrap();
-        assert_eq!(s.soft_delete_subject("av"), Some(vec![1, 2]));
+        assert_eq!(s.soft_delete_subject("av"), Some(vec![sv(1), sv(2)]));
         assert!(s.versions("av", false).is_none());
         assert_eq!(s.subjects(false), Vec::<String>::new());
         assert_eq!(s.subjects(true), vec!["av".to_string()]);
@@ -796,7 +824,7 @@ mod tests {
         apply_deleted(&mut s, "av", 1, 1, &av("A"));
         assert!(s.versions("av", false).is_none());
         apply_live(&mut s, "av", 1, 1, &av("A"));
-        assert_eq!(s.versions("av", false).unwrap(), vec![1]);
+        assert_eq!(s.versions("av", false).unwrap(), vec![sv(1)]);
     }
 
     #[test]
@@ -804,12 +832,12 @@ mod tests {
         let mut s = StoreState::default();
         s.register("av", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
-        assert!(s.schema_by_id(1, false).is_some());
+        assert!(s.schema_by_id(sid(1), false).is_some());
         apply_deleted(&mut s, "av", 1, 1, &av("A"));
-        assert!(s.schema_by_id(1, false).is_none());
-        assert!(s.schema_by_id(1, true).is_some());
-        s.permanent_delete_version("av", 1);
-        assert!(s.schema_by_id(1, true).is_none());
+        assert!(s.schema_by_id(sid(1), false).is_none());
+        assert!(s.schema_by_id(sid(1), true).is_some());
+        s.permanent_delete_version("av", sv(1));
+        assert!(s.schema_by_id(sid(1), true).is_none());
     }
 
     #[test]
@@ -819,9 +847,12 @@ mod tests {
             .unwrap();
         s.register("b", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
-        let mut sv = s.schema_id_subject_versions(1, false);
-        sv.sort();
-        assert_eq!(sv, vec![("a".to_string(), 1), ("b".to_string(), 1)]);
+        let mut pairs = s.schema_id_subject_versions(sid(1), false);
+        pairs.sort();
+        assert_eq!(
+            pairs,
+            vec![("a".to_string(), sv(1)), ("b".to_string(), sv(1))]
+        );
         assert_eq!(s.all_schemas(false).len(), 2);
     }
 
@@ -855,14 +886,14 @@ mod tests {
         use crate::kafkastore::record::{SchemaKey, SchemaValue};
         let v = SchemaValue {
             subject: subject.into(),
-            version,
-            id,
+            version: sv(version),
+            id: sid(id),
             schema_type: None,
             message_type: None,
             references: vec![],
             schema: schema.into(),
             deleted,
         };
-        s.apply_schema(&SchemaKey::new(subject, version), &v);
+        s.apply_schema(&SchemaKey::new(subject, sv(version)), &v);
     }
 }

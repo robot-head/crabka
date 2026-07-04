@@ -32,17 +32,22 @@
 //! over the windowed-key bounds and `fetch_all` off `all`, then filters each by
 //! key prefix / window start — no parallel key index.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use bytes::Bytes;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::processor::record::RecordContext;
-use crate::store::byte::ByteKeyValueStore;
-use crate::store::cache::entry::LruCacheEntry;
-use crate::store::cache::named::NamedCache;
-use crate::store::window_schema::{key_bytes_of, store_key, window_start_of};
+use crate::{
+    processor::record::RecordContext,
+    store::{
+        byte::ByteKeyValueStore,
+        cache::{entry::LruCacheEntry, named::NamedCache},
+        window_schema::{key_bytes_of, store_key, window_start_of},
+    },
+};
 
 /// Write-back caching wrapper over a windowed byte store. The cache holds
 /// windowed store-key bytes (`window_schema::store_key`) → wrapped value bytes.
@@ -338,8 +343,7 @@ fn merge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::byte::InMemoryBytes;
-    use crate::store::window_schema::wrap_value;
+    use crate::store::{byte::InMemoryBytes, window_schema::wrap_value};
 
     fn ctx() -> RecordContext {
         RecordContext {

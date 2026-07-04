@@ -3,8 +3,10 @@
 use arrow::datatypes::Schema;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{BlockStoreError, Result};
-use crate::labels::SeriesFingerprint;
+use crate::{
+    error::{BlockStoreError, Result},
+    labels::SeriesFingerprint,
+};
 
 /// Mandatory column: the series fingerprint (`UInt64`).
 pub const COL_FINGERPRINT: &str = "series_fingerprint";
@@ -54,9 +56,10 @@ pub fn validate_against(schema: &Schema, decl: &crate::block_index::BlockSchema)
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use arrow::datatypes::{DataType, Field, Schema};
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn schema_with_required_columns_is_valid() {

@@ -2,18 +2,23 @@
 //! Routes the request to the per-group share actor in `GroupCoordinator`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        share_group_heartbeat_request::ShareGroupHeartbeatRequest,
+        share_group_heartbeat_response::ShareGroupHeartbeatResponse,
+    },
+};
 use tokio::sync::oneshot;
 
-use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
-use crabka_protocol::owned::share_group_heartbeat_response::ShareGroupHeartbeatResponse;
-use crabka_protocol::{Decode, Encode};
-
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::share::actor::ShareGroupActorMessage;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    coordinator::unified::share::actor::ShareGroupActorMessage,
+    error::BrokerError,
+};
 
 #[tracing::instrument(
     name = "handle_share_group_heartbeat",
@@ -118,12 +123,13 @@ fn encode(version: i16, resp: &ShareGroupHeartbeatResponse) -> Result<Bytes, Bro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::share_group_heartbeat_response;
-    use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
+
+    use assert2::assert;
+    use crabka_protocol::{UnknownTaggedFields, owned::share_group_heartbeat_response};
+    use crabka_security::{AuthMethod, Principal};
+
+    use super::*;
 
     #[test]
     fn disabled_feature_yields_unsupported_version() {

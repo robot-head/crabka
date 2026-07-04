@@ -23,6 +23,7 @@ crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 arrow = { workspace = true }
 datafusion = { workspace = true }
 async-trait = { workspace = true }
+derive_more = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 futures = { workspace = true }
 regex = { workspace = true }

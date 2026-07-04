@@ -6,8 +6,10 @@
 
 use bytes::Bytes;
 
-use crate::dsl::processors::fk::subscription::{SubscriptionResponseWrapper, SubscriptionWrapper};
-use crate::processor::serde::{Serde, SerdeAssociate, SerdeError};
+use crate::{
+    dsl::processors::fk::subscription::{SubscriptionResponseWrapper, SubscriptionWrapper},
+    processor::serde::{Serde, SerdeAssociate, SerdeError},
+};
 
 /// `Serde<SubscriptionWrapper>` for the registration repartition topic value.
 #[derive(Debug, Clone, Copy, Default)]
@@ -49,9 +51,10 @@ impl SerdeAssociate for SubscriptionResponseWrapperSerde {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+
     use super::*;
     use crate::dsl::processors::fk::subscription::Instruction;
-    use bytes::Bytes;
 
     #[test]
     fn subscription_wrapper_serde_round_trips() {

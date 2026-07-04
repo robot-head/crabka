@@ -1,12 +1,16 @@
 //! Shared, background-refreshed schema cache. Hot-path reads are synchronous;
 //! registry I/O happens at pre-warm and on background fetches.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
-use crate::error::SchemaSerdeError;
-use crate::registry::RegistryClient;
-use crate::subject::{Role, SchemaKind, SubjectStrategy, TopicNameStrategy};
+use crate::{
+    error::SchemaSerdeError,
+    registry::RegistryClient,
+    subject::{Role, SchemaKind, SubjectStrategy, TopicNameStrategy},
+};
 
 /// How serialize-side ids are resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -234,11 +238,14 @@ impl SchemaCache {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_json, method, path},
+    };
+
     use super::*;
     use crate::registry::RegistryClient;
-    use assert2::check;
-    use wiremock::matchers::{body_json, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn cache() -> Arc<SchemaCache> {
         SchemaCache::new(RegistryClient::new("http://unused"), CacheConfig::default())

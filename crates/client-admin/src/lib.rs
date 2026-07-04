@@ -512,8 +512,9 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn kafka_error_name_known_codes() {

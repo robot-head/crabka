@@ -3,16 +3,16 @@
 //! populated by the global consumer (reading all partitions of each global source
 //! topic) and read by stream-globaltable join processors. One per app, shared via
 //! `Arc` into every task's dispatch.
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use tokio::sync::Mutex;
 
-use crate::error::StreamsClientError;
-use crate::runtime::io::{IsolationLevel, RecordFetcher};
-use crate::store::backend::StoreBackend;
-use crate::store::registry::StoreRegistry;
+use crate::{
+    error::StreamsClientError,
+    runtime::io::{IsolationLevel, RecordFetcher},
+    store::{backend::StoreBackend, registry::StoreRegistry},
+};
 
 #[derive(Clone, Default)]
 pub(crate) struct GlobalStateManager {
@@ -209,11 +209,14 @@ impl GlobalStateManager {
 mod tests {
     use std::sync::Mutex as StdMutex;
 
-    use super::*;
-    use crate::processor::serde::{Consumed, StringSerde};
-    use crate::runtime::io::{FetchBatch, FetchedRec};
-    use crate::topology::{NodeHandle, Topology};
     use assert2::check;
+
+    use super::*;
+    use crate::{
+        processor::serde::{Consumed, StringSerde},
+        runtime::io::{FetchBatch, FetchedRec},
+        topology::{NodeHandle, Topology},
+    };
 
     /// Build a one-entry `GlobalStateManager` over a `KeyValueBytesStore<String,String>`
     /// named "g", fed by source topic "gtopic", using the real `add_global_store`

@@ -9,31 +9,35 @@
 
 #![allow(clippy::pedantic)]
 
-use assert2::{assert, check};
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
+use assert2::{assert, check};
 use async_trait::async_trait;
 use axum::Extension;
-use connectrpc_axum::message::error::Code;
-use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
+use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse, error::Code};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_rebalancer::api::GoalRegistry;
-use crabka_rebalancer::api::handlers::{self, AppState};
-use crabka_rebalancer::capacity::BrokerCapacities;
-use crabka_rebalancer::executor::phases::{ClientFacade, ConfigOp, PhaseError};
-use crabka_rebalancer::executor::throttle::ThrottleTargets;
-use crabka_rebalancer::executor::{ExecutorConfig, ExecutorState};
-use crabka_rebalancer::goals::GoalContext;
-use crabka_rebalancer::health::new_registry;
-use crabka_rebalancer::ingest::{SharedSnapshot, new_shared_snapshot, snapshot_once};
-use crabka_rebalancer::metrics::RebalancerMetrics;
-use crabka_rebalancer::model::{Movement, ProposalStore};
-use crabka_rebalancer::pb;
-use crabka_rebalancer::scraper::UsageStore;
-use crabka_rebalancer::state_topic::StateBackend as _;
+use crabka_rebalancer::{
+    api::{
+        GoalRegistry,
+        handlers::{self, AppState},
+    },
+    capacity::BrokerCapacities,
+    executor::{
+        ExecutorConfig, ExecutorState,
+        phases::{ClientFacade, ConfigOp, PhaseError},
+        throttle::ThrottleTargets,
+    },
+    goals::GoalContext,
+    health::new_registry,
+    ingest::{SharedSnapshot, new_shared_snapshot, snapshot_once},
+    metrics::RebalancerMetrics,
+    model::{Movement, ProposalStore},
+    pb,
+    scraper::UsageStore,
+    state_topic::StateBackend as _,
+};
 use prometheus_client::registry::Registry;
 use tempfile::TempDir;
 
@@ -451,10 +455,12 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
 /// and the proposal reaches a terminal status.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn execute_proposal_settles_against_real_broker() {
-    use crabka_rebalancer::executor::Execution;
-    use crabka_rebalancer::executor::client_impl::LiveClient;
-    use crabka_rebalancer::model::proposal::{Proposal, ProposalStatus, ProposalSummary};
     use std::time::Instant;
+
+    use crabka_rebalancer::{
+        executor::{Execution, client_impl::LiveClient},
+        model::proposal::{Proposal, ProposalStatus, ProposalSummary},
+    };
 
     let (broker, bootstrap, _broker_dir) = boot_broker().await;
     create_topic(&bootstrap, "exec-t", 1).await;
@@ -544,9 +550,10 @@ async fn execute_proposal_settles_against_real_broker() {
 /// to `Completed` before the cancel token fires.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_clears_throttle_and_reverts() {
-    use crabka_rebalancer::executor::Execution;
-    use crabka_rebalancer::executor::client_impl::LiveClient;
-    use crabka_rebalancer::model::proposal::{Proposal, ProposalStatus, ProposalSummary};
+    use crabka_rebalancer::{
+        executor::{Execution, client_impl::LiveClient},
+        model::proposal::{Proposal, ProposalStatus, ProposalSummary},
+    };
 
     let (broker, bootstrap, _broker_dir) = boot_broker().await;
     create_topic(&bootstrap, "cancel-t", 1).await;
@@ -653,10 +660,14 @@ async fn cancel_clears_throttle_and_reverts() {
 /// tombstones the backend entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restart_resumes_in_flight_plan() {
-    use crabka_rebalancer::executor::Execution;
-    use crabka_rebalancer::executor::client_impl::LiveClient;
-    use crabka_rebalancer::executor::state::{InFlightFile, Phase};
-    use crabka_rebalancer::model::proposal::{Proposal, ProposalStatus, ProposalSummary};
+    use crabka_rebalancer::{
+        executor::{
+            Execution,
+            client_impl::LiveClient,
+            state::{InFlightFile, Phase},
+        },
+        model::proposal::{Proposal, ProposalStatus, ProposalSummary},
+    };
 
     let (broker, bootstrap, _broker_dir) = boot_broker().await;
     create_topic(&bootstrap, "resume-t", 1).await;
@@ -740,9 +751,10 @@ async fn restart_resumes_in_flight_plan() {
 /// is purely about goal interaction.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rack_aware_eliminates_same_rack_collisions() {
-    use crabka_rebalancer::goals::rack_aware::RackAware;
-    use crabka_rebalancer::goals::{Goal, GoalContext};
-    use crabka_rebalancer::model::{BrokerView, ClusterState, Movement, PartitionView};
+    use crabka_rebalancer::{
+        goals::{Goal, GoalContext, rack_aware::RackAware},
+        model::{BrokerView, ClusterState, Movement, PartitionView},
+    };
 
     let state = ClusterState {
         cluster_id: Some("c".into()),
@@ -808,12 +820,13 @@ async fn rack_aware_eliminates_same_rack_collisions() {
 /// movements that reduce broker 1's load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replica_capacity_evicts_over_capacity_broker() {
-    use crabka_rebalancer::capacity::{BrokerCapacities, BrokerCapacity};
-    use crabka_rebalancer::goals::replica_capacity::ReplicaCapacity;
-    use crabka_rebalancer::goals::{Goal, GoalContext};
-    use crabka_rebalancer::model::{BrokerView, ClusterState, Movement, PartitionView};
-    use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::{collections::HashMap, sync::Arc};
+
+    use crabka_rebalancer::{
+        capacity::{BrokerCapacities, BrokerCapacity},
+        goals::{Goal, GoalContext, replica_capacity::ReplicaCapacity},
+        model::{BrokerView, ClusterState, Movement, PartitionView},
+    };
 
     let parts: Vec<_> = (0..10)
         .map(|i| PartitionView {
@@ -913,13 +926,13 @@ async fn replica_capacity_evicts_over_capacity_broker() {
 /// broker 1's total.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disk_usage_evicts_hot_broker() {
-    use crabka_rebalancer::goals::disk_usage::DiskUsage;
-    use crabka_rebalancer::goals::{Goal, GoalContext};
-    use crabka_rebalancer::model::{BrokerView, ClusterState, Movement, PartitionView};
-    use crabka_rebalancer::scraper::parse::ParsedSample;
-    use crabka_rebalancer::scraper::{MetricKind, UsageStore, WindowConfig};
-    use std::sync::Arc;
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
+
+    use crabka_rebalancer::{
+        goals::{Goal, GoalContext, disk_usage::DiskUsage},
+        model::{BrokerView, ClusterState, Movement, PartitionView},
+        scraper::{MetricKind, UsageStore, WindowConfig, parse::ParsedSample},
+    };
 
     let parts: Vec<_> = (0..5)
         .map(|i| PartitionView {
@@ -1092,11 +1105,13 @@ async fn anomaly_store_persists_and_get_anomalies_returns_it() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn auto_trigger_skipped_when_executor_in_flight() {
-    use crabka_rebalancer::detector::{
-        Anomaly, AnomalyKey, AnomalyKind, AnomalySeverity, DetectorConfig, DetectorMetrics,
-        auto_trigger,
+    use crabka_rebalancer::{
+        detector::{
+            Anomaly, AnomalyKey, AnomalyKind, AnomalySeverity, DetectorConfig, DetectorMetrics,
+            auto_trigger,
+        },
+        executor::ExecutionHandle,
     };
-    use crabka_rebalancer::executor::ExecutionHandle;
     use tokio_util::sync::CancellationToken;
 
     let shared = new_shared_snapshot();
@@ -1154,10 +1169,12 @@ async fn auto_trigger_skipped_when_executor_in_flight() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disk_pressure_anomaly_auto_triggers_proposal() {
-    use crabka_rebalancer::detector::{
-        AnomalyKey, AnomalyKind, AnomalySeverity, DetectorConfig, DetectorMetrics, auto_trigger,
+    use crabka_rebalancer::{
+        detector::{
+            AnomalyKey, AnomalyKind, AnomalySeverity, DetectorConfig, DetectorMetrics, auto_trigger,
+        },
+        model::{BrokerView, ClusterState, PartitionView},
     };
-    use crabka_rebalancer::model::{BrokerView, ClusterState, PartitionView};
 
     let shared = new_shared_snapshot();
     let (state, _registry) = build_state(shared);

@@ -15,20 +15,25 @@
 //! Wire format: v1 flexible (tagged fields), v2 flexible + `transaction_version`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_ids::PartitionIndex;
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        write_txn_markers_request::WriteTxnMarkersRequest,
+        write_txn_markers_response::{
+            WritableTxnMarkerPartitionResult, WritableTxnMarkerResult,
+            WritableTxnMarkerTopicResult, WriteTxnMarkersResponse,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::Decode;
-use crabka_protocol::Encode;
-use crabka_protocol::owned::write_txn_markers_request::WriteTxnMarkersRequest;
-use crabka_protocol::owned::write_txn_markers_response::{
-    WritableTxnMarkerPartitionResult, WritableTxnMarkerResult, WritableTxnMarkerTopicResult,
-    WriteTxnMarkersResponse,
+use crate::{
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    txn::marker::{MarkerType, build_marker_batch},
 };
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::txn::marker::{MarkerType, build_marker_batch};
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -50,7 +55,9 @@ pub(crate) fn handle(
             } else {
                 MarkerType::Abort
             };
-            let pid = marker_entry.producer_id;
+            // Wrap the wire `i64` into `ProducerId` for the marker builder;
+            // unwrapped again below for the raw-`i64` response field.
+            let pid = crabka_log::ProducerId(marker_entry.producer_id);
             let epoch = marker_entry.producer_epoch;
 
             let mut topic_results: Vec<WritableTxnMarkerTopicResult> = Vec::new();
@@ -59,7 +66,7 @@ pub(crate) fn handle(
                 let mut partition_results: Vec<WritableTxnMarkerPartitionResult> = Vec::new();
 
                 for &p in &topic.partition_indexes {
-                    let error_code = match partitions.get(&topic.name, p) {
+                    let error_code = match partitions.get(&topic.name, PartitionIndex(p)) {
                         None => {
                             tracing::debug!(
                                 topic = %topic.name,
@@ -101,7 +108,7 @@ pub(crate) fn handle(
             }
 
             marker_results.push(WritableTxnMarkerResult {
-                producer_id: pid,
+                producer_id: pid.get(),
                 topics: topic_results,
                 ..Default::default()
             });
@@ -119,16 +126,19 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
 
     use assert2::assert;
     use crabka_log::{Log, LogConfig};
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::write_txn_markers_request::{
-        WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            write_txn_markers_request::{
+                WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequest,
+            },
+            write_txn_markers_response::WriteTxnMarkersResponse,
+        },
     };
-    use crabka_protocol::owned::write_txn_markers_response::WriteTxnMarkersResponse;
 
     use super::*;
     use crate::broker::{Broker, BrokerHandle};
@@ -141,13 +151,15 @@ mod tests {
         let log = Log::open(&part_dir, LogConfig::default()).expect("open partition log");
         let part = crate::broker::spawn_partition(
             topic.to_string(),
-            partition,
+            PartitionIndex(partition),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        broker.partitions.insert(topic.to_string(), partition, part);
+        broker
+            .partitions
+            .insert(topic.to_string(), PartitionIndex(partition), part);
     }
 
     async fn start_broker() -> (BrokerHandle, tempfile::TempDir) {

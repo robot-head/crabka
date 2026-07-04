@@ -1,14 +1,19 @@
 //! Compatibility check endpoint using the subject's effective level against
 //! the named version.
 
-use axum::extract::{Path, Query, State};
-use axum::response::Response;
+use axum::{
+    extract::{Path, Query, State},
+    response::Response,
+};
 use serde::Deserialize;
 
-use crate::compat;
-use crate::error::SrError;
-use crate::format::SchemaType;
-use crate::rest::{AppState, response::ok_json};
+use crate::{
+    compat,
+    error::SrError,
+    format::SchemaType,
+    ids::SchemaVersion,
+    rest::{AppState, response::ok_json},
+};
 
 #[derive(Deserialize)]
 struct Body {
@@ -66,12 +71,48 @@ pub async fn check(
 }
 
 /// `latest` -> None; a positive integer -> Some(n); else 42202.
-fn parse_version(v: &str) -> Result<Option<i32>, SrError> {
+fn parse_version(v: &str) -> Result<Option<SchemaVersion>, SrError> {
     if v == "latest" {
         return Ok(None);
     }
     match v.parse::<i32>() {
-        Ok(n) if n >= 1 => Ok(Some(n)),
+        Ok(n) if n >= 1 => Ok(Some(SchemaVersion(n))),
         _ => Err(SrError::InvalidVersion(v.to_string())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::*;
+
+    #[test]
+    fn parse_version_latest_is_none() {
+        check!(matches!(parse_version("latest"), Ok(None)));
+    }
+
+    #[test]
+    fn parse_version_positive_is_some() {
+        check!(matches!(parse_version("1"), Ok(Some(SchemaVersion(1)))));
+        check!(matches!(parse_version("42"), Ok(Some(SchemaVersion(42)))));
+    }
+
+    #[test]
+    fn parse_version_zero_is_rejected() {
+        // 0 parses as i32 but fails the `n >= 1` guard: must be InvalidVersion,
+        // not Ok(Some(SchemaVersion(0))).
+        check!(matches!(
+            parse_version("0"),
+            Err(SrError::InvalidVersion(_))
+        ));
+    }
+
+    #[test]
+    fn parse_version_negative_is_rejected() {
+        check!(matches!(
+            parse_version("-5"),
+            Err(SrError::InvalidVersion(_))
+        ));
     }
 }

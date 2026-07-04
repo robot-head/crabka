@@ -5,22 +5,23 @@ mod selector;
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
-use datafusion::catalog::MemTable;
-use datafusion::logical_expr::LogicalPlan;
-use datafusion::prelude::SessionContext;
+use datafusion::{catalog::MemTable, logical_expr::LogicalPlan, prelude::SessionContext};
 
-use crate::ast::{
-    Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, Scope, SpansetExpr,
-    StructuralOp,
+use crate::{
+    ast::{
+        Aggregate, ComparisonOp, Field, FieldExpr, Intrinsic, Pipeline, Query, Scope, SpansetExpr,
+        StructuralOp,
+    },
+    error::{Result, TraceqlError},
+    ids::UnixNano,
+    span_columns::{COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_SPAN_ID, COL_TRACE_ID},
+    store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore},
 };
-use crate::error::{Result, TraceqlError};
-use crate::span_columns::{COL_NS_LEFT, COL_NS_RIGHT, COL_PARENT_ID, COL_SPAN_ID, COL_TRACE_ID};
-use crate::store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore};
 
 pub(crate) struct PlannerContext {
     pub tenant: String,
-    pub start_ns: i64,
-    pub end_ns: i64,
+    pub start_ns: UnixNano,
+    pub end_ns: UnixNano,
     pub scan_options: ScanOptions,
 }
 
@@ -57,7 +58,13 @@ async fn plan_spanset_sql<S: SpanStore>(
 ) -> Result<PlannedSpanset> {
     let scan_options = scan_options_with_pipeline_projections(&ctx.scan_options, pipeline);
     let scan = store
-        .scan_with_options(&ctx.tenant, &[], ctx.start_ns, ctx.end_ns, &scan_options)
+        .scan_with_options(
+            &ctx.tenant,
+            &[],
+            ctx.start_ns.into(),
+            ctx.end_ns.into(),
+            &scan_options,
+        )
         .await?;
     let inspected_bytes = scan.inspected_bytes;
     let nested_tables = register_nested_selector_tables(store, ctx, &scan.ctx, root).await?;
@@ -182,8 +189,8 @@ async fn register_nested_selector_tables<S: SpanStore>(
             .scan_with_options(
                 &ctx.tenant,
                 &selector::field_expr_to_matchers(&selector),
-                ctx.start_ns,
-                ctx.end_ns,
+                ctx.start_ns.into(),
+                ctx.end_ns.into(),
                 &ctx.scan_options,
             )
             .await?;
@@ -836,17 +843,18 @@ fn structural_is_union(op: StructuralOp) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::Array;
-    use arrow::record_batch::RecordBatch;
+    use arrow::{array::Array, record_batch::RecordBatch};
     use assert2::{assert, check};
     use datafusion::arrow::array::AsArray;
 
     use super::*;
-    use crate::InMemorySpanStore;
-    use crate::ast::Value;
-    use crate::parser::parse;
-    use crate::result::{AttrValue, EventRef};
-    use crate::span_columns::{COL_NAME, InputSpan};
+    use crate::{
+        InMemorySpanStore,
+        ast::Value,
+        parser::parse,
+        result::{AttrValue, EventRef},
+        span_columns::{COL_NAME, InputSpan},
+    };
 
     fn span_with_parent(
         id: u8,
@@ -894,8 +902,8 @@ mod tests {
                 store,
                 &PlannerContext {
                     tenant: "t".into(),
-                    start_ns: 0,
-                    end_ns: 10_000,
+                    start_ns: UnixNano(0),
+                    end_ns: UnixNano(10_000),
                     scan_options: ScanOptions::default(),
                 },
                 &q,

@@ -8,27 +8,31 @@
 // the transaction wire handlers. Remove this attribute once those land.
 #![allow(dead_code)]
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crabka_ids::PartitionIndex;
+use crabka_log::{Offset, ProducerId};
+use crabka_metadata::MetadataImage;
+use crabka_protocol::records::{Record, RecordBatch};
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
-use crabka_metadata::MetadataImage;
-use crabka_protocol::records::{Record, RecordBatch};
-
-use crate::coordinator::unified::classic_state::OffsetEntry;
-use crate::error::BrokerError;
-use crate::partition_registry::PartitionRegistry;
-use crate::txn::bootstrap;
-use crate::txn::handlers::end_txn::next_producer_identity;
-use crate::txn::partitioner::partition_for_tid;
-use crate::txn::state::{TxnEntry, TxnState};
-use crate::txn::two_pc::should_abort_idle_txn;
-use crate::txn::version::TxnVersion;
+use crate::{
+    coordinator::unified::classic_state::OffsetEntry,
+    error::BrokerError,
+    partition_registry::PartitionRegistry,
+    txn::{
+        bootstrap,
+        handlers::end_txn::next_producer_identity,
+        partitioner::partition_for_tid,
+        state::{TxnEntry, TxnState},
+        two_pc::should_abort_idle_txn,
+        version::TxnVersion,
+    },
+};
 
 /// A consumer-group committed-offset key: `(topic, partition)`.
 pub(crate) type OffsetKey = (String, i32);
@@ -102,7 +106,7 @@ fn apply_prepare_abort(entry: &mut TxnEntry, now_ms: i64) {
 /// `(producer_id, producer_epoch)` from the KIP-890 identity bump. Records the
 /// prior id as `prev_producer_id` only when a roll actually happened (a fresh
 /// pid was allocated). Pure so the transition is unit-killable.
-fn apply_complete_abort(entry: &mut TxnEntry, new_pid: i64, new_epoch: i16, now_ms: i64) {
+fn apply_complete_abort(entry: &mut TxnEntry, new_pid: ProducerId, new_epoch: i16, now_ms: i64) {
     if new_pid != entry.producer_id {
         entry.prev_producer_id = entry.producer_id;
     }
@@ -172,10 +176,10 @@ pub(crate) struct TxnCoordinator {
     /// Live in-memory state: `transactional_id` → locked `TxnEntry`.
     state: DashMap<String, Arc<Mutex<TxnEntry>>>,
     /// Set of `__transaction_state` partition indices this broker leads.
-    leader_partitions: RwLock<HashSet<i32>>,
+    leader_partitions: RwLock<HashSet<PartitionIndex>>,
     /// Reverse lookup: `producer_id` → `transactional_id`. Used by the
     /// Produce handler to verify transactional batches (KIP-1319 v2).
-    pid_to_tid: DashMap<i64, String>,
+    pid_to_tid: DashMap<ProducerId, String>,
     /// KIP-447 transactional consumer offsets buffered per `producer_id`,
     /// pending the transaction's COMMIT/ABORT marker. `TxnOffsetCommit`
     /// appends the offset records to `__consumer_offsets` (held under the LSO)
@@ -186,7 +190,7 @@ pub(crate) struct TxnCoordinator {
     /// is dropped without applying. Keyed by `producer_id` because that is the
     /// identity `EndTxn` finalizes on; the value groups offsets by the
     /// `group_id` each `TxnOffsetCommit` named.
-    pending_txn_offsets: DashMap<i64, PendingTxnOffsets>,
+    pending_txn_offsets: DashMap<ProducerId, PendingTxnOffsets>,
 }
 
 impl TxnCoordinator {
@@ -215,7 +219,7 @@ impl TxnCoordinator {
     /// same as a non-transactional re-commit).
     pub(crate) fn buffer_txn_offsets(
         &self,
-        producer_id: i64,
+        producer_id: ProducerId,
         group_id: &str,
         entries: Vec<(OffsetKey, OffsetEntry)>,
     ) {
@@ -235,7 +239,7 @@ impl TxnCoordinator {
     /// are materialized into each group's `committed_offsets`; on ABORT this is
     /// still called so the buffer is dropped, and the result discarded. Returns
     /// an empty map if the producer buffered no transactional offsets.
-    pub(crate) fn take_txn_offsets(&self, producer_id: i64) -> PendingTxnOffsets {
+    pub(crate) fn take_txn_offsets(&self, producer_id: ProducerId) -> PendingTxnOffsets {
         self.pending_txn_offsets
             .remove(&producer_id)
             .map(|(_, v)| v)
@@ -249,7 +253,7 @@ impl TxnCoordinator {
         let mut set = HashSet::new();
         for p in image.partitions_of(bootstrap::TOPIC) {
             if p.leader == self.node_id {
-                set.insert(p.partition);
+                set.insert(PartitionIndex(p.partition));
             }
         }
         *self.leader_partitions.write().await = set;
@@ -260,8 +264,8 @@ impl TxnCoordinator {
     // `tid` and `NUM_PARTITIONS`, but keeping it as a method lets callers
     // use a consistent `coord.partition_for(tid)` style.
     #[allow(clippy::unused_self)]
-    pub(crate) fn partition_for(&self, tid: &str) -> i32 {
-        partition_for_tid(tid, bootstrap::NUM_PARTITIONS)
+    pub(crate) fn partition_for(&self, tid: &str) -> PartitionIndex {
+        PartitionIndex(partition_for_tid(tid, bootstrap::NUM_PARTITIONS))
     }
 
     /// Returns `true` if this broker is the transaction coordinator for `tid`.
@@ -277,7 +281,7 @@ impl TxnCoordinator {
 
     /// Reverse lookup: given a `producer_id`, return the `transactional_id`
     /// it was registered under, or `None` if the pid is unknown.
-    pub(crate) fn tid_for_pid(&self, pid: i64) -> Option<String> {
+    pub(crate) fn tid_for_pid(&self, pid: ProducerId) -> Option<String> {
         self.pid_to_tid.get(&pid).map(|e| e.value().clone())
     }
 
@@ -289,7 +293,7 @@ impl TxnCoordinator {
     /// once the old id is gone, and skipped for entries that never rolled
     /// (`prev == -1`). pids are globally unique, so the prior id only ever
     /// mapped to this tid — removing it can't affect another transaction.
-    fn evict_rolled_pid(pid_to_tid: &DashMap<i64, String>, entry: &TxnEntry) {
+    fn evict_rolled_pid(pid_to_tid: &DashMap<ProducerId, String>, entry: &TxnEntry) {
         if entry.prev_producer_id >= 0 && entry.prev_producer_id != entry.producer_id {
             pid_to_tid.remove(&entry.prev_producer_id);
         }
@@ -330,7 +334,7 @@ impl TxnCoordinator {
         name = "txn_coordinator_put",
         level = "debug",
         skip_all,
-        fields(tid = %entry.transactional_id, producer_id = entry.producer_id),
+        fields(tid = %entry.transactional_id, producer_id = entry.producer_id.0),
         err,
     )]
     pub(crate) async fn put(
@@ -408,11 +412,16 @@ impl TxnCoordinator {
     /// Returns [`BrokerError`] if reading a partition's log fails with an
     /// error other than reading past the end (which is treated as a normal
     /// "partition is empty" condition).
+    // The `base_offset + last_offset_delta + 1` next-batch offset advance is
+    // only reachable by replaying real committed `__transaction_state` batches
+    // from an on-disk `Log`; there is no pure seam over the read loop, so the
+    // arithmetic is exercised by the live recovery / differential suite.
+    #[cfg_attr(test, mutants::skip)]
     #[tracing::instrument(name = "txn_coordinator_recover", level = "info", skip_all, err)]
     pub(crate) async fn recover(&self, image: &MetadataImage) -> Result<(), BrokerError> {
         self.refresh_leader_partitions(image).await;
 
-        let local_partitions: Vec<i32> = self
+        let local_partitions: Vec<PartitionIndex> = self
             .leader_partitions
             .read()
             .await
@@ -436,7 +445,7 @@ impl TxnCoordinator {
                     // read error as "nothing to replay here" to be safe.
                     Err(e) => {
                         warn!(
-                            partition = p,
+                            partition = p.get(),
                             error = %e,
                             "read error during __transaction_state recovery; skipping partition"
                         );
@@ -452,7 +461,7 @@ impl TxnCoordinator {
                     for rec in &batch.records {
                         let Some(key_bytes) = rec.key.as_ref() else {
                             warn!(
-                                partition = p,
+                                partition = p.get(),
                                 "__transaction_state record missing key; skipping"
                             );
                             continue;
@@ -461,7 +470,7 @@ impl TxnCoordinator {
                             Ok(t) => t,
                             Err(e) => {
                                 warn!(
-                                    partition = p,
+                                    partition = p.get(),
                                     error = %e,
                                     "invalid TransactionLogKey in __transaction_state; skipping"
                                 );
@@ -477,7 +486,7 @@ impl TxnCoordinator {
                             Ok(e) => e,
                             Err(e) => {
                                 warn!(
-                                    partition = p,
+                                    partition = p.get(),
                                     error = %e,
                                     "invalid TransactionLogValue in __transaction_state; skipping"
                                 );
@@ -489,7 +498,7 @@ impl TxnCoordinator {
                         self.state
                             .insert(entry.transactional_id.clone(), Arc::new(Mutex::new(entry)));
                     }
-                    offset = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
+                    offset = Offset(batch.base_offset + i64::from(batch.last_offset_delta) + 1);
                 }
             }
         }
@@ -542,7 +551,7 @@ impl ReaperBackend for TxnCoordinator {
             let Some(part) = self.partitions.get(&tp.topic, tp.partition) else {
                 warn!(
                     topic = %tp.topic,
-                    partition = tp.partition,
+                    partition = tp.partition.get(),
                     "txn reaper: partition not locally led; abort marker needs inter-broker \
                      WriteTxnMarkers (not yet wired), skipping"
                 );
@@ -557,7 +566,7 @@ impl ReaperBackend for TxnCoordinator {
             if let Err(e) = part.produce_batch(marker).await {
                 warn!(
                     topic = %tp.topic,
-                    partition = tp.partition,
+                    partition = tp.partition.get(),
                     error = %e,
                     "txn reaper: failed to write abort marker"
                 );
@@ -602,50 +611,70 @@ impl ReaperBackend for TxnCoordinator {
 mod tests {
     use super::*;
 
+    fn test_coordinator() -> TxnCoordinator {
+        TxnCoordinator::new(
+            crabka_metadata::NodeId(1),
+            Arc::new(PartitionRegistry::new()),
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        )
+    }
+
+    #[test]
+    fn partition_for_maps_tid_via_murmur2_over_num_partitions() {
+        // Canonical JVM murmur2 vectors (see `partitioner` tests) with N=50,
+        // which is `bootstrap::NUM_PARTITIONS`. Pins the real mapping so a
+        // constant `PartitionIndex(0)` (the Default) is caught: none of these
+        // hash to 0.
+        let coord = test_coordinator();
+        assert_eq!(coord.partition_for("my-tid"), PartitionIndex(43));
+        assert_eq!(coord.partition_for("producer-1"), PartitionIndex(45));
+        assert_eq!(coord.partition_for("tx-orders-prod"), PartitionIndex(26));
+    }
+
     fn entry(pid: i64, prev: i64) -> TxnEntry {
-        let mut e = TxnEntry::new_empty("tid-a".into(), pid, 0, 60_000, 0);
-        e.prev_producer_id = prev;
+        let mut e = TxnEntry::new_empty("tid-a".into(), ProducerId(pid), 0, 60_000, 0);
+        e.prev_producer_id = ProducerId(prev);
         e
     }
 
     #[test]
     fn evict_rolled_pid_drops_only_the_prior_id_on_a_roll() {
-        let map: DashMap<i64, String> = DashMap::new();
-        map.insert(1000, "tid-a".into()); // the pre-roll mapping
+        let map: DashMap<ProducerId, String> = DashMap::new();
+        map.insert(ProducerId(1000), "tid-a".into()); // the pre-roll mapping
 
         // A roll: new pid 2000, prev = 1000. The stale 1000 mapping is evicted;
         // put then inserts 2000 (mirrored here).
         TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
-        map.insert(2000, "tid-a".into());
+        map.insert(ProducerId(2000), "tid-a".into());
 
         assert!(
-            map.get(&1000).is_none(),
+            map.get(&ProducerId(1000)).is_none(),
             "stale pre-roll pid must be evicted"
         );
-        assert!(map.get(&2000).map(|e| e.value().clone()) == Some("tid-a".into()));
+        assert!(map.get(&ProducerId(2000)).map(|e| e.value().clone()) == Some("tid-a".into()));
     }
 
     #[test]
     fn evict_rolled_pid_is_noop_without_a_roll() {
-        let map: DashMap<i64, String> = DashMap::new();
-        map.insert(1000, "tid-a".into());
+        let map: DashMap<ProducerId, String> = DashMap::new();
+        map.insert(ProducerId(1000), "tid-a".into());
         // Never rolled: prev == -1 → nothing evicted.
         TxnCoordinator::evict_rolled_pid(&map, &entry(1000, -1));
-        assert!(map.get(&1000).is_some());
+        assert!(map.get(&ProducerId(1000)).is_some());
         // prev == current (defensive): nothing evicted.
         TxnCoordinator::evict_rolled_pid(&map, &entry(1000, 1000));
-        assert!(map.get(&1000).is_some());
+        assert!(map.get(&ProducerId(1000)).is_some());
     }
 
     #[test]
     fn evict_rolled_pid_is_idempotent_after_the_id_is_gone() {
-        let map: DashMap<i64, String> = DashMap::new();
-        map.insert(2000, "tid-a".into());
+        let map: DashMap<ProducerId, String> = DashMap::new();
+        map.insert(ProducerId(2000), "tid-a".into());
         // prev=1000 already absent → repeated evictions are harmless no-ops.
         TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
         TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
-        assert!(map.get(&1000).is_none());
-        assert!(map.get(&2000).is_some());
+        assert!(map.get(&ProducerId(1000)).is_none());
+        assert!(map.get(&ProducerId(2000)).is_some());
     }
 
     // ── Pure transition / guard helpers ───────────────────────────────────
@@ -667,21 +696,24 @@ mod tests {
         let mut e = entry(1000, -1);
         e.state = TxnState::PrepareAbort;
         e.producer_epoch = 4;
-        apply_complete_abort(&mut e, 1000, 5, 42);
+        apply_complete_abort(&mut e, ProducerId(1000), 5, 42);
         check!(e.state == TxnState::CompleteAbort);
-        check!(e.producer_id == 1000);
+        check!(e.producer_id == ProducerId(1000));
         check!(e.producer_epoch == 5);
-        check!(e.prev_producer_id == -1, "no roll must not set prev");
+        check!(
+            e.prev_producer_id == ProducerId(-1),
+            "no roll must not set prev"
+        );
         check!(e.last_update_ms == 42);
 
         // Roll: fresh pid at epoch 0 → prior pid recorded as prev.
         let mut rolled = entry(1000, -1);
         rolled.state = TxnState::PrepareAbort;
-        apply_complete_abort(&mut rolled, 2000, 0, 43);
-        check!(rolled.producer_id == 2000);
+        apply_complete_abort(&mut rolled, ProducerId(2000), 0, 43);
+        check!(rolled.producer_id == ProducerId(2000));
         check!(rolled.producer_epoch == 0);
         check!(
-            rolled.prev_producer_id == 1000,
+            rolled.prev_producer_id == ProducerId(1000),
             "roll must record prior pid"
         );
     }
@@ -698,7 +730,7 @@ mod tests {
 
         // pid changed → reject.
         current = prepared.clone();
-        current.producer_id = 9999;
+        current.producer_id = ProducerId(9999);
         assert!(!complete_abort_guard_ok(&current, &prepared));
 
         // epoch changed → reject.
@@ -715,7 +747,7 @@ mod tests {
     // ── Orchestration loop, driven against a mock backend ─────────────────
 
     fn prepared_entry(tid: &str, pid: i64, epoch: i16) -> TxnEntry {
-        let mut e = TxnEntry::new_empty(tid.to_owned(), pid, epoch, 60_000, 0);
+        let mut e = TxnEntry::new_empty(tid.to_owned(), ProducerId(pid), epoch, 60_000, 0);
         e.state = TxnState::PrepareAbort;
         e
     }

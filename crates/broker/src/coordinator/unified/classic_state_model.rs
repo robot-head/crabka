@@ -8,9 +8,11 @@
 //! and static-never-expired invariants. See the design spec at
 //! `docs/superpowers/specs/2026-06-14-crabka-classic-group-fencing-model-design.md`.
 
-use std::hash::{Hash, Hasher};
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::{
+    hash::{Hash, Hasher},
+    sync::OnceLock,
+    time::{Duration, Instant},
+};
 
 use bytes::Bytes;
 use stateright::{Checker, Model, Property};
@@ -386,8 +388,10 @@ mod fuzz {
     use bytes::Bytes;
     use proptest::prelude::*;
 
-    use super::super::{Group, GroupState};
-    use super::{at, index_coherent, mk_member, single_owner};
+    use super::{
+        super::{Group, GroupState},
+        at, index_coherent, mk_member, single_owner,
+    };
 
     #[derive(Clone, Debug)]
     enum Op {

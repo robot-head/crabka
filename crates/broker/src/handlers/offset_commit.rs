@@ -6,29 +6,36 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
-use crabka_protocol::owned::offset_commit_response::{
-    OffsetCommitResponse, OffsetCommitResponsePartition, OffsetCommitResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        offset_commit_request::OffsetCommitRequest,
+        offset_commit_response::{
+            OffsetCommitResponse, OffsetCommitResponsePartition, OffsetCommitResponseTopic,
+        },
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{Record, RecordBatch};
-use crabka_protocol::{Decode, Encode};
 use tokio::sync::oneshot;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
-use crate::coordinator::persistence::OffsetCommitValue;
-use crate::coordinator::unified::actor::{
-    GroupActorHandle, GroupActorMessage, GroupKindTag, validate_group_commit,
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    coordinator::{
+        bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC},
+        persistence::OffsetCommitValue,
+        unified::{
+            actor::{GroupActorHandle, GroupActorMessage, GroupKindTag, validate_group_commit},
+            classic_state::OffsetEntry,
+        },
+    },
+    error::BrokerError,
+    partition::{ProduceData, ProduceJob, WriterMessage},
+    partition_registry::PartitionRegistry,
 };
-use crate::coordinator::unified::classic_state::OffsetEntry;
-use crate::error::BrokerError;
-use crate::partition::{ProduceData, ProduceJob, WriterMessage};
-use crate::partition_registry::PartitionRegistry;
 
 #[allow(clippy::too_many_lines)] // ACL preamble (group + per-topic) + commit pipeline; splitting hurts readability
 #[tracing::instrument(
@@ -318,7 +325,7 @@ async fn append_batch(
     for topic in &req.topics {
         for part in &topic.partitions {
             let value = OffsetCommitValue {
-                offset: part.committed_offset,
+                offset: crabka_log::Offset(part.committed_offset),
                 leader_epoch: part.committed_leader_epoch,
                 metadata: part.committed_metadata.clone().unwrap_or_default(),
                 commit_timestamp_ms: now_ms,
@@ -339,7 +346,9 @@ async fn append_batch(
     }
     batch.last_offset_delta = (delta - 1).max(0);
 
-    let Some(part_handle) = partitions.get(OFFSETS_TOPIC, OFFSETS_PARTITION) else {
+    let Some(part_handle) =
+        partitions.get(OFFSETS_TOPIC, crabka_ids::PartitionIndex(OFFSETS_PARTITION))
+    else {
         return Err(codes::UNKNOWN_SERVER_ERROR);
     };
     let (ack_tx, ack_rx) = oneshot::channel();
@@ -374,7 +383,7 @@ async fn update_committed(req: &OffsetCommitRequest, handle: &Arc<GroupActorHand
             entries.push((
                 (topic.name.clone(), part.partition_index),
                 OffsetEntry {
-                    offset: part.committed_offset,
+                    offset: crabka_log::Offset(part.committed_offset),
                     leader_epoch: part.committed_leader_epoch,
                     metadata: part.committed_metadata.clone().unwrap_or_default(),
                     commit_timestamp_ms: now_ms,

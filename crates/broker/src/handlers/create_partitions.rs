@@ -6,23 +6,24 @@
 //! --alter --partitions N --replica-assignment 0:1,1:2,...` flow.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord};
-use crabka_protocol::owned::create_partitions_request::{
-    CreatePartitionsAssignment, CreatePartitionsRequest,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        create_partitions_request::{CreatePartitionsAssignment, CreatePartitionsRequest},
+        create_partitions_response::{CreatePartitionsResponse, CreatePartitionsTopicResult},
+    },
 };
-use crabka_protocol::owned::create_partitions_response::{
-    CreatePartitionsResponse, CreatePartitionsTopicResult,
-};
-use crabka_protocol::{Decode, Encode};
 use crabka_raft::{NodeId, RaftError};
 
-use crate::authorizer::{AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::create_topics::round_robin_replicas;
-use crate::replicator_supervisor::materialize_partition;
+use crate::{
+    authorizer::{AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    handlers::create_topics::round_robin_replicas,
+    replicator_supervisor::materialize_partition,
+};
 
 /// Resolve the replica list for each newly-added partition.
 ///
@@ -84,13 +85,13 @@ fn resolve_new_partition_assignments(
                         format!("assignment[{i}] references negative broker id {b}"),
                     ));
                 };
-                if !known_brokers.contains(&b_u64) {
+                if !known_brokers.contains(&NodeId(b_u64)) {
                     return Err((
                         codes::INVALID_REPLICA_ASSIGNMENT,
                         format!("assignment[{i}] references unknown broker id {b}"),
                     ));
                 }
-                replicas.push(b_u64);
+                replicas.push(NodeId(b_u64));
             }
             out.push(replicas);
         }
@@ -285,7 +286,7 @@ pub(crate) async fn handle(
                 leader: replicas[0],
                 replicas: replicas.clone(),
                 isr: replicas,
-                leader_epoch: 0,
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -312,9 +313,11 @@ pub(crate) async fn handle(
                                 topic = %t.name, partition = *p, error = %e,
                                 "CreatePartitions: materialize after quorum commit failed"
                             );
-                        } else if let Some(part) = partitions_map.get(&t.name, *p) {
+                        } else if let Some(part) =
+                            partitions_map.get(&t.name, crabka_ids::PartitionIndex(*p))
+                        {
                             let leader = replicas[0];
-                            part.install_leader_change(leader, 0).await;
+                            part.install_leader_change(leader.0, 0).await;
                             if is_local_leader(leader, node_id) {
                                 // At creation the ISR equals the full replica set.
                                 part.install_isr(replicas, replicas, leader).await;
@@ -357,21 +360,23 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use std::{net::SocketAddr, sync::Arc};
+
+    use assert2::{assert, check};
     use crabka_metadata::TopicRecord;
     use crabka_protocol::owned::create_partitions_request::{
         CreatePartitionsAssignment, CreatePartitionsTopic,
     };
     use crabka_security::Principal;
-    use std::net::SocketAddr;
-    use std::sync::Arc;
 
-    use crate::broker::{Broker, BrokerHandle};
-    use crate::test_support::{DenyAll, peer, principal};
+    use crate::{
+        broker::{Broker, BrokerHandle},
+        test_support::{DenyAll, peer, principal},
+    };
 
     const VERSION: i16 = 3;
+
+    use super::*;
 
     fn assn(broker_ids: &[i32]) -> CreatePartitionsAssignment {
         CreatePartitionsAssignment {
@@ -412,7 +417,7 @@ mod tests {
     use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
 
     async fn seed_topic(handle: &BrokerHandle, name: &str, partitions: i32, rf: i16) {
-        let replicas = vec![handle.node_id()];
+        let replicas = vec![NodeId(handle.node_id())];
         let mut records = vec![MetadataRecord::V1Topic(TopicRecord {
             name: name.into(),
             topic_id: uuid::Uuid::new_v4(),
@@ -423,10 +428,10 @@ mod tests {
             records.push(MetadataRecord::V1Partition(PartitionRecord {
                 topic: name.into(),
                 partition,
-                leader: handle.node_id(),
+                leader: NodeId(handle.node_id()),
                 replicas: replicas.clone(),
                 isr: replicas.clone(),
-                leader_epoch: 0,
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -481,7 +486,11 @@ mod tests {
 
     #[test]
     fn round_robin_when_assignments_none() {
-        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
         let out = resolve_new_partition_assignments(None, &brokers, 0, 3, 2)
             .expect("round-robin should succeed");
         assert!(out.len() == 3);
@@ -495,7 +504,11 @@ mod tests {
 
     #[test]
     fn round_robin_continues_rotation_from_existing() {
-        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
         // Topic already has 2 partitions; adding 2 more (so partitions 2..4).
         // Helper must return the *tail* of `round_robin_replicas(...,4,2)`,
         // i.e. the assignments for indices 2 and 3 — not start from rotation 0.
@@ -507,7 +520,7 @@ mod tests {
 
     #[test]
     fn round_robin_rf_exceeds_broker_count_returns_invalid_rf() {
-        let brokers: Vec<NodeId> = vec![0, 1];
+        let brokers: Vec<NodeId> = vec![crabka_audit::NodeId(0), crabka_audit::NodeId(1)];
         let err = resolve_new_partition_assignments(None, &brokers, 0, 1, 3)
             .expect_err("rf=3 against 2 brokers must fail");
         assert!(err.0 == codes::INVALID_REPLICATION_FACTOR);
@@ -515,16 +528,31 @@ mod tests {
 
     #[test]
     fn honored_assignments_pass_through_verbatim() {
-        let brokers: Vec<NodeId> = vec![0, 1, 2, 3];
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+            crabka_audit::NodeId(3),
+        ];
         let provided = vec![assn(&[3, 1]), assn(&[2, 0]), assn(&[1, 3])];
         let out = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
             .expect("explicit assignments should pass validation");
-        assert!(out == vec![vec![3, 1], vec![2, 0], vec![1, 3]]);
+        assert!(
+            out == vec![
+                vec![NodeId(3), NodeId(1)],
+                vec![NodeId(2), NodeId(0)],
+                vec![NodeId(1), NodeId(3)],
+            ]
+        );
     }
 
     #[test]
     fn explicit_length_mismatch_returns_invalid_replica_assignment() {
-        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
         let provided = vec![assn(&[0, 1]), assn(&[1, 2])];
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
             .expect_err("2 assignments for 3 new partitions must fail");
@@ -537,7 +565,11 @@ mod tests {
 
     #[test]
     fn explicit_wrong_rf_returns_invalid_replica_assignment() {
-        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
         let provided = vec![assn(&[0, 1, 2])]; // 3 replicas, but rf=2
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
             .expect_err("rf mismatch must fail");
@@ -547,7 +579,11 @@ mod tests {
 
     #[test]
     fn explicit_duplicate_broker_in_assignment_returns_invalid_replica_assignment() {
-        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
         let provided = vec![assn(&[1, 1])]; // duplicate
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
             .expect_err("duplicate broker must fail");
@@ -557,7 +593,11 @@ mod tests {
 
     #[test]
     fn explicit_unknown_broker_returns_invalid_replica_assignment() {
-        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
         let provided = vec![assn(&[0, 9])]; // 9 unknown
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
             .expect_err("unknown broker must fail");
@@ -567,7 +607,11 @@ mod tests {
 
     #[test]
     fn explicit_negative_broker_id_returns_invalid_replica_assignment() {
-        let brokers: Vec<NodeId> = vec![0, 1, 2];
+        let brokers: Vec<NodeId> = vec![
+            crabka_audit::NodeId(0),
+            crabka_audit::NodeId(1),
+            crabka_audit::NodeId(2),
+        ];
         let provided = vec![assn(&[0, -1])];
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
             .expect_err("negative broker id must fail");
@@ -577,7 +621,7 @@ mod tests {
 
     #[test]
     fn empty_assignments_some_with_new_partitions_fails() {
-        let brokers: Vec<NodeId> = vec![0, 1];
+        let brokers: Vec<NodeId> = vec![crabka_audit::NodeId(0), crabka_audit::NodeId(1)];
         let provided: Vec<CreatePartitionsAssignment> = vec![];
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 2, 1)
             .expect_err("Some(empty) for >0 new partitions must fail");
@@ -617,11 +661,20 @@ mod tests {
 
     #[test]
     fn local_materialization_predicates_track_replica_membership_and_leader() {
-        check!(should_materialize_locally(&[1, 2], 1));
-        check!(should_materialize_locally(&[1, 2], 2));
-        check!(!should_materialize_locally(&[1, 2], 3));
-        check!(is_local_leader(1, 1));
-        check!(!is_local_leader(2, 1));
+        check!(should_materialize_locally(
+            &[NodeId(1), NodeId(2)],
+            NodeId(1)
+        ));
+        check!(should_materialize_locally(
+            &[NodeId(1), NodeId(2)],
+            NodeId(2)
+        ));
+        check!(!should_materialize_locally(
+            &[NodeId(1), NodeId(2)],
+            NodeId(3)
+        ));
+        check!(is_local_leader(NodeId(1), NodeId(1)));
+        check!(!is_local_leader(NodeId(2), NodeId(1)));
     }
 
     #[tokio::test]

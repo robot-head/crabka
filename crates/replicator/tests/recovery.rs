@@ -11,14 +11,16 @@
 
 mod common;
 
-use assert2::check;
-use std::collections::{BTreeMap, HashSet};
-use std::time::Duration;
-
-use crabka_replicator::config::{
-    ClusterConfig, Delivery, FlowConfig, NamingPolicy, ReplicatorConfig, Selectors,
+use std::{
+    collections::{BTreeMap, HashSet},
+    time::Duration,
 };
-use crabka_replicator::supervisor::FlowSupervisor;
+
+use assert2::check;
+use crabka_replicator::{
+    config::{ClusterConfig, Delivery, FlowConfig, NamingPolicy, ReplicatorConfig, Selectors},
+    supervisor::FlowSupervisor,
+};
 
 /// Build a `ReplicatorConfig` for the us-east → eu-west flow that replicates
 /// the `orders` topic.  Both brokers must already be running when this is

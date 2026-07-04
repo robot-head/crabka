@@ -46,8 +46,9 @@ impl Compression {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn none_round_trip_is_identity() {

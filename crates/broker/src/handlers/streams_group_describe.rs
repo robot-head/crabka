@@ -11,25 +11,27 @@
 use std::collections::BTreeMap;
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        common::streams_group_describe_response::{
+            assignment::Assignment, key_value::KeyValue, task_ids::TaskIds, topic_info::TopicInfo,
+        },
+        streams_group_describe_request::StreamsGroupDescribeRequest,
+        streams_group_describe_response::{
+            DescribedGroup, Member, StreamsGroupDescribeResponse, Subtopology, Topology,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 use tokio::sync::oneshot;
 
-use crabka_protocol::owned::common::streams_group_describe_response::assignment::Assignment;
-use crabka_protocol::owned::common::streams_group_describe_response::key_value::KeyValue;
-use crabka_protocol::owned::common::streams_group_describe_response::task_ids::TaskIds;
-use crabka_protocol::owned::common::streams_group_describe_response::topic_info::TopicInfo;
-use crabka_protocol::owned::streams_group_describe_request::StreamsGroupDescribeRequest;
-use crabka_protocol::owned::streams_group_describe_response::{
-    DescribedGroup, Member, StreamsGroupDescribeResponse, Subtopology, Topology,
+use crate::{
+    broker::Broker,
+    codes,
+    coordinator::unified::streams::actor::{StreamsDescribeMember, StreamsGroupActorMessage},
+    error::BrokerError,
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::unified::streams::actor::{
-    StreamsDescribeMember, StreamsGroupActorMessage,
-};
-use crate::error::BrokerError;
 
 /// Minimum finalized `streams.version` feature level at which the KIP-1071
 /// streams RPCs (heartbeat/describe) are served.
@@ -219,18 +221,18 @@ fn task_map_to_ids(map: &BTreeMap<String, Vec<i32>>) -> Vec<TaskIds> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::streams_group_describe_response as response_mod;
     use std::time::Duration;
 
-    use crate::coordinator::unified::streams::actor::{
-        StreamsDescribeMember, StreamsDescribeView, StreamsGroupActorMessage,
+    use assert2::assert;
+    use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+    use crabka_protocol::{
+        UnknownTaggedFields, owned::streams_group_describe_response as response_mod,
     };
-    use crate::coordinator::unified::streams::persistence::{
-        StoredSubtopology, StoredTopicInfo, StreamsGroupTopologyValue,
+
+    use super::*;
+    use crate::coordinator::unified::streams::{
+        actor::{StreamsDescribeMember, StreamsDescribeView, StreamsGroupActorMessage},
+        persistence::{StoredSubtopology, StoredTopicInfo, StreamsGroupTopologyValue},
     };
 
     fn request(group_ids: &[&str]) -> StreamsGroupDescribeRequest {

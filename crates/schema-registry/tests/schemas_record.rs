@@ -1,6 +1,7 @@
-use crabka_schema_registry::format::SchemaType;
-use crabka_schema_registry::kafkastore::record::{
-    SchemaKey, SchemaRecord, SchemaValue, encode_schema,
+use crabka_schema_registry::{
+    format::SchemaType,
+    ids::{SchemaId, SchemaVersion},
+    kafkastore::record::{SchemaKey, SchemaRecord, SchemaValue, encode_schema},
 };
 
 fn fixture(name: &str) -> serde_json::Value {
@@ -31,8 +32,10 @@ fn schema_fixture_for(subject: &str) -> (String, String) {
 fn schema_key_serialises_byte_exact() {
     // The KEY drives compaction; it must be byte-identical to Confluent's.
     let (key_str, _) = schema_fixture_for("av-value");
-    let ours =
-        String::from_utf8(serde_json::to_vec(&SchemaKey::new("av-value", 1)).unwrap()).unwrap();
+    let ours = String::from_utf8(
+        serde_json::to_vec(&SchemaKey::new("av-value", SchemaVersion(1))).unwrap(),
+    )
+    .unwrap();
     assert_eq!(ours, key_str);
 }
 
@@ -45,8 +48,8 @@ fn avro_value_omits_schema_type_and_references() {
     // Our encode produces a structurally-equal value (field order may differ).
     let (_, our_val) = encode_schema(
         "av-value",
-        1,
-        i32::try_from(v["id"].as_i64().unwrap()).unwrap(),
+        SchemaVersion(1),
+        SchemaId(i32::try_from(v["id"].as_i64().unwrap()).unwrap()),
         SchemaType::Avro,
         v["schema"].as_str().unwrap(),
         &[],
@@ -62,8 +65,8 @@ fn protobuf_value_has_schema_type() {
     assert_eq!(v["schemaType"], "PROTOBUF");
     let (_, our_val) = encode_schema(
         "pb-value",
-        i32::try_from(v["version"].as_i64().unwrap()).unwrap(),
-        i32::try_from(v["id"].as_i64().unwrap()).unwrap(),
+        SchemaVersion(i32::try_from(v["version"].as_i64().unwrap()).unwrap()),
+        SchemaId(i32::try_from(v["id"].as_i64().unwrap()).unwrap()),
         SchemaType::Protobuf,
         v["schema"].as_str().unwrap(),
         &[],
@@ -89,7 +92,7 @@ fn decode_handles_noop_and_schema_and_tombstone() {
     match SchemaRecord::decode(k.as_bytes(), Some(val.as_bytes())) {
         SchemaRecord::Schema(key, value) => {
             assert_eq!(key.subject, "av-value");
-            assert_eq!(value.id, 1);
+            assert_eq!(value.id, SchemaId(1));
         }
         other => panic!("expected Schema, got {other:?}"),
     }
@@ -104,8 +107,8 @@ fn decode_handles_noop_and_schema_and_tombstone() {
 fn schema_value_round_trips() {
     let v = SchemaValue {
         subject: "av-value".into(),
-        version: 1,
-        id: 1,
+        version: SchemaVersion(1),
+        id: SchemaId(1),
         schema_type: None,
         message_type: None,
         references: vec![],

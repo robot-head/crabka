@@ -1,21 +1,22 @@
 //! Writes columnar blocks to object storage as Parquet.
 
-use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
-use arrow::array::{Array, FixedSizeBinaryArray, Int64Array, UInt64Array};
-use arrow::datatypes::SchemaRef;
-use arrow::record_batch::RecordBatch;
-use object_store::ObjectStore;
-use object_store::path::Path;
-use parquet::arrow::AsyncArrowWriter;
-use parquet::arrow::async_writer::ParquetObjectWriter;
+use arrow::{
+    array::{Array, FixedSizeBinaryArray, Int64Array, UInt64Array},
+    datatypes::SchemaRef,
+    record_batch::RecordBatch,
+};
+use object_store::{ObjectStore, path::Path};
+use parquet::arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter};
 use tracing::instrument;
 
-use crate::block::{BlockMeta, COL_FINGERPRINT, COL_TIMESTAMP, validate_against};
-use crate::block_index::{BlockSchema, series_block_schema};
-use crate::error::{BlockStoreError, Result};
-use crate::labels::SeriesFingerprint;
+use crate::{
+    block::{BlockMeta, COL_FINGERPRINT, COL_TIMESTAMP, validate_against},
+    block_index::{BlockSchema, series_block_schema},
+    error::{BlockStoreError, Result},
+    labels::SeriesFingerprint,
+};
 
 /// Columns used to summarize a block's time bounds and distinct identity keys.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,13 +183,13 @@ fn summarize(
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Int64Array, StringArray, UInt64Array};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
+    use arrow::{
+        array::{Int64Array, StringArray, UInt64Array},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
     use assert2::{assert, check};
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use object_store::{ObjectStore, ObjectStoreExt};
+    use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
     use super::*;
 

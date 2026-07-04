@@ -1,4 +1,4 @@
-﻿//! Execution-level tests for Interactive-Query *read semantics* over the three
+//! Execution-level tests for Interactive-Query *read semantics* over the three
 //! materialized store kinds (KV / window / session). Each test builds a counting
 //! topology with the Rust DSL, pipes deterministic input through the broker-free
 //! [`TopologyTestDriver`], then reads the materialized store back through the
@@ -10,8 +10,9 @@
 //! `iq_golden.rs`, which replays the same inputs and asserts parity with a
 //! captured JVM `TopologyTestDriver` run.
 
-use crabka_client_streams::dsl::StreamsBuilder;
-use crabka_client_streams::{Consumed, I64Serde, SessionWindows, StringSerde, TimeWindows};
+use crabka_client_streams::{
+    Consumed, I64Serde, SessionWindows, StringSerde, TimeWindows, dsl::StreamsBuilder,
+};
 
 /// KV count store: `get(present)` returns the count, `get(absent)` is `None`,
 /// `range` is inclusive `[lo, hi]`, `all`/`count` cover every key.

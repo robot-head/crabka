@@ -4,15 +4,16 @@
 
 use tracing::{debug, info, warn};
 
-use crate::api::GoalRegistry;
-use crate::detector::{Anomaly, AnomalyKind, AnomalyStore, DetectorMetrics};
-use crate::executor::ExecutorState;
-use crate::goals::GoalContext;
-use crate::ingest::SharedSnapshot;
-use crate::model::ProposalStore;
-use crate::optimizer;
-
 use super::DetectorConfig;
+use crate::{
+    api::GoalRegistry,
+    detector::{Anomaly, AnomalyKind, AnomalyStore, DetectorMetrics},
+    executor::ExecutorState,
+    goals::GoalContext,
+    ingest::SharedSnapshot,
+    model::ProposalStore,
+    optimizer,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AutoTriggerError {
@@ -148,24 +149,27 @@ pub async fn maybe_trigger(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::api::GoalRegistry;
-    use crate::capacity::BrokerCapacities;
-    use crate::detector::{
-        Anomaly, AnomalyKey, AnomalyKind, AnomalySeverity, AnomalyStore, DetectorConfig,
-        DetectorMetrics,
-    };
-    use crate::executor::{ExecutionHandle, ExecutorConfig, ExecutorState};
-    use crate::goals::GoalContext;
-    use crate::health::new_registry;
-    use crate::ingest::new_shared_snapshot;
-    use crate::model::{BrokerView, ClusterState, PartitionView, ProposalStore};
-    use crate::scraper::UsageStore;
+    use std::{sync::Arc, time::Duration};
+
     use assert2::assert;
-    use std::sync::Arc;
-    use std::time::Duration;
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
+
+    use super::*;
+    use crate::{
+        api::GoalRegistry,
+        capacity::BrokerCapacities,
+        detector::{
+            Anomaly, AnomalyKey, AnomalyKind, AnomalySeverity, AnomalyStore, DetectorConfig,
+            DetectorMetrics,
+        },
+        executor::{ExecutionHandle, ExecutorConfig, ExecutorState},
+        goals::GoalContext,
+        health::new_registry,
+        ingest::new_shared_snapshot,
+        model::{BrokerView, ClusterState, PartitionView, ProposalStore},
+        scraper::UsageStore,
+    };
 
     fn anomaly(kind: AnomalyKind) -> Anomaly {
         Anomaly {

@@ -12,24 +12,25 @@
 //! `change_membership`/`add_learner` return [`RaftError::Unsupported`]
 //! ("dynamic reconfig unsupported").
 
-use std::collections::BTreeMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
-use tokio::sync::{Mutex, watch};
-use tokio::task::JoinHandle;
+use crabka_metadata::{MetadataImage, MetadataRecord};
+use tokio::{
+    sync::{Mutex, watch},
+    task::JoinHandle,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 use uuid::Uuid;
 
-use crabka_metadata::{MetadataImage, MetadataRecord};
-
-use crate::config::{BootstrapMode, ControllerConfig};
-use crate::error::RaftError;
-use crate::kraft::KraftController;
-use crate::network::{OutboundDialer, PlaintextDialer, RealPeerSender};
-use crate::server;
-use crate::types::{Node, NodeId};
+use crate::{
+    config::{BootstrapMode, ControllerConfig},
+    error::RaftError,
+    kraft::KraftController,
+    network::{OutboundDialer, PlaintextDialer, RealPeerSender},
+    server,
+    types::{Node, NodeId},
+};
 
 /// Crabka-native view of the controller's current quorum state. Surfaced by
 /// [`ControllerHandle::quorum_state`] for the broker's `DescribeQuorum` admin
@@ -224,7 +225,7 @@ impl ControllerHandle {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.self_node_id, records = records.len())
+        fields(node = self.self_node_id.0, records = records.len())
     )]
     pub async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
         match self.engine.submit_change(records.clone()).await {
@@ -321,7 +322,7 @@ impl ControllerHandle {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.self_node_id, leader, addr, records = records.len()),
+        fields(node = self.self_node_id.0, leader = leader.0, addr, records = records.len()),
         err
     )]
     async fn forward_submit_to(
@@ -362,7 +363,7 @@ impl ControllerHandle {
         };
         let conn = self
             .dialer
-            .dial(1, &addr.to_string(), opts)
+            .dial(NodeId(1), &addr.to_string(), opts)
             .await
             .map_err(RaftError::Network)?;
         let resp_body = conn
@@ -535,7 +536,7 @@ fn translate_submit_change_response(resp_body: &[u8], leader: NodeId) -> Result<
         )),
         _ => Err(RaftError::NotLeader {
             current_leader: (resp.leader_hint >= 0)
-                .then(|| u64::try_from(resp.leader_hint).unwrap_or(leader)),
+                .then(|| NodeId(u64::try_from(resp.leader_hint).unwrap_or(leader.0))),
         }),
     }
 }
@@ -638,7 +639,7 @@ impl Controller {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = config.node_id, mode = ?config.bootstrap_mode),
+        fields(node = config.node_id.0, mode = ?config.bootstrap_mode),
         err
     )]
     pub async fn start_with_listener(
@@ -727,7 +728,7 @@ impl Controller {
             config.handshake.clone(),
         ));
         info!(
-            node_id = config.node_id,
+            node_id = config.node_id.0,
             addr = %actual_addr,
             "controller started"
         );
@@ -773,9 +774,10 @@ pub fn metadata_log_nonempty(dir: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod bootstrap_mode_tests {
-    use super::*;
     use assert2::{assert, check};
     use tempfile::TempDir;
+
+    use super::*;
 
     const TEST_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
@@ -789,7 +791,7 @@ mod bootstrap_mode_tests {
         // leader" and RF=3 topics could not be placed.
         let host = "demo-broker-2-0.demo-broker-headless.default.svc.cluster.local";
         let voters = crabka_metadata::VoterSet::from_voters([crabka_metadata::Voter {
-            id: 2,
+            id: NodeId(2),
             directory_id: Uuid::nil(),
             endpoints: vec![crabka_metadata::VoterEndpoint {
                 name: "CONTROLLER".to_string(),
@@ -798,9 +800,9 @@ mod bootstrap_mode_tests {
             }],
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
-        assert!(controller_endpoint_addr(&voters, 2) == Some(format!("{host}:9093")));
+        assert!(controller_endpoint_addr(&voters, NodeId(2)) == Some(format!("{host}:9093")));
         // Unknown voter id resolves to None (no panic, no empty address).
-        assert!(controller_endpoint_addr(&voters, 99).is_none());
+        assert!(controller_endpoint_addr(&voters, NodeId(99)).is_none());
     }
 
     #[test]
@@ -813,7 +815,7 @@ mod bootstrap_mode_tests {
         // predicate (matching the first NON-controller endpoint instead) returns
         // the wrong address.
         let voters = crabka_metadata::VoterSet::from_voters([crabka_metadata::Voter {
-            id: 7,
+            id: NodeId(7),
             directory_id: Uuid::nil(),
             endpoints: vec![
                 crabka_metadata::VoterEndpoint {
@@ -829,7 +831,10 @@ mod bootstrap_mode_tests {
             ],
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
-        assert!(controller_endpoint_addr(&voters, 7) == Some("controller-host:9093".to_string()));
+        assert!(
+            controller_endpoint_addr(&voters, NodeId(7))
+                == Some("controller-host:9093".to_string())
+        );
     }
 
     fn topic_record(name: &str) -> crabka_metadata::MetadataRecord {
@@ -946,7 +951,7 @@ mod bootstrap_mode_tests {
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Join,
             initial_voters: crabka_metadata::VoterSet::from_voters(std::iter::empty()),
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("join start");
         let checkpoint_dir = crate::kraft::checkpoint_dir(dir.path());
@@ -984,13 +989,13 @@ mod bootstrap_mode_tests {
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Join,
             initial_voters: crabka_metadata::VoterSet::from_voters(std::iter::empty()),
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("join start");
 
         let add_err = <ControllerHandle as crate::reconfig::ReconfigOps>::add_learner(
             &ctrl,
-            2,
+            NodeId(2),
             Node::default(),
         )
         .await
@@ -999,7 +1004,7 @@ mod bootstrap_mode_tests {
 
         let change_err = <ControllerHandle as crate::reconfig::ReconfigOps>::change_membership(
             &ctrl,
-            std::collections::BTreeSet::from([1, 2]),
+            std::collections::BTreeSet::from([NodeId(1), NodeId(2)]),
         )
         .await
         .expect_err("static raft rejects change_membership");
@@ -1010,14 +1015,16 @@ mod bootstrap_mode_tests {
     #[tokio::test]
     async fn reconfig_ops_reflect_live_single_voter_state_and_submit_records() {
         let dir = TempDir::new().unwrap();
-        let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+        let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
         cfg.election_timeout = std::time::Duration::from_millis(200);
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
         wait_for_leader(&ctrl).await;
 
         let voters = <ControllerHandle as crate::reconfig::ReconfigOps>::current_voters(&ctrl);
-        check!(voters.contains(1));
-        check!(<ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl) == Some(1));
+        check!(voters.contains(NodeId(1)));
+        check!(
+            <ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl) == Some(NodeId(1))
+        );
         check!(<ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl));
 
         tokio::time::timeout(
@@ -1047,7 +1054,7 @@ mod bootstrap_mode_tests {
             <ControllerHandle as crate::reconfig::ReconfigOps>::leader_last_index(&ctrl);
         assert!(leader_last >= 2);
         assert!(
-            <ControllerHandle as crate::reconfig::ReconfigOps>::observer_index(&ctrl, 1)
+            <ControllerHandle as crate::reconfig::ReconfigOps>::observer_index(&ctrl, NodeId(1))
                 == Some(leader_last)
         );
         ctrl.shutdown().await;
@@ -1059,7 +1066,7 @@ mod bootstrap_mode_tests {
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Join,
             initial_voters: crabka_metadata::VoterSet::from_voters(std::iter::empty()),
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("join start");
 
@@ -1071,7 +1078,7 @@ mod bootstrap_mode_tests {
     #[tokio::test]
     async fn shutdown_releases_bound_listener_addr() {
         let dir = TempDir::new().unwrap();
-        let cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+        let cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
         let addr = ctrl.controller_bound_addr();
 
@@ -1084,7 +1091,7 @@ mod bootstrap_mode_tests {
     #[tokio::test]
     async fn cancel_releases_bound_listener_addr_without_consuming_handle() {
         let dir = TempDir::new().unwrap();
-        let cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+        let cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
         let addr = ctrl.controller_bound_addr();
 
@@ -1146,10 +1153,13 @@ mod bootstrap_mode_tests {
     #[test]
     fn translate_submit_change_response_maps_each_error_code() {
         // 0 => applied.
-        assert!(translate_submit_change_response(&submit_change_response_bytes(0, -1), 5).is_ok());
+        assert!(
+            translate_submit_change_response(&submit_change_response_bytes(0, -1), NodeId(5))
+                .is_ok()
+        );
 
         // 2 => leader rejected at apply-time: a TopicExists metadata error.
-        let err = translate_submit_change_response(&submit_change_response_bytes(2, -1), 5)
+        let err = translate_submit_change_response(&submit_change_response_bytes(2, -1), NodeId(5))
             .expect_err("code 2 is an error");
         assert!(matches!(
             err,
@@ -1158,18 +1168,18 @@ mod bootstrap_mode_tests {
 
         // Any other code collapses to NotLeader, taking the response's
         // leader_hint when non-negative.
-        let err = translate_submit_change_response(&submit_change_response_bytes(1, 9), 5)
+        let err = translate_submit_change_response(&submit_change_response_bytes(1, 9), NodeId(5))
             .expect_err("code 1 is an error");
         assert!(matches!(
             err,
             RaftError::NotLeader {
-                current_leader: Some(9)
+                current_leader: Some(NodeId(9))
             }
         ));
 
         // A negative leader_hint falls back to None (unknown), NOT to the dialed
         // leader id — distinguishing the `>= 0` guard.
-        let err = translate_submit_change_response(&submit_change_response_bytes(3, -1), 5)
+        let err = translate_submit_change_response(&submit_change_response_bytes(3, -1), NodeId(5))
             .expect_err("code 3 is an error");
         assert!(matches!(
             err,
@@ -1183,8 +1193,8 @@ mod bootstrap_mode_tests {
     fn translate_submit_change_response_propagates_decode_error() {
         // A truncated body (fewer than the fixed 10 response bytes) must surface
         // as a protocol error rather than being silently treated as success.
-        let err =
-            translate_submit_change_response(&[0u8; 3], 5).expect_err("truncated decodes err");
+        let err = translate_submit_change_response(&[0u8; 3], NodeId(5))
+            .expect_err("truncated decodes err");
         assert!(matches!(err, RaftError::Protocol(_)));
     }
 
@@ -1200,12 +1210,12 @@ mod bootstrap_mode_tests {
         transport
             .expect_send_submit_change()
             .withf(move |leader, addr, body| {
-                *leader == 7 && addr == "leader-host:9093" && body == &expected_body
+                *leader == NodeId(7) && addr == "leader-host:9093" && body == &expected_body
             })
             .times(1)
             .returning(|_, _, _| Ok(submit_change_response_bytes(0, -1)));
 
-        forward_submit_via(&transport, 7, "leader-host:9093", &records)
+        forward_submit_via(&transport, NodeId(7), "leader-host:9093", &records)
             .await
             .expect("applied");
     }
@@ -1219,13 +1229,18 @@ mod bootstrap_mode_tests {
             .expect_send_submit_change()
             .returning(|_, _, _| Ok(submit_change_response_bytes(1, 4)));
 
-        let err = forward_submit_via(&transport, 7, "leader-host:9093", &[topic_record("z")])
-            .await
-            .expect_err("not leader");
+        let err = forward_submit_via(
+            &transport,
+            NodeId(7),
+            "leader-host:9093",
+            &[topic_record("z")],
+        )
+        .await
+        .expect_err("not leader");
         assert!(matches!(
             err,
             RaftError::NotLeader {
-                current_leader: Some(4)
+                current_leader: Some(NodeId(4))
             }
         ));
     }
@@ -1242,9 +1257,14 @@ mod bootstrap_mode_tests {
             )))
         });
 
-        let err = forward_submit_via(&transport, 7, "leader-host:9093", &[topic_record("z")])
-            .await
-            .expect_err("network error");
+        let err = forward_submit_via(
+            &transport,
+            NodeId(7),
+            "leader-host:9093",
+            &[topic_record("z")],
+        )
+        .await
+        .expect_err("network error");
         assert!(matches!(err, RaftError::Network(_)));
     }
 
@@ -1253,7 +1273,7 @@ mod bootstrap_mode_tests {
         let dir = TempDir::new().unwrap();
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Bootstrap,
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("first bootstrap ok");
         // Drive a commit so the log is non-empty on the second boot.
@@ -1276,7 +1296,7 @@ mod bootstrap_mode_tests {
 
         let cfg2 = ControllerConfig {
             bootstrap_mode: BootstrapMode::Bootstrap,
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         match Controller::start(cfg2).await {
             Err(err) => assert!(
@@ -1295,7 +1315,7 @@ mod bootstrap_mode_tests {
         let dir = TempDir::new().unwrap();
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Rejoin,
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         match Controller::start(cfg).await {
             Err(err) => assert!(
@@ -1317,7 +1337,7 @@ mod bootstrap_mode_tests {
         let dir = TempDir::new().unwrap();
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Bootstrap,
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
         wait_for_leader(&ctrl).await;
@@ -1369,7 +1389,7 @@ mod bootstrap_mode_tests {
         let dir = TempDir::new().unwrap();
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Bootstrap,
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
         wait_for_leader(&ctrl).await;
@@ -1430,7 +1450,7 @@ mod bootstrap_mode_tests {
         let dialer = RecordingDialer {
             client_ids: Arc::clone(&client_ids),
         };
-        let mut cfg = ControllerConfig::for_tests(1, dir.path().to_path_buf());
+        let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
         cfg.election_timeout = std::time::Duration::from_millis(200);
         cfg.client_id = "metadata-fetch-client".into();
         cfg.dialer = Some(Arc::new(dialer));
@@ -1467,7 +1487,7 @@ mod bootstrap_mode_tests {
         let cfg = ControllerConfig {
             bootstrap_mode: BootstrapMode::Join,
             initial_voters: crabka_metadata::VoterSet::from_voters(std::iter::empty()),
-            ..ControllerConfig::for_tests(1, dir.path().to_path_buf())
+            ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         let ctrl = Controller::start(cfg)
             .await

@@ -112,8 +112,9 @@ impl ShareSessionCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn open_then_incremental_advances() {

@@ -7,38 +7,48 @@
 //! assignment is non-exclusive, so a member's epoch advances straight to the
 //! group epoch with no acknowledgement round-trip.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::time::Instant;
-
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
-
-use crabka_protocol::owned::common::share_group_heartbeat_response::topic_partitions::TopicPartitions;
-use crabka_protocol::owned::share_group_describe_response::{
-    DescribedGroup, Member as DescribeMember,
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Instant,
 };
-use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
-use crabka_protocol::owned::share_group_heartbeat_response::{
-    Assignment as RespAssignment, ShareGroupHeartbeatResponse,
-};
-use crabka_protocol::primitives::uuid::Uuid;
 
-use crate::codes;
-use crate::coordinator::unified::actor::MetadataProvider;
-use crate::coordinator::unified::assignor::{MemberSubscription, TopicMetadata};
-use crate::coordinator::unified::offsets_log::OffsetsLog;
-use crate::coordinator::unified::reconciler::ReconcileInput;
-
-use super::assignor::ShareGroupAssignor;
-use super::config::ShareGroupConfig;
-use super::persistence::{
-    ShareGroupCurrentMemberAssignmentValue, ShareGroupKey, ShareGroupMemberMetadataValue,
-    ShareGroupMetadataValue, ShareGroupStatePartitionMetadataValue,
-    ShareGroupTargetAssignmentMemberValue, ShareGroupTargetAssignmentMetadataValue,
-    encode_share_key,
+use crabka_protocol::{
+    owned::{
+        common::share_group_heartbeat_response::topic_partitions::TopicPartitions,
+        share_group_describe_response::{DescribedGroup, Member as DescribeMember},
+        share_group_heartbeat_request::ShareGroupHeartbeatRequest,
+        share_group_heartbeat_response::{
+            Assignment as RespAssignment, ShareGroupHeartbeatResponse,
+        },
+    },
+    primitives::uuid::Uuid,
 };
-use super::state::{ShareGroupState, ShareMemberState};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
+
+use super::{
+    assignor::ShareGroupAssignor,
+    config::ShareGroupConfig,
+    persistence::{
+        ShareGroupCurrentMemberAssignmentValue, ShareGroupKey, ShareGroupMemberMetadataValue,
+        ShareGroupMetadataValue, ShareGroupStatePartitionMetadataValue,
+        ShareGroupTargetAssignmentMemberValue, ShareGroupTargetAssignmentMetadataValue,
+        encode_share_key,
+    },
+    state::{ShareGroupState, ShareMemberState},
+};
+use crate::{
+    codes,
+    coordinator::unified::{
+        actor::MetadataProvider,
+        assignor::{MemberSubscription, TopicMetadata},
+        offsets_log::OffsetsLog,
+        reconciler::ReconcileInput,
+    },
+};
 
 #[derive(Debug)]
 pub enum ShareGroupActorMessage {
@@ -92,8 +102,9 @@ impl ShareDescribeView {
     /// owns the ACL outcome.
     #[must_use]
     pub fn into_described_group(self) -> DescribedGroup {
-        use crabka_protocol::owned::common::share_group_describe_response::assignment::Assignment;
-        use crabka_protocol::owned::common::share_group_describe_response::topic_partitions::TopicPartitions;
+        use crabka_protocol::owned::common::share_group_describe_response::{
+            assignment::Assignment, topic_partitions::TopicPartitions,
+        };
 
         let members = self
             .members
@@ -422,7 +433,13 @@ async fn reconcile_share_state(
     for (tid, partition) in to_init {
         let topic_uuid = uuid::Uuid::from_bytes(tid.0);
         match persister
-            .initialize(&state.group_id, topic_uuid, partition, state_epoch, 0)
+            .initialize(
+                &state.group_id,
+                topic_uuid,
+                partition,
+                state_epoch,
+                crabka_log::Offset(0),
+            )
             .await
         {
             Ok(()) => {
@@ -966,15 +983,16 @@ fn chrono_now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::{assert, check};
-
-    use crate::coordinator::unified::GroupCoordinator;
-    use crate::coordinator::unified::config::NextGenConfig;
-    use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
-    use crate::coordinator::unified::reconciler::ReconcileInput;
-    use crabka_protocol::primitives::uuid::Uuid;
     use std::sync::Arc;
+
+    use assert2::{assert, check};
+    use crabka_protocol::primitives::uuid::Uuid;
+
+    use super::*;
+    use crate::coordinator::unified::{
+        GroupCoordinator, config::NextGenConfig, offsets_log::fake::InMemoryOffsetsLog,
+        reconciler::ReconcileInput,
+    };
 
     #[derive(Debug)]
     struct StaticMetadata {

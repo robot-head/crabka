@@ -2,20 +2,26 @@
 //! (`SourceConsumer` -> `TargetSink`) plus the heartbeat and checkpoint
 //! background tasks, with build-retry resilience and clean shutdown.
 
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use crabka_connect::{ConnectorRuntime, RuntimeState};
 use tracing::warn;
 
-use crate::checkpoint_store::InternalTopicCheckpointStore;
-use crate::config::{NamingPolicy, PolicyConfig};
-use crate::record::ReplicatedRecord;
-use crate::selector::Selector;
-use crate::sink::{SinkParams, TargetSink};
-use crate::source::SourceConsumer;
-use crate::tasks::checkpoint::{CheckpointParams, CheckpointTask};
-use crate::tasks::heartbeat::{HeartbeatParams, HeartbeatTask};
+use crate::{
+    checkpoint_store::InternalTopicCheckpointStore,
+    config::{NamingPolicy, PolicyConfig},
+    record::ReplicatedRecord,
+    selector::Selector,
+    sink::{SinkParams, TargetSink},
+    source::SourceConsumer,
+    tasks::{
+        checkpoint::{CheckpointParams, CheckpointTask},
+        heartbeat::{HeartbeatParams, HeartbeatTask},
+    },
+};
 
 /// Maximum wall-clock time to keep retrying the pipeline build before giving up.
 const MAX_BUILD_ELAPSED: Duration = Duration::from_secs(30);

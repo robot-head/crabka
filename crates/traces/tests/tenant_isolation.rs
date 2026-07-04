@@ -15,26 +15,30 @@
 //! `SpanRecord`s are loaded into the tenant-keyed `InMemorySpanStore` that backs
 //! the querier, matching how the real store namespaces data by tenant.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 
 use assert2::{assert, check};
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use crabka_traceql::{
     AttrValue as TraceqlAttrValue, EngineOpts, InMemorySpanStore, InputSpan, TraceqlEngine,
 };
-use crabka_traces::distributor::{self, DistributorState, WalSink};
-use crabka_traces::limits::OverridesProvider;
-use crabka_traces::querier::http::HttpConfig;
-use crabka_traces::{AttrValue, Limits, Span, SpanRecord, TracesError};
-use http_body_util::BodyExt as _;
-use opentelemetry_proto::tonic::common::v1::{
-    AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue, any_value::Value,
+use crabka_traces::{
+    AttrValue, Limits, Span, SpanRecord, TracesError,
+    distributor::{self, DistributorState, WalSink},
+    limits::OverridesProvider,
+    querier::http::HttpConfig,
 };
-use opentelemetry_proto::tonic::resource::v1::Resource;
-use opentelemetry_proto::tonic::trace::v1::{
-    ResourceSpans, ScopeSpans, Span as OtlpSpan, TracesData,
+use http_body_util::BodyExt as _;
+use opentelemetry_proto::tonic::{
+    common::v1::{AnyValue, InstrumentationScope, KeyValue as OtlpKeyValue, any_value::Value},
+    resource::v1::Resource,
+    trace::v1::{ResourceSpans, ScopeSpans, Span as OtlpSpan, TracesData},
 };
 use prost::Message as _;
 use reqwest::StatusCode as ReqwestStatusCode;

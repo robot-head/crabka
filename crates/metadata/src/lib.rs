@@ -55,13 +55,12 @@ pub mod metadata_version;
 mod records;
 pub mod transaction_version;
 
+pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType};
 /// KIP-853 voter-set value types, re-exported from the [`crabka_voters`] leaf
 /// crate. Kept as `crabka_metadata::voters` so existing call sites are
 /// unchanged; the types live in their own crypto-free crate so the consensus
 /// core can compile to WebAssembly.
 pub use crabka_voters as voters;
-
-pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType};
 pub use error::MetadataError;
 pub use feature::{
     Feature, bootstrap_feature_records, bootstrap_feature_records_with_overrides, feature,
@@ -76,8 +75,8 @@ pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientMetricsConfigRecord,
     ClientQuotaRecord, DelegationTokenRecord, DeleteDelegationTokenRecord,
     DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, FeaturesEpochRecord,
-    KRaftVersionRecord, MetadataRecord, NodeId, PartitionDirAssignmentRecord, PartitionRecord,
-    QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
-    VotersRecord,
+    KRaftVersionRecord, LeaderEpoch, MetadataRecord, NodeId, PartitionDirAssignmentRecord,
+    PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord,
+    UnregisterBrokerRecord, VotersRecord,
 };
 pub use voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};

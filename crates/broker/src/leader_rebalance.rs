@@ -6,16 +6,17 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use crabka_metadata::{MetadataImage, MetadataRecord};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::heartbeat::controller_state::ControllerLivenessState;
-use crate::leader_election::{ElectionType, select_new_leader_for_partition};
+use crate::{
+    heartbeat::controller_state::ControllerLivenessState,
+    leader_election::{ElectionType, select_new_leader_for_partition},
+};
 
 /// Minimal trait for the controller surface we use. Lets tests inject
 /// a mock without spinning up real raft.
@@ -107,11 +108,13 @@ pub(crate) async fn rebalance_tick(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::Mutex;
+
     use assert2::assert;
     use crabka_metadata::{PartitionRecord, TopicRecord};
-    use std::sync::Mutex;
     use uuid::Uuid;
+
+    use super::*;
 
     struct MockController {
         image: Arc<MetadataImage>,
@@ -161,10 +164,18 @@ mod tests {
             img.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: "foo".into(),
                 partition: p,
-                leader: 2,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
-                leader_epoch: 5,
+                leader: crabka_audit::NodeId(2),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                leader_epoch: crabka_metadata::LeaderEpoch(5),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -177,10 +188,18 @@ mod tests {
             img.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: "foo".into(),
                 partition: p,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
-                leader_epoch: 5,
+                leader: crabka_audit::NodeId(1),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                leader_epoch: crabka_metadata::LeaderEpoch(5),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -260,7 +279,7 @@ mod tests {
         // Every submitted record must promote preferred (replicas[0] = 1).
         for record in submitted.iter() {
             match record {
-                MetadataRecord::V1Partition(p) => assert!(p.leader == 1),
+                MetadataRecord::V1Partition(p) => assert!(p.leader == crabka_audit::NodeId(1)),
                 _ => panic!("unexpected record type"),
             }
         }

@@ -2,17 +2,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use axum::body::Bytes;
-use axum::extract::State;
-use axum::response::Response;
-use prost_reflect::prost::Message;
-use prost_reflect::prost_types::{FileDescriptorProto, FileDescriptorSet};
+use axum::{body::Bytes, extract::State, response::Response};
+use prost_reflect::{
+    prost::Message,
+    prost_types::{FileDescriptorProto, FileDescriptorSet},
+};
 
-use crate::error::SrError;
-use crate::format::{self, SchemaType};
-use crate::kafkastore::RegisterSchema;
-use crate::kafkastore::record::SchemaReference;
-use crate::rest::{AppState, response::ok_json};
+use crate::{
+    error::SrError,
+    format::{self, SchemaType},
+    ids::SchemaVersion,
+    kafkastore::{RegisterSchema, record::SchemaReference},
+    rest::{AppState, response::ok_json},
+};
 
 /// POST /schemas/import
 ///
@@ -35,7 +37,7 @@ pub async fn file_descriptor_set(
         .map_err(|e| SrError::InvalidSchema(format!("FileDescriptorSet: {e}")))?;
     let import = DescriptorSetImport::new(set)?;
     tracing::Span::current().record("files", import.order.len());
-    let mut registered = BTreeMap::<String, i32>::new();
+    let mut registered = BTreeMap::<String, SchemaVersion>::new();
     let mut rows = Vec::with_capacity(import.order.len());
 
     for name in &import.order {
@@ -60,8 +62,8 @@ pub async fn file_descriptor_set(
         registered.insert(name.clone(), reg.version);
         rows.push(serde_json::json!({
             "subject": name,
-            "id": reg.id,
-            "version": reg.version,
+            "id": reg.id.0,
+            "version": reg.version.0,
         }));
     }
 
@@ -128,7 +130,7 @@ fn visit(
 
 fn references_for(
     file: &FileDescriptorProto,
-    registered: &BTreeMap<String, i32>,
+    registered: &BTreeMap<String, SchemaVersion>,
     st: &AppState,
 ) -> Result<Vec<SchemaReference>, SrError> {
     file.dependency

@@ -4,61 +4,66 @@
 //! The rest of Slice 2's planner (functions, aggregations, binary ops) will build
 //! on this public API.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::{Duration, SystemTime},
+};
 
-use arrow::array::{Array, AsArray};
-use arrow::datatypes::{Float64Type, Int64Type, UInt64Type};
+use arrow::{
+    array::{Array, AsArray},
+    datatypes::{Float64Type, Int64Type, UInt64Type},
+};
 use crabka_blockstore::{LabelMatcher, Labels, MatchOp, SeriesFingerprint};
 use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint, decode_native_histograms};
-use futures::FutureExt;
-use futures::future::BoxFuture;
-use promql_parser::label as prom_label;
-use promql_parser::parser::token::{
-    T_ADD, T_ATAN2, T_AVG, T_BOTTOMK, T_COUNT, T_COUNT_VALUES, T_DIV, T_EQLC, T_GROUP, T_GTE,
-    T_GTR, T_LAND, T_LIMIT_RATIO, T_LIMITK, T_LOR, T_LSS, T_LTE, T_LUNLESS, T_MAX, T_MIN, T_MOD,
-    T_MUL, T_NEQ, T_POW, T_QUANTILE, T_STDDEV, T_STDVAR, T_SUB, T_SUM, T_TOPK, TokenType,
+use datafusion::{logical_expr::LogicalPlan, prelude::SessionContext};
+use futures::{FutureExt, future::BoxFuture};
+use promql_parser::{
+    label as prom_label,
+    parser::{
+        AggregateExpr, AtModifier, BinModifier, BinaryExpr, Call, Expr, LabelModifier,
+        MatrixSelector, Offset, SubqueryExpr, UnaryExpr, VectorMatchCardinality, VectorSelector,
+        token::{
+            T_ADD, T_ATAN2, T_AVG, T_BOTTOMK, T_COUNT, T_COUNT_VALUES, T_DIV, T_EQLC, T_GROUP,
+            T_GTE, T_GTR, T_LAND, T_LIMIT_RATIO, T_LIMITK, T_LOR, T_LSS, T_LTE, T_LUNLESS, T_MAX,
+            T_MIN, T_MOD, T_MUL, T_NEQ, T_POW, T_QUANTILE, T_STDDEV, T_STDVAR, T_SUB, T_SUM,
+            T_TOPK, TokenType,
+        },
+        value::ValueType,
+    },
 };
-use promql_parser::parser::value::ValueType;
-use promql_parser::parser::{
-    AggregateExpr, AtModifier, BinModifier, BinaryExpr, Call, Expr, LabelModifier, MatrixSelector,
-    Offset, SubqueryExpr, UnaryExpr, VectorMatchCardinality, VectorSelector,
-};
+use regex::Regex;
 use time::OffsetDateTime;
 
-use std::cell::RefCell;
-
-use crate::error::Result;
 // Shared stale-NaN predicate: the interpreter and the `InstantManipulate`
 // operator must make identical stale-vs-genuine-NaN selection decisions.
 use crate::extension::is_stale_nan;
-use crate::functions::{OverTimeFamily, ScalarMathOp};
-use crate::planner::aggregate::{
-    AGGREGATE_VALUE_COLUMN, Grouping, SimpleAggregateOp, plan_simple_aggregate,
+use crate::{
+    DurationExprContext, PromqlError, ScanResult,
+    error::Result,
+    functions::{OverTimeFamily, ScalarMathOp},
+    parse_promql, parse_promql_with_duration_context,
+    planner::{
+        ExtendedSelectorExpr, ExtendedSelectorModifier,
+        aggregate::{AGGREGATE_VALUE_COLUMN, Grouping, SimpleAggregateOp, plan_simple_aggregate},
+        label_ops::{self, SortOrder},
+        leaf::{self, InstantSelectorPlan, LabeledSample, plan_instant_vector_selector},
+        over_time_range::{
+            self, LabeledSample as OverTimeLabeledSample, OverTimeRangePlan,
+            over_time_family_from_function_name, plan_over_time_range_selector,
+        },
+        rate_range::{
+            self, LabeledSample as RateLabeledSample, RateRangePlan, RateUdfKind,
+            plan_rate_range_selector,
+        },
+        scalar_math::{
+            self, LabeledValue as ScalarMathLabeledValue, ScalarMathPlan, plan_scalar_math,
+        },
+    },
+    result::{Annotations, InstantSample, QueryResult, RangeSeries, SampleValue},
+    store::MetricStore,
 };
-use crate::planner::label_ops::{self, SortOrder};
-use crate::planner::leaf::{
-    self, InstantSelectorPlan, LabeledSample, plan_instant_vector_selector,
-};
-use crate::planner::over_time_range::{
-    self, LabeledSample as OverTimeLabeledSample, OverTimeRangePlan,
-    over_time_family_from_function_name, plan_over_time_range_selector,
-};
-use crate::planner::rate_range::{
-    self, LabeledSample as RateLabeledSample, RateRangePlan, RateUdfKind, plan_rate_range_selector,
-};
-use crate::planner::scalar_math::{
-    self, LabeledValue as ScalarMathLabeledValue, ScalarMathPlan, plan_scalar_math,
-};
-use crate::planner::{ExtendedSelectorExpr, ExtendedSelectorModifier};
-use crate::result::{Annotations, InstantSample, QueryResult, RangeSeries, SampleValue};
-use crate::store::MetricStore;
-use crate::{DurationExprContext, parse_promql, parse_promql_with_duration_context};
-use crate::{PromqlError, ScanResult};
-use datafusion::logical_expr::LogicalPlan;
-use datafusion::prelude::SessionContext;
-use regex::Regex;
 
 /// Static options for `PromQL` evaluation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -11517,18 +11522,16 @@ fn duration_ms(duration: std::time::Duration) -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     use assert2::{assert, check};
     use crabka_blockstore::Labels;
     use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint};
 
+    use super::{MAX_RESOLUTION_POINTS, check_resolution_points, match_rate_range_call};
     use crate::{
         EngineOpts, InMemoryMetricStore, PromqlEngine, PromqlError, QueryResult, SampleValue,
     };
-
-    use super::{MAX_RESOLUTION_POINTS, check_resolution_points, match_rate_range_call};
 
     fn labels(pairs: &[(&str, &str)]) -> Labels {
         let mut labels = Labels::new();
@@ -11789,10 +11792,12 @@ mod tests {
 
         use crabka_blockstore::LabelMatcher;
 
-        use crate::error::Result;
-        use crate::store::{
-            ExemplarRecord, LabelNameCardinality, LabelValueCardinality, MetadataRecord,
-            MetricStore, ScanResult, TsdbBlock, TsdbStats,
+        use crate::{
+            error::Result,
+            store::{
+                ExemplarRecord, LabelNameCardinality, LabelValueCardinality, MetadataRecord,
+                MetricStore, ScanResult, TsdbBlock, TsdbStats,
+            },
         };
 
         // Wraps the in-memory store and counts store-level scans / series
@@ -16787,9 +16792,9 @@ mod tests {
     /// explicit and regressions are caught.
     #[test]
     fn range_planner_gate_routes_expected_shapes() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
         use promql_parser::parser::Expr;
+
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let routes = |query: &str| -> bool {
             let expr = parse_promql_with_duration_context(
@@ -16890,9 +16895,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn range_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
         use promql_parser::parser::Expr;
+
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let mut store = InMemoryMetricStore::new();
         let stale_bits = stale_nan();
@@ -17179,9 +17184,9 @@ mod tests {
 
     #[tokio::test]
     async fn instant_selector_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
         use promql_parser::parser::Expr;
+
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // A small float-only store with multiple series, an empty-string-ish
         // label set, an offset-relevant history, a stale marker (job=db: its
@@ -17299,9 +17304,9 @@ mod tests {
     /// labelsets, same per-series values), where they previously fell back.
     #[tokio::test]
     async fn empty_valued_label_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
         use promql_parser::parser::Expr;
+
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let mut store = InMemoryMetricStore::new();
         // Three series sharing `__name__=m`, distinguished only by the presence
@@ -17447,9 +17452,9 @@ mod tests {
 
         // (1) the gate routes the bare selector through the planner.
         {
-            use crate::DurationExprContext;
-            use crate::parse_promql_with_duration_context;
             use promql_parser::parser::Expr;
+
+            use crate::{DurationExprContext, parse_promql_with_duration_context};
             let expr = parse_promql_with_duration_context(
                 "m",
                 DurationExprContext::range(start, end, step),
@@ -17506,9 +17511,9 @@ mod tests {
     ///   2. planner (public range path) == interpreter byte-for-byte.
     #[tokio::test]
     async fn range_at_start_end_selector_planner_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
         use promql_parser::parser::Expr;
+
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let mut store = InMemoryMetricStore::new();
         for (job, samples) in [
@@ -17604,8 +17609,7 @@ mod tests {
     /// match the interpreter's `eval_instant_expr` byte-for-byte.
     #[tokio::test]
     async fn extended_range_fold_planner_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let mut store = InMemoryMetricStore::new();
         // A monotonic-ish counter with a reset, sampled every 30s through t=300000.
@@ -17710,9 +17714,9 @@ mod tests {
     /// `eval_instant_expr_over_steps` scalar stitching.
     #[tokio::test]
     async fn range_scalar_expr_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
         use promql_parser::parser::Expr;
+
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // A store with one series so calendar functions over `time()` have a
         // defined eval timeline; scalars ignore the series entirely.
@@ -17776,9 +17780,9 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn rate_range_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
         use promql_parser::parser::Expr;
+
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // Float-only counters with a reset, a gauge for delta, an offset
         // history, and a single-sample series (no rate value).
@@ -17912,8 +17916,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn over_time_range_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // A float-only store: a multi-sample gauge for the reductions, a second
         // labelset, a single-sample window edge case, and a stale marker that the
@@ -18141,8 +18144,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn subquery_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // A float-only store exercising the subquery sub-grid:
         //  - `reqs_total{l}`: two counters (l=a, l=b) for rate/over_time-of-rate.
@@ -18288,8 +18290,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn scalar_math_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // NaN-aware sample comparison: labels and ts must match exactly; values
         // match when bit-equal or both NaN (Prometheus treats all NaNs alike).
@@ -18416,8 +18417,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn label_ops_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // NaN-aware sample comparison: labels and ts must match exactly; values
         // match when bit-equal or both NaN.
@@ -18640,8 +18640,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn info_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // A store mirroring the conformance corpus: a base metric, a metric whose
         // identifying labels don't match any target_info, a metric with an
@@ -18799,8 +18798,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn simple_aggregate_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // A float-only multi-label store: two jobs across two groups, an
         // instance dimension for `without`, plus counters for the rate case.
@@ -19038,8 +19036,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines, clippy::type_complexity)]
     async fn aggregate_genuine_nan_group_parity() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let mut store = InMemoryMetricStore::new();
         // `g` exercises every NaN/stale shape across DISTINCT `by (l)` groups:
@@ -19200,8 +19197,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn param_aggregate_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // A float-only store exercising the parameterized aggregations:
         //  - `m{job,instance}`: a multi-instance gauge per job, with a TIE between
@@ -19461,8 +19457,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn sum_avg_collapsed_is_deterministic_and_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let mut store = InMemoryMetricStore::new();
 
@@ -19677,8 +19672,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn structural_node_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let mut store = InMemoryMetricStore::new();
         let stale_bits = stale_nan();
@@ -19820,8 +19814,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn experimental_call_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let mut store = InMemoryMetricStore::new();
         for (ts, value) in [
@@ -19885,8 +19878,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn experimental_param_aggregate_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let mut store = InMemoryMetricStore::new();
         for (instance, value) in [("a", 1.0), ("b", 2.0), ("c", 3.0), ("d", 4.0)] {
@@ -19990,8 +19982,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn classic_histogram_quantile_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // A float-only store of classic `<metric>_bucket{le}` series exercising the
         // classic histogram_quantile fold:
@@ -20132,8 +20123,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn native_histogram_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // Build a non-trivial native histogram (schema 0, two positive buckets
         // [1,2] and [2,4] carrying counts 1 and 3) with a real count/sum so the
@@ -20320,8 +20310,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn histogram_aggregation_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // A native histogram with two positive buckets so the merge / quantile
         // folds produce non-trivial structure.
@@ -20570,8 +20559,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn histogram_range_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // A native-histogram counter sample with two positive buckets, so the
         // rate/increase/delta extrapolation produces non-trivial per-bucket
@@ -20764,8 +20752,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn binary_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // NaN-aware sample comparison: labels and ts must match exactly; values
         // match when bit-equal or both NaN (Prometheus treats all NaNs alike).
@@ -20976,8 +20963,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn util_planner_path_matches_interpreter() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         // NaN-aware vector comparison: labels + ts must match exactly; values
         // match when bit-equal or both NaN (Prometheus treats all NaNs alike).
@@ -21246,8 +21232,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn plan_instant_expr_is_total_over_construct_sweep() {
-        use crate::DurationExprContext;
-        use crate::parse_promql_with_duration_context;
+        use crate::{DurationExprContext, parse_promql_with_duration_context};
 
         let mut store = InMemoryMetricStore::new();
         let time_ms = 300_000_i64;

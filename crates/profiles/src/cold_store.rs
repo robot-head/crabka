@@ -1,25 +1,30 @@
 //! Object-store backed cold-block `ProfileStore`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{Arc, RwLock};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::{Arc, RwLock},
+};
 
-use arrow::array::{ArrayRef, AsArray, UInt64Array};
-use arrow::datatypes::{Int64Type, UInt64Type};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{ArrayRef, AsArray, UInt64Array},
+    datatypes::{Int64Type, UInt64Type},
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::{LabelMatcher, ProfileIndex, SeriesFingerprint};
 use crabka_pprof::{
-    ChainedResolver, DebuginfodResolver, FileSystemResolver, Frame, NativeResolver, ProfileError,
-    ProfileScan, ProfileStats, ProfileStore, SymbolDb, SymbolSource, profile_samples_schema,
+    ChainedResolver, DebuginfodResolver, FileSystemResolver, Frame, LazySymbolizer, NativeResolver,
+    ProfileError, ProfileScan, ProfileStats, ProfileStore, SymbolDb, SymbolSource,
+    profile_samples_schema,
 };
-use datafusion::catalog::MemTable;
-use datafusion::prelude::SessionContext;
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt};
+use datafusion::{catalog::MemTable, prelude::SessionContext};
+use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::blockbuilder::STACKTRACE_PARTITION;
-use crate::symbolizer::AddressFallbackResolver;
-use crabka_pprof::LazySymbolizer;
+use crate::{
+    blockbuilder::STACKTRACE_PARTITION,
+    ids::{ExternalPartition, LocalPartition},
+    symbolizer::AddressFallbackResolver,
+};
 
 #[derive(Clone)]
 pub struct ColdProfileStore {
@@ -133,7 +138,11 @@ impl ProfileStore for ColdProfileStore {
             for (source_partition, external) in &partition_map {
                 // `source_partition` is the partition key within this block's own
                 // symbol DB, so resolution stays scoped to the correct block.
-                symbols.insert(*external, source.clone(), *source_partition);
+                symbols.insert(
+                    ExternalPartition(*external),
+                    source.clone(),
+                    LocalPartition(*source_partition),
+                );
             }
             batches.extend(
                 self.load_block_batches(
@@ -432,15 +441,15 @@ fn batch_fingerprints_overlap(batch: &RecordBatch, fps: &BTreeSet<SeriesFingerpr
 
 #[derive(Default)]
 struct CompositeSymbols {
-    by_partition: HashMap<u64, (Arc<dyn SymbolSource>, u64)>,
+    by_partition: HashMap<ExternalPartition, (Arc<dyn SymbolSource>, LocalPartition)>,
 }
 
 impl CompositeSymbols {
     fn insert(
         &mut self,
-        external_partition: u64,
+        external_partition: ExternalPartition,
         symbols: Arc<dyn SymbolSource>,
-        local_partition: u64,
+        local_partition: LocalPartition,
     ) {
         self.by_partition
             .insert(external_partition, (symbols, local_partition));
@@ -450,9 +459,9 @@ impl CompositeSymbols {
 impl SymbolSource for CompositeSymbols {
     fn resolve(&self, partition: u64, id: u32) -> Vec<Frame> {
         self.by_partition
-            .get(&partition)
+            .get(&ExternalPartition(partition))
             .map_or_else(Vec::new, |(symbols, local_partition)| {
-                symbols.resolve(*local_partition, id)
+                symbols.resolve(local_partition.0, id)
             })
     }
 }
@@ -520,12 +529,13 @@ mod tests {
     use assert2::{assert, check};
     use crabka_blockstore::{BlockIndex, Labels, MatchOp};
     use crabka_pprof::{EngineOpts, FlameEngine, SymbolizeRequest};
-    use object_store::ObjectStore;
-    use object_store::memory::InMemory;
+    use object_store::{ObjectStore, memory::InMemory};
 
     use super::*;
-    use crate::blockbuilder::build_block;
-    use crate::wal::{ProfileRecord, WalSample, WalSymbolSet};
+    use crate::{
+        blockbuilder::build_block,
+        wal::{ProfileRecord, WalSample, WalSymbolSet},
+    };
 
     const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
 

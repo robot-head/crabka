@@ -10,12 +10,13 @@
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-
 use crabka_traceql::{ScopedTag, TagScope, TypedValue};
 
-use crate::frontend::job::JobShard;
-use crate::frontend::metrics_merge::MetricsResponseJson;
-use crate::frontend::wire::{Metrics, TraceByIdResponseJson, TraceJson};
+use crate::frontend::{
+    job::JobShard,
+    metrics_merge::MetricsResponseJson,
+    wire::{Metrics, TraceByIdResponseJson, TraceJson},
+};
 
 /// A single search job: a `TraceQL` search restricted to one shard (the live hot
 /// tier, or one cold block narrowed to a row-group range) over a window.
@@ -322,8 +323,7 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
-    use crate::frontend::job::JobShard;
-    use crate::frontend::wire::TraceJson;
+    use crate::frontend::{job::JobShard, wire::TraceJson};
 
     fn trace(svc: &str) -> TraceJson {
         TraceJson {

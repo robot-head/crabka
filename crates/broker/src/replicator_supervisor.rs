@@ -13,24 +13,21 @@
 //!    where this broker is in `replicas` but is NOT the leader, and
 //!    cancels tasks for partitions removed from the image.
 
-use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::{collections::HashSet, path::PathBuf, sync::Arc};
 
+use crabka_ids::PartitionIndex;
+use crabka_log::{Log, LogConfig};
+use crabka_metadata::MetadataImage;
+use crabka_raft::NodeId;
 use dashmap::DashMap;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use crabka_log::{Log, LogConfig};
-use crabka_metadata::MetadataImage;
-use crabka_raft::NodeId;
-
-use crate::broker::spawn_partition;
-use crate::partition_registry::PartitionRegistry;
-use crate::replicator;
-use crate::throttle::ThrottleState;
-use crate::txn::coordinator::TxnCoordinator;
+use crate::{
+    broker::spawn_partition, partition_registry::PartitionRegistry, replicator,
+    throttle::ThrottleState, txn::coordinator::TxnCoordinator,
+};
 
 /// A `(topic, partition)` pair — the key the supervisor tracks follower
 /// tasks, local materialization, and dir-assignment reports by.
@@ -97,7 +94,7 @@ pub(crate) fn materialize_partition(
     // `contains_key` + `insert` pattern. JBOD placement (KIP-113) happens
     // under this lock too, so two concurrent materializations of the same
     // partition can never pick two different log dirs.
-    partitions.materialize_if_vacant(topic, partition, || {
+    partitions.materialize_if_vacant(topic, PartitionIndex(partition), || {
         let dir = crate::log_dir::place_partition_dir(log_dirs, topic, partition);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
         let log = Log::open(&dir, log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
@@ -107,7 +104,7 @@ pub(crate) fn materialize_partition(
             .to_path_buf();
         Ok(spawn_partition(
             topic.to_string(),
-            partition,
+            PartitionIndex(partition),
             owning_dir,
             log,
             log_dir_status.clone(),
@@ -127,7 +124,7 @@ pub(crate) async fn push_topic_configs(
 ) {
     let empty: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for (topic, partition) in desired {
-        let Some(part) = partitions.get(topic, *partition) else {
+        let Some(part) = partitions.get(topic, PartitionIndex(*partition)) else {
             continue;
         };
         let overrides = image.topic_config(topic).unwrap_or(&empty);
@@ -164,7 +161,7 @@ pub(crate) fn collect_changed_assignments(
     let mut wire = Vec::new();
     let mut updates = Vec::new();
     for (topic, partition) in local_set {
-        let Some(part) = partitions.get(topic, *partition) else {
+        let Some(part) = partitions.get(topic, PartitionIndex(*partition)) else {
             continue;
         };
         let dir = part.log_dir.load();
@@ -234,7 +231,7 @@ pub(crate) struct ReplicatorSupervisor {
     /// Per-follower-partition (leader, `leader_epoch`) tuple captured at
     /// spawn time. On reconcile, if the tuple changes, the task is
     /// cancelled and respawned pointed at the new leader.
-    task_targets: DashMap<TopicPartition, (NodeId, i32)>,
+    task_targets: DashMap<TopicPartition, (NodeId, crabka_metadata::LeaderEpoch)>,
     shutdown: CancellationToken,
     txn_coordinator: Option<Arc<TxnCoordinator>>,
     /// KIP-932 share coordinator. Its view of locally-led
@@ -345,13 +342,13 @@ impl ReplicatorSupervisor {
             let Some(part_record) = image.partition(&key.0, key.1).cloned() else {
                 continue;
             };
-            let Some(part) = self.partitions.get(&key.0, key.1) else {
+            let Some(part) = self.partitions.get(&key.0, PartitionIndex(key.1)) else {
                 continue;
             };
             // Always sync the partition's cached leader + epoch.
             // `Partition::install_leader_change` is idempotent (atomic stores
             // no-op on equal writes).
-            part.install_leader_change(part_record.leader, part_record.leader_epoch)
+            part.install_leader_change(part_record.leader.0, part_record.leader_epoch.0)
                 .await;
             if part_record.leader == self.node_id {
                 // Install the *current* ISR from the metadata image (not the
@@ -413,7 +410,7 @@ impl ReplicatorSupervisor {
             let leader = part.leader;
             let Some(broker) = image.broker(leader).cloned() else {
                 warn!(
-                    topic = %k.0, partition = k.1, leader,
+                    topic = %k.0, partition = k.1, leader = leader.0,
                     "leader broker not yet registered in MetadataImage; deferring"
                 );
                 continue;
@@ -444,7 +441,7 @@ impl ReplicatorSupervisor {
                 node_id: self.node_id,
                 topic: k.0,
                 topic_id: crabka_protocol::primitives::uuid::Uuid(topic_rec.topic_id.into_bytes()),
-                partition: k.1,
+                partition: crabka_ids::PartitionIndex(k.1),
                 leader_node_id: leader,
                 leader_host,
                 leader_port,
@@ -564,7 +561,12 @@ impl ReplicatorSupervisor {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        collections::BTreeSet,
+        net::SocketAddr,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
     use assert2::{assert, check};
     use crabka_metadata::{
         BrokerEndpoint, BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord,
@@ -574,11 +576,10 @@ mod tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::watch;
     use uuid::Uuid;
+
+    use super::*;
 
     /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
     /// stall fails the test deterministically instead of spinning forever.
@@ -622,7 +623,7 @@ mod tests {
             leader,
             replicas: replicas.clone(),
             isr: replicas,
-            leader_epoch,
+            leader_epoch: crabka_metadata::LeaderEpoch(leader_epoch),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -761,7 +762,7 @@ mod tests {
         let partitions = Arc::new(PartitionRegistry::new());
         let reporter = Arc::new(CountingAssignDirsReporter::default());
         let mut supervisor = ReplicatorSupervisor::new(
-            2,
+            NodeId(2),
             2,
             Arc::new(StaticMetadataSource::new(image)),
             partitions.clone(),
@@ -802,6 +803,17 @@ mod tests {
     }
 
     #[test]
+    fn includes_partition_where_self_is_follower() {
+        let img = image_with(&[
+            topic_record("t", 1),
+            partition_record("t", 0, NodeId(1), vec![NodeId(1), NodeId(2), NodeId(3)], 0),
+        ]);
+        let d = desired_follower_set(NodeId(2), &img);
+        assert!(d.contains(&("t".into(), 0)));
+        assert!(d.len() == 1);
+    }
+
+    #[test]
     fn desired_follower_set_includes_followers_excludes_leader_and_non_replicas() {
         let img = image_with(&[
             MetadataRecord::V1Topic(TopicRecord {
@@ -813,10 +825,18 @@ mod tests {
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "t".into(),
                 partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
-                leader_epoch: 0,
+                leader: crabka_audit::NodeId(1),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -825,16 +845,17 @@ mod tests {
         ]);
         let cases = [
             // Self is a follower replica → included.
-            (2, HashSet::from_iter([("t".to_string(), 0)])),
+            (NodeId(2), HashSet::from_iter([("t".to_string(), 0)])),
             // Self is the leader → excluded.
-            (1, HashSet::new()),
+            (NodeId(1), HashSet::new()),
             // Self is not a replica at all → excluded.
-            (99, HashSet::new()),
+            (NodeId(99), HashSet::new()),
         ];
         for (node_id, want) in cases {
             assert!(
                 desired_follower_set(node_id, &img) == want,
-                "node {node_id}"
+                "node {}",
+                node_id.0
             );
         }
     }
@@ -843,15 +864,15 @@ mod tests {
     fn desired_local_set_exactly_includes_all_local_replicas() {
         let img = image_with(&[
             topic_record("a", 2),
-            partition_record("a", 0, 1, vec![1, 2, 3], 0),
-            partition_record("a", 1, 2, vec![1, 2, 3], 0),
+            partition_record("a", 0, NodeId(1), vec![NodeId(1), NodeId(2), NodeId(3)], 0),
+            partition_record("a", 1, NodeId(2), vec![NodeId(1), NodeId(2), NodeId(3)], 0),
             topic_record("b", 1),
-            partition_record("b", 0, 3, vec![1, 3], 0),
+            partition_record("b", 0, NodeId(3), vec![NodeId(1), NodeId(3)], 0),
             topic_record("c", 1),
-            partition_record("c", -1, 1, vec![2, 4], 0),
+            partition_record("c", -1, NodeId(1), vec![NodeId(2), NodeId(4)], 0),
         ]);
 
-        let local = desired_local_set(2, &img);
+        let local = desired_local_set(NodeId(2), &img);
 
         assert!(
             local
@@ -880,9 +901,22 @@ mod tests {
             &Arc::new(crate::producer_state::ProducerState::new()),
         )
         .expect("materialize");
-        let part = partitions.get("t", 0).expect("part");
+        let part = partitions.get("t", PartitionIndex(0)).expect("part");
         // Mirror what reconcile does for leader partitions.
-        part.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
+        part.install_isr(
+            &[
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            &[
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            crabka_audit::NodeId(1),
+        )
+        .await;
         let st = part.replica_state.lock().await;
         assert!(st.isr.len() == 3);
     }
@@ -899,10 +933,18 @@ mod tests {
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "a".into(),
                 partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
-                leader_epoch: 0,
+                leader: crabka_audit::NodeId(1),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -917,10 +959,18 @@ mod tests {
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "b".into(),
                 partition: 0,
-                leader: 3,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
-                leader_epoch: 0,
+                leader: crabka_audit::NodeId(3),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -929,24 +979,36 @@ mod tests {
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "b".into(),
                 partition: 1,
-                leader: 2,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2, 3],
-                leader_epoch: 0,
+                leader: crabka_audit::NodeId(2),
+                replicas: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                isr: vec![
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
                 partition_epoch: 0,
             }),
         ]);
-        let d = desired_follower_set(2, &img);
+        let d = desired_follower_set(NodeId(2), &img);
         // b/1 is excluded: self is leader for it.
         assert!(d == HashSet::from_iter([("a".to_string(), 0), ("b".to_string(), 0)]));
+        assert!(d.contains(&("a".into(), 0)));
+        assert!(d.contains(&("b".into(), 0)));
+        assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
+        assert!(d.len() == 2);
     }
 
     #[test]
     fn resolve_leader_endpoint_prefers_matching_listener() {
-        let broker = broker_record(1);
+        let broker = broker_record(NodeId(1));
         assert!(resolve_leader_endpoint(&broker, "INTERNAL") == ("internal-host".into(), 19092));
         assert!(resolve_leader_endpoint(&broker, "EXTERNAL") == ("legacy-host".into(), 9092));
     }
@@ -955,13 +1017,15 @@ mod tests {
     async fn reconcile_materializes_leader_partition_and_installs_isr() {
         let img = image_with(&[
             topic_record("t", 1),
-            partition_record("t", 0, 2, vec![1, 2, 3], 7),
+            partition_record("t", 0, NodeId(2), vec![NodeId(1), NodeId(2), NodeId(3)], 7),
         ]);
         let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
 
         supervisor.reconcile(&img).await;
 
-        let part = partitions.get("t", 0).expect("local leader materialized");
+        let part = partitions
+            .get("t", PartitionIndex(0))
+            .expect("local leader materialized");
         assert!(
             part.current_leader
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -975,20 +1039,22 @@ mod tests {
             "leader epoch cache updated"
         );
         let state = part.replica_state.lock().await;
-        assert!(state.isr == [1, 2, 3].into_iter().collect());
+        assert!(state.isr == [NodeId(1), NodeId(2), NodeId(3)].into_iter().collect());
     }
 
     #[tokio::test]
     async fn reconcile_materializes_follower_but_does_not_install_isr() {
         let img = image_with(&[
             topic_record("t", 1),
-            partition_record("t", 0, 1, vec![1, 2, 3], 7),
+            partition_record("t", 0, NodeId(1), vec![NodeId(1), NodeId(2), NodeId(3)], 7),
         ]);
         let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
 
         supervisor.reconcile(&img).await;
 
-        let part = partitions.get("t", 0).expect("local follower materialized");
+        let part = partitions
+            .get("t", PartitionIndex(0))
+            .expect("local follower materialized");
         let state = part.replica_state.lock().await;
         assert!(state.isr.is_empty());
     }
@@ -999,7 +1065,10 @@ mod tests {
         let (supervisor, _partitions, _reporter, _dir) = supervisor_fixture(img.clone());
         let token = CancellationToken::new();
         supervisor.tasks.insert(("stale".into(), 0), token.clone());
-        supervisor.task_targets.insert(("stale".into(), 0), (1, 0));
+        supervisor.task_targets.insert(
+            ("stale".into(), 0),
+            (NodeId(1), crabka_metadata::LeaderEpoch(0)),
+        );
 
         supervisor.reconcile(&img).await;
 
@@ -1012,12 +1081,15 @@ mod tests {
     async fn reconcile_cancels_task_when_target_leader_or_epoch_changes() {
         let img = image_with(&[
             topic_record("t", 1),
-            partition_record("t", 0, 1, vec![1, 2], 8),
+            partition_record("t", 0, NodeId(1), vec![NodeId(1), NodeId(2)], 8),
         ]);
         let (supervisor, _partitions, _reporter, _dir) = supervisor_fixture(img.clone());
         let token = CancellationToken::new();
         supervisor.tasks.insert(("t".into(), 0), token.clone());
-        supervisor.task_targets.insert(("t".into(), 0), (9, 7));
+        supervisor.task_targets.insert(
+            ("t".into(), 0),
+            (NodeId(9), crabka_metadata::LeaderEpoch(7)),
+        );
 
         supervisor.reconcile(&img).await;
 
@@ -1036,7 +1108,7 @@ mod tests {
                 partitions: 1,
                 replication_factor: 1,
             }),
-            partition_record("t", 0, 2, vec![2], 0),
+            partition_record("t", 0, NodeId(2), vec![NodeId(2)], 0),
         ]);
         let (supervisor, partitions, reporter, _dir) = supervisor_fixture(img.clone());
         supervisor.materialize_local_partition("t", 0).unwrap();
@@ -1048,7 +1120,9 @@ mod tests {
         assert!(reporter.calls.load(Ordering::SeqCst) == 1);
         assert!(supervisor.reported_dirs.contains_key(&("t".to_string(), 0)));
 
-        let part = partitions.get("t", 0).expect("materialized");
+        let part = partitions
+            .get("t", PartitionIndex(0))
+            .expect("materialized");
         let dir = part.log_dir.load();
         let expected = supervisor.log_dir_ids.id_for(&dir).expect("dir id");
         assert!(
@@ -1067,30 +1141,31 @@ mod tests {
 
         supervisor.materialize_local_partition("t", 0).unwrap();
 
-        assert!(partitions.contains("t", 0));
+        assert!(partitions.contains("t", PartitionIndex(0)));
     }
 
     #[tokio::test]
     async fn run_reconciles_initial_image_before_shutdown() {
         let img = image_with(&[
             topic_record("t", 1),
-            partition_record("t", 0, 2, vec![2], 0),
+            partition_record("t", 0, NodeId(2), vec![NodeId(2)], 0),
         ]);
         let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img);
         supervisor.shutdown.cancel();
 
         supervisor.run().await;
 
-        assert!(partitions.contains("t", 0));
+        assert!(partitions.contains("t", PartitionIndex(0)));
     }
 
     #[tokio::test]
     async fn push_topic_configs_pushes_overrides_to_local_partition() {
+        use std::collections::BTreeMap;
+
         use crabka_log::LogConfig;
         use crabka_metadata::{
             MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
         };
-        use std::collections::BTreeMap;
         use tempfile::tempdir;
         use uuid::Uuid;
 
@@ -1105,10 +1180,10 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
-            leader_epoch: 0,
+            leader: crabka_audit::NodeId(1),
+            replicas: vec![crabka_audit::NodeId(1)],
+            isr: vec![crabka_audit::NodeId(1)],
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1142,7 +1217,9 @@ mod tests {
 
         // Wait until the writer actor applies the SetLogConfig message and the
         // partition's Log reports retention.ms=60s.
-        let part = partitions.get("t", 0).expect("partition materialized");
+        let part = partitions
+            .get("t", PartitionIndex(0))
+            .expect("partition materialized");
         await_until("retention.ms=60s applied to partition log", || {
             part.log
                 .lock()
@@ -1173,10 +1250,10 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
-            leader_epoch: 0,
+            leader: crabka_audit::NodeId(1),
+            replicas: vec![crabka_audit::NodeId(1)],
+            isr: vec![crabka_audit::NodeId(1)],
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1203,7 +1280,7 @@ mod tests {
         // No overrides → default retention applies. Wait until the writer actor
         // has processed the push (the log already carries the default, so this
         // resolves as soon as the config snapshot matches).
-        let part = partitions.get("t", 0).expect("partition");
+        let part = partitions.get("t", PartitionIndex(0)).expect("partition");
         await_until("default retention applied to partition log", || {
             part.log
                 .lock()
@@ -1236,10 +1313,10 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
-            leader_epoch: 0,
+            leader: crabka_audit::NodeId(1),
+            replicas: vec![crabka_audit::NodeId(1)],
+            isr: vec![crabka_audit::NodeId(1)],
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1265,7 +1342,9 @@ mod tests {
 
         // Confirm the partition's log_dir equals the temp dir (the parent of
         // the placed partition sub-dir).
-        let part = partitions.get("t", 0).expect("part present");
+        let part = partitions
+            .get("t", PartitionIndex(0))
+            .expect("part present");
         let loaded_dir = part.log_dir.load();
         assert!(**loaded_dir == dir.path().to_path_buf());
 

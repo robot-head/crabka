@@ -9,14 +9,15 @@ use std::time::Duration;
 
 use crabka_client_admin::AdminClient;
 use crabka_connect::RuntimeState;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
+use tokio::{sync::watch, task::JoinHandle};
 
-use crate::config::{NamingPolicy, PolicyConfig, ReplicatorConfig};
-use crate::error::ReplicatorError;
-use crate::naming::Renamer;
-use crate::selector::Selector;
-use crate::worker::{FlowWorker, FlowWorkerParams};
+use crate::{
+    config::{NamingPolicy, PolicyConfig, ReplicatorConfig},
+    error::ReplicatorError,
+    naming::Renamer,
+    selector::Selector,
+    worker::{FlowWorker, FlowWorkerParams},
+};
 
 /// How often the supervision loop polls each worker's runtime state.
 const SUPERVISE_INTERVAL: Duration = Duration::from_secs(3);
@@ -225,8 +226,7 @@ impl FlowSupervisor {
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::config::{

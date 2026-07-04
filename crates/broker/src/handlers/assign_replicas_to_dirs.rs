@@ -7,19 +7,20 @@
 //! Leader-only (`NOT_CONTROLLER` otherwise), mirroring `alter_partition`.
 
 use bytes::{Bytes, BytesMut};
+use crabka_metadata::{MetadataImage, MetadataRecord, PartitionDirAssignmentRecord};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        assign_replicas_to_dirs_request::AssignReplicasToDirsRequest,
+        assign_replicas_to_dirs_response::{
+            AssignReplicasToDirsResponse, DirectoryData as RespDirData,
+            PartitionData as RespPartData, TopicData as RespTopicData,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_metadata::{MetadataImage, MetadataRecord, PartitionDirAssignmentRecord};
-use crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest;
-use crabka_protocol::owned::assign_replicas_to_dirs_response::{
-    AssignReplicasToDirsResponse, DirectoryData as RespDirData, PartitionData as RespPartData,
-    TopicData as RespTopicData,
-};
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{broker::Broker, codes, error::BrokerError};
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -37,7 +38,7 @@ pub(crate) fn handle(
         let is_leader = controller
             .watch_leader()
             .borrow()
-            .is_some_and(|n| is_controller_leader(Some(n), node_id));
+            .is_some_and(|n| is_controller_leader(Some(n.0), node_id.0));
         if !is_leader {
             return encode_resp(version, &not_controller_response());
         }
@@ -160,7 +161,7 @@ fn assignment_changes(
     let Some(pr) = image.partition(&topic_name, partition) else {
         return Vec::new();
     };
-    let Some(slot) = pr.replicas.iter().position(|n| *n == broker_id) else {
+    let Some(slot) = pr.replicas.iter().position(|n| n.0 == broker_id) else {
         return Vec::new();
     };
     // Idempotent: skip if the slot already holds this dir (avoids churn).
@@ -171,7 +172,7 @@ fn assignment_changes(
         PartitionDirAssignmentRecord {
             topic: topic_name,
             partition,
-            replica: broker_id,
+            replica: crabka_metadata::NodeId(broker_id),
             directory: dir_uuid,
         },
     )]
@@ -188,14 +189,16 @@ fn encode_resp(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
-    use crabka_protocol::owned::assign_replicas_to_dirs_request::{
-        DirectoryData as ReqDirData, PartitionData as ReqPartData, TopicData as ReqTopicData,
+    use crabka_protocol::{
+        owned::assign_replicas_to_dirs_request::{
+            DirectoryData as ReqDirData, PartitionData as ReqPartData, TopicData as ReqTopicData,
+        },
+        primitives::uuid::Uuid as ProtocolUuid,
     };
-    use crabka_protocol::primitives::uuid::Uuid as ProtocolUuid;
 
+    use super::*;
     use crate::broker::Broker;
 
     const VERSION: i16 = 0;
@@ -366,10 +369,10 @@ mod tests {
                 MetadataRecord::V1Partition(PartitionRecord {
                     topic: "t".into(),
                     partition: 0,
-                    leader: 1,
-                    replicas: vec![1],
-                    isr: vec![1],
-                    leader_epoch: 0,
+                    leader: crabka_audit::NodeId(1),
+                    replicas: vec![crabka_audit::NodeId(1)],
+                    isr: vec![crabka_audit::NodeId(1)],
+                    leader_epoch: crabka_metadata::LeaderEpoch(0),
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![uuid::Uuid::nil()],
@@ -406,10 +409,10 @@ mod tests {
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2],
-            isr: vec![1, 2],
-            leader_epoch: 0,
+            leader: crabka_audit::NodeId(1),
+            replicas: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            isr: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::nil(), uuid::Uuid::nil()],
@@ -423,7 +426,7 @@ mod tests {
         let expected = PartitionDirAssignmentRecord {
             topic: "t".into(),
             partition: 0,
-            replica: 2,
+            replica: crabka_audit::NodeId(2),
             directory: dir,
         };
         assert!(*r == expected);
@@ -443,10 +446,10 @@ mod tests {
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2],
-            isr: vec![1, 2],
-            leader_epoch: 0,
+            leader: crabka_audit::NodeId(1),
+            replicas: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            isr: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::nil(), dir],
@@ -468,10 +471,10 @@ mod tests {
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2],
-            isr: vec![1, 2],
-            leader_epoch: 0,
+            leader: crabka_audit::NodeId(1),
+            replicas: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            isr: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::nil(), uuid::Uuid::nil()],
@@ -498,10 +501,10 @@ mod tests {
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2],
-            isr: vec![1, 2],
-            leader_epoch: 0,
+            leader: crabka_audit::NodeId(1),
+            replicas: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            isr: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::nil(), uuid::Uuid::nil()],
@@ -548,7 +551,7 @@ mod tests {
         let expected = PartitionDirAssignmentRecord {
             topic: "t".into(),
             partition: 0,
-            replica: 2,
+            replica: crabka_audit::NodeId(2),
             directory: dir_uuid,
         };
         assert!(*r == expected);

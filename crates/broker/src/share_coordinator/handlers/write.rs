@@ -6,18 +6,21 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use crabka_log::Offset;
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        write_share_group_state_request::WriteShareGroupStateRequest,
+        write_share_group_state_response::{
+            PartitionResult, WriteShareGroupStateResponse, WriteStateResult,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::owned::write_share_group_state_request::WriteShareGroupStateRequest;
-use crabka_protocol::owned::write_share_group_state_response::{
-    PartitionResult, WriteShareGroupStateResponse, WriteStateResult,
+use crate::{
+    broker::Broker, codes, error::BrokerError, share_coordinator::persistence::StateBatch,
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::share_coordinator::persistence::StateBatch;
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -44,8 +47,8 @@ pub(crate) fn handle(
                         .state_batches
                         .iter()
                         .map(|b| StateBatch {
-                            first_offset: b.first_offset,
-                            last_offset: b.last_offset,
+                            first_offset: Offset(b.first_offset),
+                            last_offset: Offset(b.last_offset),
                             delivery_state: b.delivery_state,
                             delivery_count: b.delivery_count,
                         })
@@ -57,7 +60,7 @@ pub(crate) fn handle(
                             pd.partition,
                             pd.state_epoch,
                             pd.leader_epoch,
-                            pd.start_offset,
+                            Offset(pd.start_offset),
                             pd.delivery_complete_count,
                             batches,
                         )
@@ -95,14 +98,19 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::write_share_group_state_request::{
-        PartitionData, StateBatch, WriteShareGroupStateRequest, WriteStateData,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            write_share_group_state_request::{
+                PartitionData, StateBatch, WriteShareGroupStateRequest, WriteStateData,
+            },
+            write_share_group_state_response::WriteShareGroupStateResponse,
+        },
+        primitives::uuid::Uuid as ProtoUuid,
     };
-    use crabka_protocol::owned::write_share_group_state_response::WriteShareGroupStateResponse;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+
+    use super::*;
 
     const VERSION: i16 = 1;
 
@@ -185,7 +193,7 @@ mod tests {
             .read_summary("share-group", topic_id, 4)
             .await
             .expect("written state is readable");
-        assert!(summary == (17, 3, 101, 9));
+        assert!(summary == (17, 3, Offset(101), 9));
         broker_handle.shutdown().await;
     }
 

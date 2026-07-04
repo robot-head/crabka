@@ -3,8 +3,7 @@
 //! All functions return `Result<_, String>` and map client errors via
 //! `.map_err(|e| e.to_string())` so callers stay wire-error-agnostic.
 
-use std::collections::BTreeMap;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
@@ -234,8 +233,7 @@ fn is_unknown_topic_error(msg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
 
     #[test]
     fn unknown_topic_error_matches_each_substring() {

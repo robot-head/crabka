@@ -5,33 +5,34 @@
 //! JoinGroup (offsets preserved); a streams group with a live member rejects it;
 //! and the admin handlers (List/Describe/Delete) respect the type lock.
 
+use std::{sync::Arc, time::Duration};
+
 use assert2::{assert, check};
 use bytes::Bytes;
-use std::sync::Arc;
-use std::time::Duration;
-
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
-use crabka_protocol::owned::common::streams_group_heartbeat_request::task_ids::TaskIds as ReqTaskIds;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::delete_groups_request::DeleteGroupsRequest;
-use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-use crabka_protocol::owned::leave_group_request::{LeaveGroupRequest, MemberIdentity};
-use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::offset_commit_request::{
-    OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+use crabka_protocol::{
+    owned::{
+        common::streams_group_heartbeat_request::task_ids::TaskIds as ReqTaskIds,
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        delete_groups_request::DeleteGroupsRequest,
+        join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+        leave_group_request::{LeaveGroupRequest, MemberIdentity},
+        list_groups_request::ListGroupsRequest,
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        offset_commit_request::{
+            OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+        },
+        offset_fetch_request::{
+            OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
+        },
+        streams_group_heartbeat_request::{StreamsGroupHeartbeatRequest, Subtopology, Topology},
+        streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
+        sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
+        update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest},
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
-use crabka_protocol::owned::offset_fetch_request::{
-    OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
-};
-use crabka_protocol::owned::streams_group_heartbeat_request::{
-    StreamsGroupHeartbeatRequest, Subtopology, Topology,
-};
-use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
-use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
-use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 // ── error codes ──────────────────────────────────────────────────────────────
 const ERR_NONE: i16 = 0;

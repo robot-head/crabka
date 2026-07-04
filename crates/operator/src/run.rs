@@ -10,12 +10,13 @@ use std::sync::Arc;
 use kube::Client;
 use tokio::sync::Mutex;
 
-use crate::config::OperatorConfig;
-use crate::context::Context;
-use crate::controller;
-use crate::health::{self, HealthState};
-use crate::leader_election;
-use crate::telemetry;
+use crate::{
+    config::OperatorConfig,
+    context::Context,
+    controller,
+    health::{self, HealthState},
+    leader_election, telemetry,
+};
 
 /// Run the operator. See module docs for the supervision shape.
 ///

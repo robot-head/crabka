@@ -5,10 +5,12 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{
-    ClusterState, Movement, PartitionView, Proposal, ProposalStatus, ProposalSummary,
-    validate_movement,
+use crate::{
+    goals::{Goal, GoalContext, GoalPriority},
+    model::{
+        ClusterState, Movement, PartitionView, Proposal, ProposalStatus, ProposalSummary,
+        validate_movement,
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -252,13 +254,17 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::capacity::BrokerCapacities;
-    use crate::goals::tests::FixedGoal;
-    use crate::model::{BrokerView, PartitionView};
-    use crate::scraper::UsageStore;
-    use assert2::{assert, check};
     use std::sync::Arc;
+
+    use assert2::{assert, check};
+
+    use super::*;
+    use crate::{
+        capacity::BrokerCapacities,
+        goals::tests::FixedGoal,
+        model::{BrokerView, PartitionView},
+        scraper::UsageStore,
+    };
 
     fn ctx() -> GoalContext {
         GoalContext {
@@ -586,14 +592,14 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn soft_movement_that_violates_capacity_invariant_is_dropped() {
-        use crate::capacity::{BrokerCapacities, BrokerCapacity};
-        use crate::goals::disk_capacity::DiskCapacity;
-        use crate::goals::tests::FixedGoal;
-        use crate::model::BrokerView;
-        use crate::scraper::parse::ParsedSample;
-        use crate::scraper::{MetricKind, UsageStore, WindowConfig};
-        use std::sync::Arc;
-        use std::time::Duration;
+        use std::{sync::Arc, time::Duration};
+
+        use crate::{
+            capacity::{BrokerCapacities, BrokerCapacity},
+            goals::{disk_capacity::DiskCapacity, tests::FixedGoal},
+            model::BrokerView,
+            scraper::{MetricKind, UsageStore, WindowConfig, parse::ParsedSample},
+        };
 
         // Three brokers; broker 3 is small (disk_bytes: 1000).
         // Broker 3 already hosts a replica of ("other", 0) sized at

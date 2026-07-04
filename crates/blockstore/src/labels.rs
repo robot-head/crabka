@@ -94,8 +94,9 @@ impl FromIterator<(String, String)> for Labels {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn fingerprint_is_order_independent() {

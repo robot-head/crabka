@@ -13,8 +13,7 @@
 //! than spot-checked. Every case also asserts the broker (`MetadataImage`) and
 //! gateway (`AclCache`) decision paths agree (no drift).
 
-use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::{collections::HashSet, net::SocketAddr};
 
 use crabka_metadata::{
     AclEntry, AclOperation, MetadataImage, MetadataRecord, PatternType, PermissionType,
@@ -259,8 +258,7 @@ fn acl_precedence_exhaustive() {
 
 #[cfg(test)]
 mod fuzz {
-    use std::collections::HashSet;
-    use std::net::SocketAddr;
+    use std::{collections::HashSet, net::SocketAddr};
 
     use crabka_metadata::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};
     use proptest::prelude::*;

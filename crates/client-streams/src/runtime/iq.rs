@@ -161,9 +161,13 @@ pub(crate) async fn answer_iq(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::processor::serde::{I64Serde, Serde, StringSerde};
-    use crate::store::api::{KeyValueStore, StateStore};
-    use crate::store::kv::KeyValueBytesStore;
+    use crate::{
+        processor::serde::{I64Serde, Serde, StringSerde},
+        store::{
+            api::{KeyValueStore, StateStore},
+            kv::KeyValueBytesStore,
+        },
+    };
 
     #[tokio::test]
     async fn answer_kv_get_validate_wrongkind_notfound() {

@@ -133,13 +133,15 @@ fn implies(stored: AclOperation, requested: AclOperation) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::authorize_topics;
+    use std::net::SocketAddr;
+
     use assert2::assert;
     use crabka_metadata::{MetadataImage, MetadataRecord, PatternType, ResourceType};
     use crabka_security::Principal;
-    use std::net::SocketAddr;
     use uuid::Uuid;
+
+    use super::*;
+    use crate::authorize_topics;
 
     fn no_super() -> HashSet<String> {
         HashSet::new()

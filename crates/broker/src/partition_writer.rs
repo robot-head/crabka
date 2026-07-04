@@ -5,19 +5,26 @@
 //! contribution is: ordered acks back to producers + waking long-poll
 //! Fetch consumers via a shared `Notify` after every successful append.
 
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::{
+    panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use arc_swap::ArcSwap;
-use crabka_log::Log;
-use tokio::runtime::{Handle, RuntimeFlavor};
-use tokio::sync::{Notify, mpsc};
+use crabka_ids::PartitionIndex;
+use crabka_log::{Log, Offset};
+use tokio::{
+    runtime::{Handle, RuntimeFlavor},
+    sync::{Notify, mpsc},
+};
 
-use crate::log_dir_status::LogDirRegistry;
-use crate::partition::{ProduceData, ProduceJob, SwapOutcome, WriterMessage};
-use crate::producer_state::ProducerState;
-use crate::replica_state::ReplicaState;
+use crate::{
+    log_dir_status::LogDirRegistry,
+    partition::{ProduceData, ProduceJob, SwapOutcome, WriterMessage},
+    producer_state::ProducerState,
+    replica_state::ReplicaState,
+};
 
 /// Inactivity window after which an idempotent / transactional producer's
 /// in-memory entry is considered expired and excluded from the
@@ -94,7 +101,7 @@ fn storage_failure_error(
 fn append_produce_batch(
     log: &Mutex<Log>,
     datas: Vec<ProduceData>,
-) -> (Vec<Result<i64, crate::error::BrokerError>>, i64) {
+) -> (Vec<Result<Offset, crate::error::BrokerError>>, Offset) {
     let mut guard = lock_log(log);
     let target = guard.config_snapshot().compression_type;
     let mut results = Vec::with_capacity(datas.len());
@@ -131,7 +138,7 @@ fn append_produce_batch(
 async fn run_produce_append_batch(
     log: Arc<Mutex<Log>>,
     datas: Vec<ProduceData>,
-) -> Result<(Vec<Result<i64, crate::error::BrokerError>>, i64), crate::error::BrokerError> {
+) -> Result<(Vec<Result<Offset, crate::error::BrokerError>>, Offset), crate::error::BrokerError> {
     match Handle::current().runtime_flavor() {
         RuntimeFlavor::MultiThread => catch_unwind(AssertUnwindSafe(|| {
             tokio::task::block_in_place(move || append_produce_batch(&log, datas))
@@ -148,7 +155,7 @@ async fn run_produce_append_batch(
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub async fn run(
     topic: String,
-    partition: i32,
+    partition: PartitionIndex,
     log: Arc<Mutex<Log>>,
     log_dir: Arc<ArcSwap<PathBuf>>,
     mut rx: mpsc::Receiver<WriterMessage>,
@@ -267,7 +274,7 @@ pub async fn run(
                 let log_for_blocking = log.clone();
                 let join = tokio::task::spawn_blocking(move || {
                     lock_log(&log_for_blocking)
-                        .append_at(&mut batch, offset)
+                        .append_at(&mut batch, Offset(offset))
                         .map_err(crate::error::BrokerError::from)
                 });
                 let result = match join.await {
@@ -401,7 +408,12 @@ pub async fn run(
                     .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
                 let active_producers = producer_state
                     .active_snapshot(&topic, partition, now_ms, PRODUCER_ID_EXPIRATION_MS)
-                    .await;
+                    .await
+                    // Wrap the broker-side `i64` pids/last-offsets into the log
+                    // layer's `ProducerId`/`Offset` at the compaction seam.
+                    .into_iter()
+                    .map(|(pid, off)| (crabka_log::ProducerId(pid), Offset(off)))
+                    .collect();
                 let ctx = crabka_log::CompactionContext {
                     now,
                     active_producers,
@@ -541,13 +553,14 @@ fn swap_future_log(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::tempdir;
     use tokio::sync::oneshot;
+
+    use super::*;
 
     fn sample_batch(n: i32) -> RecordBatch {
         let mut b = RecordBatch {
@@ -613,7 +626,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -635,7 +648,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert!(assigned == 0);
+        assert!(assigned == Offset(0));
 
         // Second append assigns offset 3.
         let (ack, ack_rx) = oneshot::channel();
@@ -645,7 +658,7 @@ mod tests {
         }))
         .await
         .expect("send job 2");
-        assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
+        assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == Offset(3));
 
         drop(tx);
         writer.await.expect("writer join");
@@ -674,7 +687,7 @@ mod tests {
 
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -689,7 +702,7 @@ mod tests {
 
         let mut acks = acks.into_iter();
         let first = acks.next().expect("first ack");
-        assert!(first.await.expect("ack 0").expect("append 0 ok") == 0);
+        assert!(first.await.expect("ack 0").expect("append 0 ok") == Offset(0));
         for (idx, mut ack) in acks.enumerate() {
             let assigned = ack
                 .try_recv()
@@ -697,7 +710,10 @@ mod tests {
                 .expect("append ok");
             assert!(assigned == i64::try_from(idx + 1).unwrap());
         }
-        assert!(log.lock().unwrap().log_end_offset() == i64::try_from(MAX_PRODUCE_GROUP).unwrap());
+        assert!(
+            log.lock().unwrap().log_end_offset()
+                == Offset(i64::try_from(MAX_PRODUCE_GROUP).unwrap())
+        );
 
         drop(tx);
         writer.await.expect("writer join");
@@ -713,7 +729,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -735,7 +751,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert!(assigned == 0);
+        assert!(assigned == Offset(0));
 
         drop(tx);
         writer.await.expect("writer join");
@@ -754,7 +770,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -782,8 +798,8 @@ mod tests {
                 bytes: wire.clone(),
                 last_offset_delta: 0,
                 max_timestamp: 1_234,
-                leader_epoch: 5,
-                producer_id: -1,
+                leader_epoch: crabka_log::LeaderEpoch(5),
+                producer_id: crabka_log::ProducerId(-1),
                 is_transactional: false,
             }),
             ack,
@@ -791,13 +807,13 @@ mod tests {
         .await
         .expect("send verbatim job");
         let assigned = ack_rx.await.expect("ack").expect("append ok");
-        assert!(assigned == 0);
+        assert!(assigned == Offset(0));
 
         // Read back: bytes 21.. must equal the producer's, only offset+epoch changed.
         let r = log
             .lock()
             .unwrap()
-            .read_raw(0, 1, 10 * 1024 * 1024)
+            .read_raw(Offset(0), Offset(1), 10 * 1024 * 1024)
             .unwrap();
         assert!(&r.bytes[21..] == &wire[21..], "CRC-covered region verbatim");
         assert!(&r.bytes[17..21] == &wire[17..21], "CRC unchanged");
@@ -831,10 +847,14 @@ mod tests {
         let (results, leo) = append_produce_batch(&log, vec![ProduceData::Owned(original)]);
         assert!(results.len() == 1);
         let assigned = results.into_iter().next().unwrap().expect("append ok");
-        assert!(assigned == 0);
-        assert!(leo == 2);
+        assert!(assigned == Offset(0));
+        assert!(leo == Offset(2));
 
-        let read = log.lock().unwrap().read(0, 10 * 1024 * 1024).unwrap();
+        let read = log
+            .lock()
+            .unwrap()
+            .read(Offset(0), 10 * 1024 * 1024)
+            .unwrap();
         assert!(read.batches.len() == 1);
         check!(read.batches[0].attributes.compression() == CompressionType::Lz4);
         check!(read.batches[0].records.len() == 2);
@@ -850,7 +870,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -894,7 +914,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -932,7 +952,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -974,7 +994,7 @@ mod tests {
         let notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1001,9 +1021,12 @@ mod tests {
         assert!(log.lock().unwrap().log_end_offset() == 4);
 
         let (ack, ack_rx) = oneshot::channel();
-        tx.send(WriterMessage::Truncate { offset: 0, ack })
-            .await
-            .expect("send truncate");
+        tx.send(WriterMessage::Truncate {
+            offset: Offset(0),
+            ack,
+        })
+        .await
+        .expect("send truncate");
         ack_rx.await.expect("ack").expect("truncate ok");
         assert!(log.lock().unwrap().log_end_offset() == 0);
 
@@ -1024,12 +1047,17 @@ mod tests {
         ));
         {
             let mut st = replica_state.lock().await;
-            st.install_isr(&[1], &[1], 1, std::time::Instant::now());
+            st.install_isr(
+                &[crabka_audit::NodeId(1)],
+                &[crabka_audit::NodeId(1)],
+                crabka_audit::NodeId(1),
+                std::time::Instant::now(),
+            );
         }
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1055,7 +1083,7 @@ mod tests {
             .await
             .expect("hw_advance_notify did not fire");
 
-        assert!(replica_state.lock().await.hw == 2);
+        assert!(replica_state.lock().await.hw == Offset(2));
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1074,12 +1102,17 @@ mod tests {
         ));
         {
             let mut st = replica_state.lock().await;
-            st.install_isr(&[1, 2], &[1, 2], 1, std::time::Instant::now());
+            st.install_isr(
+                &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+                &[crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+                crabka_audit::NodeId(1),
+                std::time::Instant::now(),
+            );
         }
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1102,7 +1135,7 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert!(replica_state.lock().await.hw == 0);
+        assert!(replica_state.lock().await.hw == Offset(0));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), waiter)
                 .await
@@ -1128,7 +1161,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1182,7 +1215,7 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1194,11 +1227,14 @@ mod tests {
         ));
 
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
-        tx.send(WriterMessage::TrimToOffset { new_start: 3, ack })
-            .await
-            .expect("send");
+        tx.send(WriterMessage::TrimToOffset {
+            new_start: Offset(3),
+            ack,
+        })
+        .await
+        .expect("send");
         let new_start = ack_rx.await.expect("ack").expect("trim ok");
-        assert!(new_start >= 3);
+        assert!(new_start >= Offset(3));
         assert!(log.lock().expect("lock").log_start_offset() == new_start);
 
         drop(tx);
@@ -1218,12 +1254,25 @@ mod tests {
         ));
         {
             let mut st = replica_state.lock().await;
-            st.install_isr(&[1, 2, 3], &[1, 2, 3], 1, std::time::Instant::now());
+            st.install_isr(
+                &[
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                &[
+                    crabka_audit::NodeId(1),
+                    crabka_audit::NodeId(2),
+                    crabka_audit::NodeId(3),
+                ],
+                crabka_audit::NodeId(1),
+                std::time::Instant::now(),
+            );
         }
         let hw_advance_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(run(
             "t".to_string(),
-            0,
+            PartitionIndex(0),
             log.clone(),
             Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
             rx,
@@ -1243,7 +1292,7 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert!(replica_state.lock().await.hw == 0);
+        assert!(replica_state.lock().await.hw == Offset(0));
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1279,7 +1328,7 @@ mod tests {
             (guard.log_end_offset(), guard.dir().to_path_buf())
         };
         check!(result == SwapOutcome::Swapped);
-        check!(leo == 2);
+        check!(leo == Offset(2));
         check!(log_dir_now == target_partition_path.clone());
         check!(log_dir.load().as_ref().clone() == target_dir);
         check!(!source_partition.exists());
@@ -1316,7 +1365,7 @@ mod tests {
             (guard.log_end_offset(), guard.dir().to_path_buf())
         };
         check!(result == SwapOutcome::NotCaughtUp);
-        check!(leo == 2);
+        check!(leo == Offset(2));
         check!(log_dir_now == source_partition.clone());
         check!(log_dir.load().as_ref().clone() == source_dir);
         check!(source_partition.exists());

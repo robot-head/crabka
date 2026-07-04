@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+use crate::ids::{PartitionMap, PositionMap};
+
 /// A single record crossing the connector boundary, parameterised over its key
 /// and value payload types.
 ///
@@ -81,17 +83,21 @@ pub struct Header {
 pub struct SourceOffset {
     /// Identifies the stream this position belongs to — e.g. a database table,
     /// a file path, a log shard. Mirrors Kafka Connect's `sourcePartition`.
-    pub partition: OffsetMap,
+    pub partition: PartitionMap,
     /// The position within that stream — e.g. a log sequence number, a byte
     /// offset, a row id. Mirrors Kafka Connect's `sourceOffset`.
-    pub position: OffsetMap,
+    pub position: PositionMap,
 }
 
 impl SourceOffset {
     /// A source offset from a stream-identifying `partition` and a `position`
     /// within it.
+    ///
+    /// The two halves are distinct types ([`PartitionMap`] / [`PositionMap`])
+    /// so the compiler rejects a transposed call — both are the same underlying
+    /// [`OffsetMap`], and a swap here would silently corrupt every checkpoint.
     #[must_use]
-    pub fn new(partition: OffsetMap, position: OffsetMap) -> Self {
+    pub fn new(partition: PartitionMap, position: PositionMap) -> Self {
         Self {
             partition,
             position,
@@ -153,8 +159,9 @@ impl From<&str> for OffsetValue {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn builder_sets_timestamp_and_headers() {
@@ -184,9 +191,16 @@ mod tests {
         let mut position = OffsetMap::new();
         position.insert("lsn".into(), 12_345_i64.into());
         position.insert("snapshot".into(), OffsetValue::Bool(false));
-        let offset = SourceOffset::new(partition, position);
+        let offset = SourceOffset::new(partition.into(), position.into());
 
         let json = serde_json::to_string(&offset).expect("serialize");
+        // The `PartitionMap`/`PositionMap` newtypes are `#[serde(transparent)]`,
+        // so each half encodes as the bare map — no wrapping object. A persisted
+        // checkpoint's byte shape is exactly the two `sourcePartition`/
+        // `sourceOffset` maps Kafka Connect writes.
+        check!(
+            json == r#"{"partition":{"table":"public.orders"},"position":{"lsn":12345,"snapshot":false}}"#
+        );
         let back: SourceOffset = serde_json::from_str(&json).expect("deserialize");
         check!(back == offset);
     }

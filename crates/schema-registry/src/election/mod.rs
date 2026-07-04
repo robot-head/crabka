@@ -5,12 +5,12 @@
 pub mod client;
 pub mod protocol;
 
+use client::ElectionClient;
+use protocol::SchemaRegistryIdentity;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::RegistryConfig;
-use client::ElectionClient;
-use protocol::SchemaRegistryIdentity;
 
 /// Who the primary is, from this node's point of view.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

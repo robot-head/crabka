@@ -46,12 +46,13 @@ impl AclSource for AclCache {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{
         AclOperation, MetadataImage, MetadataRecord, PermissionType, ResourceType,
     };
     use uuid::Uuid;
+
+    use super::*;
 
     fn entry(rt: ResourceType, pattern: PatternType, name: &str, op: AclOperation) -> AclEntry {
         AclEntry {

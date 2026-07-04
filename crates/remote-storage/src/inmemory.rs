@@ -2,17 +2,20 @@
 //! [`RemoteLogMetadataManager`], mirroring Kafka's test fixture of the same
 //! name. Tiered-storage tests run against this manager.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::{collections::HashMap, sync::Mutex};
 
-use crate::cache::RemoteLogMetadataCache;
-use crate::dump::{PartitionDump, RlmmCacheDump};
-use crate::error::RemoteStorageError;
-use crate::metadata::{
-    RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemotePartitionDeleteMetadata,
-    RemotePartitionDeleteState, TopicIdPartition,
+use crabka_ids::LeaderEpoch;
+
+use crate::{
+    cache::RemoteLogMetadataCache,
+    dump::{PartitionDump, RlmmCacheDump},
+    error::RemoteStorageError,
+    metadata::{
+        RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate, RemotePartitionDeleteMetadata,
+        RemotePartitionDeleteState, TopicIdPartition,
+    },
+    metadata_manager::RemoteLogMetadataManager,
 };
-use crate::metadata_manager::RemoteLogMetadataManager;
 
 /// In-memory [`RemoteLogMetadataManager`]: one
 /// `RemoteLogMetadataCache` per partition behind a single
@@ -109,7 +112,7 @@ impl RemoteLogMetadataManager for InmemoryRemoteLogMetadataManager {
     fn remote_log_segment_metadata(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
         offset: i64,
     ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError> {
         let guard = self.partitions.lock().expect("metadata mutex poisoned");
@@ -121,7 +124,7 @@ impl RemoteLogMetadataManager for InmemoryRemoteLogMetadataManager {
     fn highest_offset_for_epoch(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
     ) -> Result<Option<i64>, RemoteStorageError> {
         let guard = self.partitions.lock().expect("metadata mutex poisoned");
         Ok(guard
@@ -143,7 +146,7 @@ impl RemoteLogMetadataManager for InmemoryRemoteLogMetadataManager {
     fn list_remote_log_segments_by_epoch(
         &self,
         topic_id_partition: &TopicIdPartition,
-        leader_epoch: i32,
+        leader_epoch: LeaderEpoch,
     ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
         let guard = self.partitions.lock().expect("metadata mutex poisoned");
         Ok(guard
@@ -175,12 +178,12 @@ impl RemoteLogMetadataManager for InmemoryRemoteLogMetadataManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
     use std::collections::BTreeMap;
+
+    use assert2::{assert, check};
     use uuid::Uuid;
 
+    use super::*;
     use crate::metadata::{
         CustomMetadata, RemoteLogSegmentId, RemoteLogSegmentState, RemotePartitionDeleteState,
     };
@@ -199,7 +202,7 @@ mod tests {
             100,
             2048,
             RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(0, start)]),
+            BTreeMap::from([(LeaderEpoch(0), start)]),
         )
         .unwrap()
     }
@@ -222,20 +225,24 @@ mod tests {
         m.update_remote_log_segment_metadata(finish(10)).unwrap();
 
         let got = m
-            .remote_log_segment_metadata(&tp(), 0, 42)
+            .remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42)
             .unwrap()
             .expect("segment found");
         check!(got.remote_log_segment_id().id == Uuid::from_u128(10));
         check!(got.custom_metadata() == Some(&CustomMetadata(vec![7])));
-        check!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
+        check!(m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap() == Some(99));
     }
 
     #[test]
     fn query_unknown_partition_is_none_not_error() {
         let m = InmemoryRemoteLogMetadataManager::new();
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
-        check!(m.remote_log_segment_metadata(&other, 0, 0).unwrap() == None);
-        check!(m.highest_offset_for_epoch(&other, 0).unwrap() == None);
+        check!(
+            m.remote_log_segment_metadata(&other, LeaderEpoch(0), 0)
+                .unwrap()
+                == None
+        );
+        check!(m.highest_offset_for_epoch(&other, LeaderEpoch(0)).unwrap() == None);
         check!(m.list_remote_log_segments(&other).unwrap().is_empty());
     }
 
@@ -245,7 +252,9 @@ mod tests {
         m.add_remote_log_segment_metadata(started(10, 0, 99))
             .unwrap();
         m.update_remote_log_segment_metadata(finish(10)).unwrap();
-        let listed = m.list_remote_log_segments_by_epoch(&tp(), 0).unwrap();
+        let listed = m
+            .list_remote_log_segments_by_epoch(&tp(), LeaderEpoch(0))
+            .unwrap();
         assert!(listed.len() == 1);
         assert!(listed[0].remote_log_segment_id().id == Uuid::from_u128(10));
     }
@@ -259,17 +268,17 @@ mod tests {
 
         // Found.
         assert!(matches!(
-            m.remote_log_segment_metadata(&tp(), 0, 42),
+            m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42),
             Ok(Some(_))
         ));
         // Caught up, no covering segment → genuine miss.
         assert!(matches!(
-            m.remote_log_segment_metadata(&tp(), 0, 10_000),
+            m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 10_000),
             Ok(None)
         ));
         // Unknown partition → genuine miss, NOT NotReady.
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
-        let got = m.remote_log_segment_metadata(&other, 0, 0);
+        let got = m.remote_log_segment_metadata(&other, LeaderEpoch(0), 0);
         assert!(matches!(got, Ok(None)));
         assert!(
             !matches!(got, Err(RemoteStorageError::NotReady { .. })),
@@ -345,7 +354,12 @@ mod tests {
         let after = restored.list_remote_log_segments(&tp()).unwrap();
         check!(before == after);
         // Finished segment still queryable post-import.
-        check!(restored.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
+        check!(
+            restored
+                .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
+                .unwrap()
+                == Some(99)
+        );
         // Re-exporting yields the same dump (idempotent round trip).
         check!(m.export() == restored.export());
     }

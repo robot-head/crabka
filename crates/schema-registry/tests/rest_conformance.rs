@@ -7,15 +7,18 @@
 //! Schema strings and the registration order are taken verbatim from the fixture
 //! README (`tests/fixtures/README.md`) so that assigned IDs 1/2/3 match.
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
-use crabka_schema_registry::kafkastore::KafkaStore;
-use crabka_schema_registry::rest::{self, AppState};
+use crabka_schema_registry::{
+    config::{RegistryConfig, SecurityConfig},
+    kafkastore::KafkaStore,
+    rest::{self, AppState},
+};
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 
 // ── fixture helpers ──────────────────────────────────────────────────────────
 

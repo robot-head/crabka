@@ -29,8 +29,9 @@ pub enum CompressionError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn feature_disabled_display() {

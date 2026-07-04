@@ -1,0 +1,29 @@
+[package]
+name = "crabka-ids"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Canonical newtypes for Crabka's cross-crate Kafka identifiers (offset, partition index, …)"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-ids"
+readme = "README.md"
+keywords = ["kafka", "offset", "partition", "newtype", "crabka"]
+categories = ["data-structures"]
+
+[lints]
+workspace = true
+
+# A pure value-type leaf crate: no IO, no async, no crypto, so it stays buildable
+# for `wasm32-unknown-unknown` and can be depended on by every crate — including
+# the observability stack, which does not depend on `crabka-protocol` — that
+# needs to name a Kafka offset or partition index without threading a raw integer.
+[dependencies]
+derive_more = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+serde_json = { workspace = true }

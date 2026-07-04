@@ -7,6 +7,7 @@ pub mod compactor;
 pub mod distributor;
 pub mod error;
 pub mod frontend;
+pub mod ids;
 pub mod limits;
 pub mod livestore;
 pub mod metrics;

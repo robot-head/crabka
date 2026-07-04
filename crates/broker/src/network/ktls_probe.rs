@@ -45,8 +45,10 @@ pub(crate) async fn probe_ktls_support() -> bool {
 async fn try_probe_ktls() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::sync::Arc;
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::{TcpListener, TcpStream},
+    };
 
     // 1. Throwaway self-signed cert (ECDSA P-256) with a `localhost` SAN so the
     //    loopback client can verify the server name. Never persisted.

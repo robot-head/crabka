@@ -1,26 +1,29 @@
 //! In-memory `SpanStore` used by engine and planner tests.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+};
 
-use arrow::array::{
-    ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int32Builder, Int64Builder,
-    StringBuilder,
+use arrow::{
+    array::{
+        ArrayRef, BooleanBuilder, FixedSizeBinaryBuilder, Float64Builder, Int32Builder,
+        Int64Builder, StringBuilder,
+    },
+    datatypes::DataType,
+    record_batch::RecordBatch,
 };
-use arrow::datatypes::DataType;
-use arrow::record_batch::RecordBatch;
-use datafusion::catalog::MemTable;
-use datafusion::prelude::SessionContext;
+use datafusion::{catalog::MemTable, prelude::SessionContext};
 
-use crate::error::{Result, TraceqlError};
-use crate::result::{
-    AttrValue, EventRef, LinkRef, ScopedTag, SpanRef, TagScope, TraceSpans, TypedValue,
+use crate::{
+    error::{Result, TraceqlError},
+    result::{AttrValue, EventRef, LinkRef, ScopedTag, SpanRef, TagScope, TraceSpans, TypedValue},
+    span_columns::{
+        EVENT_ATTR_PREFIX, InputSpan, LINK_ATTR_PREFIX, NestedSet, assign_nested_set,
+        span_schema_with_attrs,
+    },
+    store::{MatchCmp, MatchScope, MatchValue, ScanResult, SpanMatcher, SpanStore},
 };
-use crate::span_columns::{
-    EVENT_ATTR_PREFIX, InputSpan, LINK_ATTR_PREFIX, NestedSet, assign_nested_set,
-    span_schema_with_attrs,
-};
-use crate::store::{MatchCmp, MatchScope, MatchValue, ScanResult, SpanMatcher, SpanStore};
 
 const INTRINSIC_TAGS: &[&str] = &[
     "span:childCount",
@@ -1315,12 +1318,14 @@ fn child_count_for(nested_sets: &[NestedSet], idx: usize) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use datafusion::arrow::array::AsArray;
 
-    use crate::result::{AttrValue, EventRef, LinkRef};
-    use crate::span_columns::{COL_NS_LEFT, COL_PARENT_ID, InputSpan};
+    use super::*;
+    use crate::{
+        result::{AttrValue, EventRef, LinkRef},
+        span_columns::{COL_NS_LEFT, COL_PARENT_ID, InputSpan},
+    };
 
     fn span(id: u8, parent: Option<u8>, name: &str, attrs: Vec<(&str, AttrValue)>) -> InputSpan {
         InputSpan {

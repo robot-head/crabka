@@ -6,8 +6,10 @@
 //! enforced at compile time by the typed [`NodeHandle`](crate::topology::NodeHandle)
 //! wiring, so the factory only needs to know how to build the node.
 
-use super::erased::{ErasedRecord, ProcessorError};
-use super::node::ErasedNode;
+use super::{
+    erased::{ErasedRecord, ProcessorError},
+    node::ErasedNode,
+};
 
 /// Closure that constructs a fresh [`ErasedNode`] (processor or sink).
 pub(crate) type MakeNode = Box<dyn Fn() -> Box<dyn ErasedNode> + Send + Sync>;

@@ -6,8 +6,7 @@ use std::collections::BTreeSet;
 
 use async_trait::async_trait;
 
-use crate::executor::throttle::ThrottleTargets;
-use crate::model::Movement;
+use crate::{executor::throttle::ThrottleTargets, model::Movement};
 
 /// A typed wrapper over the small set of admin RPCs the executor needs.
 /// The production impl forwards to `crabka_client_core::Client::send`
@@ -107,10 +106,14 @@ pub fn partition_keys(movements: &[Movement]) -> Vec<(String, i32)> {
 
 #[cfg(test)]
 pub mod tests {
-    use super::*;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use assert2::assert;
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
 
     /// Mock that records every call. Tests inspect the recorded log to
     /// assert what the executor did.

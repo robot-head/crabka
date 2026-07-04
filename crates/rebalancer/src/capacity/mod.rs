@@ -44,8 +44,9 @@ impl BrokerCapacities {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn default_is_empty() {

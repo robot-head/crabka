@@ -13,16 +13,15 @@ use std::collections::BTreeMap;
 
 use crabka_blockstore::Labels;
 use crabka_pprof::PprofProfile;
-use serde::{Deserialize, Serialize};
-
-use crate::error::ProfilesError;
-
 pub use legacy::{
     IngestFormat, IngestQuery, decode_ingest_body, decode_ingest_multipart, parse_ingest_query,
 };
 pub use otlp::decode_otlp;
 pub use push_v1::{decode_push, gunzip};
+use serde::{Deserialize, Serialize};
 pub use split::split_sample_types;
+
+use crate::error::ProfilesError;
 
 /// One decoded pprof plus its series labels, before the multi-value split.
 #[derive(Debug, Clone)]

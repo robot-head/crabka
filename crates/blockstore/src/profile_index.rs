@@ -4,21 +4,24 @@
 //! then layers the profile-type lookup and stacktrace-partition map required by
 //! Pyroscope-compatible profiles queries.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
 
-use crate::block::BlockMeta;
-use crate::block_index::BlockIndex;
-use crate::error::{BlockStoreError, Result};
-use crate::index::Index;
-use crate::index_snapshot::{latest_index_snapshot_path, put_index_snapshot};
-use crate::labels::{Labels, SeriesFingerprint};
-use crate::matcher::LabelMatcher;
+use crate::{
+    block::BlockMeta,
+    block_index::BlockIndex,
+    error::{BlockStoreError, Result},
+    index::Index,
+    index_snapshot::{latest_index_snapshot_path, put_index_snapshot},
+    labels::{Labels, SeriesFingerprint},
+    matcher::LabelMatcher,
+};
 
 /// Reserved label carrying the 5-part profile type string.
 pub const LABEL_PROFILE_TYPE: &str = "__profile_type__";
@@ -404,8 +407,10 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
-    use crate::labels::Labels;
-    use crate::matcher::{LabelMatcher, MatchOp};
+    use crate::{
+        labels::Labels,
+        matcher::{LabelMatcher, MatchOp},
+    };
 
     const CPU_TYPE: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
     const HEAP_TYPE: &str = "memory:alloc_space:bytes:space:bytes";

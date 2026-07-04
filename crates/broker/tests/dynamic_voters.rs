@@ -10,7 +10,6 @@
 //! are gated off Windows like the other multi-node suites.
 
 use assert2::assert;
-
 use crabka_raft::reconfig::{ReconfigOutcome, RemoveVoter};
 
 mod support;
@@ -56,7 +55,7 @@ async fn remove_voter_shrinks_quorum() {
     let victim = leader
         .voter_ids_for_test()
         .into_iter()
-        .find(|&id| id != leader_id)
+        .find(|&id| id != crabka_broker::NodeId(leader_id))
         .expect("a follower voter to remove");
     let victim_dir = leader
         .voter_directory_id_for_test(victim)

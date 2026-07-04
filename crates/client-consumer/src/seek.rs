@@ -33,8 +33,7 @@
 //! This mirrors the JVM client's `seek`: a one-shot position set that takes
 //! effect on the next fetch and is not re-applied after a later rebalance.
 
-use crate::consumer::Consumer;
-use crate::error::ConsumerError;
+use crate::{consumer::Consumer, error::ConsumerError};
 
 impl Consumer {
     /// Set the next offset `poll` will fetch for `(topic, partition)`.
@@ -132,7 +131,7 @@ impl Consumer {
             // awaiting_validation partitions, validate_positions skips
             // offset_epoch < 0).
             let p = positions.entry(key.clone()).or_default();
-            p.offset_epoch = -1;
+            p.offset_epoch = crabka_ids::LeaderEpoch(-1);
             p.awaiting_validation = false;
             false
         });

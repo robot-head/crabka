@@ -27,16 +27,18 @@
 //! check, the rendered TOML landing in the ConfigMap, and the mounts
 //! landing on the StatefulSet.
 
-use assert2::{assert, check};
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
+use assert2::{assert, check};
 use base64::Engine as _;
-use crabka_operator::controller::kafka::reconcile as reconcile_kafka;
-use crabka_operator::controller::kafka_node_pool::reconcile as reconcile_pool;
-use crabka_operator::crd::{
-    InterBrokerKerberos, Kafka, KafkaNodePool, KafkaNodePoolSpec, KafkaSpec, KeytabSecretRef,
-    Listener, ListenerAuthentication, ListenerAuthenticationGssapi, ListenerType, NodeRole,
+use crabka_operator::{
+    controller::{
+        kafka::reconcile as reconcile_kafka, kafka_node_pool::reconcile as reconcile_pool,
+    },
+    crd::{
+        InterBrokerKerberos, Kafka, KafkaNodePool, KafkaNodePoolSpec, KafkaSpec, KeytabSecretRef,
+        Listener, ListenerAuthentication, ListenerAuthenticationGssapi, ListenerType, NodeRole,
+    },
 };
 use http::{Method, Response};
 

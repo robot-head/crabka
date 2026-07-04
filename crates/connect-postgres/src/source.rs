@@ -4,23 +4,24 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crabka_connect::{ConnectError, ConnectRecord, OffsetValue, Source, SourceOffset};
 
-use crate::catalog::{PgCatalog, TokioPgCatalog};
-use crate::model::Operation;
-use crate::pgoutput::{
-    DecodedMessage, RelationCache, RelationEvent, RowEvent, decode_pgoutput_message,
+use crate::{
+    PgLsn, PostgresSourceConfig,
+    catalog::{PgCatalog, TokioPgCatalog},
+    ids::{CommitLsn, EndLsn, TransactionId},
+    model::Operation,
+    pgoutput::{DecodedMessage, RelationCache, RelationEvent, RowEvent, decode_pgoutput_message},
+    schema::PostgresProtoEncoder,
 };
-use crate::schema::PostgresProtoEncoder;
-use crate::{PgLsn, PostgresSourceConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LogicalEvent {
     Begin {
         final_lsn: PgLsn,
-        xid: i64,
+        xid: TransactionId,
     },
     Commit {
-        commit_lsn: PgLsn,
-        end_lsn: PgLsn,
+        commit_lsn: CommitLsn,
+        end_lsn: EndLsn,
         commit_timestamp_ms: i64,
     },
     Relation(RelationEvent),
@@ -29,7 +30,7 @@ pub enum LogicalEvent {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TransactionState {
-    xid: i64,
+    xid: TransactionId,
 }
 
 #[derive(Debug)]
@@ -179,7 +180,7 @@ impl PostgresWalSource {
                 end_lsn,
                 commit_timestamp_ms,
             } => {
-                self.commit_transaction(end_lsn, commit_timestamp_ms);
+                self.commit_transaction(end_lsn.0, commit_timestamp_ms);
             }
             LogicalEvent::Relation(relation) => {
                 self.pending.push_back(LogicalEvent::Relation(relation));
@@ -704,9 +705,12 @@ mod tests {
     use crabka_schema_serde::wire::MAGIC;
 
     use super::{LogicalEvent, PostgresWalSource, validate_database};
-    use crate::model::{ColumnSchema, ColumnValue, ScalarValue};
-    use crate::pgoutput::{RelationEvent, RowEvent, RowEventKind, RowTupleKind};
-    use crate::{PgLsn, PostgresSourceConfig};
+    use crate::{
+        PgLsn, PostgresSourceConfig,
+        ids::{CommitLsn, EndLsn, RelationId, TransactionId},
+        model::{ColumnSchema, ColumnValue, ScalarValue},
+        pgoutput::{RelationEvent, RowEvent, RowEventKind, RowTupleKind},
+    };
 
     fn header_value(
         record: &crabka_connect::ConnectRecord<bytes::Bytes, bytes::Bytes>,
@@ -733,7 +737,7 @@ mod tests {
 
     fn orders_relation() -> RelationEvent {
         RelationEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             schema: "public".to_owned(),
             table: "orders".to_owned(),
             columns: vec![
@@ -767,10 +771,10 @@ mod tests {
 
     fn insert_event(lsn: PgLsn) -> RowEvent {
         RowEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             lsn,
             commit_lsn: None,
-            txid: Some(99),
+            txid: Some(TransactionId(99)),
             commit_timestamp_ms: Some(1_700_000_000_000),
             kind: RowEventKind::Insert,
             values: vec![id(42), status("paid")],
@@ -779,7 +783,7 @@ mod tests {
 
     fn delete_event(lsn: PgLsn) -> RowEvent {
         RowEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             lsn,
             commit_lsn: None,
             txid: None,
@@ -963,6 +967,7 @@ mod tests {
         let mut non_string = crabka_connect::SourceOffset::default();
         non_string
             .partition
+            .0
             .insert("database".to_owned(), crabka_connect::OffsetValue::Long(7));
 
         check!(matches!(
@@ -1032,13 +1037,13 @@ mod tests {
                 LogicalEvent::Relation(orders_relation()),
                 LogicalEvent::Begin {
                     final_lsn: PgLsn(0x40),
-                    xid: 123,
+                    xid: TransactionId(123),
                 },
                 LogicalEvent::Row(insert_event(PgLsn(0x2a))),
                 LogicalEvent::Row(second),
                 LogicalEvent::Commit {
-                    commit_lsn: PgLsn(0x41),
-                    end_lsn: PgLsn(0x42),
+                    commit_lsn: CommitLsn(PgLsn(0x41)),
+                    end_lsn: EndLsn(PgLsn(0x42)),
                     commit_timestamp_ms: 1_700_000_000_123,
                 },
             ],
@@ -1074,12 +1079,12 @@ mod tests {
 
         source.apply_decoded_message(crate::pgoutput::DecodedMessage::Begin {
             final_lsn: PgLsn(0x40),
-            xid: 123,
+            xid: TransactionId(123),
         });
         source.apply_decoded_message(crate::pgoutput::DecodedMessage::Row(row));
         source.apply_decoded_message(crate::pgoutput::DecodedMessage::Commit {
-            commit_lsn: PgLsn(0x41),
-            end_lsn: PgLsn(0x42),
+            commit_lsn: CommitLsn(PgLsn(0x41)),
+            end_lsn: EndLsn(PgLsn(0x42)),
             commit_timestamp_ms: 1_700_000_000_123,
         });
 
@@ -1088,7 +1093,7 @@ mod tests {
         };
         check!(row.lsn == PgLsn(0x2a));
         check!(row.commit_lsn == Some(PgLsn(0x42)));
-        check!(row.txid == Some(123));
+        check!(row.txid == Some(TransactionId(123)));
         check!(row.commit_timestamp_ms == Some(1_700_000_000_123));
     }
 }
@@ -1106,8 +1111,10 @@ mod catalog_tests {
         PostgresWalSource, ensure_slot, initialize, validate_publication_settings,
         validate_publication_tables,
     };
-    use crate::catalog::{MockPgCatalog, SlotChange, SlotMetadata};
-    use crate::{PgLsn, PostgresSourceConfig};
+    use crate::{
+        PgLsn, PostgresSourceConfig,
+        catalog::{MockPgCatalog, SlotChange, SlotMetadata},
+    };
 
     fn config_with_tables(tables: Vec<String>) -> PostgresSourceConfig {
         PostgresSourceConfig {

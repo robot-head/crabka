@@ -29,9 +29,11 @@ use std::time::Duration;
 
 use stateright::{Checker, Model, Property};
 
-use super::decision::decide_phase1_transition;
-use super::state::{TxnEntry, TxnState};
-use super::two_pc::{NO_TIMEOUT_MS, should_abort_idle_txn};
+use super::{
+    decision::decide_phase1_transition,
+    state::{TxnEntry, TxnState},
+    two_pc::{NO_TIMEOUT_MS, should_abort_idle_txn},
+};
 
 const MAX_STATES: usize = 300_000;
 const MAX_DEPTH: usize = 80;
@@ -100,7 +102,7 @@ fn timeout_for(two_pc: bool) -> i32 {
 fn rebuild(s: &TwoPcProj) -> TxnEntry {
     let mut e = TxnEntry::new_empty(
         "tid".to_string(),
-        PID,
+        crabka_log::ProducerId(PID),
         s.epoch,
         timeout_for(s.two_pc),
         START_MS,

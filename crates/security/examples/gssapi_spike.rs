@@ -30,11 +30,11 @@
 
 use std::error::Error;
 
-use sspi::kerberos::ServerProperties;
 use sspi::{
     AuthIdentity, BufferType, ClientRequestFlags, CredentialUse, Credentials, CredentialsBuffers,
     DataRepresentation, EncryptionFlags, Kerberos, KerberosConfig, KerberosServerConfig, Secret,
     SecurityBuffer, SecurityBufferRef, ServerRequestFlags, Sspi, SspiImpl, Username,
+    kerberos::ServerProperties,
 };
 
 const REALM: &str = "CRABKA.TEST";

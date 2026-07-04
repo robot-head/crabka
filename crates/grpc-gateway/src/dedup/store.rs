@@ -3,10 +3,13 @@
 //! assigned dedup partitions, and keeps the claim map warm. P3 gates every
 //! produce on ownership + warmth so only the owning replica may write.
 
-use std::sync::Arc;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
@@ -14,14 +17,17 @@ use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::error::GatewayError;
+use crate::{
+    error::GatewayError,
+    ids::{Offset, PartitionIndex},
+};
 
 /// The value stored under each `idempotency_key` claim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimValue {
     pub topic: String,
-    pub partition: i32,
-    pub offset: i64,
+    pub partition: PartitionIndex,
+    pub offset: Offset,
 }
 
 pub struct DedupStore {

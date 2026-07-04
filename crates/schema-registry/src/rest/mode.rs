@@ -1,11 +1,15 @@
 //! `/mode` endpoints (global + per-subject).
 
-use axum::extract::{Path, State};
-use axum::response::Response;
+use axum::{
+    extract::{Path, State},
+    response::Response,
+};
 use serde::Deserialize;
 
-use crate::error::SrError;
-use crate::rest::{AppState, response::ok_json};
+use crate::{
+    error::SrError,
+    rest::{AppState, response::ok_json},
+};
 
 #[derive(Deserialize)]
 struct PutMode {

@@ -1,14 +1,18 @@
 use bytes::Bytes;
 use crabka_schema_serde::wire::encode_protobuf;
 use prost::Message as _;
-use prost_reflect::prost_types::field_descriptor_proto::{Label, Type};
-use prost_reflect::prost_types::{
-    DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+use prost_reflect::{
+    DescriptorPool, DynamicMessage, MessageDescriptor, Value,
+    prost_types::{
+        DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+        field_descriptor_proto::{Label, Type},
+    },
 };
-use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, Value};
 
-use crate::PostgresConnectError;
-use crate::model::{ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue};
+use crate::{
+    PostgresConnectError,
+    model::{ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue},
+};
 
 // Local placeholder IDs until schema registry allocation is wired in.
 const KEY_SCHEMA_ID: u32 = 1;
@@ -105,7 +109,7 @@ impl PostgresProtoEncoder {
             Value::Message(self.key_to_message(&difference.key)?),
         )?;
         if let Some(txid) = difference.txid {
-            set_field(&mut message, "txid", Value::I64(txid))?;
+            set_field(&mut message, "txid", Value::I64(txid.0))?;
         }
         if let Some(commit_timestamp_ms) = difference.commit_timestamp_ms {
             set_field(
@@ -288,17 +292,18 @@ fn convert_error(error: impl std::fmt::Display) -> PostgresConnectError {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
-    use prost_reflect::{DescriptorPool, DynamicMessage, Value};
-
     use crabka_schema_serde::wire::decode_protobuf;
-
-    use crate::model::{ColumnSchema, ScalarValue};
-    use crate::pgoutput::{RelationCache, RelationEvent, RowEvent, RowEventKind};
-    use crate::{ColumnValue, EntityDifference, EntityKey, Operation, PgLsn, TableSchema};
+    use prost_reflect::{DescriptorPool, DynamicMessage, Value};
 
     use super::{
         COLUMN_VALUE, ENTITY_DIFFERENCE, ENTITY_KEY, KEY_SCHEMA_ID, PostgresProtoEncoder,
         VALUE_SCHEMA_ID, message_descriptor, schema_descriptor_set,
+    };
+    use crate::{
+        ColumnValue, EntityDifference, EntityKey, Operation, PgLsn, TableSchema,
+        ids::{RelationId, TransactionId},
+        model::{ColumnSchema, ScalarValue},
+        pgoutput::{RelationCache, RelationEvent, RowEvent, RowEventKind},
     };
 
     #[test]
@@ -372,7 +377,7 @@ mod tests {
     fn decoded_int8_key_encodes_as_int_scalar_kind() {
         let mut cache = RelationCache::default();
         cache.apply_relation(RelationEvent {
-            relation_id: 7,
+            relation_id: RelationId(7),
             schema: "public".to_owned(),
             table: "orders".to_owned(),
             columns: vec![ColumnSchema {
@@ -383,7 +388,7 @@ mod tests {
         });
         let difference = cache
             .translate(RowEvent {
-                relation_id: 7,
+                relation_id: RelationId(7),
                 lsn: PgLsn(0x2a),
                 commit_lsn: None,
                 txid: None,
@@ -498,7 +503,7 @@ mod tests {
                 },
             ],
             lsn: PgLsn(42),
-            txid: Some(7),
+            txid: Some(TransactionId(7)),
             commit_timestamp_ms: Some(1_700_000_000_000),
             schema: TableSchema {
                 schema: "public".to_owned(),

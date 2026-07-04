@@ -10,8 +10,11 @@
 
 use std::sync::Mutex as StdMutex;
 
-use crabka_operator::rebalancer_client::{
-    ProposalStatus, ProposalSummary, RebalancerClientLike, RebalancerError, RebalancerProposal,
+use crabka_operator::{
+    ids::{LeaderMovementCount, MaxLeadersCount, MaxReplicasCount, ReplicaMovementCount},
+    rebalancer_client::{
+        ProposalStatus, ProposalSummary, RebalancerClientLike, RebalancerError, RebalancerProposal,
+    },
 };
 
 /// One recorded Connect-RPC.
@@ -102,12 +105,12 @@ pub fn fake_proposal(id: &str, status: ProposalStatus) -> RebalancerProposal {
         id: id.into(),
         status,
         summary: ProposalSummary {
-            replica_movements: 2,
-            leader_movements: 1,
-            max_replicas_before: 8,
-            max_replicas_after: 5,
-            max_leaders_before: 4,
-            max_leaders_after: 2,
+            replica_movements: ReplicaMovementCount(2),
+            leader_movements: LeaderMovementCount(1),
+            max_replicas_before: MaxReplicasCount(8),
+            max_replicas_after: MaxReplicasCount(5),
+            max_leaders_before: MaxLeadersCount(4),
+            max_leaders_after: MaxLeadersCount(2),
         },
         goals_applied: vec!["ReplicaDistribution".into()],
         movement_count: 2,

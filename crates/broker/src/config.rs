@@ -1,17 +1,14 @@
 //! Broker configuration. Built directly (library use) or from CLI flags
 //! (binary entry point in `bin/broker.rs`).
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
 use crabka_log::LogConfig;
+pub use crabka_raft::BootstrapMode;
 use crabka_raft::NodeId;
 use crabka_security::{ListenerProtocol, SaslMechanism, TlsConfig};
 
 use crate::BrokerError;
-
-pub use crabka_raft::BootstrapMode;
 
 /// `KRaft` `process.roles`. A node is a metadata-quorum `Controller`, a data
 /// `Broker`, or both. Default is the combined set `[Controller, Broker]`.
@@ -700,9 +697,9 @@ impl BrokerConfig {
             log_dir,
             extra_log_dirs: Vec::new(),
             log_config: LogConfig::default(),
-            node_id: 1,
+            node_id: NodeId(1),
             controller_listen_addr: controller_addr,
-            controller_quorum_voters: vec![(1, controller_addr.to_string())],
+            controller_quorum_voters: vec![(NodeId(1), controller_addr.to_string())],
             controller_server_name: None,
             bootstrap_servers: vec![],
             directory_id: uuid::Uuid::from_u128(1),
@@ -986,9 +983,9 @@ impl Default for BrokerConfig {
             log_dir: PathBuf::from("./crabka-data"),
             extra_log_dirs: Vec::new(),
             log_config: LogConfig::default(),
-            node_id: 1,
+            node_id: NodeId(1),
             controller_listen_addr: controller_addr,
-            controller_quorum_voters: vec![(1, controller_addr.to_string())],
+            controller_quorum_voters: vec![(NodeId(1), controller_addr.to_string())],
             controller_server_name: None,
             bootstrap_servers: vec![],
             directory_id: uuid::Uuid::from_u128(1),
@@ -1098,9 +1095,10 @@ impl Default for BrokerConfig {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
     use crate::BrokerError as BrokerStartError;
-    use assert2::{assert, check};
 
     #[test]
     fn production_default_selects_topic_backed_rlmm() {
@@ -1333,13 +1331,15 @@ mod tests {
         // node must not be a voter of itself.
         let c = BrokerConfig {
             roles: vec![NodeRole::Broker],
-            node_id: 1,
-            controller_quorum_voters: vec![(1, "127.0.0.1:9093".to_string())],
+            node_id: NodeId(1),
+            controller_quorum_voters: vec![(NodeId(1), "127.0.0.1:9093".to_string())],
             ..BrokerConfig::default()
         };
         assert!(matches!(
             c.validate(),
-            Err(BrokerError::NonControllerIsVoter { node_id: 1 })
+            Err(BrokerError::NonControllerIsVoter {
+                node_id: crabka_raft::NodeId(1)
+            })
         ));
     }
 

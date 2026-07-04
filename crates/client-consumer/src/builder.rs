@@ -46,13 +46,17 @@ impl IsolationLevel {
 
 // ── subscription / assignment codec (ConsumerProtocol v3) ─────────────────
 
-use crabka_protocol::owned::consumer_protocol_assignment::{
-    ConsumerProtocolAssignment, TopicPartition as AssignTopicPartition,
+use crabka_protocol::{
+    Decode, Encode, UnknownTaggedFields,
+    owned::{
+        consumer_protocol_assignment::{
+            ConsumerProtocolAssignment, TopicPartition as AssignTopicPartition,
+        },
+        consumer_protocol_subscription::{
+            ConsumerProtocolSubscription, TopicPartition as SubTopicPartition,
+        },
+    },
 };
-use crabka_protocol::owned::consumer_protocol_subscription::{
-    ConsumerProtocolSubscription, TopicPartition as SubTopicPartition,
-};
-use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
 
 const SUBSCRIPTION_WIRE_VERSION: i16 = 3;
 const ASSIGNMENT_WIRE_VERSION: i16 = 3;
@@ -189,8 +193,9 @@ pub(crate) fn decode_assignment(bytes: &[u8]) -> Vec<(String, i32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn isolation_level_wire_values_match_fetch_request_encoding() {

@@ -38,13 +38,17 @@
 //! single `DescribeGroups` is served by the sole broker (it is the group
 //! coordinator), so no `FindCoordinator` redirect is needed.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{Duration, Instant};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    time::{Duration, Instant},
+};
 
 use crabka_client_core::Client;
-use crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest;
-use crabka_protocol::owned::describe_groups_response::DescribeGroupsResponse;
+use crabka_protocol::owned::{
+    describe_groups_request::DescribeGroupsRequest,
+    describe_groups_response::DescribeGroupsResponse,
+};
 
 const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.4.0";
 const CONTAINER: &str = "crabka-describe-groups-jvm";

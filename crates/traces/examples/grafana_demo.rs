@@ -16,12 +16,16 @@
 //!   * `{ .http.method = "POST" && span:status = error }`  (boolean span filter)
 //!   * `{ resource.service.name = "checkout-frontend" } | rate()`  (metrics)
 
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use axum::extract::Request;
-use axum::middleware::{self, Next};
-use axum::response::Response as AxumResponse;
+use axum::{
+    extract::Request,
+    middleware::{self, Next},
+    response::Response as AxumResponse,
+};
 use crabka_traceql::{AttrValue, EngineOpts, InMemorySpanStore, InputSpan, TraceqlEngine};
 use crabka_traces::querier::http::router;
 

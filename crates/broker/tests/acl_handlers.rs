@@ -18,45 +18,46 @@
 //! (the SASL listener startup is fine on Windows, but keeping
 //! the gate uniform avoids one-off CI matrix surprises).
 
-use assert2::{assert, check};
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::authorizer::SimpleAclAuthorizer;
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerConfig};
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::create_acls_request::{AclCreation, CreateAclsRequest};
-use crabka_protocol::owned::create_acls_response::CreateAclsResponse;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
-use crabka_protocol::owned::delete_acls_request::{DeleteAclsFilter, DeleteAclsRequest};
-use crabka_protocol::owned::delete_acls_response::DeleteAclsResponse;
-use crabka_protocol::owned::describe_acls_request::DescribeAclsRequest;
-use crabka_protocol::owned::describe_acls_response::DescribeAclsResponse;
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::fetch_response::FetchResponse;
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
-use crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse;
-use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
-use crabka_protocol::owned::join_group_response::JoinGroupResponse;
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::metadata_response::MetadataResponse;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_broker::{Broker, BrokerConfig, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        api_versions_response::ApiVersionsResponse,
+        create_acls_request::{AclCreation, CreateAclsRequest},
+        create_acls_response::CreateAclsResponse,
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+        delete_acls_request::{DeleteAclsFilter, DeleteAclsRequest},
+        delete_acls_response::DeleteAclsResponse,
+        describe_acls_request::DescribeAclsRequest,
+        describe_acls_response::DescribeAclsResponse,
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        fetch_response::FetchResponse,
+        init_producer_id_request::InitProducerIdRequest,
+        init_producer_id_response::InitProducerIdResponse,
+        join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
+        join_group_response::JoinGroupResponse,
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        metadata_response::MetadataResponse,
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        produce_response::ProduceResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::owned::produce_response::ProduceResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::records::{Record, RecordBatch};
-use crabka_protocol::{Decode, Encode};
 use crabka_security::{ListenerProtocol, SaslMechanism};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // Wire `i8` discriminants for the Kafka ACL enums. Kept inline (rather
 // than imported from `crabka-broker::handlers::acl_wire`, which is

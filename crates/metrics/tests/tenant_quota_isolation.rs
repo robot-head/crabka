@@ -6,14 +6,18 @@
 //! to `org-a` until it returns HTTP 429, then push the SAME load to `org-b` and
 //! assert it still succeeds — proving the token bucket is per-tenant, not global.
 
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::{
+    net::SocketAddr,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use crabka_metrics::distributor::{DistributorState, ProduceError, WalSink, serve};
-use crabka_metrics::wire::pb;
-use crabka_metrics::{OverridesProvider, WalRecord};
+use crabka_metrics::{
+    OverridesProvider, WalRecord,
+    distributor::{DistributorState, ProduceError, WalSink, serve},
+    wire::pb,
+};
 use prost::Message;
 
 const ORG_A: &str = "org-a";

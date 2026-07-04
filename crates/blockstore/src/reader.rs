@@ -4,10 +4,8 @@ use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use futures::TryStreamExt;
-use object_store::path::Path;
-use object_store::{ObjectStore, ObjectStoreExt};
-use parquet::arrow::ParquetRecordBatchStreamBuilder;
-use parquet::arrow::async_reader::ParquetObjectReader;
+use object_store::{ObjectStore, ObjectStoreExt, path::Path};
+use parquet::arrow::{ParquetRecordBatchStreamBuilder, async_reader::ParquetObjectReader};
 use tracing::instrument;
 
 use crate::error::{BlockStoreError, Result};
@@ -151,16 +149,17 @@ async fn read_block_row_groups_with_cap(
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{Int64Array, StringArray, UInt64Array};
-    use arrow::datatypes::{DataType, Field, Schema};
-    use arrow::record_batch::RecordBatch;
+    use arrow::{
+        array::{Int64Array, StringArray, UInt64Array},
+        datatypes::{DataType, Field, Schema},
+        record_batch::RecordBatch,
+    };
     use assert2::{assert, check};
-    use object_store::ObjectStore;
-    use object_store::memory::InMemory;
-    use object_store::path::Path;
-    use parquet::arrow::AsyncArrowWriter;
-    use parquet::arrow::async_writer::ParquetObjectWriter;
-    use parquet::file::properties::WriterProperties;
+    use object_store::{ObjectStore, memory::InMemory, path::Path};
+    use parquet::{
+        arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter},
+        file::properties::WriterProperties,
+    };
 
     use super::*;
     use crate::writer::BlockWriter;

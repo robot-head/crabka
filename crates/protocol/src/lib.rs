@@ -28,8 +28,7 @@
 //!
 //! ```rust
 //! use bytes::BytesMut;
-//! use crabka_protocol::Encode;
-//! use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+//! use crabka_protocol::{Encode, owned::api_versions_request::ApiVersionsRequest};
 //!
 //! let req = ApiVersionsRequest::default();
 //! let version = 4;

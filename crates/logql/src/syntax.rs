@@ -1,14 +1,16 @@
-use crate::filters::field_filter_expression_to_pipeline_stage;
-use crate::util::{
-    QuotedChar, decode_quoted_escape, duration_unit, gcd_u64, is_ident_char, is_ident_start,
-    parse_bytes_literal, parse_prometheus_duration_literal,
-};
 use crate::{
-    ComparisonOp, FieldFilter, FieldFilterExpression, FieldFilterLogicOp, FieldValue, IpMatcher,
-    JsonExtraction, JsonParserConfig, LabelFormat, LabelFormatAssignment, LabelMatcher,
-    LabelSelection, LabelSelectionSet, LineFilter, LineFilterOp, LineFormat, LogfmtExtraction,
-    LogfmtParserConfig, MatchOp, ParseError, ParserStage, PatternParser, PipelineStage,
-    RegexpParser, StreamQuery, UnwrapExpression,
+    ComparisonOp, DestinationLabel, DurationNanos, FieldFilter, FieldFilterExpression,
+    FieldFilterLogicOp, FieldValue, IpMatcher, JsonExpressionPath, JsonExtraction,
+    JsonParserConfig, LabelFormat, LabelFormatAssignment, LabelMatcher, LabelSelection,
+    LabelSelectionSet, LineFilter, LineFilterOp, LineFormat, LogfmtExtraction, LogfmtParserConfig,
+    MatchOp, OffsetNanos, ParseError, ParserStage, PatternParser, PipelineStage,
+    QuantileDenominator, QuantileNumerator, RegexpParser, SourceLabel, StreamQuery,
+    UnwrapExpression,
+    filters::field_filter_expression_to_pipeline_stage,
+    util::{
+        QuotedChar, decode_quoted_escape, duration_unit, gcd_u64, is_ident_char, is_ident_start,
+        parse_bytes_literal, parse_prometheus_duration_literal,
+    },
 };
 
 #[tracing::instrument(level = "info", skip_all, fields(query = %input), err)]
@@ -119,8 +121,8 @@ pub struct MetricQuery {
     pub vector_aggregation: Option<VectorAggregation>,
     pub range_grouping: Option<VectorGrouping>,
     pub stream: StreamQuery,
-    pub range_ns: i64,
-    pub offset_ns: i64,
+    pub range_ns: DurationNanos,
+    pub offset_ns: OffsetNanos,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -239,8 +241,8 @@ pub enum RangeAggregation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Quantile {
-    pub numerator: u64,
-    pub denominator: u64,
+    pub numerator: QuantileNumerator,
+    pub denominator: QuantileDenominator,
 }
 
 enum RangeAggregationKind {
@@ -378,7 +380,9 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_metric_range_stream_query(&mut self) -> Result<(StreamQuery, i64, i64), ParseError> {
+    fn parse_metric_range_stream_query(
+        &mut self,
+    ) -> Result<(StreamQuery, DurationNanos, OffsetNanos), ParseError> {
         self.skip_ws();
         self.expect('{')?;
         let matchers = self.parse_matchers()?;
@@ -387,7 +391,7 @@ impl<'a> Parser<'a> {
 
         let mut pipeline = Vec::new();
         let mut range_ns = None;
-        let mut offset_ns = 0;
+        let mut offset_ns = OffsetNanos(0);
         let mut range_allows_following_pipeline = false;
         loop {
             self.skip_ws();
@@ -1214,8 +1218,8 @@ impl<'a> Parser<'a> {
 
         let divisor = gcd_u64(numerator, denominator);
         Ok(Quantile {
-            numerator: numerator / divisor,
-            denominator: denominator / divisor,
+            numerator: QuantileNumerator(numerator / divisor),
+            denominator: QuantileDenominator(denominator / divisor),
         })
     }
 
@@ -1256,15 +1260,15 @@ impl<'a> Parser<'a> {
         ))
     }
 
-    fn parse_range_selector(&mut self) -> Result<i64, ParseError> {
+    fn parse_range_selector(&mut self) -> Result<DurationNanos, ParseError> {
         self.expect('[')?;
         self.skip_ws();
         let range_ns = self.parse_prometheus_duration()?;
         self.expect(']')?;
-        Ok(range_ns)
+        Ok(DurationNanos(range_ns))
     }
 
-    fn parse_range_offset(&mut self) -> Result<i64, ParseError> {
+    fn parse_range_offset(&mut self) -> Result<OffsetNanos, ParseError> {
         if self.consume_keyword("offset") {
             self.skip_ws();
             let negative = self.consume("-");
@@ -1272,12 +1276,13 @@ impl<'a> Parser<'a> {
             if negative {
                 duration_ns
                     .checked_neg()
+                    .map(OffsetNanos)
                     .ok_or_else(|| self.error("range duration overflow"))
             } else {
-                Ok(duration_ns)
+                Ok(OffsetNanos(duration_ns))
             }
         } else {
-            Ok(0)
+            Ok(OffsetNanos(0))
         }
     }
 
@@ -1525,7 +1530,11 @@ impl<'a> Parser<'a> {
             let destination = self.parse_ident()?;
             self.expect('=')?;
             self.skip_ws();
-            extractions.push(JsonExtraction::new(destination, self.parse_quoted()?)?);
+            let expression = self.parse_quoted()?;
+            extractions.push(JsonExtraction::new(
+                DestinationLabel(destination),
+                JsonExpressionPath(expression),
+            )?);
             if !self.consume(",") {
                 break;
             }
@@ -1560,7 +1569,8 @@ impl<'a> Parser<'a> {
             let destination = self.parse_ident()?;
             self.skip_ws();
             let extraction = if self.consume("=") {
-                LogfmtExtraction::rename(destination, self.parse_quoted()?)?
+                let source = self.parse_quoted()?;
+                LogfmtExtraction::rename(DestinationLabel(destination), SourceLabel(source))?
             } else {
                 LogfmtExtraction::same(destination)?
             };

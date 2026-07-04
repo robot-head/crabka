@@ -12,12 +12,13 @@
 //! entirely when the cluster label is missing). Monotonic-
 //! storage failures short-circuit after step 2.
 
-use assert2::assert;
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use crabka_operator::controller::kafka_node_pool::reconcile;
-use crabka_operator::crd::{KafkaNodePool, KafkaNodePoolSpec, NodeRole};
+use assert2::assert;
+use crabka_operator::{
+    controller::kafka_node_pool::reconcile,
+    crd::{KafkaNodePool, KafkaNodePoolSpec, NodeRole},
+};
 use http::{Method, Response};
 
 #[path = "shared/mod.rs"]

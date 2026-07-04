@@ -16,6 +16,7 @@
 
 use std::time::{Duration, Instant};
 
+use crabka_log::Offset;
 use stateright::{Checker, Model, Property};
 
 use super::{AckType, AcquisitionState, RecordState};
@@ -43,7 +44,7 @@ struct ShareModel {
     /// Number of consumer members (named `m0`..`m{members-1}`).
     members: u8,
     /// High-watermark / window cap (records produced over a path).
-    max_offset: i64,
+    max_offset: Offset,
     /// Logical-clock cap.
     max_tick: u8,
     /// Delivery-attempt limit before a record is archived as a poison pill.
@@ -60,7 +61,7 @@ struct ShareModel {
 struct ShareState {
     sm: AcquisitionState,
     clock: u8,
-    hwm: i64,
+    hwm: Offset,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -74,12 +75,16 @@ enum ShareAction {
     /// `member` acknowledges `[first, last]` it holds.
     Acknowledge {
         member: u8,
-        first: i64,
-        last: i64,
+        first: Offset,
+        last: Offset,
         ack: AckType,
     },
     /// `member` renews (extends) the lock on `[first, last]` it holds.
-    Renew { member: u8, first: i64, last: i64 },
+    Renew {
+        member: u8,
+        first: Offset,
+        last: Offset,
+    },
     /// Sweep expired acquisition locks back to Available.
     ExpireLocks,
     /// Advance the logical clock by one lock-duration.
@@ -95,7 +100,7 @@ impl ShareModel {
         Self {
             t0: Instant::now(),
             members: 2,
-            max_offset,
+            max_offset: Offset(max_offset),
             max_tick: 2,
             max_attempts: 2,
             max_inflight,
@@ -109,7 +114,7 @@ impl ShareModel {
         Self {
             t0: Instant::now(),
             members: 2,
-            max_offset: 2,
+            max_offset: Offset(2),
             max_tick: 2,
             max_attempts: 2,
             max_inflight: 2,
@@ -129,7 +134,7 @@ impl ShareModel {
 // ---- observability helpers (descendant-module private access) --------------
 
 /// Delivery state of `off`, if it currently lies in a batch.
-fn offset_state(sm: &AcquisitionState, off: i64) -> Option<RecordState> {
+fn offset_state(sm: &AcquisitionState, off: Offset) -> Option<RecordState> {
     sm.batches
         .iter()
         .find(|b| b.first_offset <= off && off <= b.last_offset)
@@ -137,7 +142,7 @@ fn offset_state(sm: &AcquisitionState, off: i64) -> Option<RecordState> {
 }
 
 /// Delivery count of `off`, if it currently lies in a batch.
-fn offset_dc(sm: &AcquisitionState, off: i64) -> Option<i16> {
+fn offset_dc(sm: &AcquisitionState, off: Offset) -> Option<i16> {
     sm.batches
         .iter()
         .find(|b| b.first_offset <= off && off <= b.last_offset)
@@ -147,9 +152,9 @@ fn offset_dc(sm: &AcquisitionState, off: i64) -> Option<i16> {
 /// Maximal contiguous offset runs currently Acquired by `member`. Adjacent
 /// same-owner batches with differing lock deadlines do not coalesce, so they are
 /// stitched back into one run here (the whole run is ack/renew-able at once).
-fn acquired_runs(sm: &AcquisitionState, member: &str) -> Vec<(i64, i64)> {
-    let mut runs: Vec<(i64, i64)> = Vec::new();
-    let mut cur: Option<(i64, i64)> = None;
+fn acquired_runs(sm: &AcquisitionState, member: &str) -> Vec<(Offset, Offset)> {
+    let mut runs: Vec<(Offset, Offset)> = Vec::new();
+    let mut cur: Option<(Offset, Offset)> = None;
     for b in &sm.batches {
         let mine = b.state == RecordState::Acquired && b.acquired_by.as_deref() == Some(member);
         match (mine, cur) {
@@ -232,7 +237,8 @@ fn assert_transition(parent: &AcquisitionState, child: &AcquisitionState) {
         child.delivery_complete_count
     );
     // Per-offset delivery_count never regresses for offsets live in both.
-    for off in child.start_offset..child.end_offset {
+    for raw in child.start_offset.0..child.end_offset.0 {
+        let off = Offset(raw);
         if let (Some(pc), Some(cc)) = (offset_dc(parent, off), offset_dc(child, off)) {
             assert!(
                 cc >= pc,
@@ -242,7 +248,8 @@ fn assert_transition(parent: &AcquisitionState, child: &AcquisitionState) {
     }
     // An Acknowledged offset is terminal: in the child it is still Acknowledged
     // or has dropped below the (non-decreasing) SPSO — never resurrected.
-    for off in parent.start_offset..parent.end_offset {
+    for raw in parent.start_offset.0..parent.end_offset.0 {
+        let off = Offset(raw);
         if offset_state(parent, off) == Some(RecordState::Acknowledged) {
             match offset_state(child, off) {
                 None => assert!(
@@ -264,9 +271,9 @@ impl Model for ShareModel {
 
     fn init_states(&self) -> Vec<Self::State> {
         vec![ShareState {
-            sm: AcquisitionState::new(0),
+            sm: AcquisitionState::new(Offset(0)),
             clock: 0,
-            hwm: 0,
+            hwm: Offset(0),
         }]
     }
 
@@ -321,7 +328,7 @@ impl Model for ShareModel {
                 });
                 // A split (first half) exercises partial-ack / partial-renew.
                 if last > first {
-                    let mid = first + (last - first) / 2;
+                    let mid = first + (last.0 - first.0) / 2;
                     for ack in [AckType::Accept, AckType::Release, AckType::Reject] {
                         actions.push(ShareAction::Acknowledge {
                             member,
@@ -445,12 +452,12 @@ impl Model for ShareModel {
                 },
             ),
             Property::always("spso_in_range", |m: &ShareModel, s: &ShareState| {
-                0 <= s.sm.start_offset
+                Offset(0) <= s.sm.start_offset
                     && s.sm.start_offset <= s.sm.end_offset
                     && s.sm.end_offset <= m.max_offset
             }),
             Property::sometimes("can_advance_spso", |_, s: &ShareState| {
-                s.sm.start_offset > 0
+                s.sm.start_offset > Offset(0)
             }),
             Property::sometimes("can_acknowledge", |_, s: &ShareState| {
                 s.sm.batches

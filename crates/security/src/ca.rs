@@ -13,8 +13,7 @@ use rcgen::{
     Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, SanType,
 };
 use thiserror::Error;
-use time::format_description::well_known::Rfc3339;
-use time::{Duration, OffsetDateTime};
+use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[derive(Debug, Error)]
 pub enum CaError {
@@ -294,12 +293,11 @@ pub fn issue_user_cert(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use rustls::pki_types::CertificateDer;
-    use rustls::pki_types::pem::PemObject;
-    use x509_parser::prelude::FromDer;
-    use x509_parser::prelude::X509Certificate;
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+    use x509_parser::prelude::{FromDer, X509Certificate};
+
+    use super::*;
 
     fn pem_to_der(pem: &str) -> CertificateDer<'static> {
         CertificateDer::pem_slice_iter(pem.as_bytes())

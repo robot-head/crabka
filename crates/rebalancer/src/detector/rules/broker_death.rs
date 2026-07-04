@@ -4,13 +4,8 @@
 
 use std::collections::HashSet;
 
-use crate::detector::AnomalyKey;
-use crate::detector::AnomalyKind;
-use crate::detector::AnomalySeverity;
-
-use super::Rule;
-use super::RuleCtx;
-use super::RuleHit;
+use super::{Rule, RuleCtx, RuleHit};
+use crate::detector::{AnomalyKey, AnomalyKind, AnomalySeverity};
 
 pub struct BrokerDeath;
 
@@ -63,14 +58,17 @@ impl Rule for BrokerDeath {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
     use std::time::Duration;
 
+    use assert2::{assert, check};
+
     use super::*;
-    use crate::capacity::BrokerCapacities;
-    use crate::detector::{DetectorConfig, SnapshotHistory};
-    use crate::model::{BrokerView, ClusterState, PartitionView};
-    use crate::scraper::UsageStore;
+    use crate::{
+        capacity::BrokerCapacities,
+        detector::{DetectorConfig, SnapshotHistory},
+        model::{BrokerView, ClusterState, PartitionView},
+        scraper::UsageStore,
+    };
 
     fn state(
         brokers: &[i32],

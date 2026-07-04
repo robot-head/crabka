@@ -53,37 +53,44 @@ fn apply_image(image: &MetadataImage, node_id: NodeId, throttle: &ThrottleState)
         .broker_throttle_rate(node_id, ThrottleKind::Follower)
         .unwrap_or(0);
     if throttle.leader_out.rate() != leader_rate {
-        debug!(node_id, leader_rate, "throttle: leader-out rate update");
+        debug!(
+            node_id = node_id.0,
+            leader_rate, "throttle: leader-out rate update"
+        );
         throttle.leader_out.set_rate(leader_rate);
     }
     if throttle.follower_in.rate() != follower_rate {
-        debug!(node_id, follower_rate, "throttle: follower-in rate update");
+        debug!(
+            node_id = node_id.0,
+            follower_rate, "throttle: follower-in rate update"
+        );
         throttle.follower_in.set_rate(follower_rate);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerConfigRecord, MetadataRecord};
     use uuid::Uuid;
+
+    use super::*;
 
     #[test]
     fn apply_image_sets_rates() {
         let mut img = MetadataImage::new(Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         }));
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "follower.replication.throttled.rate".into(),
             config_value: Some("1024".into()),
         }));
         let throttle = ThrottleState::new();
-        apply_image(&img, 1, &throttle);
+        apply_image(&img, NodeId(1), &throttle);
         assert!(throttle.leader_out.rate() == 2048);
         assert!(throttle.follower_in.rate() == 1024);
     }
@@ -92,20 +99,20 @@ mod tests {
     fn apply_image_resets_to_zero_when_config_deleted() {
         let mut img = MetadataImage::new(Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         }));
         let throttle = ThrottleState::new();
-        apply_image(&img, 1, &throttle);
+        apply_image(&img, NodeId(1), &throttle);
         assert!(throttle.leader_out.rate() == 2048);
         // Delete the config.
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: None,
         }));
-        apply_image(&img, 1, &throttle);
+        apply_image(&img, NodeId(1), &throttle);
         assert!(throttle.leader_out.rate() == 0);
     }
 }

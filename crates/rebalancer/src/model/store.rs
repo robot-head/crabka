@@ -2,11 +2,12 @@
 //! persistence. Persists to `{data_dir}/proposals.json` so
 //! proposals survive a rebalancer restart.
 
-use std::collections::VecDeque;
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::{
+    collections::VecDeque,
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
@@ -153,9 +154,10 @@ fn write_atomic(path: &Path, on_disk: &OnDisk) -> Result<(), StoreError> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::model::proposal::{Proposal, ProposalStatus, ProposalSummary};
-    use assert2::assert;
 
     fn p(id: &str) -> Proposal {
         Proposal {

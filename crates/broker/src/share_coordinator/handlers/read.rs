@@ -7,18 +7,23 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        read_share_group_state_request::ReadShareGroupStateRequest,
+        read_share_group_state_response::{
+            PartitionResult, ReadShareGroupStateResponse, ReadStateResult, StateBatch,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::owned::read_share_group_state_request::ReadShareGroupStateRequest;
-use crabka_protocol::owned::read_share_group_state_response::{
-    PartitionResult, ReadShareGroupStateResponse, ReadStateResult, StateBatch,
+use crate::{
+    broker::Broker,
+    codes,
+    error::BrokerError,
+    share_coordinator::coordinator::{ShareCoordinator, UNINITIALIZED_START_OFFSET},
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::share_coordinator::coordinator::{ShareCoordinator, UNINITIALIZED_START_OFFSET};
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -54,13 +59,13 @@ async fn handle_request(
                     Some(st) => PartitionResult {
                         partition: pd.partition,
                         state_epoch: st.state_epoch,
-                        start_offset: st.start_offset,
+                        start_offset: st.start_offset.0,
                         state_batches: st
                             .state_batches
                             .iter()
                             .map(|b| StateBatch {
-                                first_offset: b.first_offset,
-                                last_offset: b.last_offset,
+                                first_offset: b.first_offset.0,
+                                last_offset: b.last_offset.0,
                                 delivery_state: b.delivery_state,
                                 delivery_count: b.delivery_count,
                                 ..Default::default()
@@ -105,12 +110,18 @@ async fn handle_request(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::read_share_group_state_request::{PartitionData, ReadStateData};
-    use crabka_protocol::owned::read_share_group_state_response::ReadShareGroupStateResponse;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use crabka_log::Offset;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            read_share_group_state_request::{PartitionData, ReadStateData},
+            read_share_group_state_response::ReadShareGroupStateResponse,
+        },
+        primitives::uuid::Uuid as ProtoUuid,
+    };
+
+    use super::*;
 
     fn decode(bytes: &Bytes) -> ReadShareGroupStateResponse {
         let mut cur: &[u8] = bytes.as_ref();
@@ -153,7 +164,7 @@ mod tests {
         let wire_topic_id = ProtoUuid(*topic_id.as_bytes());
         broker
             .share_coordinator
-            .initialize("share-group", topic_id, 4, 17, 90)
+            .initialize("share-group", topic_id, 4, 17, Offset(90))
             .await
             .expect("initialize state");
         broker
@@ -164,7 +175,7 @@ mod tests {
                 4,
                 17,
                 3,
-                101,
+                Offset(101),
                 9,
                 vec![super::super::test_support::batch(101, 105)],
             )

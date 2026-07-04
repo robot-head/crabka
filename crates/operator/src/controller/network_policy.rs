@@ -19,21 +19,29 @@
 
 use std::collections::BTreeMap;
 
-use k8s_openapi::api::networking::v1::{
-    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer as K8sPeer, NetworkPolicyPort,
-    NetworkPolicySpec as K8sNpSpec,
+use k8s_openapi::{
+    api::networking::v1::{
+        NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer as K8sPeer, NetworkPolicyPort,
+        NetworkPolicySpec as K8sNpSpec,
+    },
+    apimachinery::pkg::{
+        apis::meta::v1::{LabelSelector, ObjectMeta},
+        util::intstr::IntOrString,
+    },
 };
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
-use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::Resource as _;
-use kube::api::{Api, DeleteParams};
+use kube::{
+    Resource as _,
+    api::{Api, DeleteParams},
+};
 
-use crate::context::Context;
-use crate::controller::common::{
-    APP_LABEL, ReconcileError, apply_object, common_labels, owner_ref,
+use crate::{
+    context::Context,
+    controller::{
+        common::{APP_LABEL, ReconcileError, apply_object, common_labels, owner_ref},
+        kafka_node_pool::METRICS_PORT,
+    },
+    crd::{Kafka, Listener, NetworkPolicyPeer},
 };
-use crate::controller::kafka_node_pool::METRICS_PORT;
-use crate::crd::{Kafka, Listener, NetworkPolicyPeer};
 
 const OPERATOR_LABEL: &str = "crabka-operator";
 
@@ -223,10 +231,13 @@ pub(crate) async fn reconcile_network_policy(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::controller::common::BROKER_PORT;
-    use crate::crd::{KafkaSpec, ListenerType, NetworkPolicySpec};
     use assert2::assert;
+
+    use super::*;
+    use crate::{
+        controller::common::BROKER_PORT,
+        crd::{KafkaSpec, ListenerType, NetworkPolicySpec},
+    };
 
     fn test_kafka() -> Kafka {
         let mut k = Kafka::new(

@@ -13,15 +13,16 @@
 //! The reaper's *decision* (never abort a 2PC txn) is proven exhaustively in
 //! `txn::two_pc_model`; these tests pin the wire/handler behaviour end-to-end.
 
-use assert2::assert;
 use std::time::Duration;
 
-use tempfile::TempDir;
-
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_producer::Producer;
-use crabka_protocol::owned::describe_transactions_request::DescribeTransactionsRequest;
-use crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest;
+use crabka_protocol::owned::{
+    describe_transactions_request::DescribeTransactionsRequest,
+    init_producer_id_request::InitProducerIdRequest,
+};
+use tempfile::TempDir;
 
 // Kafka error codes (see crates/broker/src/codes.rs).
 const NONE: i16 = 0;

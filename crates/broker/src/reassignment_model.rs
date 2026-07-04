@@ -12,8 +12,10 @@
 //! each run is fenced with `within_boundary` + `target_state_count` + `timeout`
 //! and MUST be executed under the host memory watchdog while bounds are tuned.
 
-use std::collections::{BTreeSet, HashSet};
-use std::time::Duration;
+use std::{
+    collections::{BTreeSet, HashSet},
+    time::Duration,
+};
 
 use crabka_metadata::PartitionRecord;
 use crabka_raft::NodeId;
@@ -57,33 +59,51 @@ enum ReassignAction {
 impl ReassignModel {
     fn basic() -> Self {
         Self {
-            replicas: vec![1, 2, 3],
-            adding: vec![3],
-            removing: vec![2],
-            initial_isr: vec![1, 2],
-            leader: 1, // not removed → no handoff
+            replicas: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            adding: vec![crabka_audit::NodeId(3)],
+            removing: vec![crabka_audit::NodeId(2)],
+            initial_isr: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            leader: crabka_audit::NodeId(1), // not removed → no handoff
             max_epoch: 10,
         }
     }
 
     fn leader_handoff() -> Self {
         Self {
-            replicas: vec![1, 2, 3],
-            adding: vec![3],
-            removing: vec![2],
-            initial_isr: vec![1, 2],
-            leader: 2, // in `removing` → handoff required before completion
+            replicas: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            adding: vec![crabka_audit::NodeId(3)],
+            removing: vec![crabka_audit::NodeId(2)],
+            initial_isr: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            leader: crabka_audit::NodeId(2), // in `removing` → handoff required before completion
             max_epoch: 10,
         }
     }
 
     fn wide() -> Self {
         Self {
-            replicas: vec![1, 2, 3, 4, 5],
-            adding: vec![4, 5],
-            removing: vec![1, 2],
-            initial_isr: vec![1, 2, 3],
-            leader: 1, // in `removing` → handoff required
+            replicas: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+                crabka_audit::NodeId(4),
+                crabka_audit::NodeId(5),
+            ],
+            adding: vec![crabka_audit::NodeId(4), crabka_audit::NodeId(5)],
+            removing: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
+            initial_isr: vec![
+                crabka_audit::NodeId(1),
+                crabka_audit::NodeId(2),
+                crabka_audit::NodeId(3),
+            ],
+            leader: crabka_audit::NodeId(1), // in `removing` → handoff required
             max_epoch: 10,
         }
     }
@@ -111,7 +131,7 @@ fn pr_of(s: &ReassignState) -> PartitionRecord {
         leader: s.leader,
         replicas: s.replicas.clone(),
         isr: s.isr.clone(),
-        leader_epoch: s.leader_epoch,
+        leader_epoch: crabka_metadata::LeaderEpoch(s.leader_epoch),
         adding_replicas: s.adding.clone(),
         removing_replicas: s.removing.clone(),
         directories: vec![],
@@ -278,7 +298,7 @@ impl Model for ReassignModel {
                         state.adding = next.adding_replicas;
                         state.removing = next.removing_replicas;
                         state.replicas = next.replicas;
-                        state.leader_epoch = next.leader_epoch;
+                        state.leader_epoch = next.leader_epoch.0;
                     }
                     None => return None,
                 }

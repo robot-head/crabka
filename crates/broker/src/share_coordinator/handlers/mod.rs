@@ -17,25 +17,27 @@ pub(crate) mod write;
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::{path::Path, sync::Arc};
 
-    use crabka_log::{Log, LogConfig};
+    use crabka_ids::{NodeId, PartitionIndex};
+    use crabka_log::{Log, LogConfig, Offset};
 
-    use crate::broker::{Broker, BrokerHandle};
-    use crate::config::BrokerConfig;
-    use crate::partition_registry::PartitionRegistry;
-    use crate::share_coordinator::bootstrap;
-    use crate::share_coordinator::config::ShareCoordinatorConfig;
-    use crate::share_coordinator::coordinator::ShareCoordinator;
-    use crate::share_coordinator::persistence::StateBatch;
+    use crate::{
+        broker::{Broker, BrokerHandle},
+        config::BrokerConfig,
+        partition_registry::PartitionRegistry,
+        share_coordinator::{
+            bootstrap, config::ShareCoordinatorConfig, coordinator::ShareCoordinator,
+            persistence::StateBatch,
+        },
+    };
 
     pub(crate) const VERSION: i16 = 0;
 
     pub(crate) fn batch(first_offset: i64, last_offset: i64) -> StateBatch {
         StateBatch {
-            first_offset,
-            last_offset,
+            first_offset: Offset(first_offset),
+            last_offset: Offset(last_offset),
             delivery_state: 2,
             delivery_count: 3,
         }
@@ -47,13 +49,17 @@ pub(crate) mod test_support {
         let log = Log::open(&part_dir, LogConfig::default()).expect("open state partition log");
         let part = crate::broker::spawn_partition(
             bootstrap::TOPIC.to_string(),
-            partition,
+            PartitionIndex(partition),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        registry.insert(bootstrap::TOPIC.to_string(), partition, part);
+        registry.insert(
+            bootstrap::TOPIC.to_string(),
+            PartitionIndex(partition),
+            part,
+        );
     }
 
     pub(crate) fn open_all_state_partitions(registry: &PartitionRegistry, log_dir: &Path) {
@@ -66,7 +72,7 @@ pub(crate) mod test_support {
         let registry = Arc::new(PartitionRegistry::new());
         open_all_state_partitions(&registry, log_dir);
         Arc::new(ShareCoordinator::new(
-            1,
+            NodeId(1),
             registry,
             ShareCoordinatorConfig::default(),
         ))

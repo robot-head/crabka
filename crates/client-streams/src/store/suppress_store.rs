@@ -11,17 +11,21 @@
 //! The changelog KEY is the serialized record-key bytes; the changelog VALUE is
 //! the JVM `BufferValue` payload. A buffer eviction logs a `(key_bytes, None)`
 //! tombstone.
-use std::any::Any;
-use std::collections::{BTreeMap, HashMap};
+use std::{
+    any::Any,
+    collections::{BTreeMap, HashMap},
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::dsl::processors::change::Change;
-use crate::processor::serde::Serde;
-use crate::store::api::StateStore;
-use crate::store::suppress_bufval::{
-    SuppressRecordCtx, deserialize_buffer_change, serialize_buffer_change,
+use crate::{
+    dsl::processors::change::Change,
+    processor::serde::Serde,
+    store::{
+        api::StateStore,
+        suppress_bufval::{SuppressRecordCtx, deserialize_buffer_change, serialize_buffer_change},
+    },
 };
 
 /// Typed, time-ordered suppress buffer. `put` buffers (replace-by-key) a
@@ -288,9 +292,10 @@ impl<K: Send + Sync + 'static, V: Send + 'static> SuppressStore<K, V> for Suppre
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
     use crate::processor::serde::{I64Serde, StringSerde};
-    use assert2::check;
 
     fn store() -> SuppressBytesStore<String, i64> {
         SuppressBytesStore::<String, i64>::in_memory(
@@ -317,8 +322,9 @@ mod tests {
     /// with a `None` timestamp.
     #[tokio::test]
     async fn uses_statestore_defaults_for_cache_and_iq() {
-        use crate::store::cache::named::NamedCache;
         use std::sync::{Arc, Mutex};
+
+        use crate::store::cache::named::NamedCache;
         let mut s = store();
 
         // Not interactively queryable, not cache-aware.

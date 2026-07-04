@@ -4,16 +4,18 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+use crabka_ids::LeaderEpoch;
 use crabka_protocol::owned::alter_partition_request::AlterPartitionRequest;
 use crabka_raft::NodeId;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crate::partition::Partition;
-use crate::partition_registry::PartitionRegistry;
+use crate::{partition::Partition, partition_registry::PartitionRegistry};
 
 /// Cadence of the ISR maintenance scan: every leader partition's follower
 /// lag is re-evaluated once per tick.
@@ -82,13 +84,13 @@ pub(crate) async fn run(cfg: Config) {
                 &cfg.controller,
                 cfg.broker_id,
                 &part.topic,
-                part.partition_id,
+                part.partition_id.get(),
                 proposal.new_isr,
-                proposal.leader_epoch,
+                proposal.leader_epoch.0,
             )
             .await
             {
-                warn!(topic = %part.topic, partition = part.partition_id, error = %e,
+                warn!(topic = %part.topic, partition = part.partition_id.get(), error = %e,
                     "AlterPartition propose failed");
             }
         }
@@ -107,7 +109,7 @@ struct Proposal {
     /// The proposed new ISR (sorted). Guaranteed `!= prev_isr`.
     new_isr: Vec<NodeId>,
     /// Leader epoch to stamp on the `AlterPartition` request.
-    leader_epoch: i32,
+    leader_epoch: LeaderEpoch,
 }
 
 /// Returns `Some(Proposal)` if the ISR should change, else `None`.
@@ -182,7 +184,7 @@ async fn send_alter_partition(
                     topic = topic,
                     partition = partition,
                     new_isr_len = new_isr.len(),
-                    controller_target = target_id,
+                    controller_target = target_id.0,
                     "AlterPartition proposed"
                 );
                 return Ok(());
@@ -198,7 +200,7 @@ async fn send_alter_partition(
                     topic = topic,
                     partition = partition,
                     new_isr_len = new_isr.len(),
-                    controller_target = target_id,
+                    controller_target = target_id.0,
                     global_error_code = global_err,
                     partition_error_code = part_err,
                     "AlterPartition rejected by controller"
@@ -241,14 +243,14 @@ fn build_alter_partition_request(
     // KIP-903: per-member epochs come from the metadata image; unknown brokers fall back to -1.
     let new_isr_i32: Vec<i32> = new_isr
         .iter()
-        .map(|n| i32::try_from(*n).unwrap_or(i32::MAX))
+        .map(|n| i32::try_from(n.0).unwrap_or(i32::MAX))
         .collect();
     let new_isr_with_epochs: Vec<BrokerState> = new_isr_i32
         .iter()
         .map(|&bid| BrokerState {
             broker_id: bid,
             broker_epoch: image
-                .broker_epoch(u64::try_from(bid).unwrap_or(0))
+                .broker_epoch(NodeId(u64::try_from(bid).unwrap_or(0)))
                 .unwrap_or(UNKNOWN_BROKER_EPOCH),
             ..Default::default()
         })
@@ -260,7 +262,7 @@ fn build_alter_partition_request(
         // ISR member's epoch from the metadata image so the controller can
         // fence stale replicas. Unknown brokers fall back to -1 (skip-check).
         broker_epoch: image
-            .broker_epoch(u64::try_from(broker_id).unwrap_or(0))
+            .broker_epoch(NodeId(u64::try_from(broker_id).unwrap_or(0)))
             .unwrap_or(UNKNOWN_BROKER_EPOCH),
         topics: vec![TopicData {
             topic_id,
@@ -353,18 +355,20 @@ fn is_not_controller_response(global_err: i16, part_err: i16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::path::Path;
-    use std::sync::atomic::Ordering;
+    use std::{path::Path, sync::atomic::Ordering};
 
+    use crabka_ids::PartitionIndex;
+    use crabka_log::Offset;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use tempfile::tempdir;
     use tokio::sync::watch;
 
+    use super::*;
+
     fn reg(id: NodeId) -> MetadataRecord {
         MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: id,
-            broker_epoch: i64::try_from(id).unwrap(),
+            broker_epoch: i64::try_from(id.0).unwrap(),
             incarnation_id: uuid::Uuid::nil(),
             host: format!("b{id}"),
             port: 9092,
@@ -388,7 +392,7 @@ mod tests {
         let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default()).unwrap();
         crate::broker::spawn_partition(
             topic.to_string(),
-            partition,
+            PartitionIndex(partition),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
@@ -407,12 +411,12 @@ mod tests {
         let now = Instant::now();
         let mut st = part.replica_state.lock().await;
         st.install_isr(isr, replicas, leader, now);
-        st.current_leader_epoch = leader_epoch;
+        st.current_leader_epoch = LeaderEpoch(leader_epoch);
         for &(follower, last_fetch_age, last_caught_up_age) in follower_ages {
             st.per_follower.insert(
                 follower,
                 crate::replica_state::FollowerStats {
-                    leo: 0,
+                    leo: Offset(0),
                     last_fetch: now
                         .checked_sub(last_fetch_age)
                         .expect("test fetch age is representable"),
@@ -526,13 +530,13 @@ mod tests {
         let part = fixture_partition(log_dir.path(), "t", 0);
         set_replica_state(
             &part,
-            &[1, 2, 3],
-            &[1, 2, 3],
-            1,
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
             7,
             &[
-                (2, Duration::from_secs(1), Duration::from_secs(1)),
-                (3, Duration::from_secs(30), Duration::from_secs(30)),
+                (NodeId(2), Duration::from_secs(1), Duration::from_secs(1)),
+                (NodeId(3), Duration::from_secs(30), Duration::from_secs(30)),
             ],
         )
         .await;
@@ -542,9 +546,9 @@ mod tests {
             .expect("lagging ISR member should produce a shrink proposal");
 
         let expected = Proposal {
-            prev_isr: vec![1, 2, 3],
-            new_isr: vec![1, 2],
-            leader_epoch: 7,
+            prev_isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+            new_isr: vec![NodeId(1), NodeId(2)],
+            leader_epoch: LeaderEpoch(7),
         };
         assert_eq!(proposal, expected);
     }
@@ -555,13 +559,13 @@ mod tests {
         let part = fixture_partition(log_dir.path(), "t", 0);
         set_replica_state(
             &part,
-            &[1, 2],
-            &[1, 2, 3],
-            1,
+            &[NodeId(1), NodeId(2)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
             8,
             &[
-                (2, Duration::from_secs(1), Duration::from_secs(1)),
-                (3, Duration::from_secs(1), Duration::from_secs(1)),
+                (NodeId(2), Duration::from_secs(1), Duration::from_secs(1)),
+                (NodeId(3), Duration::from_secs(1), Duration::from_secs(1)),
             ],
         )
         .await;
@@ -571,9 +575,9 @@ mod tests {
             .expect("caught-up replica should produce an expand proposal");
 
         let expected = Proposal {
-            prev_isr: vec![1, 2],
-            new_isr: vec![1, 2, 3],
-            leader_epoch: 8,
+            prev_isr: vec![NodeId(1), NodeId(2)],
+            new_isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(8),
         };
         assert_eq!(proposal, expected);
     }
@@ -584,13 +588,13 @@ mod tests {
         let part = fixture_partition(log_dir.path(), "t", 0);
         set_replica_state(
             &part,
-            &[1, 2],
-            &[1, 2, 3],
-            1,
+            &[NodeId(1), NodeId(2)],
+            &[NodeId(1), NodeId(2), NodeId(3)],
+            NodeId(1),
             9,
             &[
-                (2, Duration::from_secs(1), Duration::from_secs(1)),
-                (3, Duration::from_secs(1), Duration::from_secs(30)),
+                (NodeId(2), Duration::from_secs(1), Duration::from_secs(1)),
+                (NodeId(3), Duration::from_secs(1), Duration::from_secs(30)),
             ],
         )
         .await;
@@ -609,23 +613,23 @@ mod tests {
         part.current_leader.store(1, Ordering::Release);
         set_replica_state(
             &part,
-            &[1, 2],
-            &[1, 2],
-            1,
+            &[NodeId(1), NodeId(2)],
+            &[NodeId(1), NodeId(2)],
+            NodeId(1),
             10,
-            &[(2, Duration::from_secs(30), Duration::from_secs(30))],
+            &[(NodeId(2), Duration::from_secs(30), Duration::from_secs(30))],
         )
         .await;
 
         let partitions = Arc::new(PartitionRegistry::new());
-        partitions.insert("t".to_string(), 0, part);
+        partitions.insert("t".to_string(), PartitionIndex(0), part);
         let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(
             TestMetadataSource::new(MetadataImage::new(uuid::Uuid::nil()), None),
         );
         let metrics = crate::metrics::BrokerMetrics::default();
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(run(Config {
-            node_id: 1,
+            node_id: NodeId(1),
             partitions,
             controller,
             replica_lag_time_max: Duration::from_secs(5),
@@ -650,17 +654,18 @@ mod tests {
 
     #[test]
     fn build_request_preserves_topic_broker_epochs_and_isr_fields() {
-        use crabka_protocol::UnknownTaggedFields;
-        use crabka_protocol::owned::alter_partition_request::{
-            BrokerState, PartitionData, TopicData,
+        use crabka_protocol::{
+            UnknownTaggedFields,
+            owned::alter_partition_request::{BrokerState, PartitionData, TopicData},
         };
 
         let topic_id = uuid::Uuid::from_u128(0xA11CE);
         let mut image = MetadataImage::new(uuid::Uuid::nil());
         image.apply(&topic("orders", topic_id));
-        image.apply(&reg(1));
+        image.apply(&reg(NodeId(1)));
 
-        let req = build_alter_partition_request(&image, 4, "orders", 6, &[1, 9], 12);
+        let req =
+            build_alter_partition_request(&image, 4, "orders", 6, &[NodeId(1), NodeId(9)], 12);
 
         let expected = AlterPartitionRequest {
             broker_id: 4,
@@ -694,13 +699,28 @@ mod tests {
         assert_eq!(req, expected);
     }
 
+    #[test]
+    fn build_request_stamps_leaders_own_broker_epoch_from_image() {
+        // The sending broker (id 5) is registered with a distinct positive
+        // broker epoch (reg() stamps epoch == node id). The top-level
+        // `broker_epoch` field must carry that epoch (5), not the default (0)
+        // and not the unknown-broker sentinel (-1). Pins the KIP-903 stamp so
+        // dropping the field (→ Default 0) is caught.
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&reg(NodeId(5)));
+
+        let req = build_alter_partition_request(&image, 5, "orders", 0, &[NodeId(5)], 3);
+
+        assert!(req.broker_epoch == 5);
+    }
+
     #[tokio::test]
     async fn send_alter_partition_errors_without_controller_target() {
         let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(
             TestMetadataSource::new(MetadataImage::new(uuid::Uuid::nil()), None),
         );
 
-        let err = send_alter_partition(&controller, 1, "orders", 0, vec![1], 3)
+        let err = send_alter_partition(&controller, 1, "orders", 0, vec![NodeId(1)], 3)
             .await
             .expect_err("missing controller leader should reject the send");
 
@@ -723,18 +743,18 @@ mod tests {
     #[test]
     fn alter_partition_targets_try_hint_first_then_remaining_brokers() {
         let mut image = MetadataImage::new(uuid::Uuid::nil());
-        image.apply(&reg(2));
-        image.apply(&reg(0));
-        image.apply(&reg(1));
+        image.apply(&reg(NodeId(2)));
+        image.apply(&reg(NodeId(0)));
+        image.apply(&reg(NodeId(1)));
 
-        let targets = alter_partition_targets(&image, Some(2));
+        let targets = alter_partition_targets(&image, Some(NodeId(2)));
 
         assert!(
             targets
                 == vec![
-                    (2, "b2:9092".to_string()),
-                    (0, "b0:9092".to_string()),
-                    (1, "b1:9092".to_string()),
+                    (NodeId(2), "b2:9092".to_string()),
+                    (NodeId(0), "b0:9092".to_string()),
+                    (NodeId(1), "b1:9092".to_string()),
                 ]
         );
     }
@@ -742,12 +762,18 @@ mod tests {
     #[test]
     fn alter_partition_targets_fall_back_when_hint_missing() {
         let mut image = MetadataImage::new(uuid::Uuid::nil());
-        image.apply(&reg(1));
-        image.apply(&reg(0));
+        image.apply(&reg(NodeId(1)));
+        image.apply(&reg(NodeId(0)));
 
-        let targets = alter_partition_targets(&image, Some(9));
+        let targets = alter_partition_targets(&image, Some(NodeId(9)));
 
-        assert!(targets == vec![(0, "b0:9092".to_string()), (1, "b1:9092".to_string())]);
+        assert!(
+            targets
+                == vec![
+                    (NodeId(0), "b0:9092".to_string()),
+                    (NodeId(1), "b1:9092".to_string())
+                ]
+        );
     }
 
     #[test]

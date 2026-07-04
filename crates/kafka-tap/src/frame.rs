@@ -2,10 +2,12 @@
 
 use std::collections::HashMap;
 
+use crabka_ids::{ApiKey, ApiVersion};
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct RequestPrefix {
-    pub api_key: i16,
-    pub api_version: i16,
+    pub api_key: ApiKey,
+    pub api_version: ApiVersion,
     pub correlation_id: i32,
 }
 
@@ -17,8 +19,8 @@ pub fn parse_request_prefix(body: &[u8]) -> Option<RequestPrefix> {
         return None;
     }
     Some(RequestPrefix {
-        api_key: i16::from_be_bytes([body[0], body[1]]),
-        api_version: i16::from_be_bytes([body[2], body[3]]),
+        api_key: ApiKey(i16::from_be_bytes([body[0], body[1]])),
+        api_version: ApiVersion(i16::from_be_bytes([body[2], body[3]])),
         correlation_id: i32::from_be_bytes([body[4], body[5], body[6], body[7]]),
     })
 }
@@ -37,15 +39,15 @@ pub fn read_correlation_id(body: &[u8]) -> Option<i32> {
 /// request that bore it, so responses can be classified.
 #[derive(Default)]
 pub struct Pending {
-    map: HashMap<i32, (i16, i16)>,
+    map: HashMap<i32, (ApiKey, ApiVersion)>,
 }
 
 impl Pending {
-    pub fn record(&mut self, correlation_id: i32, api_key: i16, api_version: i16) {
+    pub fn record(&mut self, correlation_id: i32, api_key: ApiKey, api_version: ApiVersion) {
         self.map.insert(correlation_id, (api_key, api_version));
     }
     #[must_use]
-    pub fn take(&mut self, correlation_id: i32) -> Option<(i16, i16)> {
+    pub fn take(&mut self, correlation_id: i32) -> Option<(ApiKey, ApiVersion)> {
         self.map.remove(&correlation_id)
     }
 }
@@ -53,8 +55,8 @@ impl Pending {
 /// One captured frame, emitted by the relay to the recorder spool.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapturedFrame {
-    pub api_key: i16,
-    pub version: i16,
+    pub api_key: ApiKey,
+    pub version: ApiVersion,
     pub is_request: bool,
     /// Full frame body, excluding the 4-byte length prefix (header + message).
     pub body: Vec<u8>,
@@ -80,8 +82,8 @@ mod tests {
         assert_eq!(
             p,
             RequestPrefix {
-                api_key: 18,
-                api_version: 3,
+                api_key: ApiKey(18),
+                api_version: ApiVersion(3),
                 correlation_id: 7
             }
         );
@@ -97,6 +99,6 @@ mod tests {
         resp.extend_from_slice(&42i32.to_be_bytes());
         resp.extend_from_slice(&[0x01]);
         let got = pending.take(read_correlation_id(&resp).unwrap()).unwrap();
-        assert_eq!(got, (1, 11));
+        assert_eq!(got, (ApiKey(1), ApiVersion(11)));
     }
 }

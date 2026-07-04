@@ -1,10 +1,11 @@
 //! Standalone tap: `kafka-tap <listen> <upstream> <spool.ndjson>`.
 //! Writes one JSON record per frame to the spool file.
-use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::{
+    io::Write,
+    sync::{Arc, Mutex},
+};
 
-use crabka_kafka_tap::frame::CapturedFrame;
-use crabka_kafka_tap::{Recorder, spawn};
+use crabka_kafka_tap::{Recorder, frame::CapturedFrame, spawn};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

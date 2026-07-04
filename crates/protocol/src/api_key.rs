@@ -24,8 +24,9 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/api_key.rs"));
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn all_keys_unique() {

@@ -76,8 +76,9 @@ pub fn api_name(api_key: i16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     #[test]
     fn api_name_known_and_unknown() {
@@ -96,11 +97,12 @@ mod tests {
     #[test]
     fn request_span_records_otel_name() {
         use std::sync::{Arc, Mutex};
-        use tracing::field::{Field, Visit};
-        use tracing::span::{Attributes, Record};
-        use tracing_subscriber::Layer;
-        use tracing_subscriber::layer::Context;
-        use tracing_subscriber::prelude::*;
+
+        use tracing::{
+            field::{Field, Visit},
+            span::{Attributes, Record},
+        };
+        use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
         #[derive(Default)]
         struct Captured {

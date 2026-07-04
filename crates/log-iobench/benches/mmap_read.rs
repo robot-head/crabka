@@ -30,12 +30,14 @@
 //! serving recent data; a cold-cache comparison would need root to drop
 //! caches and isn't portable in CI.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Seek, SeekFrom},
+    path::PathBuf,
+};
 
 use bytes::Bytes;
-use crabka_log::{Log, LogConfig};
+use crabka_log::{Log, LogConfig, Offset};
 use crabka_protocol::records::{Record, RecordBatch};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use memmap2::Mmap;
@@ -179,7 +181,7 @@ fn bench_segment_io(c: &mut Criterion) {
 fn bench_full_path(c: &mut Criterion) {
     let (_dir, log, _path, _size) = build_log();
     let end = log.log_end_offset();
-    let mid = end / 2;
+    let mid = Offset(end.0 / 2);
 
     let mut group = c.benchmark_group("full_path");
     group.bench_function("log_read_1MiB_decoded", |b| {

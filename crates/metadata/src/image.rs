@@ -4,17 +4,18 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crabka_security::{KafkaPrincipal, SaslMechanism, ScramCredential};
 use uuid::Uuid;
 
-use crabka_security::{KafkaPrincipal, SaslMechanism, ScramCredential};
-
-use crate::acl::{AclEntry, PatternType, ResourceType};
-use crate::error::MetadataError;
-use crate::records::{
-    BrokerConfigRecord, BrokerRegistrationRecord, ClientMetricsConfigRecord, ClientQuotaRecord,
-    DelegationTokenRecord, FeatureLevelRecord, FeaturesEpochRecord, KRaftVersionRecord,
-    MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
-    TopicRecord, VotersRecord,
+use crate::{
+    acl::{AclEntry, PatternType, ResourceType},
+    error::MetadataError,
+    records::{
+        BrokerConfigRecord, BrokerRegistrationRecord, ClientMetricsConfigRecord, ClientQuotaRecord,
+        DelegationTokenRecord, FeatureLevelRecord, FeaturesEpochRecord, KRaftVersionRecord,
+        MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord,
+        TopicConfigRecord, TopicRecord, VotersRecord,
+    },
 };
 
 pub type EntityKey = Vec<(String, Option<String>)>;
@@ -956,13 +957,16 @@ mod tests {
         assert!(record_variant(&feature) == "V1FeatureLevel");
     }
 
-    use crate::acl::{AclEntryFilter, AclOperation, PermissionType};
-    use crate::records::{
-        BrokerConfigRecord, ClientQuotaRecord, DeleteDelegationTokenRecord,
-        DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, QuotaEntity,
-        ScramCredentialRecord,
-    };
     use assert2::{assert, check};
+
+    use crate::{
+        acl::{AclEntryFilter, AclOperation, PermissionType},
+        records::{
+            BrokerConfigRecord, ClientQuotaRecord, DeleteDelegationTokenRecord,
+            DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, LeaderEpoch,
+            QuotaEntity, ScramCredentialRecord,
+        },
+    };
 
     fn img() -> MetadataImage {
         MetadataImage::new(Uuid::nil())
@@ -1048,7 +1052,7 @@ mod tests {
         // Brokers (one survives, one is unregistered → must not reappear).
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
-                node_id: 1,
+                node_id: NodeId(1),
                 broker_epoch: 0,
                 incarnation_id: Uuid::nil(),
                 host: "h1".into(),
@@ -1064,7 +1068,7 @@ mod tests {
         ));
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
-                node_id: 2,
+                node_id: NodeId(2),
                 broker_epoch: 0,
                 incarnation_id: Uuid::nil(),
                 host: "h2".into(),
@@ -1074,22 +1078,22 @@ mod tests {
             },
         ));
         image.apply(&MetadataRecord::V1UnregisterBroker(
-            crate::records::UnregisterBrokerRecord { node_id: 2 },
+            crate::records::UnregisterBrokerRecord { node_id: NodeId(2) },
         ));
 
         // Broker configs: one set survives, one deleted-back-to-empty.
         image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         }));
         image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "follower.replication.throttled.rate".into(),
             config_value: Some("4096".into()),
         }));
         image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "follower.replication.throttled.rate".into(),
             config_value: None,
         }));
@@ -1111,11 +1115,11 @@ mod tests {
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "orders".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2],
-            isr: vec![1, 2],
-            leader_epoch: 4,
-            adding_replicas: vec![2],
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2)],
+            isr: vec![NodeId(1), NodeId(2)],
+            leader_epoch: LeaderEpoch(4),
+            adding_replicas: vec![NodeId(2)],
             removing_replicas: vec![],
             directories: vec![],
             partition_epoch: 0,
@@ -1123,22 +1127,22 @@ mod tests {
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "orders".into(),
             partition: 1,
-            leader: 2,
-            replicas: vec![2, 1],
-            isr: vec![2],
-            leader_epoch: 7,
+            leader: NodeId(2),
+            replicas: vec![NodeId(2), NodeId(1)],
+            isr: vec![NodeId(2)],
+            leader_epoch: LeaderEpoch(7),
             adding_replicas: vec![],
-            removing_replicas: vec![1],
+            removing_replicas: vec![NodeId(1)],
             directories: vec![],
             partition_epoch: 0,
         }));
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "doomed".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
-            leader_epoch: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1)],
+            isr: vec![NodeId(1)],
+            leader_epoch: LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1348,8 +1352,10 @@ mod tests {
     /// can only round-trip through a `V1KRaftVersion` record.
     #[test]
     fn to_records_preserves_voters_and_kraft_version() {
-        use crate::records::{KRaftVersionRecord, VotersRecord};
-        use crate::voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};
+        use crate::{
+            records::{KRaftVersionRecord, VotersRecord},
+            voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet},
+        };
 
         let cid = Uuid::new_v4();
         let mut image = MetadataImage::new(cid);
@@ -1358,7 +1364,7 @@ mod tests {
         }));
         let voters = VoterSet::from_voters([
             Voter {
-                id: 1,
+                id: NodeId(1),
                 directory_id: Uuid::from_u128(1),
                 endpoints: vec![VoterEndpoint {
                     name: "CONTROLLER".into(),
@@ -1368,7 +1374,7 @@ mod tests {
                 kraft_version: KRaftVersionRange::default(),
             },
             Voter {
-                id: 2,
+                id: NodeId(2),
                 directory_id: Uuid::from_u128(2),
                 endpoints: vec![VoterEndpoint {
                     name: "CONTROLLER".into(),
@@ -1415,11 +1421,11 @@ mod tests {
         m.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 2],
-            leader_epoch: 0,
-            adding_replicas: vec![3],
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(2)],
+            leader_epoch: LeaderEpoch(0),
+            adding_replicas: vec![NodeId(3)],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::nil(), uuid::Uuid::nil(), uuid::Uuid::nil()],
             partition_epoch: 0,
@@ -1429,7 +1435,7 @@ mod tests {
             crate::records::PartitionDirAssignmentRecord {
                 topic: "t".into(),
                 partition: 0,
-                replica: 2,
+                replica: NodeId(2),
                 directory: dir,
             },
         ));
@@ -1440,11 +1446,11 @@ mod tests {
             *pr == PartitionRecord {
                 topic: "t".to_string(),
                 partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3],
-                isr: vec![1, 2],
-                leader_epoch: 0,
-                adding_replicas: vec![3],
+                leader: NodeId(1),
+                replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+                isr: vec![NodeId(1), NodeId(2)],
+                leader_epoch: crabka_ids::LeaderEpoch(0),
+                adding_replicas: vec![NodeId(3)],
                 removing_replicas: vec![],
                 directories: vec![uuid::Uuid::nil(), dir, uuid::Uuid::nil()],
                 partition_epoch: 0,
@@ -1459,10 +1465,10 @@ mod tests {
         m.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
-            leader_epoch: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1)],
+            isr: vec![NodeId(1)],
+            leader_epoch: LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1471,10 +1477,10 @@ mod tests {
         m.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 1,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
-            leader_epoch: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1)],
+            isr: vec![NodeId(1)],
+            leader_epoch: LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1505,10 +1511,10 @@ mod tests {
             m.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: topic.into(),
                 partition: p,
-                leader: 1,
-                replicas: vec![1],
-                isr: vec![1],
-                leader_epoch: 0,
+                leader: NodeId(1),
+                replicas: vec![NodeId(1)],
+                isr: vec![NodeId(1)],
+                leader_epoch: LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -1565,10 +1571,10 @@ mod tests {
         let p = MetadataRecord::V1Partition(PartitionRecord {
             topic: "ghost".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
-            leader_epoch: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1)],
+            isr: vec![NodeId(1)],
+            leader_epoch: LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1582,7 +1588,7 @@ mod tests {
     fn broker_registration_is_idempotent() {
         let mut m = img();
         let b = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             broker_epoch: 0,
             incarnation_id: Uuid::nil(),
             host: "h".into(),
@@ -1890,10 +1896,10 @@ mod tests {
             m.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: "t".into(),
                 partition: p,
-                leader: 1,
-                replicas: vec![1],
-                isr: vec![1],
-                leader_epoch: 0,
+                leader: NodeId(1),
+                replicas: vec![NodeId(1)],
+                isr: vec![NodeId(1)],
+                leader_epoch: LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -1904,10 +1910,10 @@ mod tests {
         m.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "u".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1],
-            isr: vec![1],
-            leader_epoch: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1)],
+            isr: vec![NodeId(1)],
+            leader_epoch: LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1933,10 +1939,10 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 2, 3],
-            leader_epoch: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
@@ -1957,18 +1963,18 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3, 4],
-            isr: vec![1, 2, 3],
-            leader_epoch: 0,
-            adding_replicas: vec![4],
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+            isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(0),
+            adding_replicas: vec![NodeId(4)],
             removing_replicas: vec![],
             directories: vec![],
             partition_epoch: 0,
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
         assert!(rows.len() == 1);
-        assert!(rows[0].adding_replicas == vec![4]);
+        assert!(rows[0].adding_replicas == vec![NodeId(4)]);
     }
 
     #[test]
@@ -1983,18 +1989,18 @@ mod tests {
         img.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "foo".into(),
             partition: 0,
-            leader: 1,
-            replicas: vec![1, 2, 3],
-            isr: vec![1, 2, 3],
-            leader_epoch: 0,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2), NodeId(3)],
+            isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+            leader_epoch: LeaderEpoch(0),
             adding_replicas: vec![],
-            removing_replicas: vec![3],
+            removing_replicas: vec![NodeId(3)],
             directories: vec![],
             partition_epoch: 0,
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
         assert!(rows.len() == 1);
-        assert!(rows[0].removing_replicas == vec![3]);
+        assert!(rows[0].removing_replicas == vec![NodeId(3)]);
     }
 
     #[test]
@@ -2010,11 +2016,11 @@ mod tests {
             img.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: name.into(),
                 partition: 0,
-                leader: 1,
-                replicas: vec![1, 2, 3, 4],
-                isr: vec![1, 2, 3],
-                leader_epoch: 0,
-                adding_replicas: vec![4],
+                leader: NodeId(1),
+                replicas: vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)],
+                isr: vec![NodeId(1), NodeId(2), NodeId(3)],
+                leader_epoch: LeaderEpoch(0),
+                adding_replicas: vec![NodeId(4)],
                 removing_replicas: vec![],
                 directories: vec![],
                 partition_epoch: 0,
@@ -2027,11 +2033,11 @@ mod tests {
     fn broker_config_set_inserts_into_image() {
         let mut img = MetadataImage::new(uuid::Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         }));
-        let bc = img.broker_config(1).expect("broker config");
+        let bc = img.broker_config(NodeId(1)).expect("broker config");
         assert!(bc.get("leader.replication.throttled.rate") == Some(&"2048".to_string()));
     }
 
@@ -2039,16 +2045,18 @@ mod tests {
     fn broker_config_delete_removes_from_image() {
         let mut img = MetadataImage::new(uuid::Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         }));
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: None,
         }));
-        let bc = img.broker_config(1).expect("broker_configs entry retained");
+        let bc = img
+            .broker_config(NodeId(1))
+            .expect("broker_configs entry retained");
         assert!(bc.get("leader.replication.throttled.rate").is_none());
     }
 
@@ -2056,22 +2064,25 @@ mod tests {
     fn broker_throttle_rate_parses_positive_value() {
         let mut img = MetadataImage::new(uuid::Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         }));
-        assert!(img.broker_throttle_rate(1, ThrottleKind::Leader) == Some(2048));
+        assert!(img.broker_throttle_rate(NodeId(1), ThrottleKind::Leader) == Some(2048));
     }
 
     #[test]
     fn broker_throttle_rate_returns_none_for_negative_one() {
         let mut img = MetadataImage::new(uuid::Uuid::nil());
         img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 1,
+            node_id: NodeId(1),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("-1".into()),
         }));
-        assert!(img.broker_throttle_rate(1, ThrottleKind::Leader).is_none());
+        assert!(
+            img.broker_throttle_rate(NodeId(1), ThrottleKind::Leader)
+                .is_none()
+        );
     }
 
     #[test]
@@ -2307,14 +2318,14 @@ mod tests {
         ));
         image.apply(&MetadataRecord::V1Voters(crate::records::VotersRecord {
             voters: crate::voters::VoterSet::from_voters([crate::voters::Voter {
-                id: 1,
+                id: NodeId(1),
                 directory_id: uuid::Uuid::nil(),
                 endpoints: vec![],
                 kraft_version: crate::voters::KRaftVersionRange::default(),
             }]),
         }));
         assert!(image.kraft_version() == 1);
-        assert!(image.voters().contains(1));
+        assert!(image.voters().contains(NodeId(1)));
     }
 
     #[test]
@@ -2383,8 +2394,9 @@ mod tests {
 
     #[test]
     fn min_required_metadata_version_rises_with_scram_and_tokens() {
-        use crate::metadata_version::{DELEGATION_TOKEN_MIN_LEVEL, SCRAM_MIN_LEVEL};
         use crabka_security::{KafkaPrincipal, SaslMechanism};
+
+        use crate::metadata_version::{DELEGATION_TOKEN_MIN_LEVEL, SCRAM_MIN_LEVEL};
         let mut m = img();
         m.apply(&MetadataRecord::V1ScramCredential(
             crate::records::ScramCredentialRecord {
@@ -2445,7 +2457,7 @@ mod tests {
         let mut image = MetadataImage::new(Uuid::nil());
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
-                node_id: 5,
+                node_id: NodeId(5),
                 broker_epoch: 99,
                 incarnation_id: Uuid::nil(),
                 host: "h".into(),
@@ -2454,8 +2466,8 @@ mod tests {
                 endpoints: vec![],
             },
         ));
-        assert!(image.broker_epoch(5) == Some(99));
-        assert!(image.broker_epoch(404) == None);
+        assert!(image.broker_epoch(NodeId(5)) == Some(99));
+        assert!(image.broker_epoch(NodeId(404)) == None);
     }
 
     // --- mutation-coverage tests --------------------------------------------
@@ -2473,7 +2485,7 @@ mod tests {
         let mut image = MetadataImage::new(Uuid::nil());
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
-                node_id: 7,
+                node_id: NodeId(7),
                 broker_epoch: 1,
                 incarnation_id: Uuid::nil(),
                 host: "h".into(),
@@ -2482,9 +2494,11 @@ mod tests {
                 endpoints: vec![],
             },
         ));
-        let b = image.broker(7).expect("registered broker resolvable");
-        assert!(b.node_id == 7);
-        assert!(image.broker(404).is_none());
+        let b = image
+            .broker(NodeId(7))
+            .expect("registered broker resolvable");
+        assert!(b.node_id == NodeId(7));
+        assert!(image.broker(NodeId(404)).is_none());
     }
 
     #[test]
@@ -2515,11 +2529,11 @@ mod tests {
         // or -1 (disabled). The cap check is `v < 0` (not `<=`), so 0 -> Some(0).
         let mut image = MetadataImage::new(Uuid::nil());
         image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: 3,
+            node_id: NodeId(3),
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("0".into()),
         }));
-        assert!(image.broker_throttle_rate(3, ThrottleKind::Leader) == Some(0));
+        assert!(image.broker_throttle_rate(NodeId(3), ThrottleKind::Leader) == Some(0));
     }
 
     #[test]
@@ -2532,9 +2546,9 @@ mod tests {
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 10,
-            replicas: vec![10, 20],
-            isr: vec![10, 20],
+            leader: NodeId(10),
+            replicas: vec![NodeId(10), NodeId(20)],
+            isr: vec![NodeId(10), NodeId(20)],
             directories: vec![], // not yet reported
             ..Default::default()
         }));
@@ -2543,7 +2557,7 @@ mod tests {
             crate::records::PartitionDirAssignmentRecord {
                 topic: "t".into(),
                 partition: 0,
-                replica: 10,
+                replica: NodeId(10),
                 directory: dir,
             },
         ));
@@ -2559,9 +2573,9 @@ mod tests {
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
             partition: 0,
-            leader: 10,
-            replicas: vec![10, 20],
-            isr: vec![10, 20],
+            leader: NodeId(10),
+            replicas: vec![NodeId(10), NodeId(20)],
+            isr: vec![NodeId(10), NodeId(20)],
             directories: vec![old, Uuid::nil()],
             ..Default::default()
         }));
@@ -2570,7 +2584,7 @@ mod tests {
             crate::records::PartitionDirAssignmentRecord {
                 topic: "t".into(),
                 partition: 0,
-                replica: 20,
+                replica: NodeId(20),
                 directory: dir,
             },
         ));

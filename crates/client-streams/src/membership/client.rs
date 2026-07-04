@@ -7,21 +7,22 @@
 //!
 //! `next_event` drains coordinator events; `close` leaves the group.
 
-use std::sync::Arc;
-use std::time::Duration;
-
-use tokio::sync::{Mutex, mpsc};
-use tokio::task::JoinHandle;
-use tokio_util::sync::CancellationToken;
+use std::{sync::Arc, time::Duration};
 
 use crabka_client_core::Client;
 use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::JoinHandle,
+};
+use tokio_util::sync::CancellationToken;
 
-use super::coordinator::{self, CoordinatorState};
-use super::status::map_status;
-use super::types::{StreamsAssignment, StreamsEvent, TaskOffsetTracker};
-use crate::error::StreamsClientError;
-use crate::membership::assignment::resolve;
+use super::{
+    coordinator::{self, CoordinatorState},
+    status::map_status,
+    types::{StreamsAssignment, StreamsEvent, TaskOffsetTracker},
+};
+use crate::{error::StreamsClientError, membership::assignment::resolve};
 
 const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 
@@ -299,15 +300,17 @@ fn map_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_join_heartbeat, heartbeat_interval, map_error, should_emit_statuses};
-    use crate::error::StreamsClientError;
-    use crate::membership::types::TaskOffsetTracker;
-    use crate::topology::Topology;
+    use std::sync::Arc;
+
     use assert2::check;
     use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
-    use std::sync::Arc;
     use tokio::sync::{Mutex, mpsc};
     use tokio_util::sync::CancellationToken;
+
+    use super::{build_join_heartbeat, heartbeat_interval, map_error, should_emit_statuses};
+    use crate::{
+        error::StreamsClientError, membership::types::TaskOffsetTracker, topology::Topology,
+    };
 
     fn resp(code: i16) -> StreamsGroupHeartbeatResponse {
         StreamsGroupHeartbeatResponse {

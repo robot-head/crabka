@@ -4,9 +4,11 @@
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
-use crate::emit::common::banner;
-use crate::ir::{MessageSpec, MessageType};
-use crate::name_conv;
+use crate::{
+    emit::common::banner,
+    ir::{MessageSpec, MessageType},
+    name_conv,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Flavor {

@@ -16,12 +16,13 @@ pub(crate) fn decode_metrics(bytes: &[u8]) -> Result<MetricsData, OtlpDecodeErro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use opentelemetry_proto::tonic::metrics::v1::{
         Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric::Data,
         number_data_point::Value,
     };
     use prost::Message;
+
+    use super::*;
 
     fn sample_metrics_data() -> Vec<u8> {
         let dp = NumberDataPoint {

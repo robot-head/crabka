@@ -15,8 +15,9 @@ pub fn partition_for_tid(transactional_id: &str, num_partitions: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     // Reference vectors generated from the canonical JVM implementation:
     //   Utils.abs(Utils.murmur2(tid.getBytes(StandardCharsets.UTF_8))) % 50

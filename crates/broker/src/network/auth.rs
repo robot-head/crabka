@@ -11,18 +11,23 @@
 // SCRAM, and admin paths — keep the surface in one place.
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-use std::hash::BuildHasher;
+use std::{collections::HashMap, hash::BuildHasher};
 
-use crabka_protocol::ApiKey;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
+use crabka_protocol::{
+    ApiKey,
+    owned::{
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{Principal, SaslMechanism, ScramServerExchange};
 
-use crate::codes::{ILLEGAL_SASL_STATE, UNSUPPORTED_SASL_MECHANISM};
-use crate::handlers::ApiKeyCode;
+use crate::{
+    codes::{ILLEGAL_SASL_STATE, UNSUPPORTED_SASL_MECHANISM},
+    handlers::ApiKeyCode,
+};
 
 /// Per-connection SASL state. Transitions:
 /// `Anonymous` -> (`SaslHandshake`) -> `Negotiating` -> (`SaslAuthenticate` ok)
@@ -955,8 +960,9 @@ fn fail_authenticate(reason: &str) -> SaslAuthenticateResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
 
     fn assert_success_authenticate_response(
         resp: &SaslAuthenticateResponse,
@@ -1028,8 +1034,7 @@ mod tests {
     }
 
     fn unsecured_token(sub: &str, exp_s: i64) -> String {
-        use base64::Engine;
-        use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
+        use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64};
         format!(
             "{}.{}.",
             B64.encode(b"{\"alg\":\"none\"}"),
@@ -1707,14 +1712,16 @@ mod tests {
     // `handle_authenticate_scram` against the live image.
 
     mod token_scram_fallback {
-        use super::*;
+        use std::{sync::Arc, time::Duration};
+
         use assert2::{assert, check};
         use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
-        use crabka_security::scram::hash_scram_password_with_salt;
-        use crabka_security::{KafkaPrincipal, ScramClientExchange};
-        use std::sync::Arc;
-        use std::time::Duration;
+        use crabka_security::{
+            KafkaPrincipal, ScramClientExchange, scram::hash_scram_password_with_salt,
+        };
         use tempfile::TempDir;
+
+        use super::*;
 
         async fn test_controller(
             log_dir: std::path::PathBuf,
@@ -1723,7 +1730,7 @@ mod tests {
                 election_timeout: Duration::from_millis(200),
                 heartbeat_interval: Duration::from_millis(50),
                 client_id: "test".into(),
-                ..crabka_raft::ControllerConfig::for_tests(1, log_dir)
+                ..crabka_raft::ControllerConfig::for_tests(crabka_raft::NodeId(1), log_dir)
             };
             let handle = Arc::new(crabka_raft::Controller::start(cfg).await.unwrap());
             let mut rx = handle.watch_leader();

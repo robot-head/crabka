@@ -4,14 +4,17 @@
 
 use std::collections::BTreeMap;
 
-use crate::mm2::OffsetSync;
+use crate::{
+    ids::{CommittedOffset, DownstreamOffset, PartitionIndex, UpstreamOffset},
+    mm2::OffsetSync,
+};
 
 /// Accumulates [`OffsetSync`] records and translates committed source offsets to
 /// their corresponding target offsets.
 #[derive(Default)]
 pub struct OffsetSyncStore {
     /// Outer key: (topic, partition). Inner key: upstream offset → downstream offset.
-    syncs: BTreeMap<(String, i32), BTreeMap<i64, i64>>,
+    syncs: BTreeMap<(String, PartitionIndex), BTreeMap<UpstreamOffset, DownstreamOffset>>,
 }
 
 impl OffsetSyncStore {
@@ -30,10 +33,21 @@ impl OffsetSyncStore {
     /// - the `(topic, partition)` pair has no syncs, or
     /// - `committed` is below every known upstream offset (un-replicated data).
     #[must_use]
-    pub fn translate(&self, topic: &str, partition: i32, committed: i64) -> Option<i64> {
+    pub fn translate(
+        &self,
+        topic: &str,
+        partition: PartitionIndex,
+        committed: CommittedOffset,
+    ) -> Option<DownstreamOffset> {
         let m = self.syncs.get(&(topic.to_string(), partition))?;
-        let (&up, &down) = m.range(..=committed).next_back()?;
-        Some(down + (committed - up))
+        // The inner map is keyed by `UpstreamOffset`; `committed` lives in the
+        // same (source) address space, so bound the range at the matching
+        // upstream offset.
+        let (&up, &down) = m.range(..=UpstreamOffset(committed.0)).next_back()?;
+        // `committed - up` is a source-space delta; adding it to the paired
+        // downstream offset yields the target offset. The arithmetic crosses
+        // newtype boundaries, so unwrap via `.0` rather than deriving `Add`/`Sub`.
+        Some(DownstreamOffset(down.0 + (committed.0 - up.0)))
     }
 }
 
@@ -49,15 +63,15 @@ mod tests {
         let mut s = OffsetSyncStore::default();
         s.ingest(OffsetSync {
             topic: "orders".into(),
-            partition: 0,
-            upstream: 100,
-            downstream: 70,
+            partition: PartitionIndex(0),
+            upstream: UpstreamOffset(100),
+            downstream: DownstreamOffset(70),
         });
         s.ingest(OffsetSync {
             topic: "orders".into(),
-            partition: 0,
-            upstream: 200,
-            downstream: 165,
+            partition: PartitionIndex(0),
+            upstream: UpstreamOffset(200),
+            downstream: DownstreamOffset(165),
         });
         for (partition, upstream, want) in [
             (0, 250, Some(215)), // 165 + (250-200)
@@ -66,7 +80,11 @@ mod tests {
             (9, 100, None),      // unknown partition
         ] {
             check!(
-                s.translate("orders", partition, upstream) == want,
+                s.translate(
+                    "orders",
+                    PartitionIndex(partition),
+                    CommittedOffset(upstream)
+                ) == want.map(DownstreamOffset),
                 "partition={partition} upstream={upstream}"
             );
         }

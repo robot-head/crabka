@@ -4,12 +4,16 @@
 //! in-process Crabka broker, proving the distributor-facing WAL sink and the
 //! querier/compactor-facing WAL consumer agree on the durable record boundary.
 
-use std::collections::BTreeMap;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use assert2::{assert, check};
-use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode};
+use axum::{
+    body::{Body, to_bytes},
+    http::{Request, StatusCode},
+};
 use bytes::Bytes;
 use crabka_blockstore::{
     BlockDescriptor, LabelIndex, LogBlockIndex as BlockIndex, labels, write_log_index_manifest,
@@ -21,18 +25,17 @@ use crabka_client_admin::{
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_observability::{
-    BufferedLogHotTail, KafkaLogWalConsumer, KafkaLogWalSink, LogWalConsumer, LogWalSink,
-    QuerierIndexSource, Role, ServiceConfig, WalLogRecord, WalPosition, build_service_dependencies,
-    build_service_router, poll_log_hot_tail_once, run_compactor_until_idle,
-    run_compactor_until_shutdown, serve_service_listener,
+    BufferedLogHotTail, KafkaLogWalConsumer, KafkaLogWalSink, LogWalConsumer, LogWalSink, Offset,
+    PartitionIndex, QuerierIndexSource, Role, ServiceConfig, WalLogRecord, WalPosition,
+    build_service_dependencies, build_service_router, poll_log_hot_tail_once,
+    run_compactor_until_idle, run_compactor_until_shutdown, serve_service_listener,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::net::TcpListener;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio_tungstenite::{connect_async, tungstenite::client::IntoClientRequest as _};
 use tower::ServiceExt;
 
 async fn boot() -> (BrokerHandle, String, TempDir) {
@@ -220,16 +223,16 @@ async fn observability_kafka_wal_sink_feeds_live_consumer_hot_tail() {
         hot_tail.records()
             == vec![WalLogRecord {
                 position: Some(WalPosition {
-                    partition: 0,
-                    offset: 0,
+                    partition: PartitionIndex(0),
+                    offset: Offset(0),
                 }),
                 ..record
             }]
     );
     consumer
         .commit_compacted(WalPosition {
-            partition: 0,
-            offset: 0,
+            partition: PartitionIndex(0),
+            offset: Offset(0),
         })
         .await
         .expect("commit compacted");
@@ -307,8 +310,8 @@ async fn config_built_distributor_writes_loki_push_to_live_wal() {
                     "abc123".to_string()
                 )]),
                 position: Some(WalPosition {
-                    partition: 0,
-                    offset: 0,
+                    partition: PartitionIndex(0),
+                    offset: Offset(0),
                 }),
             }]
     );
@@ -579,8 +582,8 @@ async fn config_built_distributor_allows_tenant_with_write_acl_to_append_wal() {
                 line: "api acl allowed".to_string(),
                 structured_metadata: BTreeMap::new(),
                 position: Some(WalPosition {
-                    partition: 0,
-                    offset: 0,
+                    partition: PartitionIndex(0),
+                    offset: Offset(0),
                 }),
             }]
     );

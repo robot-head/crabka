@@ -23,6 +23,7 @@ bytes = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
 crabka-voters = { version = "0.3.8", path = "../voters" }
+crabka-ids = { version = "0.3.8", path = "../ids" }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 crabka-security = { workspace = true }

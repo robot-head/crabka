@@ -1,22 +1,27 @@
 //! Top-level `Broker` lifecycle. Wires together the partition registry,
 //! metadata image, network listener, and handler table.
 
-use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering},
+    },
+};
 
+use crabka_ids::PartitionIndex;
 use dashmap::DashMap;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
+use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
-
-use crate::config::BrokerConfig;
-use crate::error::BrokerError;
-use crate::handlers::HandlerTable;
-use crate::log_dir;
-use crate::partition::{Partition, WriterMessage};
-use crate::partition_registry::PartitionRegistry;
+use crate::{
+    config::BrokerConfig,
+    error::BrokerError,
+    handlers::HandlerTable,
+    log_dir,
+    partition::{Partition, WriterMessage},
+    partition_registry::PartitionRegistry,
+};
 
 /// Startup deadline for the controller quorum to elect a leader before
 /// `Broker::start` fails with a `Startup` error.
@@ -106,7 +111,8 @@ pub struct Broker {
     /// `AlterReplicaLogDirs` handler reads it to make a second
     /// request for the same partition idempotent (or reject a
     /// conflicting target).
-    pub(crate) future_logs: Arc<DashMap<(String, i32), Arc<crate::future_log::FutureLogState>>>,
+    pub(crate) future_logs:
+        Arc<DashMap<(String, PartitionIndex), Arc<crate::future_log::FutureLogState>>>,
     pub(crate) group_coordinator: Arc<crate::coordinator::GroupCoordinator>,
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
@@ -389,7 +395,7 @@ impl BrokerHandle {
         // tests) synthesizes a single CONTROLLER endpoint and derives the
         // directory id from the node id, matching the `for_tests` convention.
         let node = crabka_raft::Node {
-            directory_id: uuid::Uuid::from_u128(u128::from(node_id)),
+            directory_id: uuid::Uuid::from_u128(u128::from(node_id.0)),
             endpoints: vec![crabka_metadata::VoterEndpoint {
                 name: "CONTROLLER".into(),
                 host: addr.ip().to_string(),
@@ -421,8 +427,13 @@ impl BrokerHandle {
     /// assert all followers caught up.
     #[allow(clippy::unused_async, clippy::used_underscore_binding)]
     pub async fn local_log_end_offset(&self, topic: &str, partition: i32) -> Option<i64> {
-        let part = self._broker.partitions.get(topic, partition)?;
-        Some(part.log_end_offset())
+        let part = self
+            ._broker
+            .partitions
+            .get(topic, PartitionIndex(partition))?;
+        // Unwrap `Offset` -> `i64` at this test-helper boundary: integration
+        // tests compare the result against raw offset literals.
+        Some(part.log_end_offset().0)
     }
 
     /// Test-only: truncate this broker's local partition log so no
@@ -445,20 +456,20 @@ impl BrokerHandle {
         let part = self
             ._broker
             .partitions
-            .get(topic, partition)
+            .get(topic, PartitionIndex(partition))
             .ok_or_else(|| {
                 crate::error::BrokerError::Replication(format!(
                     "partition {topic}-{partition} not local"
                 ))
             })?;
-        part.truncate_to(offset).await?;
+        part.truncate_to(crabka_log::Offset(offset)).await?;
         // Mirror the production truncation path (the replicator): a log
         // truncation also reverts idempotent-producer dedup entries for the
         // dropped offsets, so a retried batch from the truncated tail re-appends
         // instead of deduplicating against a vanished offset.
         self._broker
             .producer_state
-            .truncate(topic, partition, offset)
+            .truncate(topic, PartitionIndex(partition), offset)
             .await;
         Ok(())
     }
@@ -483,13 +494,13 @@ impl BrokerHandle {
         let part = self
             ._broker
             .partitions
-            .get(topic, partition)
+            .get(topic, PartitionIndex(partition))
             .ok_or_else(|| {
                 crate::error::BrokerError::Replication(format!(
                     "partition {topic}-{partition} not local"
                 ))
             })?;
-        part.test_set_log_start(new_start).await
+        part.test_set_log_start(crabka_log::Offset(new_start)).await
     }
 
     /// Test-only: directly set `current_leader_epoch` on a locally-hosted
@@ -499,7 +510,11 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub fn test_set_leader_epoch(&self, topic: &str, partition: i32, epoch: i32) {
-        if let Some(part) = self._broker.partitions.get(topic, partition) {
+        if let Some(part) = self
+            ._broker
+            .partitions
+            .get(topic, PartitionIndex(partition))
+        {
             part.test_set_leader_epoch(epoch);
         }
     }
@@ -512,7 +527,9 @@ impl BrokerHandle {
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
     pub fn partition_exists_for_test(&self, topic: &str, partition: i32) -> bool {
-        self._broker.partitions.contains(topic, partition)
+        self._broker
+            .partitions
+            .contains(topic, PartitionIndex(partition))
     }
 
     /// Test-only: read the share-state summary
@@ -530,10 +547,15 @@ impl BrokerHandle {
         topic_id: uuid::Uuid,
         partition: i32,
     ) -> Option<(i32, i32, i64, i32)> {
+        // Unwrap the summary's `start_offset` -> `i64` at this test-helper
+        // boundary: integration tests compare it against raw offset literals.
         self._broker
             .share_coordinator
             .read_summary(group, topic_id, partition)
             .await
+            .map(|(state_epoch, leader_epoch, start_offset, count)| {
+                (state_epoch, leader_epoch, start_offset.0, count)
+            })
     }
 
     /// Test-only: await until the persisted share-state summary exists for
@@ -854,8 +876,12 @@ impl BrokerHandle {
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
     pub fn partition_log_start_for_test(&self, topic: &str, partition: i32) -> Option<i64> {
-        let part = self._broker.partitions.get(topic, partition)?;
-        Some(part.log_start_offset())
+        let part = self
+            ._broker
+            .partitions
+            .get(topic, PartitionIndex(partition))?;
+        // Unwrap `Offset` -> `i64` at this test-helper boundary.
+        Some(part.log_start_offset().0)
     }
 
     /// Test-only: return the `retention.ms` override currently active in
@@ -870,7 +896,10 @@ impl BrokerHandle {
         topic: &str,
         partition: i32,
     ) -> Option<Option<std::time::Duration>> {
-        let part = self._broker.partitions.get(topic, partition)?;
+        let part = self
+            ._broker
+            .partitions
+            .get(topic, PartitionIndex(partition))?;
         let snap = part.log.lock().ok()?.config_snapshot();
         Some(snap.retention_ms)
     }
@@ -888,7 +917,10 @@ impl BrokerHandle {
         topic: &str,
         partition: i32,
     ) -> Option<crabka_log::LogConfig> {
-        let part = self._broker.partitions.get(topic, partition)?;
+        let part = self
+            ._broker
+            .partitions
+            .get(topic, PartitionIndex(partition))?;
         Some(part.log.lock().ok()?.config_snapshot())
     }
 
@@ -914,7 +946,7 @@ impl BrokerHandle {
         let part = self
             ._broker
             .partitions
-            .get(topic, partition)
+            .get(topic, PartitionIndex(partition))
             .ok_or_else(|| {
                 crate::error::BrokerError::Replication(format!(
                     "partition {topic}-{partition} not local"
@@ -930,7 +962,8 @@ impl BrokerHandle {
                 }],
                 ..Default::default()
             };
-            last_offset = part.produce_batch(batch).await?;
+            // Unwrap `Offset` -> `i64` at this test-helper boundary.
+            last_offset = part.produce_batch(batch).await?.0;
         }
         Ok(last_offset)
     }
@@ -1003,8 +1036,8 @@ impl BrokerHandle {
     /// broker without hard-coding a node id.
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
-    pub fn node_id(&self) -> crabka_raft::NodeId {
-        self._broker.config.node_id
+    pub fn node_id(&self) -> u64 {
+        self._broker.config.node_id.0
     }
 
     /// Test-only: return a snapshot of the current `MetadataImage` as seen by
@@ -1112,14 +1145,14 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
-    pub fn partition_leader_for_test(
-        &self,
-        topic: &str,
-        partition: i32,
-    ) -> Option<crabka_raft::NodeId> {
+    pub fn partition_leader_for_test(&self, topic: &str, partition: i32) -> Option<u64> {
         let img = self._broker.controller.current_image();
         let p = img.partition(topic, partition)?;
-        if p.leader == 0 { None } else { Some(p.leader) }
+        if p.leader == crabka_raft::NodeId(0) {
+            None
+        } else {
+            Some(p.leader.0)
+        }
     }
 
     /// Test-only: return the current ISR for `(topic, partition)` as seen
@@ -1128,14 +1161,10 @@ impl BrokerHandle {
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
-    pub fn partition_isr_for_test(
-        &self,
-        topic: &str,
-        partition: i32,
-    ) -> Option<Vec<crabka_raft::NodeId>> {
+    pub fn partition_isr_for_test(&self, topic: &str, partition: i32) -> Option<Vec<u64>> {
         let img = self._broker.controller.current_image();
         let p = img.partition(topic, partition)?;
-        Some(p.isr.clone())
+        Some(p.isr.iter().map(|n| n.0).collect())
     }
 
     /// Test-only: return a clone of the full `PartitionRecord` for
@@ -1252,18 +1281,21 @@ impl BrokerHandle {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some(id) = *rx.borrow_and_update()
-                    && id != 0
+                    && id != crabka_raft::NodeId(0)
                 {
                     return id;
                 }
                 if rx.changed().await.is_err() {
-                    return 0;
+                    return crabka_raft::NodeId(0);
                 }
             }
         })
         .await;
         let id = res.expect("wait_until_controller_leader timed out after 30s");
-        assert!(id != 0, "leader channel closed before a leader was elected");
+        assert!(
+            id != crabka_raft::NodeId(0),
+            "leader channel closed before a leader was elected"
+        );
         id
     }
 
@@ -1296,8 +1328,11 @@ impl BrokerHandle {
         exclude: crabka_raft::NodeId,
     ) {
         self.wait_for_image(|img| {
-            img.partition(topic, partition)
-                .is_some_and(|p| p.leader != 0 && p.leader != exclude && p.leader_epoch > 0)
+            img.partition(topic, partition).is_some_and(|p| {
+                p.leader != crabka_raft::NodeId(0)
+                    && p.leader != exclude
+                    && p.leader_epoch > crabka_metadata::LeaderEpoch(0)
+            })
         })
         .await;
     }
@@ -1325,9 +1360,13 @@ impl BrokerHandle {
     pub async fn wait_until_local_log_end_offset(&self, topic: &str, partition: i32, min: i64) {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
-                if let Some(part) = self._broker.partitions.get(topic, partition) {
+                if let Some(part) = self
+                    ._broker
+                    .partitions
+                    .get(topic, PartitionIndex(partition))
+                {
                     let notified = part.append_notify.notified();
-                    if part.log_end_offset() >= min {
+                    if part.log_end_offset() >= crabka_log::Offset(min) {
                         return;
                     }
                     notified.await;
@@ -1366,9 +1405,13 @@ impl BrokerHandle {
     ) {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
-                if let Some(part) = self._broker.partitions.get(topic, partition) {
+                if let Some(part) = self
+                    ._broker
+                    .partitions
+                    .get(topic, PartitionIndex(partition))
+                {
                     let notified = part.append_notify.notified();
-                    if part.log_end_offset() == target {
+                    if part.log_end_offset() == crabka_log::Offset(target) {
                         return;
                     }
                     // Truncation does not fire append_notify; fall back to a short
@@ -1949,7 +1992,7 @@ impl Broker {
                     config.controller_listen_addr,
                 );
                 tracing::info!(
-                    node_id = config.node_id,
+                    node_id = config.node_id.0,
                     voter_count = config.controller_quorum_voters.len(),
                     mode = ?config.bootstrap_mode,
                     "KIP-595 static voter set: deriving voters from controller_quorum_voters (peer hosts re-resolved per dial)"
@@ -2258,13 +2301,13 @@ impl Broker {
                 let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
                 let part = spawn_partition(
                     topic.clone(),
-                    partition_id,
+                    PartitionIndex(partition_id),
                     owning_dir,
                     log,
                     log_dir_status.clone(),
                     producer_state.clone(),
                 );
-                partitions.insert(topic.clone(), partition_id, part);
+                partitions.insert(topic.clone(), PartitionIndex(partition_id), part);
             }
         }
 
@@ -2401,13 +2444,13 @@ impl Broker {
         // Hoisted out of the audit_enabled block so block 2 (BrokerStarted
         // wait) can key on the actual led partition index rather than
         // hardcoding partition 0.
-        let audit_led_partition: Option<i32> = if config.audit_enabled {
+        let audit_led_partition: Option<PartitionIndex> = if config.audit_enabled {
             let image = controller.current_image();
-            let mut led: Option<i32> = None;
+            let mut led: Option<PartitionIndex> = None;
             let mut idx = 0i32;
             while let Some(part) = image.partition(&config.audit_topic, idx) {
                 if part.leader == config.node_id {
-                    led = Some(idx);
+                    led = Some(PartitionIndex(idx));
                     break;
                 }
                 idx += 1;
@@ -2654,7 +2697,7 @@ impl Broker {
                             if let Err(e) = crate::leader_election::on_broker_dead(
                                 &controller_for_ticker,
                                 ticker_node_id,
-                                n,
+                                crabka_raft::NodeId(n),
                                 &liveness_for_ticker,
                                 &metrics_for_ticker,
                                 &recovery_for_ticker,
@@ -2669,7 +2712,7 @@ impl Broker {
                             if let Err(e) = crate::leader_election::on_broker_alive(
                                 &controller_for_ticker,
                                 ticker_node_id,
-                                n,
+                                crabka_raft::NodeId(n),
                                 &liveness_for_ticker,
                             )
                             .await
@@ -2719,7 +2762,7 @@ impl Broker {
                         let ids: Vec<u64> = controller_seed
                             .current_image()
                             .brokers()
-                            .map(|b| b.node_id)
+                            .map(|b| b.node_id.0)
                             .collect();
                         liveness_seed.seed_brokers(ids).await;
                     }
@@ -2876,7 +2919,7 @@ impl Broker {
                         // broker's owned set so the metric stays
                         // per-broker; cluster-wide rollup can
                         // sum across brokers.
-                        if pr.replicas.contains(&node_id) && !alive.contains(&pr.leader) {
+                        if pr.replicas.contains(&node_id) && !alive.contains(&pr.leader.0) {
                             offline += 1;
                         }
                     }
@@ -3356,15 +3399,17 @@ impl Broker {
         {
             config.advertised_listener = format!("{host}:{}", listen_addr.port());
         }
-        let future_logs: Arc<DashMap<(String, i32), Arc<crate::future_log::FutureLogState>>> =
-            Arc::new(DashMap::new());
+        let future_logs: Arc<
+            DashMap<(String, PartitionIndex), Arc<crate::future_log::FutureLogState>>,
+        > = Arc::new(DashMap::new());
 
         // KIP-113: resume any interrupted intra-broker moves left on
         // disk as `<topic>-<partition>-future` dirs.
         for owning_dir in config.all_log_dirs() {
             let futures = log_dir::scan_future(&owning_dir).unwrap_or_default();
             for (topic, partition_id) in futures {
-                if !partitions.contains(&topic, partition_id) {
+                let partition_idx = PartitionIndex(partition_id);
+                if !partitions.contains(&topic, partition_idx) {
                     // Stranded future dir — partition is no longer
                     // hosted (e.g. topic deleted). Remove the leftover.
                     let stranded = log_dir::future_partition_dir(&owning_dir, &topic, partition_id);
@@ -3383,7 +3428,7 @@ impl Broker {
                     &owning_dir,
                     &config.log_config,
                     &topic,
-                    partition_id,
+                    partition_idx,
                 ) {
                     tracing::warn!(
                         topic = %topic, partition = partition_id,
@@ -3792,7 +3837,7 @@ fn spawn_rlmm_reconciler(
 /// the path is not stable across canonicalisation.
 pub(crate) fn spawn_partition(
     topic: String,
-    partition_id: i32,
+    partition_id: PartitionIndex,
     log_dir: std::path::PathBuf,
     log: crabka_log::Log,
     log_dir_status: crate::log_dir_status::LogDirRegistry,
@@ -4170,9 +4215,10 @@ fn tune_accepted_socket(stream: &tokio::net::TcpStream) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use tempfile::tempdir;
+
+    use super::*;
 
     struct MockMetadataSource {
         image: Arc<crabka_metadata::MetadataImage>,
@@ -4317,7 +4363,7 @@ mod tests {
             .expect("open partition log");
         let part = spawn_partition(
             topic.to_string(),
-            partition,
+            PartitionIndex(partition),
             log_dir.to_path_buf(),
             log,
             crate::log_dir_status::LogDirRegistry::default(),
@@ -4530,10 +4576,10 @@ mod tests {
         crabka_metadata::PartitionRecord {
             topic: topic.to_string(),
             partition,
-            leader,
-            replicas: replicas.to_vec(),
-            isr: isr.to_vec(),
-            leader_epoch,
+            leader: crabka_audit::NodeId(leader),
+            replicas: replicas.iter().copied().map(crabka_audit::NodeId).collect(),
+            isr: isr.iter().copied().map(crabka_audit::NodeId).collect(),
+            leader_epoch: crabka_metadata::LeaderEpoch(leader_epoch),
             adding_replicas: Vec::new(),
             removing_replicas: Vec::new(),
             directories: vec![uuid::Uuid::nil(); replicas.len()],
@@ -4584,14 +4630,14 @@ mod tests {
     ) -> BrokerConfig {
         let mut config = BrokerConfig::for_tests(log_dir.to_path_buf());
         config.broker_id = i32::try_from(node_id).expect("node id fits broker id");
-        config.node_id = node_id;
+        config.node_id = crabka_raft::NodeId(node_id);
         config.listen_addr = listen_addr;
         config.advertised_listener = listen_addr.to_string();
         config.controller_listen_addr = controller_addr;
         config.directory_id = uuid::Uuid::from_u128(u128::from(node_id));
         config.controller_quorum_voters = voters
             .iter()
-            .map(|(id, addr)| (*id, addr.to_string()))
+            .map(|(id, addr)| (crabka_raft::NodeId(*id), addr.to_string()))
             .collect();
         config
     }
@@ -4607,19 +4653,23 @@ mod tests {
         // `BeginQuorumEpoch`, never learned the leader, and never opened :9092.
         let quorum = vec![
             (
-                0u64,
+                crabka_raft::NodeId(0),
                 "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local:9093".to_string(),
             ),
             (
-                1u64,
+                crabka_raft::NodeId(1),
                 "demo-broker-1-0.demo-broker-headless.default.svc.cluster.local:9093".to_string(),
             ),
         ];
         let self_dir = uuid::Uuid::from_u128(7);
-        let set =
-            static_controller_voter_set(&quorum, 0, self_dir, "0.0.0.0:9093".parse().unwrap());
+        let set = static_controller_voter_set(
+            &quorum,
+            crabka_audit::NodeId(0),
+            self_dir,
+            "0.0.0.0:9093".parse().unwrap(),
+        );
 
-        let v0 = set.get(0).expect("voter 0 present");
+        let v0 = set.get(crabka_audit::NodeId(0)).expect("voter 0 present");
         let ep0 = v0
             .endpoints
             .iter()
@@ -4632,7 +4682,7 @@ mod tests {
         check!(ep0.port == 9093);
         check!(v0.directory_id == self_dir);
 
-        let v1 = set.get(1).expect("voter 1 present");
+        let v1 = set.get(crabka_audit::NodeId(1)).expect("voter 1 present");
         let ep1 = v1
             .endpoints
             .iter()
@@ -4646,12 +4696,18 @@ mod tests {
     fn static_voter_set_single_self_voter_uses_listen_addr() {
         // Standalone single-voter: the lone self endpoint uses this node's own
         // controller listen address.
-        let quorum = vec![(3u64, "127.0.0.1:9093".to_string())];
+        let quorum = vec![(crabka_raft::NodeId(3), "127.0.0.1:9093".to_string())];
         let self_dir = uuid::Uuid::from_u128(3);
-        let set =
-            static_controller_voter_set(&quorum, 3, self_dir, "192.168.1.5:9099".parse().unwrap());
+        let set = static_controller_voter_set(
+            &quorum,
+            crabka_audit::NodeId(3),
+            self_dir,
+            "192.168.1.5:9099".parse().unwrap(),
+        );
         assert!(set.len() == 1);
-        let v = set.get(3).expect("self voter present");
+        let v = set
+            .get(crabka_audit::NodeId(3))
+            .expect("self voter present");
         let ep = v.endpoints.iter().find(|e| e.name == "CONTROLLER").unwrap();
         assert!(ep.host == "192.168.1.5");
         assert!(ep.port == 9099);
@@ -4794,16 +4850,16 @@ mod tests {
         let source: Arc<dyn crate::metadata_source::MetadataSource> =
             Arc::new(MockMetadataSource::new(
                 crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(1)),
-                Some(7),
+                Some(crabka_raft::NodeId(7)),
             ));
 
         let leader_adapter = ControllerAdapter {
             handle: source.clone(),
-            node_id: 7,
+            node_id: crabka_raft::NodeId(7),
         };
         let follower_adapter = ControllerAdapter {
             handle: source.clone(),
-            node_id: 8,
+            node_id: crabka_raft::NodeId(8),
         };
         assert!(crate::leader_rebalance::ControllerLike::is_leader(
             &leader_adapter
@@ -4814,11 +4870,11 @@ mod tests {
 
         let leader_adapter = ReassignmentControllerAdapter {
             handle: source.clone(),
-            node_id: 7,
+            node_id: crabka_raft::NodeId(7),
         };
         let follower_adapter = ReassignmentControllerAdapter {
             handle: source,
-            node_id: 8,
+            node_id: crabka_raft::NodeId(8),
         };
         assert!(crate::reassignment::ReassignmentController::is_leader(
             &leader_adapter
@@ -4831,13 +4887,15 @@ mod tests {
     #[test]
     fn image_watcher_adapters_forward_current_image() {
         let cluster_id = uuid::Uuid::from_u128(0x5150);
-        let source: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(
-            MockMetadataSource::new(crabka_metadata::MetadataImage::new(cluster_id), Some(1)),
-        );
+        let source: Arc<dyn crate::metadata_source::MetadataSource> =
+            Arc::new(MockMetadataSource::new(
+                crabka_metadata::MetadataImage::new(cluster_id),
+                Some(crabka_raft::NodeId(1)),
+            ));
 
         let leader = ControllerAdapter {
             handle: source.clone(),
-            node_id: 1,
+            node_id: crabka_raft::NodeId(1),
         };
         assert!(
             crate::leader_rebalance::ControllerLike::current_image(&leader).cluster_id()
@@ -4846,7 +4904,7 @@ mod tests {
 
         let reassignment = ReassignmentControllerAdapter {
             handle: source.clone(),
-            node_id: 1,
+            node_id: crabka_raft::NodeId(1),
         };
         assert!(
             crate::reassignment::ReassignmentController::current_image(&reassignment).cluster_id()
@@ -4881,13 +4939,13 @@ mod tests {
         let source: Arc<dyn crate::metadata_source::MetadataSource> =
             Arc::new(MockMetadataSource::new(
                 crabka_metadata::MetadataImage::new(uuid::Uuid::from_u128(1)),
-                Some(1),
+                Some(crabka_raft::NodeId(1)),
             ));
         let record = metadata_topic_record("adapter-submit-mutant-topic", 0xADAD);
 
         let leader = ControllerAdapter {
             handle: source.clone(),
-            node_id: 1,
+            node_id: crabka_raft::NodeId(1),
         };
         assert!(
             crate::leader_rebalance::ControllerLike::submit_change(&leader, vec![record.clone()])
@@ -4897,7 +4955,7 @@ mod tests {
 
         let reassignment = ReassignmentControllerAdapter {
             handle: source.clone(),
-            node_id: 1,
+            node_id: crabka_raft::NodeId(1),
         };
         assert!(
             crate::reassignment::ReassignmentController::submit_change(
@@ -5016,14 +5074,14 @@ mod tests {
         );
         check!(
             handle
-                .change_membership([1_u64].into_iter().collect())
+                .change_membership([crabka_raft::NodeId(1)].into_iter().collect())
                 .await
                 .is_err()
         );
 
         let leader = handle.wait_until_controller_leader().await;
-        assert!(leader == handle.node_id());
-        assert!(handle.controller_leader_id().await == Some(handle.node_id()));
+        assert!(leader == crabka_raft::NodeId(handle.node_id()));
+        assert!(handle.controller_leader_id().await == Some(crabka_raft::NodeId(handle.node_id())));
 
         let mut endpoints = handle.self_registration_endpoints().await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -5036,7 +5094,7 @@ mod tests {
         handle
             .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1BrokerRegistration(
                 crabka_metadata::BrokerRegistrationRecord {
-                    node_id: handle.node_id() + 1,
+                    node_id: crabka_raft::NodeId(handle.node_id() + 1),
                     broker_epoch: 0,
                     incarnation_id: uuid::Uuid::from_u128(0xBEEF),
                     host: "127.0.0.1".to_string(),
@@ -5055,7 +5113,7 @@ mod tests {
         assert!(
             handle
                 .controller_image_for_test()
-                .broker(handle.node_id() + 1)
+                .broker(crabka_raft::NodeId(handle.node_id() + 1))
                 .is_some()
         );
         handle.wait_until_brokers_registered(2).await;
@@ -5085,10 +5143,18 @@ mod tests {
         let expected_partition = crabka_metadata::PartitionRecord {
             topic: topic.to_string(),
             partition: 0,
-            leader: partition_leader,
-            replicas: partition_isr.to_vec(),
-            isr: partition_isr.to_vec(),
-            leader_epoch: 3,
+            leader: crabka_audit::NodeId(partition_leader),
+            replicas: partition_isr
+                .iter()
+                .copied()
+                .map(crabka_audit::NodeId)
+                .collect(),
+            isr: partition_isr
+                .iter()
+                .copied()
+                .map(crabka_audit::NodeId)
+                .collect(),
+            leader_epoch: crabka_metadata::LeaderEpoch(3),
             adding_replicas: Vec::new(),
             removing_replicas: Vec::new(),
             directories: vec![uuid::Uuid::nil(); partition_isr.len()],
@@ -5101,7 +5167,11 @@ mod tests {
         check!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
-                handle.wait_until_partition_leader_changed(topic, 0, handle.node_id()),
+                handle.wait_until_partition_leader_changed(
+                    topic,
+                    0,
+                    crabka_raft::NodeId(handle.node_id())
+                ),
             )
             .await
             .is_ok()
@@ -5129,9 +5199,11 @@ mod tests {
         let local_topic = "handle-local-log-mutant-topic";
         let local_part = local_partition_with_records(dir.path(), local_topic, 0, &[b"a", b"b"]);
         assert!(!handle.partition_exists_for_test(local_topic, 0));
-        broker
-            .partitions
-            .insert(local_topic.to_string(), 0, Arc::clone(&local_part));
+        broker.partitions.insert(
+            local_topic.to_string(),
+            PartitionIndex(0),
+            Arc::clone(&local_part),
+        );
         assert!(handle.partition_exists_for_test(local_topic, 0));
         assert!(handle.local_log_end_offset(local_topic, 0).await == Some(2));
         handle.test_set_leader_epoch(local_topic, 0, 7);
@@ -5159,9 +5231,11 @@ mod tests {
             .lock()
             .expect("helper partition log lock")
             .set_config(helper_config.clone());
-        broker
-            .partitions
-            .insert(helper_topic.to_string(), 0, Arc::clone(&helper_part));
+        broker.partitions.insert(
+            helper_topic.to_string(),
+            PartitionIndex(0),
+            Arc::clone(&helper_part),
+        );
         handle
             .test_advance_log_start(helper_topic, 0, 2)
             .await
@@ -5190,9 +5264,9 @@ mod tests {
             .log
             .lock()
             .expect("helper partition log lock")
-            .read(2, 1 << 20)
+            .read(crabka_log::Offset(2), 1 << 20)
             .expect("read helper partition records");
-        assert!(read.start_offset == 2);
+        assert!(read.start_offset == crabka_log::Offset(2));
         assert!(!read.batches.is_empty());
         let records: Vec<_> = read
             .batches
@@ -5257,7 +5331,7 @@ mod tests {
         let share_state_part = local_partition_with_records(
             dir.path(),
             crate::share_coordinator::bootstrap::TOPIC,
-            share_state_partition,
+            share_state_partition.0,
             &[],
         );
         broker.partitions.insert(
@@ -5267,7 +5341,13 @@ mod tests {
         );
         broker
             .share_coordinator
-            .initialize(share_group, share_topic_id, share_partition, 11, 90)
+            .initialize(
+                share_group,
+                share_topic_id,
+                share_partition,
+                11,
+                crabka_log::Offset(90),
+            )
             .await
             .expect("initialize share state");
         broker
@@ -5278,11 +5358,11 @@ mod tests {
                 share_partition,
                 12,
                 2,
-                95,
+                crabka_log::Offset(95),
                 7,
                 vec![crate::share_coordinator::persistence::StateBatch {
-                    first_offset: 95,
-                    last_offset: 99,
+                    first_offset: crabka_log::Offset(95),
+                    last_offset: crabka_log::Offset(99),
                     delivery_state: 0,
                     delivery_count: 1,
                 }],
@@ -5333,7 +5413,7 @@ mod tests {
         );
         {
             let mut state = acquired_cell.lock().await;
-            state.materialize(3, 10);
+            state.materialize(crabka_log::Offset(3), 10);
             let acquired = state.acquire(
                 "member-1",
                 3,
@@ -5360,17 +5440,20 @@ mod tests {
         drop(closed_listener);
         let add_learner = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            handle.add_learner(handle.node_id() + 10, closed_addr),
+            handle.add_learner(crabka_raft::NodeId(handle.node_id() + 10), closed_addr),
         )
         .await
         .expect("add_learner returned before timeout");
         assert!(add_learner.is_err());
 
         let own_directory = handle
-            .voter_directory_id_for_test(handle.node_id())
+            .voter_directory_id_for_test(crabka_raft::NodeId(handle.node_id()))
             .expect("own voter directory id");
         check!(own_directory != uuid::Uuid::nil());
-        check!(handle.voter_directory_id_for_test(handle.node_id() + 10_000) == None);
+        check!(
+            handle.voter_directory_id_for_test(crabka_raft::NodeId(handle.node_id() + 10_000))
+                == None
+        );
 
         // Marking the same log dir offline twice: first succeeds, second is a
         // no-op.
@@ -5526,7 +5609,7 @@ mod tests {
         let leader = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 if let Some(leader) = handle7.controller_leader_id().await
-                    && leader != 0
+                    && leader != crabka_raft::NodeId(0)
                 {
                     return leader;
                 }
@@ -5535,7 +5618,7 @@ mod tests {
         })
         .await
         .expect("two-voter cluster leader");
-        assert!(leader == 7 || leader == 8);
+        assert!(leader == crabka_raft::NodeId(7) || leader == crabka_raft::NodeId(8));
         handle7.wait_for_image(|img| img.voters().len() == 2).await;
         handle8.wait_for_image(|img| img.voters().len() == 2).await;
 
@@ -5547,14 +5630,14 @@ mod tests {
                 .quorum_voters_for_test()
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>()
-                == [7, 8]
+                == [crabka_raft::NodeId(7), crabka_raft::NodeId(8)]
                     .into_iter()
                     .collect::<std::collections::BTreeSet<_>>()
         );
         check!(handle7.voter_count_for_test() == 2);
         check!(
             handle7.voter_ids_for_test()
-                == [7, 8]
+                == [crabka_raft::NodeId(7), crabka_raft::NodeId(8)]
                     .into_iter()
                     .collect::<std::collections::BTreeSet<_>>()
         );
@@ -5642,7 +5725,11 @@ mod tests {
                 "wait_until_partition_leader_changed",
                 Box::pin(async {
                     handle
-                        .wait_until_partition_leader_changed("missing-mutant-topic", 0, 1)
+                        .wait_until_partition_leader_changed(
+                            "missing-mutant-topic",
+                            0,
+                            crabka_raft::NodeId(1),
+                        )
                         .await;
                 }),
             ),
@@ -5698,7 +5785,11 @@ mod tests {
             assert!(
                 tokio::time::timeout(
                     timeout,
-                    handle.wait_until_partition_leader_changed(topic, 0, excluded),
+                    handle.wait_until_partition_leader_changed(
+                        topic,
+                        0,
+                        crabka_raft::NodeId(excluded)
+                    ),
                 )
                 .await
                 .is_err(),
@@ -5759,10 +5850,10 @@ mod tests {
             image.apply(&MetadataRecord::V1Partition(PartitionRecord {
                 topic: "orders".into(),
                 partition,
-                leader,
-                replicas: replicas.clone(),
-                isr: replicas,
-                leader_epoch: 0,
+                leader: crabka_audit::NodeId(leader),
+                replicas: replicas.iter().copied().map(crabka_audit::NodeId).collect(),
+                isr: replicas.iter().copied().map(crabka_audit::NodeId).collect(),
+                leader_epoch: crabka_metadata::LeaderEpoch(0),
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
@@ -5770,7 +5861,7 @@ mod tests {
             }));
         }
 
-        let got = needed_metadata_partitions(&image, 7, 50);
+        let got = needed_metadata_partitions(&image, crabka_audit::NodeId(7), 50);
 
         let mut expected = vec![
             metadata_partition_for(&TopicIdPartition::new(topic_id, "orders", 0), 50),
@@ -5872,7 +5963,7 @@ mod tests {
                 cfg,
                 tokio::runtime::Handle::current(),
                 metrics.clone(),
-                7,
+                crabka_raft::NodeId(7),
                 image_rx,
                 shutdown,
             ),

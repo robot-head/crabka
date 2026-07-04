@@ -10,16 +10,15 @@
 //! [`authz_layer`] is the `from_fn_with_state` middleware that gates each request
 //! (`403` on deny) and lets trusted intra-cluster forwards through untouched.
 
-use std::collections::HashSet;
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{collections::HashSet, net::SocketAddr, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
-use axum::extract::{Request, State};
-use axum::http::{Method, StatusCode};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::{
+    extract::{Request, State},
+    http::{Method, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
 use crabka_authz::{AclCache, AuthorizationRequest, AuthorizationResult, Authorizer};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::Principal;
@@ -725,10 +724,12 @@ mod tests {
     // `tests/security.rs` integration test, so it is intentionally NOT unit-
     // tested here; these cover the pure request-gating branches.
 
-    use axum::Router;
-    use axum::body::Body;
-    use axum::http::Request;
-    use axum::routing::{get, post};
+    use axum::{
+        Router,
+        body::Body,
+        http::Request,
+        routing::{get, post},
+    };
     use tower::ServiceExt as _; // for `oneshot`
 
     /// A router with `authz_layer` over `az`, exposing `/` (no authz target),

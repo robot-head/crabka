@@ -1,6 +1,7 @@
 //! KIP-150 non-windowed cogroup — JVM 4.1 wire-topology + behavioral goldens.
-use crabka_client_streams::dsl::StreamsBuilder;
-use crabka_client_streams::{Consumed, I64Serde, Materialized, Produced, StringSerde};
+use crabka_client_streams::{
+    Consumed, I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
+};
 
 fn assert_matches_fixture(wire: &crabka_client_streams::topology::WireTopology, fixture: &str) {
     let path = format!("tests/testdata/golden/dsl/{fixture}.topology.json");

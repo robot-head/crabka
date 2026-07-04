@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
+use crabka_metadata::{MetadataRecord, NodeId, PartitionRecord, TopicRecord};
 use crabka_raft::RaftError;
 use uuid::Uuid;
 
@@ -23,7 +23,7 @@ pub(crate) async fn ensure_topic(
 
     // Collect registered brokers for round-robin replica assignment. The
     // broker count drives the replication factor, capped at 3.
-    let mut sorted: Vec<u64> = image.brokers().map(|b| b.node_id).collect();
+    let mut sorted: Vec<NodeId> = image.brokers().map(|b| b.node_id).collect();
     if sorted.is_empty() {
         return Err(crate::error::BrokerError::Share(
             "no brokers registered; cannot bootstrap __share_group_state".into(),
@@ -59,7 +59,7 @@ pub(crate) async fn ensure_topic(
             leader: replicas[0],
             replicas: replicas.clone(),
             isr: replicas,
-            leader_epoch: 0,
+            leader_epoch: crabka_metadata::LeaderEpoch(0),
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],

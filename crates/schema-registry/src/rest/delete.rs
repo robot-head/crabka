@@ -1,11 +1,16 @@
 //! DELETE endpoints for versions and subjects (soft + permanent).
 
-use axum::extract::{Path, Query, State};
-use axum::response::Response;
+use axum::{
+    extract::{Path, Query, State},
+    response::Response,
+};
 use serde::Deserialize;
 
-use crate::error::SrError;
-use crate::rest::{AppState, response::ok_json};
+use crate::{
+    error::SrError,
+    ids::SchemaVersion,
+    rest::{AppState, response::ok_json},
+};
 
 #[derive(Deserialize, Default)]
 pub struct PermanentQ {
@@ -13,9 +18,9 @@ pub struct PermanentQ {
     permanent: bool,
 }
 
-fn parse_concrete_version(v: &str) -> Result<i32, SrError> {
+fn parse_concrete_version(v: &str) -> Result<SchemaVersion, SrError> {
     match v.parse::<i32>() {
-        Ok(n) if n >= 1 => Ok(n),
+        Ok(n) if n >= 1 => Ok(SchemaVersion(n)),
         _ => Err(SrError::InvalidVersion(v.to_string())),
     }
 }
@@ -58,4 +63,43 @@ pub async fn delete_subject(
         st.store.soft_delete_subject(&subject).await?
     };
     Ok(ok_json(&versions))
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::*;
+
+    #[test]
+    fn parse_concrete_version_positive_is_ok() {
+        check!(matches!(parse_concrete_version("1"), Ok(SchemaVersion(1))));
+        check!(matches!(parse_concrete_version("7"), Ok(SchemaVersion(7))));
+    }
+
+    #[test]
+    fn parse_concrete_version_zero_is_rejected() {
+        // 0 parses as i32 but fails the `n >= 1` guard: must be InvalidVersion,
+        // not Ok(SchemaVersion(0)).
+        check!(matches!(
+            parse_concrete_version("0"),
+            Err(SrError::InvalidVersion(_))
+        ));
+    }
+
+    #[test]
+    fn parse_concrete_version_negative_is_rejected() {
+        check!(matches!(
+            parse_concrete_version("-3"),
+            Err(SrError::InvalidVersion(_))
+        ));
+    }
+
+    #[test]
+    fn parse_concrete_version_non_numeric_is_rejected() {
+        check!(matches!(
+            parse_concrete_version("latest"),
+            Err(SrError::InvalidVersion(_))
+        ));
+    }
 }

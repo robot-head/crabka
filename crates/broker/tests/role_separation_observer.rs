@@ -6,11 +6,10 @@
 
 #![allow(clippy::manual_assert)]
 
-use assert2::assert;
 use std::collections::BTreeSet;
 
-use crabka_broker::config::NodeRole;
-use crabka_broker::{BootstrapMode, Broker};
+use assert2::assert;
+use crabka_broker::{BootstrapMode, Broker, config::NodeRole};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use tempfile::TempDir;
@@ -113,7 +112,11 @@ async fn broker_only_node_observes_and_forwards() {
     );
 
     // Assertion 3: the broker-only node is NOT in the controller's voter set.
-    let quorum_voters: BTreeSet<u64> = controller.quorum_voters_for_test().into_iter().collect();
+    let quorum_voters: BTreeSet<u64> = controller
+        .quorum_voters_for_test()
+        .into_iter()
+        .map(|n| n.0)
+        .collect();
     assert!(quorum_voters.contains(&1), "the controller is a voter");
     assert!(
         !quorum_voters.contains(&broker_only_id),

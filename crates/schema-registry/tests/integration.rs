@@ -8,22 +8,28 @@
 //! runtime can't drive the broker's accept loop concurrently with the registry's
 //! producer/reader tasks and the test body.
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use prost_reflect::prost::Message;
-use prost_reflect::prost_types::field_descriptor_proto::{Label as FieldLabel, Type as FieldType};
-use prost_reflect::prost_types::{
-    DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
-    MethodDescriptorProto, ServiceDescriptorProto,
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
 };
-use tower::ServiceExt;
-
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
-use crabka_schema_registry::format::SchemaType;
-use crabka_schema_registry::kafkastore::{KafkaStore, RegisterSchema};
-use crabka_schema_registry::rest::{self, AppState};
+use crabka_schema_registry::{
+    config::{RegistryConfig, SecurityConfig},
+    format::SchemaType,
+    ids::{SchemaId, SchemaVersion},
+    kafkastore::{KafkaStore, RegisterSchema},
+    rest::{self, AppState},
+};
+use prost_reflect::{
+    prost::Message,
+    prost_types::{
+        DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+        MethodDescriptorProto, ServiceDescriptorProto,
+        field_descriptor_proto::{Label as FieldLabel, Type as FieldType},
+    },
+};
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt;
 
 async fn boot_registry(
     rf: i32,
@@ -909,13 +915,40 @@ async fn facade_soft_then_permanent_delete_version() {
         })
         .await
         .unwrap();
-    assert_eq!(store.soft_delete_version("av", 1).await.unwrap(), 1);
-    assert_eq!(store.store.read().versions("av", false).unwrap(), vec![2]);
-    assert_eq!(store.store.read().versions("av", true).unwrap(), vec![1, 2]);
-    let err = store.permanent_delete_version("av", 2).await.unwrap_err();
+    assert_eq!(
+        store
+            .soft_delete_version("av", SchemaVersion(1))
+            .await
+            .unwrap(),
+        SchemaVersion(1)
+    );
+    assert_eq!(
+        store.store.read().versions("av", false).unwrap(),
+        vec![SchemaVersion(2)]
+    );
+    assert_eq!(
+        store.store.read().versions("av", true).unwrap(),
+        vec![SchemaVersion(1), SchemaVersion(2)]
+    );
+    let err = store
+        .permanent_delete_version("av", SchemaVersion(2))
+        .await
+        .unwrap_err();
     assert_eq!(err.error_code(), 40407);
-    assert_eq!(store.permanent_delete_version("av", 1).await.unwrap(), 1);
-    assert!(store.store.read().version("av", Some(1), true).is_none());
+    assert_eq!(
+        store
+            .permanent_delete_version("av", SchemaVersion(1))
+            .await
+            .unwrap(),
+        SchemaVersion(1)
+    );
+    assert!(
+        store
+            .store
+            .read()
+            .version("av", Some(SchemaVersion(1)), true)
+            .is_none()
+    );
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -963,20 +996,20 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
             schema: &av("C"),
             references: &[],
             message_type: None,
-            import_id: Some(42),
-            import_version: Some(5),
+            import_id: Some(SchemaId(42)),
+            import_version: Some(SchemaVersion(5)),
         })
         .await
         .unwrap();
-    assert_eq!((reg.id, reg.version), (42, 5));
+    assert_eq!((reg.id, reg.version), (SchemaId(42), SchemaVersion(5)));
     assert_eq!(
         store
             .store
             .read()
-            .version("imp", Some(5), false)
+            .version("imp", Some(SchemaVersion(5)), false)
             .unwrap()
             .id,
-        42
+        SchemaId(42)
     );
     // IMPORT requires BOTH id and version: providing only one is rejected.
     assert!(
@@ -987,7 +1020,7 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
                 schema: &av("D"),
                 references: &[],
                 message_type: None,
-                import_id: Some(7),
+                import_id: Some(SchemaId(7)),
                 import_version: None,
             })
             .await

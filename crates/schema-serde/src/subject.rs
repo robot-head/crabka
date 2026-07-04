@@ -50,8 +50,9 @@ impl SubjectStrategy for TopicNameStrategy {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn topic_name_strategy() {

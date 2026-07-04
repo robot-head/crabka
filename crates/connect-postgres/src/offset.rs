@@ -1,5 +1,4 @@
-use std::fmt;
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
 use crabka_connect::{OffsetMap, OffsetValue, SourceOffset};
 
@@ -20,7 +19,7 @@ impl PgLsn {
         ]);
         let position = OffsetMap::from([("lsn".to_owned(), OffsetValue::String(self.to_string()))]);
 
-        SourceOffset::new(partition, position)
+        SourceOffset::new(partition.into(), position.into())
     }
 
     pub fn from_source_offset(
@@ -131,6 +130,7 @@ mod tests {
         let mut non_string = PgLsn(42).to_source_offset("app", "slot_a");
         non_string
             .partition
+            .0
             .insert("slot".to_owned(), OffsetValue::Long(7));
 
         for offset in [missing, non_string] {

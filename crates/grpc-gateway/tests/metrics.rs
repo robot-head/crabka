@@ -14,11 +14,12 @@
 //!   the rendered text for that exact labeled series and parses its value, so
 //!   even under parallel execution only THIS test can touch that delta.
 
-use axum::body::Body;
-use axum::http::{Request, StatusCode};
-use tower::ServiceExt;
-
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use crabka_grpc_gateway::metrics::metrics;
+use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
 // Helper

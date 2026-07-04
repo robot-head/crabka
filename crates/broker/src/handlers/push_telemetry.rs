@@ -3,20 +3,23 @@
 //! payload, and fans it out to the Prometheus + OTLP sinks.
 
 use bytes::{Bytes, BytesMut};
+use crabka_compression::CompressionType;
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        push_telemetry_request::PushTelemetryRequest,
+        push_telemetry_response::PushTelemetryResponse,
+    },
+};
 use uuid::Uuid;
 
-use crabka_compression::CompressionType;
-use crabka_protocol::owned::push_telemetry_request::PushTelemetryRequest;
-use crabka_protocol::owned::push_telemetry_response::PushTelemetryResponse;
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::client_metrics::manager::PushDecision;
-use crate::client_metrics::otlp;
-use crate::client_metrics::prometheus_sink::DataPoint;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::handlers::context::TelemetryContext;
+use crate::{
+    broker::Broker,
+    client_metrics::{manager::PushDecision, otlp, prometheus_sink::DataPoint},
+    codes,
+    error::BrokerError,
+    handlers::context::TelemetryContext,
+};
 
 /// Max allowed decompressed:compressed expansion ratio for a client-metrics
 /// payload (decompression-bomb guard).
@@ -180,18 +183,17 @@ fn flatten_for_prometheus(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_compression::CompressionType;
-    use crabka_protocol::owned::push_telemetry_response;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+    use crabka_protocol::{owned::push_telemetry_response, primitives::uuid::Uuid as ProtoUuid};
     use opentelemetry_proto::tonic::metrics::v1::{
         Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
         ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
     };
     use uuid::Uuid;
+
+    use super::*;
 
     fn number_point(value: number_data_point::Value) -> NumberDataPoint {
         NumberDataPoint {

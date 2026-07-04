@@ -7,22 +7,25 @@
 //! runtime can't drive both the broker's accept loop and the test body
 //! when the test makes synchronous-style blocking calls into the broker.
 
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
+
 use assert2::{assert, check};
-use std::collections::HashSet;
-use std::time::{Duration, Instant};
-
 use bytes::Bytes;
-use tempfile::TempDir;
-
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::records::{Record, RecordBatch};
+use tempfile::TempDir;
 
 /// Build a `RecordBatch` with one entry per value. Mirrors the helper in
 /// `crates/broker/tests/integration.rs`.
@@ -535,11 +538,9 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
 // ── KIP-320 truncation detection (Task 10) ───────────────────────────────────
 
 use crabka_client_consumer::ConsumerError;
-use crabka_protocol::owned::delete_records_request::{
-    DeleteRecordsPartition, DeleteRecordsRequest, DeleteRecordsTopic,
-};
-use crabka_protocol::owned::offset_fetch_request::{
-    OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
+use crabka_protocol::owned::{
+    delete_records_request::{DeleteRecordsPartition, DeleteRecordsRequest, DeleteRecordsTopic},
+    offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics},
 };
 
 /// Move a partition's `log_start_offset` forward via `DeleteRecords`

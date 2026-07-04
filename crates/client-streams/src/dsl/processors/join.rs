@@ -13,8 +13,10 @@ use std::marker::PhantomData;
 
 use async_trait::async_trait;
 
-use crate::processor::api::{Processor, ProcessorContext};
-use crate::processor::record::Record;
+use crate::processor::{
+    api::{Processor, ProcessorContext},
+    record::Record,
+};
 
 /// Variance-neutral marker for multi-param processor structs.
 type Marker<T> = PhantomData<fn() -> T>;
@@ -97,20 +99,25 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use std::marker::PhantomData;
+    use std::{collections::VecDeque, marker::PhantomData};
 
     use assert2::check;
 
     use super::*;
-    use crate::processor::api::ProcessorContext;
-    use crate::processor::erased::{Dispatch, ErasedRecord};
-    use crate::processor::record::RecordContext;
-    use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::store::api::KeyValueStore;
-    use crate::store::kv::KeyValueBytesStore;
-    use crate::store::registry::StoreRegistry;
-    use crate::store::versioned::{VersionedBytesStore, VersionedKeyValueStore};
+    use crate::{
+        processor::{
+            api::ProcessorContext,
+            erased::{Dispatch, ErasedRecord},
+            record::RecordContext,
+            serde::{I64Serde, StringSerde},
+        },
+        store::{
+            api::KeyValueStore,
+            kv::KeyValueBytesStore,
+            registry::StoreRegistry,
+            versioned::{VersionedBytesStore, VersionedKeyValueStore},
+        },
+    };
 
     /// Build a store registry with a `KeyValueBytesStore<String, i64>` named
     /// `"t"` pre-seeded with `("a", 10)`.

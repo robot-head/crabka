@@ -25,8 +25,10 @@
 //! the heartbeat client (which reports offline dir UUIDs to the
 //! controller), and JBOD placement.
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use dashmap::DashMap;
 
@@ -204,9 +206,10 @@ fn probe_one(dir: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use tempfile::tempdir;
+
+    use super::*;
 
     #[test]
     fn probe_writable_tempdir_is_online() {

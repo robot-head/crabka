@@ -2,18 +2,20 @@
 //! the pure truncation-decision used by the proactive validate pass and the
 //! in-band `diverging_epoch` path.
 
+use crabka_ids::LeaderEpoch;
+
 /// Epoch metadata for one assigned partition. The fetch *offset* itself lives
 /// in `Consumer::next_offsets`; this carries the leader-epoch state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PartitionPosition {
     /// Leader epoch of the last consumed record (the `last_fetched_epoch` we
     /// send). `-1` until a record is consumed or a committed epoch is seeded.
-    pub offset_epoch: i32,
+    pub offset_epoch: LeaderEpoch,
     /// Current leader node id from the latest metadata. `-1` if unknown.
     pub leader_id: i32,
     /// Current leader epoch from the latest metadata (the `current_leader_epoch`
     /// we send). `-1` if unknown.
-    pub leader_epoch: i32,
+    pub leader_epoch: LeaderEpoch,
     /// `true` while this partition must be validated via `OffsetForLeaderEpoch`
     /// before it may be fetched again (set when the metadata leader epoch
     /// advances past `offset_epoch`).
@@ -23,9 +25,9 @@ pub(crate) struct PartitionPosition {
 impl Default for PartitionPosition {
     fn default() -> Self {
         Self {
-            offset_epoch: -1,
+            offset_epoch: LeaderEpoch(-1),
             leader_id: -1,
-            leader_epoch: -1,
+            leader_epoch: LeaderEpoch(-1),
             awaiting_validation: false,
         }
     }
@@ -36,7 +38,7 @@ impl Default for PartitionPosition {
 pub(crate) enum ValidationOutcome {
     /// Position is consistent with the leader; resume fetching. Carries the
     /// leader's epoch for that offset (to refresh `offset_epoch`).
-    Valid { leader_epoch: i32 },
+    Valid { leader_epoch: LeaderEpoch },
     /// Truncation detected; the fetcher must reset to `safe_offset`.
     Truncated { safe_offset: i64 },
 }
@@ -48,8 +50,8 @@ pub(crate) enum ValidationOutcome {
 /// end offset for that epoch is below our position.
 pub(crate) fn classify(
     offset: i64,
-    offset_epoch: i32,
-    leader_epoch: i32,
+    offset_epoch: LeaderEpoch,
+    leader_epoch: LeaderEpoch,
     leader_end_offset: i64,
 ) -> ValidationOutcome {
     if leader_end_offset < 0 || leader_epoch < offset_epoch || leader_end_offset < offset {
@@ -67,8 +69,9 @@ pub(crate) fn classify(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn classify_decides_validity_or_truncation() {
@@ -80,42 +83,48 @@ mod tests {
             (
                 "consistent position is valid",
                 100,
-                2,
-                2,
+                LeaderEpoch(2),
+                LeaderEpoch(2),
                 150,
-                Valid { leader_epoch: 2 },
+                Valid {
+                    leader_epoch: LeaderEpoch(2),
+                },
             ),
             (
                 "leader end at position is still valid",
                 100,
-                2,
-                2,
+                LeaderEpoch(2),
+                LeaderEpoch(2),
                 100,
-                Valid { leader_epoch: 2 },
+                Valid {
+                    leader_epoch: LeaderEpoch(2),
+                },
             ),
             (
                 "leader end zero is known and valid for negative position",
                 -1,
-                2,
-                2,
+                LeaderEpoch(2),
+                LeaderEpoch(2),
                 0,
-                Valid { leader_epoch: 2 },
+                Valid {
+                    leader_epoch: LeaderEpoch(2),
+                },
             ),
             // Leader's epoch-2 end offset (80) is below our position (100): the
             // tail we hold was truncated away.
             (
                 "leader end below position is truncation",
                 100,
-                2,
-                2,
+                LeaderEpoch(2),
+                LeaderEpoch(2),
                 80,
                 Truncated { safe_offset: 80 },
             ),
             (
                 "negative leader end alone truncates to zero",
                 -3,
-                2,
-                2,
+                LeaderEpoch(2),
+                LeaderEpoch(2),
                 -2,
                 Truncated { safe_offset: 0 },
             ),
@@ -124,32 +133,32 @@ mod tests {
             (
                 "older leader epoch is truncation",
                 100,
-                2,
-                1,
+                LeaderEpoch(2),
+                LeaderEpoch(1),
                 60,
                 Truncated { safe_offset: 60 },
             ),
             (
                 "older leader epoch alone is truncation",
                 10,
-                2,
-                1,
+                LeaderEpoch(2),
+                LeaderEpoch(1),
                 20,
                 Truncated { safe_offset: 20 },
             ),
             (
                 "undefined leader offset truncates to zero",
                 100,
-                2,
-                -1,
+                LeaderEpoch(2),
+                LeaderEpoch(-1),
                 -1,
                 Truncated { safe_offset: 0 },
             ),
             (
                 "undefined leader offset truncates even when epoch matches",
                 100,
-                2,
-                2,
+                LeaderEpoch(2),
+                LeaderEpoch(2),
                 -1,
                 Truncated { safe_offset: 0 },
             ),

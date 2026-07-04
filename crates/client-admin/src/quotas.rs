@@ -169,9 +169,10 @@ pub fn diff_user_quotas(current: &UserQuotaConfig, desired: &UserQuotaConfig) ->
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
     use crabka_protocol::UnknownTaggedFields;
+
+    use super::*;
 
     #[test]
     fn diff_no_change_returns_empty() {

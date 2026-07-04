@@ -18,14 +18,12 @@
 
 #![allow(dead_code)]
 
+use std::{net::SocketAddr, time::Duration};
+
 use assert2::assert;
-use std::net::SocketAddr;
-use std::time::Duration;
-
-use tempfile::TempDir;
-
-use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerError, BrokerHandle};
+use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerError, BrokerHandle, NodeId};
 use crabka_client_core::Client;
+use tempfile::TempDir;
 
 pub struct InProcess {
     pub broker: BrokerHandle,
@@ -170,8 +168,9 @@ pub async fn start_with_audit_key(
 /// `for_tests` defaults. The anonymous client will be denied every admin
 /// operation, triggering `AuthorizationDenied` audit events.
 pub async fn start_with_deny_all_authz() -> InProcess {
-    use crabka_broker::authorizer::SimpleAclAuthorizer;
     use std::collections::HashSet;
+
+    use crabka_broker::authorizer::SimpleAclAuthorizer;
 
     let tempdir = tempfile::tempdir().expect("tempdir");
     let mut config = BrokerConfig::for_tests(tempdir.path().to_path_buf());
@@ -373,12 +372,15 @@ pub fn broker_config(
     cfg.broker_id = i32::try_from(i + 1).unwrap();
     cfg.listen_addr = listen;
     cfg.advertised_listener = listen.to_string();
-    cfg.node_id = u64::try_from(i + 1).unwrap();
+    cfg.node_id = NodeId(u64::try_from(i + 1).unwrap());
     cfg.controller_listen_addr = controller_addrs[i];
     // `controller_quorum_voters` carries `<host>:<port>` strings (the dialer
     // re-resolves per connect); test voter sets are built from `SocketAddr`s,
     // so stringify here.
-    cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    cfg.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (NodeId(*id), a.to_string()))
+        .collect();
     cfg.bootstrap_mode = mode;
     cfg
 }
@@ -397,7 +399,7 @@ fn static_voter_broker_config(
 ) -> BrokerConfig {
     let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
     cfg.broker_id = i32::try_from(i + 1).unwrap();
-    cfg.node_id = u64::try_from(i + 1).unwrap();
+    cfg.node_id = NodeId(u64::try_from(i + 1).unwrap());
     // Bind a concrete (pre-bound) client port. The broker self-registers its
     // `advertised_listener` host:port into the controller image *before* it
     // binds its listeners and rewrites a `:0` advertised port to the real one
@@ -408,9 +410,12 @@ fn static_voter_broker_config(
     // The controller listener must bind the *same* concrete port that this
     // node advertises in the shared voter set, or its peers can't dial it.
     cfg.controller_listen_addr = own_controller_addr;
-    cfg.directory_id = uuid::Uuid::from_u128(u128::from(cfg.node_id));
+    cfg.directory_id = uuid::Uuid::from_u128(u128::from(cfg.node_id.0));
     cfg.bootstrap_mode = BootstrapMode::Bootstrap;
-    cfg.controller_quorum_voters = voters.iter().map(|(id, a)| (*id, a.to_string())).collect();
+    cfg.controller_quorum_voters = voters
+        .iter()
+        .map(|(id, a)| (NodeId(*id), a.to_string()))
+        .collect();
     cfg.auto_join = false;
     cfg.bootstrap_servers = vec![];
     cfg
@@ -530,7 +535,7 @@ pub async fn start_n_node_with(
     let mut leader_rx = out[0].0.watch_leader_for_test();
     let elected = tokio::time::timeout(
         Duration::from_secs(30),
-        leader_rx.wait_for(|l| matches!(l, Some(id) if *id != 0)),
+        leader_rx.wait_for(|l| matches!(l, Some(id) if *id != NodeId(0))),
     )
     .await;
     let timed_out = match &elected {

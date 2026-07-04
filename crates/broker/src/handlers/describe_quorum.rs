@@ -25,21 +25,26 @@
 //! a non-metadata topic.
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::AclOperation;
-use crabka_protocol::owned::common::describe_quorum_response::replica_state::ReplicaState;
-use crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest;
-use crabka_protocol::owned::describe_quorum_response::{
-    DescribeQuorumResponse, Listener, Node, PartitionData, TopicData,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        common::describe_quorum_response::replica_state::ReplicaState,
+        describe_quorum_request::DescribeQuorumRequest,
+        describe_quorum_response::{
+            DescribeQuorumResponse, Listener, Node, PartitionData, TopicData,
+        },
+    },
+    primitives::uuid::Uuid,
 };
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::{Decode, Encode};
 use crabka_raft::QuorumState;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes,
+    error::BrokerError,
+};
 
 /// JVM "Unknown" sentinel for a voter's `log_end_offset` when openraft
 /// isn't tracking peer progress (i.e. this node is a follower — only
@@ -127,7 +132,7 @@ fn build_topic_responses(
 ) -> Vec<TopicData> {
     let leader_id = quorum
         .current_leader
-        .map_or(-1, |n| i32::try_from(n).unwrap_or(-1));
+        .map_or(-1, |n| i32::try_from(n.0).unwrap_or(-1));
     let leader_epoch = i32::try_from(quorum.current_term).unwrap_or(i32::MAX);
     let high_watermark = i64::try_from(quorum.last_applied_index).unwrap_or(i64::MAX);
 
@@ -166,7 +171,7 @@ fn build_topic_responses(
                                         .get(&id)
                                         .map_or(Uuid::ZERO, |n| Uuid(*n.directory_id.as_bytes()));
                                     ReplicaState {
-                                        replica_id: i32::try_from(id).unwrap_or(-1),
+                                        replica_id: i32::try_from(id.0).unwrap_or(-1),
                                         replica_directory_id,
                                         log_end_offset: matched,
                                         last_fetch_timestamp: -1,
@@ -214,7 +219,7 @@ fn build_nodes(quorum: &QuorumState) -> Vec<Node> {
         .voter_nodes
         .iter()
         .map(|(&id, node)| Node {
-            node_id: i32::try_from(id).unwrap_or(-1),
+            node_id: i32::try_from(id.0).unwrap_or(-1),
             listeners: node
                 .endpoints
                 .iter()
@@ -232,13 +237,17 @@ fn build_nodes(quorum: &QuorumState) -> Vec<Node> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::describe_quorum_request::{
-        PartitionData as ReqPartitionData, TopicData as ReqTopicData,
-    };
     use std::collections::BTreeMap;
+
+    use assert2::assert;
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::describe_quorum_request::{
+            PartitionData as ReqPartitionData, TopicData as ReqTopicData,
+        },
+    };
+
+    use super::*;
 
     /// Fully-specified expected voter row (no struct-update syntax).
     fn expected_voter(replica_id: i32, log_end_offset: i64) -> ReplicaState {
@@ -274,10 +283,13 @@ mod tests {
         QuorumState {
             current_term: term,
             last_applied_index: applied,
-            current_leader: leader,
-            voters: voters.to_vec(),
+            current_leader: leader.map(crabka_raft::NodeId),
+            voters: voters.iter().copied().map(crabka_raft::NodeId).collect(),
             voter_nodes: BTreeMap::new(),
-            per_voter_matched_index: matched.iter().copied().collect::<BTreeMap<_, _>>(),
+            per_voter_matched_index: matched
+                .iter()
+                .map(|&(v, m)| (crabka_raft::NodeId(v), m))
+                .collect::<BTreeMap<_, _>>(),
         }
     }
 
@@ -462,7 +474,7 @@ mod tests {
         let dir2 = uuid::Uuid::from_u128(2);
         let mut voter_nodes = BTreeMap::new();
         voter_nodes.insert(
-            1u64,
+            crabka_audit::NodeId(1u64),
             Node {
                 directory_id: dir1,
                 endpoints: vec![VoterEndpoint {
@@ -474,7 +486,7 @@ mod tests {
             },
         );
         voter_nodes.insert(
-            2u64,
+            crabka_audit::NodeId(2u64),
             Node {
                 directory_id: dir2,
                 endpoints: vec![VoterEndpoint {
@@ -488,8 +500,8 @@ mod tests {
         let q = QuorumState {
             current_term: 1,
             last_applied_index: 5,
-            current_leader: Some(1),
-            voters: vec![1, 2],
+            current_leader: Some(crabka_audit::NodeId(1)),
+            voters: vec![crabka_audit::NodeId(1), crabka_audit::NodeId(2)],
             voter_nodes,
             per_voter_matched_index: BTreeMap::new(),
         };
@@ -529,6 +541,37 @@ mod tests {
             assert!(v.replica_directory_id == Uuid::ZERO);
         }
         assert!(build_nodes(&q).is_empty());
+    }
+
+    #[test]
+    fn leader_id_above_i32_max_falls_back_to_minus_one() {
+        // A raft NodeId is u64; the wire replica/leader id is i32. A leader
+        // node id beyond i32::MAX must surface as the -1 "unknown" sentinel
+        // (via `try_from(..).unwrap_or(-1)`), never wrap into a positive id.
+        let req = req_for(CLUSTER_METADATA_TOPIC, 0);
+        let huge = u64::from(u32::MAX) + 1; // > i32::MAX, try_from fails
+        let q = quorum_state(Some(huge), 1, 0, &[1], &[]);
+        let out = build_topic_responses(&req, &q);
+        assert!(
+            out[0].partitions[0].leader_id == -1,
+            "leader node id > i32::MAX must fall back to -1, not a positive id"
+        );
+    }
+
+    #[test]
+    fn voter_replica_id_above_i32_max_falls_back_to_minus_one() {
+        // Same guard on the per-voter replica_id: a voter node id beyond
+        // i32::MAX surfaces as -1, not a wrapped positive value.
+        let req = req_for(CLUSTER_METADATA_TOPIC, 0);
+        let huge = u64::from(u32::MAX) + 1; // > i32::MAX
+        let q = quorum_state(Some(1), 1, 0, &[huge], &[]);
+        let out = build_topic_responses(&req, &q);
+        let voters = &out[0].partitions[0].current_voters;
+        assert!(voters.len() == 1);
+        assert!(
+            voters[0].replica_id == -1,
+            "voter node id > i32::MAX must fall back to -1, not a positive id"
+        );
     }
 
     #[test]

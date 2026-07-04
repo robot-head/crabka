@@ -1,10 +1,12 @@
 //! `ArrowIpcSerde`: Arrow-IPC stream encoding of an arrow-rs `RecordBatch`.
 
-use crate::processor::serde::{DefaultSerde, Serde, SerdeAssociate, SerdeError};
-use ::arrow::array::RecordBatch;
-use ::arrow::ipc::reader::StreamReader;
-use ::arrow::ipc::writer::StreamWriter;
+use ::arrow::{
+    array::RecordBatch,
+    ipc::{reader::StreamReader, writer::StreamWriter},
+};
 use bytes::Bytes;
+
+use crate::processor::serde::{DefaultSerde, Serde, SerdeAssociate, SerdeError};
 
 /// `Serde<RecordBatch>` using the Arrow IPC stream format (schema embedded per message).
 #[derive(Debug, Clone, Copy, Default)]
@@ -44,11 +46,15 @@ impl DefaultSerde for RecordBatch {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use ::arrow::array::{Float64Array, StringArray};
-    use ::arrow::datatypes::{DataType, Field, Schema};
-    use assert2::check;
     use std::sync::Arc;
+
+    use ::arrow::{
+        array::{Float64Array, StringArray},
+        datatypes::{DataType, Field, Schema},
+    };
+    use assert2::check;
+
+    use super::*;
 
     fn sample() -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![

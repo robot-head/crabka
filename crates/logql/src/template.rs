@@ -1,15 +1,15 @@
-use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::{cmp::Ordering, collections::BTreeMap};
 
-use base64::Engine as _;
-use base64::prelude::BASE64_STANDARD;
+use base64::{Engine as _, prelude::BASE64_STANDARD};
 use chrono::{FixedOffset, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use regex::{NoExpand, Regex};
 use time::OffsetDateTime;
 
-use crate::util::{format_decimal_ratio, parse_bytes_literal, parse_prometheus_duration_literal};
-use crate::{Labels, ParseError};
+use crate::{
+    Labels, ParseError,
+    util::{format_decimal_ratio, parse_bytes_literal, parse_prometheus_duration_literal},
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LineFormat {
@@ -2687,8 +2687,7 @@ pub(crate) fn template_parse_error(message: &str) -> ParseError {
 
 #[cfg(test)]
 mod tests {
-    use std::cmp::Ordering;
-    use std::collections::BTreeMap;
+    use std::{cmp::Ordering, collections::BTreeMap};
 
     use super::{
         LineFormat, TemplatePart, TemplateRuntimeValue, ensure_template_parenthesized_token,

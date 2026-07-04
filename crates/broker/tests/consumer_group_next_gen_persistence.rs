@@ -2,13 +2,15 @@
 
 #![allow(clippy::pedantic)]
 
-use assert2::assert;
 use std::sync::Arc;
 
+use assert2::assert;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
-use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::{
+    consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest,
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+};
 
 async fn create_topic(client: &Client, name: &str, partitions: i32) {
     let req = CreateTopicsRequest {

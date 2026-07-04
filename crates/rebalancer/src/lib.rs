@@ -9,12 +9,15 @@
 //! ## Optimization workflow
 //!
 //! ```no_run
-//! use crabka_rebalancer::capacity::BrokerCapacities;
-//! use crabka_rebalancer::goals::{GoalContext, leader_distribution::LeaderDistribution};
-//! use crabka_rebalancer::model::{BrokerView, ClusterState, PartitionView};
-//! use crabka_rebalancer::optimizer;
-//! use crabka_rebalancer::scraper::UsageStore;
 //! use std::sync::Arc;
+//!
+//! use crabka_rebalancer::{
+//!     capacity::BrokerCapacities,
+//!     goals::{GoalContext, leader_distribution::LeaderDistribution},
+//!     model::{BrokerView, ClusterState, PartitionView},
+//!     optimizer,
+//!     scraper::UsageStore,
+//! };
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let state = ClusterState {

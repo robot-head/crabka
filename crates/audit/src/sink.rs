@@ -4,8 +4,10 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::event::{AuditEvent, AuditEventClass, AuditOutcome};
-use crate::ocsf::{ProductInfo, to_ocsf};
+use crate::{
+    event::{AuditEvent, AuditEventClass, AuditOutcome},
+    ocsf::{ProductInfo, to_ocsf},
+};
 
 /// Record-header key carrying the per-broker chain sequence number (decimal ASCII).
 pub const HEADER_SEQ: &str = "seq";
@@ -127,8 +129,9 @@ impl AuditSink for MemorySink {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::check;
+
+    use super::*;
 
     #[test]
     fn io_error_displays() {
@@ -145,10 +148,10 @@ mod tests {
 
     #[test]
     fn from_event_sets_principal_and_status_headers() {
-        use crate::event::{
-            AuditEndpoint, AuditEvent, AuditOutcome, AuditPrincipal, LifecycleKind,
+        use crate::{
+            event::{AuditEndpoint, AuditEvent, AuditOutcome, AuditPrincipal, LifecycleKind},
+            ocsf::ProductInfo,
         };
-        use crate::ocsf::ProductInfo;
         let product = ProductInfo {
             vendor_name: "v".into(),
             name: "n".into(),

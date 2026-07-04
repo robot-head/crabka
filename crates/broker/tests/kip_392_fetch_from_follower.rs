@@ -20,21 +20,24 @@
 #![allow(clippy::pedantic)]
 #![allow(clippy::manual_assert, clippy::cast_possible_truncation)]
 
-use assert2::assert;
-use std::collections::BTreeSet;
-use std::sync::OnceLock;
-use std::time::{Duration, Instant};
-
-use crabka_broker::replica_selector::ReplicaSelectorKind;
-use crabka_broker::{BrokerConfig, BrokerHandle};
-use crabka_client_core::Client;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use std::{
+    collections::BTreeSet,
+    sync::OnceLock,
+    time::{Duration, Instant},
 };
-use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_protocol::records::{Record, RecordBatch};
+
+use assert2::assert;
+use crabka_broker::{BrokerConfig, BrokerHandle, replica_selector::ReplicaSelectorKind};
+use crabka_client_core::Client;
+use crabka_protocol::{
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+    },
+    primitives::uuid::Uuid as WireUuid,
+    records::{Record, RecordBatch},
+};
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
@@ -98,7 +101,8 @@ async fn wait_leader_and_isr(
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition).is_some_and(|p| {
-                p.leader == leader && p.isr.iter().copied().collect::<BTreeSet<u64>>() == want
+                p.leader == leader
+                    && p.isr.iter().map(|n| n.get()).collect::<BTreeSet<u64>>() == want
             })
         })
         .await;

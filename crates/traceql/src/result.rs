@@ -136,8 +136,9 @@ pub struct TraceMetricsResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn span_ref_holds_typed_attributes() {

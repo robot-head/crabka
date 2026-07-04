@@ -3,11 +3,17 @@
 //! broker required).
 //! Run: `cargo run -p crabka-client-streams --features polars --example polars_pipeline`
 
-use crabka_client_streams::Serde;
-use crabka_client_streams::columnar::serde::polars::PolarsIpcSerde;
-use crabka_client_streams::columnar::topology::codec::{BlobCodec, ConsumedRecord};
-use crabka_client_streams::columnar::topology::operator::BuiltinOp;
-use crabka_client_streams::columnar::topology::{ColumnarTestDriver, ColumnarTopology};
+use crabka_client_streams::{
+    Serde,
+    columnar::{
+        serde::polars::PolarsIpcSerde,
+        topology::{
+            ColumnarTestDriver, ColumnarTopology,
+            codec::{BlobCodec, ConsumedRecord},
+            operator::BuiltinOp,
+        },
+    },
+};
 use polars::prelude::*;
 
 fn main() {

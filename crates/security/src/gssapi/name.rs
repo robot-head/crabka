@@ -198,8 +198,9 @@ pub fn apply(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     fn rules(specs: &[&str]) -> Vec<Rule> {
         specs.iter().map(|s| Rule::parse(s).unwrap()).collect()

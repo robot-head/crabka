@@ -3,12 +3,14 @@
 //! partition's `leader_epoch`, returns the `end_offset` of that epoch —
 //! the safe offset a fetcher must not have consumed past.
 
-use crate::connection::Connection;
-use crate::error::ClientError;
-use crabka_protocol::owned::offset_for_leader_epoch_request::{
-    OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
+use crabka_protocol::owned::{
+    offset_for_leader_epoch_request::{
+        OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
+    },
+    offset_for_leader_epoch_response::OffsetForLeaderEpochResponse,
 };
-use crabka_protocol::owned::offset_for_leader_epoch_response::OffsetForLeaderEpochResponse;
+
+use crate::{connection::Connection, error::ClientError};
 
 /// One leader-epoch end-offset answer for a partition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,13 +92,16 @@ fn parse_single(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::offset_for_leader_epoch_response::{
-        EpochEndOffset as WireEpochEndOffset, OffsetForLeaderEpochResponse,
-        OffsetForLeaderTopicResult,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::offset_for_leader_epoch_response::{
+            EpochEndOffset as WireEpochEndOffset, OffsetForLeaderEpochResponse,
+            OffsetForLeaderTopicResult,
+        },
     };
+
+    use super::*;
 
     #[test]
     fn parse_single_extracts_partition_answer() {

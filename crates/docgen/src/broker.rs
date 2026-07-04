@@ -1,8 +1,9 @@
 //! Generate the three broker reference pages: server config (`FileConfig` JSON
 //! schema), topic configs (whitelist), and the protocol API catalog.
 
-use crate::schema_md::render_sectioned_field_table;
 use std::fmt::Write;
+
+use crate::schema_md::render_sectioned_field_table;
 
 /// Server-config reference, rendered from the `FileConfig` JSON schema.
 ///
@@ -158,8 +159,9 @@ pub fn protocol_apis_md() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
+
+    use super::*;
     #[test]
     fn server_config_page_has_sectioned_field_tables() {
         let md = server_config_md();

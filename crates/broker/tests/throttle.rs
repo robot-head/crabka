@@ -27,24 +27,27 @@
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15.
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerHandle};
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
@@ -214,8 +217,10 @@ async fn create_topic_as_admin(
     partitions: i32,
     replication_factor: i16,
 ) {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    };
 
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {
@@ -247,8 +252,10 @@ async fn create_topic_as_admin(
 
 /// Create a topic via PLAINTEXT (no SASL, compat shim = allow-all).
 async fn create_topic_plaintext(addr: SocketAddr, topic: &str, partitions: i32, rf: i16) {
-    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
+    use crabka_protocol::owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        create_topics_response::CreateTopicsResponse,
+    };
 
     let req = CreateTopicsRequest {
         topics: vec![CreatableTopic {
@@ -294,10 +301,12 @@ async fn drive_incremental_alter_configs(
     pass: &str,
     resources: Vec<(i8, String, Vec<(String, Option<String>, i8)>)>,
 ) -> i16 {
-    use crabka_protocol::owned::incremental_alter_configs_request::{
-        AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
+    use crabka_protocol::owned::{
+        incremental_alter_configs_request::{
+            AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
+        },
+        incremental_alter_configs_response::IncrementalAlterConfigsResponse,
     };
-    use crabka_protocol::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse;
 
     let req = IncrementalAlterConfigsRequest {
         resources: resources
@@ -348,10 +357,12 @@ async fn drive_incremental_alter_configs_plaintext(
     addr: SocketAddr,
     resources: Vec<(i8, String, Vec<(String, Option<String>, i8)>)>,
 ) -> i16 {
-    use crabka_protocol::owned::incremental_alter_configs_request::{
-        AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
+    use crabka_protocol::owned::{
+        incremental_alter_configs_request::{
+            AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
+        },
+        incremental_alter_configs_response::IncrementalAlterConfigsResponse,
     };
-    use crabka_protocol::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse;
 
     let req = IncrementalAlterConfigsRequest {
         resources: resources
@@ -402,10 +413,10 @@ async fn drive_describe_configs(
     pass: &str,
     resources: Vec<(i8, String)>,
 ) -> Vec<(i16, Vec<(String, String)>)> {
-    use crabka_protocol::owned::describe_configs_request::{
-        DescribeConfigsRequest, DescribeConfigsResource,
+    use crabka_protocol::owned::{
+        describe_configs_request::{DescribeConfigsRequest, DescribeConfigsResource},
+        describe_configs_response::DescribeConfigsResponse,
     };
-    use crabka_protocol::owned::describe_configs_response::DescribeConfigsResponse;
 
     let req = DescribeConfigsRequest {
         resources: resources
@@ -458,11 +469,13 @@ async fn drive_describe_configs(
 /// Produce `count` records of `record_bytes` bytes each to `(topic, 0)` over
 /// a PLAINTEXT connection. Asserts `error_code=0` on the partition row.
 async fn produce_plaintext(addr: SocketAddr, topic: &str, record_bytes: usize, count: usize) {
-    use crabka_protocol::owned::produce_request::{
-        PartitionProduceData, ProduceRequest, TopicProduceData,
+    use crabka_protocol::{
+        owned::{
+            produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+            produce_response::ProduceResponse,
+        },
+        records::{Record, RecordBatch},
     };
-    use crabka_protocol::owned::produce_response::ProduceResponse;
-    use crabka_protocol::records::{Record, RecordBatch};
 
     let value = vec![0u8; record_bytes];
     let records: Vec<Record> = (0..count)
@@ -516,8 +529,10 @@ async fn produce_plaintext(addr: SocketAddr, topic: &str, record_bytes: usize, c
 /// replica fetch, subject to leader-side throttle) over a PLAINTEXT
 /// connection. Returns the raw response payload byte length.
 async fn fetch_plaintext_replica(addr: SocketAddr, topic: &str, replica_id: i32) -> usize {
-    use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-    use crabka_protocol::owned::fetch_response::FetchResponse;
+    use crabka_protocol::owned::{
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        fetch_response::FetchResponse,
+    };
 
     let req = FetchRequest {
         replica_id,
@@ -607,7 +622,10 @@ async fn broker_scoped_alter_persists_in_image() {
     // Await until the config is visible (absorb raft commit latency).
     handle
         .wait_for_image(|img| {
-            img.broker_throttle_rate(node_id, crabka_metadata::ThrottleKind::Leader) == Some(2048)
+            img.broker_throttle_rate(
+                crabka_metadata::NodeId(node_id),
+                crabka_metadata::ThrottleKind::Leader,
+            ) == Some(2048)
         })
         .await;
     handle.shutdown().await;
@@ -645,7 +663,8 @@ async fn topic_throttle_config_propagates() {
     handle
         .wait_for_image(|img| {
             let throttle = crabka_broker::throttle::TopicThrottle::for_topic(img, "foo");
-            throttle.leader.contains(0, 1) && throttle.leader.contains(0, 2)
+            throttle.leader.contains(0, crabka_broker::NodeId(1))
+                && throttle.leader.contains(0, crabka_broker::NodeId(2))
         })
         .await;
     handle.shutdown().await;
@@ -703,9 +722,12 @@ async fn throttle_rate_caps_fetch_response_size() {
     // throttle enforcement is armed when the Fetch arrives).
     handle
         .wait_for_image(|img| {
-            let rate = img.broker_throttle_rate(node_id, crabka_metadata::ThrottleKind::Leader);
+            let rate = img.broker_throttle_rate(
+                crabka_metadata::NodeId(node_id),
+                crabka_metadata::ThrottleKind::Leader,
+            );
             let throttle = crabka_broker::throttle::TopicThrottle::for_topic(img, "bar");
-            rate == Some(512) && throttle.leader.contains(0, 2)
+            rate == Some(512) && throttle.leader.contains(0, crabka_broker::NodeId(2))
         })
         .await;
 

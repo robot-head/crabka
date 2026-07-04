@@ -9,24 +9,32 @@ pub mod phases;
 pub mod state;
 pub mod throttle;
 
-use std::fmt::Write as _;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    fmt::Write as _,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
-use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
+use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::executor::phases::{
-    ClientFacade, PhaseError, apply_throttle, clear_throttle, partition_keys, submit_movements,
+use crate::{
+    executor::{
+        phases::{
+            ClientFacade, PhaseError, apply_throttle, clear_throttle, partition_keys,
+            submit_movements,
+        },
+        state::{InFlightFile, Phase, StateError},
+        throttle::{ThrottleTargets, compute_throttle_targets},
+    },
+    metrics::RebalancerMetrics,
+    model::{
+        proposal::{Proposal, ProposalStatus},
+        store::ProposalStore,
+    },
 };
-use crate::executor::state::{InFlightFile, Phase, StateError};
-use crate::executor::throttle::{ThrottleTargets, compute_throttle_targets};
-use crate::metrics::RebalancerMetrics;
-use crate::model::proposal::{Proposal, ProposalStatus};
-use crate::model::store::ProposalStore;
 
 /// Configuration controlling the executor's polling cadence and chunking.
 #[derive(Debug, Clone)]
@@ -391,13 +399,16 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::executor::phases::tests::{MockCall, MockClient};
-    use crate::model::Movement;
-    use crate::model::proposal::ProposalSummary;
-    use crate::state_topic::{StateBackend, StateTopicError};
-    use assert2::{assert, check};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use assert2::{assert, check};
+
+    use super::*;
+    use crate::{
+        executor::phases::tests::{MockCall, MockClient},
+        model::{Movement, proposal::ProposalSummary},
+        state_topic::{StateBackend, StateTopicError},
+    };
 
     /// Bounded yield-poll: spin (yielding to the runtime) until `cond` holds,
     /// so a test waits on observable in-process progress deterministically

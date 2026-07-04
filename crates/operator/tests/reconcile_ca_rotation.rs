@@ -15,12 +15,13 @@ mod shared;
 use std::sync::Arc;
 
 use base64::Engine as _;
-use crabka_operator::controller::kafka::reconcile;
-use crabka_operator::crd::{Kafka, KafkaSpec};
+use crabka_operator::{
+    controller::kafka::reconcile,
+    crd::{Kafka, KafkaSpec},
+};
 use crabka_security::ca::{generate_clients_ca, generate_cluster_ca};
 use http::{Method, Response};
 use serde_json::{Value, json};
-
 use shared::{
     MockRule, build_ctx, fake_configmap_body, fake_kafka_body, fake_keystore_secret,
     fake_pool_list_body, fake_pool_list_item, fake_service_body, json_response, not_found_body,

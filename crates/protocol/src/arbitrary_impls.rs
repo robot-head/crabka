@@ -2,9 +2,13 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 
-use crate::UnknownTaggedFields;
-use crate::owned::api_versions_request::ApiVersionsRequest;
-use crate::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+use crate::{
+    UnknownTaggedFields,
+    owned::{
+        api_versions_request::ApiVersionsRequest,
+        api_versions_response::{ApiVersion, ApiVersionsResponse},
+    },
+};
 
 fn ascii(u: &mut Unstructured, min: usize, max: usize) -> arbitrary::Result<String> {
     let len = u.int_in_range(min..=max)?;
@@ -59,8 +63,9 @@ impl<'a> Arbitrary<'a> for ApiVersionsResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn ascii_uses_input_and_stays_printable() {

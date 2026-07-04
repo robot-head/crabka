@@ -29,13 +29,19 @@
 use std::fmt;
 
 use serde_json::{Map, Value};
-use tracing::field::{Field, Visit};
-use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::fmt::format::Writer;
-use tracing_subscriber::fmt::time::{FormatTime, SystemTime};
-use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter};
-use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::{EnvFilter, Layer, Registry};
+use tracing::{
+    Event, Level, Subscriber,
+    field::{Field, Visit},
+};
+use tracing_subscriber::{
+    EnvFilter, Layer, Registry,
+    fmt::{
+        FmtContext, FormatEvent, FormatFields, MakeWriter,
+        format::Writer,
+        time::{FormatTime, SystemTime},
+    },
+    registry::LookupSpan,
+};
 
 /// Map a `tracing` [`Level`] to a Google Cloud Logging `LogSeverity` string.
 ///
@@ -158,11 +164,15 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::{
+        io::Write,
+        sync::{Arc, Mutex},
+    };
+
     use assert2::{assert, check};
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
     use tracing_subscriber::layer::SubscriberExt as _;
+
+    use super::*;
 
     #[derive(Clone)]
     struct Buf(Arc<Mutex<Vec<u8>>>);

@@ -48,8 +48,9 @@ pub struct ServiceMonitorSpec {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn metrics_config_defaults_type_prometheus() {

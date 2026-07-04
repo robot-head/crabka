@@ -16,14 +16,12 @@
 //! coordinates; `__transaction_state` persistence + the producer-epoch fence on
 //! completion make a duplicate/late sweep on a moved partition a safe no-op.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
-use crate::metadata_source::MetadataSource;
-use crate::txn::coordinator::TxnCoordinator;
+use crate::{metadata_source::MetadataSource, txn::coordinator::TxnCoordinator};
 
 /// Spawned task entry point. Returns when `shutdown` is cancelled. The cadence
 /// is [`crate::config::BrokerConfig::txn_abort_cleanup_interval`] (Kafka's

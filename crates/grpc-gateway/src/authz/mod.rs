@@ -2,12 +2,10 @@
 //! and an `ArcSwap`'d `AclCache` refreshed by polling the broker's `DescribeAcls`.
 
 pub mod auth_layer;
-pub use auth_layer::{BearerValidator, anonymous, resolve_principal};
-
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
+pub use auth_layer::{BearerValidator, anonymous, resolve_principal};
 use crabka_authz::{AclCache, Authorizer};
 use crabka_client_admin::AdminClient;
 use tokio_util::sync::CancellationToken;

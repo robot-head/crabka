@@ -1,8 +1,10 @@
 //! Hard goal: every partition's leader equals `replicas[0]` whenever
 //! that broker is alive and in ISR.
 
-use crate::goals::{Goal, GoalContext, GoalPriority};
-use crate::model::{ClusterState, Movement};
+use crate::{
+    goals::{Goal, GoalContext, GoalPriority},
+    model::{ClusterState, Movement},
+};
 
 pub struct PreferredLeaderIdempotency;
 
@@ -64,9 +66,10 @@ impl Goal for PreferredLeaderIdempotency {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
     use crate::model::{BrokerView, PartitionView};
-    use assert2::assert;
 
     fn state(parts: Vec<PartitionView>, alive_brokers: Vec<i32>) -> ClusterState {
         ClusterState {

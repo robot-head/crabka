@@ -41,20 +41,24 @@ pub mod propagation;
 
 use std::time::Duration;
 
-use opentelemetry::trace::{
-    Span as _, SpanBuilder, SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId,
-    TraceState, TracerProvider as _,
+use opentelemetry::{
+    Context, KeyValue,
+    trace::{
+        Span as _, SpanBuilder, SpanContext, SpanId, TraceContextExt as _, TraceFlags, TraceId,
+        TraceState, TracerProvider as _,
+    },
 };
-use opentelemetry::{Context, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_otlp::{LogExporter, Protocol, SpanExporter, WithExportConfig};
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::logs::SdkLoggerProvider;
-use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
-use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::SubscriberInitExt as _;
-use tracing_subscriber::{EnvFilter, Layer as _};
+use opentelemetry_sdk::{
+    Resource,
+    logs::SdkLoggerProvider,
+    propagation::TraceContextPropagator,
+    trace::{Sampler, SdkTracerProvider},
+};
+use tracing_subscriber::{
+    EnvFilter, Layer as _, layer::SubscriberExt as _, util::SubscriberInitExt as _,
+};
 
 /// Errors building the OTLP pipeline. Carries the underlying exporter
 /// build failure so a misconfigured endpoint surfaces a clear message
@@ -430,11 +434,15 @@ fn emit_heartbeat_span<T: opentelemetry::trace::Tracer>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering::SeqCst},
+    };
+
     use assert2::{assert, check};
     use opentelemetry_sdk::error::OTelSdkResult;
-    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
-    use std::sync::{Arc, Mutex};
+
+    use super::*;
 
     #[derive(Clone, Debug)]
     struct ShutdownCountingSpanExporter {

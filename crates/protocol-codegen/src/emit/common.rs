@@ -88,8 +88,9 @@ fn hex_to_signed(v: u64, suffix: &str) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn decimal_literals() {

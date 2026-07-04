@@ -1,14 +1,18 @@
 //! Compactor helpers for merging late-span blocks into replacement span blocks.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::Arc;
-
-use arrow::array::{
-    Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array,
-    ListArray, StringArray, StructArray,
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
 };
-use arrow::compute::concat_batches;
-use arrow::record_batch::RecordBatch;
+
+use arrow::{
+    array::{
+        Array, ArrayRef, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array,
+        ListArray, StringArray, StructArray,
+    },
+    compute::concat_batches,
+    record_batch::RecordBatch,
+};
 use crabka_blockstore::{
     BlockIndex, BlockMeta, BlockWriter, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
     SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_CHILD_COUNT, SCOL_DURATION_NANOS,
@@ -20,9 +24,12 @@ use crabka_blockstore::{
 };
 use object_store::ObjectStore;
 
-use crate::blockbuilder::prefixed_object_key;
-use crate::error::TracesError;
-use crate::span::batch::RESOURCE_ATTR_PREFIX;
+use crate::{
+    blockbuilder::prefixed_object_key,
+    error::TracesError,
+    ids::{MaxOffset, MinOffset, WindowStartNs},
+    span::batch::RESOURCE_ATTR_PREFIX,
+};
 
 type TagMetadata = (BTreeSet<String>, BTreeMap<String, BTreeSet<String>>);
 
@@ -31,10 +38,11 @@ type TagMetadata = (BTreeSet<String>, BTreeMap<String, BTreeSet<String>>);
 pub fn compacted_object_key(
     tenant: &str,
     partition: i32,
-    min_offset: i64,
-    max_offset: i64,
-    window_start_ns: i64,
+    min_offset: MinOffset,
+    max_offset: MaxOffset,
+    window_start_ns: WindowStartNs,
 ) -> String {
+    let (min_offset, max_offset, window_start_ns) = (min_offset.0, max_offset.0, window_start_ns.0);
     format!(
         "traces/{tenant}/{partition:05}/compacted-{min_offset:020}-{max_offset:020}-{window_start_ns}.parquet"
     )
@@ -117,9 +125,9 @@ pub async fn compact_index_window(
             &compacted_object_key(
                 &tenant,
                 0,
-                0,
-                i64::try_from(candidate_keys.len()).unwrap_or(i64::MAX),
-                start_ns,
+                MinOffset(0),
+                MaxOffset(i64::try_from(candidate_keys.len()).unwrap_or(i64::MAX)),
+                WindowStartNs(start_ns),
             ),
         );
         let meta = compact_block_keys(

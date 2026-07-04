@@ -1,26 +1,23 @@
 //! `crabka-rebalancer` — Cruise-Control-equivalent partition
 //! rebalancer for Crabka clusters.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use clap::Parser;
+use crabka_rebalancer::{
+    api::{GoalRegistry, handlers::AppState},
+    executor::{
+        Execution, ExecutionHandle, ExecutorConfig, ExecutorState, client_impl::LiveClient,
+    },
+    goals::GoalContext,
+    health::{HealthState, new_registry},
+    ingest::{Ingester, new_shared_snapshot},
+    metrics::RebalancerMetrics,
+    model::{proposal::ProposalStatus, store::ProposalStore},
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-
-use crabka_rebalancer::api::GoalRegistry;
-use crabka_rebalancer::api::handlers::AppState;
-use crabka_rebalancer::executor::client_impl::LiveClient;
-use crabka_rebalancer::executor::{Execution, ExecutionHandle, ExecutorConfig, ExecutorState};
-use crabka_rebalancer::goals::GoalContext;
-use crabka_rebalancer::health::{HealthState, new_registry};
-use crabka_rebalancer::ingest::{Ingester, new_shared_snapshot};
-use crabka_rebalancer::metrics::RebalancerMetrics;
-use crabka_rebalancer::model::proposal::ProposalStatus;
-use crabka_rebalancer::model::store::ProposalStore;
 
 fn should_warn_state_topic_load(is_loaded: bool) -> bool {
     !is_loaded

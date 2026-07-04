@@ -1,9 +1,17 @@
 //! Shared KIP-73 token bucket rate limiter.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering, Ordering::Relaxed};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering, Ordering::Relaxed},
+};
 
 use qubit_clock::{NanoClock, NanoMonotonicClock};
+
+mod ids;
+
+pub use ids::{
+    AvailableTokens, BurstCapacity, GrantedTokens, NewAvailable, RefillTokens, RequestedTokens,
+};
 
 /// Reads the injected clock's current epoch-nanoseconds as a `u64`.
 ///
@@ -49,11 +57,19 @@ impl std::fmt::Debug for TokenBucket {
 /// `refill` claimed for this call, the `burst` cap, and `requested` tokens,
 /// return `(grant, new_available)` where `capped = (available + refill).min(burst)`,
 /// `grant = requested.min(capped)`, and `new_available = capped - grant`.
+///
+/// The four inputs are distinct newtypes so a transposed call site — the
+/// textbook swap bug for four adjacent `u64`s — no longer compiles.
 #[must_use]
-pub fn plan_consume(available: u64, refill: u64, burst: u64, requested: u64) -> (u64, u64) {
-    let capped = available.saturating_add(refill).min(burst);
-    let grant = requested.min(capped);
-    (grant, capped - grant)
+pub fn plan_consume(
+    available: AvailableTokens,
+    refill: RefillTokens,
+    burst: BurstCapacity,
+    requested: RequestedTokens,
+) -> (GrantedTokens, NewAvailable) {
+    let capped = available.0.saturating_add(refill.0).min(burst.0);
+    let grant = requested.0.min(capped);
+    (GrantedTokens(grant), NewAvailable(capped - grant))
 }
 
 impl TokenBucket {
@@ -165,7 +181,12 @@ impl TokenBucket {
             let refill = ((u128::from(elapsed) * u128::from(rate)) / 1_000_000_000) as u64;
 
             let cur = self.available.load(Relaxed);
-            let (grant, new_avail) = plan_consume(cur, refill, burst, requested);
+            let (grant, new_avail) = plan_consume(
+                AvailableTokens(cur),
+                RefillTokens(refill),
+                BurstCapacity(burst),
+                RequestedTokens(requested),
+            );
 
             // Only commit if no reset straddled the read-compute window; the CAS
             // itself guards against a concurrent consumer mutating `available`.
@@ -174,10 +195,10 @@ impl TokenBucket {
             }
             if self
                 .available
-                .compare_exchange_weak(cur, new_avail, Relaxed, Relaxed)
+                .compare_exchange_weak(cur, new_avail.0, Relaxed, Relaxed)
                 .is_ok()
             {
-                return grant;
+                return grant.0;
             }
         }
     }
@@ -215,10 +236,14 @@ impl Default for ThrottleState {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-    use std::sync::mpsc::RecvTimeoutError;
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering::Relaxed},
+            mpsc::RecvTimeoutError,
+        },
+        time::Duration,
+    };
 
     use assert2::{assert, check};
     use qubit_clock::MockTime;
@@ -273,7 +298,7 @@ mod tests {
 
     #[test]
     fn plan_consume_grants_and_caps() {
-        for ((available, refill, burst, requested), want) in [
+        for ((available, refill, burst, requested), (grant, new_available)) in [
             ((100, 0, 1000, 50), (50, 50)),
             ((100, 0, 1000, 200), (100, 0)),
             ((900, 500, 1000, 200), (200, 800)),
@@ -281,7 +306,12 @@ mod tests {
             ((u64::MAX, u64::MAX, 1000, 1000), (1000, 0)),
         ] {
             assert!(
-                plan_consume(available, refill, burst, requested) == want,
+                plan_consume(
+                    AvailableTokens(available),
+                    RefillTokens(refill),
+                    BurstCapacity(burst),
+                    RequestedTokens(requested)
+                ) == (GrantedTokens(grant), NewAvailable(new_available)),
                 "plan_consume({available}, {refill}, {burst}, {requested})"
             );
         }
@@ -469,7 +499,7 @@ mod tests {
 mod plan_fuzz {
     use proptest::prelude::*;
 
-    use super::plan_consume;
+    use super::{AvailableTokens, BurstCapacity, RefillTokens, RequestedTokens, plan_consume};
 
     proptest! {
         #[test]
@@ -479,12 +509,17 @@ mod plan_fuzz {
             burst in 0u64..1_000_000,
             requested in 0u64..=u64::MAX,
         ) {
-            let (grant, new) = plan_consume(available, refill, burst, requested);
+            let (grant, new) = plan_consume(
+                AvailableTokens(available),
+                RefillTokens(refill),
+                BurstCapacity(burst),
+                RequestedTokens(requested),
+            );
             let capped = available.saturating_add(refill).min(burst);
-            prop_assert!(grant <= requested);
-            prop_assert!(grant <= capped);
-            prop_assert_eq!(new, capped - grant);
-            prop_assert!(new <= burst, "burst cap");
+            prop_assert!(grant.0 <= requested);
+            prop_assert!(grant.0 <= capped);
+            prop_assert_eq!(new.0, capped - grant.0);
+            prop_assert!(new.0 <= burst, "burst cap");
         }
     }
 }

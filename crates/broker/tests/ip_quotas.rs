@@ -12,24 +12,27 @@
 //! 3. `unthrottled_ip_unaffected` — PLAINTEXT; no quota; open 5 connections;
 //!    assert wall <500ms.
 
-use assert2::assert;
-use std::io;
-use std::net::SocketAddr;
+use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerHandle};
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
@@ -203,10 +206,10 @@ async fn drive_alter_client_quotas_sasl(
     entries: Vec<(Vec<(String, Option<String>)>, Vec<(String, f64, bool)>)>,
     validate_only: bool,
 ) -> Vec<(Vec<(String, Option<String>)>, i16)> {
-    use crabka_protocol::owned::alter_client_quotas_request::{
-        AlterClientQuotasRequest, EntityData, EntryData, OpData,
+    use crabka_protocol::owned::{
+        alter_client_quotas_request::{AlterClientQuotasRequest, EntityData, EntryData, OpData},
+        alter_client_quotas_response::AlterClientQuotasResponse,
     };
-    use crabka_protocol::owned::alter_client_quotas_response::AlterClientQuotasResponse;
 
     let req = AlterClientQuotasRequest {
         entries: entries
@@ -275,10 +278,10 @@ async fn drive_describe_client_quotas_sasl(
     components: Vec<(String, i8, Option<String>)>,
     strict: bool,
 ) -> Vec<(Vec<(String, Option<String>)>, Vec<(String, f64)>)> {
-    use crabka_protocol::owned::describe_client_quotas_request::{
-        ComponentData, DescribeClientQuotasRequest,
+    use crabka_protocol::owned::{
+        describe_client_quotas_request::{ComponentData, DescribeClientQuotasRequest},
+        describe_client_quotas_response::DescribeClientQuotasResponse,
     };
-    use crabka_protocol::owned::describe_client_quotas_response::DescribeClientQuotasResponse;
 
     let req = DescribeClientQuotasRequest {
         components: components
@@ -428,8 +431,7 @@ async fn connection_creation_rate_throttles_accept() {
     // (Without this, the OS TCP backlog completes the SYN-ACK handshake for
     // all connections immediately and TcpStream::connect returns without
     // waiting for the accept-side throttle sleep.)
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+    use crabka_protocol::{Encode, owned::api_versions_request::ApiVersionsRequest};
 
     let started = std::time::Instant::now();
     let mut streams = Vec::with_capacity(5);
@@ -502,8 +504,7 @@ async fn start_single_broker_plaintext_with_conn_caps(
 /// slot is freed once an existing connection closes (`ConnectionGuard::drop`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn max_connections_per_ip_refuses_excess_and_frees_on_close() {
-    use crabka_protocol::Encode;
-    use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+    use crabka_protocol::{Encode, owned::api_versions_request::ApiVersionsRequest};
 
     let (_handle, _dir, addr) = start_single_broker_plaintext_with_conn_caps(usize::MAX, 1).await;
 

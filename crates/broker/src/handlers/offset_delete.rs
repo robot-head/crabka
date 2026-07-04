@@ -21,26 +21,32 @@
 use std::collections::HashSet;
 
 use bytes::{Bytes, BytesMut};
-
 use crabka_metadata::{AclOperation, ResourceType};
-use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
-use crabka_protocol::owned::offset_delete_request::OffsetDeleteRequest;
-use crabka_protocol::owned::offset_delete_response::{
-    OffsetDeleteResponse, OffsetDeleteResponsePartition, OffsetDeleteResponseTopic,
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        consumer_protocol_subscription::ConsumerProtocolSubscription,
+        offset_delete_request::OffsetDeleteRequest,
+        offset_delete_response::{
+            OffsetDeleteResponse, OffsetDeleteResponsePartition, OffsetDeleteResponseTopic,
+        },
+    },
+    records::{Record, RecordBatch},
 };
-use crabka_protocol::records::{Record, RecordBatch};
-use crabka_protocol::{Decode, Encode};
 use tokio::sync::oneshot;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
-use crate::broker::Broker;
-use crate::codes;
-use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
-use crate::coordinator::persistence::OffsetCommitValue;
-use crate::coordinator::unified::actor::GroupActorMessage;
-use crate::coordinator::unified::classic_state::GroupState;
-use crate::error::BrokerError;
-use crate::partition::{ProduceData, ProduceJob, WriterMessage};
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics},
+    broker::Broker,
+    codes,
+    coordinator::{
+        bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC},
+        persistence::OffsetCommitValue,
+        unified::{actor::GroupActorMessage, classic_state::GroupState},
+    },
+    error::BrokerError,
+    partition::{ProduceData, ProduceJob, WriterMessage},
+};
 
 #[allow(clippy::too_many_lines)] // ACL preamble + subscription guard + tombstone pipeline; splitting hurts readability
 #[tracing::instrument(
@@ -307,7 +313,10 @@ fn rewrite_success_as(topics: Vec<OffsetDeleteResponseTopic>, code: i16) -> Offs
 }
 
 async fn append_tombstones(broker: &Broker, batch: RecordBatch) -> Result<(), i16> {
-    let Some(part_handle) = broker.partitions.get(OFFSETS_TOPIC, OFFSETS_PARTITION) else {
+    let Some(part_handle) = broker
+        .partitions
+        .get(OFFSETS_TOPIC, crabka_ids::PartitionIndex(OFFSETS_PARTITION))
+    else {
         return Err(codes::UNKNOWN_SERVER_ERROR);
     };
     let (ack_tx, ack_rx) = oneshot::channel();
@@ -373,15 +382,19 @@ fn encode(version: i16, resp: &OffsetDeleteResponse) -> Result<Bytes, BrokerErro
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::HashMap;
+
     use assert2::{assert, check};
     use bytes::BufMut;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
-    use crabka_protocol::owned::offset_delete_request::{
-        OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            consumer_protocol_subscription::ConsumerProtocolSubscription,
+            offset_delete_request::{OffsetDeleteRequestPartition, OffsetDeleteRequestTopic},
+        },
     };
-    use std::collections::HashMap;
+
+    use super::*;
 
     /// Fully-specified expected partition row (no struct-update syntax).
     fn expected_row(partition_index: i32, error_code: i16) -> OffsetDeleteResponsePartition {

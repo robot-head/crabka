@@ -6,18 +6,21 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use crabka_log::Offset;
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        initialize_share_group_state_request::InitializeShareGroupStateRequest,
+        initialize_share_group_state_response::{
+            InitializeShareGroupStateResponse, InitializeStateResult, PartitionResult,
+        },
+    },
+};
 use futures_util::future::BoxFuture;
 
-use crabka_protocol::owned::initialize_share_group_state_request::InitializeShareGroupStateRequest;
-use crabka_protocol::owned::initialize_share_group_state_response::{
-    InitializeShareGroupStateResponse, InitializeStateResult, PartitionResult,
+use crate::{
+    broker::Broker, codes, error::BrokerError, share_coordinator::coordinator::ShareCoordinator,
 };
-use crabka_protocol::{Decode, Encode};
-
-use crate::broker::Broker;
-use crate::codes;
-use crate::error::BrokerError;
-use crate::share_coordinator::coordinator::ShareCoordinator;
 
 pub(crate) fn handle(
     broker: &Broker,
@@ -34,6 +37,9 @@ pub(crate) fn handle(
     })
 }
 
+// cargo-mutants: equivalent — `error_message: None` is exactly the derived
+// `Default` for the `Option<String>` field, so deleting the field is a no-op.
+#[cfg_attr(test, mutants::skip)]
 async fn handle_request(
     coordinator: Arc<ShareCoordinator>,
     version: i16,
@@ -55,7 +61,7 @@ async fn handle_request(
                         topic_id,
                         pd.partition,
                         pd.state_epoch,
-                        pd.start_offset,
+                        Offset(pd.start_offset),
                     )
                     .await
                 {
@@ -68,6 +74,7 @@ async fn handle_request(
             partitions.push(PartitionResult {
                 partition: pd.partition,
                 error_code,
+                error_message: None,
                 ..Default::default()
             });
         }
@@ -89,14 +96,17 @@ async fn handle_request(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
-    use crabka_protocol::owned::initialize_share_group_state_request::{
-        InitializeStateData, PartitionData,
+    use crabka_protocol::{
+        UnknownTaggedFields,
+        owned::{
+            initialize_share_group_state_request::{InitializeStateData, PartitionData},
+            initialize_share_group_state_response::InitializeShareGroupStateResponse,
+        },
+        primitives::uuid::Uuid as ProtoUuid,
     };
-    use crabka_protocol::owned::initialize_share_group_state_response::InitializeShareGroupStateResponse;
-    use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
+
+    use super::*;
 
     fn decode(bytes: &Bytes) -> InitializeShareGroupStateResponse {
         let mut cur: &[u8] = bytes.as_ref();

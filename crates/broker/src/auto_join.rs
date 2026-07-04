@@ -20,14 +20,16 @@
 //! coordinator or openraft membership directly. All the lockstep safety lives
 //! on the leader.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use bytes::{Bytes, BytesMut};
-
-use crabka_protocol::owned::add_raft_voter_request::{self, AddRaftVoterRequest, Listener};
-use crabka_protocol::owned::add_raft_voter_response::AddRaftVoterResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        add_raft_voter_request::{self, AddRaftVoterRequest, Listener},
+        add_raft_voter_response::AddRaftVoterResponse,
+    },
+};
 
 use crate::codes;
 
@@ -66,7 +68,7 @@ pub(crate) async fn run(params: AutoJoinParams) {
     let bootstrap_servers = params.bootstrap_servers;
     if bootstrap_servers.is_empty() {
         tracing::warn!(
-            node_id = self_id,
+            node_id = self_id.0,
             "auto_join enabled but bootstrap_servers is empty; cannot discover a leader"
         );
         return;
@@ -76,8 +78,8 @@ pub(crate) async fn run(params: AutoJoinParams) {
     // (resolved port, not the possibly-zero configured port) so the leader's
     // add_learner can dial us back.
     let bound = params.controller.controller_bound_addr();
-    let Ok(voter_id) = i32::try_from(self_id) else {
-        tracing::error!(node_id = self_id, "node_id exceeds i32; cannot auto-join");
+    let Ok(voter_id) = i32::try_from(self_id.0) else {
+        tracing::error!(node_id = self_id.0, "node_id exceeds i32; cannot auto-join");
         return;
     };
     let directory_id = crabka_protocol::primitives::uuid::Uuid(*params.directory_id.as_bytes());
@@ -92,7 +94,7 @@ pub(crate) async fn run(params: AutoJoinParams) {
     loop {
         // Terminate as soon as the committed voter set includes us.
         if controller.current_image().voters().contains(self_id) {
-            tracing::info!(node_id = self_id, "auto-join complete; node is a voter");
+            tracing::info!(node_id = self_id.0, "auto-join complete; node is a voter");
             return;
         }
 
@@ -108,7 +110,7 @@ pub(crate) async fn run(params: AutoJoinParams) {
             }
             Err(e) => {
                 tracing::debug!(
-                    node_id = self_id,
+                    node_id = self_id.0,
                     server = %target,
                     error = %e,
                     "auto-join: dial/RPC failed; trying next bootstrap server"
@@ -173,7 +175,7 @@ fn log_join_outcome(
     match resp.error_code {
         codes::NONE => {
             tracing::info!(
-                node_id = self_id,
+                node_id = self_id.0,
                 leader = %target,
                 "auto-join accepted by leader"
             );
@@ -187,7 +189,7 @@ fn log_join_outcome(
             // but it isn't a routable address — fall back to rotating across
             // the configured bootstrap servers.
             tracing::debug!(
-                node_id = self_id,
+                node_id = self_id.0,
                 server = %target,
                 msg = ?resp.error_message,
                 "auto-join target is not the leader; trying next bootstrap server"
@@ -196,7 +198,7 @@ fn log_join_outcome(
         }
         codes::REQUEST_TIMED_OUT => {
             tracing::debug!(
-                node_id = self_id,
+                node_id = self_id.0,
                 server = %target,
                 "auto-join: reconfiguration in progress on leader; retrying"
             );
@@ -206,7 +208,7 @@ fn log_join_outcome(
             // Observer not yet caught up within the lag bound. Keep replicating
             // (openraft is doing that in the background) and retry shortly.
             tracing::debug!(
-                node_id = self_id,
+                node_id = self_id.0,
                 server = %target,
                 msg = ?resp.error_message,
                 "auto-join: not yet caught up; retrying"
@@ -215,7 +217,7 @@ fn log_join_outcome(
         }
         other => {
             tracing::warn!(
-                node_id = self_id,
+                node_id = self_id.0,
                 server = %target,
                 error_code = other,
                 msg = ?resp.error_message,
@@ -277,17 +279,23 @@ fn auto_join_connection_options() -> crabka_client_core::ConnectionOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crabka_metadata::{KRaftVersionRange, MetadataImage, MetadataRecord};
-    use crabka_metadata::{Voter, VoterEndpoint, VoterSet, VotersRecord};
+    use std::{
+        collections::BTreeSet,
+        net::SocketAddr,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+
+    use crabka_metadata::{
+        KRaftVersionRange, MetadataImage, MetadataRecord, Voter, VoterEndpoint, VoterSet,
+        VotersRecord,
+    };
     use crabka_raft::{
         AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
         SnapshotRange, UpdateVoter,
     };
-    use std::collections::BTreeSet;
-    use std::net::SocketAddr;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::watch;
+
+    use super::*;
 
     struct MockSource {
         image: Arc<MetadataImage>,
@@ -365,7 +373,7 @@ mod tests {
         image.apply(&MetadataRecord::V1Voters(VotersRecord {
             voters: VoterSet::from_voters([Voter {
                 id: node_id,
-                directory_id: uuid::Uuid::from_u128(node_id.into()),
+                directory_id: uuid::Uuid::from_u128(node_id.0.into()),
                 endpoints: vec![VoterEndpoint {
                     name: "CONTROLLER".to_string(),
                     host: "127.0.0.1".to_string(),
@@ -458,23 +466,23 @@ mod tests {
         };
 
         assert_eq!(
-            log_join_outcome(1, target, &response(codes::NONE)),
+            log_join_outcome(NodeId(1), target, &response(codes::NONE)),
             JoinOutcome::Accepted
         );
         assert_eq!(
-            log_join_outcome(1, target, &response(codes::NOT_LEADER_OR_FOLLOWER)),
+            log_join_outcome(NodeId(1), target, &response(codes::NOT_LEADER_OR_FOLLOWER)),
             JoinOutcome::NotLeader
         );
         assert_eq!(
-            log_join_outcome(1, target, &response(codes::REQUEST_TIMED_OUT)),
+            log_join_outcome(NodeId(1), target, &response(codes::REQUEST_TIMED_OUT)),
             JoinOutcome::TimedOut
         );
         assert_eq!(
-            log_join_outcome(1, target, &response(codes::INVALID_REQUEST)),
+            log_join_outcome(NodeId(1), target, &response(codes::INVALID_REQUEST)),
             JoinOutcome::NotCaughtUp
         );
         assert_eq!(
-            log_join_outcome(1, target, &response(1234)),
+            log_join_outcome(NodeId(1), target, &response(1234)),
             JoinOutcome::Unexpected(1234)
         );
     }
@@ -515,7 +523,7 @@ mod tests {
 
         let params = AutoJoinParams {
             auto_join: false,
-            node_id: 999,
+            node_id: crabka_raft::NodeId(999),
             directory_id: uuid::Uuid::from_u128(1),
             cluster_id: None,
             // Unroutable: would hang the loop if `run` ignored auto_join=false.
@@ -535,13 +543,13 @@ mod tests {
     #[tokio::test]
     async fn run_with_auto_join_true_checks_current_voter_set_before_returning() {
         let source = Arc::new(MockSource {
-            image: Arc::new(image_with_voter(7)),
+            image: Arc::new(image_with_voter(NodeId(7))),
             current_image_calls: AtomicUsize::new(0),
             controller_bound_addr_calls: AtomicUsize::new(0),
         });
         let params = AutoJoinParams {
             auto_join: true,
-            node_id: 7,
+            node_id: crabka_raft::NodeId(7),
             directory_id: uuid::Uuid::from_u128(7),
             cluster_id: None,
             bootstrap_servers: vec!["127.0.0.1:1".parse().unwrap()],

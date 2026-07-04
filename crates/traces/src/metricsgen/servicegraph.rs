@@ -4,12 +4,12 @@ use std::collections::HashMap;
 
 use bytes::{Buf, BufMut, BytesMut};
 
-use crate::metricsgen::checkpoint::{
-    CheckpointCodecError, encode_checkpoint_key, parse_checkpoint_key,
+use crate::metricsgen::{
+    checkpoint::{CheckpointCodecError, encode_checkpoint_key, parse_checkpoint_key},
+    config::MetricsGenConfig,
+    contract::{SpanKind, SpanRecord, StatusCode},
+    series::{Series, SeriesSample, sorted_labels},
 };
-use crate::metricsgen::config::MetricsGenConfig;
-use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
-use crate::metricsgen::series::{Series, SeriesSample, sorted_labels};
 
 const NS_PER_SEC: f64 = 1_000_000_000.0;
 
@@ -624,9 +624,11 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
-    use crate::metricsgen::config::MetricsGenConfig;
-    use crate::metricsgen::contract::{SpanKind, SpanRecord, StatusCode};
-    use crate::metricsgen::series::{Series, SeriesSample};
+    use crate::metricsgen::{
+        config::MetricsGenConfig,
+        contract::{SpanKind, SpanRecord, StatusCode},
+        series::{Series, SeriesSample},
+    };
 
     fn span(
         service: &str,

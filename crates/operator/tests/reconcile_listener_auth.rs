@@ -1,10 +1,12 @@
 //! Integration tests for listener authentication wiring — SCRAM-SHA-512, SCRAM-SHA-256, mTLS, and `NodePort` SAN injection.
 
-use assert2::{assert, check};
 use std::sync::Arc;
 
-use crabka_operator::controller::kafka::reconcile;
-use crabka_operator::crd::{Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerType};
+use assert2::{assert, check};
+use crabka_operator::{
+    controller::kafka::reconcile,
+    crd::{Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerType},
+};
 use http::{Method, Response};
 
 #[path = "shared/mod.rs"]

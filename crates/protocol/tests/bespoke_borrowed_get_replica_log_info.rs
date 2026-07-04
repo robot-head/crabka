@@ -6,14 +6,18 @@
 
 use assert2::assert;
 use bytes::BytesMut;
-use crabka_protocol::borrowed::get_replica_log_info_request::{
-    GetReplicaLogInfoRequest, MAX_VERSION, MIN_VERSION, TopicPartitions,
+use crabka_protocol::{
+    DecodeBorrow, Encode,
+    borrowed::{
+        get_replica_log_info_request::{
+            GetReplicaLogInfoRequest, MAX_VERSION, MIN_VERSION, TopicPartitions,
+        },
+        get_replica_log_info_response::{
+            GetReplicaLogInfoResponse, PartitionLogInfo, TopicPartitionLogInfo,
+        },
+    },
+    primitives::uuid::Uuid,
 };
-use crabka_protocol::borrowed::get_replica_log_info_response::{
-    GetReplicaLogInfoResponse, PartitionLogInfo, TopicPartitionLogInfo,
-};
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::{DecodeBorrow, Encode};
 
 #[test]
 fn borrowed_request_populated_roundtrip() {

@@ -3,16 +3,10 @@
 //! Skips partitions currently being reassigned (transient ISR
 //! shortfalls during rebalance are expected).
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
-use crate::detector::AnomalyKey;
-use crate::detector::AnomalyKind;
-use crate::detector::AnomalySeverity;
-
-use super::Rule;
-use super::RuleCtx;
-use super::RuleHit;
+use super::{Rule, RuleCtx, RuleHit};
+use crate::detector::{AnomalyKey, AnomalyKind, AnomalySeverity};
 
 pub struct UnderReplicatedPartitions;
 
@@ -113,14 +107,17 @@ impl Rule for UnderReplicatedPartitions {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
     use std::time::Duration;
 
+    use assert2::assert;
+
     use super::*;
-    use crate::capacity::BrokerCapacities;
-    use crate::detector::{DetectorConfig, SnapshotHistory};
-    use crate::model::{BrokerView, ClusterState, InFlightReassignment, PartitionView};
-    use crate::scraper::UsageStore;
+    use crate::{
+        capacity::BrokerCapacities,
+        detector::{DetectorConfig, SnapshotHistory},
+        model::{BrokerView, ClusterState, InFlightReassignment, PartitionView},
+        scraper::UsageStore,
+    };
 
     fn part_full(topic: &str, partition: i32, replicas: Vec<i32>) -> PartitionView {
         PartitionView {

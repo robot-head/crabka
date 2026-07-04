@@ -8,19 +8,28 @@ use assert2::assert;
 mod support;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crabka_protocol::kafka_3_6_2::owned::produce_request::{
-    PartitionProduceData as LegacyPartitionProduceData, ProduceRequest as LegacyProduceRequest,
-    TopicProduceData as LegacyTopicProduceData,
+use crabka_ids::Offset;
+use crabka_protocol::{
+    Decode, Encode,
+    kafka_3_6_2::owned::{
+        produce_request::{
+            PartitionProduceData as LegacyPartitionProduceData,
+            ProduceRequest as LegacyProduceRequest, TopicProduceData as LegacyTopicProduceData,
+        },
+        produce_response::ProduceResponse as LegacyProduceResponse,
+    },
+    owned::{
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
+        fetch_request::{FetchPartition, FetchRequest, FetchTopic},
+        metadata_request::{MetadataRequest, MetadataRequestTopic},
+    },
+    records::RecordsPayload,
 };
-use crabka_protocol::kafka_3_6_2::owned::produce_response::ProduceResponse as LegacyProduceResponse;
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
-use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
-use crabka_protocol::records::RecordsPayload;
-use crabka_protocol::{Decode, Encode};
 use crabka_records_legacy::{Magic, ParsedRecord, encode_flat_message_set};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 // ── Raw TCP wire helpers ──────────────────────────────────────────────────────
 
@@ -32,7 +41,7 @@ fn build_v0_messageset(pairs: &[(&str, &str)]) -> Bytes {
         .iter()
         .enumerate()
         .map(|(i, (k, v))| ParsedRecord {
-            offset: i64::try_from(i).expect("index fits in i64"),
+            offset: Offset(i64::try_from(i).expect("index fits in i64")),
             timestamp: None, // v0 has no timestamps
             key: Some(Bytes::copy_from_slice(k.as_bytes())),
             value: Some(Bytes::copy_from_slice(v.as_bytes())),

@@ -7,36 +7,39 @@
 //! [`crate::dsl::kstream::KStream`]: reconstruct the parent handle from
 //! `LowerState`, perform the typed Processor-API call, record the resulting node
 //! name. Materialized ops (`map_values`/`filter`) also register a state store.
-use std::any::Any;
-use std::cell::RefCell;
-use std::marker::PhantomData;
-use std::rc::Rc;
-use std::sync::Arc;
+use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
 
-use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
-use crate::dsl::kstream::KStream;
-use crate::dsl::names;
-use crate::dsl::processors::change::Change;
-use crate::dsl::processors::fk::processors::{
-    FkJoinOutputProcessor, ForeignTableJoinProcessor, SubscriptionJoinProcessor,
-    SubscriptionReceiveProcessor, SubscriptionResolverProcessor, SubscriptionSendProcessor,
+use crate::{
+    dsl::{
+        builder::InternalStreamsBuilder,
+        graph::{GraphNodeKind, LowerState, NodeId},
+        kstream::KStream,
+        names,
+        processors::{
+            change::Change,
+            fk::{
+                processors::{
+                    FkJoinOutputProcessor, ForeignTableJoinProcessor, SubscriptionJoinProcessor,
+                    SubscriptionReceiveProcessor, SubscriptionResolverProcessor,
+                    SubscriptionSendProcessor,
+                },
+                subscription::{SubscriptionResponseWrapper, SubscriptionWrapper},
+                wrapper_serde::{SubscriptionResponseWrapperSerde, SubscriptionWrapperSerde},
+            },
+            ktable_join::{
+                JoinKind, KTableKTableJoinOtherProcessor, KTableKTableJoinThisProcessor,
+            },
+            stateless::MergeProcessor,
+            table::{
+                KTableFilterProcessor, KTableMapValuesProcessor, KTableMapValuesViewProcessor,
+                KTableToStreamProcessor,
+            },
+            tuple_forwarder::TupleForwarder,
+        },
+    },
+    processor::serde::{DefaultSerde, Serde, SerdeArc},
+    topology::NodeHandle,
 };
-use crate::dsl::processors::fk::subscription::{SubscriptionResponseWrapper, SubscriptionWrapper};
-use crate::dsl::processors::fk::wrapper_serde::{
-    SubscriptionResponseWrapperSerde, SubscriptionWrapperSerde,
-};
-use crate::dsl::processors::ktable_join::{
-    JoinKind, KTableKTableJoinOtherProcessor, KTableKTableJoinThisProcessor,
-};
-use crate::dsl::processors::stateless::MergeProcessor;
-use crate::dsl::processors::table::{
-    KTableFilterProcessor, KTableMapValuesProcessor, KTableMapValuesViewProcessor,
-    KTableToStreamProcessor,
-};
-use crate::dsl::processors::tuple_forwarder::TupleForwarder;
-use crate::processor::serde::{DefaultSerde, Serde, SerdeArc};
-use crate::topology::NodeHandle;
 
 /// A serde-carrying closure that registers a `SuppressBytesStore` for a `suppress`
 /// node during lowering. Attached to a `KTable` by the producing op (windowed/
@@ -1336,9 +1339,10 @@ fn mint_table_store<KS, VS>(
 mod tests {
     #[test]
     fn versioned_table_handle_carries_retention() {
-        use crate::dsl::builder::StreamsBuilder;
-        use crate::dsl::config::Materialized;
-        use crate::processor::serde::{I64Serde, StringSerde};
+        use crate::{
+            dsl::{builder::StreamsBuilder, config::Materialized},
+            processor::serde::{I64Serde, StringSerde},
+        };
 
         let b = StreamsBuilder::new();
         let t = b.table_explicit::<StringSerde, I64Serde>(
@@ -1361,9 +1365,11 @@ mod tests {
 mod fk_exec_tests {
     use std::sync::{Arc, Mutex};
 
-    use crate::dsl::builder::StreamsBuilder;
-    use crate::processor::serde::{Consumed, StringSerde};
-    use crate::test_driver::TopologyTestDriver;
+    use crate::{
+        dsl::builder::StreamsBuilder,
+        processor::serde::{Consumed, StringSerde},
+        test_driver::TopologyTestDriver,
+    };
 
     type Out = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
     /// One sequence step: `(input_topic, key, value, ts, expected_emissions)`,

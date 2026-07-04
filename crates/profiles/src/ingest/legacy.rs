@@ -1,13 +1,12 @@
 //! Legacy `POST /ingest` door.
 
+use std::{collections::BTreeMap, io::Cursor};
+
 use crabka_blockstore::Labels;
 use crabka_pprof::PprofProfile;
 use serde::Deserialize;
-use std::collections::BTreeMap;
-use std::io::Cursor;
 
-use crate::error::ProfilesError;
-use crate::ingest::RawProfile;
+use crate::{error::ProfilesError, ingest::RawProfile};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IngestFormat {

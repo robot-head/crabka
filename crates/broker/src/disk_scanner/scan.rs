@@ -3,9 +3,7 @@
 //! materialized", not an error) and propagates IO errors for other
 //! failure modes.
 
-use std::fs;
-use std::io;
-use std::path::Path;
+use std::{fs, io, path::Path};
 
 pub fn sum_partition_dir(path: &Path) -> Result<u64, io::Error> {
     let entries = match fs::read_dir(path) {
@@ -26,9 +24,11 @@ pub fn sum_partition_dir(path: &Path) -> Result<u64, io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use assert2::assert;
     use std::io::Write;
+
+    use assert2::assert;
+
+    use super::*;
 
     #[test]
     fn empty_dir_returns_zero() {

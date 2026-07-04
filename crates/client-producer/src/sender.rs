@@ -30,32 +30,39 @@
 //! `DUPLICATE_SEQUENCE_NUMBER` — ahead of any new batch for that partition, on
 //! the next cycle. The retry slots persist across cycles (owned by [`run`]).
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
+use crabka_compression::CompressionType;
+use crabka_protocol::{
+    owned::{
+        produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+        produce_response::ProduceResponse,
+    },
+    primitives::uuid::Uuid,
+    records::{Attributes, Record, RecordBatch, RecordHeader},
+};
 use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
-use crabka_compression::CompressionType;
-use crabka_protocol::owned::produce_request::{
-    PartitionProduceData, ProduceRequest, TopicProduceData,
+use crate::{
+    accumulator::{Accumulator, InProgressBatch, PendingRecord},
+    compression::Compression,
+    error::ProducerError,
+    partitioner::UniformStickyPartitioner,
+    producer::{Acks, STATE_ACTIVE, STATE_FENCED, TopicMetadata},
+    record::RecordMetadata,
+    transactional::TxnState,
+    transport::ProduceTransport,
 };
-use crabka_protocol::owned::produce_response::ProduceResponse;
-use crabka_protocol::primitives::uuid::Uuid;
-use crabka_protocol::records::{Attributes, Record, RecordBatch, RecordHeader};
-
-use crate::accumulator::{Accumulator, InProgressBatch, PendingRecord};
-use crate::compression::Compression;
-use crate::error::ProducerError;
-use crate::partitioner::UniformStickyPartitioner;
-use crate::producer::{Acks, STATE_ACTIVE, STATE_FENCED, TopicMetadata};
-use crate::record::RecordMetadata;
-use crate::transactional::TxnState;
-use crate::transport::ProduceTransport;
 
 /// Wire error codes referenced when interpreting `PartitionProduceResponse`.
 mod codes {
@@ -1095,9 +1102,10 @@ fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use assert2::{assert, check};
     use tokio::sync::oneshot;
+
+    use super::*;
 
     /// Build a `PreparedBatch` for `(topic, partition)` with `base_sequence` and
     /// a single record, returning the batch and the record's ack receiver so a
@@ -1281,27 +1289,30 @@ mod tests {
 /// described in the module docs.
 #[cfg(test)]
 mod harness {
-    use super::*;
+    use std::sync::{Mutex as StdMutex, atomic::AtomicI64};
+
     use assert2::{assert, check};
-    use std::sync::Mutex as StdMutex;
-    use std::sync::atomic::AtomicI64;
+    use crabka_client_core::ClientError;
+    use crabka_protocol::{
+        owned::{
+            metadata_response::{
+                MetadataResponse, MetadataResponsePartition, MetadataResponseTopic,
+            },
+            produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
+            produce_response::{
+                LeaderIdAndEpoch, PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
+            },
+        },
+        records::{Attributes, Record, RecordBatch},
+    };
     use tokio::sync::oneshot;
 
-    use crabka_client_core::ClientError;
-    use crabka_protocol::owned::metadata_response::{
-        MetadataResponse, MetadataResponsePartition, MetadataResponseTopic,
+    use super::*;
+    use crate::{
+        accumulator::Accumulator,
+        producer::{STATE_ACTIVE, STATE_FENCED, TopicMetadata},
+        transactional::TxnState,
     };
-    use crabka_protocol::owned::produce_request::{
-        PartitionProduceData, ProduceRequest, TopicProduceData,
-    };
-    use crabka_protocol::owned::produce_response::{
-        LeaderIdAndEpoch, PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
-    };
-    use crabka_protocol::records::{Attributes, Record, RecordBatch};
-
-    use crate::accumulator::Accumulator;
-    use crate::producer::{STATE_ACTIVE, STATE_FENCED, TopicMetadata};
-    use crate::transactional::TxnState;
 
     /// Per-`(topic, partition)` accumulator map (mirrors the production type).
     type AccumulatorMap = Arc<DashMap<(String, i32), Arc<Mutex<Accumulator>>>>;

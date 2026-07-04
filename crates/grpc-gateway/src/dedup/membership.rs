@@ -9,12 +9,14 @@
 //! live owner: the table breaks ties by record offset, and the topic's single
 //! partition makes those offsets a total order, so the most-recent claim wins.
 
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::sync::RwLock;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
