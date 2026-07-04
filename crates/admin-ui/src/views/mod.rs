@@ -1,8 +1,14 @@
+pub mod acls;
+pub mod groups;
 pub mod layout;
+pub mod log_dirs;
 pub mod login;
 pub mod overview;
+pub mod quotas;
+pub mod topics;
+pub mod users;
 
-use dioxus::dioxus_core::{Template, VNode};
+use dioxus::dioxus_core::{Element, Template, VNode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Route {
@@ -52,6 +58,19 @@ impl Route {
         }
 
         Self::Login
+    }
+}
+
+pub fn render_route(route: Route) -> Element {
+    match route {
+        Route::Overview => overview::overview_view(),
+        Route::Login => login::login_view(),
+        Route::Topics => topics::topics_view(),
+        Route::Groups => groups::groups_view(),
+        Route::Acls => acls::acls_view(),
+        Route::Users => users::users_view(),
+        Route::Quotas => quotas::quotas_view(),
+        Route::LogDirs => log_dirs::log_dirs_view(),
     }
 }
 

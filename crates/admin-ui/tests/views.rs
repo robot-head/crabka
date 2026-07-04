@@ -1,4 +1,42 @@
-use crabka_admin_ui::views::{Route, layout::sidebar_links};
+use crabka_admin_ui::views::{
+    Route, acls, groups, layout::sidebar_links, log_dirs, quotas, render_route, topics, users,
+};
+use dioxus::dioxus_core::{Element, TemplateNode, VNode};
+
+fn rendered_text(view: Element) -> String {
+    let vnode = view.expect("static view should render without runtime errors");
+
+    collect_vnode_text(&vnode)
+}
+
+fn collect_vnode_text(vnode: &VNode) -> String {
+    let mut text = String::new();
+
+    collect_template_text(vnode.template.roots, &mut text);
+
+    text
+}
+
+fn collect_template_text(nodes: &[TemplateNode], text: &mut String) {
+    for node in nodes {
+        match node {
+            TemplateNode::Element { children, .. } => collect_template_text(children, text),
+            TemplateNode::Text { text: node_text } => text.push_str(node_text),
+            TemplateNode::Dynamic { .. } => {}
+        }
+    }
+}
+
+fn assert_view_contains(view: Element, expected_text: &[&str]) {
+    let actual_text = rendered_text(view);
+
+    for expected in expected_text {
+        assert!(
+            actual_text.contains(expected),
+            "expected rendered text to contain {expected:?}, got {actual_text:?}"
+        );
+    }
+}
 
 #[test]
 fn route_exposes_first_slice_paths_and_labels() {
@@ -74,4 +112,77 @@ fn unauthenticated_route_guard_selects_login() {
 #[test]
 fn app_remains_callable() {
     assert!(crabka_admin_ui::app().is_ok());
+}
+
+#[test]
+fn topic_view_renders_read_only_empty_state() {
+    assert_view_contains(
+        topics::topics_view(),
+        &["Topics", "Create Topic", "No topics loaded yet."],
+    );
+}
+
+#[test]
+fn consumer_groups_view_renders_read_only_empty_state() {
+    assert_view_contains(
+        groups::groups_view(),
+        &["Consumer Groups", "No groups loaded yet."],
+    );
+}
+
+#[test]
+fn acls_view_renders_read_only_empty_state() {
+    assert_view_contains(
+        acls::acls_view(),
+        &["ACLs", "Create ACL", "No ACLs loaded yet."],
+    );
+}
+
+#[test]
+fn users_view_renders_scram_empty_state() {
+    assert_view_contains(
+        users::users_view(),
+        &[
+            "SCRAM Users",
+            "Upsert SCRAM-SHA-512",
+            "No user operation selected.",
+        ],
+    );
+}
+
+#[test]
+fn quotas_view_renders_search_empty_state() {
+    assert_view_contains(
+        quotas::quotas_view(),
+        &["Quotas", "Search for a user to describe quotas."],
+    );
+}
+
+#[test]
+fn log_dirs_view_renders_empty_state() {
+    assert_view_contains(
+        log_dirs::log_dirs_view(),
+        &["Log Dirs", "No log-dir data loaded yet."],
+    );
+}
+
+#[test]
+fn every_route_renders_a_page() {
+    let routes = [
+        Route::Overview,
+        Route::Login,
+        Route::Topics,
+        Route::Groups,
+        Route::Acls,
+        Route::Users,
+        Route::Quotas,
+        Route::LogDirs,
+    ];
+
+    for route in routes {
+        assert!(
+            render_route(route).is_ok(),
+            "route {route:?} should render a page"
+        );
+    }
 }
