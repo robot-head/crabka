@@ -171,7 +171,7 @@ fn effective_lso(log: &[Batch], hw: Offset) -> Offset {
 fn visible(log: &[Batch], hw: Offset) -> Vec<i64> {
     let eff = effective_lso(log, hw);
     (0..log.len() as i64)
-        .filter(|&off| off < eff.0)
+        .filter(|&off| off < eff)
         .filter(|&off| {
             let b = log[off as usize];
             b.kind == Kind::Data && txn_outcome(log, b.producer, b.generation) != Some(Kind::Abort)
@@ -209,7 +209,7 @@ impl Model for EosModel {
 
     fn actions(&self, s: &Self::State, acts: &mut Vec<Self::Action>) {
         // A follower replicating: advance the HWM toward the log end.
-        if s.hw.0 < s.log.len() as i64 {
+        if s.hw < s.log.len() as i64 {
             acts.push(Act::Ack);
         }
         if s.log.len() >= self.max_log {
@@ -303,7 +303,7 @@ impl Model for EosModel {
         }
         // HWM never regresses and never passes the log end.
         assert!(
-            s.hw >= last.hw && s.hw.0 <= s.log.len() as i64,
+            s.hw >= last.hw && s.hw <= s.log.len() as i64,
             "HWM out of range"
         );
         // LSO is monotonic across every transition (offsets only grow; the
@@ -333,7 +333,7 @@ impl Model for EosModel {
                 let eff = effective_lso(&s.log, s.hw);
                 s.log.iter().enumerate().all(|(off, b)| {
                     !(b.kind == Kind::Data
-                        && (off as i64) < eff.0
+                        && (off as i64) < eff
                         && txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Commit))
                         || v.contains(&(off as i64))
                 })
@@ -353,7 +353,7 @@ impl Model for EosModel {
                 let eff = effective_lso(&s.log, s.hw);
                 s.log.iter().enumerate().any(|(off, b)| {
                     b.kind == Kind::Data
-                        && (off as i64) < eff.0
+                        && (off as i64) < eff
                         && txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Abort)
                 })
             }),
@@ -363,7 +363,7 @@ impl Model for EosModel {
                 let l = lso(&s.log);
                 s.log.iter().enumerate().any(|(off, b)| {
                     b.kind == Kind::Data
-                        && (off as i64) >= l.0
+                        && (off as i64) >= l
                         && txn_outcome(&s.log, b.producer, b.generation) == Some(Kind::Commit)
                 })
             }),

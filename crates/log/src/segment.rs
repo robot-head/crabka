@@ -539,11 +539,11 @@ impl Segment {
             let total = 12 + batch_len;
             let batch_last = base + i64::from(hdr.last_offset_delta.get());
 
-            if batch_last < fetch_offset.0 {
+            if batch_last < fetch_offset {
                 pos += total;
                 continue;
             }
-            if base >= limit_offset.0 {
+            if base >= limit_offset {
                 break;
             }
             if pos + total > buf.len() {
@@ -656,11 +656,11 @@ impl Segment {
             let total = 12 + batch_len as u64;
             let batch_last = base + i64::from(hdr.last_offset_delta.get());
 
-            if batch_last < fetch_offset.0 {
+            if batch_last < fetch_offset {
                 pos += total;
                 continue;
             }
-            if base >= limit_offset.0 {
+            if base >= limit_offset {
                 break;
             }
             // Batch straddles the window end. `read_raw` re-reads exactly one
@@ -1409,7 +1409,7 @@ mod tests {
         assert!(on_disk.len() == wire.len(), "size must be unchanged");
 
         // base_offset (0..8) patched to the assigned value.
-        check!(i64::from_be_bytes(on_disk[0..8].try_into().unwrap()) == assigned_base.0);
+        check!(i64::from_be_bytes(on_disk[0..8].try_into().unwrap()) == assigned_base);
         // partition_leader_epoch (12..16) patched to the stamped epoch.
         check!(i32::from_be_bytes(on_disk[12..16].try_into().unwrap()) == stamped_epoch);
         // CRC field (17..21) byte-identical to the producer's.
@@ -1426,7 +1426,7 @@ mod tests {
         // And it decodes (CRC still valid).
         let mut cur: &[u8] = &on_disk;
         let decoded = crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
-        assert!(decoded.base_offset == assigned_base.0);
+        assert!(decoded.base_offset == assigned_base);
         assert!(decoded.partition_leader_epoch == stamped_epoch);
         drop(dir);
     }

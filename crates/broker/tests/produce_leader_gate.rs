@@ -194,10 +194,10 @@ async fn produce_to_non_leader_is_rejected() {
         .0
         .wait_for_image(|img| {
             img.partition("gate-rf3", 0)
-                .is_some_and(|pr| pr.leader.get() != 0)
+                .is_some_and(|pr| pr.leader != 0)
                 && (0..6).all(|p| {
                     img.partition("gate-rf1", p)
-                        .is_some_and(|pr| pr.leader.get() != 0)
+                        .is_some_and(|pr| pr.leader != 0)
                 })
         })
         .await;

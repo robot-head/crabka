@@ -5371,7 +5371,7 @@ async fn wait_jvm_partition_leader(
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .is_some_and(|p| p.leader.0 == leader)
+                .is_some_and(|p| p.leader == leader)
         })
         .await;
 }
@@ -5401,7 +5401,7 @@ async fn wait_jvm_partition_any_leader(
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .is_some_and(|p| p.leader.0 != 0)
+                .is_some_and(|p| p.leader != 0)
         })
         .await;
     handle

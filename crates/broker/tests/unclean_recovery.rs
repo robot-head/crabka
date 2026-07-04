@@ -221,7 +221,7 @@ async fn wait_partition_leader(handle: &BrokerHandle, topic: &str, partition: i3
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .is_some_and(|p| p.leader.get() == leader)
+                .is_some_and(|p| p.leader == leader)
         })
         .await;
 }

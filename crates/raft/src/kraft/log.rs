@@ -235,10 +235,10 @@ mod tests {
         check!(first == Offset(0));
         check!(second == Offset(1));
         assert!(decoded.len() == 2);
-        check!(decoded[0].base_offset == first.0);
-        check!(decoded[1].base_offset == second.0);
+        check!(decoded[0].base_offset == first);
+        check!(decoded[1].base_offset == second);
         check!(log.log_end_offset() == Offset(i64::try_from(decoded.len()).unwrap()));
-        check!(log.log_end_offset().0 == LogView::end_offset(&log));
+        check!(log.log_end_offset() == LogView::end_offset(&log));
     }
 
     #[test]

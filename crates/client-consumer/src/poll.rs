@@ -459,7 +459,7 @@ impl Consumer {
                             // (offset_epoch < 0) has nothing to validate; flagging it
                             // would wedge it — validate_positions skips offset_epoch
                             // < 0, and the fetch builder skips awaiting_validation.
-                            if p.offset_epoch.get() >= 0 {
+                            if p.offset_epoch.is_known() {
                                 p.awaiting_validation = true;
                             }
                         }

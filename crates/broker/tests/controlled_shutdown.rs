@@ -170,7 +170,7 @@ async fn force_leadership_for_test(
         .wait_for_image(|img| {
             (0..partitions).all(|p| {
                 img.partition(topic, p)
-                    .is_some_and(|pr| pr.leader.0 == target)
+                    .is_some_and(|pr| pr.leader == target)
             })
         })
         .await;
@@ -237,7 +237,7 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
     // exhaustive, so concentrate every leader onto the target first.
     let mut replicas: Vec<u64> = (1..=3).collect();
     // Put target first so its `replicas[0]` is itself (preferred).
-    replicas.sort_by_key(|n| if *n == target_node_id.0 { 0 } else { 1 });
+    replicas.sort_by_key(|n| if *n == target_node_id { 0 } else { 1 });
     force_leadership_for_test(
         &cluster[raft_leader_idx].0,
         TOPIC,

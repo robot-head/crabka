@@ -458,7 +458,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
     let b2_id = b2.node_id();
     b1.wait_for_image(|img| {
         img.partition(TOPIC, 0)
-            .is_some_and(|p| p.leader.get() == b1_id || p.leader.get() == b2_id)
+            .is_some_and(|p| p.leader == b1_id || p.leader == b2_id)
     })
     .await;
     let (leader_node_id, follower_node_id, follower_addr) =

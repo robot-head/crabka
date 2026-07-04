@@ -317,7 +317,7 @@ impl Log {
     ///
     /// Returns [`LogError::InvalidArgument`] if `new_start` is negative.
     pub fn set_log_start_offset(&mut self, new_start: Offset) -> Result<(), LogError> {
-        if new_start.0 < 0 {
+        if new_start < 0 {
             return Err(LogError::InvalidArgument(
                 "set_log_start_offset: new_start must be >= 0".into(),
             ));
@@ -341,7 +341,7 @@ impl Log {
     /// move `log_start` *forward* past where there is no local data.
     #[instrument(level = "info", skip_all, fields(new_base = new_base.0), err)]
     pub fn reset_to(&mut self, new_base: Offset) -> Result<(), LogError> {
-        if new_base.0 < 0 {
+        if new_base < 0 {
             return Err(LogError::OffsetMismatch {
                 expected: Offset(0),
                 actual: new_base,
@@ -481,7 +481,7 @@ impl Log {
         self.append_preserving_offset(batch)?;
         // Record epoch transition when the epoch is valid and exceeds the
         // previously recorded epoch (or no epoch has been recorded yet).
-        if leader_epoch.0 >= 0
+        if leader_epoch.is_known()
             && self
                 .epoch_checkpoint
                 .latest_epoch()
@@ -519,7 +519,7 @@ impl Log {
         let assigned_base = self.log_end_offset();
         tracing::Span::current().record("assigned_base", assigned_base.0);
         self.append_verbatim_preserving_offset(batch, assigned_base)?;
-        if leader_epoch.0 >= 0
+        if leader_epoch.is_known()
             && self
                 .epoch_checkpoint
                 .latest_epoch()
@@ -577,7 +577,7 @@ impl Log {
 
         // --- LSO tracking (no control batches on this path) ---
         let pid = batch.producer_id;
-        if batch.is_transactional && pid.0 >= 0 {
+        if batch.is_transactional && !pid.is_none() {
             // Record the first offset of this txn on this partition; LSO
             // stays put until a commit/abort marker (which arrives via the
             // owned control-batch path).
@@ -628,7 +628,7 @@ impl Log {
         // Mirror the leader-side epoch bookkeeping in [`Log::append`]: record the
         // batch's leader epoch when it advances past the latest recorded epoch,
         // so a follower's leader-epoch checkpoint tracks replicated epochs.
-        if leader_epoch.0 >= 0
+        if leader_epoch.is_known()
             && self
                 .epoch_checkpoint
                 .latest_epoch()
@@ -698,7 +698,7 @@ impl Log {
             if self.pending.is_empty() {
                 self.lso = self.log_end_offset();
             }
-        } else if batch.attributes.is_transactional() && pid.0 >= 0 {
+        } else if batch.attributes.is_transactional() && !pid.is_none() {
             // Record the first offset of this txn on this partition.
             self.pending.entry(pid).or_insert(Offset(batch.base_offset));
             // LSO stays where it is until commit/abort.
@@ -1063,7 +1063,7 @@ impl Log {
         err,
     )]
     pub fn trim_to_offset(&mut self, target: Offset) -> Result<Offset, LogError> {
-        if target.0 < 0 {
+        if target < 0 {
             return Err(LogError::InvalidArgument(
                 "trim_to_offset: target must be >= 0".into(),
             ));
@@ -1250,7 +1250,7 @@ impl Log {
         err,
     )]
     pub fn delete_local_segments_through(&mut self, target: Offset) -> Result<usize, LogError> {
-        if target.0 < 0 {
+        if target < 0 {
             return Err(LogError::InvalidArgument(
                 "delete_local_segments_through: target must be >= 0".into(),
             ));

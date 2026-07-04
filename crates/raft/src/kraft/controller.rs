@@ -2918,7 +2918,7 @@ mod tests {
             .expect("read appended leader-change");
         assert!(batches.len() == 1);
         let batch = &batches[0];
-        check!(batch.base_offset == start.0);
+        check!(batch.base_offset == start);
         check!(batch.partition_leader_epoch == 4);
         check!(batch.attributes.is_control_batch());
         check!(batch.records.len() == 1);
@@ -3113,7 +3113,7 @@ mod tests {
 
         check!(*leader_rx.borrow_and_update() == Some(NodeId(1)));
         check!(quorum_rx.borrow().leader_id == Some(NodeId(1)));
-        check!(quorum_rx.borrow().log_end_offset == engine.log.log_end_offset().0);
+        check!(quorum_rx.borrow().log_end_offset == engine.log.log_end_offset());
     }
 
     #[tokio::test]

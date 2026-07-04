@@ -151,7 +151,7 @@ impl Model for IsrModel {
     fn actions(&self, state: &Self::State, actions: &mut Vec<Self::Action>) {
         let leader = self.leader();
 
-        if state.leader_leo.0 < self.max_offset {
+        if state.leader_leo < self.max_offset {
             actions.push(IsrAction::LeaderAppend);
         }
 
@@ -209,7 +209,7 @@ impl Model for IsrModel {
         let mut state = last.clone();
         match action {
             IsrAction::LeaderAppend => {
-                if state.leader_leo.0 >= self.max_offset {
+                if state.leader_leo >= self.max_offset {
                     return None;
                 }
                 state.leader_leo += 1;
@@ -276,13 +276,13 @@ impl Model for IsrModel {
     }
 
     fn within_boundary(&self, state: &Self::State) -> bool {
-        state.leader_leo.0 <= self.max_offset
-            && state.rs.hw.0 <= self.max_offset
+        state.leader_leo <= self.max_offset
+            && state.rs.hw <= self.max_offset
             && state
                 .rs
                 .per_follower
                 .values()
-                .all(|s| s.leo.0 <= self.max_offset)
+                .all(|s| s.leo <= self.max_offset)
     }
 }
 

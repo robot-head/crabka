@@ -141,7 +141,7 @@ where
                 // tagged-fields byte) and expects a ResponseHeader v0 reply (also
                 // no tagged-fields byte) — the documented Kafka asymmetry. We
                 // serialize it separately rather than poisoning the generic codec.
-                if api_key_n.get() == API_KEY_API_VERSIONS {
+                if api_key_n == API_KEY_API_VERSIONS {
                     // ApiVersionsResponse always uses a v0 ResponseHeader (no
                     // tagged-fields byte), but the BODY shape depends on the
                     // request version: v0..=2 are non-flexible (i32 array), v3+
@@ -156,7 +156,7 @@ where
                 // `dispatch` because it needs the request version (for the
                 // flexible body codec) and the controller's metadata image. The
                 // flexible v1 ResponseHeader is supplied by `write_response`.
-                if api_key_n.get() == API_KEY_DESCRIBE_CLUSTER {
+                if api_key_n == API_KEY_DESCRIBE_CLUSTER {
                     let resp =
                         describe_cluster_response_body(api_version.get(), &body, &engine).await?;
                     write_response(&mut stream, correlation_id, resp).await?;

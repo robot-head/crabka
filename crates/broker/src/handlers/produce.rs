@@ -1739,7 +1739,7 @@ mod tests {
             match data {
                 ProduceData::Verbatim(v) => {
                     check!(&v.bytes[..] == &wire[..]);
-                    check!(v.leader_epoch.0 == 7);
+                    check!(v.leader_epoch == 7);
                     check!(v.max_timestamp == 42);
                     check!(v.last_offset_delta == 0);
                 }
@@ -1880,7 +1880,7 @@ mod tests {
                     check!(v.bytes.len() < big.len());
                     check!(v.max_timestamp == 7_777);
                     check!(v.last_offset_delta == 0);
-                    check!(v.leader_epoch.0 == 3);
+                    check!(v.leader_epoch == 3);
                 }
                 ProduceData::Owned(_) => {
                     panic!("lz4 producer batch must pass through verbatim (no decompress)")

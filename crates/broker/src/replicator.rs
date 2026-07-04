@@ -378,7 +378,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
         .and_then(|t| {
             t.partitions
                 .iter_mut()
-                .find(|p| p.partition_index == cfg.partition.get())
+                .find(|p| p.partition_index == cfg.partition)
         })
     else {
         return LoopAction::Continue;
@@ -609,11 +609,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
         .topics
         .iter()
         .find(|t| t.topic == cfg.topic)
-        .and_then(|t| {
-            t.partitions
-                .iter()
-                .find(|p| p.partition == cfg.partition.get())
-        })
+        .and_then(|t| t.partitions.iter().find(|p| p.partition == cfg.partition))
         .map(|p| p.end_offset)
     else {
         return Ok(());

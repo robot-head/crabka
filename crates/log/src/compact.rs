@@ -441,7 +441,7 @@ impl CleanedTransactionMetadata {
     /// The transactional-data state for a given producer.
     #[must_use]
     pub fn txn_state(&self, producer_id: ProducerId) -> TxnDataState {
-        if producer_id.0 < 0 {
+        if producer_id.is_none() {
             return TxnDataState::NotTransactional;
         }
         if self.survivors.contains(&producer_id) {

@@ -57,7 +57,7 @@ pub(crate) async fn run(cfg: Config) {
             if part
                 .current_leader
                 .load(std::sync::atomic::Ordering::Acquire)
-                != cfg.node_id.0
+                != cfg.node_id
             {
                 continue;
             }

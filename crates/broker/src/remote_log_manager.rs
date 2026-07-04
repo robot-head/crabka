@@ -87,7 +87,7 @@ async fn tick_all(
     let snapshot: Vec<Arc<Partition>> = partitions.arcs();
     let image = controller.current_image();
     for partition in snapshot {
-        if partition.current_leader.load(Ordering::Relaxed) != node_id.0 {
+        if partition.current_leader.load(Ordering::Relaxed) != node_id {
             continue;
         }
         // Read config + sealed-segment list under the log lock, then drop it.

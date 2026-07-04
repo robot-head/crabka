@@ -83,7 +83,7 @@ pub(crate) async fn tick_all(
     let snapshot: Vec<Arc<Partition>> = partitions.arcs();
     for partition in snapshot {
         let leader = partition.current_leader.load(Ordering::Relaxed);
-        if leader != node_id.0 {
+        if leader != node_id {
             continue;
         }
         let policy = {

@@ -240,10 +240,7 @@ async fn partition_leaders(client: &Client, handle: &BrokerHandle) -> Vec<(i32, 
     // event-driven via the image watch channel, then take one Metadata snapshot.
     handle
         .wait_for_image(|img| {
-            (0..2).all(|p| {
-                img.partition(TOPIC, p)
-                    .is_some_and(|pr| pr.leader.get() != 0)
-            })
+            (0..2).all(|p| img.partition(TOPIC, p).is_some_and(|pr| pr.leader != 0))
         })
         .await;
     let resp = client

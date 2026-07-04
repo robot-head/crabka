@@ -351,7 +351,7 @@ pub(crate) async fn handle(
                     log.epoch_checkpoint()
                         .epoch_and_offset_for(LeaderEpoch(req_last_fetched_epoch), leo)
                 };
-                if found_epoch.0 < req_last_fetched_epoch || end_offset.0 < fetch_offset {
+                if found_epoch < req_last_fetched_epoch || end_offset < fetch_offset {
                     out.error_code = codes::NONE;
                     out.diverging_epoch = EpochEndOffset {
                         epoch: found_epoch.0,

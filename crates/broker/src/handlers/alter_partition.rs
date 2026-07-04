@@ -173,7 +173,7 @@ fn handle_partition(
 
     // Leader-epoch fencing. `req_leader_epoch` is the raw wire epoch; compare
     // against the metadata `LeaderEpoch`'s inner value.
-    if req_leader_epoch != part_rec.leader_epoch.0 {
+    if req_leader_epoch != part_rec.leader_epoch {
         return error_part(
             partition_index,
             codes::FENCED_LEADER_EPOCH,

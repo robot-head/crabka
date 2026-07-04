@@ -122,13 +122,13 @@ pub(crate) fn encode_value(entry: &TxnEntry, flexible: bool) -> Vec<u8> {
     // (TxnEntry has no such field) and so is always omitted.
     if flexible {
         let mut tagged = WriteTaggedFields::new();
-        if entry.prev_producer_id.get() != PRODUCER_ID_NONE {
+        if !entry.prev_producer_id.is_none() {
             tagged.add(
                 TAG_PREV_PRODUCER_ID,
                 i64_to_bytes(entry.prev_producer_id.get()),
             );
         }
-        if entry.next_producer_id.get() != PRODUCER_ID_NONE {
+        if !entry.next_producer_id.is_none() {
             tagged.add(
                 TAG_NEXT_PRODUCER_ID,
                 i64_to_bytes(entry.next_producer_id.get()),

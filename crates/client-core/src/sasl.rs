@@ -425,7 +425,7 @@ where
         return Err(OutboundSaslError::Codec("response missing corr_id".into()));
     }
     let _resp_corr_id = cur.get_i32();
-    let uses_v1_header = flexible && api_key.0 != 18;
+    let uses_v1_header = flexible && api_key != 18;
     if uses_v1_header {
         if cur.is_empty() {
             return Err(OutboundSaslError::Codec(

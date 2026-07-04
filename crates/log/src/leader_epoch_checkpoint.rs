@@ -642,7 +642,7 @@ mod fuzz {
             let latest = leader.iter().map(|e| e.epoch).max();
 
             // Always a valid truncation target.
-            prop_assert!(trunc.0 >= 0, "truncation target {} < 0", trunc);
+            prop_assert!(trunc >= 0, "truncation target {} < 0", trunc);
             // The resolved epoch never exceeds the requested epoch.
             prop_assert!(
                 found <= requested,

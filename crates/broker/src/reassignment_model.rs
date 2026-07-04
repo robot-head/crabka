@@ -143,7 +143,7 @@ fn pr_of(s: &ReassignState) -> PartitionRecord {
 /// safety-critical invariants; they hold per-decision under any ordering.
 fn assert_step(pre: &ReassignState, next: &PartitionRecord) {
     assert!(
-        next.leader_epoch.0 >= pre.leader_epoch,
+        next.leader_epoch >= pre.leader_epoch,
         "leader_epoch regressed: {} -> {}",
         pre.leader_epoch,
         next.leader_epoch
@@ -187,7 +187,7 @@ fn assert_step(pre: &ReassignState, next: &PartitionRecord) {
             "handoff changed removing"
         );
         assert!(
-            next.leader_epoch.0 == pre.leader_epoch + 1,
+            next.leader_epoch == pre.leader_epoch + 1,
             "handoff did not bump leader_epoch by exactly 1"
         );
     } else if next.adding_replicas.is_empty() && next.removing_replicas.is_empty() {
@@ -209,7 +209,7 @@ fn assert_step(pre: &ReassignState, next: &PartitionRecord) {
             "completion ISR not a subset of replicas"
         );
         assert!(
-            next.leader_epoch.0 == pre.leader_epoch,
+            next.leader_epoch == pre.leader_epoch,
             "completion bumped leader_epoch"
         );
     } else {

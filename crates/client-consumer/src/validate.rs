@@ -24,17 +24,17 @@ fn update_leader_epoch(pos: &mut PartitionPosition, leader_epoch: LeaderEpoch) {
 }
 
 fn should_await_validation(leader_epoch: LeaderEpoch, offset_epoch: LeaderEpoch) -> bool {
-    leader_epoch > offset_epoch && offset_epoch.get() >= 0
+    leader_epoch > offset_epoch && offset_epoch.is_known()
 }
 
 fn clear_unvalidatable_position(pos: &mut PartitionPosition) {
-    if pos.awaiting_validation && pos.offset_epoch.get() < 0 {
+    if pos.awaiting_validation && !pos.offset_epoch.is_known() {
         pos.awaiting_validation = false;
     }
 }
 
 fn should_validate_position(pos: &PartitionPosition) -> bool {
-    pos.awaiting_validation && pos.offset_epoch.get() >= 0
+    pos.awaiting_validation && pos.offset_epoch.is_known()
 }
 
 fn should_route_to_leader(leader_id: i32, knows_leader: bool) -> bool {

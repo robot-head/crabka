@@ -294,7 +294,7 @@ impl TxnCoordinator {
     /// (`prev == -1`). pids are globally unique, so the prior id only ever
     /// mapped to this tid — removing it can't affect another transaction.
     fn evict_rolled_pid(pid_to_tid: &DashMap<ProducerId, String>, entry: &TxnEntry) {
-        if entry.prev_producer_id.get() >= 0 && entry.prev_producer_id != entry.producer_id {
+        if entry.prev_producer_id >= 0 && entry.prev_producer_id != entry.producer_id {
             pid_to_tid.remove(&entry.prev_producer_id);
         }
     }

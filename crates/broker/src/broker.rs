@@ -2851,7 +2851,7 @@ impl Broker {
                         .arcs()
                         .iter()
                         .filter(|p| {
-                            p.current_leader.load(std::sync::atomic::Ordering::Acquire) == node_id.0
+                            p.current_leader.load(std::sync::atomic::Ordering::Acquire) == node_id
                         })
                         .count();
                     m.partitions_led.set(i64::try_from(led).unwrap_or(i64::MAX));

@@ -708,7 +708,7 @@ mod tests {
                 .try_recv()
                 .expect("same group ack is ready")
                 .expect("append ok");
-            assert!(assigned.0 == i64::try_from(idx + 1).unwrap());
+            assert!(assigned == i64::try_from(idx + 1).unwrap());
         }
         assert!(
             log.lock().unwrap().log_end_offset()
@@ -936,7 +936,7 @@ mod tests {
             .await
             .expect("send replicate");
         ack_rx.await.expect("ack recv").expect("replicate ok");
-        assert!(log.lock().unwrap().log_end_offset().0 == 3);
+        assert!(log.lock().unwrap().log_end_offset() == 3);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -978,7 +978,7 @@ mod tests {
             .expect_err("expected offset mismatch");
         assert!(matches!(err, crate::error::BrokerError::Log(_)));
         // Local log must not have advanced.
-        assert!(log.lock().unwrap().log_end_offset().0 == 0);
+        assert!(log.lock().unwrap().log_end_offset() == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1018,7 +1018,7 @@ mod tests {
             .expect("send produce");
             ack_rx.await.expect("ack").expect("ok");
         }
-        assert!(log.lock().unwrap().log_end_offset().0 == 4);
+        assert!(log.lock().unwrap().log_end_offset() == 4);
 
         let (ack, ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Truncate {
@@ -1028,7 +1028,7 @@ mod tests {
         .await
         .expect("send truncate");
         ack_rx.await.expect("ack").expect("truncate ok");
-        assert!(log.lock().unwrap().log_end_offset().0 == 0);
+        assert!(log.lock().unwrap().log_end_offset() == 0);
 
         drop(tx);
         writer.await.expect("writer join");
