@@ -1,4 +1,4 @@
-use crabka_admin_ui::admin::{log_dir_rows, topic_rows};
+use crabka_admin_ui::admin::{group_rows, log_dir_rows, topic_rows};
 use crabka_admin_ui::dto::{KafkaErrorDto, ResourceOutcome};
 use crabka_admin_ui::error::UiError;
 use crabka_client_admin::{
@@ -104,6 +104,15 @@ fn maps_topic_metadata_to_rows_with_errors() {
             message: Some("topic missing".to_string()),
         })
     );
+}
+
+#[test]
+fn maps_group_ids_to_group_rows() {
+    let rows = group_rows(vec!["payments".to_string(), "shipping".to_string()]);
+
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].group_id, "payments");
+    assert_eq!(rows[1].group_id, "shipping");
 }
 
 #[test]

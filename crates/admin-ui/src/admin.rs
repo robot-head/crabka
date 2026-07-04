@@ -1,6 +1,6 @@
 use crabka_client_admin::{AdminClient, AdminError, LogDirInfo, TopicMetadata};
 
-use crate::dto::{KafkaErrorDto, LogDirRow, TopicRow};
+use crate::dto::{GroupRow, KafkaErrorDto, LogDirRow, TopicRow};
 
 pub struct AdminFacade {
     client: AdminClient,
@@ -16,6 +16,12 @@ impl AdminFacade {
         let metadata = self.client.metadata(&[]).await?;
 
         Ok(topic_rows(metadata))
+    }
+
+    pub async fn groups(&mut self) -> Result<Vec<GroupRow>, AdminError> {
+        let groups = self.client.list_groups().await?;
+
+        Ok(group_rows(groups))
     }
 
     pub async fn log_dirs(&mut self) -> Result<Vec<LogDirRow>, AdminError> {
@@ -37,6 +43,14 @@ pub fn topic_rows(metadata: TopicMetadata) -> Vec<TopicRow> {
             replication_factor: topic.replication_factor,
             error: topic.error.as_ref().map(KafkaErrorDto::from),
         })
+        .collect()
+}
+
+#[must_use]
+pub fn group_rows(group_ids: Vec<String>) -> Vec<GroupRow> {
+    group_ids
+        .into_iter()
+        .map(|group_id| GroupRow { group_id })
         .collect()
 }
 
