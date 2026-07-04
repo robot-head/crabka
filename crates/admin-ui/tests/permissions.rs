@@ -27,11 +27,17 @@ fn wildcard_allow(resource_type: ResourceType, operation: AclOperation) -> AclEn
     }
 }
 
+fn wildcard_deny(resource_type: ResourceType, operation: AclOperation) -> AclEntry {
+    AclEntry {
+        principal: "User:*".to_string(),
+        ..deny(resource_type, operation)
+    }
+}
+
 #[test]
 fn derives_topic_admin_capabilities_from_topic_acls() {
     let entries = vec![
         allow(ResourceType::Topic, AclOperation::Describe),
-        allow(ResourceType::Topic, AclOperation::Create),
         allow(ResourceType::Topic, AclOperation::AlterConfigs),
         allow(ResourceType::Topic, AclOperation::Delete),
     ];
@@ -39,14 +45,13 @@ fn derives_topic_admin_capabilities_from_topic_acls() {
     let capabilities = derive_capabilities("User:alice", &entries);
 
     assert!(capabilities.can_view_topics);
-    assert!(capabilities.can_create_topics);
+    assert!(!capabilities.can_create_topics);
     assert!(capabilities.can_alter_topics);
     assert!(capabilities.can_delete_topics);
     assert_eq!(
         capabilities,
         Capabilities {
             can_view_topics: true,
-            can_create_topics: true,
             can_alter_topics: true,
             can_delete_topics: true,
             ..Capabilities::default()
@@ -103,14 +108,8 @@ fn cluster_describe_configs_does_not_grant_acl_view() {
     let capabilities = derive_capabilities("User:alice", &entries);
 
     assert!(!capabilities.can_view_acls);
-    assert!(capabilities.can_view_quotas);
-    assert_eq!(
-        capabilities,
-        Capabilities {
-            can_view_quotas: true,
-            ..Capabilities::default()
-        }
-    );
+    assert!(!capabilities.can_view_quotas);
+    assert_eq!(capabilities, Capabilities::default());
 }
 
 #[test]
@@ -121,16 +120,9 @@ fn cluster_alter_configs_does_not_grant_acl_or_user_admin() {
 
     assert!(!capabilities.can_alter_acls);
     assert!(!capabilities.can_alter_users);
-    assert!(capabilities.can_view_quotas);
-    assert!(capabilities.can_alter_quotas);
-    assert_eq!(
-        capabilities,
-        Capabilities {
-            can_view_quotas: true,
-            can_alter_quotas: true,
-            ..Capabilities::default()
-        }
-    );
+    assert!(!capabilities.can_view_quotas);
+    assert!(!capabilities.can_alter_quotas);
+    assert_eq!(capabilities, Capabilities::default());
 }
 
 #[test]
@@ -155,4 +147,74 @@ fn topic_mutating_operations_imply_topic_view() {
     assert!(capabilities.can_view_topics);
     assert!(capabilities.can_alter_topics);
     assert!(capabilities.can_delete_topics);
+}
+
+#[test]
+fn cluster_create_grants_topic_creation() {
+    let entries = vec![allow(ResourceType::Cluster, AclOperation::Create)];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(capabilities.can_create_topics);
+}
+
+#[test]
+fn cluster_describe_and_alter_are_quota_grants_not_config_ops() {
+    let describe = derive_capabilities(
+        "User:alice",
+        &[allow(ResourceType::Cluster, AclOperation::Describe)],
+    );
+    let alter = derive_capabilities(
+        "User:alice",
+        &[allow(ResourceType::Cluster, AclOperation::Alter)],
+    );
+
+    assert!(describe.can_view_quotas);
+    assert!(!describe.can_alter_quotas);
+    assert!(alter.can_view_quotas);
+    assert!(alter.can_alter_quotas);
+}
+
+#[test]
+fn exact_deny_takes_precedence_over_allow_for_topic_capabilities() {
+    let entries = vec![
+        allow(ResourceType::Topic, AclOperation::All),
+        deny(ResourceType::Topic, AclOperation::Describe),
+        allow(ResourceType::Cluster, AclOperation::Create),
+        deny(ResourceType::Cluster, AclOperation::Create),
+    ];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(!capabilities.can_view_topics);
+    assert!(!capabilities.can_create_topics);
+    assert!(capabilities.can_alter_topics);
+    assert!(capabilities.can_delete_topics);
+}
+
+#[test]
+fn wildcard_deny_takes_precedence_for_cluster_admin_and_quotas() {
+    let entries = vec![
+        allow(ResourceType::Cluster, AclOperation::All),
+        wildcard_deny(ResourceType::Cluster, AclOperation::Alter),
+    ];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(!capabilities.can_view_acls);
+    assert!(!capabilities.can_alter_acls);
+    assert!(!capabilities.can_alter_users);
+    assert!(!capabilities.can_view_quotas);
+    assert!(!capabilities.can_alter_quotas);
+}
+
+#[test]
+fn cluster_alter_implies_acl_view_and_admin_capabilities() {
+    let entries = vec![allow(ResourceType::Cluster, AclOperation::Alter)];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(capabilities.can_view_acls);
+    assert!(capabilities.can_alter_acls);
+    assert!(capabilities.can_alter_users);
 }
