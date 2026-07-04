@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
-use axum::http::{Request, StatusCode, header};
+use axum::http::{Method, Request, StatusCode, header};
+use crabka_admin_ui::auth::LoginBroker;
 use crabka_admin_ui::config::AdminUiConfig;
 use crabka_admin_ui::dto::{
     AclRequestDto, AlterConfigRequestDto, CreatePartitionsRequestDto, CreateTopicRequestDto,
@@ -14,7 +15,9 @@ use crabka_admin_ui::dto::{
 };
 use crabka_admin_ui::error::UiError;
 use crabka_admin_ui::server::{AppState, SESSION_COOKIE_NAME, router, router_with_factory};
-use crabka_admin_ui::server_fns::{AdminMutationSeam, AdminReadSeam, AdminSeamFactory};
+use crabka_admin_ui::server_fns::{
+    AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow, UserRow,
+};
 use crabka_admin_ui::session::{SessionRecord, SessionStore};
 use tower::ServiceExt as _;
 
@@ -52,6 +55,23 @@ async fn get_from(
     app.oneshot(request.body(Body::empty()).expect("request builds"))
         .await
         .expect("router responds")
+}
+
+async fn post_form_from(
+    app: axum::Router,
+    path: &str,
+    form_body: &'static str,
+) -> axum::response::Response {
+    app.oneshot(
+        Request::builder()
+            .method(Method::POST)
+            .uri(path)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(form_body))
+            .expect("request builds"),
+    )
+    .await
+    .expect("router responds")
 }
 
 async fn response_text(response: axum::response::Response) -> String {
@@ -100,6 +120,52 @@ async fn login_returns_html_with_login_prompt() {
 
     let body = response_text(response).await;
     assert!(body.contains("Sign in to Crabka"));
+    assert!(body.contains("method=\"post\""));
+    assert!(body.contains("name=\"username\""));
+    assert!(body.contains("name=\"password\""));
+}
+
+#[tokio::test]
+async fn posting_login_sets_session_cookie_and_cookie_authenticates_protected_route() {
+    let state = AppState::new(AdminUiConfig::default());
+    let factory = RecordingAdminSeamFactory::default();
+    let login_broker = RecordingLoginBroker::default();
+    let app = crabka_admin_ui::server::router_with_factory_and_login_broker(
+        state,
+        factory.clone(),
+        login_broker.clone(),
+    );
+    let password_sentinel = "login-route-password-sentinel";
+
+    let login_response = post_form_from(
+        app.clone(),
+        "/login",
+        "username=alice&password=login-route-password-sentinel",
+    )
+    .await;
+
+    assert_eq!(login_response.status(), StatusCode::OK);
+    let set_cookie = login_response
+        .headers()
+        .get(header::SET_COOKIE)
+        .expect("login sets a session cookie")
+        .to_str()
+        .expect("cookie is ASCII")
+        .to_string();
+    assert!(set_cookie.starts_with(&format!("{SESSION_COOKIE_NAME}=")));
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("SameSite=Lax"));
+    assert!(set_cookie.contains("Path=/"));
+    assert_eq!(login_broker.calls.load(Ordering::SeqCst), 1);
+
+    let login_body = response_text(login_response).await;
+    assert!(!login_body.contains(password_sentinel));
+
+    let protected_response = get_from(app, "/topics", Some(set_cookie)).await;
+
+    assert_eq!(protected_response.status(), StatusCode::OK);
+    let protected_body = response_text(protected_response).await;
+    assert!(protected_body.contains("orders"));
 }
 
 #[tokio::test]
@@ -136,6 +202,9 @@ async fn authenticated_read_routes_call_injected_seams_and_render_rows() {
     for (path, expected) in [
         ("/topics", "orders"),
         ("/groups", "consumer-a"),
+        ("/acls", "User:alice"),
+        ("/users", "scram-alice"),
+        ("/quotas", "producer_byte_rate"),
         ("/log-dirs", "/var/lib/crabka"),
     ] {
         let response = get_from(app.clone(), path, cookie.clone()).await;
@@ -147,6 +216,9 @@ async fn authenticated_read_routes_call_injected_seams_and_render_rows() {
 
     assert_eq!(factory.topics.load(Ordering::SeqCst), 1);
     assert_eq!(factory.groups.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.acls.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.users.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.quotas.load(Ordering::SeqCst), 1);
     assert_eq!(factory.log_dirs.load(Ordering::SeqCst), 1);
 }
 
@@ -179,7 +251,31 @@ async fn missing_or_invalid_cookie_does_not_call_injected_seams() {
         assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
         assert_eq!(factory.topics.load(Ordering::SeqCst), 0);
         assert_eq!(factory.groups.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.acls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.users.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.quotas.load(Ordering::SeqCst), 0);
         assert_eq!(factory.log_dirs.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingLoginBroker {
+    calls: Arc<AtomicUsize>,
+}
+
+impl LoginBroker for RecordingLoginBroker {
+    fn check_login<'a>(
+        &'a self,
+        _cfg: &'a AdminUiConfig,
+        username: &'a str,
+        password: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            assert_eq!(username, "alice");
+            assert_eq!(password, "login-route-password-sentinel");
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
     }
 }
 
@@ -188,6 +284,9 @@ struct RecordingAdminSeamFactory {
     read_seam_calls: Arc<AtomicUsize>,
     topics: Arc<AtomicUsize>,
     groups: Arc<AtomicUsize>,
+    acls: Arc<AtomicUsize>,
+    users: Arc<AtomicUsize>,
+    quotas: Arc<AtomicUsize>,
     log_dirs: Arc<AtomicUsize>,
 }
 
@@ -237,6 +336,45 @@ impl AdminReadSeam for RecordingAdminSeamFactory {
             self.groups.fetch_add(1, Ordering::SeqCst);
             Ok(vec![GroupRow {
                 group_id: "consumer-a".to_string(),
+            }])
+        })
+    }
+
+    fn acls<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AclRow>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.acls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![AclRow {
+                resource: "Topic:orders".to_string(),
+                principal: "User:alice".to_string(),
+                operation: "Read".to_string(),
+                permission: "Allow".to_string(),
+            }])
+        })
+    }
+
+    fn users<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<UserRow>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.users.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![UserRow {
+                username: "scram-alice".to_string(),
+                principal: "User:scram-alice".to_string(),
+            }])
+        })
+    }
+
+    fn quotas<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.quotas.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![QuotaRow {
+                entity: "User:alice".to_string(),
+                quota_type: "producer_byte_rate".to_string(),
+                value: "1024".to_string(),
             }])
         })
     }

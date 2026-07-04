@@ -61,65 +61,6 @@ pub async fn logout<F>(context: &ServerFunctionContext<'_, F>) -> Result<(), UiE
     logout_with_context(context).await
 }
 
-pub async fn current_session() -> Result<CurrentSession, UiError> {
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    current_session_with_context(&context)
-}
-
-pub async fn list_topics() -> Result<Vec<TopicRow>, UiError> {
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    list_topics_with_context(&context).await
-}
-
-pub async fn list_groups() -> Result<Vec<GroupRow>, UiError> {
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    list_groups_with_context(&context).await
-}
-
-pub async fn list_acls() -> Result<Vec<AclRow>, UiError> {
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    current_session_with_context(&context)?;
-    Ok(Vec::new())
-}
-
-pub async fn list_users() -> Result<Vec<UserRow>, UiError> {
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    current_session_with_context(&context)?;
-    Ok(Vec::new())
-}
-
-pub async fn list_quotas() -> Result<Vec<QuotaRow>, UiError> {
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    current_session_with_context(&context)?;
-    Ok(Vec::new())
-}
-
-pub async fn list_log_dirs() -> Result<Vec<LogDirRow>, UiError> {
-    let factory = BrokerAdminSeamFactory;
-    let cfg = AdminUiConfig::default();
-    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
-
-    list_log_dirs_with_context(&context).await
-}
-
 pub async fn create_topic<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: CreateTopicRequestDto,
@@ -205,6 +146,18 @@ pub trait AdminReadSeam {
     fn groups<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<GroupRow>, UiError>> + Send + 'a>>;
+
+    fn acls<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AclRow>, UiError>> + Send + 'a>>;
+
+    fn users<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<UserRow>, UiError>> + Send + 'a>>;
+
+    fn quotas<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>>;
 
     fn log_dirs<'a>(
         &'a self,
@@ -409,6 +362,60 @@ pub async fn list_groups_with_context<F: AdminSeamFactory>(
     reader.groups().await
 }
 
+pub async fn list_acls_with_reader<R: AdminReadSeam>(
+    sessions: &SessionStore,
+    raw_session_id: Option<&str>,
+    reader: &R,
+) -> Result<Vec<AclRow>, UiError> {
+    require_session(sessions, raw_session_id)?;
+
+    reader.acls().await
+}
+
+pub async fn list_acls<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+) -> Result<Vec<AclRow>, UiError> {
+    let reader = read_seam_from_context(context)?;
+
+    reader.acls().await
+}
+
+pub async fn list_users_with_reader<R: AdminReadSeam>(
+    sessions: &SessionStore,
+    raw_session_id: Option<&str>,
+    reader: &R,
+) -> Result<Vec<UserRow>, UiError> {
+    require_session(sessions, raw_session_id)?;
+
+    reader.users().await
+}
+
+pub async fn list_users<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+) -> Result<Vec<UserRow>, UiError> {
+    let reader = read_seam_from_context(context)?;
+
+    reader.users().await
+}
+
+pub async fn list_quotas_with_reader<R: AdminReadSeam>(
+    sessions: &SessionStore,
+    raw_session_id: Option<&str>,
+    reader: &R,
+) -> Result<Vec<QuotaRow>, UiError> {
+    require_session(sessions, raw_session_id)?;
+
+    reader.quotas().await
+}
+
+pub async fn list_quotas<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+) -> Result<Vec<QuotaRow>, UiError> {
+    let reader = read_seam_from_context(context)?;
+
+    reader.quotas().await
+}
+
 pub async fn list_log_dirs_with_reader<R: AdminReadSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
@@ -593,6 +600,36 @@ impl AdminReadSeam for BrokerAdminReadSeam {
         Box::pin(async move {
             let mut facade = self.facade().await?;
             Ok(facade.groups().await?)
+        })
+    }
+
+    fn acls<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AclRow>, UiError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(UiError::Admin(
+                "list ACLs is unsupported by the broker admin seam yet".to_string(),
+            ))
+        })
+    }
+
+    fn users<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<UserRow>, UiError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(UiError::Admin(
+                "list SCRAM users is unsupported by the broker admin seam yet".to_string(),
+            ))
+        })
+    }
+
+    fn quotas<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>> {
+        Box::pin(async {
+            Err(UiError::Admin(
+                "list quotas is unsupported by the broker admin seam yet".to_string(),
+            ))
         })
     }
 

@@ -15,7 +15,8 @@ use crabka_admin_ui::dto::{
 use crabka_admin_ui::error::UiError;
 use crabka_admin_ui::server::AppState;
 use crabka_admin_ui::server_fns::{
-    AdminMutationSeam, AdminReadSeam, AdminSeamFactory, ServerFunctionContext,
+    AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow, ServerFunctionContext,
+    UserRow,
 };
 use crabka_admin_ui::session::{SessionCredentials, SessionRecord, SessionStore, SessionUser};
 use std::future::Future;
@@ -108,7 +109,8 @@ async fn session_seams_reject_without_exposing_session_values() {
     let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
 
     let logout_result = crabka_admin_ui::server_fns::logout(&context).await;
-    let current_session_result = crabka_admin_ui::server_fns::current_session().await;
+    let current_session_result =
+        crabka_admin_ui::server_fns::current_session_with_context(&context);
 
     assert!(matches!(logout_result, Err(UiError::NotAuthenticated)));
     assert!(matches!(
@@ -154,23 +156,6 @@ fn current_session_with_store_rejects_missing_invalid_and_expired_sessions() {
 }
 
 #[tokio::test]
-async fn resource_seams_are_callable_and_require_authentication() {
-    let topics = crabka_admin_ui::server_fns::list_topics().await;
-    let groups = crabka_admin_ui::server_fns::list_groups().await;
-    let acls = crabka_admin_ui::server_fns::list_acls().await;
-    let users = crabka_admin_ui::server_fns::list_users().await;
-    let quotas = crabka_admin_ui::server_fns::list_quotas().await;
-    let log_dirs = crabka_admin_ui::server_fns::list_log_dirs().await;
-
-    assert!(matches!(topics, Err(UiError::NotAuthenticated)));
-    assert!(matches!(groups, Err(UiError::NotAuthenticated)));
-    assert!(matches!(acls, Err(UiError::NotAuthenticated)));
-    assert!(matches!(users, Err(UiError::NotAuthenticated)));
-    assert!(matches!(quotas, Err(UiError::NotAuthenticated)));
-    assert!(matches!(log_dirs, Err(UiError::NotAuthenticated)));
-}
-
-#[tokio::test]
 async fn authenticated_read_seams_validate_session_and_call_admin_reader() {
     let sessions = SessionStore::new(Duration::from_secs(60));
     let session_id = sessions.create_user("alice", "User:alice");
@@ -190,6 +175,27 @@ async fn authenticated_read_seams_validate_session_and_call_admin_reader() {
     )
     .await
     .expect("groups read succeeds");
+    let acls = crabka_admin_ui::server_fns::list_acls_with_reader(
+        &sessions,
+        Some(session_id.expose_for_cookie()),
+        &reader,
+    )
+    .await
+    .expect("ACLs read succeeds");
+    let users = crabka_admin_ui::server_fns::list_users_with_reader(
+        &sessions,
+        Some(session_id.expose_for_cookie()),
+        &reader,
+    )
+    .await
+    .expect("users read succeeds");
+    let quotas = crabka_admin_ui::server_fns::list_quotas_with_reader(
+        &sessions,
+        Some(session_id.expose_for_cookie()),
+        &reader,
+    )
+    .await
+    .expect("quotas read succeeds");
     let log_dirs = crabka_admin_ui::server_fns::list_log_dirs_with_reader(
         &sessions,
         Some(session_id.expose_for_cookie()),
@@ -200,9 +206,15 @@ async fn authenticated_read_seams_validate_session_and_call_admin_reader() {
 
     assert_eq!(topics[0].name, "orders");
     assert_eq!(groups[0].group_id, "consumer-a");
+    assert_eq!(acls[0].principal, "User:alice");
+    assert_eq!(users[0].username, "scram-alice");
+    assert_eq!(quotas[0].quota_type, "producer_byte_rate");
     assert_eq!(log_dirs[0].log_dir, "/var/lib/crabka");
     assert_eq!(reader.topics.load(Ordering::SeqCst), 1);
     assert_eq!(reader.groups.load(Ordering::SeqCst), 1);
+    assert_eq!(reader.acls.load(Ordering::SeqCst), 1);
+    assert_eq!(reader.users.load(Ordering::SeqCst), 1);
+    assert_eq!(reader.quotas.load(Ordering::SeqCst), 1);
     assert_eq!(reader.log_dirs.load(Ordering::SeqCst), 1);
     assert!(matches!(
         crabka_admin_ui::server_fns::list_topics_with_reader(&sessions, None, &reader).await,
@@ -229,16 +241,31 @@ async fn public_context_reads_validate_session_and_call_admin_reader() {
     let groups = crabka_admin_ui::server_fns::list_groups_with_context(&context)
         .await
         .expect("groups public context read succeeds");
+    let acls = crabka_admin_ui::server_fns::list_acls(&context)
+        .await
+        .expect("ACLs public context read succeeds");
+    let users = crabka_admin_ui::server_fns::list_users(&context)
+        .await
+        .expect("users public context read succeeds");
+    let quotas = crabka_admin_ui::server_fns::list_quotas(&context)
+        .await
+        .expect("quotas public context read succeeds");
     let log_dirs = crabka_admin_ui::server_fns::list_log_dirs_with_context(&context)
         .await
         .expect("log dirs public context read succeeds");
 
     assert_eq!(topics[0].name, "orders");
     assert_eq!(groups[0].group_id, "consumer-a");
+    assert_eq!(acls[0].principal, "User:alice");
+    assert_eq!(users[0].username, "scram-alice");
+    assert_eq!(quotas[0].quota_type, "producer_byte_rate");
     assert_eq!(log_dirs[0].log_dir, "/var/lib/crabka");
-    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 6);
     assert_eq!(factory.reader.topics.load(Ordering::SeqCst), 1);
     assert_eq!(factory.reader.groups.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.reader.acls.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.reader.users.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.reader.quotas.load(Ordering::SeqCst), 1);
     assert_eq!(factory.reader.log_dirs.load(Ordering::SeqCst), 1);
 }
 
@@ -276,6 +303,18 @@ async fn public_context_reads_reject_unauthenticated_sessions() {
     ));
     assert!(matches!(
         crabka_admin_ui::server_fns::list_groups_with_context(&context).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::list_acls(&context).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::list_users(&context).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::list_quotas(&context).await,
         Err(UiError::NotAuthenticated)
     ));
     assert!(matches!(
@@ -633,6 +672,9 @@ impl LoginBroker for RecordingLoginBroker {
 struct RecordingAdminReadSeam {
     topics: AtomicUsize,
     groups: AtomicUsize,
+    acls: AtomicUsize,
+    users: AtomicUsize,
+    quotas: AtomicUsize,
     log_dirs: AtomicUsize,
 }
 
@@ -659,6 +701,45 @@ impl AdminReadSeam for RecordingAdminReadSeam {
             self.groups.fetch_add(1, Ordering::SeqCst);
             Ok(vec![GroupRow {
                 group_id: "consumer-a".to_string(),
+            }])
+        })
+    }
+
+    fn acls<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AclRow>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.acls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![AclRow {
+                resource: "Topic:orders".to_string(),
+                principal: "User:alice".to_string(),
+                operation: "Read".to_string(),
+                permission: "Allow".to_string(),
+            }])
+        })
+    }
+
+    fn users<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<UserRow>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.users.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![UserRow {
+                username: "scram-alice".to_string(),
+                principal: "User:scram-alice".to_string(),
+            }])
+        })
+    }
+
+    fn quotas<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.quotas.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![QuotaRow {
+                entity: "User:alice".to_string(),
+                quota_type: "producer_byte_rate".to_string(),
+                value: "1024".to_string(),
             }])
         })
     }
@@ -756,6 +837,24 @@ impl AdminReadSeam for &RecordingAdminReadSeam {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<GroupRow>, UiError>> + Send + 'a>> {
         (*self).groups()
+    }
+
+    fn acls<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AclRow>, UiError>> + Send + 'a>> {
+        (*self).acls()
+    }
+
+    fn users<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<UserRow>, UiError>> + Send + 'a>> {
+        (*self).users()
+    }
+
+    fn quotas<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<QuotaRow>, UiError>> + Send + 'a>> {
+        (*self).quotas()
     }
 
     fn log_dirs<'a>(
