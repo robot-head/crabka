@@ -1,0 +1,66 @@
+package:
+  name: creusot-toolchain
+  version: 0.12.0
+  epoch: 0
+  description: Creusot deductive verifier toolchain (cargo-creusot, Why3, why3find, SMT provers)
+  copyright:
+    - license: LGPL-2.1-or-later
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - apk-tools
+      - autoconf
+      - automake
+      - bash
+      - build-base
+      - busybox
+      - ca-certificates-bundle
+      - curl
+      - git
+      - gmp-dev
+      - ocaml
+      - opam
+      - pkgconf
+      - rsync
+      - rustup
+      - unzip
+      - zlib-dev
+
+# The toolchain is built under a FIXED HOME (/opt/creusot/home) that is
+# identical at build time and runtime, because opam switches and rustup
+# toolchains bake absolute paths. The tree is then copied verbatim into the
+# package. Dev/CI tool: hermeticity standards are relaxed vs the broker
+# images (network-enabled pipeline, same precedent as crabka.yaml's cargo build).
+pipeline:
+  - name: Build Creusot at the pinned tag
+    runs: |
+      set -eux
+      export HOME=/opt/creusot/home
+      mkdir -p "$HOME"
+      export PATH="$HOME/.cargo/bin:$PATH"
+      export OPAMVAR_in_creusot_ci=true
+
+      git clone --depth 1 --branch v0.12.0 https://github.com/creusot-rs/creusot /tmp/creusot
+      cd /tmp/creusot
+
+      # rustup: install exactly the nightly the repo pins via rust-toolchain.
+      rustup-init -y --default-toolchain none --no-modify-path
+      rustup show
+      rustup default "$(rustup show active-toolchain | cut -d' ' -f1)"
+
+      # opam: bare init (no sandbox inside the build container), then let
+      # Creusot's own INSTALL drive Why3/why3find/prover setup.
+      opam init --disable-sandboxing --bare -y
+      ./INSTALL
+
+      # Sanity inside the build env before packaging.
+      cargo creusot --help
+      chmod 755 "$HOME/.opam/opam-init/hooks/sandbox.sh"
+
+      mkdir -p "${{targets.destdir}}/opt/creusot"
+      cp -a /opt/creusot/home "${{targets.destdir}}/opt/creusot/home"
