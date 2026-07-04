@@ -12,6 +12,8 @@ use crabka_admin_ui::session::{SessionId, SessionStore};
 use crabka_client_core::security::SaslCredentials;
 use crabka_security::{ListenerProtocol, SaslMechanism};
 
+const EXPECTED_PASSWORD: &str = "secret";
+
 #[test]
 fn build_security_uses_scram_sha512_only() {
     let cfg = AdminUiConfig {
@@ -98,25 +100,21 @@ async fn login_uses_broker_probe_and_creates_session() {
     let success = service
         .login(LoginRequest {
             username: "alice".to_string(),
-            password: "secret".to_string(),
+            password: EXPECTED_PASSWORD.to_string(),
         })
         .await
         .expect("broker probe succeeds");
 
     assert_eq!(success.username, "alice");
     assert_eq!(success.principal, "User:alice");
-    assert_eq!(
-        broker
-            .calls
-            .lock()
-            .expect("calls lock is not poisoned")
-            .as_slice(),
-        &[(
-            vec!["127.0.0.1:9092".to_string()],
-            "alice".to_string(),
-            "secret".to_string(),
-        )]
-    );
+    let calls = broker.calls.lock().expect("calls lock is not poisoned");
+    assert_eq!(calls.len(), 1);
+    let call = &calls[0];
+    assert_eq!(call.bootstrap_addrs, ["127.0.0.1:9092"]);
+    assert_eq!(call.username, "alice");
+    assert!(call.password_matched);
+    assert_eq!(call.password_len, EXPECTED_PASSWORD.len());
+    drop(calls);
 
     let session_id = SessionId::try_from(success.session_id.as_str()).expect("session id is valid");
     let session = sessions.get(&session_id).expect("login creates session");
@@ -124,9 +122,53 @@ async fn login_uses_broker_probe_and_creates_session() {
     assert_eq!(session.user.principal, "User:alice");
 }
 
+#[test]
+fn recording_login_broker_calls_do_not_debug_raw_passwords() {
+    let broker = RecordingLoginBroker::default();
+    broker
+        .calls
+        .lock()
+        .expect("calls lock is not poisoned")
+        .push(RecordedLoginCall::from_parts(
+            &["127.0.0.1:9092".to_string()],
+            "alice",
+            EXPECTED_PASSWORD,
+        ));
+
+    let debug = format!(
+        "{:?}",
+        broker
+            .calls
+            .lock()
+            .expect("calls lock is not poisoned")
+            .as_slice()
+    );
+
+    assert!(!debug.contains(EXPECTED_PASSWORD));
+}
+
 #[derive(Default)]
 struct RecordingLoginBroker {
-    calls: Mutex<Vec<(Vec<String>, String, String)>>,
+    calls: Mutex<Vec<RecordedLoginCall>>,
+}
+
+#[derive(Debug)]
+struct RecordedLoginCall {
+    bootstrap_addrs: Vec<String>,
+    username: String,
+    password_matched: bool,
+    password_len: usize,
+}
+
+impl RecordedLoginCall {
+    fn from_parts(bootstrap_addrs: &[String], username: &str, password: &str) -> Self {
+        Self {
+            bootstrap_addrs: bootstrap_addrs.to_vec(),
+            username: username.to_string(),
+            password_matched: password == EXPECTED_PASSWORD,
+            password_len: password.len(),
+        }
+    }
 }
 
 impl LoginBroker for RecordingLoginBroker {
@@ -137,14 +179,9 @@ impl LoginBroker for RecordingLoginBroker {
         password: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
         Box::pin(async move {
-            self.calls
-                .lock()
-                .expect("calls lock is not poisoned")
-                .push((
-                    cfg.bootstrap_addrs.clone(),
-                    username.to_string(),
-                    password.to_string(),
-                ));
+            self.calls.lock().expect("calls lock is not poisoned").push(
+                RecordedLoginCall::from_parts(&cfg.bootstrap_addrs, username, password),
+            );
             Ok(())
         })
     }
