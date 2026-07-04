@@ -11,8 +11,10 @@ use crabka_admin_ui::dto::{
 };
 use crabka_admin_ui::error::UiError;
 use crabka_admin_ui::server::AppState;
-use crabka_admin_ui::server_fns::{AdminMutationSeam, AdminReadSeam};
-use crabka_admin_ui::session::SessionStore;
+use crabka_admin_ui::server_fns::{
+    AdminMutationSeam, AdminReadSeam, AdminSeamFactory, ServerFunctionContext,
+};
+use crabka_admin_ui::session::{SessionCredentials, SessionRecord, SessionStore, SessionUser};
 use std::future::Future;
 use std::pin::Pin;
 
@@ -201,6 +203,60 @@ async fn authenticated_read_seams_validate_session_and_call_admin_reader() {
 }
 
 #[tokio::test]
+async fn public_context_reads_validate_session_and_call_admin_reader() {
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let session_id = authenticated_session(&sessions);
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(
+        &cfg,
+        &sessions,
+        Some(session_id.expose_for_cookie()),
+        &factory,
+    );
+
+    let topics = crabka_admin_ui::server_fns::list_topics_with_context(&context)
+        .await
+        .expect("topics public context read succeeds");
+    let groups = crabka_admin_ui::server_fns::list_groups_with_context(&context)
+        .await
+        .expect("groups public context read succeeds");
+    let log_dirs = crabka_admin_ui::server_fns::list_log_dirs_with_context(&context)
+        .await
+        .expect("log dirs public context read succeeds");
+
+    assert_eq!(topics[0].name, "orders");
+    assert_eq!(groups[0].group_id, "consumer-a");
+    assert_eq!(log_dirs[0].log_dir, "/var/lib/crabka");
+    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 3);
+    assert_eq!(factory.reader.topics.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.reader.groups.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.reader.log_dirs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn public_context_reads_reject_unauthenticated_sessions() {
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
+
+    assert!(matches!(
+        crabka_admin_ui::server_fns::list_topics_with_context(&context).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::list_groups_with_context(&context).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::list_log_dirs_with_context(&context).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn mutation_seams_validate_requests_before_requiring_authentication() {
     let invalid_topic = crabka_admin_ui::server_fns::create_topic(CreateTopicRequestDto {
         name: "orders".to_string(),
@@ -285,6 +341,83 @@ async fn authenticated_mutation_seam_validates_then_calls_admin_mutation() {
     ));
 }
 
+#[tokio::test]
+async fn public_context_create_topic_validates_session_and_calls_admin_mutation() {
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let session_id = authenticated_session(&sessions);
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(
+        &cfg,
+        &sessions,
+        Some(session_id.expose_for_cookie()),
+        &factory,
+    );
+
+    let outcomes = crabka_admin_ui::server_fns::create_topic_with_context(
+        &context,
+        CreateTopicRequestDto {
+            name: "orders".to_string(),
+            partitions: 3,
+            replicas: 1,
+            configs: Vec::new(),
+        },
+    )
+    .await
+    .expect("public context mutation succeeds");
+
+    assert_eq!(outcomes, vec![ResourceOutcome::ok("orders")]);
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        factory.mutations.create_topic_calls.load(Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn public_context_create_topic_rejects_unauthenticated_after_validation() {
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
+
+    let result = crabka_admin_ui::server_fns::create_topic_with_context(
+        &context,
+        CreateTopicRequestDto {
+            name: "orders".to_string(),
+            partitions: 3,
+            replicas: 1,
+            configs: Vec::new(),
+        },
+    )
+    .await;
+
+    assert!(matches!(result, Err(UiError::NotAuthenticated)));
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn public_context_create_topic_validates_before_authentication() {
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
+
+    let result = crabka_admin_ui::server_fns::create_topic_with_context(
+        &context,
+        CreateTopicRequestDto {
+            name: "orders".to_string(),
+            partitions: 0,
+            replicas: 1,
+            configs: Vec::new(),
+        },
+    )
+    .await;
+
+    assert!(matches!(result, Err(UiError::Admin(_))));
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+}
+
 #[derive(Default)]
 struct RecordingLoginBroker {
     calls: AtomicUsize,
@@ -361,6 +494,78 @@ impl AdminReadSeam for RecordingAdminReadSeam {
 #[derive(Default)]
 struct RecordingAdminMutationSeam {
     create_topic_calls: AtomicUsize,
+}
+
+#[derive(Default)]
+struct RecordingAdminSeamFactory {
+    reader: RecordingAdminReadSeam,
+    mutations: RecordingAdminMutationSeam,
+    read_seam_calls: AtomicUsize,
+    mutation_seam_calls: AtomicUsize,
+}
+
+impl AdminSeamFactory for RecordingAdminSeamFactory {
+    type Reader<'a> = &'a RecordingAdminReadSeam;
+    type Mutations<'a> = &'a RecordingAdminMutationSeam;
+
+    fn read_seam<'a>(
+        &'a self,
+        _cfg: &AdminUiConfig,
+        record: &SessionRecord,
+    ) -> Result<Self::Reader<'a>, UiError> {
+        assert_eq!(record.user.username, "alice");
+        self.read_seam_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(&self.reader)
+    }
+
+    fn mutation_seam<'a>(
+        &'a self,
+        _cfg: &AdminUiConfig,
+        record: &SessionRecord,
+    ) -> Result<Self::Mutations<'a>, UiError> {
+        assert_eq!(record.user.username, "alice");
+        self.mutation_seam_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(&self.mutations)
+    }
+}
+
+impl AdminReadSeam for &RecordingAdminReadSeam {
+    fn topics<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<TopicRow>, UiError>> + Send + 'a>> {
+        (*self).topics()
+    }
+
+    fn groups<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<GroupRow>, UiError>> + Send + 'a>> {
+        (*self).groups()
+    }
+
+    fn log_dirs<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<LogDirRow>, UiError>> + Send + 'a>> {
+        (*self).log_dirs()
+    }
+}
+
+impl AdminMutationSeam for &RecordingAdminMutationSeam {
+    fn create_topic<'a>(
+        &'a self,
+        request: CreateTopicRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        (*self).create_topic(request)
+    }
+}
+
+fn authenticated_session(sessions: &SessionStore) -> crabka_admin_ui::session::SessionId {
+    sessions.create_authenticated(
+        SessionUser {
+            username: "alice".to_string(),
+            principal: "User:alice".to_string(),
+        },
+        SessionCredentials::scram_sha512("password".to_string()),
+    )
 }
 
 impl AdminMutationSeam for RecordingAdminMutationSeam {

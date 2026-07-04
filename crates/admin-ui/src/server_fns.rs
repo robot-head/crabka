@@ -184,6 +184,74 @@ pub trait AdminMutationSeam {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>>;
 }
 
+pub trait AdminSeamFactory {
+    type Reader<'a>: AdminReadSeam
+    where
+        Self: 'a;
+    type Mutations<'a>: AdminMutationSeam
+    where
+        Self: 'a;
+
+    fn read_seam<'a>(
+        &'a self,
+        cfg: &AdminUiConfig,
+        record: &SessionRecord,
+    ) -> Result<Self::Reader<'a>, UiError>;
+
+    fn mutation_seam<'a>(
+        &'a self,
+        cfg: &AdminUiConfig,
+        record: &SessionRecord,
+    ) -> Result<Self::Mutations<'a>, UiError>;
+}
+
+pub struct BrokerAdminSeamFactory;
+
+impl AdminSeamFactory for BrokerAdminSeamFactory {
+    type Reader<'a> = BrokerAdminReadSeam;
+    type Mutations<'a> = BrokerAdminMutationSeam;
+
+    fn read_seam<'a>(
+        &'a self,
+        cfg: &AdminUiConfig,
+        record: &SessionRecord,
+    ) -> Result<Self::Reader<'a>, UiError> {
+        BrokerAdminReadSeam::from_session(cfg, record)
+    }
+
+    fn mutation_seam<'a>(
+        &'a self,
+        cfg: &AdminUiConfig,
+        record: &SessionRecord,
+    ) -> Result<Self::Mutations<'a>, UiError> {
+        BrokerAdminMutationSeam::from_session(cfg, record)
+    }
+}
+
+pub struct ServerFunctionContext<'a, F = BrokerAdminSeamFactory> {
+    pub cfg: &'a AdminUiConfig,
+    pub sessions: &'a SessionStore,
+    pub raw_session_id: Option<&'a str>,
+    pub seam_factory: &'a F,
+}
+
+impl<'a, F> ServerFunctionContext<'a, F> {
+    #[must_use]
+    pub const fn new(
+        cfg: &'a AdminUiConfig,
+        sessions: &'a SessionStore,
+        raw_session_id: Option<&'a str>,
+        seam_factory: &'a F,
+    ) -> Self {
+        Self {
+            cfg,
+            sessions,
+            raw_session_id,
+            seam_factory,
+        }
+    }
+}
+
 pub async fn login_with_context<B: LoginBroker>(
     cfg: &AdminUiConfig,
     sessions: &SessionStore,
@@ -217,12 +285,28 @@ pub async fn list_topics_with_reader<R: AdminReadSeam>(
     reader.topics().await
 }
 
+pub async fn list_topics_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+) -> Result<Vec<TopicRow>, UiError> {
+    let reader = read_seam_from_context(context)?;
+
+    reader.topics().await
+}
+
 pub async fn list_groups_with_reader<R: AdminReadSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
     reader: &R,
 ) -> Result<Vec<GroupRow>, UiError> {
     require_session(sessions, raw_session_id)?;
+
+    reader.groups().await
+}
+
+pub async fn list_groups_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+) -> Result<Vec<GroupRow>, UiError> {
+    let reader = read_seam_from_context(context)?;
 
     reader.groups().await
 }
@@ -237,6 +321,14 @@ pub async fn list_log_dirs_with_reader<R: AdminReadSeam>(
     reader.log_dirs().await
 }
 
+pub async fn list_log_dirs_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+) -> Result<Vec<LogDirRow>, UiError> {
+    let reader = read_seam_from_context(context)?;
+
+    reader.log_dirs().await
+}
+
 pub async fn create_topic_with_mutations<M: AdminMutationSeam>(
     sessions: &SessionStore,
     raw_session_id: Option<&str>,
@@ -245,6 +337,16 @@ pub async fn create_topic_with_mutations<M: AdminMutationSeam>(
 ) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
     require_session(sessions, raw_session_id)?;
+
+    mutations.create_topic(request).await
+}
+
+pub async fn create_topic_with_context<F: AdminSeamFactory>(
+    context: &ServerFunctionContext<'_, F>,
+    request: CreateTopicRequestDto,
+) -> Result<Vec<ResourceOutcome>, UiError> {
+    ensure_valid_request(request.validate())?;
+    let mutations = mutation_seam_from_context(context)?;
 
     mutations.create_topic(request).await
 }
@@ -370,6 +472,22 @@ fn require_session(
     };
 
     sessions.get(&session_id).ok_or(UiError::NotAuthenticated)
+}
+
+fn read_seam_from_context<'a, F: AdminSeamFactory>(
+    context: &'a ServerFunctionContext<'_, F>,
+) -> Result<F::Reader<'a>, UiError> {
+    let record = require_session(context.sessions, context.raw_session_id)?;
+
+    context.seam_factory.read_seam(context.cfg, &record)
+}
+
+fn mutation_seam_from_context<'a, F: AdminSeamFactory>(
+    context: &'a ServerFunctionContext<'_, F>,
+) -> Result<F::Mutations<'a>, UiError> {
+    let record = require_session(context.sessions, context.raw_session_id)?;
+
+    context.seam_factory.mutation_seam(context.cfg, &record)
 }
 
 fn runtime_sessions() -> &'static SessionStore {
