@@ -1,9 +1,11 @@
 //! Standalone Dioxus administration UI for one Crabka cluster.
 
+pub mod admin;
 pub mod auth;
 pub mod config;
 pub mod dto;
 pub mod error;
+pub mod permissions;
 pub mod server;
 pub mod session;
 
