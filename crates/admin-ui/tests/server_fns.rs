@@ -235,6 +235,27 @@ async fn public_context_reads_validate_session_and_call_admin_reader() {
 }
 
 #[tokio::test]
+async fn public_context_current_session_uses_exported_context_path() {
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let session_id = authenticated_session(&sessions);
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(
+        &cfg,
+        &sessions,
+        Some(session_id.expose_for_cookie()),
+        &factory,
+    );
+
+    let current_session = crabka_admin_ui::server_fns::current_session_with_context(&context)
+        .expect("public context current session resolves");
+
+    assert_eq!(current_session.username, "alice");
+    assert_eq!(current_session.principal, "User:alice");
+    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn public_context_reads_reject_unauthenticated_sessions() {
     let sessions = SessionStore::new(Duration::from_secs(60));
     let cfg = AdminUiConfig::default();

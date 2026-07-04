@@ -1,7 +1,17 @@
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use crabka_admin_ui::config::AdminUiConfig;
-use crabka_admin_ui::server::{AppState, router};
+use crabka_admin_ui::dto::{GroupRow, LogDirRow, ResourceOutcome, TopicRow};
+use crabka_admin_ui::error::UiError;
+use crabka_admin_ui::server::{AppState, SESSION_COOKIE_NAME, router, router_with_factory};
+use crabka_admin_ui::server_fns::{AdminMutationSeam, AdminReadSeam, AdminSeamFactory};
+use crabka_admin_ui::session::{SessionRecord, SessionStore};
 use tower::ServiceExt as _;
 
 fn smoke_app() -> axum::Router {
@@ -21,6 +31,21 @@ async fn get(path: &str) -> axum::response::Response {
                 .body(Body::empty())
                 .expect("request builds"),
         )
+        .await
+        .expect("router responds")
+}
+
+async fn get_from(
+    app: axum::Router,
+    path: &str,
+    cookie: Option<String>,
+) -> axum::response::Response {
+    let mut request = Request::builder().uri(path);
+    if let Some(cookie) = cookie {
+        request = request.header(header::COOKIE, cookie);
+    }
+
+    app.oneshot(request.body(Body::empty()).expect("request builds"))
         .await
         .expect("router responds")
 }
@@ -76,16 +101,12 @@ async fn login_returns_html_with_login_prompt() {
 #[tokio::test]
 async fn linked_admin_pages_return_static_html() {
     for (path, heading, empty_state) in [
-        ("/topics", "Topics", "No topics loaded yet."),
-        (
-            "/groups",
-            "Consumer Groups",
-            "No consumer groups loaded yet.",
-        ),
-        ("/acls", "ACLs", "No ACL operation selected."),
-        ("/users", "SCRAM Users", "No user operation selected."),
-        ("/quotas", "Quotas", "No quota data loaded yet."),
-        ("/log-dirs", "Log Dirs", "No log-dir data loaded yet."),
+        ("/topics", "Topics", "Authentication required."),
+        ("/groups", "Consumer Groups", "Authentication required."),
+        ("/acls", "ACLs", "Authentication required."),
+        ("/users", "SCRAM Users", "Authentication required."),
+        ("/quotas", "Quotas", "Authentication required."),
+        ("/log-dirs", "Log Dirs", "Authentication required."),
     ] {
         let response = get(path).await;
 
@@ -93,5 +114,152 @@ async fn linked_admin_pages_return_static_html() {
         let body = response_text(response).await;
         assert!(body.contains(heading), "{path} heading");
         assert!(body.contains(empty_state), "{path} empty state");
+    }
+}
+
+#[tokio::test]
+async fn authenticated_read_routes_call_injected_seams_and_render_rows() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = Some(format!(
+        "{SESSION_COOKIE_NAME}={}",
+        session_id.expose_for_cookie()
+    ));
+
+    for (path, expected) in [
+        ("/topics", "orders"),
+        ("/groups", "consumer-a"),
+        ("/log-dirs", "/var/lib/crabka"),
+    ] {
+        let response = get_from(app.clone(), path, cookie.clone()).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{path} status");
+        let body = response_text(response).await;
+        assert!(body.contains(expected), "{path} row content");
+    }
+
+    assert_eq!(factory.topics.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.groups.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.log_dirs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn missing_or_invalid_cookie_does_not_call_injected_seams() {
+    for cookie in [None, Some(format!("{SESSION_COOKIE_NAME}=not-a-session"))] {
+        let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+        let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+        let factory = RecordingAdminSeamFactory::default();
+        let app = router_with_factory(state, factory.clone());
+
+        for path in [
+            "/topics",
+            "/groups",
+            "/log-dirs",
+            "/acls",
+            "/users",
+            "/quotas",
+        ] {
+            let response = get_from(app.clone(), path, cookie.clone()).await;
+
+            assert_eq!(response.status(), StatusCode::OK, "{path} status");
+            let body = response_text(response).await;
+            assert!(
+                body.contains("Authentication required."),
+                "{path} auth state"
+            );
+        }
+
+        assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.topics.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.groups.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.log_dirs.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingAdminSeamFactory {
+    read_seam_calls: Arc<AtomicUsize>,
+    topics: Arc<AtomicUsize>,
+    groups: Arc<AtomicUsize>,
+    log_dirs: Arc<AtomicUsize>,
+}
+
+impl AdminSeamFactory for RecordingAdminSeamFactory {
+    type Reader<'a> = Self;
+    type Mutations<'a> = Self;
+
+    fn read_seam<'a>(
+        &'a self,
+        _cfg: &AdminUiConfig,
+        record: &SessionRecord,
+    ) -> Result<Self::Reader<'a>, UiError> {
+        assert_eq!(record.user.username, "alice");
+        self.read_seam_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.clone())
+    }
+
+    fn mutation_seam<'a>(
+        &'a self,
+        _cfg: &AdminUiConfig,
+        _record: &SessionRecord,
+    ) -> Result<Self::Mutations<'a>, UiError> {
+        Ok(self.clone())
+    }
+}
+
+impl AdminReadSeam for RecordingAdminSeamFactory {
+    fn topics<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<TopicRow>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.topics.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![TopicRow {
+                name: "orders".to_string(),
+                topic_id: None,
+                partition_count: 3,
+                replication_factor: 1,
+                error: None,
+            }])
+        })
+    }
+
+    fn groups<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<GroupRow>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.groups.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![GroupRow {
+                group_id: "consumer-a".to_string(),
+            }])
+        })
+    }
+
+    fn log_dirs<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<LogDirRow>, UiError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.log_dirs.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![LogDirRow {
+                log_dir: "/var/lib/crabka".to_string(),
+                topic: "orders".to_string(),
+                partition: 0,
+                partition_size: 10,
+                offset_lag: 0,
+                is_future_key: false,
+                error: None,
+            }])
+        })
+    }
+}
+
+impl AdminMutationSeam for RecordingAdminSeamFactory {
+    fn create_topic<'a>(
+        &'a self,
+        _request: crabka_admin_ui::dto::CreateTopicRequestDto,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 }

@@ -62,37 +62,72 @@ pub async fn logout() -> Result<(), UiError> {
 }
 
 pub async fn current_session() -> Result<CurrentSession, UiError> {
-    current_session_with_store(runtime_sessions(), None)
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    current_session_with_context(&context)
 }
 
 pub async fn list_topics() -> Result<Vec<TopicRow>, UiError> {
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    list_topics_with_context(&context).await
 }
 
 pub async fn list_groups() -> Result<Vec<GroupRow>, UiError> {
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    list_groups_with_context(&context).await
 }
 
 pub async fn list_acls() -> Result<Vec<AclRow>, UiError> {
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    current_session_with_context(&context)?;
+    Ok(Vec::new())
 }
 
 pub async fn list_users() -> Result<Vec<UserRow>, UiError> {
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    current_session_with_context(&context)?;
+    Ok(Vec::new())
 }
 
 pub async fn list_quotas() -> Result<Vec<QuotaRow>, UiError> {
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    current_session_with_context(&context)?;
+    Ok(Vec::new())
 }
 
 pub async fn list_log_dirs() -> Result<Vec<LogDirRow>, UiError> {
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    list_log_dirs_with_context(&context).await
 }
 
 pub async fn create_topic(request: CreateTopicRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
     ensure_valid_request(request.validate())?;
 
-    reject_missing_session().await
+    let factory = BrokerAdminSeamFactory;
+    let cfg = AdminUiConfig::default();
+    let context = ServerFunctionContext::new(&cfg, runtime_sessions(), None, &factory);
+
+    create_topic_with_context(&context, request).await
 }
 
 pub async fn delete_topic(request: DeleteTopicRequestDto) -> Result<Vec<ResourceOutcome>, UiError> {
@@ -205,6 +240,7 @@ pub trait AdminSeamFactory {
     ) -> Result<Self::Mutations<'a>, UiError>;
 }
 
+#[derive(Clone, Copy, Debug, Default)]
 pub struct BrokerAdminSeamFactory;
 
 impl AdminSeamFactory for BrokerAdminSeamFactory {
@@ -273,6 +309,12 @@ pub fn current_session_with_store(
         username: record.user.username,
         principal: record.user.principal,
     })
+}
+
+pub fn current_session_with_context<F>(
+    context: &ServerFunctionContext<'_, F>,
+) -> Result<CurrentSession, UiError> {
+    current_session_with_store(context.sessions, context.raw_session_id)
 }
 
 pub async fn list_topics_with_reader<R: AdminReadSeam>(
