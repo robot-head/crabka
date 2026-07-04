@@ -63,6 +63,9 @@ async fn await_txn_coordinator(client: &crabka_client_core::Client, tid: &str) {
             Instant::now() <= deadline,
             "txn coordinator never became available: {fc:?}"
         );
+        // intentional: the FindCoordinator RPC itself triggers the lazy
+        // __transaction_state leader election; coordinator availability is not
+        // in the metadata image and has no awaiter/metric, so poll the RPC.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -191,6 +194,9 @@ async fn begin_and_commit_offsets(
             init.error_code == NOT_COORDINATOR && Instant::now() <= deadline,
             "InitProducerId: {init:?}"
         );
+        // intentional: NOT_COORDINATOR clears once the elected leader installs
+        // the txn coordinator locally — coordinator-local state, not in the
+        // metadata image and with no awaiter/metric; bounded RPC-response poll.
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 

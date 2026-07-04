@@ -173,38 +173,29 @@ async fn start_three_tiered_brokers() -> (
 
 /// Wait until all three brokers see each other registered (broker_count >= 3).
 async fn await_all_brokers_registered(b1: &BrokerHandle, b2: &BrokerHandle, b3: &BrokerHandle) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let c1 = b1.broker_count().await;
-        let c2 = b2.broker_count().await;
-        let c3 = b3.broker_count().await;
-        if c1 >= 3 && c2 >= 3 && c3 >= 3 {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "brokers didn't converge on 3-broker view within 60s (b1={c1} b2={c2} b3={c3})"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    // Each broker's own metadata image must show all 3 brokers registered.
+    b1.wait_until_brokers_registered(3).await;
+    b2.wait_until_brokers_registered(3).await;
+    b3.wait_until_brokers_registered(3).await;
 }
 
 /// Wait until the topic-backed RLMM is active on all three brokers.
 async fn await_all_rlmm_active(b1: &BrokerHandle, b2: &BrokerHandle, b3: &BrokerHandle) {
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let a1 = b1.rlmm_topic_backed_active_for_test();
-        let a2 = b2.rlmm_topic_backed_active_for_test();
-        let a3 = b3.rlmm_topic_backed_active_for_test();
-        if a1 && a2 && a3 {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "topic-backed RLMM not active on all brokers within 60s (b1={a1} b2={a2} b3={a3})"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    // Topic-backed RLMM going live flips the tiered_storage_rlmm_topic_backed
+    // gauge to 1 on each broker (the same signal rlmm_topic_backed_active_for_test
+    // reads directly).
+    b1.wait_for_metrics("b1 topic-backed RLMM active", |m| {
+        m.tiered_storage_rlmm_topic_backed.get() == 1
+    })
+    .await;
+    b2.wait_for_metrics("b2 topic-backed RLMM active", |m| {
+        m.tiered_storage_rlmm_topic_backed.get() == 1
+    })
+    .await;
+    b3.wait_for_metrics("b3 topic-backed RLMM active", |m| {
+        m.tiered_storage_rlmm_topic_backed.get() == 1
+    })
+    .await;
 }
 
 /// Fetch the topic-id for `name` from the given client (Metadata request).
@@ -277,6 +268,8 @@ async fn fetch_all_records(
             Instant::now() <= deadline,
             "survivor never returned a valid topic id for {topic} within deadline"
         );
+        // intentional: topic-id visibility is polled over the wire client (this
+        // helper has no BrokerHandle); retry until the survivor's metadata settles.
         tokio::time::sleep(Duration::from_millis(300)).await;
     };
 
@@ -332,6 +325,8 @@ async fn fetch_all_records(
             "survivor only served {total_records}/{expected_count} records before deadline; \
              fetch_offset={fetch_offset}"
         );
+        // intentional: records are fetched over the wire client (no BrokerHandle
+        // here); retry the bounded Fetch poll until the survivor serves them all.
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
@@ -446,30 +441,32 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
             b1.partition_log_config_for_test(TOPIC, 0),
             b2.partition_log_config_for_test(TOPIC, 0),
         );
+        // intentional: the tiered LogConfig override is applied by each broker's
+        // local reconcile loop and is not surfaced in the metadata image or any
+        // metric, so poll partition_log_config_for_test directly.
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     eprintln!("ITEST: tiered config propagated; discovering partition leader");
 
     // Discover which of broker 1 / broker 2 is the partition leader.
     // With rf=2 and 3 registered brokers, round-robin assigns [1, 2];
-    // broker 1 is the preferred leader.
-    let leader_deadline = Instant::now() + Duration::from_secs(30);
-    let (leader_node_id, follower_node_id, follower_addr) = loop {
-        let l = b1.partition_leader_for_test(TOPIC, 0);
-        if l == Some(b1.node_id()) {
+    // broker 1 is the preferred leader. Wait until b1's metadata image names
+    // the partition leader as one of the two replicas, then read which.
+    let b1_id = b1.node_id();
+    let b2_id = b2.node_id();
+    b1.wait_for_image(|img| {
+        img.partition(TOPIC, 0)
+            .is_some_and(|p| p.leader == b1_id || p.leader == b2_id)
+    })
+    .await;
+    let (leader_node_id, follower_node_id, follower_addr) =
+        if b1.partition_leader_for_test(TOPIC, 0) == Some(b1_id) {
             let f_addr = format!("127.0.0.1:{}", b2.listen_addr().port());
-            break (b1.node_id(), b2.node_id(), f_addr);
-        } else if l == Some(b2.node_id()) {
+            (b1_id, b2_id, f_addr)
+        } else {
             let f_addr = format!("127.0.0.1:{}", b1.listen_addr().port());
-            break (b2.node_id(), b1.node_id(), f_addr);
-        }
-        assert!(
-            Instant::now() <= leader_deadline,
-            "no partition leader on b1 or b2 within 30s; b1 reports {:?}",
-            b1.partition_leader_for_test(TOPIC, 0),
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    };
+            (b2_id, b1_id, f_addr)
+        };
     eprintln!(
         "ITEST: partition leader=broker{leader_node_id} follower=broker{follower_node_id}; \
          producing {RECORDS} records"
@@ -531,12 +528,18 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
             Instant::now() <= copy_deadline,
             "fewer than 2 segments tiered within 60s (found {n})"
         );
+        // intentional: segments landing in the shared remote object store is
+        // filesystem state with no crabka metric/awaiter; poll the dir directly.
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
     // Give the RLMM time to propagate CopySegment metadata to the follower via
     // __remote_log_metadata (rf=2).  Interval=1s → 8 ticks plus consume latency.
+    // intentional: the follower's RLMM consumer catching up on
+    // __remote_log_metadata has no metadata-image/metric signal to await;
+    // wait a fixed propagation window before killing the leader.
     eprintln!("ITEST: waiting 8s for RLMM metadata propagation to follower");
+    // real-time wait (not a progress poll): RLMM propagates CopySegment metadata to the follower over the broker's own 1s interval ticks; no in-process observable to poll.
     tokio::time::sleep(Duration::from_secs(8)).await;
 
     // Shut down the partition leader.  The surviving 2/3 quorum (broker 2 + 3)
@@ -570,23 +573,17 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
     // Wait for the survivor to become the user-partition leader.
     // The surviving quorum (broker2 + broker3) commits the new leader record.
     eprintln!("ITEST: waiting for survivor (broker{follower_node_id}) to become partition leader");
-    let failover_deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if survivor.partition_leader_for_test(TOPIC, 0) == Some(follower_node_id) {
-            eprintln!("ITEST: survivor (broker{follower_node_id}) is now partition leader");
-            break;
-        }
-        assert!(
-            Instant::now() <= failover_deadline,
-            "survivor (broker{follower_node_id}) didn't become partition leader within 30s; \
-             current={:?}",
-            survivor.partition_leader_for_test(TOPIC, 0),
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+    // Failover moves the partition leader off the (killed) old leader; with
+    // rf=2 the only surviving replica is the follower, so the new leader can
+    // only be `follower_node_id`.
+    survivor
+        .wait_until_partition_leader_changed(TOPIC, 0, leader_node_id)
+        .await;
+    eprintln!("ITEST: survivor (broker{follower_node_id}) is now partition leader");
 
     // Give the survivor's RLMM 3 more reconcile ticks to settle on the
     // now-led partition's metadata (RLMM interval=1s → 3 extra ticks).
+    // intentional: RLMM reconcile settling has no image/metric signal to await.
     tokio::time::sleep(Duration::from_secs(3)).await;
 
     // Consume ALL produced records from the survivor at offset 0.

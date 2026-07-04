@@ -163,7 +163,7 @@ where
             tokio::time::Instant::now() < deadline,
             "await_until timed out"
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -209,7 +209,7 @@ async fn await_single_leader(net: &SimNet, ids: &[NodeId], timeout: Duration) ->
             "no single agreed leader within timeout: {:?}",
             leaders(&net, &ids).await
         );
-        tokio::time::sleep(Duration::from_millis(15)).await;
+        tokio::task::yield_now().await;
     }
 }
 
@@ -449,7 +449,10 @@ async fn restart_recovers_image() {
     victim_ctrl.trigger_snapshot().await.unwrap();
     victim_ctrl.shutdown().await;
     net.remove(victim);
-    // Let the loop drain.
+    // intentional: let the shutdown-signalled engine task exit and drop its
+    // KraftLog before we reopen the same data dir. `shutdown()` only sends
+    // `Command::Shutdown`; the loop is spawned fire-and-forget with no JoinHandle,
+    // so there is no accessor to await loop teardown / log-handle release.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let victim_dir = dirs.get(&victim).unwrap().path().to_path_buf();

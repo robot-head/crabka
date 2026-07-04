@@ -249,12 +249,12 @@ async fn sasl_scram_sha256_authenticate(
         )));
     }
 
-    let mut client = crabka_security::ScramClientExchange::new(
+    let client = crabka_security::ScramClientExchange::new(
         username.to_string(),
         password.as_bytes().to_vec(),
         SaslMechanism::ScramSha256,
     );
-    let client_first = client
+    let (client_first, client) = client
         .client_first()
         .map_err(|e| io::Error::other(format!("scram client_first: {e:?}")))?;
 
@@ -276,7 +276,7 @@ async fn sasl_scram_sha256_authenticate(
         )));
     }
 
-    let client_final = client
+    let (client_final, client) = client
         .step(&r1_resp.auth_bytes)
         .map_err(|e| io::Error::other(format!("scram step: {e:?}")))?;
     let mut body = BytesMut::new();
@@ -722,31 +722,24 @@ async fn delegation_token_lifecycle_end_to_end() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async fn wait_for_token(handle: &BrokerHandle, token_id: &str) -> crabka_metadata::DelegationToken {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        if let Some(t) = img.delegation_token_by_id(token_id) {
-            return t.clone();
-        }
-        if std::time::Instant::now() > deadline {
-            panic!("token {token_id} not visible in image after 5s");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    // Watch the committed metadata image (same controller handle
+    // `controller_image_for_test` reads) until the V1DelegationToken record
+    // materializes, then re-read it to return the applied token.
+    handle
+        .wait_for_image(|img| img.delegation_token_by_id(token_id).is_some())
+        .await;
+    handle
+        .controller_image_for_test()
+        .delegation_token_by_id(token_id)
+        .expect("token present in image after wait_for_image")
+        .clone()
 }
 
 async fn wait_for_token_gone(handle: &BrokerHandle, token_id: &str) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let img = handle.controller_image_for_test();
-        if img.delegation_token_by_id(token_id).is_none() {
-            return;
-        }
-        if std::time::Instant::now() > deadline {
-            panic!("token {token_id} still visible in image after 5s (expected tombstone)");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
+    // Watch the committed metadata image until the token's tombstone applies.
+    handle
+        .wait_for_image(|img| img.delegation_token_by_id(token_id).is_none())
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

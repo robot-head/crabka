@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .to("orders-pb-doubled");
 
-    let mut streams = app.run(topology).await?;
+    let streams = app.run(topology).await?;
     streams.close().await?;
     Ok(())
 }

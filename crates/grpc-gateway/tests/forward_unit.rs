@@ -92,6 +92,7 @@ async fn spawn_mock() -> String {
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
+    // real-time wait (not a progress poll): readiness settle for the spawned mock forward endpoint, not in-process gateway state.
     // small readiness pause so the first request doesn't race serve startup
     tokio::time::sleep(Duration::from_millis(150)).await;
     addr

@@ -580,6 +580,18 @@ mod tests {
     use tokio::sync::watch;
     use uuid::Uuid;
 
+    /// Yield-poll until `cond` holds, with a bounded hang-guard so a genuine
+    /// stall fails the test deterministically instead of spinning forever.
+    async fn await_until(what: &str, mut cond: impl FnMut() -> bool) {
+        for _ in 0..200_000 {
+            if cond() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("condition never held: {what}");
+    }
+
     fn image_with(records: &[MetadataRecord]) -> MetadataImage {
         let mut img = MetadataImage::new(Uuid::nil());
         for r in records {
@@ -1128,11 +1140,18 @@ mod tests {
         desired.insert(("t".to_string(), 0));
         push_topic_configs(&desired, &partitions, &img).await;
 
-        // Give the writer actor a moment to apply the SetLogConfig message.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // Verify the partition's Log now has retention.ms=60s.
+        // Wait until the writer actor applies the SetLogConfig message and the
+        // partition's Log reports retention.ms=60s.
         let part = partitions.get("t", 0).expect("partition materialized");
+        await_until("retention.ms=60s applied to partition log", || {
+            part.log
+                .lock()
+                .expect("log lock")
+                .config_snapshot()
+                .retention_ms
+                == Some(std::time::Duration::from_mins(1))
+        })
+        .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
         assert!(snap.retention_ms == Some(std::time::Duration::from_mins(1)));
     }
@@ -1181,10 +1200,19 @@ mod tests {
         desired.insert(("t".to_string(), 0));
         push_topic_configs(&desired, &partitions, &img).await;
 
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // No overrides → default retention applies.
+        // No overrides → default retention applies. Wait until the writer actor
+        // has processed the push (the log already carries the default, so this
+        // resolves as soon as the config snapshot matches).
         let part = partitions.get("t", 0).expect("partition");
+        await_until("default retention applied to partition log", || {
+            part.log
+                .lock()
+                .expect("log lock")
+                .config_snapshot()
+                .retention_ms
+                == LogConfig::default().retention_ms
+        })
+        .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
         assert!(snap.retention_ms == LogConfig::default().retention_ms);
     }

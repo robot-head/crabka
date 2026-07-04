@@ -144,7 +144,7 @@ async fn collect_output_keyed(
             break;
         }
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     collected
@@ -164,7 +164,7 @@ async fn open_counts_store(
             {
                 Ok(store) => return store,
                 // Not yet assigned / still joining: retry.
-                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(_) => tokio::task::yield_now().await,
             }
         }
     })
@@ -241,7 +241,7 @@ async fn dsl_count_restart_restore_emit_on_update() {
     // flush-on-commit wiring lands in a later record-caching sub-task, so this
     // emit-on-update test pins caching off until then.
     let app_id = "dsl-count-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
@@ -279,7 +279,7 @@ async fn dsl_count_restart_restore_emit_on_update() {
     // Produce one more "a" to dsl-in BEFORE starting so it's queued.
     produce_one(&producer, "a").await;
 
-    let mut streams2 = KafkaStreams::builder()
+    let streams2 = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
@@ -371,7 +371,7 @@ async fn dsl_count_restart_restore_caching_on() {
     //       commit interval keeps flushes to at most one (the immediate first
     //       tick); the deduped emit is guaranteed by single-batch processing. ──
     let app_id = "dsl-count-cache-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
@@ -394,7 +394,7 @@ async fn dsl_count_restart_restore_caching_on() {
             if a == Some(2) && b == Some(1) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await;
@@ -448,7 +448,7 @@ async fn dsl_count_restart_restore_caching_on() {
     //       the close-flush wrote. ────────────────────────────────────────────
     produce_one(&producer, "a").await;
 
-    let mut streams2 = KafkaStreams::builder()
+    let streams2 = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(dsl_counting_topology(app_id))
@@ -465,7 +465,7 @@ async fn dsl_count_restart_restore_caching_on() {
             if store2.get(&"a".to_string()).await.unwrap() == Some(3) {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await;

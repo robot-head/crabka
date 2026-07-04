@@ -280,6 +280,9 @@ async fn streams_join_and_converge(
         if total >= want_active {
             break;
         }
+        // intentional: backoff between streams heartbeat rounds while the
+        // coordinator computes task assignment. Streams task assignment is not
+        // in the metadata image and exposes no awaiter/metric to poll on.
         tokio::time::sleep(Duration::from_millis(200)).await;
         let active = resp.active_tasks.clone().map(|v| {
             v.into_iter()

@@ -135,7 +135,7 @@ async fn collect_output(
             break;
         }
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     collected
@@ -185,7 +185,7 @@ async fn kafka_streams_processes_records_end_to_end() {
     topo.add_sink("out", "stream-out", [&up]);
     let built = topo.build("stream-app").unwrap();
 
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id("stream-app")
         .topology(built)

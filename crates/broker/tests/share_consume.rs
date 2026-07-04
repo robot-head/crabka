@@ -242,6 +242,9 @@ async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32
             return;
         }
         if p.error_code == 3 || p.error_code == 6 {
+            // intentional: bounded produce-retry backoff while the partition
+            // leader materializes; this helper has no BrokerHandle to await on
+            // and mirrors a real producer's retry.
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -445,6 +448,9 @@ async fn fetch_until_acquired(
         if row.error_code == NONE && acquired_count(&row) > 0 {
             return row;
         }
+        // intentional: bounded RPC poll — the acquire happens only via this
+        // ShareFetch as share-state leadership/acquisition settles; no
+        // metadata-image or metric signal reflects "the next fetch will acquire".
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     panic!("share fetch never acquired any records for {group}:{tid}:{partition}");
@@ -614,6 +620,9 @@ async fn reject_archives() {
         if acquired_count(&row3) > 0 {
             break;
         }
+        // intentional: bounded RPC poll — acquiring the freshly produced offset
+        // 2 requires re-fetching; no image/metric signals when it becomes
+        // acquirable.
         tokio::time::sleep(Duration::from_millis(100)).await;
         row3 = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
     }
@@ -670,6 +679,9 @@ async fn acquire_past_leading_batch_returns_bytes() {
         if acquired_count(&row3) > 0 {
             break;
         }
+        // intentional: bounded RPC poll — acquiring the freshly produced offset
+        // 3 requires re-fetching; no image/metric signals when it becomes
+        // acquirable.
         tokio::time::sleep(Duration::from_millis(100)).await;
         row3 = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
     }
@@ -979,7 +991,7 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
         .await
         .unwrap();
     producer.init_transactions().await.unwrap();
-    producer.begin_transaction().await.unwrap();
+    let txn = producer.begin_transaction().await.unwrap();
     for v in ["a", "b", "c"] {
         drop(
             producer
@@ -1006,6 +1018,9 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
             "read_committed must not surface open-txn records, got {:?}",
             row.acquired_records
         );
+        // intentional: deliberately observe that nothing is acquired across a
+        // window while the txn stays open (behavior under test, not a
+        // state-settle guess).
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
@@ -1014,7 +1029,7 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
     // the committed records (proving they were deferred, not dropped). The
     // acquired window also covers the control-marker offset, whose bytes the
     // read path filters out — so we assert on the surfaced record VALUES.
-    producer.commit_transaction().await.unwrap();
+    txn.commit().await.unwrap();
     let mut values: Vec<String> = Vec::new();
     for epoch in 6..30 {
         let row = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
@@ -1032,6 +1047,9 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
                 break;
             }
         }
+        // intentional: bounded RPC poll for the post-commit LSO advance
+        // (transaction-coordinator state, not in the metadata image) to surface
+        // via ShareFetch.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
@@ -1085,6 +1103,8 @@ async fn produce_one(client: &Client, topic: &str, tid: uuid::Uuid, partition: i
             return;
         }
         if p.error_code == 3 || p.error_code == 6 {
+            // intentional: bounded produce-retry backoff while the partition
+            // leader materializes; this helper has no BrokerHandle to await on.
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         }
@@ -1144,6 +1164,8 @@ async fn fragmented_window_records_match_acquired_offsets() {
         if acquired_count(&row2) >= 2 {
             break;
         }
+        // intentional: bounded RPC poll — re-acquiring the released disjoint set
+        // {0, 2} happens only via this ShareFetch; no image/metric reflects it.
         tokio::time::sleep(Duration::from_millis(100)).await;
         row2 = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
     }

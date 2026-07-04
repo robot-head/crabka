@@ -687,32 +687,9 @@ async fn three_node_jvm_round_trip() {
     ]);
 
     // 2. Wait for the topic to propagate from node 1 (where kafka-topics
-    //    created it) to node 2 (where we'll produce). A flat sleep races
-    //    on CI's slower kernel; poll Metadata against node 2 until we
-    //    actually see the topic listed.
-    {
-        use crabka_protocol::owned::metadata_request::MetadataRequest;
-        let probe = crabka_client_core::Client::builder()
-            .bootstrap(format!("host.docker.internal:{}", client_ports[1]))
-            .build()
-            .await
-            .expect("metadata probe client");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
-        loop {
-            let m = probe
-                .send(MetadataRequest::default())
-                .await
-                .expect("metadata");
-            if m.topics.iter().any(|t| t.name.as_deref() == Some(TOPIC)) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "topic not propagated to node 2 within 2 min",
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    }
+    //    created it) to node 2 (where we'll produce) by observing node 2's
+    //    committed metadata image directly.
+    cluster[1].0.wait_until_partition_present(TOPIC, 0).await;
 
     // 3. Produce via kafka-console-producer (JVM). The JVM AdminClient
     //    transparently follows the partition leader: it asks any node's
@@ -786,6 +763,10 @@ async fn three_node_jvm_round_trip() {
     let leader_idx = leader_idx.expect("a leader exists");
     let (leader, _dir) = cluster.remove(leader_idx);
     leader.shutdown().await;
+    // intentional: allow the surviving voters to run a controller re-election
+    // after the leader was killed. There is no "controller leader changed"
+    // awaiter, and a survivor's cached leader value can momentarily read stale,
+    // so a fixed settle window is used rather than risk a stale-value wait.
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
     // 6. Survivor still answers Metadata via kafka-topics --list.
@@ -956,37 +937,10 @@ async fn three_node_replication_byte_compare() {
         &bootstrap_1,
     ]);
 
-    // 2. Wait for the ISR to include all three brokers. ISR
-    //    == replicas always, so this is "did the metadata propagate".
-    //    Poll `kafka-topics --describe` until the Isr line lists 1, 2, 3
-    //    in any permutation. 2-minute deadline matches the other JVM
-    //    test's CI tolerance.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
-    loop {
-        let desc = docker_run_kafka_tool(&[
-            "kafka-topics",
-            "--describe",
-            "--topic",
-            TOPIC,
-            "--bootstrap-server",
-            &bootstrap_1,
-        ]);
-        let s = String::from_utf8_lossy(&desc.stdout);
-        let has_isr_3 = s.contains("Isr: 1,2,3")
-            || s.contains("Isr: 1,3,2")
-            || s.contains("Isr: 2,1,3")
-            || s.contains("Isr: 2,3,1")
-            || s.contains("Isr: 3,1,2")
-            || s.contains("Isr: 3,2,1");
-        if has_isr_3 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "topic metadata not fully propagated within 2 min: {s}",
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
+    // 2. Wait for the ISR to include all three brokers (ISR == replicas here),
+    //    i.e. the metadata propagated. The in-process image ISR is exactly what
+    //    `kafka-topics --describe` reports, so observe it directly.
+    cluster[0].0.wait_until_isr_len(TOPIC, 0, 3).await;
 
     // 3. Produce 100 records via kafka-console-producer with acks=all so
     //    each produce response gates on HW = LEO across the full ISR.
@@ -1028,11 +982,14 @@ async fn three_node_replication_byte_compare() {
         String::from_utf8_lossy(&prod_out.stderr),
     );
 
-    // 4. Wait for replication lag to drain. `kafka-topics --describe`
-    //    doesn't expose `log_end_offset`, so we can't poll for
-    //    convergence directly; a 5-second sleep is the standard CI
-    //    tolerance after a 100-record produce burst.
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    // 4. Wait for replication lag to drain: every broker's local partition log
+    //    must reach the full 100 records before we dump them. With acks=all the
+    //    produce above already gated on HW=LEO across the ISR, so this resolves
+    //    immediately; the awaiter reads each broker's local log end offset
+    //    directly (which `kafka-topics --describe` cannot expose).
+    for entry in cluster.iter().take(3) {
+        entry.0.wait_until_local_log_end_offset(TOPIC, 0, 100).await;
+    }
 
     // 5. For each broker, dump the local partition file via
     //    `kafka-dump-log`. The `-v <host>:/data:ro` mount makes the
@@ -1232,6 +1189,8 @@ async fn transactional_console_producer_eos() {
     );
 
     // 3. Brief pause to let commit markers propagate through the log.
+    // intentional: transactional commit-marker propagation and LSO advance are
+    // not in the metadata image and have no crabka awaiter/metric.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // 4. Consume with `read_committed` via node 3. The consumer must see at
@@ -1429,6 +1388,10 @@ async fn acks_all_durability() {
         String::from_utf8_lossy(&producer_out.stderr),
     );
 
+    // intentional: wait for the produced records (acks=-1) to replicate to
+    // node 3 and its high-watermark to advance before the read_committed
+    // consume below. Follower high-watermark/LSO is not in the metadata image
+    // and has no crabka awaiter/metric.
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let bootstrap_3 = format!("host.docker.internal:{}", client_ports[2]);
@@ -1593,33 +1556,10 @@ async fn acks_all_survives_leader_crash() {
         &bootstrap_1,
     ]);
 
-    // 2. Wait for ISR to include all three brokers before starting the produce burst.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
-    loop {
-        let desc = docker_run_kafka_tool(&[
-            "kafka-topics",
-            "--describe",
-            "--topic",
-            TOPIC,
-            "--bootstrap-server",
-            &bootstrap_1,
-        ]);
-        let s = String::from_utf8_lossy(&desc.stdout);
-        let has_isr_3 = s.contains("Isr: 1,2,3")
-            || s.contains("Isr: 1,3,2")
-            || s.contains("Isr: 2,1,3")
-            || s.contains("Isr: 2,3,1")
-            || s.contains("Isr: 3,1,2")
-            || s.contains("Isr: 3,2,1");
-        if has_isr_3 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "ISR did not converge to 3 within 2 min: {s}",
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
+    // 2. Wait for ISR to include all three brokers before starting the produce
+    //    burst. The in-process metadata image ISR is exactly what the JVM
+    //    `kafka-topics --describe` reports, so observe it directly.
+    cluster[0].0.wait_until_isr_len(TOPIC, 0, 3).await;
 
     // 3. Determine partition-0 leader from Metadata via local port (not Docker).
     let leader_node_id = {
@@ -1674,6 +1614,8 @@ async fn acks_all_survives_leader_crash() {
         .expect("spawn kafka-console-producer");
 
     // 5. After ~50ms (producer has connected), kill the partition leader.
+    // intentional: this timing window — killing the leader mid-produce — is the
+    // behavior under test, not a wait on any observable broker state.
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
     let leader_idx = usize::try_from((leader_node_id - 1).max(0)).unwrap_or(0);
@@ -1698,6 +1640,9 @@ async fn acks_all_survives_leader_crash() {
     }
 
     // 7. Wait briefly for replication to settle post-election.
+    // intentional: post-election follower high-watermark convergence is not in
+    // the metadata image and has no crabka awaiter/metric; the JVM consumer
+    // below has its own poll timeout to absorb any remaining replication lag.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // 8. Consume from a survivor. Require at least 1 record — the cluster
@@ -3851,19 +3796,8 @@ async fn jvm_inter_broker_replication_authed() {
     // the load-bearing inter-broker SASL handshake. If the peer SASL
     // credentials mismatched, broker 1 would never register and this
     // would time out.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
-    loop {
-        let n0 = broker0.broker_count().await;
-        let n1 = broker1.broker_count().await;
-        if n0 >= 2 && n1 >= 2 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "brokers didn't converge on 2-broker view within 60s (b0={n0} b1={n1})"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    broker0.wait_until_brokers_registered(2).await;
+    broker1.wait_until_brokers_registered(2).await;
 
     // JVM client config: SASL_PLAINTEXT + PLAIN as the admin (super-user).
     let props = write_client_props(&format!(
@@ -3897,19 +3831,11 @@ async fn jvm_inter_broker_replication_authed() {
         ],
     );
 
-    // Wait for the topic to materialize on its leader (either broker).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        let on_b0 = broker0.has_partition(TOPIC, 0).await;
-        let on_b1 = broker1.has_partition(TOPIC, 0).await;
-        if on_b0 || on_b1 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "topic did not propagate within 30s (b0={on_b0} b1={on_b1})"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Wait for the topic to materialize in a broker's metadata image (either
+    // broker; committed metadata converges on both).
+    tokio::select! {
+        () = broker0.wait_until_partition_present(TOPIC, 0) => {}
+        () = broker1.wait_until_partition_present(TOPIC, 0) => {}
     }
 
     // Produce 50 records via `kafka-console-producer`. The metadata
@@ -3956,19 +3882,12 @@ async fn jvm_inter_broker_replication_authed() {
     );
 
     // Verify the leader has 50 records on disk. We don't know in advance
-    // which broker leads partition 0 (raft picks one), so accept either.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let off0 = broker0.local_log_end_offset(TOPIC, 0).await.unwrap_or(0);
-        let off1 = broker1.local_log_end_offset(TOPIC, 0).await.unwrap_or(0);
-        if off0 >= 50 || off1 >= 50 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "leader didn't reach 50 records within 10s (b0={off0} b1={off1})"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // which broker leads partition 0 (raft picks one), so wait for whichever
+    // broker's local log reaches offset 50 first; the losing awaiter is
+    // dropped (the non-leader never materializes the partition locally).
+    tokio::select! {
+        () = broker0.wait_until_local_log_end_offset(TOPIC, 0, 50) => {}
+        () = broker1.wait_until_local_log_end_offset(TOPIC, 0, 50) => {}
     }
 
     broker0.shutdown().await;
@@ -4175,19 +4094,8 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
     // the load-bearing inter-broker SASL_SSL handshake on the controller
     // listener. Without TLS + SASL working in both directions, broker 1
     // never registers and this would time out.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
-    loop {
-        let n0 = broker0.broker_count().await;
-        let n1 = broker1.broker_count().await;
-        if n0 >= 2 && n1 >= 2 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "brokers didn't converge on 2-broker view within 60s (b0={n0} b1={n1})"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    broker0.wait_until_brokers_registered(2).await;
+    broker1.wait_until_brokers_registered(2).await;
 
     // Step A: provision alice's SCRAM-SHA-512 credential via admin/PLAIN
     // over the SASL_SSL data-plane listener. Use cp-kafka:7.5.0 (KIP-554).
@@ -4279,20 +4187,9 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
         );
     }
 
-    // Wait for the topic to materialize on both brokers.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
-    loop {
-        let on_b0 = broker0.has_partition(TOPIC, 0).await;
-        let on_b1 = broker1.has_partition(TOPIC, 0).await;
-        if on_b0 && on_b1 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "topic did not propagate to both brokers within 60s (b0={on_b0} b1={on_b1})"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    // Wait for the topic to materialize on both brokers' metadata images.
+    broker0.wait_until_partition_present(TOPIC, 0).await;
+    broker1.wait_until_partition_present(TOPIC, 0).await;
 
     // Produce 50 records via `kafka-console-producer` as alice over SASL_SSL.
     let mut child = Command::new("docker")
@@ -4341,19 +4238,8 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
     // Assert BOTH brokers reach offset 50 on partition 0 — proves rf=2
     // follower replication completed over the SASL_SSL inter-broker
     // listener (the production-shape end-to-end claim).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
-    loop {
-        let off0 = broker0.local_log_end_offset(TOPIC, 0).await.unwrap_or(0);
-        let off1 = broker1.local_log_end_offset(TOPIC, 0).await.unwrap_or(0);
-        if off0 >= 50 && off1 >= 50 {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "SASL_SSL rf=2 brokers didn't both reach 50 records within 90s (b0={off0} b1={off1})"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    broker0.wait_until_local_log_end_offset(TOPIC, 0, 50).await;
+    broker1.wait_until_local_log_end_offset(TOPIC, 0, 50).await;
 
     broker0.shutdown().await;
     broker1.shutdown().await;
@@ -5444,18 +5330,12 @@ async fn wait_jvm_partition_leader(
     partition: i32,
     leader: u64,
 ) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if handle.partition_leader_for_test(topic, partition) == Some(leader) {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "partition {topic}-{partition} didn't elect leader={leader} within 30s; current={:?}",
-            handle.partition_leader_for_test(topic, partition)
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    handle
+        .wait_for_image(|img| {
+            img.partition(topic, partition)
+                .is_some_and(|p| p.leader == leader)
+        })
+        .await;
 }
 
 /// Poll until the ISR for `(topic, partition)` contains `node`.
@@ -5465,21 +5345,12 @@ async fn wait_jvm_isr_contains(
     partition: i32,
     node: u64,
 ) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if handle
-            .partition_isr_for_test(topic, partition)
-            .is_some_and(|isr| isr.contains(&node))
-        {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "ISR for {topic}-{partition} never included node={node} within 30s; current={:?}",
-            handle.partition_isr_for_test(topic, partition)
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    handle
+        .wait_for_image(|img| {
+            img.partition(topic, partition)
+                .is_some_and(|p| p.isr.contains(&node))
+        })
+        .await;
 }
 
 /// Poll until `handle` reports any non-zero leader for `(topic, partition)`.
@@ -5489,17 +5360,15 @@ async fn wait_jvm_partition_any_leader(
     topic: &str,
     partition: i32,
 ) -> u64 {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if let Some(l) = handle.partition_leader_for_test(topic, partition) {
-            return l;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "partition {topic}-{partition} had no leader within 30s",
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    handle
+        .wait_for_image(|img| {
+            img.partition(topic, partition)
+                .is_some_and(|p| p.leader != 0)
+        })
+        .await;
+    handle
+        .partition_leader_for_test(topic, partition)
+        .expect("non-zero leader present after wait")
 }
 
 /// Poll until all three brokers have seen `n_brokers` registered brokers.
@@ -5509,20 +5378,9 @@ async fn wait_three_brokers_registered(
     h3: &crabka_broker::BrokerHandle,
     n_brokers: usize,
 ) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(1);
-    loop {
-        let c1 = h1.broker_count().await;
-        let c2 = h2.broker_count().await;
-        let c3 = h3.broker_count().await;
-        if c1 >= n_brokers && c2 >= n_brokers && c3 >= n_brokers {
-            return;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "brokers didn't converge on {n_brokers}-broker view within 60s (b1={c1} b2={c2} b3={c3})"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    h1.wait_until_brokers_registered(n_brokers).await;
+    h2.wait_until_brokers_registered(n_brokers).await;
+    h3.wait_until_brokers_registered(n_brokers).await;
 }
 
 /// JVM acceptance test for `kafka-leader-election --election-type preferred`.
@@ -5586,18 +5444,8 @@ async fn jvm_kafka_leader_election_preferred() {
         ],
     );
 
-    // Wait for broker 1 to see the partition in its metadata image.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if h1.has_partition(TOPIC, 0).await {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "partition {TOPIC}-0 never appeared on broker 1 within 30s"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    // Wait for broker 1 to see the partition in the committed metadata image.
+    h1.wait_until_partition_present(TOPIC, 0).await;
 
     // Record the initial leader (should be broker 1 as preferred replica).
     let initial_leader = wait_jvm_partition_any_leader(&h1, TOPIC, 0).await;
@@ -5785,18 +5633,8 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
         ],
     );
 
-    // Wait for broker 1 to see the partition.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if h1.has_partition(TOPIC, 0).await {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "partition {TOPIC}-0 never appeared on broker 1 within 30s"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    // Wait for broker 1 to see the partition in the committed metadata image.
+    h1.wait_until_partition_present(TOPIC, 0).await;
 
     // Determine initial replicas and pick the third broker as the new target.
     // Broker node IDs are i32 on the wire but stored as u64 in PartitionRecord.
@@ -5872,28 +5710,23 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
         .await
         .expect("inject ISR for reassignment completion");
 
-    // Poll until adding_replicas and removing_replicas are both empty and
-    // the replicas set matches [staying, new_node].
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        let pr = h1
-            .partition_record_for_test(TOPIC, 0)
-            .expect("partition record (poll)");
-        if pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty() {
-            let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
-            let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
-            assert!(
-                got == want,
-                "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
-            );
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "reassignment did not complete within 20s; pr={pr:?}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    // Wait until adding_replicas and removing_replicas are both drained from
+    // the committed metadata image.
+    h1.wait_for_image(|img| {
+        img.partition(TOPIC, 0)
+            .is_some_and(|pr| pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty())
+    })
+    .await;
+    // After completion the replica set must match [staying, new_node].
+    let pr = h1
+        .partition_record_for_test(TOPIC, 0)
+        .expect("partition record after reassignment");
+    let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
+    let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
+    assert!(
+        got == want,
+        "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
+    );
     eprintln!("CRABKA[test] reassignment completed; running --verify");
 
     // --verify should report completion.
@@ -5985,18 +5818,8 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
         ],
     );
 
-    // Wait for broker 1 to see the partition.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    loop {
-        if h1.has_partition(TOPIC, 0).await {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "partition {TOPIC}-0 never appeared on broker 1 within 30s"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    // Wait for broker 1 to see the partition in the committed metadata image.
+    h1.wait_until_partition_present(TOPIC, 0).await;
 
     // Determine initial replicas; pick the broker not in the replica set.
     let pr = h1
@@ -6106,27 +5929,23 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
         .await
         .expect("inject ISR for reassignment completion");
 
-    // Poll until reassignment completes.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    loop {
-        let pr = h1
-            .partition_record_for_test(TOPIC, 0)
-            .expect("partition record (poll)");
-        if pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty() {
-            let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
-            let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
-            assert!(
-                got == want,
-                "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
-            );
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "reassignment did not complete within 20s; pr={pr:?}"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    // Wait until the reassignment completes (adding/removing replicas drained
+    // from the committed metadata image).
+    h1.wait_for_image(|img| {
+        img.partition(TOPIC, 0)
+            .is_some_and(|pr| pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty())
+    })
+    .await;
+    // After completion the replica set must be exactly {staying, new_node}.
+    let pr = h1
+        .partition_record_for_test(TOPIC, 0)
+        .expect("partition record after reassignment");
+    let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
+    let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
+    assert!(
+        got == want,
+        "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
+    );
     eprintln!("CRABKA[test] reassignment completed; running --verify");
 
     // --verify clears throttle configs and exits 0 (broker-scoped
@@ -6165,21 +5984,11 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
     );
 
     // Confirm throttle configs were cleared from the metadata image after --verify.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let img = h1.controller_image_for_test();
-        if img
-            .broker_throttle_rate(1, crabka_metadata::ThrottleKind::Leader)
+    h1.wait_for_image(|img| {
+        img.broker_throttle_rate(1, crabka_metadata::ThrottleKind::Leader)
             .is_none()
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "throttle config not cleared from image within 5s after --verify"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    })
+    .await;
 
     h1.shutdown().await;
     h2.shutdown().await;
@@ -6470,25 +6279,15 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
         String::from_utf8_lossy(&del_out.stderr)
     );
 
-    // Confirm quota cleared from image (poll up to 5 s).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let img = h1.controller_image_for_test();
+    // Confirm the quota was cleared from the committed metadata image.
+    h1.wait_for_image(|img| {
         let key: crabka_metadata::EntityKey = vec![("user".to_string(), Some(ALICE.to_string()))];
-        if img
-            .client_quotas()
+        img.client_quotas()
             .get(&key)
             .and_then(|m| m.get("producer_byte_rate"))
             .is_none()
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "quota not cleared from image within 5s after --delete-config"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    })
+    .await;
 
     h1.shutdown().await;
     h2.shutdown().await;
@@ -6608,26 +6407,16 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
         String::from_utf8_lossy(&del_out.stderr)
     );
 
-    // Confirm quota cleared from image (poll up to 5 s).
-    let ip_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let img = h1.controller_image_for_test();
+    // Confirm the quota was cleared from the committed metadata image.
+    h1.wait_for_image(|img| {
         let key: crabka_metadata::EntityKey =
             vec![("ip".to_string(), Some("127.0.0.1".to_string()))];
-        if img
-            .client_quotas()
+        img.client_quotas()
             .get(&key)
             .and_then(|m| m.get("connection_creation_rate"))
             .is_none()
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= ip_deadline,
-            "ip quota not cleared from image within 5s after --delete-config"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    })
+    .await;
 
     h1.shutdown().await;
     h2.shutdown().await;
@@ -6755,25 +6544,15 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
         String::from_utf8_lossy(&del_out.stderr)
     );
 
-    // Confirm quota cleared from image (poll up to 5 s).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        let img = h1.controller_image_for_test();
+    // Confirm the quota was cleared from the committed metadata image.
+    h1.wait_for_image(|img| {
         let key: crabka_metadata::EntityKey = vec![("user".to_string(), Some(ALICE.to_string()))];
-        if img
-            .client_quotas()
+        img.client_quotas()
             .get(&key)
             .and_then(|m| m.get("controller_mutation_rate"))
             .is_none()
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= deadline,
-            "controller_mutation_rate not cleared from image within 5s after --delete-config"
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    })
+    .await;
 
     h1.shutdown().await;
     h2.shutdown().await;
@@ -6953,6 +6732,8 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
             std::time::Instant::now() <= cfg_deadline,
             "cleanup.policy/segment.bytes never propagated within 10s"
         );
+        // intentional: bounded poll of the local reconciled LogConfig override;
+        // `partition_log_config_for_test` is not surfaced by any awaiter/metric.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
@@ -7016,9 +6797,30 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
     );
     eprintln!("CRABKA[test] produced 5 records; waiting for cleaner to compact...");
 
-    // 3. Wait for at least two cleaner ticks (3s interval → wait 8s) so
-    //    the stale k1 values are compacted away.
-    tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+    // 3. Wait until the cleaner completes at least two compaction passes over
+    //    this partition *after* the records landed (per-partition counter
+    //    bumped once per sweep), so a sweep that was in-flight when the segment
+    //    sealed can't be mistaken for one that saw the new records. This
+    //    guarantees the stale k1 values have been compacted away.
+    let compactions_before = broker
+        .metrics()
+        .log_compactions_total
+        .get_or_create(&crabka_broker::metrics::PartitionLabel {
+            topic: TOPIC.to_string(),
+            partition: 0,
+        })
+        .get();
+    broker
+        .wait_for_metrics("partition compacted after produce", |m| {
+            m.log_compactions_total
+                .get_or_create(&crabka_broker::metrics::PartitionLabel {
+                    topic: TOPIC.to_string(),
+                    partition: 0,
+                })
+                .get()
+                >= compactions_before + 2
+        })
+        .await;
 
     // 4. Consume from beginning — only the latest per-key records should appear.
     let consumer_out = docker_run_kafka_tool(&[
@@ -7117,8 +6919,13 @@ async fn jvm_kafka_log_dirs_describe_reports_jbod_spread() {
         BOOTSTRAP,
     ]);
 
-    // Give the supervisor a moment to materialize every partition on disk.
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Wait for the local writer-actor of every partition to materialize on
+    // disk before the JVM tool inspects the log dirs.
+    for p in 0..6 {
+        broker
+            .wait_until_local_log_end_offset("jbodtopic", p, 0)
+            .await;
+    }
 
     let out = docker_run_kafka_tool(&[
         "kafka-log-dirs",
@@ -7778,6 +7585,8 @@ fn wait_for_minio_ready() {
             std::thread::sleep(std::time::Duration::from_millis(500));
             return;
         }
+        // intentional: bounded readiness poll of the external MinIO process;
+        // no crabka metric reflects its TCP/S3 listener coming up.
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
     panic!("MinIO never accepted TCP on 127.0.0.1:{MINIO_PORT}");
@@ -7971,6 +7780,8 @@ async fn create_tiered_topic(broker: &crabka_broker::BrokerHandle, topic: &str) 
             "tiered-storage topic config never propagated within 10s; saw {:?}",
             broker.partition_log_config_for_test(topic, 0)
         );
+        // intentional: bounded poll of the local reconciled LogConfig override;
+        // `partition_log_config_for_test` is not surfaced by any awaiter/metric.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
@@ -8037,6 +7848,8 @@ async fn wait_for_minio_segments(bucket: &str, min_log_objects: usize) -> String
     let mut bucket_listing = String::new();
     let mut copied_log_objects = 0usize;
     for _ in 0..40 {
+        // intentional: bounded poll of an external process (MinIO via `mc ls`);
+        // no crabka metric reflects object arrival in the bucket.
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         bucket_listing = minio_list_objects(bucket);
         copied_log_objects = bucket_listing
@@ -8207,9 +8020,10 @@ async fn tiered_storage_topic_rlmm_survives_restart() {
     // has run (evicting them from disk).
     wait_for_minio_segments(MINIO_BUCKET, 2).await;
 
-    // Give the RLMM snapshot task at least one cycle (snapshot_interval=2s)
-    // so the on-disk snapshot has a chance to flush before we pull the plug.
-    // Even if the snapshot hasn't flushed, recovery still succeeds via
+    // intentional: give the RLMM snapshot task at least one cycle
+    // (snapshot_interval=2s) so the on-disk snapshot has a chance to flush
+    // before we pull the plug. The snapshot flush has no awaiter/metric. Even
+    // if the snapshot hasn't flushed, recovery still succeeds via
     // `__remote_log_metadata` topic replay — the snapshot is only an
     // optimisation that avoids replaying the full topic on startup.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -9087,6 +8901,8 @@ async fn tiered_storage_topic_rlmm_multi_broker_metadata_sharing() {
             b1.partition_log_config_for_test(TOPIC, 0),
             b2.partition_log_config_for_test(TOPIC, 0),
         );
+        // intentional: bounded poll of the local reconciled LogConfig override;
+        // `partition_log_config_for_test` is not surfaced by any awaiter/metric.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     eprintln!("CRABKA[test] tiered config propagated; producing {RECORDS} records");
@@ -9101,9 +8917,10 @@ async fn tiered_storage_topic_rlmm_multi_broker_metadata_sharing() {
     wait_for_minio_segments(MINIO_BUCKET, 2).await;
     eprintln!("CRABKA[test] MinIO has >=2 segments; waiting for RLMM metadata propagation to b2");
 
-    // Give the topic-backed RLMM enough time to flush metadata records to
-    // `__remote_log_metadata` and for broker 2 (the survivor) to consume them.
-    // The RLMM reconciler ticks every 1s and the metadata topic rf=2.
+    // intentional: give the topic-backed RLMM enough time to flush metadata
+    // records to `__remote_log_metadata` and for broker 2 (the survivor) to
+    // consume them. Cross-broker consumption of those metadata records has no
+    // crabka awaiter/metric. The RLMM reconciler ticks every 1s, topic rf=2.
     tokio::time::sleep(std::time::Duration::from_secs(6)).await;
 
     // Kill broker 1: forces the user-partition leader election to move to b2.
@@ -9112,8 +8929,10 @@ async fn tiered_storage_topic_rlmm_multi_broker_metadata_sharing() {
     eprintln!("CRABKA[test] shutting down broker 1 to force failover to broker 2");
     b1.shutdown().await;
 
-    // Allow the survivor to (a) win the user-partition leader election and
-    // (b) have its RLMM reconciler settle on the now-led partition's metadata.
+    // intentional: allow the survivor to (a) win the user-partition leader
+    // election and (b) have its RLMM reconciler settle on the now-led
+    // partition's metadata. The RLMM reconciler settling has no awaiter/metric,
+    // so a fixed window is used rather than a possibly-never-resolving wait.
     eprintln!("CRABKA[test] waiting for b2 to become leader and RLMM to settle (10s)");
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 

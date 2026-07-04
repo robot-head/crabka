@@ -131,7 +131,7 @@ impl RealPeerSender {
     #[tracing::instrument(level = "debug", skip_all, fields(peer), err)]
     async fn connect(&self, peer: NodeId) -> Result<Arc<Connection>, RaftError> {
         if let Some(c) = self.connections.get(&peer) {
-            return Ok(c.value().clone());
+            return Ok(Arc::clone(c.value()));
         }
         let addr = controller_addr(&self.voters, peer).ok_or(RaftError::NotLeader {
             current_leader: None,
@@ -141,7 +141,7 @@ impl RealPeerSender {
             ..ConnectionOptions::default()
         };
         let conn = Arc::new(self.dialer.dial(peer, &addr, opts).await?);
-        self.connections.insert(peer, conn.clone());
+        self.connections.insert(peer, Arc::clone(&conn));
         Ok(conn)
     }
 }

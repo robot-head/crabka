@@ -16,6 +16,7 @@ categories = ["concurrency"]
 workspace = true
 
 [dependencies]
+qubit-clock = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

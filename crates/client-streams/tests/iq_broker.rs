@@ -137,7 +137,7 @@ async fn interactive_query_kv_store_over_broker() {
 
     // ── 2. Start the counting KafkaStreams app ────────────────────────────────
     let app_id = "iq-broker-app";
-    let mut streams = KafkaStreams::builder()
+    let streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(counting_topology(app_id))
@@ -161,7 +161,7 @@ async fn interactive_query_kv_store_over_broker() {
             std::time::Instant::now() < deadline,
             "counts store did not reach a→2 within 15s",
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     };
 
     // ── 4. Assert the materialized read semantics ─────────────────────────────

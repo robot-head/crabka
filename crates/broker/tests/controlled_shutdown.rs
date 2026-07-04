@@ -19,7 +19,7 @@
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::BrokerHandle;
@@ -113,17 +113,7 @@ async fn create_topic(addr: SocketAddr, name: &str, partitions: i32, rf: i16) {
 /// Wait until `(topic, partition)` appears in `handle`'s metadata
 /// image.
 async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if handle.has_partition(topic, partition).await {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "partition {topic}-{partition} never appeared within 15s"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    handle.wait_until_partition_present(topic, partition).await;
 }
 
 /// Inject a `PartitionRecord` forcing `target` to be the leader for
@@ -164,24 +154,14 @@ async fn force_leadership_for_test(
     }
 
     // Wait until every partition reports `target` as leader.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let mut all = true;
-        for p in 0..partitions {
-            if leader_handle.partition_leader_for_test(topic, p) != Some(target) {
-                all = false;
-                break;
-            }
-        }
-        if all {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "forced leader {target} not observed on all {partitions} partitions within 15s"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    leader_handle
+        .wait_for_image(|img| {
+            (0..partitions).all(|p| {
+                img.partition(topic, p)
+                    .is_some_and(|pr| pr.leader == target)
+            })
+        })
+        .await;
 }
 
 /// Returns the count of partitions in `topic` currently led by `target`
@@ -215,20 +195,11 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
     // which cannot be drained. Targeting a follower keeps the test
     // focused on the controllable wire path.
     let raft_leader_idx = {
-        let deadline = Instant::now() + Duration::from_secs(15);
-        loop {
-            let lid = cluster[0].0.controller_leader_id().await;
-            if let Some(l) = lid
-                && let Some(pos) = cluster.iter().position(|(_, cfg, _)| cfg.node_id == l)
-            {
-                break pos;
-            }
-            assert!(
-                Instant::now() <= deadline,
-                "controller leader not visible within 15s"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+        let leader = cluster[0].0.wait_until_controller_leader().await;
+        cluster
+            .iter()
+            .position(|(_, cfg, _)| cfg.node_id == leader)
+            .expect("controller leader must be a cluster member")
     };
     let target_idx = (raft_leader_idx + 1) % cluster.len();
     let target_node_id = cluster[target_idx].1.node_id;
@@ -297,19 +268,12 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
     // the controller's image, at the moment of that response, had zero
     // partitions led by the target. Verify on a surviving broker.
     let observer = &cluster[0].0;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let remaining = leader_count(observer, TOPIC, PARTITIONS, target_node_id);
-        if remaining == 0 {
-            break;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "target broker {target_node_id} still leads {remaining} partitions \
-             15s after controlled_shutdown returned"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    observer
+        .wait_for_image(|img| {
+            (0..PARTITIONS)
+                .all(|p| img.partition(TOPIC, p).map(|pr| pr.leader) != Some(target_node_id))
+        })
+        .await;
 
     // Tidy up surviving brokers.
     for (h, _, _) in cluster {

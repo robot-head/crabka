@@ -288,7 +288,7 @@ mod tests {
                 .load(std::sync::atomic::Ordering::SeqCst)
                 == 0
             {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::task::yield_now().await;
             }
         })
         .await

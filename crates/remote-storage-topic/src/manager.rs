@@ -177,8 +177,8 @@ impl TopicBasedRemoteLogMetadataManager {
         let (stream, assignment_handle) = log.subscribe(Vec::new());
         let pump = runtime.spawn(pump_loop(
             stream,
-            inner.clone(),
-            applied.clone(),
+            Arc::clone(&inner),
+            Arc::clone(&applied),
             applied_tx.clone(),
             shutdown.clone(),
         ));
@@ -542,7 +542,7 @@ impl TopicBasedRemoteLogMetadataManager {
         event: Bytes,
     ) -> Result<(), RemoteStorageError> {
         let partition = metadata_partition_for(tp, self.log.partition_count());
-        let log = self.log.clone();
+        let log = Arc::clone(&self.log);
         // Caller is on a non-runtime (spawn_blocking) thread; block_on
         // is safe and gives us the assigned offset to wait on.
         self.runtime.block_on(async {
@@ -838,7 +838,9 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "partition never became ready"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            // Yield-poll the pump's progress rather than sleeping a fixed
+            // cadence; the deadline above stays as the hang-guard.
+            tokio::task::yield_now().await;
         }
     }
 
@@ -879,7 +881,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "manager did not catch up on all partitions within 5s"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            tokio::task::yield_now().await;
         }
         m
     }
@@ -944,7 +946,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "manager B did not converge within 2s"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
         assert!(b.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
         let got = b
@@ -1138,7 +1140,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "fresh manager did not catch up on the orders partition"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            tokio::task::yield_now().await;
         }
         let post_cache = fresh.list_remote_log_segments(&tp()).unwrap();
         assert!(
@@ -1196,7 +1198,7 @@ mod tests {
                         std::time::Instant::now() < deadline,
                         "metadata partition never became ready"
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    tokio::task::yield_now().await;
                 }
                 other => panic!("unexpected read outcome: {other:?}"),
             }
@@ -1301,7 +1303,7 @@ mod tests {
                 std::time::Instant::now() < deadline,
                 "managers did not catch up: a={a_own:?} b={b_own:?}"
             );
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            tokio::task::yield_now().await;
         }
 
         // Cross reads (partition the broker does NOT consume) are a genuine
@@ -1452,7 +1454,7 @@ mod tests {
                         std::time::Instant::now() < deadline,
                         "partition never became ready after HWM recovered"
                     );
-                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    tokio::task::yield_now().await;
                 }
                 other => panic!("unexpected read outcome after recovery: {other:?}"),
             }

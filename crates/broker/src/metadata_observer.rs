@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use qubit_clock::sleep::AsyncSleeper;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -35,6 +36,11 @@ pub struct ObserverConfig {
     pub max_bytes: u32,
     /// Idle poll interval once caught up to the high watermark.
     pub poll_interval: Duration,
+    /// Relative sleeper driving the idle poll cadence. Production uses
+    /// [`qubit_clock::sleep::SystemSleeper`] (real time); tests inject a
+    /// [`qubit_clock::sleep::MockSleeper`] so the poll interval fires on a
+    /// controlled mock timeline instead of wall-clock time.
+    pub sleeper: Arc<dyn AsyncSleeper>,
 }
 
 /// Handle to a running observer. Holds the image watch and the background
@@ -227,7 +233,7 @@ async fn run_loop(
             return;
         }
         if config.voters.is_empty() {
-            tokio::time::sleep(config.poll_interval).await;
+            config.sleeper.sleep_for_async(config.poll_interval).await;
             continue;
         }
         let (target, addr) = voter_at(&config.voters, target_idx).clone();
@@ -240,7 +246,7 @@ async fn run_loop(
             if new_offset == fetch_offset {
                 tokio::select! {
                     () = shutdown.cancelled() => return,
-                    () = tokio::time::sleep(config.poll_interval) => {}
+                    () = config.sleeper.sleep_for_async(config.poll_interval) => {}
                 }
             } else {
                 fetch_offset = new_offset;
@@ -249,7 +255,7 @@ async fn run_loop(
             target_idx = target_idx.wrapping_add(1);
             tokio::select! {
                 () = shutdown.cancelled() => return,
-                () = tokio::time::sleep(config.poll_interval) => {}
+                () = config.sleeper.sleep_for_async(config.poll_interval) => {}
             }
         }
     }
@@ -267,6 +273,8 @@ mod tests {
     use crabka_protocol::records::header::Attributes;
     use crabka_protocol::records::{Record, RecordBatch};
     use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
+    use qubit_clock::MockWaiterKind;
+    use qubit_clock::sleep::{MockSleeper, SystemSleeper};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -450,6 +458,7 @@ mod tests {
             cluster_id: Uuid::nil(),
             max_bytes: TEST_MAX_FETCH_BYTES,
             poll_interval: Duration::from_mins(1),
+            sleeper: Arc::new(SystemSleeper::new()),
         });
 
         observer.cancel().await;
@@ -474,6 +483,8 @@ mod tests {
             })
             .await;
         let dial_count = Arc::new(AtomicUsize::new(0));
+        let sleeper = MockSleeper::new();
+        let timeline = sleeper.timeline();
         let observer = MetadataObserver::start(ObserverConfig {
             voters: vec![(1, mock.addr.to_string())],
             dialer: Arc::new(CountingDialer {
@@ -483,17 +494,39 @@ mod tests {
             cluster_id: Uuid::nil(),
             max_bytes: TEST_MAX_FETCH_BYTES,
             poll_interval: Duration::from_millis(250),
+            sleeper: Arc::new(sleeper),
         });
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while fetches.load(Ordering::SeqCst) == 0 {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        // Await (not sleep) for the first fetch to land. The fetch is real
+        // loopback network I/O through the mock broker, which is not time-gated
+        // — drive the executor with `yield_now` until the counter moves.
+        let mut saw_first_fetch = false;
+        for _ in 0..100_000 {
+            if fetches.load(Ordering::SeqCst) >= 1 {
+                saw_first_fetch = true;
+                break;
             }
+            tokio::task::yield_now().await;
+        }
+        assert!(saw_first_fetch, "observer should issue the first fetch");
+        let after_first_fetch = fetches.load(Ordering::SeqCst);
+
+        // The empty fetch left the observer caught up, so it must now be parked
+        // on `sleep_for_async(poll_interval)`. Confirm the sleep waiter is
+        // registered (blocking thread — never stalls the current-thread runtime
+        // that drives the observer to its park). Parked on a mock timeline that
+        // we never advance, the observer cannot re-fetch, so the counts are
+        // deterministically frozen at their first-fetch values.
+        let tl = timeline.clone();
+        let parked = tokio::task::spawn_blocking(move || {
+            tl.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))
         })
         .await
-        .expect("observer should issue the first fetch");
-        let after_first_fetch = fetches.load(Ordering::SeqCst);
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        .unwrap();
+        assert!(
+            parked,
+            "observer should park on the poll-interval sleep after an empty fetch",
+        );
 
         assert!(fetches.load(Ordering::SeqCst) == after_first_fetch);
         assert!(dial_count.load(Ordering::SeqCst) == after_first_fetch);
@@ -534,6 +567,7 @@ mod tests {
             cluster_id: Uuid::nil(),
             max_bytes: TEST_MAX_FETCH_BYTES,
             poll_interval: Duration::from_millis(50),
+            sleeper: Arc::new(SystemSleeper::new()),
         });
 
         let mut img_rx = observer.watch_image();

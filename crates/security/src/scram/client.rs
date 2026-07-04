@@ -11,26 +11,31 @@ use subtle::ConstantTimeEq;
 
 use crate::{AuthError, SaslMechanism};
 
-#[derive(Debug)]
-enum State {
-    Initial,
-    AwaitingServerFirst {
-        client_first_bare: String,
-        client_nonce: String,
-    },
-    AwaitingServerFinal {
-        auth_message: String,
-        server_key: Vec<u8>,
-    },
-    Finished,
-}
-
+/// RFC 5802 SCRAM client-side handshake, initial phase.
 #[derive(Debug)]
 pub struct ScramClientExchange {
     username: String,
     password: Vec<u8>,
     mechanism: SaslMechanism,
-    state: State,
+}
+
+/// Post-client-first phase: awaiting the server-first message.
+#[derive(Debug)]
+pub struct AwaitingServerFirst {
+    username: String,
+    password: Vec<u8>,
+    mechanism: SaslMechanism,
+    client_first_bare: String,
+    client_nonce: String,
+}
+
+/// Post-client-final phase: awaiting the server-final message.
+#[derive(Debug)]
+pub struct AwaitingServerFinal {
+    mechanism: SaslMechanism,
+    username: String,
+    auth_message: String,
+    server_key: Vec<u8>,
 }
 
 impl ScramClientExchange {
@@ -44,22 +49,24 @@ impl ScramClientExchange {
             username,
             password,
             mechanism,
-            state: State::Initial,
         }
     }
 
     // SCRAM client-first. skip_all keeps the stored `password` out of span
     // fields; only the non-sensitive mechanism + username are recorded.
+    //
+    // `AwaitingServerFirst` is intentionally not re-exported: callers thread
+    // it through via type inference (`let (bytes, exch) = x.client_first()?`)
+    // without ever naming the phase type, so the typestate chain can't be
+    // driven out of order.
+    #[allow(private_interfaces)]
     #[tracing::instrument(
         level = "debug",
         skip_all,
         fields(mechanism = %self.mechanism.wire_name(), principal = %self.username),
         err
     )]
-    pub fn client_first(&mut self) -> Result<Vec<u8>, AuthError> {
-        if !matches!(self.state, State::Initial) {
-            return Err(AuthError::MalformedMessage);
-        }
+    pub fn client_first(self) -> Result<(Vec<u8>, AwaitingServerFirst), AuthError> {
         let mut nonce_bytes = [0u8; 18];
         SystemRandom::new()
             .fill(&mut nonce_bytes)
@@ -67,29 +74,31 @@ impl ScramClientExchange {
         let client_nonce = B64.encode(nonce_bytes);
         let bare = format!("n={},r={}", self.username, client_nonce);
         let msg = format!("n,,{bare}");
-        self.state = State::AwaitingServerFirst {
+        let next = AwaitingServerFirst {
+            username: self.username,
+            password: self.password,
+            mechanism: self.mechanism,
             client_first_bare: bare,
             client_nonce,
         };
-        Ok(msg.into_bytes())
+        Ok((msg.into_bytes(), next))
     }
+}
 
+impl AwaitingServerFirst {
     // SCRAM client processing of server-first. skip_all keeps the stored
     // `password` and the raw `server_bytes` out of span fields.
+    //
+    // `AwaitingServerFinal` is intentionally not re-exported; see
+    // `ScramClientExchange::client_first`.
+    #[allow(private_interfaces)]
     #[tracing::instrument(
         level = "debug",
         skip_all,
         fields(mechanism = %self.mechanism.wire_name(), principal = %self.username),
         err
     )]
-    pub fn step(&mut self, server_bytes: &[u8]) -> Result<Vec<u8>, AuthError> {
-        let State::AwaitingServerFirst {
-            client_first_bare,
-            client_nonce,
-        } = std::mem::replace(&mut self.state, State::Finished)
-        else {
-            return Err(AuthError::MalformedMessage);
-        };
+    pub fn step(self, server_bytes: &[u8]) -> Result<(Vec<u8>, AwaitingServerFinal), AuthError> {
         let s = std::str::from_utf8(server_bytes).map_err(|_| AuthError::MalformedMessage)?;
         let mut nonce = None;
         let mut salt = None;
@@ -106,13 +115,13 @@ impl ScramClientExchange {
         let (Some(combined_nonce), Some(salt), Some(iters)) = (nonce, salt, iterations) else {
             return Err(AuthError::MalformedMessage);
         };
-        if !combined_nonce.starts_with(&client_nonce) {
+        if !combined_nonce.starts_with(&self.client_nonce) {
             return Err(AuthError::BadProof);
         }
 
         let channel_binding = B64.encode(b"n,,");
         let client_final_no_proof = format!("c={channel_binding},r={combined_nonce}");
-        let auth_message = format!("{client_first_bare},{s},{client_final_no_proof}");
+        let auth_message = format!("{},{s},{client_final_no_proof}", self.client_first_bare);
 
         let (proof, server_key) = match self.mechanism {
             SaslMechanism::ScramSha512 => {
@@ -127,43 +136,41 @@ impl ScramClientExchange {
         };
 
         let client_final = format!("{client_final_no_proof},p={}", B64.encode(&proof));
-        self.state = State::AwaitingServerFinal {
+        let next = AwaitingServerFinal {
+            mechanism: self.mechanism,
+            username: self.username,
             auth_message,
             server_key,
         };
-        Ok(client_final.into_bytes())
+        Ok((client_final.into_bytes(), next))
     }
+}
 
+impl AwaitingServerFinal {
     // SCRAM client verification of server-final (server signature). skip_all
-    // keeps the stored `password` and raw `server_bytes` out of span fields.
+    // keeps the raw `server_bytes` out of span fields. Terminal: no further
+    // exchange state to hold.
     #[tracing::instrument(
         level = "debug",
         skip_all,
         fields(mechanism = %self.mechanism.wire_name(), principal = %self.username),
         err
     )]
-    pub fn verify_server_final(&mut self, server_bytes: &[u8]) -> Result<(), AuthError> {
-        let State::AwaitingServerFinal {
-            auth_message,
-            server_key,
-        } = std::mem::replace(&mut self.state, State::Finished)
-        else {
-            return Err(AuthError::MalformedMessage);
-        };
+    pub fn verify_server_final(self, server_bytes: &[u8]) -> Result<(), AuthError> {
         let s = std::str::from_utf8(server_bytes).map_err(|_| AuthError::MalformedMessage)?;
         let v_b64 = s.strip_prefix("v=").ok_or(AuthError::MalformedMessage)?;
         let v = B64.decode(v_b64).map_err(|_| AuthError::MalformedMessage)?;
         let expected: Vec<u8> = match self.mechanism {
             SaslMechanism::ScramSha512 => {
-                let mut mac = <Hmac<Sha512>>::new_from_slice(&server_key)
+                let mut mac = <Hmac<Sha512>>::new_from_slice(&self.server_key)
                     .map_err(|_| AuthError::MalformedMessage)?;
-                mac.update(auth_message.as_bytes());
+                mac.update(self.auth_message.as_bytes());
                 mac.finalize().into_bytes().to_vec()
             }
             SaslMechanism::ScramSha256 => {
-                let mut mac = <Hmac<Sha256>>::new_from_slice(&server_key)
+                let mut mac = <Hmac<Sha256>>::new_from_slice(&self.server_key)
                     .map_err(|_| AuthError::MalformedMessage)?;
-                mac.update(auth_message.as_bytes());
+                mac.update(self.auth_message.as_bytes());
                 mac.finalize().into_bytes().to_vec()
             }
             SaslMechanism::Plain | SaslMechanism::OAuthBearer | SaslMechanism::Gssapi => {

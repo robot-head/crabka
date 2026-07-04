@@ -143,20 +143,8 @@ async fn describe_log_dirs(addr: SocketAddr) -> DescribeLogDirsResponse {
 }
 
 async fn wait_all_partitions(handle: &BrokerHandle, topic: &str, n: i32) {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let mut all = true;
-        for p in 0..n {
-            if !handle.has_partition(topic, p).await {
-                all = false;
-                break;
-            }
-        }
-        if all {
-            return;
-        }
-        assert!(Instant::now() <= deadline, "partitions never materialized");
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    for p in 0..n {
+        handle.wait_until_partition_present(topic, p).await;
     }
 }
 
@@ -218,6 +206,11 @@ async fn wait_for_move_complete(
             Instant::now() <= deadline,
             "move never completed: in_target={current_in_target:?} any_future={any_future}"
         );
+        // intentional: log-dir move completion is broker-local physical state
+        // (the `future_logs` map plus the on-disk partition-dir rename), not
+        // reflected in the MetadataImage, exposed by any `*_for_test`
+        // accessor, or surfaced as a metric. `DescribeLogDirs` over the wire
+        // is the only observable, so we poll it with backoff.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

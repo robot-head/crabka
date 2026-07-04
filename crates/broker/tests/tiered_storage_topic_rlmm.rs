@@ -102,20 +102,14 @@ async fn build_client_secured(
         .expect("client build")
 }
 
-/// Poll the `tiered_storage_rlmm_topic_backed` gauge until the slice-48f
-/// bootstrap swaps the topic-backed manager in.
+/// Wait for the slice-48f bootstrap to swap the topic-backed manager in,
+/// signalled by the `tiered_storage_rlmm_topic_backed` gauge flipping to 1.
 async fn await_activation(broker: &BrokerHandle) {
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if broker.rlmm_topic_backed_active_for_test() {
-            return;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "topic-backed RLMM never activated within 30s"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    broker
+        .wait_for_metrics("rlmm topic-backed", |m| {
+            m.tiered_storage_rlmm_topic_backed.get() == 1
+        })
+        .await;
 }
 
 /// The bootstrap completes against the loopback listener: the activation
@@ -220,6 +214,8 @@ async fn copy_then_fetch_round_trip(
     // the supervisor's reconcile loop into the partition's `LogConfig`.
     // Without this gate the first batches land in a default-config log
     // (1 GiB segments, tiering off) and never roll or copy.
+    // intentional: this is a local `LogConfig` override applied by the
+    // reconcile loop — there is no awaiter/metric for it, so poll directly.
     let cfg_deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(cfg) = broker.partition_log_config_for_test(topic, 0)
@@ -234,7 +230,7 @@ async fn copy_then_fetch_round_trip(
             "tiered-storage topic config never propagated within 10s; saw {:?}",
             broker.partition_log_config_for_test(topic, 0)
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Single-record batches (~85 bytes each) roll the 1 KiB segment every
@@ -248,6 +244,9 @@ async fn copy_then_fetch_round_trip(
     // `LocalTieredStorage` layout writes each copied segment's bytes to a
     // file named `log`; its presence proves the RLM copy task's
     // `CopySegment*` events round-tripped through `__remote_log_metadata`.
+    // intentional: remote-tier object presence is filesystem state on the
+    // `LocalTieredStorage` backend — it is not in the metadata image and has
+    // no broker metric, so poll the remote dir directly (bounded loop).
     let copy_deadline = Instant::now() + Duration::from_secs(30);
     loop {
         if count_remote_log_files(remote_dir) >= 1 {
@@ -257,13 +256,16 @@ async fn copy_then_fetch_round_trip(
             Instant::now() <= copy_deadline,
             "no segment tiered to remote storage within 30s"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     }
 
     // Read offset 0 back. Whether it is served from a still-local segment
     // or (after eviction) the remote tier, a successful read exercises the
     // full path with the topic-backed RLMM active. Retry to absorb the
     // local-retention eviction race.
+    // intentional: this drives the wire Fetch API and inspects the returned
+    // records — a wire-response poll with no backing metric/image signal, so
+    // keep the bounded retry loop.
     let topic_id = topic_id_for(client, topic).await;
     let fetch_deadline = Instant::now() + Duration::from_secs(30);
     let value = loop {
@@ -300,7 +302,7 @@ async fn copy_then_fetch_round_trip(
             Instant::now() <= fetch_deadline,
             "offset 0 never returned records within 30s"
         );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::task::yield_now().await;
     };
 
     assert!(
@@ -513,6 +515,8 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
 
     // Wait for the tiered config to propagate into the partition's LogConfig
     // (same gate as the loopback round-trip test).
+    // intentional: local `LogConfig` override applied by the reconcile loop —
+    // no awaiter/metric exists for it, so poll directly.
     let cfg_deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(pcfg) = broker.partition_log_config_for_test(TOPIC, 0)
@@ -527,7 +531,7 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
             "tiered-storage topic config never propagated within 10s; saw {:?}",
             broker.partition_log_config_for_test(TOPIC, 0)
         );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
 
     // Same 80 records as the loopback round-trip — enough to seal several
@@ -537,7 +541,10 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
         .await
         .expect("produce records");
 
-    // Several copy-task ticks (200 ms interval × ~10 ticks).
+    // intentional: this is the behaviour under test — a deliberate "observe
+    // nothing tiered within a window" wait. We let several copy-task ticks
+    // elapse (200 ms interval × ~10 ticks) and then assert 0 tiered objects;
+    // there is no "did-not-happen" event to await on.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // The RLMM is still NotReady, so add_remote_log_segment_metadata returns
