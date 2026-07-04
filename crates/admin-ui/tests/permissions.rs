@@ -166,6 +166,56 @@ fn topic_mutating_operations_imply_topic_view() {
 }
 
 #[test]
+fn topic_alter_configs_does_not_imply_topic_view() {
+    let entries = vec![allow(ResourceType::Topic, AclOperation::AlterConfigs)];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(!capabilities.can_view_topics);
+    assert!(capabilities.can_alter_topics);
+}
+
+#[test]
+fn denying_topic_alter_configs_does_not_mask_topic_alter() {
+    let entries = vec![
+        allow(ResourceType::Topic, AclOperation::Alter),
+        deny(ResourceType::Topic, AclOperation::AlterConfigs),
+    ];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(capabilities.can_view_topics);
+    assert!(capabilities.can_alter_topics);
+}
+
+#[test]
+fn denying_topic_alter_does_not_mask_topic_alter_configs() {
+    let entries = vec![
+        allow(ResourceType::Topic, AclOperation::AlterConfigs),
+        deny(ResourceType::Topic, AclOperation::Alter),
+    ];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(!capabilities.can_view_topics);
+    assert!(capabilities.can_alter_topics);
+}
+
+#[test]
+fn denying_topic_all_masks_topic_capabilities_broadly() {
+    let entries = vec![
+        allow(ResourceType::Topic, AclOperation::All),
+        deny(ResourceType::Topic, AclOperation::All),
+    ];
+
+    let capabilities = derive_capabilities("User:alice", &entries);
+
+    assert!(!capabilities.can_view_topics);
+    assert!(!capabilities.can_alter_topics);
+    assert!(!capabilities.can_delete_topics);
+}
+
+#[test]
 fn cluster_create_grants_topic_creation() {
     let entries = vec![allow(ResourceType::Cluster, AclOperation::Create)];
 

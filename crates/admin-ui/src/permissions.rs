@@ -35,23 +35,24 @@ fn derive_capabilities_for_optional_host(
     peer_host: Option<&str>,
     entries: &[AclEntry],
 ) -> Capabilities {
-    let mut capabilities = Capabilities::default();
-    let mut denied_capabilities = Capabilities::default();
+    let effective = |resource_type, operation| {
+        has_effective_permission(principal, peer_host, entries, resource_type, operation)
+    };
 
-    for entry in entries {
-        if !is_for_principal_and_host(entry, principal, peer_host) {
-            continue;
-        }
-
-        match entry.permission_type {
-            PermissionType::Allow => apply_entry(&mut capabilities, entry),
-            PermissionType::Deny => apply_entry(&mut denied_capabilities, entry),
-        }
+    Capabilities {
+        can_view_topics: effective(ResourceType::Topic, AclOperation::Describe),
+        can_create_topics: effective(ResourceType::Cluster, AclOperation::Create),
+        can_alter_topics: effective(ResourceType::Topic, AclOperation::Alter)
+            || effective(ResourceType::Topic, AclOperation::AlterConfigs),
+        can_delete_topics: effective(ResourceType::Topic, AclOperation::Delete),
+        can_view_groups: effective(ResourceType::Group, AclOperation::Describe),
+        can_view_acls: effective(ResourceType::Cluster, AclOperation::Describe),
+        can_alter_acls: effective(ResourceType::Cluster, AclOperation::Alter),
+        can_alter_users: effective(ResourceType::Cluster, AclOperation::Alter),
+        can_view_quotas: effective(ResourceType::Cluster, AclOperation::Describe),
+        can_alter_quotas: effective(ResourceType::Cluster, AclOperation::Alter),
+        can_view_log_dirs: effective(ResourceType::Cluster, AclOperation::Describe),
     }
-
-    remove_denied_capabilities(&mut capabilities, denied_capabilities);
-
-    capabilities
 }
 
 fn is_for_principal_and_host(entry: &AclEntry, principal: &str, peer_host: Option<&str>) -> bool {
@@ -70,106 +71,42 @@ fn is_for_host(entry: &AclEntry, peer_host: Option<&str>) -> bool {
     peer_host.is_some_and(|host| entry.host == host)
 }
 
-fn apply_entry(capabilities: &mut Capabilities, entry: &AclEntry) {
-    match entry.resource_type {
-        ResourceType::Topic => apply_topic_operation(capabilities, entry.operation),
-        ResourceType::Group => apply_group_operation(capabilities, entry.operation),
-        ResourceType::Cluster => apply_cluster_operation(capabilities, entry.operation),
-        ResourceType::TransactionalId => {}
+fn has_effective_permission(
+    principal: &str,
+    peer_host: Option<&str>,
+    entries: &[AclEntry],
+    resource_type: ResourceType,
+    operation: AclOperation,
+) -> bool {
+    let mut saw_allow = false;
+
+    for entry in entries {
+        if entry.resource_type != resource_type
+            || !is_for_principal_and_host(entry, principal, peer_host)
+            || !matches_operation(entry.operation, operation)
+        {
+            continue;
+        }
+
+        match entry.permission_type {
+            PermissionType::Allow => saw_allow = true,
+            PermissionType::Deny => return false,
+        }
     }
+
+    saw_allow
 }
 
-fn remove_denied_capabilities(capabilities: &mut Capabilities, denied: Capabilities) {
-    capabilities.can_view_topics &= !denied.can_view_topics;
-    capabilities.can_create_topics &= !denied.can_create_topics;
-    capabilities.can_alter_topics &= !denied.can_alter_topics;
-    capabilities.can_delete_topics &= !denied.can_delete_topics;
-    capabilities.can_view_groups &= !denied.can_view_groups;
-    capabilities.can_view_acls &= !denied.can_view_acls;
-    capabilities.can_alter_acls &= !denied.can_alter_acls;
-    capabilities.can_alter_users &= !denied.can_alter_users;
-    capabilities.can_view_quotas &= !denied.can_view_quotas;
-    capabilities.can_alter_quotas &= !denied.can_alter_quotas;
-    capabilities.can_view_log_dirs &= !denied.can_view_log_dirs;
+fn matches_operation(stored: AclOperation, requested: AclOperation) -> bool {
+    stored == requested || matches!(stored, AclOperation::All) || implies(stored, requested)
 }
 
-fn apply_topic_operation(capabilities: &mut Capabilities, operation: AclOperation) {
-    match operation {
-        AclOperation::All => {
-            capabilities.can_view_topics = true;
-            capabilities.can_create_topics = true;
-            capabilities.can_alter_topics = true;
-            capabilities.can_delete_topics = true;
-        }
-        AclOperation::Describe | AclOperation::Read | AclOperation::Write => {
-            capabilities.can_view_topics = true;
-        }
-        AclOperation::Alter | AclOperation::AlterConfigs => {
-            capabilities.can_view_topics = true;
-            capabilities.can_alter_topics = true;
-        }
-        AclOperation::Delete => {
-            capabilities.can_view_topics = true;
-            capabilities.can_delete_topics = true;
-        }
-        AclOperation::Create
-        | AclOperation::ClusterAction
-        | AclOperation::DescribeConfigs
-        | AclOperation::IdempotentWrite
-        | AclOperation::TwoPhaseCommit => {}
-    }
-}
-
-fn apply_group_operation(capabilities: &mut Capabilities, operation: AclOperation) {
-    match operation {
-        AclOperation::All
-        | AclOperation::Read
-        | AclOperation::Delete
-        | AclOperation::Alter
-        | AclOperation::Describe => {
-            capabilities.can_view_groups = true;
-        }
-        AclOperation::Write
-        | AclOperation::Create
-        | AclOperation::ClusterAction
-        | AclOperation::DescribeConfigs
-        | AclOperation::AlterConfigs
-        | AclOperation::IdempotentWrite
-        | AclOperation::TwoPhaseCommit => {}
-    }
-}
-
-fn apply_cluster_operation(capabilities: &mut Capabilities, operation: AclOperation) {
-    match operation {
-        AclOperation::All => {
-            capabilities.can_view_acls = true;
-            capabilities.can_alter_acls = true;
-            capabilities.can_alter_users = true;
-            capabilities.can_view_quotas = true;
-            capabilities.can_alter_quotas = true;
-            capabilities.can_view_log_dirs = true;
-        }
-        AclOperation::Describe => {
-            capabilities.can_view_acls = true;
-            capabilities.can_view_log_dirs = true;
-            capabilities.can_view_quotas = true;
-        }
-        AclOperation::Alter => {
-            capabilities.can_view_acls = true;
-            capabilities.can_view_log_dirs = true;
-            capabilities.can_view_quotas = true;
-            capabilities.can_alter_acls = true;
-            capabilities.can_alter_users = true;
-            capabilities.can_alter_quotas = true;
-        }
-        AclOperation::Create => capabilities.can_create_topics = true,
-        AclOperation::DescribeConfigs
-        | AclOperation::AlterConfigs
-        | AclOperation::Read
-        | AclOperation::Write
-        | AclOperation::Delete
-        | AclOperation::ClusterAction
-        | AclOperation::IdempotentWrite
-        | AclOperation::TwoPhaseCommit => {}
-    }
+fn implies(stored: AclOperation, requested: AclOperation) -> bool {
+    matches!(
+        (stored, requested),
+        (
+            AclOperation::Read | AclOperation::Write | AclOperation::Delete | AclOperation::Alter,
+            AclOperation::Describe,
+        ) | (AclOperation::AlterConfigs, AclOperation::DescribeConfigs)
+    )
 }
