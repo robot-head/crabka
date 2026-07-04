@@ -12,7 +12,10 @@ use crabka_admin_ui::session::{SessionId, SessionStore};
 use crabka_client_core::security::SaslCredentials;
 use crabka_security::{ListenerProtocol, SaslMechanism};
 
-const EXPECTED_PASSWORD: &str = "secret";
+const SCRAM_PLAINTEXT_PASSWORD: &str = "password-sentinel";
+const SCRAM_SSL_PASSWORD: &str = "tls-password-sentinel";
+const EXPECTED_PASSWORD: &str = "login-password-sentinel";
+const SESSION_ID_SENTINEL: &str = "session-id-sentinel";
 
 #[test]
 fn build_security_uses_scram_sha512_only() {
@@ -22,19 +25,12 @@ fn build_security_uses_scram_sha512_only() {
         ..AdminUiConfig::default()
     };
 
-    let security = build_scram_sha512_security(&cfg, "alice", "secret");
+    let security = build_scram_sha512_security(&cfg, "alice", SCRAM_PLAINTEXT_PASSWORD);
 
     assert_eq!(security.protocol, ListenerProtocol::SaslPlaintext);
     assert!(security.tls.is_none());
     assert!(security.sasl_host.is_none());
-    assert!(matches!(
-        security.sasl,
-        Some(SaslCredentials::Scram {
-            mechanism: SaslMechanism::ScramSha512,
-            ref username,
-            ref password,
-        }) if username == "alice" && password == "secret"
-    ));
+    assert_scram_sha512_credentials(security.sasl.as_ref(), "alice", SCRAM_PLAINTEXT_PASSWORD);
 }
 
 #[test]
@@ -49,7 +45,7 @@ fn build_security_preserves_sasl_ssl_tls_material() {
         ..AdminUiConfig::default()
     };
 
-    let security = build_scram_sha512_security(&cfg, "carol", "top-secret");
+    let security = build_scram_sha512_security(&cfg, "carol", SCRAM_SSL_PASSWORD);
     let tls = security.tls.expect("SASL_SSL carries TLS config");
 
     assert_eq!(security.protocol, ListenerProtocol::SaslSsl);
@@ -60,14 +56,7 @@ fn build_security_preserves_sasl_ssl_tls_material() {
         Some((PathBuf::from("client.crt"), PathBuf::from("client.key")))
     );
     assert!(security.sasl_host.is_none());
-    assert!(matches!(
-        security.sasl,
-        Some(SaslCredentials::Scram {
-            mechanism: SaslMechanism::ScramSha512,
-            ref username,
-            ref password,
-        }) if username == "carol" && password == "top-secret"
-    ));
+    assert_scram_sha512_credentials(security.sasl.as_ref(), "carol", SCRAM_SSL_PASSWORD);
 }
 
 #[test]
@@ -75,7 +64,7 @@ fn login_success_debug_redacts_session_id() {
     let success = LoginSuccess {
         username: "alice".to_string(),
         principal: "User:alice".to_string(),
-        session_id: "raw-session-cookie-value".to_string(),
+        session_id: SESSION_ID_SENTINEL.to_string(),
     };
 
     let debug = format!("{success:?}");
@@ -83,7 +72,7 @@ fn login_success_debug_redacts_session_id() {
     assert!(debug.contains("alice"));
     assert!(debug.contains("User:alice"));
     assert!(debug.contains("<redacted>"));
-    assert!(!debug.contains("raw-session-cookie-value"));
+    assert_debug_does_not_contain_secret(&debug, SESSION_ID_SENTINEL, "session id");
 }
 
 #[tokio::test]
@@ -144,7 +133,33 @@ fn recording_login_broker_calls_do_not_debug_raw_passwords() {
             .as_slice()
     );
 
-    assert!(!debug.contains(EXPECTED_PASSWORD));
+    assert_debug_does_not_contain_secret(&debug, EXPECTED_PASSWORD, "password");
+}
+
+fn assert_scram_sha512_credentials(
+    credentials: Option<&SaslCredentials>,
+    expected_username: &str,
+    expected_password: &str,
+) {
+    let Some(SaslCredentials::Scram {
+        mechanism,
+        username,
+        password,
+    }) = credentials
+    else {
+        panic!("expected SCRAM credentials");
+    };
+
+    assert_eq!(*mechanism, SaslMechanism::ScramSha512);
+    assert_eq!(username, expected_username);
+    assert!(
+        password == expected_password,
+        "SCRAM password did not match expected test sentinel"
+    );
+}
+
+fn assert_debug_does_not_contain_secret(debug: &str, secret: &str, label: &str) {
+    assert!(!debug.contains(secret), "debug output leaked {label}");
 }
 
 #[derive(Default)]
