@@ -471,6 +471,12 @@ async fn dispatch_metadata_fetch(
 /// quorum; otherwise the registered brokers are returned. The controller
 /// listener carries no principal/ACL context (it is the inter-node trust
 /// boundary, like `metadata_fetch`), so there is no auth gate.
+// The broker-id `i32::try_from(node_id).unwrap_or(-1)` overflow fallback is
+// unreachable: the metadata layer rejects registering a `node_id` exceeding
+// `i32::MAX` (BrokerRegistrationRecord encode validation), so the `-1` sentinel
+// is dead defensive code that no input can reach. The reachable voter/broker
+// projection is covered by the sibling tests.
+#[cfg_attr(test, mutants::skip)]
 async fn describe_cluster_response_body(
     version: i16,
     body: &[u8],

@@ -1607,6 +1607,200 @@ mod tests {
         assert!(resp == expected);
     }
 
+    #[tokio::test]
+    async fn process_partition_leader_without_local_replica_hints_leader() {
+        // We ARE the image-designated leader (this_node_id == leader), but the
+        // local writer-actor hasn't been spun up (empty registry). This takes
+        // the "transient not-leader" branch, whose `current_leader` hint must
+        // still carry the real leader id + epoch from the image — not the 0
+        // defaults a struct-field-deletion mutant would leave.
+        use crabka_protocol::owned::produce_response::{
+            LeaderIdAndEpoch, PartitionProduceResponse,
+        };
+        let mut img = image_with_topic("orders", &[2, 3]);
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "orders".into(),
+            partition: 0,
+            leader: crabka_audit::NodeId(2),
+            replicas: vec![crabka_audit::NodeId(2), crabka_audit::NodeId(3)],
+            isr: vec![crabka_audit::NodeId(2), crabka_audit::NodeId(3)],
+            leader_epoch: crabka_metadata::LeaderEpoch(17),
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        }));
+        let image = Arc::new(img);
+        // Empty registry → `partitions.get(..)` returns None.
+        let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let txn_coordinator = Arc::new(crate::txn::coordinator::TxnCoordinator::new(
+            crabka_audit::NodeId(2),
+            Arc::clone(&partitions),
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        ));
+        let producer_state = Arc::new(crate::producer_state::ProducerState::new());
+        let log_dir_status = crate::log_dir_status::LogDirRegistry::default();
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let payload = encode_batch(&RecordBatch {
+            records: vec![Record {
+                value: Some(Bytes::from_static(b"hello")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let resp = process_partition(
+            FramedPartition {
+                index: 0,
+                payload: PartitionPayload::Slice(payload),
+            },
+            None,
+            "orders",
+            false,
+            false,
+            1,
+            Duration::from_millis(1),
+            &partitions,
+            &txn_coordinator,
+            &producer_state,
+            &log_dir_status,
+            &image,
+            // We are the leader (node 2), but hold no local replica.
+            crabka_audit::NodeId(2),
+            &metrics,
+        )
+        .await
+        .expect("process partition");
+
+        let expected = PartitionProduceResponse {
+            index: 0,
+            error_code: crate::codes::NOT_LEADER_OR_FOLLOWER,
+            base_offset: 0,
+            log_append_time_ms: -1,
+            log_start_offset: -1,
+            record_errors: vec![],
+            error_message: None,
+            current_leader: LeaderIdAndEpoch {
+                leader_id: 2,
+                leader_epoch: 17,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+            },
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+    }
+
+    /// Idempotent-retry (`Decision::Duplicate`) under `acks=all` re-waits for
+    /// the HW to reach the duplicate's *last offset + 1* before claiming
+    /// success. With the duplicate spanning offsets 0..=2 the durability
+    /// target is 3 (`base_offset 0 + last_offset_delta 2 + 1`). If the HW is
+    /// stuck at 2 the wait times out → `NOT_ENOUGH_REPLICAS_AFTER_APPEND`.
+    /// The `+ 1` matters: a mutant flipping it to `- 1` would target offset 1,
+    /// which HW 2 already satisfies, wrongly returning `NONE`.
+    #[tokio::test]
+    async fn duplicate_acks_all_waits_for_last_offset_plus_one() {
+        use crabka_protocol::owned::produce_response::PartitionProduceResponse;
+
+        let dir = tempfile::tempdir().unwrap();
+        let image = Arc::new(image_with_topic("orders", &[1]));
+        let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let txn_coordinator = Arc::new(crate::txn::coordinator::TxnCoordinator::new(
+            crabka_audit::NodeId(1),
+            Arc::clone(&partitions),
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        ));
+        let producer_state = Arc::new(crate::producer_state::ProducerState::new());
+        let log_dir_status = crate::log_dir_status::LogDirRegistry::default();
+        let metrics = crate::metrics::BrokerMetrics::new();
+
+        // Materialize the local leader replica for "orders"-0.
+        let part_dir = crate::log_dir::partition_dir(dir.path(), "orders", 0);
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default()).unwrap();
+        let part = crate::broker::spawn_partition(
+            "orders".to_string(),
+            crabka_ids::PartitionIndex(0),
+            dir.path().to_path_buf(),
+            log,
+            log_dir_status.clone(),
+            Arc::clone(&producer_state),
+        );
+        // Push LEO to 3 so the HW can be clamped to 2 (one below the target).
+        {
+            let mut batch = RecordBatch {
+                last_offset_delta: 2,
+                records: (0..3)
+                    .map(|i| Record {
+                        offset_delta: i,
+                        value: Some(Bytes::from_static(b"v")),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            part.log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .append(&mut batch)
+                .expect("seed source records");
+        }
+        assert!(part.log_end_offset() == crabka_log::Offset(3));
+        part.set_follower_hw(crabka_log::Offset(2)).await;
+        assert!(part.high_watermark().await == crabka_log::Offset(2));
+        partitions.insert("orders".to_string(), crabka_ids::PartitionIndex(0), part);
+
+        // Pre-seed the dedup tracker so the incoming batch is a Duplicate whose
+        // recorded base_offset is 0 and span is 0..=2.
+        let pid: i64 = 7777;
+        producer_state
+            .commit("orders", crabka_ids::PartitionIndex(0), pid, 0, 0, 2, 0, 0)
+            .await;
+
+        // Incoming (retried) batch: same pid/epoch/base_sequence/span.
+        let payload = encode_batch(&RecordBatch {
+            producer_id: pid,
+            producer_epoch: 0,
+            base_sequence: 0,
+            last_offset_delta: 2,
+            records: (0..3)
+                .map(|i| Record {
+                    offset_delta: i,
+                    value: Some(Bytes::from_static(b"v")),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        });
+
+        let resp: PartitionProduceResponse = process_partition(
+            FramedPartition {
+                index: 0,
+                payload: PartitionPayload::Slice(payload),
+            },
+            None,
+            "orders",
+            false,
+            false,
+            -1, // acks = all
+            Duration::from_millis(50),
+            &partitions,
+            &txn_coordinator,
+            &producer_state,
+            &log_dir_status,
+            &image,
+            crabka_audit::NodeId(1),
+            &metrics,
+        )
+        .await
+        .expect("process partition");
+
+        check!(resp.base_offset == 0);
+        check!(
+            resp.error_code == crate::codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND,
+            "HW 2 < target 3 must time out; a `-1` mutant would target offset 1 and return NONE"
+        );
+    }
+
     #[test]
     fn consume_producer_quota_tuple_match_overage_throttles() {
         use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};

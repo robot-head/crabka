@@ -375,7 +375,19 @@ impl_primitive_cmp!(ApiVersion, i16);
 mod tests {
     use assert2::check;
 
-    use super::{ApiKey, LeaderEpoch, NodeId, Offset, ProducerId};
+    use super::{ApiKey, ApiVersion, LeaderEpoch, NodeId, Offset, PartitionIndex, ProducerId};
+
+    #[test]
+    fn accessors_and_advance_return_the_inner_value() {
+        check!(Offset(9).get() == 9);
+        check!(PartitionIndex(4).get() == 4);
+        check!(NodeId(7).get() == 7);
+        check!(ProducerId(42).get() == 42);
+        check!(LeaderEpoch(3).get() == 3);
+        check!(ApiKey(18).get() == 18);
+        check!(ApiVersion(2).get() == 2);
+        check!(LeaderEpoch(4).next() == LeaderEpoch(5));
+    }
 
     #[test]
     fn compares_against_raw_primitive_in_both_directions() {

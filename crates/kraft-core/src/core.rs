@@ -1661,4 +1661,19 @@ mod tests {
             })
         )));
     }
+
+    #[test]
+    fn election_jitter_is_deterministic_hash_in_range() {
+        // Pin the exact deterministic jitter so a constant-return regression
+        // (no jitter at all → split-vote livelock) is caught. The values are the
+        // integer hash of (node, epoch) mod base_ms; they are non-zero and
+        // node-dependent, so both "always 0" and "always 1" are distinguished.
+        check!(election_jitter_ms(NodeId(1), 0, 1000) == 485);
+        check!(election_jitter_ms(NodeId(2), 0, 1000) == 354); // different node → different spread
+        check!(election_jitter_ms(NodeId(1), 1, 1000) == 446); // same node, next epoch → re-spread
+        // Jitter must always stay strictly inside [0, base_ms).
+        check!(election_jitter_ms(NodeId(1), 0, 1000) < 1000);
+        // A zero base disables jitter entirely (guard branch): returns 0, not 1.
+        check!(election_jitter_ms(NodeId(1), 0, 0) == 0);
+    }
 }

@@ -64,3 +64,42 @@ pub async fn delete_subject(
     };
     Ok(ok_json(&versions))
 }
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::*;
+
+    #[test]
+    fn parse_concrete_version_positive_is_ok() {
+        check!(matches!(parse_concrete_version("1"), Ok(SchemaVersion(1))));
+        check!(matches!(parse_concrete_version("7"), Ok(SchemaVersion(7))));
+    }
+
+    #[test]
+    fn parse_concrete_version_zero_is_rejected() {
+        // 0 parses as i32 but fails the `n >= 1` guard: must be InvalidVersion,
+        // not Ok(SchemaVersion(0)).
+        check!(matches!(
+            parse_concrete_version("0"),
+            Err(SrError::InvalidVersion(_))
+        ));
+    }
+
+    #[test]
+    fn parse_concrete_version_negative_is_rejected() {
+        check!(matches!(
+            parse_concrete_version("-3"),
+            Err(SrError::InvalidVersion(_))
+        ));
+    }
+
+    #[test]
+    fn parse_concrete_version_non_numeric_is_rejected() {
+        check!(matches!(
+            parse_concrete_version("latest"),
+            Err(SrError::InvalidVersion(_))
+        ));
+    }
+}

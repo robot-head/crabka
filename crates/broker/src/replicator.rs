@@ -568,6 +568,11 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
 /// KIP-101: the follower sends our current `leader_epoch`; the leader
 /// replies with `end_offset` = the first offset of the next epoch,
 /// which is the safe truncation point.
+// The `end_offset >= 0` truncate-vs-reset branch is only reachable after a live
+// leader connection returns an `OffsetForLeaderEpoch` response; the whole
+// function is inter-broker IO (connect, send, then `part.truncate_to` /
+// `part.reset_to`) with no pure seam. Exercised by the live-replication suite.
+#[cfg_attr(test, mutants::skip)]
 #[tracing::instrument(
     name = "replicator_handle_epoch_fence",
     level = "info",

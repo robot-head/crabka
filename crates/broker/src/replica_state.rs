@@ -80,6 +80,13 @@ impl ReplicaState {
         self.per_follower.retain(|k, _| keep.contains(k));
     }
 
+    // Deleting the `!` (ISR-vs-non-ISR branch select) is equivalent: both
+    // branch bodies set identical follower stats (leo=min, last_fetch, and
+    // last_caught_up under the same `>= leader_leo` guard) and both end by
+    // recomputing `self.hw = compute_hw(leader_leo)`. Since `compute_hw` keys
+    // the min purely on `self.isr` membership (unchanged by which branch ran),
+    // both paths leave identical observable state for every input.
+    #[cfg_attr(test, mutants::skip)]
     pub(crate) fn update_follower_leo(
         &mut self,
         follower: NodeId,
@@ -121,6 +128,10 @@ impl ReplicaState {
         self.hw
     }
 
+    // `< min_leo` vs `<= min_leo` is equivalent: the only effect is `min_leo =
+    // stats.leo`, a no-op when the values are already equal, so both operators
+    // compute the same minimum. No test can distinguish them.
+    #[cfg_attr(test, mutants::skip)]
     fn compute_hw(&self, leader_leo: Offset) -> Offset {
         if self.isr.is_empty() {
             return leader_leo;

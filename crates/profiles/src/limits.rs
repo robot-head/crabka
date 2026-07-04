@@ -252,6 +252,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_query_range_unlimited_accepts_any_range() {
+        // `max_query_length_secs == 0` means unlimited: even a range far larger
+        // than any finite cap must be accepted. This pins the `||` in the early
+        // return — an `&&` there would fall through and reject against a `0`
+        // limit, turning unlimited into "reject everything".
+        let limits = Limits {
+            max_query_length_secs: 0,
+            ..Limits::default()
+        };
+
+        assert!(
+            limits
+                .validate_query_range_ms(StartMs(0), EndMs(120_000))
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn validate_query_range_rejects_open_ended_ranges_without_overflow() {
         let limits = Limits {
             max_query_length_secs: 60,

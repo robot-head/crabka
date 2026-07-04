@@ -805,4 +805,229 @@ mod tests {
         check!(st.delivery_complete_count == 4);
         check!(st.state_batches == vec![batch(20, 29)]);
     }
+
+    // `replay_led_partitions` must derive each record's offset as
+    // `base_offset + offset_delta` and advance the inter-batch cursor as
+    // `base_offset + last_offset_delta + 1`. A hand-crafted TWO-record batch
+    // (an update at offset_delta 0, then a snapshot at offset_delta 1) pins
+    // both: after replay, the snapshot's recorded `last_snapshot_offset` must
+    // be `base_offset + 1`, and a second batch appended after it must also be
+    // replayed (only reachable when the cursor advances by
+    // `last_offset_delta + 1`).
+    #[tokio::test]
+    async fn replay_uses_per_record_and_inter_batch_offsets() {
+        let dir = tempdir().unwrap();
+        let (coord, reg) = coordinator(dir.path());
+        lead_all(&coord).await;
+        let tid = uuid::Uuid::from_bytes([11; 16]);
+        let state_partition = coord.state_partition_for("g", &tid, 0);
+        let part = reg
+            .get(bootstrap::TOPIC, state_partition)
+            .expect("state partition open");
+
+        let snap_key = encode_state_key(&ShareStateKey {
+            record_type: KEY_SHARE_SNAPSHOT,
+            group_id: "g".to_string(),
+            topic_id: tid,
+            partition: 0,
+        });
+        let upd_key = encode_state_key(&ShareStateKey {
+            record_type: KEY_SHARE_UPDATE,
+            group_id: "g".to_string(),
+            topic_id: tid,
+            partition: 0,
+        });
+
+        // Batch A (base_offset 0): an UPDATE at delta 0, then a SNAPSHOT at
+        // delta 1 (last_offset_delta = 1). The snapshot's rec_offset is
+        // `base_offset + 1 == 1`.
+        let mut batch_a = RecordBatch {
+            last_offset_delta: 1,
+            ..RecordBatch::default()
+        };
+        batch_a.records.push(Record {
+            offset_delta: 0,
+            key: Some(upd_key.clone()),
+            value: Some(
+                ShareUpdateValue {
+                    snapshot_epoch: 0,
+                    leader_epoch: 1,
+                    start_offset: Offset(0),
+                    delivery_complete_count: 0,
+                    state_batches: vec![],
+                }
+                .encode(),
+            ),
+            ..Default::default()
+        });
+        batch_a.records.push(Record {
+            offset_delta: 1,
+            key: Some(snap_key.clone()),
+            value: Some(
+                ShareSnapshotValue {
+                    snapshot_epoch: 5,
+                    state_epoch: 2,
+                    leader_epoch: 3,
+                    start_offset: Offset(20),
+                    delivery_complete_count: 4,
+                    state_batches: vec![batch(20, 29)],
+                }
+                .encode(),
+            ),
+            ..Default::default()
+        });
+        part.produce_batch(batch_a).await.unwrap();
+
+        // Batch B (base_offset 2): a later SNAPSHOT. Only reached if the cursor
+        // advanced past batch A by `last_offset_delta + 1`.
+        let mut batch_b = RecordBatch::default();
+        batch_b.records.push(Record {
+            offset_delta: 0,
+            key: Some(snap_key.clone()),
+            value: Some(
+                ShareSnapshotValue {
+                    snapshot_epoch: 6,
+                    state_epoch: 2,
+                    leader_epoch: 9,
+                    start_offset: Offset(50),
+                    delivery_complete_count: 8,
+                    state_batches: vec![batch(50, 59)],
+                }
+                .encode(),
+            ),
+            ..Default::default()
+        });
+        part.produce_batch(batch_b).await.unwrap();
+
+        coord.replay_led_partitions().await;
+
+        let st = coord.read("g", tid, 0).await.expect("recovered");
+        // Batch B is the final snapshot — proves the inter-batch cursor advanced
+        // past batch A (base_offset + last_offset_delta + 1 == 2).
+        check!(st.leader_epoch == 9);
+        check!(st.start_offset == Offset(50));
+        check!(st.delivery_complete_count == 8);
+        check!(st.state_batches == vec![batch(50, 59)]);
+        // Batch B's snapshot sits at base_offset 2 (single record, delta 0).
+        check!(st.last_snapshot_offset == Offset(2));
+    }
+
+    /// Replaying ONLY batch A pins the per-record offset arithmetic in
+    /// isolation: the snapshot at `offset_delta 1` over `base_offset 0` records
+    /// `last_snapshot_offset == Offset(1)`, not `Offset(-1)`.
+    #[tokio::test]
+    async fn replay_snapshot_offset_is_base_plus_delta() {
+        let dir = tempdir().unwrap();
+        let (coord, reg) = coordinator(dir.path());
+        lead_all(&coord).await;
+        let tid = uuid::Uuid::from_bytes([12; 16]);
+        let state_partition = coord.state_partition_for("g", &tid, 0);
+        let part = reg
+            .get(bootstrap::TOPIC, state_partition)
+            .expect("state partition open");
+
+        let snap_key = encode_state_key(&ShareStateKey {
+            record_type: KEY_SHARE_SNAPSHOT,
+            group_id: "g".to_string(),
+            topic_id: tid,
+            partition: 0,
+        });
+        let upd_key = encode_state_key(&ShareStateKey {
+            record_type: KEY_SHARE_UPDATE,
+            group_id: "g".to_string(),
+            topic_id: tid,
+            partition: 0,
+        });
+
+        // Single batch, base_offset 0: an UPDATE at delta 0 then a SNAPSHOT at
+        // delta 1. The snapshot's rec_offset is `0 + 1 == 1`.
+        let mut batch_a = RecordBatch {
+            last_offset_delta: 1,
+            ..RecordBatch::default()
+        };
+        batch_a.records.push(Record {
+            offset_delta: 0,
+            key: Some(upd_key),
+            value: Some(
+                ShareUpdateValue {
+                    snapshot_epoch: 0,
+                    leader_epoch: 1,
+                    start_offset: Offset(0),
+                    delivery_complete_count: 0,
+                    state_batches: vec![],
+                }
+                .encode(),
+            ),
+            ..Default::default()
+        });
+        batch_a.records.push(Record {
+            offset_delta: 1,
+            key: Some(snap_key),
+            value: Some(
+                ShareSnapshotValue {
+                    snapshot_epoch: 5,
+                    state_epoch: 2,
+                    leader_epoch: 3,
+                    start_offset: Offset(20),
+                    delivery_complete_count: 4,
+                    state_batches: vec![batch(20, 29)],
+                }
+                .encode(),
+            ),
+            ..Default::default()
+        });
+        part.produce_batch(batch_a).await.unwrap();
+
+        coord.replay_led_partitions().await;
+
+        let st = coord.read("g", tid, 0).await.expect("recovered");
+        check!(st.leader_epoch == 3);
+        check!(st.start_offset == Offset(20));
+        // The snapshot record sits at base_offset(0) + offset_delta(1) == 1.
+        check!(st.last_snapshot_offset == Offset(1));
+    }
+
+    /// After a snapshot fold, `maybe_prune` must trim the state-partition log
+    /// prefix up to the redundant offset (the folded snapshot's offset). The
+    /// partition's `log_start_offset` advances past 0; if pruning is skipped it
+    /// stays at 0.
+    #[tokio::test]
+    async fn snapshot_fold_prunes_log_prefix() {
+        let dir = tempdir().unwrap();
+        let reg = Arc::new(PartitionRegistry::new());
+        for p in 0..bootstrap::NUM_PARTITIONS {
+            open_state_partition(&reg, dir.path(), p);
+        }
+        // Fold after 2 updates so a snapshot lands a few records in.
+        let cfg = ShareCoordinatorConfig {
+            snapshot_update_records_per_snapshot: 2,
+            ..ShareCoordinatorConfig::default()
+        };
+        let coord = ShareCoordinator::new(crabka_audit::NodeId(1), reg.clone(), cfg);
+        lead_all(&coord).await;
+        let tid = uuid::Uuid::from_bytes([13; 16]);
+        let state_partition = coord.state_partition_for("g", &tid, 0);
+        let part = reg
+            .get(bootstrap::TOPIC, state_partition)
+            .expect("state partition open");
+
+        // record 0: initialize snapshot.
+        coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
+        // records 1,2: updates; the 2nd crosses the threshold and folds a
+        // snapshot at record 3, then prunes up to it.
+        coord
+            .write("g", tid, 0, 1, 1, Offset(0), 0, vec![batch(0, 9)])
+            .await
+            .unwrap();
+        coord
+            .write("g", tid, 0, 1, 1, Offset(0), 0, vec![batch(10, 19)])
+            .await
+            .unwrap();
+
+        // The folded snapshot's offset is the sole key's last-snapshot offset,
+        // which is > 0 and exceeds the log's initial start (0), so the prune
+        // advanced the prefix. Without pruning the start stays at 0.
+        let start = part.log_start_offset();
+        check!(start > Offset(0));
+    }
 }

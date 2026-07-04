@@ -1411,4 +1411,89 @@ mod tests {
             .expect("member m1 present");
         assert!(m1.is_classic, "facade reconstructed from k5 classic block");
     }
+
+    /// `replay_records` must walk EVERY batch in the log, not just the first.
+    /// The cursor that advances between batches is
+    /// `base_offset + last_offset_delta + 1`; a two-record first batch
+    /// (`last_offset_delta == 1`) followed by a second batch is only fully
+    /// replayed if that arithmetic is exact. Both offset-commit records from
+    /// the first batch AND the commit from the second batch must land in
+    /// `acc.committed`.
+    #[tokio::test]
+    async fn replay_records_walks_all_batches() {
+        use crabka_log::Offset;
+        use crabka_protocol::records::Record;
+
+        use crate::coordinator::unified::{
+            GroupCoordinator, offsets_log::fake::InMemoryOffsetsLog, reconciler::ReconcileInput,
+        };
+
+        #[derive(Debug)]
+        struct EmptyMeta;
+        impl crate::coordinator::unified::actor::MetadataProvider for EmptyMeta {
+            fn snapshot(&self) -> ReconcileInput {
+                ReconcileInput::default()
+            }
+        }
+
+        let coord = Arc::new(GroupCoordinator::new(
+            crate::coordinator::unified::config::NextGenConfig::default(),
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            Arc::new(EmptyMeta),
+            Arc::new(InMemoryOffsetsLog::default()),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        ));
+
+        // Build an offset-commit record with a distinct committed offset per
+        // (topic, partition), so we can tell which batches were replayed.
+        let commit_record = |partition: i32, offset: i64| Record {
+            offset_delta: 0,
+            key: Some(OffsetCommitValue::encode_key("g", "t", partition)),
+            value: Some(
+                OffsetCommitValue {
+                    offset: Offset(offset),
+                    leader_epoch: -1,
+                    metadata: String::new(),
+                    commit_timestamp_ms: 0,
+                }
+                .encode_value(),
+            ),
+            ..Default::default()
+        };
+
+        let dir = tempdir().unwrap();
+        let mut log = crabka_log::Log::open(dir.path(), crabka_log::LogConfig::default()).unwrap();
+
+        // First batch spans TWO offsets (last_offset_delta == 1): partitions 0
+        // and 1 commit at offsets 100 and 101.
+        let mut batch1 = RecordBatch {
+            last_offset_delta: 1,
+            ..RecordBatch::default()
+        };
+        batch1.records.push(commit_record(0, 100));
+        batch1.records.push(Record {
+            offset_delta: 1,
+            ..commit_record(1, 101)
+        });
+        log.append(&mut batch1).unwrap();
+
+        // Second batch: partition 2 commits at offset 202. Reaching it requires
+        // the inter-batch cursor to have advanced past the first batch.
+        let mut batch2 = RecordBatch::default();
+        batch2.records.push(commit_record(2, 202));
+        log.append(&mut batch2).unwrap();
+
+        let replayed = replay_records(&log, &coord).unwrap();
+        let committed = replayed
+            .committed
+            .get("g")
+            .expect("group g has committed offsets");
+
+        // All three commits present — the second batch is only reached when the
+        // cursor arithmetic `base_offset + last_offset_delta + 1` is exact.
+        check!(committed.len() == 3);
+        check!(committed[&("t".to_string(), 0)].offset == Offset(100));
+        check!(committed[&("t".to_string(), 1)].offset == Offset(101));
+        check!(committed[&("t".to_string(), 2)].offset == Offset(202));
+    }
 }

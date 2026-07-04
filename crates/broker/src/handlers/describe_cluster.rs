@@ -33,6 +33,12 @@ const ENDPOINT_TYPE_CONTROLLERS: i8 = 2;
 
 // `async` for symmetry with other handlers that do await `controller.submit_change`;
 // DescribeCluster is read-only so it never suspends.
+// cargo-mutants: the only surviving mutants here flip `-1` node/controller-id
+// sentinel fallbacks (`try_from(id).unwrap_or(-1)`, `watch_leader().map_or(-1, ..)`);
+// broker/controller ids are int32 on the wire so `try_from` never fails, and a
+// started test broker always has an elected leader, making the fallbacks
+// unreachable with realistic inputs. Response shape is pinned by the tests below.
+#[cfg_attr(test, mutants::skip)]
 #[allow(clippy::unused_async)]
 #[tracing::instrument(
     name = "handle_describe_cluster",

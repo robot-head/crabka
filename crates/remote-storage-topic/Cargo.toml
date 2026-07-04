@@ -33,6 +33,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+mutants = { workspace = true }
 assert2 = { workspace = true }
 crabka-security = { version = "0.3", path = "../security" }
 serde_json = { workspace = true }

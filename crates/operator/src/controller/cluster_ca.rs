@@ -1572,6 +1572,41 @@ mod san_tests {
         assert!(parsed.len() == 1);
         assert!(parsed[0] == "DNS:internal.svc");
     }
+
+    // Round-trip: issue a leaf with a known CN and mixed DNS/IP SANs, then pull
+    // them back out with `read_existing_cn_and_sans`. Pins the actual parsed CN
+    // and SAN list so a body-stub mutant (Ok(("", vec![])) / Ok(("xyzzy", vec![])))
+    // is caught — the CN must equal the issued name and the SANs must be preserved.
+    #[test]
+    fn read_existing_cn_and_sans_round_trips_cn_and_sans() {
+        use super::read_existing_cn_and_sans;
+
+        let cluster_ca = generate_cluster_ca("test-san-ca", 365).expect("test CA");
+        let internal_sans = vec![SubjectAltName::Dns("internal.svc".into())];
+        let extra = vec![
+            SubjectAltName::Dns("broker-0.example.com".into()),
+            SubjectAltName::Ip("203.0.113.10".parse().unwrap()),
+        ];
+        let leaf = issue_broker_cert(
+            &cluster_ca.cert_pem,
+            &cluster_ca.key_pem,
+            "broker-0",
+            &internal_sans,
+            &extra,
+            365,
+        )
+        .unwrap();
+
+        let (cn, sans) = read_existing_cn_and_sans(&leaf.cert_pem).expect("parse leaf");
+        assert!(cn == "broker-0");
+        for want in [
+            SubjectAltName::Dns("internal.svc".into()),
+            SubjectAltName::Dns("broker-0.example.com".into()),
+            SubjectAltName::Ip("203.0.113.10".parse().unwrap()),
+        ] {
+            assert!(sans.contains(&want), "missing {want:?} in {sans:?}");
+        }
+    }
 }
 
 #[cfg(test)]

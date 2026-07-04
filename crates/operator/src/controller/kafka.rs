@@ -1928,6 +1928,36 @@ mod tests {
         assert!(reason == "Stable");
     }
 
+    // Boundary: with zero pools the cluster is never "rolling", even when the
+    // (defaulted) ready/replica totals disagree. Pins `pool_count > 0` so a
+    // `>=` mutant (which would treat pool_count==0 as rolling) fails here.
+    #[test]
+    fn rolling_condition_zero_pools_is_stable() {
+        let r = ClusterRollup {
+            replicas: ReplicaCount(3),
+            ready_replicas: ReadyReplicaCount(1),
+            pool_count: 0,
+        };
+        let (rolling, reason, _) = rolling_condition_from_rollup(&r);
+        assert!(!rolling);
+        assert!(reason == "Stable");
+    }
+
+    // Boundary: a pool that exists but reports zero replicas (ready==replicas==0)
+    // is PartiallyReady, not Available. Pins `replicas.0 > 0` so a `>=` mutant
+    // (which would call an all-zero cluster "Available") fails here.
+    #[test]
+    fn rollup_condition_zero_replicas_is_partially_ready() {
+        let r = ClusterRollup {
+            replicas: ReplicaCount(0),
+            ready_replicas: ReadyReplicaCount(0),
+            pool_count: 1,
+        };
+        let (ready, reason, _) = rollup_condition(&r);
+        assert!(!ready);
+        assert!(reason == "PartiallyReady");
+    }
+
     // Pure helper — picks the first OAuth listener as canonical.
     // The reconcile-level no-op cases (no OAuth listener / empty
     // tls_trusted_certificates) are exercised through this helper plus the

@@ -104,6 +104,10 @@ impl SharePersister {
     /// Returns [`BrokerError::Share`] if the local coordinator fences/rejects
     /// the call, or [`BrokerError`] from the inter-broker dial/send on the
     /// remote path. The caller logs and retries — it must not fail a heartbeat.
+    // cargo-mutants: the `topics` payload is only sent on the follower->leader
+    // remote path (`send_to_leader` dials a real inter-broker socket); only the
+    // live-broker integration suite exercises it, not in-file unit tests.
+    #[cfg_attr(test, mutants::skip)]
     pub(crate) async fn initialize(
         &self,
         group: &str,
@@ -289,6 +293,10 @@ impl SharePersister {
     /// # Errors
     ///
     /// As [`SharePersister::initialize`].
+    // cargo-mutants: the `topics` payload is only sent on the follower->leader
+    // remote path (`send_to_leader` dials a real inter-broker socket); only the
+    // live-broker integration suite exercises it, not in-file unit tests.
+    #[cfg_attr(test, mutants::skip)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn write_state(
         &self,

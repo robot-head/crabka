@@ -409,6 +409,140 @@ mod tests {
         assert!(log_dir_capacity(phantom) == (-1, -1));
     }
 
+    /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>` via the
+    /// real `spawn_partition` path (mirrors the `future_log` / registry test
+    /// fixtures) and append `count` records so its LEO advances to `count`.
+    fn partition_with_leo(
+        log_dir: &std::path::Path,
+        topic: &str,
+        partition: crabka_ids::PartitionIndex,
+        count: i32,
+    ) -> std::sync::Arc<crate::partition::Partition> {
+        let part_dir = log_dir::partition_dir(log_dir, topic, partition.get());
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default()).unwrap();
+        let part = crate::broker::spawn_partition(
+            topic.to_string(),
+            partition,
+            log_dir.to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            std::sync::Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        if count > 0 {
+            append_n(&part.log, count);
+        }
+        part
+    }
+
+    /// Append a single `count`-record batch to a `Log` behind a mutex,
+    /// advancing its LEO by `count`.
+    fn append_n(log: &std::sync::Mutex<crabka_log::Log>, count: i32) {
+        use bytes::Bytes;
+        use crabka_protocol::records::{Attributes, Record, RecordBatch};
+        let mut batch = RecordBatch {
+            base_offset: 0,
+            partition_leader_epoch: -1,
+            attributes: Attributes::default(),
+            last_offset_delta: count - 1,
+            base_timestamp: 1_700_000_000,
+            max_timestamp: 1_700_000_000,
+            producer_id: -1,
+            producer_epoch: -1,
+            base_sequence: -1,
+            records: (0..count)
+                .map(|i| Record {
+                    attributes: 0,
+                    offset_delta: i,
+                    timestamp_delta: 0,
+                    key: None,
+                    value: Some(Bytes::from_static(b"v")),
+                    headers: vec![],
+                })
+                .collect(),
+        };
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .append(&mut batch)
+            .expect("append records");
+    }
+
+    /// A partition that isn't materialized locally reports lag `0`, not the
+    /// `-1` a whole-function replacement mutant would return.
+    #[tokio::test]
+    async fn offset_lag_missing_partition_is_zero() {
+        let reg = crate::partition_registry::PartitionRegistry::new();
+        assert!(offset_lag_for(&reg, "ghost", 0).await == 0);
+    }
+
+    /// A materialized partition with LEO ahead of HW reports `LEO - HW`
+    /// (fresh HW is 0), pinning the real subtraction against the whole-fn
+    /// `-> -1` replacement.
+    #[tokio::test]
+    async fn offset_lag_uses_leo_minus_hw() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = crate::partition_registry::PartitionRegistry::new();
+        let part = partition_with_leo(dir.path(), "t", crabka_ids::PartitionIndex(0), 5);
+        assert!(part.log_end_offset() == crabka_log::Offset(5));
+        reg.insert("t".to_string(), crabka_ids::PartitionIndex(0), part);
+        // Fresh partition HW is 0 → lag == LEO == 5 (not -1, not 0).
+        assert!(offset_lag_for(&reg, "t", 0).await == 5);
+    }
+
+    /// Build a `FutureLogState` whose future log has LEO `future_count`.
+    fn future_state_with_leo(
+        dir: &std::path::Path,
+        future_count: i32,
+    ) -> std::sync::Arc<crate::future_log::FutureLogState> {
+        let future_path = dir.join("future");
+        std::fs::create_dir_all(&future_path).unwrap();
+        let flog = crabka_log::Log::open(&future_path, crabka_log::LogConfig::default()).unwrap();
+        let future_log = std::sync::Arc::new(std::sync::Mutex::new(flog));
+        if future_count > 0 {
+            append_n(&future_log, future_count);
+        }
+        std::sync::Arc::new(crate::future_log::FutureLogState {
+            target_log_dir: dir.to_path_buf(),
+            future_path,
+            future_log,
+            cancel: tokio_util::sync::CancellationToken::new(),
+            task: std::sync::Mutex::new(None::<tokio::task::JoinHandle<()>>),
+        })
+    }
+
+    /// With no local partition, the future-log lag is `0`, not the `1` a
+    /// whole-function `-> 1` replacement mutant would return.
+    #[tokio::test]
+    async fn future_offset_lag_missing_partition_is_zero() {
+        let reg = crate::partition_registry::PartitionRegistry::new();
+        let future_logs = dashmap::DashMap::new();
+        let lag = future_offset_lag(&reg, &future_logs, "ghost", crabka_ids::PartitionIndex(0));
+        assert!(lag == 0);
+    }
+
+    /// `future_offset_lag` is `current_log.LEO − future_log.LEO`, clamped at 0.
+    /// With current LEO 5 and future LEO 2 the answer is 3 — which
+    /// distinguishes the real subtraction from every mutant: `-> 0` (0),
+    /// `-> 1` (1), `-` → `+` (7), and `-` → `/` (2).
+    #[tokio::test]
+    async fn future_offset_lag_is_current_minus_future_leo() {
+        let cur_dir = tempfile::tempdir().unwrap();
+        let fut_dir = tempfile::tempdir().unwrap();
+        let reg = crate::partition_registry::PartitionRegistry::new();
+        let part = partition_with_leo(cur_dir.path(), "t", crabka_ids::PartitionIndex(3), 5);
+        assert!(part.log_end_offset() == crabka_log::Offset(5));
+        reg.insert("t".to_string(), crabka_ids::PartitionIndex(3), part);
+
+        let future_logs = dashmap::DashMap::new();
+        future_logs.insert(
+            ("t".to_string(), crabka_ids::PartitionIndex(3)),
+            future_state_with_leo(fut_dir.path(), 2),
+        );
+
+        let lag = future_offset_lag(&reg, &future_logs, "t", crabka_ids::PartitionIndex(3));
+        assert!(lag == 3, "current LEO 5 − future LEO 2 == 3, got {lag}");
+    }
+
     #[test]
     fn cluster_describe_denied_yields_cluster_authorization_failed() {
         use crabka_protocol::owned::describe_log_dirs_response::{self, DescribeLogDirsResponse};

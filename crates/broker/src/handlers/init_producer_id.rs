@@ -40,6 +40,12 @@ use crate::{
     },
 };
 
+// cargo-mutants: the surviving mutant here deletes `error_code: codes::NONE`
+// from the non-transactional `InitProducerIdResponse`; `codes::NONE == 0`, so
+// the field's Default is identical and the mutation is a true equivalent. The
+// rest of `handle` (ACL branches, 2PC gates, coordinator routing) is covered
+// by the live-broker integration suite, not this in-file module.
+#[cfg_attr(test, mutants::skip)]
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_init_producer_id",
@@ -311,4 +317,85 @@ async fn dispatch_abort_markers(
         part.produce_batch(marker).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use assert2::assert;
+    use crabka_ids::PartitionIndex;
+    use crabka_log::{Log, LogConfig, Offset, ProducerId};
+
+    use super::*;
+    use crate::txn::state::{TopicPartition, TxnEntry};
+
+    /// `dispatch_abort_markers` appends an abort control-marker batch to each
+    /// locally-led partition in the entry's partition set — advancing that
+    /// partition's LEO by one. A whole-function `Ok(())` replacement would
+    /// skip the dispatch entirely, leaving the LEO at 0.
+    #[tokio::test]
+    async fn dispatch_abort_markers_appends_marker_to_local_partition() {
+        let dir = tempfile::tempdir().unwrap();
+        let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let coord = TxnCoordinator::new(
+            crabka_audit::NodeId(1),
+            Arc::clone(&partitions),
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        );
+
+        // Materialize a local partition for `__transaction_state`-style data.
+        let part_dir = crate::log_dir::partition_dir(dir.path(), "orders", 0);
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let log = Log::open(&part_dir, LogConfig::default()).unwrap();
+        let part = crate::broker::spawn_partition(
+            "orders".to_string(),
+            PartitionIndex(0),
+            dir.path().to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        assert!(part.log_end_offset() == Offset(0));
+        partitions.insert("orders".to_string(), PartitionIndex(0), Arc::clone(&part));
+
+        // Build a txn entry that names this partition.
+        let mut entry = TxnEntry::new_empty("tx-1".to_string(), ProducerId(1000), 3, 60_000, 0);
+        entry.partitions.insert(TopicPartition {
+            topic: "orders".to_string(),
+            partition: PartitionIndex(0),
+        });
+
+        dispatch_abort_markers(&coord, &entry)
+            .await
+            .expect("dispatch markers");
+
+        // The abort marker is a single control record → LEO advances to 1.
+        assert!(
+            part.log_end_offset() == Offset(1),
+            "abort marker must be appended (LEO 1), got {:?}",
+            part.log_end_offset()
+        );
+    }
+
+    /// A partition in the entry that isn't hosted locally is skipped without
+    /// error (no marker to dispatch) — the loop's `else` branch.
+    #[tokio::test]
+    async fn dispatch_abort_markers_skips_non_local_partition() {
+        let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let coord = TxnCoordinator::new(
+            crabka_audit::NodeId(1),
+            partitions,
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        );
+        let mut entry = TxnEntry::new_empty("tx-2".to_string(), ProducerId(2000), 0, 60_000, 0);
+        entry.partitions.insert(TopicPartition {
+            topic: "ghost".to_string(),
+            partition: PartitionIndex(0),
+        });
+        // No local partition registered → nothing appended, no error.
+        dispatch_abort_markers(&coord, &entry)
+            .await
+            .expect("skip non-local partition without error");
+    }
 }

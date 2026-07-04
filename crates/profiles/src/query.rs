@@ -4990,6 +4990,14 @@ overrides:
     }
 
     #[test]
+    fn heatmap_time_buckets_span_uses_nonzero_start() {
+        // With a non-zero start, the bucket count depends on `end - start`, not
+        // `end + start`. Here span = 20_000ms / 10_000ms/step = 2 buckets.
+        // A `+` in the span computation would see 80_000ms → 8 buckets.
+        check!(heatmap_time_buckets(StartMs(30_000), EndMs(50_000), 10.0).unwrap() == 2);
+    }
+
+    #[test]
     fn heatmap_time_buckets_rejects_sub_millisecond_steps() {
         for step in [0.0001, 0.0005, 0.0009999] {
             check!(heatmap_time_buckets(StartMs(0), EndMs(1), step).is_err());

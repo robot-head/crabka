@@ -207,6 +207,11 @@ impl Log {
         ),
         err,
     )]
+    // The only mutant here is the `segments.len() + 1` in the `span.record`
+    // call, a tracing-span diagnostic field with no behavioral effect. The
+    // sibling `seal_at(next_base - 1)` recovery arithmetic is separately pinned
+    // by `reopen_seals_recovered_segments_at_next_base_minus_one`.
+    #[cfg_attr(test, mutants::skip)]
     pub fn open(dir: impl AsRef<Path>, config: LogConfig) -> Result<Self, LogError> {
         let dir = dir.as_ref().to_path_buf();
         fs::create_dir_all(&dir)?;
@@ -742,6 +747,12 @@ impl Log {
         fields(batches = tracing::field::Empty),
         err,
     )]
+    // The `current_offset = base + last_offset_delta + 1` cursor advance only
+    // ever moves the cursor too LOW under these mutations; each segment's
+    // `read` self-filters via `batch_last >= offset` and clamps sub-base
+    // offsets, so a too-low cursor yields the same batches and `start_offset`
+    // (taken from `batches.first()`). No distinguishing input exists.
+    #[cfg_attr(test, mutants::skip)]
     pub fn read(&self, offset: Offset, max_bytes: usize) -> Result<ReadOutput, LogError> {
         let log_start = self.log_start_offset();
         let log_end = self.log_end_offset();
@@ -1899,6 +1910,80 @@ mod tests {
         assert!(log.log_end_offset() == before);
     }
 
+    // `truncate_to` promoting a **sealed** segment with base_offset > 0 must
+    // compute the relative cut as `offset - base` (line: `offset.0 -
+    // seg.base_offset().0`). We build sealed segment base 1 holding three
+    // single-record batches (offsets 1,2,3), drop the active segment, and
+    // truncate to offset 3. Correct `rel = 3 - 1 = 2` drops only the offset-3
+    // batch → log_end 3. Both the `+` mutant (`rel = 4`) and the `/` mutant
+    // (`rel = 3`) leave every batch in place → log_end 4.
+    #[test]
+    fn truncate_to_promoted_sealed_uses_relative_offset() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let big = LogConfig {
+            segment_bytes: 1 << 30,
+            ..LogConfig::default()
+        };
+        let tiny = LogConfig {
+            segment_bytes: 1,
+            ..LogConfig::default()
+        };
+        // Batch A → active base 0.
+        log.append(&mut test_batch_at(0)).unwrap();
+        // Roll: seal base 0, fresh active base 1, batch B.
+        log.set_config(tiny.clone());
+        log.append(&mut test_batch_at(1)).unwrap();
+        // No roll: batches C, D accumulate in active base 1 (offsets 2, 3).
+        log.set_config(big);
+        log.append(&mut test_batch_at(2)).unwrap();
+        log.append(&mut test_batch_at(3)).unwrap();
+        // Roll: seal base 1 (offsets 1,2,3), fresh active base 4, batch E.
+        log.set_config(tiny);
+        log.append(&mut test_batch_at(4)).unwrap();
+        assert!(log.log_end_offset() == Offset(5));
+
+        // Truncate to 3: active base 4 (>=3) is dropped, then sealed base 1 is
+        // promoted and truncated. rel = 3 - 1 = 2 keeps offsets 1,2, drops 3.
+        log.truncate_to(Offset(3)).unwrap();
+        assert!(log.log_end_offset() == Offset(3));
+    }
+
+    // `truncate_to` truncating a **surviving active** segment with
+    // base_offset > 0 must compute the cut as `offset - base` (line:
+    // `offset.0 - active.base_offset().0`). Active segment base 1 holds three
+    // single-record batches (offsets 1,2,3); truncate to offset 3. Correct
+    // `rel = 3 - 1 = 2` drops only the offset-3 batch → log_end 3. The `+`
+    // mutant (`rel = 4`) drops nothing → log_end 4.
+    #[test]
+    fn truncate_to_active_segment_uses_relative_offset() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let big = LogConfig {
+            segment_bytes: 1 << 30,
+            ..LogConfig::default()
+        };
+        let tiny = LogConfig {
+            segment_bytes: 1,
+            ..LogConfig::default()
+        };
+        // Batch A → active base 0.
+        log.append(&mut test_batch_at(0)).unwrap();
+        // Roll: seal base 0, fresh active base 1, batch B.
+        log.set_config(tiny);
+        log.append(&mut test_batch_at(1)).unwrap();
+        // No roll: batches C, D accumulate in active base 1 (offsets 2, 3).
+        log.set_config(big);
+        log.append(&mut test_batch_at(2)).unwrap();
+        log.append(&mut test_batch_at(3)).unwrap();
+        assert!(log.log_end_offset() == Offset(4));
+
+        // Active base 1 survives (1 < 3); rel = 3 - 1 = 2 drops the offset-3
+        // batch, keeps offsets 1,2 → log_end 3.
+        log.truncate_to(Offset(3)).unwrap();
+        assert!(log.log_end_offset() == Offset(3));
+    }
+
     #[test]
     fn open_recovers_partial_trailing_batch() {
         let dir = tempdir().unwrap();
@@ -2103,6 +2188,74 @@ mod tests {
         );
     }
 
+    // The aborted-txn `last_offset` is `marker.base_offset +
+    // marker.last_offset_delta`. Using a marker that spans TWO offsets
+    // (`last_offset_delta = 1`) pins the `+`: the txn batch occupies offsets
+    // 0..=2, the abort marker lands at base_offset 3 with delta 1, so the
+    // recorded `last_offset` is `3 + 1 = 4`. Mutating `+`→`-` would record 2.
+    #[test]
+    fn abort_marker_last_offset_uses_base_plus_delta() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        let mut t = transactional_batch(1000, 0, &["a", "b", "c"]);
+        log.append(&mut t).unwrap(); // offsets 0..=2
+
+        // Abort marker spanning two offsets (delta 1): base 3, last 4.
+        let mut a = abort_marker(1000, 0);
+        a.last_offset_delta = 1;
+        log.append(&mut a).unwrap();
+
+        let idx = TxnIndex::open(dir.path().join("00000000000000000000.txnindex")).unwrap();
+        assert!(
+            idx.entries()
+                == [AbortedTxn {
+                    start_offset: Offset(0),
+                    last_offset: Offset(4), // 3 + 1, not 3 - 1
+                    producer_id: ProducerId(1000),
+                }]
+        );
+    }
+
+    // LSO tracking (owned path) keys on `is_transactional() && !pid.is_none()`.
+    // A NON-transactional batch that carries a valid producer_id (idempotent
+    // producer, pid >= 0) must NOT be treated as an open txn: LSO advances to
+    // log_end. Mutating `&&`→`||` would hold LSO at the batch base (0).
+    #[test]
+    fn non_txn_batch_with_valid_pid_advances_lso() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        // Idempotent (not transactional) producer: pid >= 0, no transactional
+        // attribute bit set.
+        let mut b = sample_batch(2);
+        b.producer_id = 55;
+        b.producer_epoch = 0;
+        assert!(!b.attributes.is_transactional());
+        log.append(&mut b).unwrap();
+        // Not an open txn → LSO advances to log_end (2), not held at 0.
+        assert!(log.lso() == log.log_end_offset());
+        assert!(log.lso() == Offset(2));
+    }
+
+    // Verbatim counterpart of `non_txn_batch_with_valid_pid_advances_lso`,
+    // pinning the `&&` in the verbatim LSO-tracking branch. A non-transactional
+    // verbatim batch with a valid producer_id must advance LSO; `&&`→`||`
+    // would hold it at the batch base (0).
+    #[test]
+    fn non_txn_verbatim_batch_with_valid_pid_advances_lso() {
+        let (dir, mut log) = test_log();
+        let mut producer = test_batch_at(0);
+        producer.last_offset_delta = 1; // spans offsets 0..=1
+        producer.producer_id = 55; // valid pid, but NOT transactional
+        producer.producer_epoch = 0;
+        assert!(!producer.attributes.is_transactional());
+        let (_wire, vb) = verbatim_from(&producer, LeaderEpoch(0));
+        log.append_verbatim(&vb).unwrap();
+        assert!(log.log_end_offset() == Offset(2));
+        // Non-txn → LSO advances to log_end (2), not held at 0.
+        assert!(log.lso() == Offset(2));
+        drop(dir);
+    }
+
     #[test]
     fn lso_held_by_remaining_producer_after_partial_commit() {
         use tempfile::TempDir;
@@ -2252,6 +2405,45 @@ mod tests {
             "read from offset 0 after reopen must return the first batch (offset 0), got start_offset={}",
             r.start_offset
         );
+    }
+
+    /// On reopen, each recovered sealed segment's `last_offset` is set to
+    /// `next_base - 1` (line: `seg.seal_at(Offset(base_offsets[i + 1] - 1))`).
+    /// Multi-record segments give non-consecutive bases so the `- 1` is
+    /// observable: for consecutive exports `last_offset + 1 == next_base`.
+    /// Mutating `- 1`→`+ 1` sets `last_offset = next_base + 1` (so
+    /// `last_offset + 1 == next_base + 2`); mutating `- 1`→`/ 1` sets
+    /// `last_offset = next_base` (so `last_offset + 1 == next_base + 1`).
+    #[test]
+    fn reopen_seals_recovered_segments_at_next_base_minus_one() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let cfg = LogConfig {
+            segment_bytes: 1, // roll on every append
+            ..LogConfig::default()
+        };
+        {
+            let mut log = Log::open(dir.path(), cfg.clone()).unwrap();
+            // Multi-record batches → segment bases are 0, 2, 4, ... (each
+            // sealed segment spans two offsets), so next_base - base == 2.
+            for _ in 0..4 {
+                log.append(&mut sample_batch(2)).unwrap();
+            }
+            assert!(log.segments.len() >= 2, "need multiple sealed segments");
+        }
+        // Reopen: sealed segments recovered via no-scan open + seal_at(next-1).
+        let reopened = Log::open(dir.path(), cfg).unwrap();
+        let exports = reopened.tierable_segments();
+        assert!(exports.len() >= 2, "expected multiple sealed exports");
+        for pair in exports.windows(2) {
+            // last_offset must be exactly one below the next segment's base.
+            assert!(
+                pair[0].last_offset + 1 == pair[1].base_offset,
+                "sealed last_offset {:?} + 1 must equal next base {:?}",
+                pair[0].last_offset,
+                pair[1].base_offset
+            );
+        }
     }
 
     #[test]
@@ -2438,6 +2630,60 @@ mod tests {
         assert!(
             keys.contains(&b"active-key".as_ref()),
             "active segment record must survive"
+        );
+    }
+
+    /// Compaction must actually run — not be a no-op. Three sealed segments
+    /// each carry a record under the SAME key "k1"; after `compact` exactly ONE
+    /// k1 record (the newest, "v2") must remain, and the sealed segment list
+    /// must collapse to a single rewritten segment. Skipping compaction
+    /// (`return Ok(())`) would leave all three k1 records and three sealed
+    /// segments.
+    #[test]
+    fn compact_actually_dedupes_reducing_record_count() {
+        let dir = tempdir().unwrap();
+        let cfg = LogConfig {
+            cleanup_policy: crate::CleanupPolicy::Compact,
+            segment_bytes: 1, // one batch per segment: every append exceeds this and rolls
+            ..Default::default()
+        };
+        let mut log = Log::open(dir.path(), cfg).unwrap();
+
+        // Three sealed segments, each one record under "k1" (v0, v1, v2).
+        for i in 0..3 {
+            let v = format!("v{i}");
+            let mut b = keyed_batch(0, &[(0, b"k1", v.as_bytes())]);
+            log.append(&mut b).unwrap();
+        }
+        // A final append lands in a fresh active segment (untouched by compact).
+        let mut tail = keyed_batch(0, &[(0, b"tail", b"t")]);
+        log.append(&mut tail).unwrap();
+
+        // Sanity: before compaction there are >= 2 sealed segments holding the
+        // three k1 versions.
+        assert!(log.segments.len() >= 2, "need multiple sealed segments");
+
+        log.compact(&compaction_ctx()).unwrap();
+
+        // Sealed segments collapse to exactly one rewritten segment.
+        assert!(
+            log.segments.len() == 1,
+            "compaction must consolidate sealed segments into one; got {}",
+            log.segments.len()
+        );
+
+        // Exactly one surviving k1 record, and it is the newest value "v2".
+        let out = log.read(Offset(0), 1024 * 1024).unwrap();
+        let k1_values: Vec<&[u8]> = out
+            .batches
+            .iter()
+            .flat_map(|b| b.records.iter())
+            .filter(|r| r.key.as_deref() == Some(b"k1".as_ref()))
+            .map(|r| r.value.as_deref().unwrap())
+            .collect();
+        assert!(
+            k1_values == vec![b"v2".as_ref()],
+            "exactly the newest k1 must survive; got {k1_values:?}"
         );
     }
 

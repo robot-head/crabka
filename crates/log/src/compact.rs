@@ -628,6 +628,54 @@ mod build_map_tests {
         let map = build_offset_map(&segs).unwrap();
         assert!(map.get(b"k1".as_ref()) == Some(&Offset(10)));
     }
+
+    // Survivor detection compares each record's absolute offset
+    // (`base_offset + offset_delta`) against the newest-for-key offset in the
+    // offset map (`== Some(absolute)`). Two transactional producers write the
+    // SAME key k1:
+    //   - producer 1000 at offset 0 (superseded), and
+    //   - producer 2000 at base 10, delta 5 → offset 15 (newest for k1).
+    // The map therefore holds k1 → 15, so producer 2000 survives and producer
+    // 1000 does not. This pins:
+    //   - `absolute = base_offset + offset_delta` (line 429): mutating `+`→`-`
+    //     makes 2000's record resolve to 5, not 15 → 2000 misclassified
+    //     `DataFullyGone`.
+    //   - the `== Some(absolute)` equality (line 430): mutating `==`→`!=`
+    //     inverts the match — 2000 (the match) becomes `DataFullyGone` and
+    //     1000 (the non-match) becomes `DataSurvives`.
+    #[test]
+    fn build_detects_surviving_txn_producer() {
+        let dir = tempdir().unwrap();
+        // Producer 1000: k1 at offset 0 — superseded by producer 2000.
+        let old = RecordBatch {
+            base_offset: 0,
+            last_offset_delta: 0,
+            producer_id: 1000,
+            attributes: Attributes::default().with_transactional(true),
+            records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+            ..RecordBatch::default()
+        };
+        // Producer 2000: k1 at base 10, offset_delta 5 → absolute offset 15,
+        // the newest-for-key record.
+        let newest = RecordBatch {
+            base_offset: 10,
+            last_offset_delta: 5,
+            producer_id: 2000,
+            attributes: Attributes::default().with_transactional(true),
+            records: vec![make_record(5, Some(b"k1"), Some(b"v2"))],
+            ..RecordBatch::default()
+        };
+        let seg = write_sealed_batches(dir.path(), &[old, newest]);
+        let segs: Vec<&Segment> = vec![&seg];
+        let map = build_offset_map(&segs).unwrap();
+        // Sanity: the newest-for-key absolute offset is 15 (10 + 5).
+        assert!(map.get(b"k1".as_ref()) == Some(&Offset(15)));
+
+        let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+        // Producer 2000's newest data survives; producer 1000's is superseded.
+        assert!(txn.txn_state(ProducerId(2000)) == TxnDataState::DataSurvives);
+        assert!(txn.txn_state(ProducerId(1000)) == TxnDataState::DataFullyGone);
+    }
 }
 
 /// Result of [`rewrite_segments`]: paths to the three `.swap` files
@@ -1192,6 +1240,53 @@ mod rewrite_tests {
         check!(bare.producer_epoch == 7);
         check!(bare.base_sequence == 3);
         check!(bare.base_offset == 0);
+    }
+
+    // `RETAIN_EMPTY` last-offset arithmetic: an emptied output-last batch is
+    // re-emitted as a bare header, and its `base_offset + last_offset_delta`
+    // must extend `new_last_offset`. The emptied batch sits at base_offset 100
+    // with `last_offset_delta` 5, so its last absolute offset is `100 + 5 =
+    // 105`. This pins the `+` in `Offset(base_offset + last_offset_delta)`:
+    // mutating it to `-` would report `new_last_offset == 95`.
+    #[test]
+    fn rewrite_retain_empty_extends_last_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        // Batch 0 (base 0): one surviving keyed record (abs offset 0).
+        let data0 = RecordBatch {
+            base_offset: 0,
+            last_offset_delta: 0,
+            producer_id: -1,
+            records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+            ..RecordBatch::default()
+        };
+        // Batch 1 (base 100, last_offset_delta 5): only NULL-key records, all
+        // dropped, so the batch is emptied. As the output-last batch it is
+        // re-emitted as a bare header spanning abs offsets 100..=105.
+        let data1 = RecordBatch {
+            base_offset: 100,
+            last_offset_delta: 5,
+            producer_id: -1,
+            records: vec![
+                make_record(0, None, Some(b"n1")),
+                make_record(5, None, Some(b"n2")),
+            ],
+            ..RecordBatch::default()
+        };
+        let seg = write_sealed_batches(dir.path(), &[data0, data1]);
+        let segs = vec![&seg];
+        let out = rewrite_simple(dir.path(), &segs);
+
+        // The emptied batch is re-emitted as a bare header at base_offset 100.
+        let bytes = fs::read(&out.log_swap).unwrap();
+        let batches = decode_all(&bytes);
+        let bare = batches
+            .iter()
+            .find(|b| b.base_offset == 100)
+            .expect("emptied output-last batch re-emitted as bare header");
+        check!(bare.records.is_empty());
+        check!(bare.last_offset_delta == 5);
+        // new_last_offset covers the bare header's last absolute offset: 100+5.
+        assert!(out.new_last_offset == Offset(105));
     }
 }
 

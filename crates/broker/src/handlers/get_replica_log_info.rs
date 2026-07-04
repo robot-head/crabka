@@ -191,6 +191,105 @@ mod tests {
 
     use super::*;
 
+    /// A locally-hosted partition answers with its cached
+    /// `current_leader_epoch` (and `last_written_leader_epoch`) — a non-zero
+    /// epoch pins the struct field against the deletion mutant, which would
+    /// default it to 0.
+    #[tokio::test]
+    async fn hosted_partition_reports_current_leader_epoch() {
+        use std::sync::{Arc, atomic::Ordering};
+
+        use bytes::BytesMut;
+        use crabka_metadata::{MetadataRecord, NodeId, PartitionRecord, TopicRecord};
+        use crabka_protocol::owned::{
+            get_replica_log_info_request::{self, GetReplicaLogInfoRequest, TopicPartitions},
+            get_replica_log_info_response::GetReplicaLogInfoResponse,
+        };
+
+        use crate::test_support::{peer, principal};
+
+        let topic_uuid = uuid::Uuid::from_u128(0xABCD);
+        let (broker_handle, dir) = crate::test_support::start_broker_with_authorizer_no_audit(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+        )
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+
+        // Seed the topic so the handler resolves topic_id → name.
+        broker
+            .controller
+            .submit_change(vec![
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "orders".into(),
+                    topic_id: topic_uuid,
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                MetadataRecord::V1Partition(PartitionRecord {
+                    topic: "orders".into(),
+                    partition: 0,
+                    leader: NodeId(1),
+                    replicas: vec![NodeId(1)],
+                    isr: vec![NodeId(1)],
+                    leader_epoch: crabka_metadata::LeaderEpoch(0),
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![uuid::Uuid::nil()],
+                    partition_epoch: 1,
+                }),
+            ])
+            .await
+            .expect("seed topic");
+
+        // Materialize a local replica and force a non-zero leader epoch.
+        let part_dir = crate::log_dir::partition_dir(dir.path(), "orders", 0);
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default()).unwrap();
+        let part = crate::broker::spawn_partition(
+            "orders".to_string(),
+            crabka_ids::PartitionIndex(0),
+            dir.path().to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        part.current_leader_epoch.store(11, Ordering::Release);
+        broker
+            .partitions
+            .insert("orders".to_string(), crabka_ids::PartitionIndex(0), part);
+
+        let version = get_replica_log_info_request::MAX_VERSION;
+        let req = GetReplicaLogInfoRequest {
+            topic_partitions: vec![TopicPartitions {
+                topic_id: crabka_protocol::primitives::uuid::Uuid(*topic_uuid.as_bytes()),
+                partitions: vec![0],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut req_buf = BytesMut::new();
+        req.encode(&mut req_buf, version).expect("encode req");
+
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = crate::test_support::request_context(&p, &peer, "inter-broker");
+        let bytes = handle(&broker, version, 123, &req_buf, &ctx)
+            .await
+            .expect("handle");
+        let mut cur: &[u8] = &bytes;
+        let resp = GetReplicaLogInfoResponse::decode(&mut cur, version).unwrap();
+
+        let row = &resp.topic_partition_log_info_list[0].partition_log_info[0];
+        assert!(row.error_code == codes::NONE);
+        assert!(
+            row.current_leader_epoch == 11,
+            "hosted partition must report its current_leader_epoch (11), got {}",
+            row.current_leader_epoch
+        );
+        assert!(row.last_written_leader_epoch == 11);
+        broker_handle.shutdown().await;
+    }
+
     /// Empty ACLs + no super-users → every principal is denied
     /// `ClusterAction`, so the denied response carries
     /// `CLUSTER_AUTHORIZATION_FAILED`.

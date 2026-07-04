@@ -1353,4 +1353,55 @@ mod tests {
         check!(actor.state.target.active["m1"] == BTreeMap::from([("0".to_string(), vec![0, 1])]));
         check!(actor.state.phase == StreamsGroupStatePhase::Stable);
     }
+
+    #[test]
+    fn task_lag_is_end_minus_offset_only_when_both_reported() {
+        let mut m = StreamsMemberState::joining("m1", "client", "/127.0.0.1");
+        // Two tasks with both endpoints reported → lag = end - offset.
+        m.task_end_offsets = BTreeMap::from([
+            (("sub-a".to_string(), 0), Offset(10)),
+            (("sub-a".to_string(), 1), Offset(5)),
+            // A task with an end offset but NO reported position is dropped.
+            (("sub-b".to_string(), 0), Offset(99)),
+        ]);
+        m.task_offsets = BTreeMap::from([
+            (("sub-a".to_string(), 0), Offset(3)),
+            (("sub-a".to_string(), 1), Offset(5)),
+        ]);
+        let lag = task_lag(&m);
+        // 10 - 3 = 7 (kills `-`→`+` which is 13, and `-`→`/` which is 3).
+        check!(lag[&("sub-a".to_string(), 0)] == 7);
+        // 5 - 5 = 0 (kills `-`→`/` which would be 1).
+        check!(lag[&("sub-a".to_string(), 1)] == 0);
+        // sub-b has no reported position, so it is absent (pins the filter and
+        // kills the fixed-map replacements that inject sub-b / xyzzy keys).
+        check!(!lag.contains_key(&("sub-b".to_string(), 0)));
+        check!(lag.len() == 2);
+    }
+
+    #[test]
+    fn task_offsets_to_map_wraps_each_wire_entry() {
+        use crabka_protocol::owned::common::streams_group_heartbeat_request::task_offset::TaskOffset;
+        let wire = vec![
+            TaskOffset {
+                subtopology_id: "sub-a".to_string(),
+                partition: 0,
+                offset: 42,
+                ..Default::default()
+            },
+            TaskOffset {
+                subtopology_id: "sub-a".to_string(),
+                partition: 1,
+                offset: 7,
+                ..Default::default()
+            },
+        ];
+        let map = task_offsets_to_map(&wire);
+        check!(
+            map == BTreeMap::from([
+                (("sub-a".to_string(), 0), Offset(42)),
+                (("sub-a".to_string(), 1), Offset(7)),
+            ])
+        );
+    }
 }

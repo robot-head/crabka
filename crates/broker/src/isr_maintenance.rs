@@ -699,6 +699,21 @@ mod tests {
         assert_eq!(req, expected);
     }
 
+    #[test]
+    fn build_request_stamps_leaders_own_broker_epoch_from_image() {
+        // The sending broker (id 5) is registered with a distinct positive
+        // broker epoch (reg() stamps epoch == node id). The top-level
+        // `broker_epoch` field must carry that epoch (5), not the default (0)
+        // and not the unknown-broker sentinel (-1). Pins the KIP-903 stamp so
+        // dropping the field (→ Default 0) is caught.
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&reg(NodeId(5)));
+
+        let req = build_alter_partition_request(&image, 5, "orders", 0, &[NodeId(5)], 3);
+
+        assert!(req.broker_epoch == 5);
+    }
+
     #[tokio::test]
     async fn send_alter_partition_errors_without_controller_target() {
         let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(

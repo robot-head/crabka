@@ -354,6 +354,18 @@ mod tests {
     }
 
     #[test]
+    fn record_ingest_adds_positive_bytes_and_items() {
+        let m = ServiceMetrics::new();
+        m.record_ingest(true, IngestBytes(1024), IngestItems(3), 0.012);
+
+        // A positive body/item count must flow through to the cumulative
+        // counters. This pins the `> 0` guards: flipping to `< 0` or `== 0`
+        // would skip `inc_by` for positive inputs, leaving these at zero.
+        check!(m.ingest_bytes.get() == 1024);
+        check!(m.ingest_items.get() == 3);
+    }
+
+    #[test]
     fn wal_append_failure_is_separate_from_request_outcome() {
         let m = ServiceMetrics::new();
         // An ok=false request alone must NOT bump wal_append_failures.

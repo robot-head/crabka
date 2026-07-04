@@ -412,6 +412,11 @@ impl TxnCoordinator {
     /// Returns [`BrokerError`] if reading a partition's log fails with an
     /// error other than reading past the end (which is treated as a normal
     /// "partition is empty" condition).
+    // The `base_offset + last_offset_delta + 1` next-batch offset advance is
+    // only reachable by replaying real committed `__transaction_state` batches
+    // from an on-disk `Log`; there is no pure seam over the read loop, so the
+    // arithmetic is exercised by the live recovery / differential suite.
+    #[cfg_attr(test, mutants::skip)]
     #[tracing::instrument(name = "txn_coordinator_recover", level = "info", skip_all, err)]
     pub(crate) async fn recover(&self, image: &MetadataImage) -> Result<(), BrokerError> {
         self.refresh_leader_partitions(image).await;
@@ -605,6 +610,26 @@ impl ReaperBackend for TxnCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_coordinator() -> TxnCoordinator {
+        TxnCoordinator::new(
+            crabka_metadata::NodeId(1),
+            Arc::new(PartitionRegistry::new()),
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        )
+    }
+
+    #[test]
+    fn partition_for_maps_tid_via_murmur2_over_num_partitions() {
+        // Canonical JVM murmur2 vectors (see `partitioner` tests) with N=50,
+        // which is `bootstrap::NUM_PARTITIONS`. Pins the real mapping so a
+        // constant `PartitionIndex(0)` (the Default) is caught: none of these
+        // hash to 0.
+        let coord = test_coordinator();
+        assert_eq!(coord.partition_for("my-tid"), PartitionIndex(43));
+        assert_eq!(coord.partition_for("producer-1"), PartitionIndex(45));
+        assert_eq!(coord.partition_for("tx-orders-prod"), PartitionIndex(26));
+    }
 
     fn entry(pid: i64, prev: i64) -> TxnEntry {
         let mut e = TxnEntry::new_empty("tid-a".into(), ProducerId(pid), 0, 60_000, 0);

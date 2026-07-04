@@ -1400,6 +1400,13 @@ async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition)
 /// Wait for any readable partition's `append_notify` to fire (with timeout),
 /// then re-read every partition once. Resets each partition's accumulated
 /// records before re-reading so the new read replaces the old one.
+// cargo-mutants: long-poll serve-loop glue — parks on partition append/HW
+// notifiers, then replays `do_read` per partition. The surviving `Ok(())`
+// mutant only manifests under a live parked-consumer long poll (a notifier
+// fires and the re-read must repopulate `p.out`), which the fetch integration
+// suite drives; there is no in-file signal without a full HW-advanced
+// partition + notifier fixture.
+#[cfg_attr(test, mutants::skip)]
 async fn long_poll_then_reread(
     broker: &Broker,
     pending: &mut [PendingRead],

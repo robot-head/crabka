@@ -184,6 +184,75 @@ mod tests {
         client_id = "admin-client"
     );
 
+    /// The producer-id filter keeps entries whose pid IS in the filter set.
+    /// With a single seeded txn whose pid matches the filter, the entry is
+    /// returned. Deleting the `!` in `!pid_filter.contains(..)` would invert
+    /// the guard and drop the matching entry instead.
+    #[tokio::test]
+    async fn producer_id_filter_keeps_matching_pid() {
+        use crabka_log::ProducerId;
+
+        use crate::txn::state::TxnEntry;
+
+        let version = crabka_protocol::owned::list_transactions_response::MAX_VERSION;
+        let (broker_handle, dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+
+        // Materialize the __transaction_state partition this tid hashes to so
+        // the coordinator can persist the seeded entry.
+        let tid = "txn-list-pid-filter";
+        let coord = &broker.txn_coordinator;
+        let p = coord.partition_for(tid);
+        let part_dir =
+            crate::log_dir::partition_dir(dir.path(), crate::txn::bootstrap::TOPIC, p.get());
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default()).unwrap();
+        let part = crate::broker::spawn_partition(
+            crate::txn::bootstrap::TOPIC.to_string(),
+            p,
+            dir.path().to_path_buf(),
+            log,
+            crate::log_dir_status::LogDirRegistry::default(),
+            std::sync::Arc::new(crate::producer_state::ProducerState::new()),
+        );
+        broker
+            .partitions
+            .insert(crate::txn::bootstrap::TOPIC.to_string(), p, part);
+
+        let entry = TxnEntry::new_empty(tid.to_string(), ProducerId(100), 0, 60_000, 0);
+        coord
+            .put(entry, crate::txn::version::TxnVersion::Classic)
+            .await
+            .expect("seed txn entry");
+
+        let p_alice = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p_alice, &peer);
+        // Filter on the seeded pid → the matching entry must be kept.
+        let req = ListTransactionsRequest {
+            producer_id_filters: vec![100],
+            duration_filter: -1,
+            ..Default::default()
+        };
+        let req = encode_request(&req, version);
+        let bytes = handle(&broker, version, 123, &req, &ctx)
+            .await
+            .expect("handle");
+        let resp = decode_response(&bytes, version);
+
+        let pids: Vec<i64> = resp
+            .transaction_states
+            .iter()
+            .map(|s| s.producer_id)
+            .collect();
+        assert!(
+            pids == vec![100],
+            "pid filter must keep the matching entry, got {pids:?}"
+        );
+        broker_handle.shutdown().await;
+    }
+
     #[tokio::test]
     async fn handler_reports_unknown_state_filters_and_top_level_fields() {
         let version = crabka_protocol::owned::list_transactions_response::MAX_VERSION;

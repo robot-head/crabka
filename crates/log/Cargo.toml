@@ -34,6 +34,7 @@ tracing = { workspace = true }
 zerocopy = { workspace = true }
 
 [dev-dependencies]
+mutants = { workspace = true }
 assert2 = { workspace = true }
 proptest = { workspace = true }
 # Exhaustive enumeration of the leader-epoch truncation core

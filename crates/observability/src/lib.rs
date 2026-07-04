@@ -21878,4 +21878,77 @@ mod tests {
         assert!(!pattern_value_is_variable("cafe"));
         assert!(!pattern_value_is_variable("authenticationToken"));
     }
+
+    /// A negative range offset MUST render with a leading `-` sign, and a positive
+    /// offset MUST NOT. This pins the `offset_ns.0 < 0` sign branch in
+    /// `format_metric_range_selector`: replacing `<` with `==` (never true here,
+    /// since the `== 0` case is handled by the outer guard) would drop the sign and
+    /// emit a positive offset for a query that asked to look *forward* in time.
+    #[test]
+    fn format_metric_range_selector_signs_negative_offset() {
+        let negative = parse_metric_query("count_over_time({app=\"x\"}[5m] offset -3m)").unwrap();
+        let positive = parse_metric_query("count_over_time({app=\"x\"}[5m] offset 3m)").unwrap();
+
+        let negative_selector =
+            format_metric_range_selector(&negative).expect("negative offset selector");
+        let positive_selector =
+            format_metric_range_selector(&positive).expect("positive offset selector");
+
+        // The negative offset carries the sign; the positive one does not.
+        check!(negative_selector.contains(" offset -"));
+        check!(!positive_selector.contains(" offset -"));
+        // The two differ ONLY by the sign character.
+        check!(negative_selector == positive_selector.replace(" offset ", " offset -"));
+    }
+
+    /// `count_loki_metric_result_hot_tail_samples` counts matched ingester samples and
+    /// returns 0 when there is nothing to match: an `absent_over_time` query short-
+    /// circuits to 0, and a query whose response JSON has no `data.result` array also
+    /// yields 0. Replacing the whole body with a constant `1` (the mutant) would report
+    /// a phantom ingester sample and skew the store/ingester scan-stat split.
+    #[test]
+    fn count_loki_metric_result_hot_tail_samples_returns_zero_when_nothing_matches() {
+        let plan = StreamPlan {
+            tenant: "tenant".to_string(),
+            time_range: TimeRange::new(0, 300_000_000_000).unwrap(),
+            query: StreamQuery {
+                matchers: Vec::new(),
+                pipeline: Vec::new(),
+            },
+            fingerprints: BTreeSet::new(),
+            blocks: Vec::new(),
+        };
+        let frontier = CompactionFrontier::new(0);
+        let eval_range = TimeRange::new(0, 300_000_000_000).unwrap();
+        let step_ns = 60_000_000_000;
+
+        // `absent_over_time` short-circuits to 0 regardless of the response body.
+        let absent_query = parse_metric_query("absent_over_time({app=\"x\"}[5m])").unwrap();
+        let absent = count_loki_metric_result_hot_tail_samples(
+            &json!({ "data": { "result": [] } }),
+            &plan,
+            &absent_query,
+            &[],
+            &frontier,
+            eval_range,
+            step_ns,
+            &[],
+        );
+        check!(absent == 0);
+
+        // A non-absent query with an empty hot tail and a response lacking any
+        // `data.result` array matches nothing and returns 0.
+        let count_query = parse_metric_query("count_over_time({app=\"x\"}[5m])").unwrap();
+        let none = count_loki_metric_result_hot_tail_samples(
+            &json!({}),
+            &plan,
+            &count_query,
+            &[],
+            &frontier,
+            eval_range,
+            step_ns,
+            &[],
+        );
+        check!(none == 0);
+    }
 }

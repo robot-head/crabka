@@ -80,3 +80,39 @@ fn parse_version(v: &str) -> Result<Option<SchemaVersion>, SrError> {
         _ => Err(SrError::InvalidVersion(v.to_string())),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use assert2::check;
+
+    use super::*;
+
+    #[test]
+    fn parse_version_latest_is_none() {
+        check!(matches!(parse_version("latest"), Ok(None)));
+    }
+
+    #[test]
+    fn parse_version_positive_is_some() {
+        check!(matches!(parse_version("1"), Ok(Some(SchemaVersion(1)))));
+        check!(matches!(parse_version("42"), Ok(Some(SchemaVersion(42)))));
+    }
+
+    #[test]
+    fn parse_version_zero_is_rejected() {
+        // 0 parses as i32 but fails the `n >= 1` guard: must be InvalidVersion,
+        // not Ok(Some(SchemaVersion(0))).
+        check!(matches!(
+            parse_version("0"),
+            Err(SrError::InvalidVersion(_))
+        ));
+    }
+
+    #[test]
+    fn parse_version_negative_is_rejected() {
+        check!(matches!(
+            parse_version("-5"),
+            Err(SrError::InvalidVersion(_))
+        ));
+    }
+}

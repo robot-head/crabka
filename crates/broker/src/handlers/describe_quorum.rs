@@ -544,6 +544,37 @@ mod tests {
     }
 
     #[test]
+    fn leader_id_above_i32_max_falls_back_to_minus_one() {
+        // A raft NodeId is u64; the wire replica/leader id is i32. A leader
+        // node id beyond i32::MAX must surface as the -1 "unknown" sentinel
+        // (via `try_from(..).unwrap_or(-1)`), never wrap into a positive id.
+        let req = req_for(CLUSTER_METADATA_TOPIC, 0);
+        let huge = u64::from(u32::MAX) + 1; // > i32::MAX, try_from fails
+        let q = quorum_state(Some(huge), 1, 0, &[1], &[]);
+        let out = build_topic_responses(&req, &q);
+        assert!(
+            out[0].partitions[0].leader_id == -1,
+            "leader node id > i32::MAX must fall back to -1, not a positive id"
+        );
+    }
+
+    #[test]
+    fn voter_replica_id_above_i32_max_falls_back_to_minus_one() {
+        // Same guard on the per-voter replica_id: a voter node id beyond
+        // i32::MAX surfaces as -1, not a wrapped positive value.
+        let req = req_for(CLUSTER_METADATA_TOPIC, 0);
+        let huge = u64::from(u32::MAX) + 1; // > i32::MAX
+        let q = quorum_state(Some(1), 1, 0, &[huge], &[]);
+        let out = build_topic_responses(&req, &q);
+        let voters = &out[0].partitions[0].current_voters;
+        assert!(voters.len() == 1);
+        assert!(
+            voters[0].replica_id == -1,
+            "voter node id > i32::MAX must fall back to -1, not a positive id"
+        );
+    }
+
+    #[test]
     fn current_term_above_i32_max_saturates() {
         // Defensive: openraft's term is u64; KRaft wire is i32. A term
         // beyond i32::MAX (huge cluster history) saturates so we don't

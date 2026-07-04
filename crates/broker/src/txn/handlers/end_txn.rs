@@ -535,6 +535,11 @@ async fn dispatch_markers(
 /// leadership change. Leader-election-on-failure is not yet implemented, so we
 /// hard-code `coordinator_epoch = 0` here. Once coordinator failover is
 /// implemented the caller must supply the real epoch.
+// The `WriteTxnMarkersRequest` is built inline and immediately dispatched over a
+// live inter-broker connection; the `markers` field never surfaces as a return
+// value, so dropping it (→ empty Default vec) is only observable through the
+// remote RPC. Exercised by the live txn marker-fanout / differential suite.
+#[cfg_attr(test, mutants::skip)]
 #[allow(clippy::too_many_arguments)]
 async fn send_write_txn_markers(
     my_node_id: NodeId,

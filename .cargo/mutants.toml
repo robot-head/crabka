@@ -87,6 +87,14 @@ exclude_globs = [
 # under `#[cfg(not(feature = ...))]` gets mutated even though the active build
 # never compiles it — the mutation is a no-op that always "survives".
 exclude_re = [
+    # ListPartitionReassignments `removing_replicas` echo: only populated for a
+    # partition with an *in-flight* removal, which the controller cannot hold from a
+    # directly-seeded `PartitionRecord` — apply auto-completes the removal (verified:
+    # seeding replicas=[1,2,3] + removing=[3] applies as replicas=[1,2] + removing=[]).
+    # A genuine pending removal exists only mid-flight in the live
+    # AlterPartitionReassignments state machine (integration suite). The sibling
+    # `adding_replicas` field is pinned by `filtered_success_response_...`.
+    "(crates/)?broker/src/handlers/list_partition_reassignments\\.rs.*delete field removing_replicas from struct OngoingPartitionReassignment",
     # crabka-compression's feature-disabled codec stubs (`#[cfg(not(feature =
     # "gzip"))] fn gzip_compress -> Err(FeatureDisabled(..))`, etc.). They are
     # only reachable — and only killable — with the codec feature turned off.

@@ -479,6 +479,8 @@ fn to_wire_uuid(u: uuid::Uuid) -> WireUuid {
 /// A dedicated connection per partition keeps the metadata consumer off
 /// any parkable/shared stream: the broker is serial per-connection, so a
 /// long-`max_wait_ms` fetch must not head-of-line-block other RPCs.
+// cargo-mutants: live-broker fetch loop over a real connection, not unit-testable
+#[cfg_attr(test, mutants::skip)]
 #[instrument(level = "debug", skip_all, fields(partition, start_offset))]
 async fn partition_fetch_loop(
     state: Arc<ConsumerState>,

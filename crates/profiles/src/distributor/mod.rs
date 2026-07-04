@@ -1361,6 +1361,102 @@ overrides:
         );
     }
 
+    fn push_request_one_sample() -> pb::push::v1::PushRequest {
+        use std::io::Write as _;
+
+        let pprof_bytes = crate::wire::test_fixtures::cpu_profile_pprof_bytes();
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&pprof_bytes).unwrap();
+        let gzipped = encoder.finish().unwrap();
+
+        pb::push::v1::PushRequest {
+            series: vec![pb::push::v1::RawProfileSeries {
+                labels: vec![
+                    pb::types::v1::LabelPair {
+                        name: "__name__".into(),
+                        value: "process_cpu".into(),
+                    },
+                    pb::types::v1::LabelPair {
+                        name: "service_name".into(),
+                        value: "api".into(),
+                    },
+                ],
+                samples: vec![pb::push::v1::RawSample {
+                    raw_profile: gzipped,
+                    id: "s1".into(),
+                }],
+                annotations: Vec::new(),
+            }],
+        }
+    }
+
+    // The Connect `push` handler must decode the request, append the decoded
+    // profile to the WAL sink, and record the ingest metrics. A body replaced
+    // with a bare `Ok(Default::default())` would append nothing.
+    #[tokio::test]
+    async fn push_handler_appends_record_and_records_metrics() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = state_with(sink.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-scope-orgid", "tenant-a".parse().unwrap());
+
+        push_handler(
+            Extension(state.clone()),
+            headers,
+            ConnectRequest(push_request_one_sample()),
+        )
+        .await
+        .unwrap();
+
+        let recs = sink.0.lock().unwrap();
+        check!(recs.len() == 1);
+        check!(recs[0].tenant == "tenant-a");
+        // Metrics side effect: one ok ingest request was recorded.
+        check!(
+            state
+                .metrics
+                .ingest_requests
+                .get_or_create(&crate::metrics::StatusLabel {
+                    status: "ok".into(),
+                })
+                .get()
+                == 1
+        );
+    }
+
+    // The Connect `export` (OTLP) handler must decode the request, append the
+    // decoded profile to the WAL sink, and record the ingest metrics. A body
+    // replaced with a bare `Ok(Default::default())` would append nothing.
+    #[tokio::test]
+    async fn export_handler_appends_record_and_records_metrics() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = state_with(sink.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-scope-orgid", "tenant-a".parse().unwrap());
+
+        export_handler(
+            Extension(state.clone()),
+            headers,
+            ConnectRequest(otlp_export_request()),
+        )
+        .await
+        .unwrap();
+
+        let recs = sink.0.lock().unwrap();
+        check!(recs.len() == 1);
+        check!(recs[0].tenant == "tenant-a");
+        check!(
+            state
+                .metrics
+                .ingest_requests
+                .get_or_create(&crate::metrics::StatusLabel {
+                    status: "ok".into(),
+                })
+                .get()
+                == 1
+        );
+    }
+
     #[tokio::test]
     async fn otlp_http_profiles_path_appends_records() {
         let sink = Arc::new(RecordingSink::default());

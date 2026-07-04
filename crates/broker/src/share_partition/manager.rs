@@ -337,9 +337,13 @@ mod tests {
 
     impl MockSource {
         fn new() -> Self {
+            Self::with_image(Arc::new(MetadataImage::new(uuid::Uuid::nil())))
+        }
+
+        fn with_image(image: Arc<MetadataImage>) -> Self {
             let (tx, rx) = watch::channel(Some(crabka_metadata::NodeId(1)));
             Self {
-                image: Arc::new(MetadataImage::new(uuid::Uuid::nil())),
+                image,
                 leader_rx: rx,
                 _leader_tx: tx,
             }
@@ -393,6 +397,34 @@ mod tests {
     fn manager() -> Arc<SharePartitionLeaderManager> {
         let reg = Arc::new(PartitionRegistry::new());
         let controller: Arc<dyn MetadataSource> = Arc::new(MockSource::new());
+        let coord = Arc::new(ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            reg.clone(),
+            ShareCoordinatorConfig::default(),
+        ));
+        let client = Arc::new(InterBrokerClient::new(None, None));
+        let persister = Arc::new(SharePersister::new(
+            crabka_audit::NodeId(1),
+            coord,
+            controller.clone(),
+            client,
+            ListenerProtocol::Plaintext,
+            "INTERNAL".to_string(),
+        ));
+        Arc::new(SharePartitionLeaderManager::new(
+            crabka_audit::NodeId(1),
+            reg,
+            controller,
+            persister,
+            Arc::new(ShareGroupConfig::default()),
+        ))
+    }
+
+    /// A manager whose controller serves `image` (so `current_leader_of` and
+    /// friends resolve real topic/partition leadership).
+    fn manager_with_image(image: Arc<MetadataImage>) -> Arc<SharePartitionLeaderManager> {
+        let reg = Arc::new(PartitionRegistry::new());
+        let controller: Arc<dyn MetadataSource> = Arc::new(MockSource::with_image(image));
         let coord = Arc::new(ShareCoordinator::new(
             crabka_audit::NodeId(1),
             reg.clone(),
@@ -482,5 +514,47 @@ mod tests {
         mgr.invalidate("g1", tid, 0);
         let cell2 = mgr.get_or_load("g1", tid, 0).await;
         assert!(!Arc::ptr_eq(&cell, &cell2));
+    }
+
+    #[tokio::test]
+    async fn current_leader_of_reads_image_leader_and_epoch() {
+        use crabka_ids::LeaderEpoch;
+        use crabka_metadata::{PartitionRecord, TopicRecord};
+
+        let tid = uuid::Uuid::from_bytes([31; 16]);
+        // A topic-partition led by node 2 at leader epoch 5. Both components are
+        // non-default and differ from every fixed-tuple mutant
+        // ((0,0)/(0,1)/(-1,0)/(1,1)).
+        let image = Arc::new(MetadataImage::from_records(
+            uuid::Uuid::nil(),
+            &[
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: tid,
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                MetadataRecord::V1Partition(PartitionRecord {
+                    topic: "t".into(),
+                    partition: 0,
+                    leader: NodeId(2),
+                    replicas: vec![NodeId(2)],
+                    isr: vec![NodeId(2)],
+                    leader_epoch: LeaderEpoch(5),
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![],
+                    partition_epoch: 0,
+                }),
+            ],
+        ));
+        let mgr = manager_with_image(image);
+
+        // Known partition resolves to (leader_id, leader_epoch) from the image.
+        assert!(mgr.current_leader_of(tid, 0) == (2, 5));
+        // Unknown partition of a known topic -> (-1, -1).
+        assert!(mgr.current_leader_of(tid, 9) == (-1, -1));
+        // Unknown topic -> (-1, -1).
+        assert!(mgr.current_leader_of(uuid::Uuid::from_bytes([99; 16]), 0) == (-1, -1));
     }
 }

@@ -155,6 +155,10 @@ crate::sendfile_cfg! {
 }
 
 impl RawSegmentRead {
+    // The `last_offset` of an empty read is a never-read sentinel: every
+    // consumer guards on `is_empty()` (which checks `bytes`) before touching
+    // `last_offset`, so `Offset(-1)` vs `Offset(1)` is unobservable.
+    #[cfg_attr(test, mutants::skip)]
     fn empty() -> Self {
         Self {
             start_offset: Offset(0),
@@ -825,6 +829,13 @@ impl Segment {
         ),
         err,
     )]
+    // The only mutant here flips the sparse-index `rel = batch_base - seg_base`
+    // to `+`, corrupting an OFFSET-INDEX hint only. Every read/truncate path
+    // treats the index as a lower-bound hint and re-scans + filters, so an
+    // inflated `rel` (seg_base > 0) resolves to the from-start fallback and
+    // yields identical output; the last_offset/index-presence effects are
+    // pinned by `append_verbatim_updates_index_and_last_offset`.
+    #[cfg_attr(test, mutants::skip)]
     pub fn append_verbatim(
         &mut self,
         bytes: &[u8],
@@ -1154,6 +1165,109 @@ mod tests {
         assert!(base_offsets == [0, 1, 2]);
     }
 
+    /// Tail recovery must PHYSICALLY truncate a partial/garbage trailing tail,
+    /// using `consumed += before - cur.len()` (the exact bytes each valid batch
+    /// decode advanced) to locate the valid end. Mutating `-`→`+` inflates
+    /// `consumed`, pushing `valid_end` past `log_size` so the garbage is never
+    /// truncated: the file would keep its trailing bytes.
+    #[test]
+    fn recover_active_tail_truncates_trailing_garbage() {
+        let dir = tempdir().unwrap();
+        let valid_size = {
+            let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
+            seg.append(&sample_batch(0, 3, 100), 0).unwrap();
+            seg.append(&sample_batch(3, 2, 200), 0).unwrap();
+            seg.flush().unwrap();
+            seg.size_bytes()
+        };
+
+        // Append 16 bytes of garbage (an undecodable partial batch tail).
+        let log_path = name::log_path(dir.path(), 0);
+        let mut f = OpenOptions::new().append(true).open(&log_path).unwrap();
+        f.write_all(&[0xCD; 16]).unwrap();
+        f.sync_data().unwrap();
+        drop(f);
+
+        // Reopen with validation: the tail scan must clip the garbage.
+        let seg = Segment::open_active(dir.path(), Offset(0), true).unwrap();
+        assert!(seg.last_offset() == Offset(4));
+        assert!(
+            seg.size_bytes() == valid_size,
+            "garbage tail must be truncated: size {} != valid {valid_size}",
+            seg.size_bytes()
+        );
+    }
+
+    // `Segment::read` maps the absolute fetch offset to a relative index key
+    // via `offset - base_offset`. With a dense index and base_offset 100,
+    // reading from offset 103 must start at the batch containing 103 and
+    // return the batches at 103 and 105. Mutating `-`→`+` computes
+    // `103 + 100 = 203`, whose index lookup lands at (or past) the last
+    // batch, skipping the offset-103 batch.
+    #[test]
+    fn read_uses_relative_offset_for_index_lookup() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(100)).unwrap();
+        // Dense index (interval 0 → every batch indexed).
+        seg.append(&sample_batch(100, 3, 100), 0).unwrap(); // offsets 100..=102
+        seg.append(&sample_batch(103, 2, 200), 0).unwrap(); // offsets 103..=104
+        seg.append(&sample_batch(105, 1, 300), 0).unwrap(); // offset 105
+        assert!(seg.last_offset() == Offset(105));
+
+        let read = seg.read(Offset(103), usize::MAX).unwrap();
+        let bases: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
+        assert!(
+            bases == [103, 105],
+            "read(103) must return batches at 103 and 105; got {bases:?}"
+        );
+    }
+
+    // `Segment::read_raw` maps the fetch offset to the relative index key the
+    // same way. base_offset 100, dense index, `read_raw(103)` must begin at
+    // the offset-103 batch (`start_offset == 103`). Mutating `-`→`+` computes
+    // `203`, whose lookup skips past the offset-103 batch → `start_offset`
+    // becomes 105.
+    #[test]
+    fn read_raw_uses_relative_offset_for_index_lookup() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(100)).unwrap();
+        seg.append(&sample_batch(100, 3, 100), 0).unwrap(); // offsets 100..=102
+        seg.append(&sample_batch(103, 2, 200), 0).unwrap(); // offsets 103..=104
+        seg.append(&sample_batch(105, 1, 300), 0).unwrap(); // offset 105
+
+        let r = seg.read_raw(Offset(103), Offset(1000), usize::MAX).unwrap();
+        assert!(!r.is_empty());
+        assert!(
+            r.start_offset == Offset(103),
+            "read_raw(103) must start at offset 103; got {:?}",
+            r.start_offset
+        );
+    }
+
+    /// `Segment::read` accumulates consumed bytes as `before - cursor.len()`
+    /// (the exact bytes each batch decode advanced) to enforce the `max_bytes`
+    /// budget. With `max_bytes` set to the segment's full size, all three
+    /// batches fit and are returned. Mutating `-`→`+` inflates `consumed` on
+    /// the first batch past `max_bytes`, breaking after one batch.
+    #[test]
+    fn read_consumed_bytes_gates_max_bytes_budget() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
+        seg.append(&sample_batch(0, 1, 100), 0).unwrap();
+        seg.append(&sample_batch(1, 1, 200), 0).unwrap();
+        seg.append(&sample_batch(2, 1, 300), 0).unwrap();
+        // Exactly the whole segment: correct consumed accounting fits all three
+        // batches; inflated accounting overshoots after the first.
+        let max_bytes = usize::try_from(seg.size_bytes()).unwrap();
+
+        let read = seg.read(Offset(0), max_bytes).unwrap();
+        let bases: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
+        assert!(
+            bases == [0, 1, 2],
+            "all three batches must fit the exact-size budget; got {bases:?}"
+        );
+    }
+
     #[test]
     fn append_after_truncate_writes_at_new_eof() {
         let dir = tempdir().unwrap();
@@ -1170,6 +1284,36 @@ mod tests {
         let read = seg.read(Offset(0), usize::MAX).unwrap();
         let base_offsets: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
         assert!(base_offsets == [0, 1]);
+    }
+
+    /// `truncate_to_relative` decides which batches to drop by each batch's last
+    /// offset, `batch.base_offset + last_offset_delta`, compared against
+    /// `target_abs`. Using MULTI-record batches makes the `+` load-bearing:
+    /// batch A spans 0..=2, batch B spans 3..=5, and truncating to rel 3
+    /// (`target_abs = 3`) must keep A (last 2 < 3) and drop B (last 5 >= 3).
+    /// Mutating `+`→`-` computes A's last as -2 and B's as 1, so B is wrongly
+    /// kept and the read still returns batch B.
+    #[test]
+    fn truncate_to_relative_uses_batch_last_offset() {
+        let dir = tempdir().unwrap();
+        let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
+        seg.append(&sample_batch(0, 3, 100), 0).unwrap(); // offsets 0..=2
+        seg.append(&sample_batch(3, 3, 200), 0).unwrap(); // offsets 3..=5
+        assert!(seg.last_offset() == Offset(5));
+
+        // target_abs = base(0) + rel(3) = 3. Drop batches with last >= 3.
+        seg.truncate_to_relative(3).unwrap();
+        assert!(
+            seg.last_offset() == Offset(2),
+            "only batch A (last 2) must remain; got {:?}",
+            seg.last_offset()
+        );
+        let read = seg.read(Offset(0), usize::MAX).unwrap();
+        let bases: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
+        assert!(
+            bases == [0],
+            "batch B must be truncated away; got {bases:?}"
+        );
     }
 
     #[test]

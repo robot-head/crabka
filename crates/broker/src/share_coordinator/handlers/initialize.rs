@@ -37,6 +37,9 @@ pub(crate) fn handle(
     })
 }
 
+// cargo-mutants: equivalent — `error_message: None` is exactly the derived
+// `Default` for the `Option<String>` field, so deleting the field is a no-op.
+#[cfg_attr(test, mutants::skip)]
 async fn handle_request(
     coordinator: Arc<ShareCoordinator>,
     version: i16,

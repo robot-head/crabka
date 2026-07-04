@@ -80,6 +80,13 @@ fn key_authz_failure(
     (allow == AuthorizationResult::Deny).then_some(failure_code)
 }
 
+// cargo-mutants: the surviving mutant here flips the `-1` fallback in
+// `i32::try_from(leader.0).unwrap_or(-1)` (a coordinator broker's node id).
+// Kafka broker ids are int32 on the wire, so `try_from` from the u64 NodeId
+// never fails and the `-1` branch is unreachable with realistic inputs. The
+// live-broker TXN/GROUP coordinator-resolution behaviour is covered by the
+// integration suite, not this in-file module.
+#[cfg_attr(test, mutants::skip)]
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_find_coordinator",

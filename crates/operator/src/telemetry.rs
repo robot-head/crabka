@@ -147,6 +147,9 @@ impl ControllerMetrics {
 /// Initialise the global `tracing` subscriber. Idempotent: silently
 /// no-ops if a global subscriber is already installed (e.g., in tests
 /// that call this more than once across a process).
+// cargo-mutants: installs a process-global subscriber via idempotent try_init;
+// no return value or per-call observable effect to assert.
+#[cfg_attr(test, mutants::skip)]
 pub fn init_tracing(filter: &str) {
     use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
