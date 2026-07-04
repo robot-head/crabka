@@ -30,6 +30,7 @@ crabka-security = { version = "0.3.8", path = "../security" }
 dioxus = { version = "0.7.9", default-features = false, features = ["fullstack", "router", "server"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+parking_lot.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tower = { workspace = true, features = ["util"] }
