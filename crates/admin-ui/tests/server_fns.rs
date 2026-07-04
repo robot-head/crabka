@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crabka_admin_ui::auth::LoginRequest;
 use crabka_admin_ui::config::{AdminUiConfig, BrokerSecurityConfig};
+use crabka_admin_ui::dto::{CreateTopicRequestDto, ScramUserUpsertDto};
 use crabka_admin_ui::error::UiError;
 use crabka_admin_ui::server::AppState;
 use crabka_admin_ui::session::SessionStore;
@@ -83,6 +84,52 @@ async fn resource_seams_are_callable_and_require_authentication() {
     assert!(matches!(users, Err(UiError::NotAuthenticated)));
     assert!(matches!(quotas, Err(UiError::NotAuthenticated)));
     assert!(matches!(log_dirs, Err(UiError::NotAuthenticated)));
+}
+
+#[tokio::test]
+async fn mutation_seams_validate_requests_before_requiring_authentication() {
+    let invalid_topic = crabka_admin_ui::server_fns::create_topic(CreateTopicRequestDto {
+        name: "orders".to_string(),
+        partitions: 0,
+        replicas: 1,
+        configs: Vec::new(),
+    })
+    .await;
+    let invalid_scram = crabka_admin_ui::server_fns::upsert_scram_sha512_user(ScramUserUpsertDto {
+        username: "alice".to_string(),
+        password: String::new(),
+        iterations: 4096,
+    })
+    .await;
+
+    assert!(matches!(invalid_topic, Err(UiError::Admin(_))));
+    assert!(matches!(invalid_scram, Err(UiError::Admin(_))));
+}
+
+#[tokio::test]
+async fn mutation_seams_require_authentication_after_validation_without_leaking_password() {
+    let password_sentinel = "server-fn-scram-password-sentinel";
+    let create_topic = crabka_admin_ui::server_fns::create_topic(CreateTopicRequestDto {
+        name: "orders".to_string(),
+        partitions: 3,
+        replicas: 1,
+        configs: Vec::new(),
+    })
+    .await;
+    let upsert_scram = crabka_admin_ui::server_fns::upsert_scram_sha512_user(ScramUserUpsertDto {
+        username: "alice".to_string(),
+        password: password_sentinel.to_string(),
+        iterations: 4096,
+    })
+    .await;
+
+    assert!(matches!(create_topic, Err(UiError::NotAuthenticated)));
+    assert!(matches!(upsert_scram, Err(UiError::NotAuthenticated)));
+    assert_debug_does_not_contain_secret(
+        &format!("{upsert_scram:?}"),
+        password_sentinel,
+        "SCRAM password",
+    );
 }
 
 fn format_result_debug<T: std::fmt::Debug>(result: &Result<T, UiError>) -> String {

@@ -1,5 +1,8 @@
 use crabka_admin_ui::admin::{group_rows, log_dir_rows, topic_rows};
-use crabka_admin_ui::dto::{KafkaErrorDto, ResourceOutcome};
+use crabka_admin_ui::dto::{
+    ConfigEntryDto, CreateTopicRequestDto, KafkaErrorDto, LogDirMoveRequestDto, ResourceOutcome,
+    ScramUserUpsertDto,
+};
 use crabka_admin_ui::error::UiError;
 use crabka_client_admin::{
     AdminError, KafkaError, LogDirInfo, LogDirPartitionInfo, LogDirTopicInfo, TopicMetadata,
@@ -20,6 +23,96 @@ fn resource_outcome_reports_error_state() {
 
     assert!(!ok.has_error());
     assert!(failed.has_error());
+}
+
+#[test]
+fn create_topic_request_accepts_valid_topic_shape() {
+    let request = CreateTopicRequestDto {
+        name: "orders".to_string(),
+        partitions: 3,
+        replicas: 1,
+        configs: vec![ConfigEntryDto {
+            name: "cleanup.policy".to_string(),
+            value: "delete".to_string(),
+        }],
+    };
+
+    assert!(request.validate().is_ok());
+}
+
+#[test]
+fn create_topic_request_rejects_invalid_counts_and_blank_names() {
+    let zero_partitions = CreateTopicRequestDto {
+        name: "orders".to_string(),
+        partitions: 0,
+        replicas: 1,
+        configs: Vec::new(),
+    };
+    let blank_name = CreateTopicRequestDto {
+        name: " ".to_string(),
+        partitions: 1,
+        replicas: 1,
+        configs: Vec::new(),
+    };
+    let blank_config = CreateTopicRequestDto {
+        name: "orders".to_string(),
+        partitions: 1,
+        replicas: 1,
+        configs: vec![ConfigEntryDto {
+            name: "\t".to_string(),
+            value: "delete".to_string(),
+        }],
+    };
+
+    assert!(zero_partitions.validate().is_err());
+    assert!(blank_name.validate().is_err());
+    assert!(blank_config.validate().is_err());
+}
+
+#[test]
+fn scram_upsert_request_rejects_empty_password_and_bad_iterations() {
+    let empty_password = ScramUserUpsertDto {
+        username: "alice".to_string(),
+        password: String::new(),
+        iterations: 4096,
+    };
+    let zero_iterations = ScramUserUpsertDto {
+        username: "alice".to_string(),
+        password: "not-asserted".to_string(),
+        iterations: 0,
+    };
+
+    assert!(empty_password.validate().is_err());
+    assert!(zero_iterations.validate().is_err());
+}
+
+#[test]
+fn scram_upsert_debug_redacts_password() {
+    let password_sentinel = "scram-debug-password-sentinel";
+    let request = ScramUserUpsertDto {
+        username: "alice".to_string(),
+        password: password_sentinel.to_string(),
+        iterations: 4096,
+    };
+
+    let debug = format!("{request:?}");
+
+    assert!(
+        !debug.contains(password_sentinel),
+        "debug output leaked password"
+    );
+    assert!(debug.contains("<redacted>"));
+}
+
+#[test]
+fn log_dir_move_request_rejects_nonsensical_fields() {
+    let request = LogDirMoveRequestDto {
+        topic: "orders".to_string(),
+        partition: -1,
+        destination_log_dir: " ".to_string(),
+    };
+
+    assert!(request.validate().is_err());
 }
 
 #[test]
