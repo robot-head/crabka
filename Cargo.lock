@@ -2549,6 +2549,7 @@ version = "0.3.8"
 dependencies = [
  "assert2",
  "bytes",
+ "crabka-verified",
  "crabka-voters",
  "serde",
  "tracing",
@@ -2565,6 +2566,7 @@ dependencies = [
  "crabka-compression",
  "crabka-ids",
  "crabka-protocol",
+ "crabka-verified",
  "hex",
  "mutants",
  "proptest",
