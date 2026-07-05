@@ -14,34 +14,65 @@
 
 #[cfg(creusot)]
 use creusot_std::prelude::DeepModel;
+#[cfg(not(creusot))]
 use derive_more::{Display, From, Into};
 
 /// Tokens currently sitting in the bucket, available to grant.
 #[cfg_attr(creusot, derive(DeepModel))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into)]
+#[cfg_attr(
+    not(creusot),
+    derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into
+    )
+)]
 pub struct AvailableTokens(pub u64);
 
 /// Tokens accrued since the last refill, to be added to `available` this call.
 #[cfg_attr(creusot, derive(DeepModel))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into)]
+#[cfg_attr(
+    not(creusot),
+    derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into
+    )
+)]
 pub struct RefillTokens(pub u64);
 
 /// The burst cap: the maximum the bucket may hold after a refill.
 #[cfg_attr(creusot, derive(DeepModel))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into)]
+#[cfg_attr(
+    not(creusot),
+    derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into
+    )
+)]
 pub struct BurstCapacity(pub u64);
 
 /// Tokens the caller is asking to consume.
 #[cfg_attr(creusot, derive(DeepModel))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into)]
+#[cfg_attr(
+    not(creusot),
+    derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into
+    )
+)]
 pub struct RequestedTokens(pub u64);
 
 /// Tokens actually granted by a consume call (`<= requested`).
 #[cfg_attr(creusot, derive(DeepModel))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into)]
+#[cfg_attr(
+    not(creusot),
+    derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into
+    )
+)]
 pub struct GrantedTokens(pub u64);
 
 /// The bucket's new `available` count after a consume call commits.
 #[cfg_attr(creusot, derive(DeepModel))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into)]
+#[cfg_attr(
+    not(creusot),
+    derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Display, From, Into
+    )
+)]
 pub struct NewAvailable(pub u64);
