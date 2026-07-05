@@ -263,6 +263,27 @@ pub struct GroupRow {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AclRow {
+    pub resource: String,
+    pub principal: String,
+    pub operation: String,
+    pub permission: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserRow {
+    pub username: String,
+    pub principal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuotaRow {
+    pub entity: String,
+    pub quota_type: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LogDirRow {
     pub log_dir: String,
     pub topic: String,

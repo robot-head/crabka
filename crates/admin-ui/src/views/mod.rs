@@ -4,11 +4,14 @@ pub mod layout;
 pub mod log_dirs;
 pub mod login;
 pub mod overview;
+pub mod page;
 pub mod quotas;
 pub mod topics;
 pub mod users;
 
 use dioxus::dioxus_core::{Element, Template, VNode};
+
+pub use page::{ReadRouteState, RoutePage, render_page};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Route {

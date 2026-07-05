@@ -19,6 +19,7 @@ use crabka_admin_ui::server_fns::{
     AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow, UserRow,
 };
 use crabka_admin_ui::session::{SessionRecord, SessionStore};
+use crabka_admin_ui::views::{ReadRouteState, RoutePage, render_page};
 use tower::ServiceExt as _;
 
 fn smoke_app() -> axum::Router {
@@ -80,6 +81,25 @@ async fn response_text(response: axum::response::Response) -> String {
         .expect("body can be collected");
 
     String::from_utf8(bytes.to_vec()).expect("HTML body is UTF-8")
+}
+
+fn sample_topic_row() -> TopicRow {
+    TopicRow {
+        name: "orders".to_string(),
+        topic_id: None,
+        partition_count: 3,
+        replication_factor: 1,
+        error: None,
+    }
+}
+
+fn sample_acl_row() -> AclRow {
+    AclRow {
+        resource: "Topic:orders".to_string(),
+        principal: "User:alice".to_string(),
+        operation: "Read".to_string(),
+        permission: "Allow".to_string(),
+    }
 }
 
 #[tokio::test]
@@ -171,7 +191,7 @@ async fn posting_login_sets_session_cookie_and_cookie_authenticates_protected_ro
 }
 
 #[tokio::test]
-async fn linked_admin_pages_render_shared_dioxus_route_shells() {
+async fn linked_admin_pages_render_shared_view_route_shells() {
     for (path, heading, route_marker, empty_state) in [
         (
             "/topics",
@@ -215,7 +235,7 @@ async fn linked_admin_pages_render_shared_dioxus_route_shells() {
         assert_eq!(response.status(), StatusCode::OK, "{path} status");
         let body = response_text(response).await;
         assert!(body.contains(heading), "{path} heading");
-        assert!(body.contains(route_marker), "{path} Dioxus route marker");
+        assert!(body.contains(route_marker), "{path} shared route marker");
         assert!(body.contains(empty_state), "{path} empty state");
     }
 }
@@ -253,6 +273,35 @@ async fn authenticated_read_routes_call_injected_seams_and_render_rows() {
     assert_eq!(factory.users.load(Ordering::SeqCst), 1);
     assert_eq!(factory.quotas.load(Ordering::SeqCst), 1);
     assert_eq!(factory.log_dirs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn dynamic_read_routes_match_shared_page_renderer() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory);
+    let cookie = Some(format!(
+        "{SESSION_COOKIE_NAME}={}",
+        session_id.expose_for_cookie()
+    ));
+
+    let topics_body = response_text(get_from(app.clone(), "/topics", cookie.clone()).await).await;
+    let acls_body = response_text(get_from(app, "/acls", cookie).await).await;
+
+    assert_eq!(
+        topics_body,
+        render_page(&RoutePage::topics(ReadRouteState::Rows(vec![
+            sample_topic_row()
+        ])))
+    );
+    assert_eq!(
+        acls_body,
+        render_page(&RoutePage::acls(ReadRouteState::Rows(vec![
+            sample_acl_row()
+        ])))
+    );
 }
 
 #[tokio::test]
@@ -352,13 +401,7 @@ impl AdminReadSeam for RecordingAdminSeamFactory {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<TopicRow>, UiError>> + Send + 'a>> {
         Box::pin(async move {
             self.topics.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![TopicRow {
-                name: "orders".to_string(),
-                topic_id: None,
-                partition_count: 3,
-                replication_factor: 1,
-                error: None,
-            }])
+            Ok(vec![sample_topic_row()])
         })
     }
 
@@ -378,12 +421,7 @@ impl AdminReadSeam for RecordingAdminSeamFactory {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<AclRow>, UiError>> + Send + 'a>> {
         Box::pin(async move {
             self.acls.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![AclRow {
-                resource: "Topic:orders".to_string(),
-                principal: "User:alice".to_string(),
-                operation: "Read".to_string(),
-                permission: "Allow".to_string(),
-            }])
+            Ok(vec![sample_acl_row()])
         })
     }
 

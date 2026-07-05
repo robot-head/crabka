@@ -1,6 +1,8 @@
 use crabka_admin_ui::views::{
-    Route, acls, groups, layout::sidebar_links, log_dirs, quotas, render_route, topics, users,
+    ReadRouteState, Route, RoutePage, acls, groups, layout::sidebar_links, log_dirs, quotas,
+    render_page, render_route, topics, users,
 };
+use crabka_admin_ui::{dto::TopicRow, server_fns::AclRow};
 use dioxus::dioxus_core::{Element, TemplateNode, VNode};
 
 fn rendered_text(view: Element) -> String {
@@ -185,4 +187,27 @@ fn every_route_renders_a_page() {
             "route {route:?} should render a page"
         );
     }
+}
+
+#[test]
+fn shared_page_renderer_renders_dynamic_topics_and_acls() {
+    let topics_html = render_page(&RoutePage::topics(ReadRouteState::Rows(vec![TopicRow {
+        name: "orders<east>".to_string(),
+        topic_id: None,
+        partition_count: 3,
+        replication_factor: 1,
+        error: None,
+    }])));
+    let acls_html = render_page(&RoutePage::acls(ReadRouteState::Rows(vec![AclRow {
+        resource: "Topic:orders".to_string(),
+        principal: "User:alice".to_string(),
+        operation: "Read".to_string(),
+        permission: "Allow".to_string(),
+    }])));
+
+    assert!(topics_html.contains("admin-section topics-section"));
+    assert!(topics_html.contains("orders&lt;east&gt;"));
+    assert!(!topics_html.contains("orders<east>"));
+    assert!(acls_html.contains("admin-section acls-section"));
+    assert!(acls_html.contains("Topic:orders User:alice Read Allow"));
 }

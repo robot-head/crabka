@@ -28,31 +28,12 @@ use crate::dto::{
 use crate::error::UiError;
 use crate::session::{SessionId, SessionRecord, SessionStore};
 
+pub use crate::dto::{AclRow, QuotaRow, UserRow};
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentSession {
     pub username: String,
     pub principal: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AclRow {
-    pub resource: String,
-    pub principal: String,
-    pub operation: String,
-    pub permission: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UserRow {
-    pub username: String,
-    pub principal: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QuotaRow {
-    pub entity: String,
-    pub quota_type: String,
-    pub value: String,
 }
 
 pub async fn login(request: LoginRequest) -> Result<LoginSuccess, UiError> {

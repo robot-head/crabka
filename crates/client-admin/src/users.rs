@@ -215,19 +215,7 @@ impl AdminClient {
         };
         let resp = self.conn.send(req).await?;
 
-        Ok(resp
-            .results
-            .into_iter()
-            .map(|result| UserScramCredentials {
-                username: result.user,
-                mechanisms: result
-                    .credential_infos
-                    .into_iter()
-                    .map(|credential| scram_mechanism_name(credential.mechanism).to_string())
-                    .collect(),
-                error: error_if(result.error_code, result.error_message),
-            })
-            .collect())
+        parse_describe_user_scram_credentials_response(resp)
     }
 
     /// Create the supplied ACLs.
@@ -396,6 +384,33 @@ fn parse_alter_scram_results(
             error: error_if(r.error_code, r.error_message),
         })
         .collect()
+}
+
+fn parse_describe_user_scram_credentials_response(
+    resp: <DescribeUserScramCredentialsRequest as crabka_protocol::ProtocolRequest>::Response,
+) -> Result<Vec<UserScramCredentials>, AdminError> {
+    if resp.error_code != 0 {
+        return Err(AdminError::Broker {
+            api: "DescribeUserScramCredentials",
+            code: resp.error_code,
+            name: kafka_error_name(resp.error_code),
+            message: resp.error_message,
+        });
+    }
+
+    Ok(resp
+        .results
+        .into_iter()
+        .map(|result| UserScramCredentials {
+            username: result.user,
+            mechanisms: result
+                .credential_infos
+                .into_iter()
+                .map(|credential| scram_mechanism_name(credential.mechanism).to_string())
+                .collect(),
+            error: error_if(result.error_code, result.error_message),
+        })
+        .collect())
 }
 
 fn scram_mechanism_name(mechanism: i8) -> &'static str {
@@ -806,5 +821,32 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
             }
         );
+    }
+
+    #[test]
+    fn users_describe_scram_top_level_error_returns_broker_error() {
+        let resp = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
+            error_code: 31,
+            error_message: Some("cluster auth denied".to_string()),
+            ..Default::default()
+        };
+
+        let err = parse_describe_user_scram_credentials_response(resp)
+            .expect_err("top-level SCRAM describe errors must fail the request");
+
+        match err {
+            AdminError::Broker {
+                api,
+                code,
+                name,
+                message,
+            } => {
+                check!(api == "DescribeUserScramCredentials");
+                check!(code == 31);
+                check!(name == "CLUSTER_AUTHORIZATION_FAILED");
+                check!(message == Some("cluster auth denied".to_string()));
+            }
+            other => panic!("expected broker error, got {other:?}"),
+        }
     }
 }

@@ -499,12 +499,14 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
         7 => "REQUEST_TIMED_OUT",
         17 => "INVALID_TOPIC_EXCEPTION",
         19 => "NOT_ENOUGH_REPLICAS",
+        31 => "CLUSTER_AUTHORIZATION_FAILED",
         36 => "TOPIC_ALREADY_EXISTS",
         37 => "INVALID_PARTITIONS",
         38 => "INVALID_REPLICATION_FACTOR",
         39 => "INVALID_REPLICA_ASSIGNMENT",
         40 => "INVALID_CONFIG",
         41 => "NOT_CONTROLLER",
+        83 => "RESOURCE_NOT_FOUND_USER",
         87 => "REASSIGNMENT_IN_PROGRESS",
         _ => "UNKNOWN",
     }
@@ -522,6 +524,16 @@ mod tests {
             (0, "NONE"),
             (36, "TOPIC_ALREADY_EXISTS"),
             (41, "NOT_CONTROLLER"),
+        ] {
+            assert!(kafka_error_name(code) == want);
+        }
+    }
+
+    #[test]
+    fn users_kafka_error_name_includes_scram_describe_codes() {
+        for (code, want) in [
+            (31, "CLUSTER_AUTHORIZATION_FAILED"),
+            (83, "RESOURCE_NOT_FOUND_USER"),
         ] {
             assert!(kafka_error_name(code) == want);
         }

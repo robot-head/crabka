@@ -7,8 +7,9 @@ use crabka_client_admin::{
     TopicMetadata, UserQuotaConfig, UserScramCredentials,
 };
 
-use crate::dto::{GroupRow, KafkaErrorDto, LogDirRow, ResourceOutcome, TopicRow};
-use crate::server_fns::{AclRow, QuotaRow, UserRow};
+use crate::dto::{
+    AclRow, GroupRow, KafkaErrorDto, LogDirRow, QuotaRow, ResourceOutcome, TopicRow, UserRow,
+};
 
 pub struct AdminFacade {
     client: AdminClient,
