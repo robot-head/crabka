@@ -285,6 +285,11 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
         .await
         .expect("produce ok");
     assert!(offset == 0);
+    // The writer sends the acks=1 response after the local append and then
+    // advances the rf=1 high watermark asynchronously. Wait on the actual HW
+    // transition before asserting the Fetch response so this regression test
+    // does not race that post-ack recompute.
+    broker.wait_until_high_watermark("clamp", 0, 3).await;
 
     let client = Client::builder()
         .bootstrap(bootstrap.clone())
