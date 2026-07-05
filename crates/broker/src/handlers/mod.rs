@@ -23,6 +23,11 @@ pub type ErrorCode = i16;
 /// Client-chosen request correlation id, echoed verbatim in the response header.
 pub type CorrelationId = i32;
 
+use bytes::{Bytes, BytesMut};
+use crabka_protocol::Encode;
+
+use crate::error::BrokerError;
+
 pub(crate) mod context;
 pub(crate) use context::{RequestContext, TelemetryContext};
 
@@ -30,6 +35,35 @@ pub(crate) mod registry;
 pub(crate) use registry::DispatchRegistry;
 #[allow(unused_imports)] // Staged for later dispatch-registry handler families.
 pub(crate) use registry::{DispatchEntry, DispatchKind, PlainHandler, RequestQuotaPolicy};
+
+pub(crate) fn encode_response<R: Encode>(
+    resp: &R,
+    version: ApiVersion,
+) -> Result<Bytes, BrokerError> {
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
+}
+
+pub(crate) fn acl_denied(
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &crabka_metadata::MetadataImage,
+    ctx: &RequestContext<'_>,
+    resource_type: crabka_metadata::ResourceType,
+    resource_name: &str,
+    operation: crabka_metadata::AclOperation,
+) -> bool {
+    authorizer.authorize(
+        image,
+        &crate::authorizer::AuthorizationRequest {
+            principal: ctx.principal,
+            host: ctx.peer,
+            resource_type,
+            resource_name,
+            operation,
+        },
+    ) == crate::authorizer::AuthorizationResult::Deny
+}
 
 pub(crate) mod acl_wire;
 // KIP-853 dynamic-quorum reconfiguration (api_keys 80/81/82).
@@ -169,12 +203,25 @@ pub(crate) fn audit_admin(
 
 #[cfg(test)]
 mod tests {
-    use std::net::SocketAddr;
+    use std::{collections::HashSet, net::SocketAddr};
 
     use assert2::assert;
+    use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+    use crabka_protocol::{
+        Decode,
+        owned::api_versions_response::{ApiVersion, ApiVersionsResponse},
+    };
     use crabka_security::{AuthMethod, Principal};
 
     use super::*;
+
+    fn principal() -> Principal {
+        Principal {
+            name: "alice".to_string(),
+            auth_method: AuthMethod::SaslPlain,
+            groups: vec!["operators".to_string()],
+        }
+    }
 
     #[test]
     fn audit_admin_emits_admin_operation_event() {
@@ -239,5 +286,54 @@ mod tests {
             }
             other => panic!("expected admin operation event, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn encode_response_round_trips_protocol_body() {
+        let resp = ApiVersionsResponse {
+            error_code: crate::codes::NONE,
+            api_keys: vec![ApiVersion {
+                api_key: 18,
+                min_version: 0,
+                max_version: 4,
+                ..Default::default()
+            }],
+            throttle_time_ms: 0,
+            ..Default::default()
+        };
+
+        let bytes = encode_response(&resp, 3).expect("encode response");
+        let mut cur: &[u8] = &bytes;
+        let decoded = ApiVersionsResponse::decode(&mut cur, 3).expect("decode response");
+
+        assert!(decoded.error_code == crate::codes::NONE);
+        assert!(decoded.api_keys.len() == 1);
+        assert!(decoded.api_keys[0].api_key == 18);
+        assert!(decoded.api_keys[0].min_version == 0);
+        assert!(decoded.api_keys[0].max_version == 4);
+    }
+
+    #[test]
+    fn acl_denied_reports_simple_acl_denial() {
+        let authorizer = crate::authorizer::SimpleAclAuthorizer::new(HashSet::new());
+        let image = MetadataImage::new(uuid::Uuid::nil());
+        let principal = principal();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 9092));
+        let ctx = RequestContext {
+            principal: &principal,
+            peer: &peer,
+            client_id: "client-a",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        };
+
+        assert!(acl_denied(
+            &authorizer,
+            &image,
+            &ctx,
+            ResourceType::Topic,
+            "orders",
+            AclOperation::Describe,
+        ));
     }
 }
