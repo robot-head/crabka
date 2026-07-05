@@ -4675,12 +4675,16 @@ dependencies = [
  "dioxus-config-macro",
  "dioxus-config-macros",
  "dioxus-core",
+ "dioxus-core-macro",
  "dioxus-fullstack",
  "dioxus-fullstack-macro",
+ "dioxus-html",
  "dioxus-liveview",
  "dioxus-router",
  "dioxus-server",
+ "dioxus-signals",
  "dioxus-ssr",
+ "dioxus-stores",
  "dioxus-web",
  "serde",
  "subsecond",
@@ -5183,6 +5187,30 @@ dependencies = [
  "dioxus-core",
  "dioxus-core-types",
  "rustc-hash 2.1.2",
+]
+
+[[package]]
+name = "dioxus-stores"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64bec7b21c86b1360ec965a07a53a2c96b7caee3465049e1c299a45024e87614"
+dependencies = [
+ "dioxus-core",
+ "dioxus-signals",
+ "dioxus-stores-macro",
+ "generational-box",
+]
+
+[[package]]
+name = "dioxus-stores-macro"
+version = "0.7.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40a5875e9f890f27b1cc3e5b56c1e23601211470315a1fb8627c4ca4f3b2be9a"
+dependencies = [
+ "convert_case 0.8.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]

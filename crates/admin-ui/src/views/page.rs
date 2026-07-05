@@ -400,7 +400,7 @@ fn render_paragraph(message: &str, html: &mut String) {
 }
 
 fn login_form() -> &'static str {
-    r#"<form method="post" action="/login"><label>Username <input name="username" autocomplete="username"></label><label>Password <input name="password" type="password" autocomplete="current-password"></label><button type="submit">Sign in</button></form>"#
+    r#"<form method="post" action="/login"><label>Username <input name="username" autocomplete="username"/></label><label>Password <input name="password" type="password" autocomplete="current-password"/></label><button type="submit">Sign in</button></form>"#
 }
 
 fn push_escaped(html: &mut String, value: &str) {

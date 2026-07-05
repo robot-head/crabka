@@ -539,6 +539,7 @@ mod tests {
         ] {
             assert!(kafka_error_name(code) == want);
         }
+        assert!(kafka_error_name(66) != "RESOURCE_NOT_FOUND");
     }
 
     #[test]

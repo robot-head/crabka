@@ -18,7 +18,7 @@ use crabka_protocol::{
     Decode, Encode,
     owned::{
         alter_user_scram_credentials_request::{
-            AlterUserScramCredentialsRequest, ScramCredentialUpsertion,
+            AlterUserScramCredentialsRequest, ScramCredentialDeletion, ScramCredentialUpsertion,
         },
         alter_user_scram_credentials_response::AlterUserScramCredentialsResponse,
         api_versions_request::ApiVersionsRequest,
@@ -2049,6 +2049,48 @@ async fn alter_scram_creds_duplicate_resource_rejected() {
         resp.results[1].error_code == 84, // DUPLICATE_RESOURCE
         "second occurrence of (user, mech) must get DUPLICATE_RESOURCE, got {:?}",
         resp.results[1]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_missing_deletion_returns_resource_not_found_91() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("admin".to_string(), "secret".to_string());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    let req = AlterUserScramCredentialsRequest {
+        deletions: vec![ScramCredentialDeletion {
+            name: "ghost".to_string(),
+            mechanism: WIRE_MECH_SCRAM_SHA_512,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
+        .await
+        .expect("PLAIN auth + AUSCR missing deletion");
+
+    handle.shutdown().await;
+    assert!(resp.results.len() == 1);
+    assert!(
+        resp.results[0].error_code == 91,
+        "missing deletion target must get RESOURCE_NOT_FOUND (91), got {:?}",
+        resp.results[0]
     );
 }
 

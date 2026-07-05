@@ -142,15 +142,10 @@ pub const INVALID_RESOURCE_TYPE: i16 = INVALID_REQUEST;
 /// `AlterUserScramCredentials` handler when the request principal is not the
 /// configured super-user.
 pub const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
-/// `RESOURCE_NOT_FOUND` (66) — per-user error when a deletion targets a
-/// credential that does not exist in the metadata image.
-pub const RESOURCE_NOT_FOUND: i16 = 66;
-/// `RESOURCE_NOT_FOUND` (91) — per-user error returned by
-/// `DescribeUserScramCredentials` when the requested user has no SCRAM
-/// credentials in the metadata image. The internal constant is API-scoped
-/// because this file already has the older delete-target-missing
-/// `RESOURCE_NOT_FOUND` code 66.
-pub const DESCRIBE_USER_SCRAM_RESOURCE_NOT_FOUND: i16 = 91;
+/// `RESOURCE_NOT_FOUND` (91) — resource named by the request does not exist.
+/// KIP-554 uses this for missing SCRAM credentials in both Alter deletion and
+/// Describe per-user result rows.
+pub const RESOURCE_NOT_FOUND: i16 = 91;
 /// `UNACCEPTABLE_CREDENTIAL` (78) — per-user error when an upsertion carries
 /// invalid SCRAM parameters (iterations < 4096, empty salt, `salted_password`
 /// of the wrong length, or an unknown mechanism). Canonical Apache Kafka

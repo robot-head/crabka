@@ -16,7 +16,7 @@ use crabka_security::SaslMechanism;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
-use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, DESCRIBE_USER_SCRAM_RESOURCE_NOT_FOUND};
+use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, RESOURCE_NOT_FOUND};
 
 #[allow(clippy::unused_async)]
 #[tracing::instrument(
@@ -41,7 +41,7 @@ pub(crate) async fn handle(
             host: ctx.peer,
             resource_type: ResourceType::Cluster,
             resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
-            operation: crabka_metadata::AclOperation::Alter,
+            operation: crabka_metadata::AclOperation::Describe,
         },
     );
     if matches!(allow, AuthorizationResult::Deny) {
@@ -90,7 +90,7 @@ fn build_results(
             if pairs.is_empty() && !known_users.contains(&user) {
                 DescribeUserScramCredentialsResult {
                     user,
-                    error_code: DESCRIBE_USER_SCRAM_RESOURCE_NOT_FOUND,
+                    error_code: RESOURCE_NOT_FOUND,
                     error_message: Some("no such SCRAM user".into()),
                     credential_infos: vec![],
                     ..Default::default()
@@ -141,8 +141,29 @@ fn encode_response<R: Encode>(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_metadata::{MetadataRecord, ScramCredentialRecord};
+    use crabka_metadata::{AclOperation, MetadataRecord, ScramCredentialRecord};
     use crabka_protocol::UnknownTaggedFields;
+    use std::sync::Arc;
+
+    #[derive(Debug)]
+    struct ClusterDescribeOnly;
+
+    impl crate::authorizer::Authorizer for ClusterDescribeOnly {
+        fn authorize(
+            &self,
+            _source: &dyn crabka_authz::AclSource,
+            req: &crate::authorizer::AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            if req.resource_type == ResourceType::Cluster
+                && req.resource_name == crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME
+                && req.operation == AclOperation::Describe
+            {
+                return AuthorizationResult::Allow;
+            }
+
+            AuthorizationResult::Deny
+        }
+    }
 
     use super::*;
 
@@ -269,5 +290,57 @@ mod tests {
         ] {
             assert!(sasl_mechanism_to_byte(mechanism) == want, "{mechanism:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn handle_allows_cluster_describe_authorization() {
+        let (broker_handle, _dir) =
+            crate::test_support::start_broker_with_authorizer(Arc::new(ClusterDescribeOnly)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = crate::test_support::principal("alice");
+        let peer = crate::test_support::peer();
+        let ctx = crate::test_support::request_context(&principal, &peer, "scram-describe-test");
+
+        let bytes = handle(
+            &broker,
+            DescribeUserScramCredentialsRequest::default(),
+            &ctx,
+            0,
+        )
+        .await
+        .expect("describe should encode");
+        let resp: DescribeUserScramCredentialsResponse =
+            crate::test_support::decode_response(&bytes, 0);
+
+        assert!(resp.error_code == 0, "Cluster Describe should authorize");
+        assert!(resp.results.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_rejects_without_cluster_describe_authorization() {
+        let (broker_handle, _dir) = crate::test_support::start_broker_with_authorizer(Arc::new(
+            crate::test_support::DenyAll,
+        ))
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = crate::test_support::principal("alice");
+        let peer = crate::test_support::peer();
+        let ctx = crate::test_support::request_context(&principal, &peer, "scram-describe-test");
+
+        let bytes = handle(
+            &broker,
+            DescribeUserScramCredentialsRequest::default(),
+            &ctx,
+            0,
+        )
+        .await
+        .expect("describe denial should encode");
+        let resp: DescribeUserScramCredentialsResponse =
+            crate::test_support::decode_response(&bytes, 0);
+
+        assert!(resp.error_code == CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.results.is_empty());
+        broker_handle.shutdown().await;
     }
 }

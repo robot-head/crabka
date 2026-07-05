@@ -24,7 +24,7 @@
 //! `DUPLICATE_RESOURCE` (84) on the second occurrence.
 //!
 //! Deletion targets that are not present in the current metadata image get
-//! `RESOURCE_NOT_FOUND` (66).
+//! `RESOURCE_NOT_FOUND` (91).
 //!
 //! On a successful submit the handler emits one `V1ScramCredential` or
 //! `V1DeleteScramCredential` record per accepted row through
@@ -545,6 +545,11 @@ mod tests {
         let mut records = Vec::new();
 
         let r = process_deletion(&broker, deletion("alice"), true, &mut seen, &mut records);
+        assert!(
+            r.error_code == 91,
+            "missing SCRAM deletion target must use Kafka RESOURCE_NOT_FOUND (91), got {}",
+            r.error_code
+        );
         let expected = expected_result(
             "alice",
             codes::RESOURCE_NOT_FOUND,

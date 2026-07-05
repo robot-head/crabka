@@ -20,17 +20,19 @@ use std::{io, net::SocketAddr};
 
 use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
-use crabka_protocol::{
-    Decode, Encode,
-    owned::{
-        api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse,
-        sasl_authenticate_request::SaslAuthenticateRequest,
-        sasl_authenticate_response::SaslAuthenticateResponse,
-        sasl_handshake_request::SaslHandshakeRequest,
-        sasl_handshake_response::SaslHandshakeResponse,
-    },
+use crabka_broker::authorizer::SimpleAclAuthorizer;
+use crabka_broker::config::ListenerSpec;
+use crabka_broker::{Broker, BrokerHandle};
+use crabka_metadata::{
+    AclEntry, AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
 };
+use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
+use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
+use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
+use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
+use crabka_protocol::{Decode, Encode};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
 use tokio::{
@@ -165,6 +167,13 @@ async fn start_single_broker_sasl_plaintext_with_users(
     super_user: &str,
     users: &[(&str, &str)],
 ) -> (BrokerHandle, TempDir, SocketAddr) {
+    start_single_broker_sasl_plaintext_with_acl_authorizer(&[super_user], users).await
+}
+
+async fn start_single_broker_sasl_plaintext_with_acl_authorizer(
+    super_users: &[&str],
+    users: &[(&str, &str)],
+) -> (BrokerHandle, TempDir, SocketAddr) {
     let log_dir = tempfile::tempdir().unwrap();
     let mut cfg = crabka_broker::BrokerConfig::for_tests(log_dir.path().to_path_buf());
     cfg.listeners = vec![ListenerSpec {
@@ -181,11 +190,33 @@ async fn start_single_broker_sasl_plaintext_with_users(
         cfg.plain_credentials
             .insert((*name).to_string(), (*pass).to_string());
     }
-    cfg.super_users = std::iter::once(super_user.to_string()).collect();
+    cfg.super_users = super_users.iter().map(|user| (*user).to_string()).collect();
+    cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
     (handle, log_dir, addr)
+}
+
+async fn seed_cluster_acl(handle: &BrokerHandle, principal: &str, operation: AclOperation) {
+    handle
+        .submit_metadata_record_for_test(MetadataRecord::V1AccessControlEntry(AclEntry {
+            resource_type: ResourceType::Cluster,
+            resource_name: "kafka-cluster".into(),
+            pattern_type: PatternType::Literal,
+            principal: format!("User:{principal}"),
+            host: "*".into(),
+            operation,
+            permission_type: PermissionType::Allow,
+        }))
+        .await
+        .expect("seed cluster ACL");
+    handle
+        .wait_for_image(|img| {
+            img.matching_acls(ResourceType::Cluster, "kafka-cluster")
+                .any(|entry| entry.principal == format!("User:{principal}"))
+        })
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -333,4 +364,36 @@ async fn describe_unknown_user_returns_error() {
         "expected RESOURCE_NOT_FOUND (91) for unknown user ghost; got {}",
         row.1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_allows_cluster_describe_acl() {
+    let (handle, _dir, addr) =
+        start_single_broker_sasl_plaintext_with_acl_authorizer(&[], &[("alice", "alice-secret")])
+            .await;
+    seed_cluster_acl(&handle, "alice", AclOperation::Describe).await;
+
+    let (top_err, per_user) =
+        drive_describe_user_scram_credentials_sasl(addr, "alice", "alice-secret", None).await;
+
+    handle.shutdown().await;
+    assert!(top_err == 0, "Cluster Describe ACL should authorize");
+    assert!(per_user.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_rejects_without_cluster_describe_acl() {
+    let (handle, _dir, addr) =
+        start_single_broker_sasl_plaintext_with_acl_authorizer(&[], &[("alice", "alice-secret")])
+            .await;
+
+    let (top_err, per_user) =
+        drive_describe_user_scram_credentials_sasl(addr, "alice", "alice-secret", None).await;
+
+    handle.shutdown().await;
+    assert!(
+        top_err == 31,
+        "missing Cluster Describe ACL should be rejected"
+    );
+    assert!(per_user.is_empty());
 }
