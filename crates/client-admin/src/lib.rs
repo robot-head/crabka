@@ -34,7 +34,7 @@ pub use topics::{
 pub use users::{
     AclEntry, AclEntryFilter, AclOperation, CreateAclOutcome, DEFAULT_SCRAM_ITERATIONS,
     DeleteAclFilterOutcome, PatternType, PermissionType, ResourceType, ScramDeletion,
-    ScramUpsertion, ScramUserOutcome, UserScramCredentials,
+    ScramUpsertion, ScramUserOutcome, UserScramCredential, UserScramCredentials,
 };
 
 /// Test seam for `AdminClient`. The operator's reconcile only needs
@@ -506,7 +506,7 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
         39 => "INVALID_REPLICA_ASSIGNMENT",
         40 => "INVALID_CONFIG",
         41 => "NOT_CONTROLLER",
-        83 => "RESOURCE_NOT_FOUND_USER",
+        83 => "RESOURCE_NOT_FOUND",
         87 => "REASSIGNMENT_IN_PROGRESS",
         _ => "UNKNOWN",
     }
@@ -533,7 +533,7 @@ mod tests {
     fn users_kafka_error_name_includes_scram_describe_codes() {
         for (code, want) in [
             (31, "CLUSTER_AUTHORIZATION_FAILED"),
-            (83, "RESOURCE_NOT_FOUND_USER"),
+            (83, "RESOURCE_NOT_FOUND"),
         ] {
             assert!(kafka_error_name(code) == want);
         }

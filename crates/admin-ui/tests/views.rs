@@ -1,43 +1,11 @@
 use crabka_admin_ui::views::{
     ReadRouteState, Route, RoutePage, acls, groups, layout::sidebar_links, log_dirs, quotas,
-    render_page, render_route, topics, users,
+    render_page, render_page_body_html, render_route, render_route_html, topics, users,
 };
 use crabka_admin_ui::{dto::TopicRow, server_fns::AclRow};
-use dioxus::dioxus_core::{Element, TemplateNode, VNode};
 
-fn rendered_text(view: Element) -> String {
-    let vnode = view.expect("static view should render without runtime errors");
-
-    collect_vnode_text(&vnode)
-}
-
-fn collect_vnode_text(vnode: &VNode) -> String {
-    let mut text = String::new();
-
-    collect_template_text(vnode.template.roots, &mut text);
-
-    text
-}
-
-fn collect_template_text(nodes: &[TemplateNode], text: &mut String) {
-    for node in nodes {
-        match node {
-            TemplateNode::Element { children, .. } => collect_template_text(children, text),
-            TemplateNode::Text { text: node_text } => text.push_str(node_text),
-            TemplateNode::Dynamic { .. } => {}
-        }
-    }
-}
-
-fn assert_view_contains(view: Element, expected_text: &[&str]) {
-    let actual_text = rendered_text(view);
-
-    for expected in expected_text {
-        assert!(
-            actual_text.contains(expected),
-            "expected rendered text to contain {expected:?}, got {actual_text:?}"
-        );
-    }
+fn ssr_route_body(page: &RoutePage) -> String {
+    format!("<div>{}</div>", render_page_body_html(page))
 }
 
 #[test]
@@ -117,55 +85,19 @@ fn app_remains_callable() {
 }
 
 #[test]
-fn topic_view_renders_read_only_empty_state() {
-    assert_view_contains(
-        topics::topics_view(),
-        &["Topics", "Create Topic", "No topics loaded yet."],
-    );
-}
+fn protected_view_modules_use_shared_unauthenticated_page_by_default() {
+    let expected_body = ssr_route_body(&RoutePage::login());
 
-#[test]
-fn consumer_groups_view_renders_read_only_empty_state() {
-    assert_view_contains(
-        groups::groups_view(),
-        &["Consumer Groups", "No groups loaded yet."],
-    );
-}
-
-#[test]
-fn acls_view_renders_read_only_empty_state() {
-    assert_view_contains(
-        acls::acls_view(),
-        &["ACLs", "Create ACL", "No ACLs loaded yet."],
-    );
-}
-
-#[test]
-fn users_view_renders_scram_empty_state() {
-    assert_view_contains(
-        users::users_view(),
-        &[
-            "SCRAM Users",
-            "Upsert SCRAM-SHA-512",
-            "No user operation selected.",
-        ],
-    );
-}
-
-#[test]
-fn quotas_view_renders_search_empty_state() {
-    assert_view_contains(
-        quotas::quotas_view(),
-        &["Quotas", "Search for a user to describe quotas."],
-    );
-}
-
-#[test]
-fn log_dirs_view_renders_empty_state() {
-    assert_view_contains(
-        log_dirs::log_dirs_view(),
-        &["Log Dirs", "No log-dir data loaded yet."],
-    );
+    for view in [
+        topics::topics_view,
+        groups::groups_view,
+        acls::acls_view,
+        users::users_view,
+        quotas::quotas_view,
+        log_dirs::log_dirs_view,
+    ] {
+        assert_eq!(dioxus_ssr::render_element(view()), expected_body);
+    }
 }
 
 #[test]
@@ -187,6 +119,37 @@ fn every_route_renders_a_page() {
             "route {route:?} should render a page"
         );
     }
+}
+
+#[test]
+fn protected_render_routes_use_shared_unauthenticated_page_by_default() {
+    for (route, old_placeholder) in [
+        (Route::Acls, "No ACLs loaded yet."),
+        (Route::Users, "No user operation selected."),
+        (Route::Quotas, "Search for a user to describe quotas."),
+    ] {
+        let expected_html = render_page(&RoutePage::for_unauthenticated_route(route));
+        let expected_body = ssr_route_body(&RoutePage::for_unauthenticated_route(route));
+        let route_html = render_route_html(route);
+
+        assert_eq!(route_html, expected_html, "{route:?} shared HTML");
+        assert_eq!(
+            dioxus_ssr::render_element(render_route(route)),
+            expected_body
+        );
+        assert!(route_html.contains("Sign in to Crabka Admin"));
+        assert!(!route_html.contains(old_placeholder));
+    }
+}
+
+#[test]
+fn route_element_ssr_embeds_shared_page_body_html() {
+    let page = RoutePage::for_unauthenticated_route(Route::Acls);
+
+    assert_eq!(
+        dioxus_ssr::render_element(render_route(Route::Acls)),
+        ssr_route_body(&page)
+    );
 }
 
 #[test]

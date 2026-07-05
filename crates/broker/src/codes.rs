@@ -145,11 +145,12 @@ pub const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
 /// `RESOURCE_NOT_FOUND` (66) — per-user error when a deletion targets a
 /// credential that does not exist in the metadata image.
 pub const RESOURCE_NOT_FOUND: i16 = 66;
-/// `RESOURCE_NOT_FOUND_USER` (83) — per-user error returned by
+/// `RESOURCE_NOT_FOUND` (83) — per-user error returned by
 /// `DescribeUserScramCredentials` when the requested user has no SCRAM
-/// credentials in the metadata image. Apache Kafka uses error code 83 for
-/// this case (distinct from the deletion-target-missing code 66).
-pub const RESOURCE_NOT_FOUND_USER: i16 = 83;
+/// credentials in the metadata image. The internal constant is API-scoped
+/// because this file already has the older delete-target-missing
+/// `RESOURCE_NOT_FOUND` code 66.
+pub const DESCRIBE_USER_SCRAM_RESOURCE_NOT_FOUND: i16 = 83;
 /// `UNACCEPTABLE_CREDENTIAL` (78) — per-user error when an upsertion carries
 /// invalid SCRAM parameters (iterations < 4096, empty salt, `salted_password`
 /// of the wrong length, or an unknown mechanism). Canonical Apache Kafka

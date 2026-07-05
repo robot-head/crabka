@@ -14,11 +14,9 @@ use crabka_protocol::{
 };
 use crabka_security::SaslMechanism;
 
-use crate::{
-    authorizer::{AuthorizationRequest, AuthorizationResult},
-    broker::Broker,
-    codes::{CLUSTER_AUTHORIZATION_FAILED, RESOURCE_NOT_FOUND_USER},
-};
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
+use crate::broker::Broker;
+use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, DESCRIBE_USER_SCRAM_RESOURCE_NOT_FOUND};
 
 #[allow(clippy::unused_async)]
 #[tracing::instrument(
@@ -92,7 +90,7 @@ fn build_results(
             if pairs.is_empty() && !known_users.contains(&user) {
                 DescribeUserScramCredentialsResult {
                     user,
-                    error_code: RESOURCE_NOT_FOUND_USER,
+                    error_code: DESCRIBE_USER_SCRAM_RESOURCE_NOT_FOUND,
                     error_message: Some("no such SCRAM user".into()),
                     credential_infos: vec![],
                     ..Default::default()
@@ -254,7 +252,7 @@ mod tests {
         );
         let expected = vec![DescribeUserScramCredentialsResult {
             user: "ghost".to_string(),
-            error_code: RESOURCE_NOT_FOUND_USER,
+            error_code: DESCRIBE_USER_SCRAM_RESOURCE_NOT_FOUND,
             error_message: Some("no such SCRAM user".to_string()),
             credential_infos: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),

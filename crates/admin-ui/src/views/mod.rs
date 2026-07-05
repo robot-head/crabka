@@ -9,9 +9,9 @@ pub mod quotas;
 pub mod topics;
 pub mod users;
 
-use dioxus::dioxus_core::{Element, Template, VNode};
+use dioxus::dioxus_core::{Attribute, Element, Template, TemplateAttribute, TemplateNode, VNode};
 
-pub use page::{ReadRouteState, RoutePage, render_page};
+pub use page::{ReadRouteState, RoutePage, render_page, render_page_body_html};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Route {
@@ -64,19 +64,43 @@ impl Route {
     }
 }
 
-pub fn render_route(route: Route) -> Element {
-    match route {
-        Route::Overview => overview::overview_view(),
-        Route::Login => login::login_view(),
-        Route::Topics => topics::topics_view(),
-        Route::Groups => groups::groups_view(),
-        Route::Acls => acls::acls_view(),
-        Route::Users => users::users_view(),
-        Route::Quotas => quotas::quotas_view(),
-        Route::LogDirs => log_dirs::log_dirs_view(),
-    }
+#[must_use]
+pub fn render_route_html(route: Route) -> String {
+    render_page(&RoutePage::for_unauthenticated_route(route))
 }
 
-fn static_vnode(template: Template) -> VNode {
-    VNode::new(None, template, Box::new([]), Box::new([]))
+pub fn render_route(route: Route) -> Element {
+    render_page_element(&RoutePage::for_unauthenticated_route(route))
+}
+
+pub fn render_page_element(page: &RoutePage) -> Element {
+    Ok(render_html_fragment_vnode(render_page_body_html(page)))
+}
+
+fn render_html_fragment_vnode(html: String) -> VNode {
+    const ROOT_ATTRS: &[TemplateAttribute] = &[TemplateAttribute::Dynamic { id: 0 }];
+    const ROOTS: &[TemplateNode] = &[TemplateNode::Element {
+        tag: "div",
+        namespace: None,
+        attrs: ROOT_ATTRS,
+        children: &[],
+    }];
+    const ATTR_PATHS: &[&[u8]] = &[&[0]];
+    const TEMPLATE: Template = Template {
+        roots: ROOTS,
+        node_paths: &[],
+        attr_paths: ATTR_PATHS,
+    };
+
+    VNode::new(
+        None,
+        TEMPLATE,
+        Box::new([]),
+        Box::new([Box::new([Attribute::new(
+            "dangerous_inner_html",
+            html,
+            None,
+            false,
+        )])]),
+    )
 }

@@ -2,8 +2,11 @@ use std::fmt::Write as _;
 
 use crate::dto::{AclRow, GroupRow, LogDirRow, QuotaRow, TopicRow, UserRow};
 
+use super::Route;
+
 #[derive(Clone, PartialEq, Eq)]
 pub enum ReadRouteState<T> {
+    Loading,
     AuthenticationRequired,
     LoadFailed,
     Rows(Vec<T>),
@@ -51,6 +54,29 @@ impl RoutePage {
     pub const fn login_failed() -> Self {
         Self::Login {
             state: LoginRouteState::AuthenticationFailed,
+        }
+    }
+
+    #[must_use]
+    pub const fn for_unauthenticated_route(route: Route) -> Self {
+        Self::for_guarded_route(route.guard_for_authentication(false))
+    }
+
+    #[must_use]
+    pub const fn for_authenticated_route(route: Route) -> Self {
+        Self::for_guarded_route(route.guard_for_authentication(true))
+    }
+
+    const fn for_guarded_route(route: Route) -> Self {
+        match route {
+            Route::Overview => Self::overview(),
+            Route::Login => Self::login(),
+            Route::Topics => Self::topics(ReadRouteState::Loading),
+            Route::Groups => Self::groups(ReadRouteState::Loading),
+            Route::Acls => Self::acls(ReadRouteState::Loading),
+            Route::Users => Self::users(ReadRouteState::Loading),
+            Route::Quotas => Self::quotas(ReadRouteState::Loading),
+            Route::LogDirs => Self::log_dirs(ReadRouteState::Loading),
         }
     }
 
@@ -107,12 +133,19 @@ pub fn render_page(page: &RoutePage) -> String {
     );
     push_escaped(&mut html, page.title());
     html.push_str("</title></head><body>");
-    render_page_body(page, &mut html);
+    push_page_body(page, &mut html);
     html.push_str("</body></html>");
     html
 }
 
-fn render_page_body(page: &RoutePage, html: &mut String) {
+#[must_use]
+pub fn render_page_body_html(page: &RoutePage) -> String {
+    let mut html = String::new();
+    push_page_body(page, &mut html);
+    html
+}
+
+fn push_page_body(page: &RoutePage, html: &mut String) {
     if let RoutePage::Login { state } = page {
         render_login(*state, html);
         return;
@@ -167,6 +200,7 @@ fn render_topics(state: &ReadRouteState<TopicRow>, html: &mut String) {
     html.push_str(r#"<section class="admin-section topics-section"><h2>Topics</h2><button>Create Topic</button>"#);
 
     match state {
+        ReadRouteState::Loading => render_paragraph("Loading topics…", html),
         ReadRouteState::AuthenticationRequired => {
             render_paragraph("Authentication required.", html);
         }
@@ -196,6 +230,7 @@ fn render_groups(state: &ReadRouteState<GroupRow>, html: &mut String) {
     html.push_str(r#"<section class="admin-section groups-section"><h2>Consumer Groups</h2>"#);
 
     match state {
+        ReadRouteState::Loading => render_paragraph("Loading consumer groups…", html),
         ReadRouteState::AuthenticationRequired => {
             render_paragraph("Authentication required.", html);
         }
@@ -227,6 +262,7 @@ fn render_acls(state: &ReadRouteState<AclRow>, html: &mut String) {
     );
 
     match state {
+        ReadRouteState::Loading => render_paragraph("Loading ACLs…", html),
         ReadRouteState::AuthenticationRequired => {
             render_paragraph("Authentication required.", html);
         }
@@ -262,6 +298,7 @@ fn render_users(state: &ReadRouteState<UserRow>, html: &mut String) {
     html.push_str(r#"<section class="admin-section users-section"><h2>SCRAM Users</h2><button>Upsert SCRAM-SHA-512</button>"#);
 
     match state {
+        ReadRouteState::Loading => render_paragraph("Loading SCRAM users…", html),
         ReadRouteState::AuthenticationRequired => {
             render_paragraph("Authentication required.", html);
         }
@@ -293,6 +330,7 @@ fn render_quotas(state: &ReadRouteState<QuotaRow>, html: &mut String) {
     html.push_str(r#"<section class="admin-section quotas-section"><h2>Quotas</h2>"#);
 
     match state {
+        ReadRouteState::Loading => render_paragraph("Loading quotas…", html),
         ReadRouteState::AuthenticationRequired => {
             render_paragraph("Authentication required.", html);
         }
@@ -326,6 +364,7 @@ fn render_log_dirs(state: &ReadRouteState<LogDirRow>, html: &mut String) {
     html.push_str(r#"<section class="admin-section log-dirs-section"><h2>Log Dirs</h2>"#);
 
     match state {
+        ReadRouteState::Loading => render_paragraph("Loading log-dir data…", html),
         ReadRouteState::AuthenticationRequired => {
             render_paragraph("Authentication required.", html);
         }

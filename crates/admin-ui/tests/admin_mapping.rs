@@ -10,7 +10,7 @@ use crabka_client_admin::{
     AclEntry, AclOperation, AdminError, AlterReplicaLogDirOutcome, CreatePartitionsOutcome,
     DeleteAclFilterOutcome, DeleteTopicOutcome, KafkaError, LogDirInfo, LogDirPartitionInfo,
     LogDirTopicInfo, PatternType, PermissionType, ResourceType, ScramUserOutcome, TopicMetadata,
-    TopicMetadataEntry, UserScramCredentials,
+    TopicMetadataEntry, UserScramCredential, UserScramCredentials,
 };
 use std::collections::BTreeMap;
 
@@ -253,7 +253,10 @@ fn maps_user_quota_config_to_visible_rows() {
 fn maps_scram_credentials_to_user_rows() {
     let rows = crabka_admin_ui::admin::user_rows(vec![UserScramCredentials {
         username: "alice".to_string(),
-        mechanisms: vec!["SCRAM-SHA-512".to_string()],
+        credentials: vec![UserScramCredential {
+            mechanism: "SCRAM-SHA-512".to_string(),
+            iterations: 8192,
+        }],
         error: None,
     }]);
 

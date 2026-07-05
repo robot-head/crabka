@@ -14,7 +14,7 @@ use crate::config::AdminUiConfig;
 use crate::error::UiError;
 use crate::server_fns::{self, AdminSeamFactory, BrokerAdminSeamFactory, ServerFunctionContext};
 use crate::session::SessionStore;
-use crate::views::{ReadRouteState, RoutePage, render_page};
+use crate::views::{ReadRouteState, Route, RoutePage, render_page};
 
 pub const SESSION_COOKIE_NAME: &str = "crabka_admin_session";
 
@@ -87,7 +87,7 @@ where
 
     Router::new()
         .route("/healthz", get(healthz))
-        .route("/", get(root))
+        .route("/", get(root::<F, B>))
         .route("/login", get(login).post(post_login::<F, B>))
         .route("/topics", get(topics))
         .route("/groups", get(groups))
@@ -102,8 +102,19 @@ async fn healthz() -> StatusCode {
     StatusCode::OK
 }
 
-async fn root() -> Html<String> {
-    Html(render_page(&RoutePage::overview()))
+async fn root<F, B>(State(state): State<AdminRouterState<F, B>>, headers: HeaderMap) -> Html<String>
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let page = if is_authenticated(&state, &headers) {
+        RoutePage::for_authenticated_route(Route::Overview)
+    } else {
+        RoutePage::for_unauthenticated_route(Route::Overview)
+    };
+
+    Html(render_page(&page))
 }
 
 async fn login() -> Html<String> {
@@ -302,6 +313,14 @@ fn context_from_headers<'a, F, B>(
         Some(raw_session_id),
         &state.seam_factory,
     ))
+}
+
+fn is_authenticated<F, B>(state: &AdminRouterState<F, B>, headers: &HeaderMap) -> bool {
+    let Some(raw_session_id) = session_cookie(headers) else {
+        return false;
+    };
+
+    server_fns::current_session_with_store(&state.app.sessions, Some(raw_session_id)).is_ok()
 }
 
 fn session_cookie(headers: &HeaderMap) -> Option<&str> {

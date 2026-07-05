@@ -119,9 +119,15 @@ pub struct ScramUserOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserScramCredential {
+    pub mechanism: String,
+    pub iterations: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserScramCredentials {
     pub username: String,
-    pub mechanisms: Vec<String>,
+    pub credentials: Vec<UserScramCredential>,
     pub error: Option<KafkaError>,
 }
 
@@ -403,10 +409,13 @@ fn parse_describe_user_scram_credentials_response(
         .into_iter()
         .map(|result| UserScramCredentials {
             username: result.user,
-            mechanisms: result
+            credentials: result
                 .credential_infos
                 .into_iter()
-                .map(|credential| scram_mechanism_name(credential.mechanism).to_string())
+                .map(|credential| UserScramCredential {
+                    mechanism: scram_mechanism_name(credential.mechanism).to_string(),
+                    iterations: credential.iterations,
+                })
                 .collect(),
             error: error_if(result.error_code, result.error_message),
         })
@@ -848,5 +857,49 @@ mod tests {
             }
             other => panic!("expected broker error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn users_describe_scram_preserves_credential_iterations() {
+        let resp = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
+            results: vec![
+                crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResult {
+                    user: "alice".to_string(),
+                    credential_infos: vec![
+                        crabka_protocol::owned::describe_user_scram_credentials_response::CredentialInfo {
+                            mechanism: 1,
+                            iterations: 4096,
+                            ..Default::default()
+                        },
+                        crabka_protocol::owned::describe_user_scram_credentials_response::CredentialInfo {
+                            mechanism: 2,
+                            iterations: 8192,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let users = parse_describe_user_scram_credentials_response(resp)
+            .expect("valid SCRAM describe response should parse");
+
+        assert!(users.len() == 1);
+        check!(users[0].username == "alice");
+        check!(
+            users[0].credentials
+                == vec![
+                    UserScramCredential {
+                        mechanism: "SCRAM-SHA-256".to_string(),
+                        iterations: 4096,
+                    },
+                    UserScramCredential {
+                        mechanism: "SCRAM-SHA-512".to_string(),
+                        iterations: 8192,
+                    },
+                ]
+        );
     }
 }

@@ -110,7 +110,7 @@ async fn healthz_returns_ok() {
 }
 
 #[tokio::test]
-async fn root_returns_html() {
+async fn root_without_cookie_renders_login_instead_of_operations_shell() {
     let response = get("/").await;
 
     assert_eq!(response.status(), StatusCode::OK);
@@ -123,9 +123,29 @@ async fn root_returns_html() {
 
     let body = response_text(response).await;
     assert!(body.contains("<!doctype html>"));
-    assert!(body.contains("Crabka Admin"));
-    assert!(body.contains("operations-shell"));
-    assert!(body.contains("Crabka Operations"));
+    assert!(body.contains("Sign in to Crabka Admin"));
+    assert!(!body.contains("operations-shell"));
+    assert!(!body.contains("Crabka Operations"));
+}
+
+#[tokio::test]
+async fn root_with_valid_cookie_renders_overview_shell() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = Some(format!(
+        "{SESSION_COOKIE_NAME}={}",
+        session_id.expose_for_cookie()
+    ));
+
+    let response = get_from(app, "/", cookie).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_text(response).await;
+    assert_eq!(body, render_page(&RoutePage::overview()));
+    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -287,21 +307,61 @@ async fn dynamic_read_routes_match_shared_page_renderer() {
         session_id.expose_for_cookie()
     ));
 
-    let topics_body = response_text(get_from(app.clone(), "/topics", cookie.clone()).await).await;
-    let acls_body = response_text(get_from(app, "/acls", cookie).await).await;
+    let cases = [
+        (
+            "/topics",
+            render_page(&RoutePage::topics(ReadRouteState::Rows(vec![
+                sample_topic_row(),
+            ]))),
+        ),
+        (
+            "/groups",
+            render_page(&RoutePage::groups(ReadRouteState::Rows(vec![GroupRow {
+                group_id: "consumer-a".to_string(),
+            }]))),
+        ),
+        (
+            "/acls",
+            render_page(&RoutePage::acls(ReadRouteState::Rows(vec![
+                sample_acl_row(),
+            ]))),
+        ),
+        (
+            "/users",
+            render_page(&RoutePage::users(ReadRouteState::Rows(vec![UserRow {
+                username: "scram-alice".to_string(),
+                principal: "User:scram-alice".to_string(),
+            }]))),
+        ),
+        (
+            "/quotas",
+            render_page(&RoutePage::quotas(ReadRouteState::Rows(vec![QuotaRow {
+                entity: "User:alice".to_string(),
+                quota_type: "producer_byte_rate".to_string(),
+                value: "1024".to_string(),
+            }]))),
+        ),
+        (
+            "/log-dirs",
+            render_page(&RoutePage::log_dirs(ReadRouteState::Rows(vec![
+                LogDirRow {
+                    log_dir: "/var/lib/crabka".to_string(),
+                    topic: "orders".to_string(),
+                    partition: 0,
+                    partition_size: 10,
+                    offset_lag: 0,
+                    is_future_key: false,
+                    error: None,
+                },
+            ]))),
+        ),
+    ];
 
-    assert_eq!(
-        topics_body,
-        render_page(&RoutePage::topics(ReadRouteState::Rows(vec![
-            sample_topic_row()
-        ])))
-    );
-    assert_eq!(
-        acls_body,
-        render_page(&RoutePage::acls(ReadRouteState::Rows(vec![
-            sample_acl_row()
-        ])))
-    );
+    for (path, expected_body) in cases {
+        let body = response_text(get_from(app.clone(), path, cookie.clone()).await).await;
+
+        assert_eq!(body, expected_body, "{path} shared renderer output");
+    }
 }
 
 #[tokio::test]

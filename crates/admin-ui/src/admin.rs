@@ -4,7 +4,7 @@ use crabka_client_admin::{
     AclEntry, AclEntryFilter, AdminClient, AdminError, AlterConfigsOutcome,
     AlterReplicaLogDirOutcome, CreateAclOutcome, CreatePartitionsOutcome, CreateTopicOutcome,
     DeleteAclFilterOutcome, DeleteTopicOutcome, KafkaError, LogDirInfo, ScramUserOutcome,
-    TopicMetadata, UserQuotaConfig, UserScramCredentials,
+    TopicMetadata, UserQuotaConfig, UserScramCredential, UserScramCredentials,
 };
 
 use crate::dto::{
@@ -121,9 +121,17 @@ pub fn user_rows(users: Vec<UserScramCredentials>) -> Vec<UserRow> {
         .into_iter()
         .map(|user| UserRow {
             username: user.username,
-            principal: user.mechanisms.join(", "),
+            principal: scram_credential_summary(&user.credentials),
         })
         .collect()
+}
+
+fn scram_credential_summary(credentials: &[UserScramCredential]) -> String {
+    credentials
+        .iter()
+        .map(|credential| credential.mechanism.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[must_use]
