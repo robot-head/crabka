@@ -514,6 +514,7 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
         91 => "RESOURCE_NOT_FOUND",
         92 => "DUPLICATE_RESOURCE",
         93 => "UNACCEPTABLE_CREDENTIAL",
+        107 => "INELIGIBLE_REPLICA",
         87 => "REASSIGNMENT_IN_PROGRESS",
         _ => "UNKNOWN",
     }
@@ -551,6 +552,11 @@ mod tests {
         ] {
             assert!(kafka_error_name(code) == want);
         }
+    }
+
+    #[test]
+    fn users_kafka_error_name_includes_ineligible_replica() {
+        assert!(kafka_error_name(107) == "INELIGIBLE_REPLICA");
     }
 
     #[test]

@@ -639,6 +639,7 @@ async fn authenticated_public_context_mutations_still_return_validation_errors()
         Err(UiError::Admin(_))
     ));
 
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
     assert_eq!(factory.mutations.total_calls(), 0);
 }
 
