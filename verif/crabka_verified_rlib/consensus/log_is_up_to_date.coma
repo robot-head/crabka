@@ -1,0 +1,36 @@
+(* #"/work/crates/verified/src/consensus.rs" 202 0 207 9 *)
+
+let%span sconsensus = "/work/crates/verified/src/consensus.rs" 208 4 208 78
+let%span sconsensus'0 = "/work/crates/verified/src/consensus.rs" 208 29 208 78
+let%span sconsensus'1 = "/work/crates/verified/src/consensus.rs" 199 10 200 61
+
+use creusot.int.UInt32
+use creusot.int.Int64
+use creusot.prelude.Any
+use int.Int
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let log_is_up_to_date [#"/work/crates/verified/src/consensus.rs" 202 0 207 9] (my_epoch: UInt32.t) (my_end: Int64.t)
+  (cand_epoch: UInt32.t) (cand_offset: Int64.t) (return (x: bool)) = (! bb0
+  [ bb0 = s0
+    [ s0 = [ &_10 <- UInt32.gt cand_epoch my_epoch ] s1
+    | s1 = any [ br0 -> {_10 = false} (! bb2) | br1 -> {_10} (! bb1) ] ]
+  | bb1 = s0 [ s0 = [ &_ret <- [%#sconsensus] true ] s1 | s1 = return {_ret} ]
+  | bb2 = s0
+    [ s0 = [ &_13 <- cand_epoch = my_epoch ] s1 | s1 = any [ br0 -> {_13 = false} (! bb4) | br1 -> {_13} (! bb3) ] ]
+  | bb3 = s0 [ s0 = [ &_ret <- Int64.ge cand_offset my_end ] s1 | s1 = return {_ret} ]
+  | bb4 = s0 [ s0 = [ &_ret <- [%#sconsensus'0] false ] s1 | s1 = return {_ret} ] ]
+  [ & _ret: bool = Any.any_l ()
+  | & my_epoch: UInt32.t = my_epoch
+  | & my_end: Int64.t = my_end
+  | & cand_epoch: UInt32.t = cand_epoch
+  | & cand_offset: Int64.t = cand_offset
+  | & _10: bool = Any.any_l ()
+  | & _13: bool = Any.any_l () ])
+  [ return (result: bool) -> {[@stop_split] [@expl:log_is_up_to_date ensures] [%#sconsensus'1] result
+    = (UInt32.t'int cand_epoch > UInt32.t'int my_epoch
+    \/ UInt32.t'int cand_epoch = UInt32.t'int my_epoch /\ Int64.to_int cand_offset >= Int64.to_int my_end)}
+    (! return {result}) ]

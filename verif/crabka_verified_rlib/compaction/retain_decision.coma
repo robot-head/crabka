@@ -1,0 +1,155 @@
+(* #"/work/crates/verified/src/compaction.rs" 114 0 121 19 *)
+
+let%span scompaction = "/work/crates/verified/src/compaction.rs" 128 51 128 95
+let%span scompaction'0 = "/work/crates/verified/src/compaction.rs" 145 43 145 87
+let%span scompaction'1 = "/work/crates/verified/src/compaction.rs" 94 10 95 38
+let%span scompaction'2 = "/work/crates/verified/src/compaction.rs" 96 10 98 67
+let%span scompaction'3 = "/work/crates/verified/src/compaction.rs" 99 10 101 93
+let%span scompaction'4 = "/work/crates/verified/src/compaction.rs" 102 10 102 80
+let%span scompaction'5 = "/work/crates/verified/src/compaction.rs" 103 10 103 101
+let%span scompaction'6 = "/work/crates/verified/src/compaction.rs" 104 10 105 38
+let%span scompaction'7 = "/work/crates/verified/src/compaction.rs" 106 10 109 67
+let%span scompaction'8 = "/work/crates/verified/src/compaction.rs" 110 10 112 93
+let%span scompaction'9 = "/work/crates/verified/src/compaction.rs" 74 10 74 71
+let%span scompaction'10 = "/work/crates/verified/src/compaction.rs" 75 10 81 1
+let%span scompaction'11 = "/work/crates/verified/src/compaction.rs" 64 8 70 9
+
+use creusot.int.Int64
+use creusot.prelude.Any
+use int.Int
+
+type t_Option_i64 = None | Some Int64.t
+
+type t_BatchMeta = { is_control: bool; producer_id: Int64.t; existing_horizon: t_Option_i64 }
+
+type t_TxnDataState = NotTransactional | DataSurvives | DataFullyGone
+
+let elim_Some (_x: t_Option_i64) (return (f0: Int64.t)) = any
+  [ _k (f0: Int64.t) -> {Some f0 = _x} (! return {f0})
+  | _chk -> (! {[@expl:elim Some] match _x with
+      | Some _ -> true
+      | _ -> false
+      end}
+    any) ]
+
+type t_RetainDecision = Keep | SetHorizon Int64.t | Delete
+
+function compute_horizon_model [#"/work/crates/verified/src/compaction.rs" 62 0 62 74] (now_ms: Int64.t) (delete_retention_ms: Int64.t) : int
+ = [%#scompaction'11] if Int64.to_int now_ms + Int64.to_int delete_retention_ms > 9223372036854775807 then
+    9223372036854775807
+  else
+    if Int64.to_int now_ms + Int64.to_int delete_retention_ms < - 9223372036854775807 - 1 then
+      - 9223372036854775807 - 1
+    else
+      Int64.to_int now_ms + Int64.to_int delete_retention_ms
+
+
+
+let compute_horizon (now_ms: Int64.t) (delete_retention_ms: Int64.t) (return (x: Int64.t)) = any
+  [ return (result: Int64.t) ->
+  {[@stop_split] [@expl:compute_horizon ensures] ([@stop_split] [@expl:compute_horizon ensures #0] [%#scompaction'9] Int64.to_int result
+      = compute_horizon_model now_ms delete_retention_ms)
+    /\ ([@stop_split] [@expl:compute_horizon ensures #1] [%#scompaction'10] Int64.to_int result
+    = (if Int64.to_int now_ms + Int64.to_int delete_retention_ms > 9223372036854775807 then
+      9223372036854775807
+    else
+      if Int64.to_int now_ms + Int64.to_int delete_retention_ms < - 9223372036854775807 - 1 then
+        - 9223372036854775807 - 1
+      else
+        Int64.to_int now_ms + Int64.to_int delete_retention_ms
+
+    ))}
+    (! return {result}) ]
+
+type t_RecordMeta = { has_key: bool; has_value: bool }
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let retain_decision [#"/work/crates/verified/src/compaction.rs" 114 0 121 19] (rec': t_RecordMeta) (batch: t_BatchMeta)
+  (is_newest_for_key: bool) (txn: t_TxnDataState) (now_ms: Int64.t) (delete_retention_ms: Int64.t)
+  (return (x: t_RetainDecision)) = (! bb0
+  [ bb0 = any [ br0 -> {batch.is_control = false} (! bb15) | br1 -> {batch.is_control} (! bb1) ]
+  | bb1 = any
+    [ br0 -> {txn = NotTransactional} (! bb5)
+    | br1 -> {txn = DataSurvives} (! bb5)
+    | br2 -> {txn = DataFullyGone} (! bb3) ]
+  | bb3 = any
+    [ br0 -> {batch.existing_horizon = None} (! bb9)
+    | br1 (x0: Int64.t) -> {batch.existing_horizon = Some x0} (! bb11) ]
+  | bb11 = s0
+    [ s0 = elim_Some {batch.existing_horizon} (fun (r0: Int64.t) -> [ &h'0 <- r0 ] s1)
+    | s1 = [ &_56 <- Int64.ge now_ms h'0 ] s2
+    | s2 = any [ br0 -> {_56 = false} (! bb10) | br1 -> {_56} (! bb12) ] ]
+  | bb12 = s0
+    [ s0 = elim_Some {batch.existing_horizon} (fun (r0: Int64.t) -> [ &h <- r0 ] s1)
+    | s1 = [ &_ret <- Delete ] s2
+    | s2 = return {_ret} ]
+  | bb10 = s0 [ s0 = [ &_ret <- Keep ] s1 | s1 = return {_ret} ]
+  | bb9 = s0
+    [ s0 = compute_horizon [%#scompaction] {now_ms} {delete_retention_ms} (fun (_x: Int64.t) -> [ &_59 <- _x ] s1)
+    | s1 = [ &_ret <- SetHorizon _59 ] s2
+    | s2 = return {_ret} ]
+  | bb5 = s0 [ s0 = [ &_ret <- Keep ] s1 | s1 = return {_ret} ]
+  | bb15 = any [ br0 -> {rec'.has_key = false} (! bb17) | br1 -> {rec'.has_key} (! bb16) ]
+  | bb16 = any [ br0 -> {is_newest_for_key = false} (! bb19) | br1 -> {is_newest_for_key} (! bb18) ]
+  | bb18 = any [ br0 -> {rec'.has_value = false} (! bb21) | br1 -> {rec'.has_value} (! bb20) ]
+  | bb20 = s0 [ s0 = [ &_ret <- Keep ] s1 | s1 = return {_ret} ]
+  | bb21 = any
+    [ br0 -> {batch.existing_horizon = None} (! bb25)
+    | br1 (x0: Int64.t) -> {batch.existing_horizon = Some x0} (! bb27) ]
+  | bb27 = s0
+    [ s0 = elim_Some {batch.existing_horizon} (fun (r0: Int64.t) -> [ &h'2 <- r0 ] s1)
+    | s1 = [ &_75 <- Int64.ge now_ms h'2 ] s2
+    | s2 = any [ br0 -> {_75 = false} (! bb26) | br1 -> {_75} (! bb28) ] ]
+  | bb28 = s0
+    [ s0 = elim_Some {batch.existing_horizon} (fun (r0: Int64.t) -> [ &h'1 <- r0 ] s1)
+    | s1 = [ &_ret <- Delete ] s2
+    | s2 = return {_ret} ]
+  | bb26 = s0 [ s0 = [ &_ret <- Keep ] s1 | s1 = return {_ret} ]
+  | bb25 = s0
+    [ s0 = compute_horizon [%#scompaction'0] {now_ms} {delete_retention_ms} (fun (_x: Int64.t) -> [ &_78 <- _x ] s1)
+    | s1 = [ &_ret <- SetHorizon _78 ] s2
+    | s2 = return {_ret} ]
+  | bb19 = s0 [ s0 = [ &_ret <- Delete ] s1 | s1 = return {_ret} ]
+  | bb17 = s0 [ s0 = [ &_ret <- Delete ] s1 | s1 = return {_ret} ] ]
+  [ & _ret: t_RetainDecision = Any.any_l ()
+  | & rec': t_RecordMeta = rec'
+  | & batch: t_BatchMeta = batch
+  | & is_newest_for_key: bool = is_newest_for_key
+  | & txn: t_TxnDataState = txn
+  | & now_ms: Int64.t = now_ms
+  | & delete_retention_ms: Int64.t = delete_retention_ms
+  | & h: Int64.t = Any.any_l ()
+  | & h'0: Int64.t = Any.any_l ()
+  | & _56: bool = Any.any_l ()
+  | & _59: Int64.t = Any.any_l ()
+  | & h'1: Int64.t = Any.any_l ()
+  | & h'2: Int64.t = Any.any_l ()
+  | & _75: bool = Any.any_l ()
+  | & _78: Int64.t = Any.any_l () ])
+  [ return (result: t_RetainDecision) ->
+  {[@stop_split] [@expl:retain_decision ensures] ([@stop_split] [@expl:retain_decision ensures #0] [%#scompaction'1] batch.is_control
+        /\ (txn = DataSurvives \/ txn = NotTransactional) -> result = Keep)
+    /\ ([@stop_split] [@expl:retain_decision ensures #1] [%#scompaction'2] batch.is_control
+        /\ txn = DataFullyGone /\ batch.existing_horizon = None
+      -> (exists h: Int64.t. result = SetHorizon h
+        /\ Int64.to_int h = compute_horizon_model now_ms delete_retention_ms))
+    /\ ([@stop_split] [@expl:retain_decision ensures #2] [%#scompaction'3] forall h: Int64.t. batch.is_control
+          /\ txn = DataFullyGone /\ batch.existing_horizon = Some h
+        -> result = (if Int64.to_int now_ms >= Int64.to_int h then Delete else Keep))
+    /\ ([@stop_split] [@expl:retain_decision ensures #3] [%#scompaction'4] not batch.is_control /\ not rec'.has_key
+      -> result = Delete)
+    /\ ([@stop_split] [@expl:retain_decision ensures #4] [%#scompaction'5] not batch.is_control
+        /\ rec'.has_key /\ not is_newest_for_key -> result = Delete)
+    /\ ([@stop_split] [@expl:retain_decision ensures #5] [%#scompaction'6] not batch.is_control
+        /\ rec'.has_key /\ is_newest_for_key /\ rec'.has_value -> result = Keep)
+    /\ ([@stop_split] [@expl:retain_decision ensures #6] [%#scompaction'7] not batch.is_control
+        /\ rec'.has_key /\ is_newest_for_key /\ not rec'.has_value /\ batch.existing_horizon = None
+      -> (exists h: Int64.t. result = SetHorizon h
+        /\ Int64.to_int h = compute_horizon_model now_ms delete_retention_ms))
+    /\ ([@stop_split] [@expl:retain_decision ensures #7] [%#scompaction'8] forall h: Int64.t. not batch.is_control
+        /\ rec'.has_key /\ is_newest_for_key /\ not rec'.has_value /\ batch.existing_horizon = Some h
+      -> result = (if Int64.to_int now_ms >= Int64.to_int h then Delete else Keep))}
+    (! return {result}) ]
