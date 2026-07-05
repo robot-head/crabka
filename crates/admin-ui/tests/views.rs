@@ -222,3 +222,64 @@ fn full_page_renderer_uses_dioxus_ssr_for_dynamic_and_protected_pages() {
         assert!(rendered_page.contains("<body><div>"));
     }
 }
+
+#[test]
+fn shared_page_renderer_renders_empty_table_states() {
+    let cases = [
+        (
+            RoutePage::topics(ReadRouteState::Rows(Vec::new())),
+            "No topics loaded yet.",
+        ),
+        (
+            RoutePage::groups(ReadRouteState::Rows(Vec::new())),
+            "No consumer groups loaded yet.",
+        ),
+        (
+            RoutePage::acls(ReadRouteState::Rows(Vec::new())),
+            "No ACLs loaded yet.",
+        ),
+        (
+            RoutePage::users(ReadRouteState::Rows(Vec::new())),
+            "No SCRAM users loaded yet.",
+        ),
+        (
+            RoutePage::quotas(ReadRouteState::Rows(Vec::new())),
+            "No quotas loaded yet.",
+        ),
+        (
+            RoutePage::log_dirs(ReadRouteState::Rows(Vec::new())),
+            "No log-dir data loaded yet.",
+        ),
+    ];
+
+    for (page, empty_message) in cases {
+        let rendered = render_page(&page);
+
+        assert!(
+            rendered.contains(empty_message),
+            "missing empty message {empty_message}"
+        );
+        assert!(
+            !rendered.contains("<ul>"),
+            "empty state should not render a list for {empty_message}"
+        );
+    }
+}
+
+#[test]
+fn shared_page_renderer_escapes_all_html_metacharacters() {
+    let rendered = render_page(&RoutePage::topics(ReadRouteState::Rows(vec![TopicRow {
+        name: "<&>\"'".to_string(),
+        topic_id: None,
+        partition_count: 1,
+        replication_factor: 1,
+        error: None,
+    }])));
+
+    assert!(rendered.contains("&#38;"));
+    assert!(rendered.contains("&#60;"));
+    assert!(rendered.contains("&#62;"));
+    assert!(rendered.contains("&#34;"));
+    assert!(rendered.contains("&#39;"));
+    assert!(!rendered.contains("<&>\"'"));
+}

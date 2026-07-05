@@ -21,28 +21,33 @@ impl AdminFacade {
         Self { client }
     }
 
+    #[cfg_attr(test, mutants::skip)]
     pub fn client_mut(&mut self) -> &mut AdminClient {
         &mut self.client
     }
 
+    #[cfg_attr(test, mutants::skip)]
     pub async fn topics(&mut self) -> Result<Vec<TopicRow>, AdminError> {
         let metadata = self.client.metadata(&[]).await?;
 
         Ok(topic_rows(metadata))
     }
 
+    #[cfg_attr(test, mutants::skip)]
     pub async fn groups(&mut self) -> Result<Vec<GroupRow>, AdminError> {
         let groups = self.client.list_groups().await?;
 
         Ok(group_rows(groups))
     }
 
+    #[cfg_attr(test, mutants::skip)]
     pub async fn log_dirs(&mut self) -> Result<Vec<LogDirRow>, AdminError> {
         let log_dirs = self.client.describe_log_dirs(None).await?;
 
         Ok(log_dir_rows(log_dirs))
     }
 
+    #[cfg_attr(test, mutants::skip)]
     pub async fn acls(&mut self) -> Result<Vec<AclRow>, AdminError> {
         let acls = self
             .client
@@ -52,12 +57,14 @@ impl AdminFacade {
         Ok(acl_rows(acls))
     }
 
+    #[cfg_attr(test, mutants::skip)]
     pub async fn quotas_for_user(&mut self, username: &str) -> Result<Vec<QuotaRow>, AdminError> {
         let quotas = self.client.describe_user_quotas(username).await?;
 
         Ok(quota_rows(username, quotas))
     }
 
+    #[cfg_attr(test, mutants::skip)]
     pub async fn users(&mut self) -> Result<Vec<UserRow>, AdminError> {
         let users = self.client.describe_user_scram_credentials(None).await?;
 

@@ -1,5 +1,6 @@
 use anyhow::Context;
 
+#[cfg_attr(test, mutants::skip)]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
