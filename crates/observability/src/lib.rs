@@ -20,7 +20,7 @@ use std::{
 
 use async_trait::async_trait;
 use axum::{
-    Router,
+    Extension, Router,
     body::Bytes,
     extract::{
         Path, RawQuery, State,
@@ -3258,6 +3258,50 @@ pub fn distributor_router(sink: impl LogWalSink) -> Router {
     )
 }
 
+#[derive(Clone, Copy)]
+struct RoleOps {
+    target: &'static str,
+    ring_component: &'static str,
+    role_ring_path: Option<&'static str>,
+}
+
+const DISTRIBUTOR_OPS: RoleOps = RoleOps {
+    target: "distributor",
+    ring_component: "crabka-distributor",
+    role_ring_path: Some("/distributor/ring"),
+};
+
+const QUERIER_OPS: RoleOps = RoleOps {
+    target: "querier",
+    ring_component: "crabka-querier",
+    role_ring_path: None,
+};
+
+const COMPACTOR_OPS: RoleOps = RoleOps {
+    target: "compactor",
+    ring_component: "crabka-compactor",
+    role_ring_path: Some("/compactor/ring"),
+};
+
+fn with_role_ops_routes<S>(mut router: Router<S>, ops: RoleOps) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router = router
+        .route("/ready", get(ready))
+        .route("/log_level", get(log_level).post(log_level_post))
+        .route("/metrics", get(role_metrics))
+        .route("/config", get(role_config))
+        .route("/services", get(role_services))
+        .route("/memberlist", get(memberlist_status))
+        .route("/ring", get(role_ring))
+        .route("/loki/api/v1/status/buildinfo", get(build_info));
+    if let Some(path) = ops.role_ring_path {
+        router = router.route(path, get(role_ring));
+    }
+    router.layer(Extension(ops))
+}
+
 fn distributor_router_with_sink(
     sink: Arc<dyn LogWalSink>,
     ingest_limiter: Arc<dyn LogIngestLimiter>,
@@ -3274,15 +3318,8 @@ fn distributor_router_with_sink(
         metrics: metrics.clone(),
     };
 
-    Router::new()
-        .route("/ready", get(ready))
-        .route("/log_level", get(log_level).post(log_level_post))
-        .route("/metrics", get(distributor_metrics))
-        .route("/config", get(distributor_config))
-        .route("/services", get(distributor_services))
-        .route("/memberlist", get(memberlist_status))
+    with_role_ops_routes(Router::new(), DISTRIBUTOR_OPS)
         .route("/flush", post(flush_ingester_chunks))
-        .route("/ring", get(distributor_ring))
         .route(
             "/ingester/prepare_shutdown",
             get(get_prepare_shutdown)
@@ -3293,8 +3330,6 @@ fn distributor_router_with_sink(
             "/ingester/shutdown",
             get(shutdown_ingester).post(shutdown_ingester),
         )
-        .route("/distributor/ring", get(distributor_ring))
-        .route("/loki/api/v1/status/buildinfo", get(build_info))
         .route(
             "/loki/api/v1/format_query",
             get(format_query).post(format_query_post),
@@ -6213,15 +6248,7 @@ async fn serve_compactor_service_listener(
 }
 
 pub fn loki_router(state: QuerierState) -> Router {
-    Router::new()
-        .route("/ready", get(ready))
-        .route("/log_level", get(log_level).post(log_level_post))
-        .route("/metrics", get(querier_metrics))
-        .route("/config", get(querier_config))
-        .route("/services", get(querier_services))
-        .route("/memberlist", get(memberlist_status))
-        .route("/ring", get(querier_ring))
-        .route("/loki/api/v1/status/buildinfo", get(build_info))
+    with_role_ops_routes(Router::new(), QUERIER_OPS)
         .route("/loki/api/v1/rules", get(loki_rules))
         .route(
             "/loki/api/v1/rules/{namespace}",
@@ -6323,15 +6350,7 @@ pub fn loki_router(state: QuerierState) -> Router {
 
 fn compactor_router_with_delete_requests(delete_requests: SharedLogDeleteRequests) -> Router {
     let delete_state = CompactorDeleteState { delete_requests };
-    Router::new()
-        .route("/ready", get(ready))
-        .route("/log_level", get(log_level).post(log_level_post))
-        .route("/metrics", get(compactor_metrics))
-        .route("/config", get(compactor_config))
-        .route("/services", get(compactor_services))
-        .route("/memberlist", get(memberlist_status))
-        .route("/ring", get(compactor_ring))
-        .route("/compactor/ring", get(compactor_ring))
+    with_role_ops_routes(Router::new(), COMPACTOR_OPS)
         .route(
             "/loki/api/v1/format_query",
             get(format_query).post(format_query_post),
@@ -6343,7 +6362,6 @@ fn compactor_router_with_delete_requests(delete_requests: SharedLogDeleteRequest
                 .put(create_delete_request)
                 .delete(cancel_delete_request),
         )
-        .route("/loki/api/v1/status/buildinfo", get(build_info))
         .with_state(delete_state)
 }
 
@@ -6444,16 +6462,11 @@ fn parse_log_level_param(raw_query: Option<&str>) -> Result<String, HttpQueryErr
     Err(HttpQueryError::MissingQueryParameter("log_level"))
 }
 
-async fn querier_config(RawQuery(raw_query): RawQuery) -> Response {
-    status_config("querier", raw_query.as_deref())
-}
-
-async fn distributor_config(RawQuery(raw_query): RawQuery) -> Response {
-    status_config("distributor", raw_query.as_deref())
-}
-
-async fn compactor_config(RawQuery(raw_query): RawQuery) -> Response {
-    status_config("compactor", raw_query.as_deref())
+async fn role_config(
+    Extension(ops): Extension<RoleOps>,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    status_config(ops.target, raw_query.as_deref())
 }
 
 fn status_config(_target: &'static str, raw_query: Option<&str>) -> Response {
@@ -6496,16 +6509,8 @@ fn query_param_value(raw_query: Option<&str>, name: &str) -> Option<String> {
     None
 }
 
-async fn querier_services() -> Response {
-    status_services("querier")
-}
-
-async fn distributor_services() -> Response {
-    status_services("distributor")
-}
-
-async fn compactor_services() -> Response {
-    status_services("compactor")
+async fn role_services(Extension(ops): Extension<RoleOps>) -> Response {
+    status_services(ops.target)
 }
 
 fn status_services(_name: &'static str) -> Response {
@@ -6540,24 +6545,8 @@ async fn memberlist_status() -> Response {
         .into_response()
 }
 
-async fn querier_metrics() -> Response {
-    status_metrics("querier")
-}
-
-async fn distributor_metrics() -> Response {
-    status_metrics("distributor")
-}
-
-async fn compactor_metrics() -> Response {
-    status_metrics("compactor")
-}
-
-async fn distributor_ring() -> Response {
-    ring_status_page("crabka-distributor")
-}
-
-async fn querier_ring() -> Response {
-    ring_status_page("crabka-querier")
+async fn role_metrics(Extension(ops): Extension<RoleOps>) -> Response {
+    status_metrics(ops.target)
 }
 
 async fn scheduler_ring() -> Response {
@@ -6568,8 +6557,8 @@ async fn ruler_ring() -> Response {
     ruler_status_page()
 }
 
-async fn compactor_ring() -> Response {
-    ring_status_page("crabka-compactor")
+async fn role_ring(Extension(ops): Extension<RoleOps>) -> Response {
+    ring_status_page(ops.ring_component)
 }
 
 #[derive(Clone, Default)]
