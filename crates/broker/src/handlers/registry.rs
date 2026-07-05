@@ -38,6 +38,15 @@ pub(crate) type TelemetryHandler = for<'a> fn(
     &'a TelemetryContext<'a>,
 ) -> BoxFuture<'a, Result<Bytes, BrokerError>>;
 
+pub(crate) type AuthHandler = for<'a> fn(
+    &'a Broker,
+    ApiVersion,
+    CorrelationId,
+    &'a [u8],
+    &'a crate::network::auth::ConnectionAuth,
+    &'a std::net::SocketAddr,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RequestQuotaPolicy {
     ApplyFallbackAccounting,
@@ -51,6 +60,9 @@ pub(crate) enum DispatchKind {
     Context(ContextHandler),
     Produce(ProduceHandler),
     Telemetry(TelemetryHandler),
+    DecodedContext(ContextHandler),
+    EncodedContext(ContextHandler),
+    Auth(AuthHandler),
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +120,41 @@ impl DispatchEntry {
             flexible_min,
             quota_policy: RequestQuotaPolicy::InlineExempt,
             kind: DispatchKind::Telemetry(handler),
+        }
+    }
+
+    pub(crate) fn decoded_context(
+        api_key: ApiKey,
+        flexible_min: ApiVersion,
+        handler: ContextHandler,
+    ) -> Self {
+        Self {
+            api_key,
+            flexible_min,
+            quota_policy: RequestQuotaPolicy::InlineExempt,
+            kind: DispatchKind::DecodedContext(handler),
+        }
+    }
+
+    pub(crate) fn encoded_context(
+        api_key: ApiKey,
+        flexible_min: ApiVersion,
+        handler: ContextHandler,
+    ) -> Self {
+        Self {
+            api_key,
+            flexible_min,
+            quota_policy: RequestQuotaPolicy::InlineExempt,
+            kind: DispatchKind::EncodedContext(handler),
+        }
+    }
+
+    pub(crate) fn auth(api_key: ApiKey, flexible_min: ApiVersion, handler: AuthHandler) -> Self {
+        Self {
+            api_key,
+            flexible_min,
+            quota_policy: RequestQuotaPolicy::InlineExempt,
+            kind: DispatchKind::Auth(handler),
         }
     }
 
@@ -207,6 +254,434 @@ fn produce_adapter<'a>(
         body_bytes,
         ctx,
     ))
+}
+
+fn describe_acls_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use crabka_protocol::Decode;
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::describe_acls_request::DescribeAclsRequest::decode(
+            &mut cur, version,
+        )?;
+        crate::handlers::describe_acls::handle(broker, req, ctx, version).await
+    })
+}
+
+fn create_acls_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use crabka_protocol::Decode;
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::create_acls_request::CreateAclsRequest::decode(
+            &mut cur, version,
+        )?;
+        crate::handlers::create_acls::handle(broker, req, ctx, version).await
+    })
+}
+
+fn delete_acls_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use crabka_protocol::Decode;
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::delete_acls_request::DeleteAclsRequest::decode(
+            &mut cur, version,
+        )?;
+        crate::handlers::delete_acls::handle(broker, req, ctx, version).await
+    })
+}
+
+fn elect_leaders_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use crabka_protocol::Decode;
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::elect_leaders_request::ElectLeadersRequest::decode(
+            &mut cur, version,
+        )?;
+        crate::handlers::elect_leaders::handle(broker, req, ctx, version).await
+    })
+}
+
+fn alter_partition_reassignments_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use crabka_protocol::Decode;
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest::decode(
+            &mut cur,
+            version,
+        )?;
+        crate::handlers::alter_partition_reassignments::handle(broker, req, ctx, version).await
+    })
+}
+
+fn list_partition_reassignments_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use crabka_protocol::Decode;
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest::decode(
+            &mut cur,
+            version,
+        )?;
+        crate::handlers::list_partition_reassignments::handle(broker, req, ctx, version).await
+    })
+}
+
+fn describe_client_quotas_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use crabka_protocol::Decode;
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::describe_client_quotas_request::DescribeClientQuotasRequest::decode(
+            &mut cur,
+            version,
+        )?;
+        crate::handlers::describe_client_quotas::handle(broker, req, ctx, version).await
+    })
+}
+
+fn alter_client_quotas_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use crabka_protocol::Decode;
+
+        let mut cur = body;
+        let req =
+            crabka_protocol::owned::alter_client_quotas_request::AlterClientQuotasRequest::decode(
+                &mut cur, version,
+            )?;
+        crate::handlers::alter_client_quotas::handle(broker, req, ctx, version).await
+    })
+}
+
+fn describe_user_scram_credentials_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use crabka_protocol::Decode;
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest::decode(
+            &mut cur,
+            version,
+        )?;
+        crate::handlers::describe_user_scram_credentials::handle(broker, req, ctx, version).await
+    })
+}
+
+fn alter_user_scram_credentials_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use bytes::BytesMut;
+        use crabka_protocol::{Decode, Encode};
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::alter_user_scram_credentials_request::AlterUserScramCredentialsRequest::decode(
+            &mut cur,
+            version,
+        )?;
+        let resp = crate::handlers::alter_user_scram_credentials::handle(broker, req, ctx).await;
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut buf, version)?;
+        Ok(buf.freeze())
+    })
+}
+
+fn update_features_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    ctx: &'a RequestContext<'a>,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use bytes::BytesMut;
+        use crabka_protocol::{Decode, Encode};
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::update_features_request::UpdateFeaturesRequest::decode(
+            &mut cur, version,
+        )?;
+        let resp = crate::handlers::update_features::handle(broker, req, version, ctx).await;
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut buf, version)?;
+        Ok(buf.freeze())
+    })
+}
+
+fn alter_replica_log_dirs_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    correlation_id: CorrelationId,
+    body: &'a [u8],
+    auth: &'a crate::network::auth::ConnectionAuth,
+    peer: &'a std::net::SocketAddr,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use std::collections::BTreeMap;
+
+        use bytes::BytesMut;
+        use crabka_protocol::{
+            Decode, Encode,
+            owned::{
+                alter_replica_log_dirs_request::AlterReplicaLogDirsRequest,
+                alter_replica_log_dirs_response::{
+                    AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult,
+                    AlterReplicaLogDirsResponse,
+                },
+            },
+        };
+
+        let anonymous;
+        let principal = match auth.principal() {
+            Some(principal) => principal,
+            None => {
+                anonymous = crabka_security::Principal {
+                    name: "ANONYMOUS".to_string(),
+                    auth_method: crabka_security::AuthMethod::Anonymous,
+                    groups: vec![],
+                };
+                &anonymous
+            }
+        };
+
+        let image = broker.controller.current_image();
+        let authorized = broker.config.authorizer.authorize(
+            &*image,
+            &crate::authorizer::AuthorizationRequest {
+                principal,
+                host: peer,
+                resource_type: crabka_metadata::ResourceType::Cluster,
+                resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
+                operation: crabka_metadata::AclOperation::Alter,
+            },
+        ) == crate::authorizer::AuthorizationResult::Allow;
+
+        if !authorized {
+            let mut cur = body;
+            let req = AlterReplicaLogDirsRequest::decode(&mut cur, version)?;
+            let mut by_topic: BTreeMap<String, Vec<AlterReplicaLogDirPartitionResult>> =
+                BTreeMap::new();
+            for dir in req.dirs {
+                for topic in dir.topics {
+                    for partition_index in topic.partitions {
+                        by_topic.entry(topic.name.clone()).or_default().push(
+                            AlterReplicaLogDirPartitionResult {
+                                partition_index,
+                                error_code: crate::codes::CLUSTER_AUTHORIZATION_FAILED,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                }
+            }
+            let results = by_topic
+                .into_iter()
+                .map(|(topic_name, partitions)| AlterReplicaLogDirTopicResult {
+                    topic_name,
+                    partitions,
+                    ..Default::default()
+                })
+                .collect();
+            let resp = AlterReplicaLogDirsResponse {
+                throttle_time_ms: 0,
+                results,
+                ..Default::default()
+            };
+            let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+            resp.encode(&mut buf, version)?;
+            return Ok(buf.freeze());
+        }
+
+        crate::handlers::alter_replica_log_dirs::handle(broker, version, correlation_id, body).await
+    })
+}
+
+fn create_delegation_token_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    auth: &'a crate::network::auth::ConnectionAuth,
+    _peer: &'a std::net::SocketAddr,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use bytes::BytesMut;
+        use crabka_protocol::{Decode, Encode};
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest::decode(
+            &mut cur,
+            version,
+        )?;
+        let resp = crate::handlers::create_delegation_token::handle(
+            &req,
+            auth,
+            broker.config.delegation_token_secret_key.as_ref(),
+            broker.config.delegation_token_max_lifetime_ms,
+            broker.config.delegation_token_default_renew_period_ms,
+            &*broker.controller,
+            &broker.config.super_users,
+        )
+        .await;
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut buf, version)?;
+        Ok(buf.freeze())
+    })
+}
+
+fn renew_delegation_token_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    auth: &'a crate::network::auth::ConnectionAuth,
+    _peer: &'a std::net::SocketAddr,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use bytes::BytesMut;
+        use crabka_protocol::{Decode, Encode};
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::renew_delegation_token_request::RenewDelegationTokenRequest::decode(
+            &mut cur,
+            version,
+        )?;
+        let resp = crate::handlers::renew_delegation_token::handle(
+            &req,
+            auth,
+            broker.config.delegation_token_secret_key.as_ref(),
+            broker.config.delegation_token_default_renew_period_ms,
+            &*broker.controller,
+            &broker.config.super_users,
+        )
+        .await;
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut buf, version)?;
+        Ok(buf.freeze())
+    })
+}
+
+fn expire_delegation_token_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    auth: &'a crate::network::auth::ConnectionAuth,
+    _peer: &'a std::net::SocketAddr,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use bytes::BytesMut;
+        use crabka_protocol::{Decode, Encode};
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest::decode(
+            &mut cur,
+            version,
+        )?;
+        let resp = crate::handlers::expire_delegation_token::handle(
+            &req,
+            auth,
+            broker.config.delegation_token_secret_key.as_ref(),
+            &*broker.controller,
+            &broker.config.super_users,
+        )
+        .await;
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut buf, version)?;
+        Ok(buf.freeze())
+    })
+}
+
+fn describe_delegation_token_adapter<'a>(
+    broker: &'a Broker,
+    version: ApiVersion,
+    _correlation_id: CorrelationId,
+    body: &'a [u8],
+    auth: &'a crate::network::auth::ConnectionAuth,
+    peer: &'a std::net::SocketAddr,
+) -> BoxFuture<'a, Result<Bytes, BrokerError>> {
+    Box::pin(async move {
+        use bytes::BytesMut;
+        use crabka_protocol::{Decode, Encode};
+
+        let mut cur = body;
+        let req = crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenRequest::decode(
+            &mut cur,
+            version,
+        )?;
+        let resp = crate::handlers::describe_delegation_token::handle(
+            &req,
+            auth,
+            broker.config.delegation_token_secret_key.as_ref(),
+            &*broker.controller,
+            peer,
+            broker.config.authorizer.as_ref(),
+        )
+        .await;
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut buf, version)?;
+        Ok(buf.freeze())
+    })
 }
 
 context_adapter!(metadata_adapter, crate::handlers::metadata::handle);
@@ -678,6 +1153,86 @@ pub(crate) fn build_registry() -> DispatchRegistry {
         crabka_protocol::owned::describe_log_dirs_request::FLEXIBLE_MIN,
         describe_log_dirs_adapter,
     ));
+    registry.register(DispatchEntry::decoded_context(
+        ApiKey::DescribeAcls,
+        crabka_protocol::owned::describe_acls_request::FLEXIBLE_MIN,
+        describe_acls_adapter,
+    ));
+    registry.register(DispatchEntry::decoded_context(
+        ApiKey::CreateAcls,
+        crabka_protocol::owned::create_acls_request::FLEXIBLE_MIN,
+        create_acls_adapter,
+    ));
+    registry.register(DispatchEntry::decoded_context(
+        ApiKey::DeleteAcls,
+        crabka_protocol::owned::delete_acls_request::FLEXIBLE_MIN,
+        delete_acls_adapter,
+    ));
+    registry.register(DispatchEntry::decoded_context(
+        ApiKey::ElectLeaders,
+        crabka_protocol::owned::elect_leaders_request::FLEXIBLE_MIN,
+        elect_leaders_adapter,
+    ));
+    registry.register(DispatchEntry::decoded_context(
+        ApiKey::AlterPartitionReassignments,
+        crabka_protocol::owned::alter_partition_reassignments_request::FLEXIBLE_MIN,
+        alter_partition_reassignments_adapter,
+    ));
+    registry.register(DispatchEntry::decoded_context(
+        ApiKey::ListPartitionReassignments,
+        crabka_protocol::owned::list_partition_reassignments_request::FLEXIBLE_MIN,
+        list_partition_reassignments_adapter,
+    ));
+    registry.register(DispatchEntry::decoded_context(
+        ApiKey::DescribeClientQuotas,
+        crabka_protocol::owned::describe_client_quotas_request::FLEXIBLE_MIN,
+        describe_client_quotas_adapter,
+    ));
+    registry.register(DispatchEntry::decoded_context(
+        ApiKey::AlterClientQuotas,
+        crabka_protocol::owned::alter_client_quotas_request::FLEXIBLE_MIN,
+        alter_client_quotas_adapter,
+    ));
+    registry.register(DispatchEntry::decoded_context(
+        ApiKey::DescribeUserScramCredentials,
+        crabka_protocol::owned::describe_user_scram_credentials_request::FLEXIBLE_MIN,
+        describe_user_scram_credentials_adapter,
+    ));
+    registry.register(DispatchEntry::encoded_context(
+        ApiKey::AlterUserScramCredentials,
+        crabka_protocol::owned::alter_user_scram_credentials_request::FLEXIBLE_MIN,
+        alter_user_scram_credentials_adapter,
+    ));
+    registry.register(DispatchEntry::encoded_context(
+        ApiKey::UpdateFeatures,
+        crabka_protocol::owned::update_features_request::FLEXIBLE_MIN,
+        update_features_adapter,
+    ));
+    registry.register(DispatchEntry::auth(
+        ApiKey::AlterReplicaLogDirs,
+        crabka_protocol::owned::alter_replica_log_dirs_request::FLEXIBLE_MIN,
+        alter_replica_log_dirs_adapter,
+    ));
+    registry.register(DispatchEntry::auth(
+        ApiKey::CreateDelegationToken,
+        crabka_protocol::owned::create_delegation_token_request::FLEXIBLE_MIN,
+        create_delegation_token_adapter,
+    ));
+    registry.register(DispatchEntry::auth(
+        ApiKey::RenewDelegationToken,
+        crabka_protocol::owned::renew_delegation_token_request::FLEXIBLE_MIN,
+        renew_delegation_token_adapter,
+    ));
+    registry.register(DispatchEntry::auth(
+        ApiKey::ExpireDelegationToken,
+        crabka_protocol::owned::expire_delegation_token_request::FLEXIBLE_MIN,
+        expire_delegation_token_adapter,
+    ));
+    registry.register(DispatchEntry::auth(
+        ApiKey::DescribeDelegationToken,
+        crabka_protocol::owned::describe_delegation_token_request::FLEXIBLE_MIN,
+        describe_delegation_token_adapter,
+    ));
     registry.register(DispatchEntry::context(
         ApiKey::InitProducerId,
         crabka_protocol::owned::init_producer_id_request::FLEXIBLE_MIN,
@@ -771,6 +1326,39 @@ mod tests {
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
             assert!(
                 matches!(entry.kind(), DispatchKind::Telemetry(_)),
+                "api_key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_registers_decoded_context_handlers() {
+        let registry = build_registry();
+
+        for key in [29, 30, 31, 43, 45, 46, 48, 49, 50, 51, 57] {
+            let entry = registry
+                .get(key)
+                .unwrap_or_else(|| panic!("registered api_key {key}"));
+            assert!(
+                matches!(
+                    entry.kind(),
+                    DispatchKind::DecodedContext(_) | DispatchKind::EncodedContext(_)
+                ),
+                "api_key {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn registry_registers_auth_handlers() {
+        let registry = build_registry();
+
+        for key in [34, 38, 39, 40, 41] {
+            let entry = registry
+                .get(key)
+                .unwrap_or_else(|| panic!("registered api_key {key}"));
+            assert!(
+                matches!(entry.kind(), DispatchKind::Auth(_)),
                 "api_key {key}"
             );
         }
