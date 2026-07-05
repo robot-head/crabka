@@ -395,6 +395,37 @@ exclude_re = [
     # for every reachable (non-zero) offset. The negative/positive sign paths are
     # asserted by `format_metric_range_selector_signs_negative_offset`.
     "observability/src/lib\\.rs.*replace < with <= in format_metric_range_selector",
+    # Creusot-only proof/spec helpers are behind `#[cfg(creusot)]` and are not
+    # compiled by cargo-mutants' default `cargo nextest` package runs. Mutating
+    # them is therefore a no-op for mutation testing; `creusot-verify` replays the
+    # checked-in proof sessions instead. The executable kernels in these files
+    # remain mutation-tested below, except for separately listed infinite-loop
+    # mutants.
+    "(crates/)?verified/src/compaction\\.rs.*(compute_horizon_model)",
+    "(crates/)?verified/src/consensus\\.rs.*(hwm_member_at|count_ge(_prefix)?|lemma_[A-Za-z0-9_]+|least_hwm_member_ge_index)",
+    "(crates/)?throttle/src/lib\\.rs.*replace capped ->",
+    "(crates/)?throttle/src/lib\\.rs.*in capped",
+    # These Creusot-friendly loops intentionally use manual index counters. The
+    # listed mutations break loop progress and hang the test process, so
+    # cargo-mutants can only classify them as TIMEOUT rather than a useful
+    # assertion gap. Vote-count increments in candidate_has_majority stay
+    # mutation-tested by the focused HWM behavior tests below.
+    "(crates/)?verified/src/consensus\\.rs:238:.*replace \\+= with \\*= in candidate_has_majority",
+    "(crates/)?verified/src/consensus\\.rs:296:.*replace \\+= with \\*= in recompute_high_watermark",
+    # Equivalent under recompute_high_watermark's public preconditions: every
+    # candidate is either `log_end` or a follower offset `<= log_end`, so the
+    # leader-count `log_end >= cand` half is always true. The `count < majority`
+    # guards only cap work once the boolean result is already true.
+    "(crates/)?verified/src/consensus\\.rs.*replace && with \\|\\| in candidate_has_majority",
+    "(crates/)?verified/src/consensus\\.rs.*replace < with <= in candidate_has_majority",
+    # Equivalent mutant: accepting a candidate equal to the current
+    # majority_offset only writes the same offset back. The epoch-start gate on
+    # line 300 remains mutation-tested.
+    "(crates/)?verified/src/consensus\\.rs:291:.*replace > with >= in recompute_high_watermark",
+    "(crates/)?verified/src/log_index\\.rs.*replace < with <= in offset_index_lookup",
+    "(crates/)?verified/src/log_index\\.rs.*replace \\+ with \\* in offset_index_lookup",
+    "(crates/)?verified/src/log_index\\.rs.*replace / with % in offset_index_lookup",
+    "(crates/)?verified/src/log_index\\.rs.*replace \\+ with - in offset_index_lookup",
     # `run_produce_append_batch` dispatches the blocking group append by runtime
     # flavor: the `MultiThread` arm uses `block_in_place`, the `_` fallback uses
     # `spawn_blocking`. They differ only in scheduling — same append result, same

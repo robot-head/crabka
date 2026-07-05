@@ -74,6 +74,13 @@ exceptions = [
     # permissive, non-copyleft license). Pulled in transitively via polars
     # (the `polars` columnar-streams feature).
     { allow = ["BSL-1.0"], crate = "xxhash-rust" },
+    # Creusot's specification attributes/proc macros are LGPL-2.1-or-later.
+    # They enter the graph only through the newly added verified kernels
+    # (`crabka-verified`) and throttle arithmetic contracts; ordinary cargo
+    # builds use Creusot's dummy macro implementation, so keep this allowance
+    # crate-scoped rather than allowing LGPL globally.
+    { allow = ["LGPL-2.1-or-later"], crate = "creusot-std" },
+    { allow = ["LGPL-2.1-or-later"], crate = "creusot-std-proc" },
 ]
 confidence-threshold = 0.93
 

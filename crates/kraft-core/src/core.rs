@@ -18,14 +18,7 @@ use crate::{
 /// without per-node config.
 #[must_use]
 pub fn election_jitter_ms(me: NodeId, epoch: Epoch, base_ms: u64) -> u64 {
-    if base_ms == 0 {
-        return 0;
-    }
-    // Cheap integer hash of (node id, epoch); avoids any RNG so the sims stay
-    // deterministic.
-    let mix = me.0.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ u64::from(epoch).wrapping_mul(0xD1B5_4A32_D192_ED03);
-    mix % base_ms
+    crabka_verified::election_jitter_ms(me.0, epoch, base_ms)
 }
 
 /// The hand-rolled KIP-595 + KIP-996 quorum state machine. Pure and
@@ -88,9 +81,12 @@ impl QuorumStateMachine {
     /// `true` if `candidate_log` is at least as up-to-date as ours
     /// (KIP-595: higher last epoch wins; on tie, higher/equal offset wins).
     fn log_is_up_to_date(log: &dyn LogView, cand: LogEnd) -> bool {
-        let my_epoch = log.last_epoch();
-        let my_end = log.end_offset();
-        cand.last_epoch > my_epoch || (cand.last_epoch == my_epoch && cand.last_offset >= my_end)
+        crabka_verified::log_is_up_to_date(
+            log.last_epoch(),
+            log.end_offset(),
+            cand.last_epoch,
+            cand.last_offset,
+        )
     }
 
     /// The deadline for an election timer armed at `now`. Adds deterministic
@@ -230,28 +226,22 @@ impl QuorumStateMachine {
         else {
             return 0;
         };
-        let mut match_offsets: Vec<i64> = Vec::with_capacity(replicas.len() + 1);
-        match_offsets.push(log_end);
-        for progress in replicas.values() {
-            match_offsets.push(progress.fetch_offset);
-        }
-        // Sort descending; the majority-th largest sits at index `majority - 1`.
-        match_offsets.sort_unstable_by(|a, b| b.cmp(a));
-        let majority_offset = match_offsets[self.state.majority() - 1];
-        // Leader-completeness gate: only commit once the current-epoch entry at
-        // `epoch_start_offset` is itself majority-replicated. Until then, hold.
-        let gated = if majority_offset > *epoch_start_offset {
-            majority_offset
-        } else {
-            *high_watermark
-        };
-        // Monotonicity is intrinsic: the HWM never regresses. The
-        // `majority()`-th offset can drop below the current HWM if a follower's
-        // recorded `fetch_offset` legitimately falls (e.g. it truncated a
-        // divergent suffix, or — in tests/models — a reordered stale fetch
-        // arrives). Clamping here keeps the contract a property of this function
-        // rather than of every caller's guard.
-        let new_hwm = gated.max(*high_watermark);
+        // Clamp inputs into the verified kernel's precondition domain: a
+        // follower's acknowledged offset never legitimately exceeds the
+        // leader's log end, and the leader's HWM is always within its log.
+        // Both are invariants of correct operation; clamping makes them
+        // locally evident instead of a distributed assumption.
+        let follower_offsets: Vec<i64> = replicas
+            .values()
+            .map(|progress| progress.fetch_offset.min(log_end))
+            .collect();
+        let new_hwm = crabka_verified::recompute_high_watermark(
+            log_end,
+            &follower_offsets,
+            self.state.majority(),
+            *epoch_start_offset,
+            (*high_watermark).min(log_end),
+        );
         debug_assert!(
             new_hwm <= log_end,
             "HWM {new_hwm} must not exceed leader log end {log_end}"

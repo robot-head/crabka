@@ -1,0 +1,10 @@
+{
+  "profile": [],
+  "proofs": {
+    "Coma": {
+      "vc_compute_horizon": { "prover": "alt-ergo", "time": 0.011 },
+      "vc_elim_Some": { "prover": "alt-ergo", "time": 0.004 },
+      "vc_retain_decision": { "prover": "alt-ergo", "time": 0.031 }
+    }
+  }
+}

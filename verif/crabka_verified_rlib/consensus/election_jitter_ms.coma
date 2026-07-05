@@ -1,0 +1,68 @@
+(* #"/work/crates/verified/src/consensus.rs" 186 0 186 67 *)
+
+let%span snum = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/std/num.rs" 316 26 316 48
+let%span sconsensus = "/work/crates/verified/src/consensus.rs" 187 18 187 19
+let%span sconsensus'0 = "/work/crates/verified/src/consensus.rs" 188 15 188 16
+let%span sconsensus'1 = "/work/crates/verified/src/consensus.rs" 192 30 192 51
+let%span sconsensus'2 = "/work/crates/verified/src/consensus.rs" 192 14 192 52
+let%span sconsensus'3 = "/work/crates/verified/src/consensus.rs" 193 10 193 26
+let%span sconsensus'4 = "/work/crates/verified/src/consensus.rs" 193 40 193 61
+let%span sconsensus'5 = "/work/crates/verified/src/consensus.rs" 193 10 193 62
+let%span sconsensus'6 = "/work/crates/verified/src/consensus.rs" 194 4 194 17
+let%span sconsensus'7 = "/work/crates/verified/src/consensus.rs" 183 10 183 40
+let%span sconsensus'8 = "/work/crates/verified/src/consensus.rs" 184 10 184 45
+let%span sconvert = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/std/convert.rs" 146 26 146 51
+
+use creusot.int.UInt64
+use creusot.int.UInt32
+use creusot.prelude.Any
+use int.Int
+
+let wrapping_mul (self_: UInt64.t) (rhs: UInt64.t) (return (x: UInt64.t)) = any
+  [ return (result: UInt64.t) -> {[@stop_split] [@expl:wrapping_mul ensures] [%#snum] result = UInt64.mul self_ rhs}
+    (! return {result}) ]
+
+let from_u64 (small: UInt32.t) (return (x: UInt64.t)) = any
+  [ return (result: UInt64.t) -> {[@stop_split] [@expl:from ensures] [%#sconvert] result
+    = UInt64.of_int (UInt32.t'int small)}
+    (! return {result}) ]
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let election_jitter_ms [#"/work/crates/verified/src/consensus.rs" 186 0 186 67] (me: UInt64.t) (epoch: UInt32.t)
+  (base_ms: UInt64.t) (return (x: UInt64.t)) = (! bb0
+  [ bb0 = s0
+    [ s0 = [ &_9 <- base_ms = ([%#sconsensus] (0: UInt64.t)) ] s1
+    | s1 = any [ br0 -> {_9 = false} (! bb2) | br1 -> {_9} (! bb1) ] ]
+  | bb1 = s0 [ s0 = [ &_ret <- [%#sconsensus'0] (0: UInt64.t) ] s1 | s1 = return {_ret} ]
+  | bb2 = s0
+    [ s0 = wrapping_mul [%#sconsensus'2] {me} {[%#sconsensus'1] (11400714819323198485: UInt64.t)}
+        (fun (_x: UInt64.t) -> [ &_13 <- _x ] s1)
+    | s1 = from_u64 [%#sconsensus'3] {epoch} (fun (_x: UInt64.t) -> [ &_16 <- _x ] s2)
+    | s2 = wrapping_mul [%#sconsensus'5] {_16} {[%#sconsensus'4] (15111065706836454659: UInt64.t)}
+        (fun (_x: UInt64.t) -> [ &_15 <- _x ] s3)
+    | s3 = [ &mix <- UInt64.bw_xor _13 _15 ] s4
+    | s4 = [ &_19 <- base_ms ] s5
+    | s5 = [ &_20 <- _19 = ([%#sconsensus'6] (0: UInt64.t)) ] s6
+    | s6 = {[@expl:remainder by zero] [%#sconsensus'6] not _20} s7
+    | s7 = UInt64.rem [%#sconsensus'6] {mix} {_19} (fun (_x: UInt64.t) -> [ &_ret <- _x ] s8)
+    | s8 = return {_ret} ] ]
+  [ & _ret: UInt64.t = Any.any_l ()
+  | & me: UInt64.t = me
+  | & epoch: UInt32.t = epoch
+  | & base_ms: UInt64.t = base_ms
+  | & _9: bool = Any.any_l ()
+  | & mix: UInt64.t = Any.any_l ()
+  | & _13: UInt64.t = Any.any_l ()
+  | & _15: UInt64.t = Any.any_l ()
+  | & _16: UInt64.t = Any.any_l ()
+  | & _19: UInt64.t = Any.any_l ()
+  | & _20: bool = Any.any_l () ])
+  [ return (result: UInt64.t) ->
+  {[@stop_split] [@expl:election_jitter_ms ensures] ([@stop_split] [@expl:election_jitter_ms ensures #0] [%#sconsensus'7] UInt64.t'int base_ms
+        = 0 -> UInt64.t'int result = 0)
+    /\ ([@stop_split] [@expl:election_jitter_ms ensures #1] [%#sconsensus'8] UInt64.t'int base_ms > 0
+    -> UInt64.t'int result < UInt64.t'int base_ms)}
+    (! return {result}) ]
