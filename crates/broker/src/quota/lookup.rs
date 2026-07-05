@@ -57,14 +57,7 @@ pub fn lookup_quota_with_key(
         vec![("user".into(), None)],
         vec![("client-id".into(), None)],
     ];
-    for key in candidates {
-        if let Some(configs) = image.client_quotas().get(&key)
-            && let Some(&v) = configs.get(quota_key)
-        {
-            return Some((key, v));
-        }
-    }
-    None
+    first_matching_quota(image, candidates, quota_key)
 }
 
 /// Lookup an `ip`-scoped quota for `peer_ip`. Priority order:
@@ -96,6 +89,14 @@ pub fn lookup_ip_quota_with_key(
         vec![("ip".into(), Some(peer_ip.to_string()))],
         vec![("ip".into(), None)],
     ];
+    first_matching_quota(image, candidates, quota_key)
+}
+
+fn first_matching_quota(
+    image: &MetadataImage,
+    candidates: impl IntoIterator<Item = EntityKey>,
+    quota_key: &str,
+) -> Option<(EntityKey, f64)> {
     for key in candidates {
         if let Some(configs) = image.client_quotas().get(&key)
             && let Some(&v) = configs.get(quota_key)
