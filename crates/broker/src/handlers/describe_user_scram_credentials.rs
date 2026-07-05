@@ -2,18 +2,23 @@
 
 use bytes::Bytes;
 use crabka_metadata::{MetadataImage, ResourceType};
-use crabka_protocol::Encode;
-use crabka_protocol::owned::describe_user_scram_credentials_request::{
-    DescribeUserScramCredentialsRequest, UserName,
-};
-use crabka_protocol::owned::describe_user_scram_credentials_response::{
-    CredentialInfo, DescribeUserScramCredentialsResponse, DescribeUserScramCredentialsResult,
+use crabka_protocol::{
+    Encode,
+    owned::{
+        describe_user_scram_credentials_request::{DescribeUserScramCredentialsRequest, UserName},
+        describe_user_scram_credentials_response::{
+            CredentialInfo, DescribeUserScramCredentialsResponse,
+            DescribeUserScramCredentialsResult,
+        },
+    },
 };
 use crabka_security::SaslMechanism;
 
-use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
-use crate::broker::Broker;
-use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, DUPLICATE_RESOURCE, RESOURCE_NOT_FOUND};
+use crate::{
+    authorizer::{AuthorizationRequest, AuthorizationResult},
+    broker::Broker,
+    codes::{CLUSTER_AUTHORIZATION_FAILED, DUPLICATE_RESOURCE, RESOURCE_NOT_FOUND},
+};
 
 const DESCRIBE_DUPLICATE_USER: &str =
     "Cannot describe SCRAM credentials for the same user twice in a single request";
@@ -198,10 +203,11 @@ fn encode_response<R: Encode>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use assert2::assert;
     use crabka_metadata::{AclOperation, MetadataRecord, ScramCredentialRecord};
     use crabka_protocol::UnknownTaggedFields;
-    use std::sync::Arc;
 
     #[derive(Debug)]
     struct ClusterDescribeOnly;

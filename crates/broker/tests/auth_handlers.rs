@@ -2112,14 +2112,10 @@ async fn alter_scram_creds_unknown_mechanism_returns_unsupported_sasl_mechanism(
         ..Default::default()
     };
 
-    let resp = drive_alter_user_scram_credentials_as_plain(
-        addr,
-        "admin",
-        admin_password.as_bytes(),
-        req,
-    )
-    .await
-    .expect("PLAIN auth + AUSCR unknown mechanism");
+    let resp =
+        drive_alter_user_scram_credentials_as_plain(addr, "admin", admin_password.as_bytes(), req)
+            .await
+            .expect("PLAIN auth + AUSCR unknown mechanism");
 
     handle.shutdown().await;
     assert!(resp.results.len() == 1);
@@ -2240,14 +2236,10 @@ async fn alter_scram_creds_duplicate_deletion_and_upsertion_rejected_per_user() 
         ..Default::default()
     };
 
-    let resp = drive_alter_user_scram_credentials_as_plain(
-        addr,
-        "admin",
-        admin_password.as_bytes(),
-        req,
-    )
-    .await
-    .expect("PLAIN auth + AUSCR duplicate deletion/upsertion");
+    let resp =
+        drive_alter_user_scram_credentials_as_plain(addr, "admin", admin_password.as_bytes(), req)
+            .await
+            .expect("PLAIN auth + AUSCR duplicate deletion/upsertion");
 
     handle.shutdown().await;
     assert!(resp.results.len() == 1, "one result row per username");
@@ -2289,14 +2281,10 @@ async fn alter_scram_creds_missing_deletion_returns_resource_not_found_91() {
         ..Default::default()
     };
 
-    let resp = drive_alter_user_scram_credentials_as_plain(
-        addr,
-        "admin",
-        admin_password.as_bytes(),
-        req,
-    )
-    .await
-    .expect("PLAIN auth + AUSCR missing deletion");
+    let resp =
+        drive_alter_user_scram_credentials_as_plain(addr, "admin", admin_password.as_bytes(), req)
+            .await
+            .expect("PLAIN auth + AUSCR missing deletion");
 
     handle.shutdown().await;
     assert!(resp.results.len() == 1);

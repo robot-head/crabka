@@ -20,26 +20,27 @@ use std::{io, net::SocketAddr};
 
 use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use uuid::Uuid;
-use crabka_broker::authorizer::SimpleAclAuthorizer;
-use crabka_broker::config::ListenerSpec;
-use crabka_broker::{Broker, BrokerHandle};
+use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
     AclEntry, AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
 };
-use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
-use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
-use crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest;
-use crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse;
-use crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest;
-use crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse;
-use crabka_protocol::{Decode, Encode};
+use crabka_protocol::{
+    Decode, Encode,
+    owned::{
+        api_versions_request::ApiVersionsRequest, api_versions_response::ApiVersionsResponse,
+        sasl_authenticate_request::SaslAuthenticateRequest,
+        sasl_authenticate_response::SaslAuthenticateResponse,
+        sasl_handshake_request::SaslHandshakeRequest,
+        sasl_handshake_response::SaslHandshakeResponse,
+    },
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+use uuid::Uuid;
 
 const KAFKA_DUPLICATE_RESOURCE: i16 = 92;
 const WIRE_MECH_SCRAM_SHA_512: i8 = 2;
@@ -403,11 +404,9 @@ async fn describe_duplicate_requested_user_returns_single_duplicate_resource_row
             .expect("system clock before UNIX_EPOCH")
             .as_nanos()
     );
-    let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
-        "admin",
-        &[("admin", admin_pass.as_str())],
-    )
-    .await;
+    let (handle, _dir, addr) =
+        start_single_broker_sasl_plaintext_with_users("admin", &[("admin", admin_pass.as_str())])
+            .await;
     seed_scram_credential(&handle, "alice", SaslMechanism::ScramSha512, 4096).await;
     seed_scram_credential(&handle, "bob", SaslMechanism::ScramSha512, 8192).await;
 
