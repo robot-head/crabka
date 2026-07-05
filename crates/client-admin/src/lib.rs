@@ -366,6 +366,18 @@ pub struct KafkaError {
     pub message: Option<String>,
 }
 
+pub(crate) fn kafka_error_if(code: i16, message: Option<String>) -> Option<KafkaError> {
+    if code == 0 {
+        None
+    } else {
+        Some(KafkaError {
+            code,
+            name: kafka_error_name(code),
+            message,
+        })
+    }
+}
+
 /// Short-lived admin client targeting one cluster's controller.
 /// Optionally negotiates TLS/SASL via [`AdminClient::connect_secured`].
 pub struct AdminClient {
@@ -562,6 +574,23 @@ mod tests {
     #[test]
     fn kafka_error_name_unknown_returns_unknown() {
         assert!(kafka_error_name(9999) == "UNKNOWN");
+    }
+
+    #[test]
+    fn kafka_error_if_zero_code_is_none() {
+        assert!(kafka_error_if(0, None).is_none());
+    }
+
+    #[test]
+    fn kafka_error_if_nonzero_carries_name() {
+        let e = kafka_error_if(36, Some("dup".into())).unwrap();
+        assert!(
+            e == KafkaError {
+                code: 36,
+                name: "TOPIC_ALREADY_EXISTS",
+                message: Some("dup".to_string()),
+            }
+        );
     }
 
     #[tokio::test]

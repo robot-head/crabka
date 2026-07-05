@@ -14,7 +14,7 @@ use crabka_protocol::owned::{
     describe_log_dirs_request::{DescribableLogDirTopic, DescribeLogDirsRequest},
 };
 
-use crate::{AdminClient, AdminError, KafkaError, kafka_error_name};
+use crate::{AdminClient, AdminError, KafkaError, kafka_error_if};
 
 /// One row of an `AlterReplicaLogDirs` result.
 #[derive(Debug, Clone)]
@@ -80,15 +80,7 @@ impl AdminClient {
         let mut out = Vec::new();
         for topic in resp.results {
             for p in topic.partitions {
-                let error = if p.error_code == 0 {
-                    None
-                } else {
-                    Some(KafkaError {
-                        code: p.error_code,
-                        name: kafka_error_name(p.error_code),
-                        message: None,
-                    })
-                };
+                let error = kafka_error_if(p.error_code, None);
                 out.push(AlterReplicaLogDirOutcome {
                     topic: topic.topic_name.clone(),
                     partition: p.partition_index,
@@ -125,15 +117,7 @@ impl AdminClient {
 
         let mut out = Vec::new();
         for result in resp.results {
-            let error = if result.error_code == 0 {
-                None
-            } else {
-                Some(KafkaError {
-                    code: result.error_code,
-                    name: kafka_error_name(result.error_code),
-                    message: None,
-                })
-            };
+            let error = kafka_error_if(result.error_code, None);
             let topics = result
                 .topics
                 .into_iter()

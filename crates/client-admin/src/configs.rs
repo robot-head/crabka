@@ -15,7 +15,7 @@ use crabka_protocol::owned::{
     },
 };
 
-use crate::{AdminClient, AdminError, KafkaError, kafka_error_name};
+use crate::{AdminClient, AdminError, KafkaError, kafka_error_if, kafka_error_name};
 
 /// `ConfigSource = DYNAMIC_TOPIC_CONFIG` per
 /// <https://kafka.apache.org/protocol#The_Messages_DescribeConfigs>.
@@ -100,15 +100,7 @@ pub(crate) fn parse_incremental_alter_outcomes(
         .into_iter()
         .map(|r| AlterConfigsOutcome {
             topic: r.resource_name,
-            error: if r.error_code == 0 {
-                None
-            } else {
-                Some(KafkaError {
-                    code: r.error_code,
-                    name: kafka_error_name(r.error_code),
-                    message: r.error_message,
-                })
-            },
+            error: kafka_error_if(r.error_code, r.error_message),
         })
         .collect()
 }

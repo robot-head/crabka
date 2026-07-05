@@ -56,13 +56,13 @@ impl Transaction<'_> {
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
     pub async fn commit(self) -> Result<(), EndTransactionError<Self>> {
-        match self.producer.end_transaction(true).await {
-            Ok(()) => Ok(()),
-            Err(source) => Err(EndTransactionError {
+        self.producer
+            .end_transaction(true)
+            .await
+            .map_err(|source| EndTransactionError {
                 transaction: self,
                 source,
-            }),
-        }
+            })
     }
 
     /// Abort this transaction.
@@ -73,13 +73,13 @@ impl Transaction<'_> {
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
     pub async fn abort(self) -> Result<(), EndTransactionError<Self>> {
-        match self.producer.end_transaction(false).await {
-            Ok(()) => Ok(()),
-            Err(source) => Err(EndTransactionError {
+        self.producer
+            .end_transaction(false)
+            .await
+            .map_err(|source| EndTransactionError {
                 transaction: self,
                 source,
-            }),
-        }
+            })
     }
 }
 
@@ -106,13 +106,13 @@ impl OwnedTransaction {
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
     pub async fn commit(self) -> Result<(), EndTransactionError<Self>> {
-        match self.producer.end_transaction(true).await {
-            Ok(()) => Ok(()),
-            Err(source) => Err(EndTransactionError {
+        self.producer
+            .end_transaction(true)
+            .await
+            .map_err(|source| EndTransactionError {
                 transaction: self,
                 source,
-            }),
-        }
+            })
     }
 
     /// Abort this transaction.
@@ -123,13 +123,13 @@ impl OwnedTransaction {
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
     pub async fn abort(self) -> Result<(), EndTransactionError<Self>> {
-        match self.producer.end_transaction(false).await {
-            Ok(()) => Ok(()),
-            Err(source) => Err(EndTransactionError {
+        self.producer
+            .end_transaction(false)
+            .await
+            .map_err(|source| EndTransactionError {
                 transaction: self,
                 source,
-            }),
-        }
+            })
     }
 }
 

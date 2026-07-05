@@ -19,12 +19,10 @@ use crabka_protocol::owned::{
     describe_client_quotas_request::{ComponentData, DescribeClientQuotasRequest},
 };
 
-use crate::{AdminClient, AdminError, KafkaError, kafka_error_name};
+use crate::{AdminClient, AdminError, KafkaError, kafka_error_if, kafka_error_name};
 
-/// Wire `match_type` constants from KIP-546 / `DescribeClientQuotasRequest.json`.
+/// Wire `match_type` constant from KIP-546 / `DescribeClientQuotasRequest.json`.
 const MATCH_TYPE_EXACT: i8 = 0;
-const _MATCH_TYPE_DEFAULT: i8 = 1;
-const _MATCH_TYPE_ANY: i8 = 2;
 
 /// One mutation against a (user) quota entity. The reconciler computes
 /// these by diffing the spec against the current broker state.
@@ -115,14 +113,7 @@ impl AdminClient {
         let Some(entry) = entry else {
             return Ok(None);
         };
-        if entry.error_code == 0 {
-            return Ok(None);
-        }
-        Ok(Some(KafkaError {
-            code: entry.error_code,
-            name: kafka_error_name(entry.error_code),
-            message: entry.error_message,
-        }))
+        Ok(kafka_error_if(entry.error_code, entry.error_message))
     }
 }
 

@@ -405,15 +405,18 @@ impl Producer {
     /// `coordinators` array introduced in version 4.
     #[tracing::instrument(level = "debug", skip_all, fields(transactional_id = %tid), err)]
     async fn find_txn_coordinator(&self, tid: &str) -> Result<String, ProducerError> {
+        self.find_coordinator(tid, 1).await
+    }
+
+    async fn find_coordinator(&self, key: &str, key_type: i8) -> Result<String, ProducerError> {
         let resp = self
             .client
             .send(FindCoordinatorRequest {
                 // v0-3: the `key` field carries the lookup key
-                key: tid.to_owned(),
-                // key_type = 1 → TRANSACTION (vs 0 = GROUP)
-                key_type: 1,
+                key: key.to_owned(),
+                key_type,
                 // v4+: repeated coordinator_keys list
-                coordinator_keys: vec![tid.to_owned()],
+                coordinator_keys: vec![key.to_owned()],
                 ..Default::default()
             })
             .await?;
@@ -550,30 +553,7 @@ impl Producer {
     /// [`find_txn_coordinator`]: Self::find_txn_coordinator
     #[tracing::instrument(level = "debug", skip_all, fields(group_id = %group_id), err)]
     async fn find_group_coordinator(&self, group_id: &str) -> Result<String, ProducerError> {
-        let resp = self
-            .client
-            .send(FindCoordinatorRequest {
-                key: group_id.to_owned(),
-                // key_type = 0 → GROUP
-                key_type: 0,
-                coordinator_keys: vec![group_id.to_owned()],
-                ..Default::default()
-            })
-            .await?;
-
-        // v4+ returns a `coordinators` array; prefer it when present.
-        if let Some(coord) = resp.coordinators.first() {
-            if coord.error_code != 0 {
-                return Err(ProducerError::Server(coord.error_code));
-            }
-            return Ok(format!("{}:{}", coord.host, coord.port));
-        }
-
-        // Fallback: legacy top-level host/port (versions 0–3).
-        if resp.error_code != 0 {
-            return Err(ProducerError::Server(resp.error_code));
-        }
-        Ok(format!("{}:{}", resp.host, resp.port))
+        self.find_coordinator(group_id, 0).await
     }
 
     // ── Internal lifecycle ───────────────────────────────────────────────────

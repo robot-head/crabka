@@ -24,7 +24,7 @@ use crabka_protocol::owned::{
 use crabka_security::SaslMechanism;
 use ring::rand::{SecureRandom, SystemRandom};
 
-use crate::{AdminClient, AdminError, KafkaError, kafka_error_name};
+use crate::{AdminClient, AdminError, KafkaError, kafka_error_if, kafka_error_name};
 
 /// KIP-554 wire byte for SCRAM-SHA-512. SHA-256 is byte `1`.
 const SCRAM_SHA_512_WIRE: i8 = 2;
@@ -238,7 +238,7 @@ impl AdminClient {
             .results
             .into_iter()
             .map(|r| CreateAclOutcome {
-                error: error_if(r.error_code, r.error_message),
+                error: kafka_error_if(r.error_code, r.error_message),
             })
             .collect())
     }
@@ -257,7 +257,7 @@ impl AdminClient {
         let resp = self.conn.send(req).await?;
         let mut out = Vec::with_capacity(resp.filter_results.len());
         for fr in resp.filter_results {
-            if let Some(err) = error_if(fr.error_code, fr.error_message) {
+            if let Some(err) = kafka_error_if(fr.error_code, fr.error_message) {
                 out.push(DeleteAclFilterOutcome {
                     error: Some(err),
                     matched: Vec::new(),
@@ -292,18 +292,6 @@ impl AdminClient {
             });
         }
         Ok(out)
-    }
-}
-
-fn error_if(code: i16, message: Option<String>) -> Option<KafkaError> {
-    if code == 0 {
-        None
-    } else {
-        Some(KafkaError {
-            code,
-            name: kafka_error_name(code),
-            message,
-        })
     }
 }
 
@@ -387,7 +375,7 @@ fn parse_alter_scram_results(
         .into_iter()
         .map(|r| ScramUserOutcome {
             username: r.user,
-            error: error_if(r.error_code, r.error_message),
+            error: kafka_error_if(r.error_code, r.error_message),
         })
         .collect()
 }
@@ -431,14 +419,15 @@ fn scram_mechanism_name(mechanism: i8) -> &'static str {
 }
 
 fn filter_to_describe_request(f: &AclEntryFilter) -> DescribeAclsRequest {
+    let wire = acl_filter_wire_fields(f);
     DescribeAclsRequest {
-        resource_type_filter: f.resource_type.map_or(WIRE_ANY, resource_type_to_wire),
-        resource_name_filter: f.resource_name.clone(),
-        pattern_type_filter: f.pattern_type.map_or(WIRE_ANY, pattern_type_to_wire),
-        principal_filter: f.principal.clone(),
-        host_filter: f.host.clone(),
-        operation: f.operation.map_or(WIRE_ANY, operation_to_wire),
-        permission_type: f.permission_type.map_or(WIRE_ANY, permission_to_wire),
+        resource_type_filter: wire.resource_type_filter,
+        resource_name_filter: wire.resource_name_filter,
+        pattern_type_filter: wire.pattern_type_filter,
+        principal_filter: wire.principal_filter,
+        host_filter: wire.host_filter,
+        operation: wire.operation,
+        permission_type: wire.permission_type,
         ..Default::default()
     }
 }
@@ -491,7 +480,31 @@ pub(crate) fn acl_to_creation(e: &AclEntry) -> AclCreation {
 /// Pure: serialize an `AclEntryFilter` to the wire `DeleteAcls` filter.
 /// `None` axes use the wire ANY discriminant.
 pub(crate) fn acl_filter_to_wire(f: &AclEntryFilter) -> DeleteAclsFilter {
+    let wire = acl_filter_wire_fields(f);
     DeleteAclsFilter {
+        resource_type_filter: wire.resource_type_filter,
+        resource_name_filter: wire.resource_name_filter,
+        pattern_type_filter: wire.pattern_type_filter,
+        principal_filter: wire.principal_filter,
+        host_filter: wire.host_filter,
+        operation: wire.operation,
+        permission_type: wire.permission_type,
+        ..Default::default()
+    }
+}
+
+struct AclFilterWireFields {
+    resource_type_filter: i8,
+    resource_name_filter: Option<String>,
+    pattern_type_filter: i8,
+    principal_filter: Option<String>,
+    host_filter: Option<String>,
+    operation: i8,
+    permission_type: i8,
+}
+
+fn acl_filter_wire_fields(f: &AclEntryFilter) -> AclFilterWireFields {
+    AclFilterWireFields {
         resource_type_filter: f.resource_type.map_or(WIRE_ANY, resource_type_to_wire),
         resource_name_filter: f.resource_name.clone(),
         pattern_type_filter: f.pattern_type.map_or(WIRE_ANY, pattern_type_to_wire),
@@ -499,7 +512,6 @@ pub(crate) fn acl_filter_to_wire(f: &AclEntryFilter) -> DeleteAclsFilter {
         host_filter: f.host.clone(),
         operation: f.operation.map_or(WIRE_ANY, operation_to_wire),
         permission_type: f.permission_type.map_or(WIRE_ANY, permission_to_wire),
-        ..Default::default()
     }
 }
 
