@@ -100,6 +100,17 @@ pub(crate) async fn handle(
         },
     ) == AuthorizationResult::Allow;
 
+    if !authorized {
+        return AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: distinct_requested_users(&req)
+                .into_iter()
+                .map(|user| err_result(user, codes::CLUSTER_AUTHORIZATION_FAILED, "not super-user"))
+                .collect(),
+            ..Default::default()
+        };
+    }
+
     // KIP-554/KIP-778: KRaft SCRAM requires metadata.version >= 3.5-IV2.
     if crate::features::require_feature(
         &image,
@@ -109,16 +120,12 @@ pub(crate) async fn handle(
     .is_err()
     {
         let msg = "SCRAM is not enabled at the cluster's metadata.version.";
-        let mut results = Vec::new();
-        for d in &req.deletions {
-            results.push(err_result(d.name.clone(), codes::UNSUPPORTED_VERSION, msg));
-        }
-        for u in &req.upsertions {
-            results.push(err_result(u.name.clone(), codes::UNSUPPORTED_VERSION, msg));
-        }
         return AlterUserScramCredentialsResponse {
             throttle_time_ms: 0,
-            results,
+            results: distinct_requested_users(&req)
+                .into_iter()
+                .map(|user| err_result(user, codes::UNSUPPORTED_VERSION, msg))
+                .collect(),
             ..Default::default()
         };
     }
@@ -229,6 +236,17 @@ fn remember_user(user_order: &mut Vec<String>, user: &str) {
         return;
     }
     user_order.push(user.to_string());
+}
+
+fn distinct_requested_users(req: &AlterUserScramCredentialsRequest) -> Vec<String> {
+    let mut users = Vec::new();
+    for deletion in &req.deletions {
+        remember_user(&mut users, &deletion.name);
+    }
+    for upsertion in &req.upsertions {
+        remember_user(&mut users, &upsertion.name);
+    }
+    users
 }
 
 fn stage_deletion(
@@ -1240,6 +1258,106 @@ mod tests {
         let req = AlterUserScramCredentialsRequest {
             deletions: vec![deletion("alice")],
             upsertions: vec![valid_upsertion("bob")],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        let msg = "SCRAM is not enabled at the cluster's metadata.version.";
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![
+                expected_result("alice", codes::UNSUPPORTED_VERSION, Some(msg)),
+                expected_result("bob", codes::UNSUPPORTED_VERSION, Some(msg)),
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_low_metadata_version_denied_request_reports_authorization_per_distinct_user() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        broker
+            .controller
+            .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crate::features::METADATA_VERSION.to_string(),
+                level: crabka_metadata::metadata_version::SCRAM_MIN_LEVEL - 1,
+            })])
+            .await
+            .expect("seed low metadata.version");
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let mut invalid_upsertion = valid_upsertion("bob");
+        invalid_upsertion.iterations = MIN_ITERATIONS - 1;
+        let req = AlterUserScramCredentialsRequest {
+            deletions: vec![ScramCredentialDeletion {
+                name: "alice".into(),
+                mechanism: 99,
+                ..Default::default()
+            }],
+            upsertions: vec![invalid_upsertion, valid_upsertion("bob")],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![
+                expected_result(
+                    "alice",
+                    codes::CLUSTER_AUTHORIZATION_FAILED,
+                    Some("not super-user"),
+                ),
+                expected_result(
+                    "bob",
+                    codes::CLUSTER_AUTHORIZATION_FAILED,
+                    Some("not super-user"),
+                ),
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_low_metadata_version_authorized_request_deduplicates_unsupported_users() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        broker
+            .controller
+            .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: crate::features::METADATA_VERSION.to_string(),
+                level: crabka_metadata::metadata_version::SCRAM_MIN_LEVEL - 1,
+            })])
+            .await
+            .expect("seed low metadata.version");
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterUserScramCredentialsRequest {
+            deletions: vec![deletion("alice")],
+            upsertions: vec![
+                valid_upsertion("bob"),
+                valid_upsertion("bob"),
+                valid_upsertion("alice"),
+            ],
             ..Default::default()
         };
 
