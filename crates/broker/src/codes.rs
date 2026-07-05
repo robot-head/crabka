@@ -147,9 +147,8 @@ pub const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
 /// Describe per-user result rows.
 pub const RESOURCE_NOT_FOUND: i16 = 91;
 /// `UNACCEPTABLE_CREDENTIAL` (93) — per-user error when an upsertion carries
-/// invalid SCRAM parameters (iterations < 4096, empty salt, `salted_password`
-/// of the wrong length, or too many iterations). Canonical Apache Kafka
-/// assigns code 93 to this error.
+/// invalid SCRAM parameters (iterations < 4096, too many iterations, or an
+/// empty username). Canonical Apache Kafka assigns code 93 to this error.
 pub const UNACCEPTABLE_CREDENTIAL: i16 = 93;
 /// `DUPLICATE_RESOURCE` (92) — per-user error when the same user appears
 /// twice in one `AlterUserScramCredentials` or

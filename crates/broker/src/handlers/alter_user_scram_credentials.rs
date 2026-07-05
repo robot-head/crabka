@@ -1,18 +1,14 @@
 //! `AlterUserScramCredentials` handler (`api_key` 51, KIP-554).
 //!
 //! KIP-554 puts PBKDF2 on the *client* side: the wire request carries the
-//! already-stretched PBKDF2 output as `salted_password` (32 bytes for
-//! SHA-256, 64 bytes for SHA-512). The broker derives `stored_key` /
-//! `server_key` from that without ever seeing the user's plaintext
-//! password.
+//! already-stretched PBKDF2 output as `salted_password`. The broker derives
+//! `stored_key` / `server_key` from the supplied bytes without ever seeing the
+//! user's plaintext password.
 //!
 //! Per-user validation (each upsertion is checked independently):
 //!
 //! - `iterations >= 4096` else `UNACCEPTABLE_CREDENTIAL` (93).
 //! - `iterations <= 16384` else `UNACCEPTABLE_CREDENTIAL`.
-//! - `salt` non-empty else `UNACCEPTABLE_CREDENTIAL`.
-//! - `salted_password.len()` matches the chosen mechanism's hash length
-//!   (32 for SHA-256, 64 for SHA-512) else `UNACCEPTABLE_CREDENTIAL`.
 //! - Unknown mechanism wire value → `UNSUPPORTED_SASL_MECHANISM` (33).
 //!
 //! Authorization: `Alter` on `Cluster("kafka-cluster")`. On Deny,
@@ -422,19 +418,6 @@ fn validate_upsertion(
             message: "iterations > 16384",
         });
     }
-    if upsertion.salt.is_empty() {
-        return Err(AlterationError {
-            code: codes::UNACCEPTABLE_CREDENTIAL,
-            message: "empty salt",
-        });
-    }
-    let expected_salted_len = crabka_security::scram_hash_len(mech);
-    if upsertion.salted_password.len() != expected_salted_len {
-        return Err(AlterationError {
-            code: codes::UNACCEPTABLE_CREDENTIAL,
-            message: "wrong salted_password length",
-        });
-    }
     Ok(mech)
 }
 
@@ -449,9 +432,9 @@ fn upsertion_record(
     upsertion: &ScramCredentialUpsertion,
     mechanism: SaslMechanism,
 ) -> MetadataRecord {
-    // Per KIP-554 the wire `salted_password` is the PBKDF2 output (32
-    // bytes for SHA-256, 64 for SHA-512); recompute `stored_key` and
-    // `server_key` from it for storage in the metadata image.
+    // Per KIP-554 the wire `salted_password` is the PBKDF2 output; recompute
+    // `stored_key` and `server_key` from the supplied bytes for storage in the
+    // metadata image.
     let (stored_key, server_key) =
         crabka_security::derive_keys_from_salted(mechanism, &upsertion.salted_password);
     MetadataRecord::V1ScramCredential(ScramCredentialRecord {
@@ -733,32 +716,14 @@ mod tests {
     fn process_upsertion_validates_boundaries_and_records_success() {
         let mut records = Vec::new();
 
-        let rejections = [
-            (
-                {
-                    let mut u = valid_upsertion("too-few");
-                    u.iterations = MIN_ITERATIONS - 1;
-                    u
-                },
-                "iterations < 4096",
-            ),
-            (
-                {
-                    let mut u = valid_upsertion("empty-salt");
-                    u.salt = Bytes::new();
-                    u
-                },
-                "empty salt",
-            ),
-            (
-                {
-                    let mut u = valid_upsertion("wrong-len");
-                    u.salted_password = Bytes::from(vec![7; 31]);
-                    u
-                },
-                "wrong salted_password length",
-            ),
-        ];
+        let rejections = [(
+            {
+                let mut u = valid_upsertion("too-few");
+                u.iterations = MIN_ITERATIONS - 1;
+                u
+            },
+            "iterations < 4096",
+        )];
         for (upsertion, msg) in rejections {
             let user = upsertion.name.clone();
             let r = process_upsertion(upsertion, true, &mut records);
@@ -784,6 +749,42 @@ mod tests {
             iterations: u32::try_from(MIN_ITERATIONS).expect("min fits"),
         })];
         assert!(records == expected_records);
+    }
+
+    #[test]
+    fn process_upsertion_accepts_empty_salt() {
+        let mut records = Vec::new();
+        let mut upsertion = valid_upsertion("empty-salt");
+        upsertion.salt = Bytes::new();
+
+        let r = process_upsertion(upsertion, true, &mut records);
+
+        assert!(r == expected_result("empty-salt", 0, None));
+        assert!(records.len() == 1);
+        let MetadataRecord::V1ScramCredential(record) = &records[0] else {
+            panic!("accepted upsertion must persist a SCRAM credential record");
+        };
+        assert!(record.salt.is_empty());
+    }
+
+    #[test]
+    fn process_upsertion_accepts_non_hash_length_salted_password() {
+        let mut records = Vec::new();
+        let mut upsertion = valid_upsertion("odd-bytes");
+        let salted_password = Bytes::from_static(b"not-a-sha-sized-secret");
+        upsertion.salted_password = salted_password.clone();
+
+        let r = process_upsertion(upsertion, true, &mut records);
+
+        assert!(r == expected_result("odd-bytes", 0, None));
+        assert!(records.len() == 1);
+        let MetadataRecord::V1ScramCredential(record) = &records[0] else {
+            panic!("accepted upsertion must persist a SCRAM credential record");
+        };
+        let (stored_key, server_key) =
+            crabka_security::derive_keys_from_salted(SaslMechanism::ScramSha256, &salted_password);
+        assert!(record.stored_key == stored_key);
+        assert!(record.server_key == server_key);
     }
 
     #[test]
