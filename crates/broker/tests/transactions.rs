@@ -133,6 +133,15 @@ fn rec(topic: &str, v: &str) -> ProducerRecord {
     }
 }
 
+async fn send_ok(producer: &Producer, record: ProducerRecord) {
+    producer
+        .send(record)
+        .await
+        .await
+        .expect("producer delivery channel open")
+        .expect("produce acknowledged");
+}
+
 // ── test 1 ────────────────────────────────────────────────────────────────────
 
 /// Commit a transaction, then a `read_committed` consumer sees all 3 records.
@@ -393,7 +402,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
             .await
             .unwrap();
         for v in ["i0", "i1", "i2", "i3", "i4"] {
-            drop(nt.send(rec("input", v)).await);
+            send_ok(&nt, rec("input", v)).await;
         }
         nt.flush().await.unwrap();
         nt.close().await.unwrap();
@@ -433,7 +442,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
                     "{}_v",
                     String::from_utf8_lossy(r.value.as_deref().unwrap_or(b""))
                 );
-                drop(producer.send(rec("output", &out_val)).await);
+                send_ok(&producer, rec("output", &out_val)).await;
                 last_offset = Some((("input".into(), r.partition), r.offset + 1));
                 read += 1;
             }
