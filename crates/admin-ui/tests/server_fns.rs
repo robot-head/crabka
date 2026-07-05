@@ -325,39 +325,68 @@ async fn public_context_reads_reject_unauthenticated_sessions() {
 }
 
 #[tokio::test]
-async fn mutation_seams_validate_requests_before_requiring_authentication() {
+async fn mutation_seams_require_authentication_before_validating_requests() {
     let sessions = SessionStore::new(Duration::from_secs(60));
     let cfg = AdminUiConfig::default();
     let factory = RecordingAdminSeamFactory::default();
     let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
 
-    let invalid_topic = crabka_admin_ui::server_fns::create_topic(
-        &context,
-        CreateTopicRequestDto {
-            name: "orders".to_string(),
-            partitions: 0,
-            replicas: 1,
-            configs: Vec::new(),
-        },
-    )
-    .await;
+    let invalid_topic =
+        crabka_admin_ui::server_fns::create_topic(&context, invalid_create_topic_request()).await;
     let invalid_scram = crabka_admin_ui::server_fns::upsert_scram_sha512_user(
         &context,
-        ScramUserUpsertDto {
-            username: "alice".to_string(),
-            password: String::new(),
-            iterations: 4096,
-        },
+        invalid_scram_upsert_request(),
     )
     .await;
 
-    assert!(matches!(invalid_topic, Err(UiError::Admin(_))));
-    assert!(matches!(invalid_scram, Err(UiError::Admin(_))));
+    assert!(matches!(invalid_topic, Err(UiError::NotAuthenticated)));
+    assert!(matches!(invalid_scram, Err(UiError::NotAuthenticated)));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_topic(&context, invalid_delete_topic_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::create_partitions(
+            &context,
+            invalid_create_partitions_request()
+        )
+        .await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::alter_configs(&context, invalid_alter_config_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::create_acl(&context, invalid_create_acl_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_acl(&context, invalid_delete_acl_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_scram_user(&context, invalid_scram_delete_request())
+            .await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::upsert_quota(&context, invalid_quota_upsert_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_quota(&context, invalid_quota_delete_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::move_log_dir(&context, invalid_log_dir_move_request()).await,
+        Err(UiError::NotAuthenticated)
+    ));
     assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn mutation_seams_require_authentication_after_validation_without_leaking_password() {
+async fn mutation_seams_require_authentication_without_leaking_password() {
     let password_sentinel = "server-fn-scram-password-sentinel";
     let sessions = SessionStore::new(Duration::from_secs(60));
     let cfg = AdminUiConfig::default();
@@ -464,7 +493,7 @@ async fn public_create_topic_validates_session_and_calls_admin_mutation() {
 }
 
 #[tokio::test]
-async fn public_create_topic_rejects_unauthenticated_after_validation() {
+async fn public_create_topic_rejects_unauthenticated_before_mutation() {
     let sessions = SessionStore::new(Duration::from_secs(60));
     let cfg = AdminUiConfig::default();
     let factory = RecordingAdminSeamFactory::default();
@@ -486,7 +515,7 @@ async fn public_create_topic_rejects_unauthenticated_after_validation() {
 }
 
 #[tokio::test]
-async fn public_create_topic_validates_before_authentication() {
+async fn public_create_topic_requires_authentication_before_validation() {
     let sessions = SessionStore::new(Duration::from_secs(60));
     let cfg = AdminUiConfig::default();
     let factory = RecordingAdminSeamFactory::default();
@@ -503,8 +532,78 @@ async fn public_create_topic_validates_before_authentication() {
     )
     .await;
 
-    assert!(matches!(result, Err(UiError::Admin(_))));
+    assert!(matches!(result, Err(UiError::NotAuthenticated)));
     assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn authenticated_public_context_mutations_still_return_validation_errors() {
+    let sessions = SessionStore::new(Duration::from_secs(60));
+    let session_id = authenticated_session(&sessions);
+    let cfg = AdminUiConfig::default();
+    let factory = RecordingAdminSeamFactory::default();
+    let context = ServerFunctionContext::new(
+        &cfg,
+        &sessions,
+        Some(session_id.expose_for_cookie()),
+        &factory,
+    );
+
+    assert!(matches!(
+        crabka_admin_ui::server_fns::create_topic(&context, invalid_create_topic_request()).await,
+        Err(UiError::Admin(_))
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_topic(&context, invalid_delete_topic_request()).await,
+        Err(UiError::Admin(_))
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::create_partitions(
+            &context,
+            invalid_create_partitions_request()
+        )
+        .await,
+        Err(UiError::Admin(_))
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::alter_configs(&context, invalid_alter_config_request()).await,
+        Err(UiError::Admin(_))
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::create_acl(&context, invalid_create_acl_request()).await,
+        Err(UiError::Admin(_))
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_acl(&context, invalid_delete_acl_request()).await,
+        Err(UiError::Admin(_))
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::upsert_scram_sha512_user(
+            &context,
+            invalid_scram_upsert_request()
+        )
+        .await,
+        Err(UiError::Admin(_))
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_scram_user(&context, invalid_scram_delete_request())
+            .await,
+        Err(UiError::Admin(_))
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::upsert_quota(&context, invalid_quota_upsert_request()).await,
+        Err(UiError::Admin(_))
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::delete_quota(&context, invalid_quota_delete_request()).await,
+        Err(UiError::Admin(_))
+    ));
+    assert!(matches!(
+        crabka_admin_ui::server_fns::move_log_dir(&context, invalid_log_dir_move_request()).await,
+        Err(UiError::Admin(_))
+    ));
+
+    assert_eq!(factory.mutations.total_calls(), 0);
 }
 
 #[tokio::test]
@@ -1071,10 +1170,32 @@ fn delete_topic_request() -> DeleteTopicRequestDto {
     }
 }
 
+fn invalid_create_topic_request() -> CreateTopicRequestDto {
+    CreateTopicRequestDto {
+        name: "orders".to_string(),
+        partitions: 0,
+        replicas: 1,
+        configs: Vec::new(),
+    }
+}
+
+fn invalid_delete_topic_request() -> DeleteTopicRequestDto {
+    DeleteTopicRequestDto {
+        name: String::new(),
+    }
+}
+
 fn create_partitions_request() -> CreatePartitionsRequestDto {
     CreatePartitionsRequestDto {
         topic: "orders".to_string(),
         total_count: 6,
+    }
+}
+
+fn invalid_create_partitions_request() -> CreatePartitionsRequestDto {
+    CreatePartitionsRequestDto {
+        topic: "orders".to_string(),
+        total_count: 0,
     }
 }
 
@@ -1084,6 +1205,17 @@ fn alter_config_request() -> AlterConfigRequestDto {
         resource_name: "orders".to_string(),
         configs: vec![ConfigEntryDto {
             name: "cleanup.policy".to_string(),
+            value: "compact".to_string(),
+        }],
+    }
+}
+
+fn invalid_alter_config_request() -> AlterConfigRequestDto {
+    AlterConfigRequestDto {
+        resource_type: "topic".to_string(),
+        resource_name: "orders".to_string(),
+        configs: vec![ConfigEntryDto {
+            name: String::new(),
             value: "compact".to_string(),
         }],
     }
@@ -1100,6 +1232,20 @@ fn acl_request() -> AclRequestDto {
     }
 }
 
+fn invalid_create_acl_request() -> AclRequestDto {
+    AclRequestDto {
+        principal: String::new(),
+        ..acl_request()
+    }
+}
+
+fn invalid_delete_acl_request() -> AclRequestDto {
+    AclRequestDto {
+        host: String::new(),
+        ..acl_request()
+    }
+}
+
 fn scram_upsert_request() -> ScramUserUpsertDto {
     ScramUserUpsertDto {
         username: "alice".to_string(),
@@ -1108,9 +1254,23 @@ fn scram_upsert_request() -> ScramUserUpsertDto {
     }
 }
 
+fn invalid_scram_upsert_request() -> ScramUserUpsertDto {
+    ScramUserUpsertDto {
+        username: "alice".to_string(),
+        password: String::new(),
+        iterations: 4096,
+    }
+}
+
 fn scram_delete_request() -> ScramUserDeleteDto {
     ScramUserDeleteDto {
         username: "alice".to_string(),
+    }
+}
+
+fn invalid_scram_delete_request() -> ScramUserDeleteDto {
+    ScramUserDeleteDto {
+        username: String::new(),
     }
 }
 
@@ -1122,10 +1282,24 @@ fn quota_upsert_request() -> QuotaUpsertDto {
     }
 }
 
+fn invalid_quota_upsert_request() -> QuotaUpsertDto {
+    QuotaUpsertDto {
+        value: f64::NAN,
+        ..quota_upsert_request()
+    }
+}
+
 fn quota_delete_request() -> QuotaDeleteDto {
     QuotaDeleteDto {
         entity: "user=alice".to_string(),
         quota_type: "producer_byte_rate".to_string(),
+    }
+}
+
+fn invalid_quota_delete_request() -> QuotaDeleteDto {
+    QuotaDeleteDto {
+        quota_type: String::new(),
+        ..quota_delete_request()
     }
 }
 
@@ -1134,6 +1308,13 @@ fn log_dir_move_request() -> LogDirMoveRequestDto {
         topic: "orders".to_string(),
         partition: 0,
         destination_log_dir: "/var/lib/crabka-1".to_string(),
+    }
+}
+
+fn invalid_log_dir_move_request() -> LogDirMoveRequestDto {
+    LogDirMoveRequestDto {
+        partition: -1,
+        ..log_dir_move_request()
     }
 }
 

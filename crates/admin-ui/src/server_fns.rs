@@ -425,8 +425,8 @@ pub async fn create_topic_with_mutations<M: AdminMutationSeam>(
     mutations: &M,
     request: CreateTopicRequestDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     require_session(sessions, raw_session_id)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.create_topic(request).await
 }
@@ -435,8 +435,8 @@ pub async fn create_topic_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: CreateTopicRequestDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.create_topic(request).await
 }
@@ -445,8 +445,8 @@ pub async fn delete_topic_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: DeleteTopicRequestDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.delete_topic(request).await
 }
@@ -455,8 +455,8 @@ pub async fn create_partitions_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: CreatePartitionsRequestDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.create_partitions(request).await
 }
@@ -465,8 +465,8 @@ pub async fn alter_configs_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: AlterConfigRequestDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.alter_configs(request).await
 }
@@ -475,8 +475,8 @@ pub async fn create_acl_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: AclRequestDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.create_acl(request).await
 }
@@ -485,8 +485,8 @@ pub async fn delete_acl_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: AclRequestDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.delete_acl(request).await
 }
@@ -495,8 +495,8 @@ pub async fn upsert_scram_sha512_user_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: ScramUserUpsertDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.upsert_scram_sha512_user(request).await
 }
@@ -505,8 +505,8 @@ pub async fn delete_scram_user_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: ScramUserDeleteDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.delete_scram_user(request).await
 }
@@ -515,8 +515,8 @@ pub async fn upsert_quota_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: QuotaUpsertDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.upsert_quota(request).await
 }
@@ -525,8 +525,8 @@ pub async fn delete_quota_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: QuotaDeleteDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.delete_quota(request).await
 }
@@ -535,8 +535,8 @@ pub async fn move_log_dir_with_context<F: AdminSeamFactory>(
     context: &ServerFunctionContext<'_, F>,
     request: LogDirMoveRequestDto,
 ) -> Result<Vec<ResourceOutcome>, UiError> {
-    ensure_valid_request(request.validate())?;
     let mutations = mutation_seam_from_context(context)?;
+    ensure_valid_request(request.validate())?;
 
     mutations.move_log_dir(request).await
 }

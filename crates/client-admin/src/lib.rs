@@ -507,7 +507,9 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
         39 => "INVALID_REPLICA_ASSIGNMENT",
         40 => "INVALID_CONFIG",
         41 => "NOT_CONTROLLER",
+        66 => "DELEGATION_TOKEN_EXPIRED",
         83 => "ELIGIBLE_LEADERS_NOT_AVAILABLE",
+        84 => "ELECTION_NOT_NEEDED",
         91 => "RESOURCE_NOT_FOUND",
         92 => "DUPLICATE_RESOURCE",
         93 => "UNACCEPTABLE_CREDENTIAL",
@@ -538,14 +540,15 @@ mod tests {
         for (code, want) in [
             (31, "CLUSTER_AUTHORIZATION_FAILED"),
             (33, "UNSUPPORTED_SASL_MECHANISM"),
+            (66, "DELEGATION_TOKEN_EXPIRED"),
             (83, "ELIGIBLE_LEADERS_NOT_AVAILABLE"),
+            (84, "ELECTION_NOT_NEEDED"),
             (91, "RESOURCE_NOT_FOUND"),
             (92, "DUPLICATE_RESOURCE"),
             (93, "UNACCEPTABLE_CREDENTIAL"),
         ] {
             assert!(kafka_error_name(code) == want);
         }
-        assert!(kafka_error_name(66) != "RESOURCE_NOT_FOUND");
     }
 
     #[test]
