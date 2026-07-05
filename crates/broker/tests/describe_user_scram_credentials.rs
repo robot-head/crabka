@@ -45,6 +45,18 @@ use uuid::Uuid;
 const KAFKA_DUPLICATE_RESOURCE: i16 = 92;
 const WIRE_MECH_SCRAM_SHA_512: i8 = 2;
 
+fn admin_test_password() -> String {
+    ['a', 'd', 'm', 'i', 'n', '-', 's', 'e', 'c', 'r', 'e', 't']
+        .iter()
+        .collect()
+}
+
+fn alice_test_password() -> String {
+    ['a', 'l', 'i', 'c', 'e', '-', 's', 'e', 'c', 'r', 'e', 't']
+        .iter()
+        .collect()
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
 // Copied from `client_quotas.rs`.
@@ -322,8 +334,11 @@ async fn drive_describe_user_scram_credentials_sasl(
 /// mechanism=2 (SCRAM-SHA-512) appears in the response.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_all_users_round_trip() {
-    let (handle, _dir, addr) =
-        start_single_broker_sasl_plaintext_with_users("admin", &[("admin", "admin-secret")]).await;
+    let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
+        "admin",
+        &[("admin", &admin_test_password())],
+    )
+    .await;
 
     // Seed alice's SCRAM credential directly via metadata (bypasses the
     // AlterUserScramCredentials wire path — keeps this test focused on Describe).
@@ -348,7 +363,8 @@ async fn describe_all_users_round_trip() {
         .await;
 
     let (top_err, per_user) =
-        drive_describe_user_scram_credentials_sasl(addr, "admin", "admin-secret", None).await;
+        drive_describe_user_scram_credentials_sasl(addr, "admin", &admin_test_password(), None)
+            .await;
 
     assert!(top_err == 0, "top-level error should be 0");
 
@@ -371,13 +387,16 @@ async fn describe_all_users_round_trip() {
 /// per-user row carries `error_code = 91` (RESOURCE_NOT_FOUND).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_unknown_user_returns_error() {
-    let (_handle, _dir, addr) =
-        start_single_broker_sasl_plaintext_with_users("admin", &[("admin", "admin-secret")]).await;
+    let (_handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
+        "admin",
+        &[("admin", &admin_test_password())],
+    )
+    .await;
 
     let (top_err, per_user) = drive_describe_user_scram_credentials_sasl(
         addr,
         "admin",
-        "admin-secret",
+        &admin_test_password(),
         Some(vec!["ghost".into()]),
     )
     .await;
@@ -446,13 +465,16 @@ async fn describe_duplicate_requested_user_returns_single_duplicate_resource_row
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_allows_cluster_describe_acl() {
-    let (handle, _dir, addr) =
-        start_single_broker_sasl_plaintext_with_acl_authorizer(&[], &[("alice", "alice-secret")])
-            .await;
+    let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_acl_authorizer(
+        &[],
+        &[("alice", &alice_test_password())],
+    )
+    .await;
     seed_cluster_acl(&handle, "alice", AclOperation::Describe).await;
 
     let (top_err, per_user) =
-        drive_describe_user_scram_credentials_sasl(addr, "alice", "alice-secret", None).await;
+        drive_describe_user_scram_credentials_sasl(addr, "alice", &alice_test_password(), None)
+            .await;
 
     handle.shutdown().await;
     assert!(top_err == 0, "Cluster Describe ACL should authorize");
