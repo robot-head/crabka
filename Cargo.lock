@@ -2178,6 +2178,7 @@ dependencies = [
  "crabka-security",
  "dioxus",
  "dioxus-ssr",
+ "mutants",
  "parking_lot",
  "playwright-rs",
  "serde",
