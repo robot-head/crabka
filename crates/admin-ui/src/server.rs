@@ -130,13 +130,7 @@ where
     for<'a> F::Reader<'a>: Send,
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
-    let result = server_fns::login_with_context(
-        &state.app.cfg,
-        &state.app.sessions,
-        &state.login_broker,
-        request,
-    )
-    .await;
+    let result = server_fns::login_with_app_state(&state.app, &state.login_broker, request).await;
 
     let Ok(success) = result else {
         return (

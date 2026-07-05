@@ -5,8 +5,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::OnceLock;
-use std::time::Duration;
 
 use crabka_client_admin::{
     AclEntry, AclEntryFilter, AclOperation, AdminClient, CreatePartitionsOp, CreateTopicSpec,
@@ -16,9 +14,7 @@ use crabka_client_admin::{
 use serde::{Deserialize, Serialize};
 
 use crate::admin::{AdminFacade, quota_mutation_outcome, resource_outcome_rows};
-use crate::auth::{
-    AdminClientLoginBroker, LoginBroker, LoginRequest, LoginSuccess, build_scram_sha512_security,
-};
+use crate::auth::{LoginBroker, LoginRequest, LoginSuccess, build_scram_sha512_security};
 use crate::config::AdminUiConfig;
 use crate::dto::{
     AclRequestDto, AlterConfigRequestDto, CreatePartitionsRequestDto, CreateTopicRequestDto,
@@ -26,6 +22,7 @@ use crate::dto::{
     QuotaUpsertDto, ResourceOutcome, ScramUserDeleteDto, ScramUserUpsertDto, TopicRow,
 };
 use crate::error::UiError;
+use crate::server::AppState;
 use crate::session::{SessionId, SessionRecord, SessionStore};
 
 pub use crate::dto::{AclRow, QuotaRow, UserRow};
@@ -34,12 +31,6 @@ pub use crate::dto::{AclRow, QuotaRow, UserRow};
 pub struct CurrentSession {
     pub username: String,
     pub principal: String,
-}
-
-pub async fn login(request: LoginRequest) -> Result<LoginSuccess, UiError> {
-    let cfg = AdminUiConfig::from_env().map_err(|error| UiError::Admin(error.to_string()))?;
-
-    login_with_context(&cfg, runtime_sessions(), &AdminClientLoginBroker, request).await
 }
 
 pub async fn logout<F>(context: &ServerFunctionContext<'_, F>) -> Result<(), UiError> {
@@ -284,6 +275,14 @@ pub async fn login_with_context<B: LoginBroker>(
     crate::auth::AuthService::new_with_broker(cfg, sessions, broker)
         .login(request)
         .await
+}
+
+pub async fn login_with_app_state<B: LoginBroker>(
+    state: &AppState,
+    broker: &B,
+    request: LoginRequest,
+) -> Result<LoginSuccess, UiError> {
+    login_with_context(&state.cfg, &state.sessions, broker, request).await
 }
 
 pub async fn logout_with_context<F>(context: &ServerFunctionContext<'_, F>) -> Result<(), UiError> {
@@ -991,10 +990,4 @@ fn mutation_seam_from_context<'a, F: AdminSeamFactory>(
     let record = require_session(context.sessions, context.raw_session_id)?;
 
     context.seam_factory.mutation_seam(context.cfg, &record)
-}
-
-fn runtime_sessions() -> &'static SessionStore {
-    static SESSIONS: OnceLock<SessionStore> = OnceLock::new();
-
-    SESSIONS.get_or_init(|| SessionStore::new(Duration::from_hours(8)))
 }

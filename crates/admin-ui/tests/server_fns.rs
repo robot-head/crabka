@@ -49,11 +49,18 @@ fn app_state_carries_config_and_sessions() {
 }
 
 #[tokio::test]
-async fn login_seam_rejects_without_exposing_password() {
-    let result = crabka_admin_ui::server_fns::login(LoginRequest {
-        username: "alice".to_string(),
-        password: LOGIN_PASSWORD_SENTINEL.to_string(),
-    })
+async fn app_state_login_rejects_without_exposing_password() {
+    let state = AppState::new(AdminUiConfig::default());
+    let broker = RejectingLoginBroker;
+
+    let result = crabka_admin_ui::server_fns::login_with_app_state(
+        &state,
+        &broker,
+        LoginRequest {
+            username: "alice".to_string(),
+            password: LOGIN_PASSWORD_SENTINEL.to_string(),
+        },
+    )
     .await;
 
     assert!(result.is_err());
@@ -62,6 +69,35 @@ async fn login_seam_rejects_without_exposing_password() {
         LOGIN_PASSWORD_SENTINEL,
         "password",
     );
+}
+
+#[tokio::test]
+async fn app_state_login_stores_session_in_protected_route_store() {
+    let state = AppState::new(AdminUiConfig {
+        bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
+        ..AdminUiConfig::default()
+    });
+    let broker = RecordingLoginBroker::default();
+
+    let success = crabka_admin_ui::server_fns::login_with_app_state(
+        &state,
+        &broker,
+        LoginRequest {
+            username: "alice".to_string(),
+            password: LOGIN_PASSWORD_SENTINEL.to_string(),
+        },
+    )
+    .await
+    .expect("login succeeds through app state");
+
+    let current_session = crabka_admin_ui::server_fns::current_session_with_store(
+        &state.sessions,
+        Some(&success.session_id),
+    )
+    .expect("session is stored in app state's protected-route store");
+
+    assert_eq!(broker.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(current_session.username, "alice");
 }
 
 #[tokio::test]
@@ -764,6 +800,20 @@ impl LoginBroker for RecordingLoginBroker {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RejectingLoginBroker;
+
+impl LoginBroker for RejectingLoginBroker {
+    fn check_login<'a>(
+        &'a self,
+        _cfg: &'a AdminUiConfig,
+        _username: &'a str,
+        _password: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
+        Box::pin(async { Err(UiError::Admin("login rejected".to_string())) })
     }
 }
 

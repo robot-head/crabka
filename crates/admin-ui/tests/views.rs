@@ -5,7 +5,28 @@ use crabka_admin_ui::views::{
 use crabka_admin_ui::{dto::TopicRow, server_fns::AclRow};
 
 fn ssr_route_body(page: &RoutePage) -> String {
-    format!("<div>{}</div>", render_page_body_html(page))
+    render_page_body_html(page)
+}
+
+fn ssr_full_page(page: &RoutePage) -> String {
+    format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{}</title></head><body>{}</body></html>",
+        expected_title(page),
+        dioxus_ssr::render_element(crabka_admin_ui::views::render_page_element(page))
+    )
+}
+
+fn expected_title(page: &RoutePage) -> &'static str {
+    match page {
+        RoutePage::Overview { .. } => "Crabka Admin",
+        RoutePage::Login { .. } => "Sign in to Crabka",
+        RoutePage::Topics { .. } => "Topics",
+        RoutePage::Groups { .. } => "Consumer Groups",
+        RoutePage::Acls { .. } => "ACLs",
+        RoutePage::Users { .. } => "SCRAM Users",
+        RoutePage::Quotas { .. } => "Quotas",
+        RoutePage::LogDirs { .. } => "Log Dirs",
+    }
 }
 
 #[test]
@@ -174,8 +195,27 @@ fn shared_page_renderer_renders_dynamic_topics_and_acls() {
     }])));
 
     assert!(topics_html.contains("admin-section topics-section"));
-    assert!(topics_html.contains("orders&lt;east&gt;"));
+    assert!(topics_html.contains("orders&#60;east&#62;"));
     assert!(!topics_html.contains("orders<east>"));
     assert!(acls_html.contains("admin-section acls-section"));
     assert!(acls_html.contains("Topic:orders User:alice Read Allow"));
+}
+
+#[test]
+fn full_page_renderer_uses_dioxus_ssr_for_dynamic_and_protected_pages() {
+    let dynamic_topic_page = RoutePage::topics(ReadRouteState::Rows(vec![TopicRow {
+        name: "orders<east>".to_string(),
+        topic_id: None,
+        partition_count: 3,
+        replication_factor: 1,
+        error: None,
+    }]));
+    let protected_page = RoutePage::for_unauthenticated_route(Route::Topics);
+
+    for page in [&dynamic_topic_page, &protected_page] {
+        let rendered_page = render_page(page);
+
+        assert_eq!(rendered_page, ssr_full_page(page));
+        assert!(rendered_page.contains("<body><div>"));
+    }
 }
