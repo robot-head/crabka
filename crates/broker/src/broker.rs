@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::BrokerConfig,
     error::BrokerError,
-    handlers::HandlerTable,
+    handlers::DispatchRegistry,
     log_dir,
     partition::{Partition, WriterMessage},
     partition_registry::PartitionRegistry,
@@ -228,11 +228,11 @@ pub struct Broker {
     /// `KafkaTopicAuditSink`. Disabled (`AuditLog::disabled()`) when
     /// `BrokerConfig::audit_enabled` is `false`.
     pub(crate) audit_log: std::sync::Arc<crabka_audit::AuditLog>,
-    handlers: HandlerTable,
+    handlers: DispatchRegistry,
 }
 
 impl Broker {
-    pub(crate) fn handlers(&self) -> &HandlerTable {
+    pub(crate) fn handlers(&self) -> &DispatchRegistry {
         &self.handlers
     }
 
@@ -3359,8 +3359,8 @@ impl Broker {
             ));
         }
 
-        // 5. Build handler table.
-        let handlers = crate::handlers::build_table();
+        // 5. Build dispatch registry.
+        let handlers = crate::handlers::registry::build_registry();
 
         // 6. Bind one TcpListener per `ListenerSpec`. The legacy single-listener
         //    path is preserved via `effective_listeners()`, which synthesizes

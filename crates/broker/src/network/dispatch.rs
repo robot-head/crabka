@@ -845,7 +845,7 @@ async fn serve_connection_stream<S>(
                 client_software_version.clone_from(&req.client_software_version);
             }
         }
-        // KIP-124 request_percentage enforcement — fallback HandlerTable path only.
+        // KIP-124 request_percentage enforcement — fallback plain-registry path only.
         // Intercept arms (admin RPCs: ACLs, ElectLeaders, AlterPartitionReassignments,
         // ListPartitionReassignments, AlterClientQuotas, DescribeClientQuotas, etc.)
         // handle their own response write inline and are NOT subject to
@@ -4079,7 +4079,7 @@ async fn dispatch_one(broker: &Broker, frame: &[u8]) -> Result<Bytes, BrokerErro
 
     let handler = broker
         .handlers()
-        .get(api_key)
+        .get_plain(api_key)
         .ok_or(BrokerError::UnsupportedApi {
             api_key,
             version: api_version,
@@ -4845,7 +4845,7 @@ mod tests {
 
     /// The three KIP-853 controller-plane RPCs (`AddRaftVoter` 80,
     /// `RemoveRaftVoter` 81, `UpdateRaftVoter` 82) are dispatched by inline
-    /// `serve_connection_stream` match arms, not by the `HandlerTable`. If an
+    /// `serve_connection_stream` match arms, not by the plain registry. If an
     /// arm is deleted the frame falls through to `dispatch_one`, which — with
     /// no table entry — synthesizes an `UNSUPPORTED_VERSION` (35) response
     /// instead of running the real handler. Drive each RPC over a real socket
