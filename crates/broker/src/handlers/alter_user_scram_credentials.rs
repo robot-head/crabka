@@ -60,6 +60,7 @@ const MIN_ITERATIONS: i32 = 4096;
 const MAX_ITERATIONS: i32 = 16_384;
 const DUPLICATE_ALTERATION_MESSAGE: &str =
     "A user credential cannot be altered twice in the same request";
+const EMPTY_USERNAME_MESSAGE: &str = "Username must not be empty";
 
 /// KIP-554 wire byte identifying a SCRAM mechanism (see [`wire_to_mech`]).
 type MechanismWireByte = i8;
@@ -161,6 +162,22 @@ fn plan_alterations(
     let mut upsertions = HashMap::new();
     let mut errors = HashMap::new();
 
+    if !authorized {
+        for deletion in &req.deletions {
+            remember_user(&mut user_order, &deletion.name);
+        }
+        for upsertion in &req.upsertions {
+            remember_user(&mut user_order, &upsertion.name);
+        }
+        return AlterationPlan {
+            user_results: user_order
+                .into_iter()
+                .map(|user| err_result(user, codes::CLUSTER_AUTHORIZATION_FAILED, "not super-user"))
+                .collect(),
+            records: Vec::new(),
+        };
+    }
+
     for deletion in req.deletions {
         remember_user(&mut user_order, &deletion.name);
         stage_deletion(broker, deletion, authorized, &mut deletions, &mut errors);
@@ -217,8 +234,7 @@ fn stage_deletion(
     deletions: &mut HashMap<String, (ScramCredentialDeletion, SaslMechanism)>,
     errors: &mut HashMap<String, AlterationError>,
 ) {
-    if let Some(error) = errors.get_mut(&deletion.name) {
-        *error = duplicate_alteration_error();
+    if errors.contains_key(&deletion.name) {
         return;
     }
 
@@ -244,8 +260,7 @@ fn stage_upsertion(
     upsertions: &mut HashMap<String, (ScramCredentialUpsertion, SaslMechanism)>,
     errors: &mut HashMap<String, AlterationError>,
 ) {
-    if let Some(error) = errors.get_mut(&upsertion.name) {
-        *error = duplicate_alteration_error();
+    if errors.contains_key(&upsertion.name) {
         return;
     }
 
@@ -309,18 +324,24 @@ fn validate_deletion(
     deletion: &ScramCredentialDeletion,
     authorized: bool,
 ) -> Result<SaslMechanism, AlterationError> {
-    let Some(mech) = wire_to_mech(deletion.mechanism) else {
-        return Err(AlterationError {
-            code: codes::UNSUPPORTED_SASL_MECHANISM,
-            message: "unknown mechanism",
-        });
-    };
     if !authorized {
         return Err(AlterationError {
             code: codes::CLUSTER_AUTHORIZATION_FAILED,
             message: "not super-user",
         });
     }
+    if deletion.name.is_empty() {
+        return Err(AlterationError {
+            code: codes::UNACCEPTABLE_CREDENTIAL,
+            message: EMPTY_USERNAME_MESSAGE,
+        });
+    }
+    let Some(mech) = wire_to_mech(deletion.mechanism) else {
+        return Err(AlterationError {
+            code: codes::UNSUPPORTED_SASL_MECHANISM,
+            message: "unknown mechanism",
+        });
+    };
     if broker
         .controller
         .current_image()
@@ -339,6 +360,18 @@ fn validate_upsertion(
     upsertion: &ScramCredentialUpsertion,
     authorized: bool,
 ) -> Result<SaslMechanism, AlterationError> {
+    if !authorized {
+        return Err(AlterationError {
+            code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            message: "not super-user",
+        });
+    }
+    if upsertion.name.is_empty() {
+        return Err(AlterationError {
+            code: codes::UNACCEPTABLE_CREDENTIAL,
+            message: EMPTY_USERNAME_MESSAGE,
+        });
+    }
     let Some(mech) = wire_to_mech(upsertion.mechanism) else {
         return Err(AlterationError {
             code: codes::UNSUPPORTED_SASL_MECHANISM,
@@ -368,12 +401,6 @@ fn validate_upsertion(
         return Err(AlterationError {
             code: codes::UNACCEPTABLE_CREDENTIAL,
             message: "wrong salted_password length",
-        });
-    }
-    if !authorized {
-        return Err(AlterationError {
-            code: codes::CLUSTER_AUTHORIZATION_FAILED,
-            message: "not super-user",
         });
     }
     Ok(mech)
@@ -926,7 +953,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_duplicate_username_after_missing_deletion_prioritizes_duplicate_resource() {
+    async fn handle_duplicate_username_after_missing_deletion_preserves_resource_not_found() {
         let (broker_handle, _dir) =
             start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
         let broker = broker_handle.broker_arc_for_test();
@@ -958,8 +985,8 @@ mod tests {
             throttle_time_ms: 0,
             results: vec![expected_result(
                 "alice",
-                KAFKA_DUPLICATE_RESOURCE,
-                Some("A user credential cannot be altered twice in the same request"),
+                codes::RESOURCE_NOT_FOUND,
+                Some("credential not found"),
             )],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
@@ -973,6 +1000,131 @@ mod tests {
         assert!(
             image
                 .scram_credential("alice", SaslMechanism::ScramSha512)
+                .is_none()
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_denies_invalid_rows_before_scram_validation() {
+        let (broker_handle, _dir) = start_broker(Arc::new(DenyAll)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let mut invalid_upsertion = valid_upsertion("bob");
+        invalid_upsertion.iterations = MIN_ITERATIONS - 1;
+        let req = AlterUserScramCredentialsRequest {
+            deletions: vec![ScramCredentialDeletion {
+                name: "alice".into(),
+                mechanism: 99,
+                ..Default::default()
+            }],
+            upsertions: vec![invalid_upsertion, valid_upsertion("bob")],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![
+                expected_result(
+                    "alice",
+                    codes::CLUSTER_AUTHORIZATION_FAILED,
+                    Some("not super-user"),
+                ),
+                expected_result(
+                    "bob",
+                    codes::CLUSTER_AUTHORIZATION_FAILED,
+                    Some("not super-user"),
+                ),
+            ],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_empty_deletion_username_is_unacceptable_credential() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterUserScramCredentialsRequest {
+            deletions: vec![deletion("")],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![expected_result(
+                "",
+                KAFKA_UNACCEPTABLE_CREDENTIAL,
+                Some("Username must not be empty"),
+            )],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+        assert!(
+            broker
+                .controller
+                .current_image()
+                .scram_credential("", SaslMechanism::ScramSha256)
+                .is_none()
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_empty_upsertion_username_is_unacceptable_credential() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterUserScramCredentialsRequest {
+            upsertions: vec![valid_upsertion("")],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![expected_result(
+                "",
+                KAFKA_UNACCEPTABLE_CREDENTIAL,
+                Some("Username must not be empty"),
+            )],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+        assert!(
+            broker
+                .controller
+                .current_image()
+                .scram_credential("", SaslMechanism::ScramSha256)
                 .is_none()
         );
         broker_handle.shutdown().await;
