@@ -26,12 +26,7 @@ use crabka_protocol::{
     },
 };
 
-use crate::{
-    authorizer::{AuthorizationRequest, AuthorizationResult},
-    broker::Broker,
-    codes,
-    error::BrokerError,
-};
+use crate::{broker::Broker, codes, error::BrokerError};
 
 #[allow(clippy::unused_async)] // async to match the inline-intercept handler shape.
 #[tracing::instrument(
@@ -70,12 +65,13 @@ pub(crate) async fn handle(
         let mut topics_out: Vec<OffsetForLeaderTopicResult> = Vec::with_capacity(req.topics.len());
 
         for topic in req.topics {
-            if topic_describe_denied(
+            if crate::handlers::acl_denied(
                 broker.config.authorizer.as_ref(),
                 &acl_image,
-                ctx.principal,
-                ctx.peer,
+                ctx,
+                ResourceType::Topic,
                 &topic.topic,
+                AclOperation::Describe,
             ) {
                 let parts_out = topic
                     .partitions
@@ -162,26 +158,6 @@ pub(crate) async fn handle(
     }
 }
 
-/// `Describe` on `Topic(name)` gate. Returns `true` when denied.
-fn topic_describe_denied(
-    authorizer: &dyn crate::authorizer::Authorizer,
-    image: &crabka_metadata::MetadataImage,
-    principal: &crabka_security::Principal,
-    host: &std::net::SocketAddr,
-    topic: &str,
-) -> bool {
-    authorizer.authorize(
-        image,
-        &AuthorizationRequest {
-            principal,
-            host,
-            resource_type: ResourceType::Topic,
-            resource_name: topic,
-            operation: AclOperation::Describe,
-        },
-    ) == AuthorizationResult::Deny
-}
-
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -204,12 +180,20 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert!(topic_describe_denied(
+        let ctx = crate::handlers::RequestContext {
+            principal: &principal,
+            peer: &peer,
+            client_id: "client-a",
+            sendfile_capable: false,
+            connection_listener_name: "PLAINTEXT",
+        };
+        assert!(crate::handlers::acl_denied(
             &authorizer,
             &image,
-            &principal,
-            &peer,
-            "t"
+            &ctx,
+            ResourceType::Topic,
+            "t",
+            AclOperation::Describe,
         ));
 
         let resp = OffsetForLeaderEpochResponse {

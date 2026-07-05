@@ -34,13 +34,11 @@ pub(crate) fn recover_from_partition_tail(partition: &Partition) -> Option<(u64,
     for batch in &out.batches {
         for rec in &batch.records {
             // Skip checkpoint records (they don't advance the chained seq).
-            if header_bytes(rec, HEADER_EVENT_CLASS).as_deref()
-                == Some(EVENT_CLASS_CHECKPOINT.as_bytes())
-            {
+            if header_bytes(rec, HEADER_EVENT_CLASS) == Some(EVENT_CLASS_CHECKPOINT.as_bytes()) {
                 continue;
             }
             let seq = header_str(rec, HEADER_SEQ).and_then(|s| s.parse::<u64>().ok());
-            let prev = header_str(rec, HEADER_PREV_HASH).and_then(|s| from_hex32(&s));
+            let prev = header_str(rec, HEADER_PREV_HASH).and_then(from_hex32);
             let value: &[u8] = rec
                 .value
                 .as_ref()
@@ -54,15 +52,15 @@ pub(crate) fn recover_from_partition_tail(partition: &Partition) -> Option<(u64,
     last
 }
 
-fn header_bytes(rec: &crabka_protocol::records::Record, key: &str) -> Option<Vec<u8>> {
+fn header_bytes<'a>(rec: &'a crabka_protocol::records::Record, key: &str) -> Option<&'a [u8]> {
     rec.headers
         .iter()
         .find(|h| h.key == key)
-        .and_then(|h| h.value.as_ref().map(|b| b.to_vec()))
+        .and_then(|h| h.value.as_deref())
 }
 
-fn header_str(rec: &crabka_protocol::records::Record, key: &str) -> Option<String> {
-    header_bytes(rec, key).and_then(|v| std::str::from_utf8(&v).ok().map(str::to_owned))
+fn header_str<'a>(rec: &'a crabka_protocol::records::Record, key: &str) -> Option<&'a str> {
+    header_bytes(rec, key).and_then(|v| std::str::from_utf8(v).ok())
 }
 
 fn tail_window_start(log_end_offset: crabka_log::Offset) -> crabka_log::Offset {
@@ -229,7 +227,8 @@ mod tests {
             ..Default::default()
         };
 
-        let cases = [("target", Some(vec![0xCA, 0xFE])), ("missing", None)];
+        let cases: [(&str, Option<&[u8]>); 2] =
+            [("target", Some(&[0xCA, 0xFE])), ("missing", None)];
         for (key, want) in cases {
             assert!(header_bytes(&rec, key) == want, "key {key:?}");
         }
@@ -246,7 +245,7 @@ mod tests {
         };
 
         let cases = [
-            ("text", Some("audit-seq".to_string())),
+            ("text", Some("audit-seq")),
             ("binary", None), // invalid UTF-8 → rejected
             ("missing", None),
         ];
