@@ -23,6 +23,15 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use crabka_ids::{Offset, ProducerId};
 use crabka_protocol::records::RecordBatch;
+// ---------------------------------------------------------------------------
+// KIP-534 pure decision cores
+//
+// The retain/horizon core now lives in `crabka-verified`, where its contract
+// is proven with Creusot. Thin typed wrappers keep log-local `ProducerId`
+// boundaries explicit while `compact_model.rs` and `core_tests` keep driving
+// the exact production path.
+// ---------------------------------------------------------------------------
+pub(crate) use crabka_verified::{RecordMeta, RetainDecision, TxnDataState};
 use tracing::instrument;
 
 use crate::{
@@ -31,22 +40,6 @@ use crate::{
     segment::Segment,
     txn_index::{AbortedTxn, TxnIndex},
 };
-
-// ---------------------------------------------------------------------------
-// KIP-534 pure decision cores
-//
-// These are `pub(crate)` (reachable from a sibling test module via `super::`)
-// because a later task builds a stateright model + proptest on them. The
-// retain/horizon logic lives here in pure form so it can be exhaustively
-// model-checked without touching the filesystem.
-// ---------------------------------------------------------------------------
-
-/// Per-record facts the retain decision needs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RecordMeta {
-    pub has_key: bool,
-    pub has_value: bool,
-}
 
 /// Per-batch facts the retain decision needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,27 +51,36 @@ pub(crate) struct BatchMeta {
     pub existing_horizon: Option<i64>,
 }
 
-/// Whether a producer's transactional DATA still survives compaction.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TxnDataState {
-    /// `producer_id < 0`: not a transactional producer.
-    NotTransactional,
-    /// At least one of this producer's data records survives compaction.
-    DataSurvives,
-    /// All of this producer's data records have been compacted away.
-    DataFullyGone,
+/// Compute the delete horizon timestamp: `now + delete.retention.ms`. The
+/// tombstone/marker is retained until wall-clock reaches this value.
+#[must_use]
+#[allow(dead_code)]
+pub(crate) const fn compute_horizon(now_ms: i64, delete_retention_ms: i64) -> i64 {
+    crabka_verified::compute_horizon(now_ms, delete_retention_ms)
 }
 
-/// What to do with a record during the rewrite pass.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RetainDecision {
-    /// Keep the record as-is.
-    Keep,
-    /// Keep the record but stamp its batch with this delete horizon
-    /// (`base_timestamp = horizon`, bit 6 set).
-    SetHorizon(i64),
-    /// Drop the record.
-    Delete,
+/// The single per-record KIP-534 retain decision.
+#[must_use]
+pub(crate) const fn retain_decision(
+    rec: RecordMeta,
+    batch: BatchMeta,
+    is_newest_for_key: bool,
+    txn: TxnDataState,
+    now_ms: i64,
+    delete_retention_ms: i64,
+) -> RetainDecision {
+    crabka_verified::retain_decision(
+        rec,
+        crabka_verified::BatchMeta {
+            is_control: batch.is_control,
+            producer_id: batch.producer_id.0,
+            existing_horizon: batch.existing_horizon,
+        },
+        is_newest_for_key,
+        txn,
+        now_ms,
+        delete_retention_ms,
+    )
 }
 
 /// `build_offset_map` filter; the control-batch bug fix lives here. Control-batch
@@ -86,12 +88,6 @@ pub(crate) enum RetainDecision {
 /// the dedup map. Null-key data is also never indexed.
 pub(crate) fn should_index_key(key: Option<&[u8]>, is_control_batch: bool) -> bool {
     !is_control_batch && key.is_some()
-}
-
-/// Compute the delete horizon timestamp: `now + delete.retention.ms`. The
-/// tombstone/marker is retained until wall-clock reaches this value.
-pub(crate) fn compute_horizon(now_ms: i64, delete_retention_ms: i64) -> i64 {
-    now_ms.saturating_add(delete_retention_ms)
 }
 
 /// Reinterpret per-record timestamp deltas (`i64`) when stamping a delete
@@ -126,48 +122,6 @@ pub(crate) fn txn_data_fully_gone(
     survivors: &HashSet<ProducerId>,
 ) -> bool {
     !survivors.contains(&producer_id)
-}
-
-/// The single per-record KIP-534 retain decision.
-///
-/// Control batches (txn commit/abort markers) are retained as long as their
-/// transaction's data survives; once the data is fully compacted away the
-/// marker ages out via the delete horizon. Data records dedup newest-wins;
-/// tombstones (null value) age out via the delete horizon once they are the
-/// newest entry for their key.
-pub(crate) fn retain_decision(
-    rec: RecordMeta,
-    batch: BatchMeta,
-    is_newest_for_key: bool,
-    txn: TxnDataState,
-    now_ms: i64,
-    delete_retention_ms: i64,
-) -> RetainDecision {
-    if batch.is_control {
-        return match txn {
-            TxnDataState::DataSurvives | TxnDataState::NotTransactional => RetainDecision::Keep,
-            TxnDataState::DataFullyGone => match batch.existing_horizon {
-                Some(h) if now_ms >= h => RetainDecision::Delete,
-                Some(_) => RetainDecision::Keep,
-                None => RetainDecision::SetHorizon(compute_horizon(now_ms, delete_retention_ms)),
-            },
-        };
-    }
-    if !rec.has_key {
-        return RetainDecision::Delete;
-    }
-    if !is_newest_for_key {
-        return RetainDecision::Delete;
-    }
-    if rec.has_value {
-        return RetainDecision::Keep;
-    }
-    // Newest-for-key tombstone: age out via the delete horizon.
-    match batch.existing_horizon {
-        Some(h) if now_ms >= h => RetainDecision::Delete,
-        Some(_) => RetainDecision::Keep,
-        None => RetainDecision::SetHorizon(compute_horizon(now_ms, delete_retention_ms)),
-    }
 }
 
 #[cfg(test)]
@@ -232,6 +186,13 @@ mod core_tests {
                 "horizon={existing_horizon:?} newest={is_newest} now={now_ms}"
             );
         }
+    }
+
+    #[test]
+    fn compute_horizon_saturates_at_i64_bounds() {
+        assert!(compute_horizon(100, 50) == 150);
+        assert!(compute_horizon(i64::MAX - 1, 50) == i64::MAX);
+        assert!(compute_horizon(i64::MIN + 1, -50) == i64::MIN);
     }
 
     #[test]

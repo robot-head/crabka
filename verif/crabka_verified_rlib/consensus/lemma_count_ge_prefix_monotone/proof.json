@@ -1,0 +1,11 @@
+{
+  "profile": [],
+  "proofs": {
+    "Coma": {
+      "vc_lemma_count_ge_prefix_monotone": {
+        "prover": "alt-ergo",
+        "time": 0.016
+      }
+    }
+  }
+}

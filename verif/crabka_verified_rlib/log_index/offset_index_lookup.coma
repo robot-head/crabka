@@ -1,0 +1,202 @@
+(* #"/work/crates/verified/src/log_index.rs" 22 0 22 70 *)
+
+let%span swell_founded = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/well_founded.rs" 62 16 62 28
+let%span sslice = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/std/slice.rs" 331 18 331 40
+let%span slog_index = "/work/crates/verified/src/log_index.rs" 23 17 23 23
+let%span slog_index'0 = "/work/crates/verified/src/log_index.rs" 24 17 24 30
+let%span slog_index'1 = "/work/crates/verified/src/log_index.rs" 28 14 28 21
+let%span slog_index'2 = "/work/crates/verified/src/log_index.rs" 27 16 27 90
+let%span slog_index'3 = "/work/crates/verified/src/log_index.rs" 26 16 26 78
+let%span slog_index'4 = "/work/crates/verified/src/log_index.rs" 25 16 25 51
+let%span slog_index'5 = "/work/crates/verified/src/log_index.rs" 30 23 30 32
+let%span slog_index'6 = "/work/crates/verified/src/log_index.rs" 30 35 30 36
+let%span slog_index'7 = "/work/crates/verified/src/log_index.rs" 30 23 30 36
+let%span slog_index'8 = "/work/crates/verified/src/log_index.rs" 30 18 30 36
+let%span slog_index'9 = "/work/crates/verified/src/log_index.rs" 31 11 31 23
+let%span slog_index'10 = "/work/crates/verified/src/log_index.rs" 31 11 31 25
+let%span slog_index'11 = "/work/crates/verified/src/log_index.rs" 32 23 32 24
+let%span slog_index'12 = "/work/crates/verified/src/log_index.rs" 32 12 32 24
+let%span slog_index'13 = "/work/crates/verified/src/log_index.rs" 37 13 37 14
+let%span slog_index'14 = "/work/crates/verified/src/log_index.rs" 37 17 37 18
+let%span slog_index'15 = "/work/crates/verified/src/log_index.rs" 37 41 37 42
+let%span slog_index'16 = "/work/crates/verified/src/log_index.rs" 37 36 37 42
+let%span slog_index'17 = "/work/crates/verified/src/log_index.rs" 37 28 37 43
+let%span slog_index'18 = "/work/crates/verified/src/log_index.rs" 37 28 37 45
+let%span slog_index'19 = "/work/crates/verified/src/log_index.rs" 12 11 13 39
+let%span slog_index'20 = "/work/crates/verified/src/log_index.rs" 14 10 18 84
+let%span slog_index'21 = "/work/crates/verified/src/log_index.rs" 19 10 20 20
+let%span sord = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 162 41 162 102
+let%span sord'0 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 168 41 168 99
+let%span sord'1 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 174 41 174 99
+let%span sord'2 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 180 41 180 102
+let%span sord'3 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 186 41 186 83
+let%span sord'4 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 192 42 192 59
+let%span sord'5 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 193 42 193 59
+let%span sord'6 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 194 41 194 58
+let%span sord'7 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 200 42 200 83
+let%span sord'8 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 201 41 201 85
+let%span sord'9 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 207 42 207 86
+let%span sord'10 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 208 41 208 82
+let%span sord'11 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 214 41 214 97
+let%span sord'12 = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/ord.rs" 296 16 302 17
+
+use creusot.int.UInt64
+use creusot.slice.Slice64
+use creusot.int.UInt32
+use seq.Seq
+use creusot.slice.Slice64Ops
+use creusot.prelude.Any
+use int.Int
+
+type tup2_u32_u32 = { f0: UInt32.t; f1: UInt32.t }
+
+let len_tup2_u32_u32 (self_: Slice64.slice tup2_u32_u32) (return (x: UInt64.t)) = any
+  [ return (result: UInt64.t) -> {[@stop_split] [@expl:len ensures] [%#sslice] Seq.length (Slice64.view self_)
+    = UInt64.t'int result}
+    (! return {result}) ]
+
+type t_Ordering = Less | Equal | Greater
+
+function cmp_log_usize (self: UInt64.t) (o: UInt64.t) : t_Ordering = [%#sord'12] if UInt64.lt self o then
+    Less
+  else
+    if self = o then Equal else Greater
+
+
+function eq_cmp_usize (x: UInt64.t) (y: UInt64.t) : ()
+
+axiom eq_cmp_usize_spec: forall x: UInt64.t, y: UInt64.t. [%#sord'11] (x = y) = (cmp_log_usize x y = Equal)
+
+function antisym2_usize (x: UInt64.t) (y: UInt64.t) : ()
+
+axiom antisym2_usize_spec: forall x: UInt64.t, y: UInt64.t. ([%#sord'9] cmp_log_usize x y = Greater)
+    -> ([%#sord'10] cmp_log_usize y x = Less)
+
+function antisym1_usize (x: UInt64.t) (y: UInt64.t) : ()
+
+axiom antisym1_usize_spec: forall x: UInt64.t, y: UInt64.t. ([%#sord'7] cmp_log_usize x y = Less)
+    -> ([%#sord'8] cmp_log_usize y x = Greater)
+
+function trans_usize (x: UInt64.t) (y: UInt64.t) (z: UInt64.t) (o: t_Ordering) : ()
+
+axiom trans_usize_spec: forall x: UInt64.t, y: UInt64.t, z: UInt64.t, o: t_Ordering. ([%#sord'4] cmp_log_usize x y = o)
+    -> ([%#sord'5] cmp_log_usize y z = o) -> ([%#sord'6] cmp_log_usize x z = o)
+
+function refl_usize (x: UInt64.t) : ()
+
+axiom refl_usize_spec: forall x: UInt64.t. [%#sord'3] cmp_log_usize x x = Equal
+
+function cmp_gt_log_usize (x: UInt64.t) (y: UInt64.t) : ()
+
+axiom cmp_gt_log_usize_spec: forall x: UInt64.t, y: UInt64.t. [%#sord'2] UInt64.gt x y = (cmp_log_usize x y = Greater)
+
+function cmp_ge_log_usize (x: UInt64.t) (y: UInt64.t) : ()
+
+axiom cmp_ge_log_usize_spec: forall x: UInt64.t, y: UInt64.t. [%#sord'1] UInt64.ge x y = (cmp_log_usize x y <> Less)
+
+function cmp_lt_log_usize (x: UInt64.t) (y: UInt64.t) : ()
+
+axiom cmp_lt_log_usize_spec: forall x: UInt64.t, y: UInt64.t. [%#sord'0] UInt64.lt x y = (cmp_log_usize x y = Less)
+
+function cmp_le_log_usize (x: UInt64.t) (y: UInt64.t) : ()
+
+axiom cmp_le_log_usize_spec: forall x: UInt64.t, y: UInt64.t. [%#sord] UInt64.le x y = (cmp_log_usize x y <> Greater)
+
+predicate well_founded_relation_usize [@inline:trivial] (self: UInt64.t) (other: UInt64.t) =
+  [%#swell_founded] UInt64.gt self other
+
+meta "rewrite_def" predicate well_founded_relation_usize
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let offset_index_lookup [#"/work/crates/verified/src/log_index.rs" 22 0 22 70] (entries: Slice64.slice tup2_u32_u32)
+  (target: UInt32.t) (return (x: UInt32.t)) =
+{[@stop_split] [@expl:offset_index_lookup requires] [%#slog_index'19] forall i: int, j: int. 0 <= i
+      /\ i < j /\ j < Seq.length (Slice64.view entries)
+    -> UInt32.t'int (Seq.get (Slice64.view entries) i).f0 < UInt32.t'int (Seq.get (Slice64.view entries) j).f0}
+  (! bb0
+  [ bb0 = s0
+    [ s0 = [ &lo <- [%#slog_index] (0: UInt64.t) ] s1
+    | s1 = len_tup2_u32_u32 [%#slog_index'0] {entries} (fun (_x: UInt64.t) -> [ &hi <- _x ] s2)
+    | s2 = bb2 ]
+  | bb2 = bb2invariant
+    [ bb2 = {[@expl:loop variant] well_founded_relation_usize variant_old_bb2 ([%#slog_index'1] UInt64.sub hi lo)}
+      bb2invariant
+    | bb2invariant = {[@expl:loop invariant #0] [%#slog_index'4] UInt64.t'int lo <= UInt64.t'int hi
+      /\ UInt64.t'int hi <= Seq.length (Slice64.view entries)}
+      {[@expl:loop invariant #1] [%#slog_index'3] forall i: int. 0 <= i /\ i < UInt64.t'int lo
+        -> UInt32.t'int (Seq.get (Slice64.view entries) i).f0 <= UInt32.t'int target}
+      {[@expl:loop invariant #2] [%#slog_index'2] forall i: int. UInt64.t'int hi <= i
+          /\ i < Seq.length (Slice64.view entries)
+        -> UInt32.t'int (Seq.get (Slice64.view entries) i).f0 > UInt32.t'int target}
+      (! [ &variant_old_bb2 <- [%#slog_index'1] UInt64.sub hi lo ] s0)
+      [ s0 = [ &_32 <- UInt64.lt lo hi ] s1 | s1 = any [ br0 -> {_32 = false} (! bb10) | br1 -> {_32} (! bb4) ] ]
+      [ bb4 = s0
+        [ s0 = UInt64.sub [%#slog_index'5] {hi} {lo} (fun (_x: UInt64.t) -> [ &_38 <- _x ] s1)
+        | s1 = [ &_41 <- ([%#slog_index'6] (2: UInt64.t)) = ([%#slog_index'7] (0: UInt64.t)) ] s2
+        | s2 = {[@expl:division by zero] [%#slog_index'7] not _41} s3
+        | s3 = UInt64.div [%#slog_index'7] {_38} {[%#slog_index'6] (2: UInt64.t)}
+            (fun (_x: UInt64.t) -> [ &_37 <- _x ] s4)
+        | s4 = UInt64.add [%#slog_index'8] {lo} {_37} (fun (_x: UInt64.t) -> [ &mid <- _x ] s5)
+        | s5 = [ &_44 <- mid ] s6
+        | s6 = [ &_45 <- Slice64Ops.length entries ] s7
+        | s7 = [ &_46 <- UInt64.lt _44 _45 ] s8
+        | s8 = {[@expl:index in bounds] [%#slog_index'9] _46} s9
+        | s9 = Slice64Ops.get [%#slog_index'10] <tup2_u32_u32> {entries} {_44}
+            (fun (r: tup2_u32_u32) -> [ &_43 <- r.f0 ] s10)
+        | s10 = [ &_42 <- UInt32.le _43 target ] s11
+        | s11 = any [ br0 -> {_42 = false} (! bb8) | br1 -> {_42} (! bb7) ] ]
+      | bb7 = s0
+        [ s0 = UInt64.add [%#slog_index'12] {mid} {[%#slog_index'11] (1: UInt64.t)}
+            (fun (_x: UInt64.t) -> [ &lo <- _x ] s1)
+        | s1 = bb2 ]
+      | bb8 = s0 [ s0 = [ &hi <- mid ] s1 | s1 = bb2 ] ] ]
+  | bb10 = s0
+    [ s0 = [ &_51 <- lo = ([%#slog_index'13] (0: UInt64.t)) ] s1
+    | s1 = any [ br0 -> {_51 = false} (! bb12) | br1 -> {_51} (! bb11) ] ]
+  | bb11 = s0 [ s0 = [ &_ret <- [%#slog_index'14] (0: UInt32.t) ] s1 | s1 = return {_ret} ]
+  | bb12 = s0
+    [ s0 = UInt64.sub [%#slog_index'16] {lo} {[%#slog_index'15] (1: UInt64.t)} (fun (_x: UInt64.t) -> [ &_53 <- _x ] s1)
+    | s1 = [ &_55 <- Slice64Ops.length entries ] s2
+    | s2 = [ &_56 <- UInt64.lt _53 _55 ] s3
+    | s3 = {[@expl:index in bounds] [%#slog_index'17] _56} s4
+    | s4 = Slice64Ops.get [%#slog_index'18] <tup2_u32_u32> {entries} {_53}
+        (fun (r: tup2_u32_u32) -> [ &_ret <- r.f1 ] s5)
+    | s5 = return {_ret} ] ]
+  [ & _ret: UInt32.t = Any.any_l ()
+  | & entries: Slice64.slice tup2_u32_u32 = entries
+  | & target: UInt32.t = target
+  | & lo: UInt64.t = Any.any_l ()
+  | & hi: UInt64.t = Any.any_l ()
+  | & _32: bool = Any.any_l ()
+  | & mid: UInt64.t = Any.any_l ()
+  | & _37: UInt64.t = Any.any_l ()
+  | & _38: UInt64.t = Any.any_l ()
+  | & _41: bool = Any.any_l ()
+  | & _42: bool = Any.any_l ()
+  | & _43: UInt32.t = Any.any_l ()
+  | & _44: UInt64.t = Any.any_l ()
+  | & _45: UInt64.t = Any.any_l ()
+  | & _46: bool = Any.any_l ()
+  | & _51: bool = Any.any_l ()
+  | & _53: UInt64.t = Any.any_l ()
+  | & _55: UInt64.t = Any.any_l ()
+  | & _56: bool = Any.any_l ()
+  | & variant_old_bb2: UInt64.t = Any.any_l () ])
+  [ return (result: UInt32.t) ->
+  {[@stop_split] [@expl:offset_index_lookup ensures] ([@stop_split] [@expl:offset_index_lookup ensures #0] [%#slog_index'20] (exists i: int. 0
+            <= i
+          /\ i < Seq.length (Slice64.view entries)
+          /\ UInt32.t'int (Seq.get (Slice64.view entries) i).f0 <= UInt32.t'int target)
+      -> (exists i: int. 0 <= i
+        /\ i < Seq.length (Slice64.view entries)
+        /\ UInt32.t'int (Seq.get (Slice64.view entries) i).f0 <= UInt32.t'int target
+        /\ UInt32.t'int result = UInt32.t'int (Seq.get (Slice64.view entries) i).f1
+        /\ (forall j: int. i < j /\ j < Seq.length (Slice64.view entries)
+          -> UInt32.t'int (Seq.get (Slice64.view entries) j).f0 > UInt32.t'int target)))
+    /\ ([@stop_split] [@expl:offset_index_lookup ensures #1] [%#slog_index'21] (forall i: int. 0 <= i
+          /\ i < Seq.length (Slice64.view entries)
+        -> UInt32.t'int (Seq.get (Slice64.view entries) i).f0 > UInt32.t'int target) -> UInt32.t'int result = 0)}
+    (! return {result}) ]

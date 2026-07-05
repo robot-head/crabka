@@ -1,0 +1,12 @@
+{
+  "profile": [],
+  "proofs": {
+    "Coma": {
+      "vc_lemma_hwm_member_maximal": { "prover": "alt-ergo", "time": 0.014 },
+      "vc_lemma_hwm_threshold_has_member": {
+        "prover": "alt-ergo",
+        "time": 0.009
+      }
+    }
+  }
+}

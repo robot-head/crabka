@@ -1,0 +1,175 @@
+(* #"/work/crates/verified/src/consensus.rs" 160 0 160 79 *)
+
+let%span sconsensus = "/work/crates/verified/src/consensus.rs" 161 18 165 82
+let%span sconsensus'0 = "/work/crates/verified/src/consensus.rs" 155 11 155 54
+let%span sconsensus'1 = "/work/crates/verified/src/consensus.rs" 156 10 159 78
+let%span sconsensus'2 = "/work/crates/verified/src/consensus.rs" 33 10 33 17
+let%span sconsensus'3 = "/work/crates/verified/src/consensus.rs" 35 16 35 59
+let%span sconsensus'4 = "/work/crates/verified/src/consensus.rs" 69 10 69 15
+let%span sconsensus'5 = "/work/crates/verified/src/consensus.rs" 63 11 63 44
+let%span sconsensus'6 = "/work/crates/verified/src/consensus.rs" 64 11 64 53
+let%span sconsensus'7 = "/work/crates/verified/src/consensus.rs" 65 10 65 39
+let%span sconsensus'8 = "/work/crates/verified/src/consensus.rs" 66 10 66 48
+let%span sconsensus'9 = "/work/crates/verified/src/consensus.rs" 67 10 68 44
+let%span sconsensus'10 = "/work/crates/verified/src/consensus.rs" 71 4 151 5
+let%span sconsensus'11 = "/work/crates/verified/src/consensus.rs" 13 8 13 48
+let%span sconsensus'12 = "/work/crates/verified/src/consensus.rs" 19 10 19 15
+let%span sconsensus'13 = "/work/crates/verified/src/consensus.rs" 22 8 27 9
+let%span sconsensus'14 = "/work/crates/verified/src/consensus.rs" 43 10 43 15
+let%span sconsensus'15 = "/work/crates/verified/src/consensus.rs" 40 11 40 45
+let%span sconsensus'16 = "/work/crates/verified/src/consensus.rs" 41 11 41 22
+let%span sconsensus'17 = "/work/crates/verified/src/consensus.rs" 42 10 42 93
+let%span sconsensus'18 = "/work/crates/verified/src/consensus.rs" 45 4 47 5
+let%span sconsensus'19 = "/work/crates/verified/src/consensus.rs" 54 10 54 15
+let%span sconsensus'20 = "/work/crates/verified/src/consensus.rs" 52 11 52 45
+let%span sconsensus'21 = "/work/crates/verified/src/consensus.rs" 53 10 53 52
+let%span sconsensus'22 = "/work/crates/verified/src/consensus.rs" 56 4 58 5
+
+use creusot.int.Int64
+use seq.Seq
+use creusot.slice.Slice64
+use creusot.int.UInt64
+use creusot.prelude.Any
+use int.Int
+
+function hwm_member_at [#"/work/crates/verified/src/consensus.rs" 11 0 11 62] (log_end: int) (s: Seq.seq Int64.t) (k: int) : int
+ = [%#sconsensus'11] if k = 0 then log_end else Int64.to_int (Seq.get s (k - 1))
+
+function count_ge_prefix [#"/work/crates/verified/src/consensus.rs" 20 0 20 76] (log_end: int) (s: Seq.seq Int64.t) (v: int) (limit: int) : int
+
+axiom count_ge_prefix_def:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [count_ge_prefix log_end s v limit]. count_ge_prefix log_end s v limit
+    = ([%#sconsensus'13] if limit <= 0 then
+      0
+    else
+      count_ge_prefix log_end s v (limit - 1) + (if hwm_member_at log_end s (limit - 1) >= v then 1 else 0)
+    )
+
+function count_ge [#"/work/crates/verified/src/consensus.rs" 34 0 34 57] (log_end: int) (s: Seq.seq Int64.t) (v: int) : int
+
+axiom count_ge_def: forall log_end: int, s: Seq.seq Int64.t, v: int [count_ge log_end s v]. count_ge log_end s v
+    = ([%#sconsensus'3] count_ge_prefix log_end s v (Seq.length s + 1))
+
+function lemma_count_ge_prefix_monotone [#"/work/crates/verified/src/consensus.rs" 44 0 44 97] (log_end: int) (s: Seq.seq Int64.t) (low: int) (high: int) (limit: int) : ()
+
+axiom lemma_count_ge_prefix_monotone_def:
+  forall log_end: int, s: Seq.seq Int64.t, low: int, high: int, limit: int [lemma_count_ge_prefix_monotone log_end s low high limit]. ([%#sconsensus'15] 0
+        <= limit
+      /\ limit <= Seq.length s + 1)
+    -> ([%#sconsensus'16] low <= high)
+    -> lemma_count_ge_prefix_monotone log_end s low high limit
+    = ([%#sconsensus'18] if limit > 0 then
+      let _ = lemma_count_ge_prefix_monotone log_end s low high (limit - 1) in ()
+    else
+      ()
+    )
+
+axiom lemma_count_ge_prefix_monotone_spec:
+  forall log_end: int, s: Seq.seq Int64.t, low: int, high: int, limit: int. ([%#sconsensus'15] 0 <= limit
+      /\ limit <= Seq.length s + 1)
+    -> ([%#sconsensus'16] low <= high)
+    -> ([%#sconsensus'17] count_ge_prefix log_end s low limit >= count_ge_prefix log_end s high limit)
+
+function lemma_count_ge_prefix_nonnegative [#"/work/crates/verified/src/consensus.rs" 55 0 55 87] (log_end: int) (s: Seq.seq Int64.t) (v: int) (limit: int) : ()
+
+axiom lemma_count_ge_prefix_nonnegative_def:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [lemma_count_ge_prefix_nonnegative log_end s v limit]. ([%#sconsensus'20] 0
+        <= limit
+      /\ limit <= Seq.length s + 1)
+    -> lemma_count_ge_prefix_nonnegative log_end s v limit
+    = ([%#sconsensus'22] if limit > 0 then
+      let _ = lemma_count_ge_prefix_nonnegative log_end s v (limit - 1) in ()
+    else
+      ()
+    )
+
+axiom lemma_count_ge_prefix_nonnegative_spec:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int. ([%#sconsensus'20] 0 <= limit
+      /\ limit <= Seq.length s + 1) -> ([%#sconsensus'21] count_ge_prefix log_end s v limit >= 0)
+
+function least_hwm_member_ge_index [#"/work/crates/verified/src/consensus.rs" 70 0 70 86] (log_end: int) (s: Seq.seq Int64.t) (v: int) (limit: int) : int
+
+axiom least_hwm_member_ge_index_def:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [least_hwm_member_ge_index log_end s v limit]. ([%#sconsensus'5] 0
+        < limit
+      /\ limit <= Seq.length s + 1)
+    -> ([%#sconsensus'6] count_ge_prefix log_end s v limit >= 1)
+    -> least_hwm_member_ge_index log_end s v limit
+    = ([%#sconsensus'10] if limit <= 1 then
+      0
+    else
+      let last_index = limit
+      - 1 in let last_member = hwm_member_at log_end s last_index in let previous_count = count_ge_prefix log_end s v last_index in if last_member
+      >= v then
+        if previous_count >= 1 then
+          let previous_index = least_hwm_member_ge_index log_end s v last_index in let previous_member = hwm_member_at log_end s previous_index in if last_member
+          <= previous_member then
+            let _ = lemma_count_ge_prefix_monotone log_end s last_member previous_member last_index in last_index
+          else
+            previous_index
+
+        else
+          let _ = lemma_count_ge_prefix_nonnegative log_end s v last_index in let _ = lemma_count_ge_prefix_nonnegative log_end s last_member last_index in last_index
+
+      else
+        least_hwm_member_ge_index log_end s v last_index
+
+    )
+
+axiom least_hwm_member_ge_index_spec:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [least_hwm_member_ge_index log_end s v limit]. ([%#sconsensus'5] 0
+        < limit
+      /\ limit <= Seq.length s + 1)
+    -> ([%#sconsensus'6] count_ge_prefix log_end s v limit >= 1)
+    -> ([%#sconsensus'7] 0 <= least_hwm_member_ge_index log_end s v limit
+    /\ least_hwm_member_ge_index log_end s v limit < limit)
+
+axiom least_hwm_member_ge_index_spec'0:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [least_hwm_member_ge_index log_end s v limit]. ([%#sconsensus'5] 0
+        < limit
+      /\ limit <= Seq.length s + 1)
+    -> ([%#sconsensus'6] count_ge_prefix log_end s v limit >= 1)
+    -> ([%#sconsensus'8] hwm_member_at log_end s (least_hwm_member_ge_index log_end s v limit) >= v)
+
+axiom least_hwm_member_ge_index_spec'1:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [least_hwm_member_ge_index log_end s v limit]. ([%#sconsensus'5] 0
+        < limit
+      /\ limit <= Seq.length s + 1)
+    -> ([%#sconsensus'6] count_ge_prefix log_end s v limit >= 1)
+    -> ([%#sconsensus'9] count_ge_prefix log_end s (hwm_member_at log_end s (least_hwm_member_ge_index log_end s v limit)) limit
+    >= count_ge_prefix log_end s v limit)
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let lemma_hwm_threshold_has_member [#"/work/crates/verified/src/consensus.rs" 160 0 160 79] (log_end: Int64.t)
+  (s: Slice64.slice Int64.t) (majority: UInt64.t) (return (x: ())) =
+{[@stop_split] [@expl:lemma_hwm_threshold_has_member requires] [%#sconsensus'0] 1 <= UInt64.t'int majority
+  /\ UInt64.t'int majority <= Seq.length (Slice64.view s) + 1}
+  (! bb0
+  [ bb0 = s0
+    [ s0 = {[@expl:assertion] [%#sconsensus] forall v: int. count_ge (Int64.to_int log_end) (Slice64.view s) v
+          >= UInt64.t'int majority
+        -> (exists k: int. k
+            = least_hwm_member_ge_index (Int64.to_int log_end) (Slice64.view s) v (Seq.length (Slice64.view s) + 1)
+          /\ 0 <= k
+          /\ k < Seq.length (Slice64.view s) + 1
+          /\ hwm_member_at (Int64.to_int log_end) (Slice64.view s) k >= v
+          /\ count_ge (Int64.to_int log_end) (Slice64.view s) (hwm_member_at (Int64.to_int log_end) (Slice64.view s) k)
+          >= UInt64.t'int majority)}
+      s1
+    | s1 = return {_ret} ] ]
+  [ & _ret: () = Any.any_l ()
+  | & log_end: Int64.t = log_end
+  | & s: Slice64.slice Int64.t = s
+  | & majority: UInt64.t = majority ])
+  [ return (result: ()) ->
+  {[@stop_split] [@expl:lemma_hwm_threshold_has_member ensures] [%#sconsensus'1] forall v: int. count_ge (Int64.to_int log_end) (Slice64.view s) v
+        >= UInt64.t'int majority
+      -> (exists k: int. 0 <= k
+        /\ k < Seq.length (Slice64.view s) + 1
+        /\ hwm_member_at (Int64.to_int log_end) (Slice64.view s) k >= v
+        /\ count_ge (Int64.to_int log_end) (Slice64.view s) (hwm_member_at (Int64.to_int log_end) (Slice64.view s) k)
+        >= UInt64.t'int majority)}
+    (! return {result}) ]
