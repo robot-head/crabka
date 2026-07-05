@@ -1517,6 +1517,276 @@ fn native_kafka_log_record_rejects_broker_timestamp_overflow() {
     assert!(error.to_string().contains("invalid native Kafka timestamp"));
 }
 
+fn minimal_service_config(target: Role) -> ServiceConfig {
+    ServiceConfig {
+        target,
+        listen_addr: "127.0.0.1:0".parse().unwrap(),
+        object_store_url: None,
+        wal_bootstrap_server: None,
+        wal_topic: "__crabka_observability_logs_wal".to_string(),
+        wal_group_id: "crabka-observability-compactor".to_string(),
+        data_root: ".".into(),
+        querier_index_source: QuerierIndexSource::LocalManifest,
+        tenant: None,
+        index_prefix: None,
+        query_start_ns: None,
+        query_end_ns: None,
+        max_query_range_ns: None,
+        max_query_series: None,
+        max_query_bytes: None,
+        max_query_length: None,
+        max_ingest_body_bytes: None,
+        wal_append_timeout_ms: None,
+    }
+}
+
+async fn get_response(app: axum::Router, uri: &str) -> axum::response::Response {
+    app.oneshot(
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn post_form_response(
+    app: axum::Router,
+    uri: &str,
+    body: &'static str,
+) -> axum::response::Response {
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(body))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+fn assert_content_type(response: &axum::response::Response, expected: &str, context: &str) {
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            == Some(expected),
+        "{context} content-type"
+    );
+}
+
+#[tokio::test]
+async fn role_operations_routes_match_existing_behavior() {
+    let distributor = build_service_router(
+        &minimal_service_config(Role::Distributor),
+        ServiceDependencies::default().with_wal_sink(InMemoryWalSink::default()),
+        None,
+    )
+    .await
+    .unwrap();
+    let querier = loki_router(QuerierState::new(
+        ".",
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+    let compactor = build_service_router(
+        &minimal_service_config(Role::Compactor),
+        ServiceDependencies::default(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    for (name, app) in [
+        ("distributor", distributor),
+        ("querier", querier),
+        ("compactor", compactor),
+    ] {
+        let response = get_response(app.clone(), "/ready").await;
+        assert!(response.status() == StatusCode::OK, "{name} /ready status");
+        assert_content_type(
+            &response,
+            "text/plain; charset=utf-8",
+            &format!("{name} /ready"),
+        );
+        assert!(text_body(response).await == "ready\n", "{name} /ready body");
+
+        let response = get_response(app.clone(), "/config").await;
+        assert!(response.status() == StatusCode::OK, "{name} /config status");
+        assert_content_type(
+            &response,
+            "application/yaml; charset=utf-8",
+            &format!("{name} /config"),
+        );
+        assert!(
+            text_body(response).await == "target: all\n",
+            "{name} /config body"
+        );
+
+        let response = get_response(app.clone(), "/config?mode=defaults").await;
+        assert!(
+            response.status() == StatusCode::OK,
+            "{name} /config?mode=defaults status"
+        );
+        assert_content_type(
+            &response,
+            "application/yaml; charset=utf-8",
+            &format!("{name} /config?mode=defaults"),
+        );
+        assert!(
+            text_body(response).await == "target: all\nauth_enabled: true\n",
+            "{name} /config?mode=defaults body"
+        );
+
+        let response = get_response(app.clone(), "/config?mode=diff").await;
+        assert!(
+            response.status() == StatusCode::INTERNAL_SERVER_ERROR,
+            "{name} /config?mode=diff status"
+        );
+        assert_content_type(
+            &response,
+            "text/plain; charset=utf-8",
+            &format!("{name} /config?mode=diff"),
+        );
+        assert!(
+            text_body(response).await == "unsupported type <nil>\n",
+            "{name} /config?mode=diff body"
+        );
+
+        let response = get_response(app.clone(), "/services").await;
+        assert!(
+            response.status() == StatusCode::OK,
+            "{name} /services status"
+        );
+        assert_content_type(
+            &response,
+            "text/plain; charset=utf-8",
+            &format!("{name} /services"),
+        );
+        assert!(
+            text_body(response).await
+                == "query-scheduler => Running\n\
+                    ingester-querier => Running\n\
+                    query-frontend => Running\n\
+                    server => Running\n\
+                    querier => Running\n\
+                    rule-evaluator => Running\n\
+                    memberlist-kv => Running\n\
+                    query-frontend-tripperware => Running\n\
+                    analytics => Running\n\
+                    ruler => Running\n\
+                    cache-generation-loader => Running\n\
+                    store => Running\n\
+                    ring => Running\n\
+                    ingester => Running\n\
+                    compactor => Running\n\
+                    distributor => Running\n\
+                    query-scheduler-ring => Running\n",
+            "{name} /services body"
+        );
+
+        let response = get_response(app.clone(), "/memberlist").await;
+        assert!(
+            response.status() == StatusCode::OK,
+            "{name} /memberlist status"
+        );
+        assert_content_type(&response, "text/plain", &format!("{name} /memberlist"));
+        assert!(
+            text_body(response).await == "This instance doesn't use memberlist.",
+            "{name} /memberlist body"
+        );
+
+        let response = get_response(app.clone(), "/metrics").await;
+        assert!(
+            response.status() == StatusCode::OK,
+            "{name} /metrics status"
+        );
+        assert_content_type(
+            &response,
+            "text/plain; version=0.0.4; charset=utf-8",
+            &format!("{name} /metrics"),
+        );
+        assert!(
+            text_body(response).await.contains("# HELP"),
+            "{name} /metrics body"
+        );
+
+        let response = get_response(app.clone(), "/loki/api/v1/status/buildinfo").await;
+        assert!(
+            response.status() == StatusCode::OK,
+            "{name} buildinfo status"
+        );
+        assert_content_type(&response, "application/json", &format!("{name} buildinfo"));
+        assert!(
+            text_body(response).await
+                == format!(
+                    "{{\"version\":\"{}\",\"revision\":\"unknown\",\"branch\":\"unknown\",\"buildDate\":\"\",\"buildUser\":\"crabka\",\"goVersion\":\"not-go\"}}",
+                    env!("CARGO_PKG_VERSION")
+                ),
+            "{name} buildinfo body"
+        );
+
+        let response = post_form_response(app.clone(), "/log_level", "log_level=verbose").await;
+        assert!(
+            response.status() == StatusCode::BAD_REQUEST,
+            "{name} invalid log_level status"
+        );
+        assert_content_type(
+            &response,
+            "application/json",
+            &format!("{name} invalid log_level"),
+        );
+        assert!(
+            text_body(response).await
+                == "{\"status\":\"failed\",\"message\":\"unrecognized log level \\\"verbose\\\"\"}",
+            "{name} invalid log_level body"
+        );
+    }
+}
+
+#[tokio::test]
+async fn role_ring_alias_routes_remain_available() {
+    let distributor = build_service_router(
+        &minimal_service_config(Role::Distributor),
+        ServiceDependencies::default().with_wal_sink(InMemoryWalSink::default()),
+        None,
+    )
+    .await
+    .unwrap();
+    let querier = loki_router(QuerierState::new(
+        ".",
+        LabelIndex::default(),
+        BlockIndex::default(),
+    ));
+    let compactor = build_service_router(
+        &minimal_service_config(Role::Compactor),
+        ServiceDependencies::default(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    for (app, uri, expected) in [
+        (distributor.clone(), "/ring", "crabka-distributor"),
+        (distributor, "/distributor/ring", "crabka-distributor"),
+        (querier.clone(), "/ring", "crabka-querier"),
+        (querier.clone(), "/scheduler/ring", "crabka-scheduler"),
+        (querier, "/ruler/ring", "Cortex Ruler Status"),
+        (compactor.clone(), "/ring", "crabka-compactor"),
+        (compactor, "/compactor/ring", "crabka-compactor"),
+    ] {
+        let response = get_response(app, uri).await;
+        assert!(response.status() == StatusCode::OK, "{uri} status");
+        assert_content_type(&response, "text/html; charset=utf-8", uri);
+        assert!(text_body(response).await.contains(expected), "{uri} body");
+    }
+}
+
 #[tokio::test]
 async fn service_router_builds_distributor_role() {
     let sink = InMemoryWalSink::default();
