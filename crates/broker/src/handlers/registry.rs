@@ -517,16 +517,15 @@ fn alter_replica_log_dirs_adapter<'a>(
         };
 
         let anonymous;
-        let principal = match auth.principal() {
-            Some(principal) => principal,
-            None => {
-                anonymous = crabka_security::Principal {
-                    name: "ANONYMOUS".to_string(),
-                    auth_method: crabka_security::AuthMethod::Anonymous,
-                    groups: vec![],
-                };
-                &anonymous
-            }
+        let principal = if let Some(principal) = auth.principal() {
+            principal
+        } else {
+            anonymous = crabka_security::Principal {
+                name: "ANONYMOUS".to_string(),
+                auth_method: crabka_security::AuthMethod::Anonymous,
+                groups: vec![],
+            };
+            &anonymous
         };
 
         let image = broker.controller.current_image();
@@ -885,6 +884,7 @@ telemetry_adapter!(
     crate::handlers::push_telemetry::handle
 );
 
+#[allow(clippy::too_many_lines)]
 pub(crate) fn build_registry() -> DispatchRegistry {
     let mut registry = DispatchRegistry::new();
 

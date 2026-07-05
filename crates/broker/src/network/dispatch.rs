@@ -842,7 +842,7 @@ async fn handle_fetch_frame_from_parsed(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn dispatch_registered_bytes(
     broker: &Broker,
     entry: crate::handlers::DispatchEntry,
