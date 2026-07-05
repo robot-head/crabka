@@ -42,7 +42,9 @@ where
     let client_id = if cid_len > 0 {
         let n = usize::try_from(cid_len).expect("positive i16 fits usize");
         if cur.remaining() < n {
-            return Err(protocol_invalid("request frame: client_id length > available"));
+            return Err(protocol_invalid(
+                "request frame: client_id length > available",
+            ));
         }
         let raw = &cur[..n];
         cur.advance(n);
@@ -52,13 +54,7 @@ where
     };
 
     if body_flexible {
-        if cur.remaining() < 1 {
-            return Err(protocol_invalid("request frame: missing header tagged-fields byte"));
-        }
-        let tagged = cur.get_u8();
-        if tagged != 0 {
-            tracing::debug!(api_key, api_version, "non-empty header tagged fields ignored");
-        }
+        crabka_protocol::tagged_fields::read_tagged_fields(&mut cur, |_tag, _payload| Ok(false))?;
     }
 
     Ok(ParsedRequest {
@@ -111,7 +107,7 @@ mod tests {
         api_version: i16,
         correlation_id: i32,
         client_id: Option<&[u8]>,
-        tagged: Option<u8>,
+        tagged: Option<&[u8]>,
         body: &[u8],
     ) -> BytesMut {
         let mut buf = BytesMut::new();
@@ -126,7 +122,7 @@ mod tests {
             None => buf.put_i16(-1),
         }
         if let Some(tagged) = tagged {
-            buf.put_u8(tagged);
+            buf.put_slice(tagged);
         }
         buf.put_slice(body);
         buf
@@ -148,14 +144,33 @@ mod tests {
 
     #[test]
     fn parse_request_flexible_header_consumes_tagged_fields_byte() {
-        let frame = request_frame(18, 3, 7, Some(b"client-a"), Some(0), b"body");
+        let frame = request_frame(18, 3, 7, Some(b"client-a"), Some(&[0]), b"body");
 
-        let parsed = parse_request(&frame, |key, version| key == 18 && version >= 3)
-            .expect("parse request");
+        let parsed =
+            parse_request(&frame, |key, version| key == 18 && version >= 3).expect("parse request");
 
         check!(parsed.api_key == 18);
         check!(parsed.api_version == 3);
         check!(parsed.correlation_id == 7);
+        check!(parsed.client_id == Some("client-a"));
+        check!(parsed.body_flexible);
+        check!(parsed.body == b"body".as_slice());
+    }
+
+    #[test]
+    fn parse_request_flexible_header_skips_non_empty_tagged_fields() {
+        let frame = request_frame(
+            18,
+            3,
+            7,
+            Some(b"client-a"),
+            Some(&[1, 1, 3, b't', b'a', b'g']),
+            b"body",
+        );
+
+        let parsed =
+            parse_request(&frame, |key, version| key == 18 && version >= 3).expect("parse request");
+
         check!(parsed.client_id == Some("client-a"));
         check!(parsed.body_flexible);
         check!(parsed.body == b"body".as_slice());
@@ -178,7 +193,10 @@ mod tests {
                 "truncated client id",
                 truncated_client_id[..truncated_client_id.len() - 1].to_vec(),
             ),
-            ("flexible missing tagged byte", flexible_without_tag.to_vec()),
+            (
+                "flexible missing tagged byte",
+                flexible_without_tag.to_vec(),
+            ),
         ];
 
         for (case, frame) in cases {
