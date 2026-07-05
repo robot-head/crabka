@@ -217,7 +217,8 @@ fn stage_deletion(
     deletions: &mut HashMap<String, (ScramCredentialDeletion, SaslMechanism)>,
     errors: &mut HashMap<String, AlterationError>,
 ) {
-    if errors.contains_key(&deletion.name) {
+    if let Some(error) = errors.get_mut(&deletion.name) {
+        *error = duplicate_alteration_error();
         return;
     }
 
@@ -243,7 +244,8 @@ fn stage_upsertion(
     upsertions: &mut HashMap<String, (ScramCredentialUpsertion, SaslMechanism)>,
     errors: &mut HashMap<String, AlterationError>,
 ) {
-    if errors.contains_key(&upsertion.name) {
+    if let Some(error) = errors.get_mut(&upsertion.name) {
+        *error = duplicate_alteration_error();
         return;
     }
 
@@ -918,6 +920,59 @@ mod tests {
         assert!(
             image
                 .scram_credential("alice", SaslMechanism::ScramSha256)
+                .is_none()
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_duplicate_username_after_missing_deletion_prioritizes_duplicate_resource() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterUserScramCredentialsRequest {
+            deletions: vec![ScramCredentialDeletion {
+                name: "alice".into(),
+                mechanism: 2,
+                ..Default::default()
+            }],
+            upsertions: vec![valid_upsertion_for_mechanism(
+                "alice",
+                1,
+                SaslMechanism::ScramSha256,
+            )],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![expected_result(
+                "alice",
+                KAFKA_DUPLICATE_RESOURCE,
+                Some("A user credential cannot be altered twice in the same request"),
+            )],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+        let image = broker.controller.current_image();
+        assert!(
+            image
+                .scram_credential("alice", SaslMechanism::ScramSha256)
+                .is_none()
+        );
+        assert!(
+            image
+                .scram_credential("alice", SaslMechanism::ScramSha512)
                 .is_none()
         );
         broker_handle.shutdown().await;
