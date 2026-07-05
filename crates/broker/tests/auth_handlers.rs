@@ -2077,6 +2077,13 @@ async fn alter_scram_creds_high_iterations_rejected_but_max_allowed() {
 async fn alter_scram_creds_unknown_mechanism_returns_unsupported_sasl_mechanism() {
     let log_dir = tempfile::tempdir().unwrap();
     let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    let admin_password = format!(
+        "test-pass-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
     cfg.listeners = vec![ListenerSpec {
         name: "SASL_PLAINTEXT".to_string(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
@@ -2088,7 +2095,7 @@ async fn alter_scram_creds_unknown_mechanism_returns_unsupported_sasl_mechanism(
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
-        .insert("admin".to_string(), "secret".to_string());
+        .insert("admin".to_string(), admin_password.clone());
     cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
@@ -2105,9 +2112,14 @@ async fn alter_scram_creds_unknown_mechanism_returns_unsupported_sasl_mechanism(
         ..Default::default()
     };
 
-    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
-        .await
-        .expect("PLAIN auth + AUSCR unknown mechanism");
+    let resp = drive_alter_user_scram_credentials_as_plain(
+        addr,
+        "admin",
+        admin_password.as_bytes(),
+        req,
+    )
+    .await
+    .expect("PLAIN auth + AUSCR unknown mechanism");
 
     handle.shutdown().await;
     assert!(resp.results.len() == 1);
@@ -2184,8 +2196,9 @@ async fn alter_scram_creds_duplicate_deletion_and_upsertion_rejected_per_user() 
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    let admin_password = uuid::Uuid::new_v4().to_string();
     cfg.plain_credentials
-        .insert("admin".to_string(), "secret".to_string());
+        .insert("admin".to_string(), admin_password.clone());
     cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
@@ -2227,9 +2240,14 @@ async fn alter_scram_creds_duplicate_deletion_and_upsertion_rejected_per_user() 
         ..Default::default()
     };
 
-    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
-        .await
-        .expect("PLAIN auth + AUSCR duplicate deletion/upsertion");
+    let resp = drive_alter_user_scram_credentials_as_plain(
+        addr,
+        "admin",
+        admin_password.as_bytes(),
+        req,
+    )
+    .await
+    .expect("PLAIN auth + AUSCR duplicate deletion/upsertion");
 
     handle.shutdown().await;
     assert!(resp.results.len() == 1, "one result row per username");
@@ -2255,8 +2273,9 @@ async fn alter_scram_creds_missing_deletion_returns_resource_not_found_91() {
     }];
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    let admin_password = uuid::Uuid::new_v4().to_string();
     cfg.plain_credentials
-        .insert("admin".to_string(), "secret".to_string());
+        .insert("admin".to_string(), admin_password.clone());
     cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
@@ -2270,9 +2289,14 @@ async fn alter_scram_creds_missing_deletion_returns_resource_not_found_91() {
         ..Default::default()
     };
 
-    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
-        .await
-        .expect("PLAIN auth + AUSCR missing deletion");
+    let resp = drive_alter_user_scram_credentials_as_plain(
+        addr,
+        "admin",
+        admin_password.as_bytes(),
+        req,
+    )
+    .await
+    .expect("PLAIN auth + AUSCR missing deletion");
 
     handle.shutdown().await;
     assert!(resp.results.len() == 1);

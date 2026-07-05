@@ -20,6 +20,7 @@ use std::{io, net::SocketAddr};
 
 use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
+use uuid::Uuid;
 use crabka_broker::authorizer::SimpleAclAuthorizer;
 use crabka_broker::config::ListenerSpec;
 use crabka_broker::{Broker, BrokerHandle};
@@ -395,15 +396,25 @@ async fn describe_unknown_user_returns_error() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_duplicate_requested_user_returns_single_duplicate_resource_row() {
-    let (handle, _dir, addr) =
-        start_single_broker_sasl_plaintext_with_users("admin", &[("admin", "admin-secret")]).await;
+    let admin_pass = format!(
+        "admin-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before UNIX_EPOCH")
+            .as_nanos()
+    );
+    let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
+        "admin",
+        &[("admin", admin_pass.as_str())],
+    )
+    .await;
     seed_scram_credential(&handle, "alice", SaslMechanism::ScramSha512, 4096).await;
     seed_scram_credential(&handle, "bob", SaslMechanism::ScramSha512, 8192).await;
 
     let (top_err, per_user) = drive_describe_user_scram_credentials_sasl(
         addr,
         "admin",
-        "admin-secret",
+        admin_pass.as_str(),
         Some(vec!["alice".into(), "bob".into(), "alice".into()]),
     )
     .await;
@@ -451,12 +462,16 @@ async fn describe_allows_cluster_describe_acl() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_rejects_without_cluster_describe_acl() {
-    let (handle, _dir, addr) =
-        start_single_broker_sasl_plaintext_with_acl_authorizer(&[], &[("alice", "alice-secret")])
-            .await;
+    let alice_password = Uuid::new_v4().to_string();
+    let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_acl_authorizer(
+        &[],
+        &[("alice", alice_password.as_str())],
+    )
+    .await;
 
     let (top_err, per_user) =
-        drive_describe_user_scram_credentials_sasl(addr, "alice", "alice-secret", None).await;
+        drive_describe_user_scram_credentials_sasl(addr, "alice", alice_password.as_str(), None)
+            .await;
 
     handle.shutdown().await;
     assert!(
