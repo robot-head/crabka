@@ -1414,6 +1414,40 @@ impl BrokerHandle {
         );
     }
 
+    /// Test-only: await until the LOCAL high watermark for `topic-partition`
+    /// reaches `min`. Uses the partition's HW notify so tests can wait for the
+    /// async HW recompute that happens after the writer acks `acks=1` appends.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_high_watermark(&self, topic: &str, partition: i32, min: i64) {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
+            loop {
+                if let Some(part) = self
+                    ._broker
+                    .partitions
+                    .get(topic, PartitionIndex(partition))
+                {
+                    let notified = part.hw_advance_notify.notified();
+                    if part.high_watermark().await >= crabka_log::Offset(min) {
+                        return;
+                    }
+                    notified.await;
+                } else {
+                    let mut img = self._broker.controller.watch_image();
+                    if img.changed().await.is_err() {
+                        return;
+                    }
+                }
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "high_watermark({topic}-{partition}) did not reach {min} within 30s"
+        );
+    }
+
     /// Test-only: await until the LOCAL log end offset for `topic-partition` is
     /// EXACTLY `target`. Unlike `wait_until_local_log_end_offset` (monotonic `>=`),
     /// this is for non-monotonic convergence (e.g. a follower truncating a divergent
