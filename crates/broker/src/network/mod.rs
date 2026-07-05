@@ -12,3 +12,4 @@ pub(crate) mod fetch_writer;
 /// whether TLS fetch connections route through kernel-offloaded sendfile.
 pub(crate) mod ktls_probe;
 pub(crate) mod listener;
+pub(crate) mod request;
