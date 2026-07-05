@@ -491,6 +491,46 @@ async fn serve_connection_stream<S>(
                 }
             }};
         }
+
+        let parsed = match crate::network::request::parse_request(&frame, handler_body_flexible) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                tracing::warn!(error = %e, "request parse error, closing");
+                break;
+            }
+        };
+
+        if let Some(entry) = broker.handlers().get(parsed.api_key)
+            && !matches!(entry.kind(), crate::handlers::DispatchKind::Plain(_))
+            && let Some(result) = dispatch_registered_bytes(
+                &broker,
+                entry,
+                &parsed,
+                &frame,
+                &auth,
+                &peer,
+                &spec.name,
+                &client_software_name,
+                &client_software_version,
+            )
+            .instrument(req_span.clone())
+            .await
+        {
+            match result {
+                Ok(bytes) => {
+                    if let Err(e) = framed.send(bytes).await {
+                        tracing::warn!(error = %e, "framed.send error during registry dispatch, closing");
+                        break;
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "registry dispatch error, closing connection");
+                    break;
+                }
+            }
+        }
+
         // Route on the typed `ApiKey` registry. Wire keys with no `ApiKey`
         // variant (and frames too short to peek) hit the `_` arm and fall
         // through to `dispatch_one()` below, exactly like non-intercepted keys.
@@ -4035,6 +4075,106 @@ fn peek_client_id(frame: &[u8]) -> Option<&str> {
         return None;
     }
     std::str::from_utf8(&frame[start..end]).ok()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_registered_bytes(
+    broker: &Broker,
+    entry: crate::handlers::DispatchEntry,
+    parsed: &crate::network::request::ParsedRequest<'_>,
+    frame: &Bytes,
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+    listener_name: &str,
+    client_software_name: &str,
+    client_software_version: &str,
+) -> Option<Result<Bytes, BrokerError>> {
+    match entry.kind() {
+        crate::handlers::DispatchKind::Context(handler) => {
+            let ctx = crate::handlers::RequestContext::new(
+                principal_or_anonymous(auth),
+                peer,
+                parsed.client_id.unwrap_or(""),
+                false,
+                listener_name,
+            );
+            Some(
+                handler(
+                    broker,
+                    parsed.api_version,
+                    parsed.correlation_id,
+                    parsed.body,
+                    &ctx,
+                )
+                .await
+                .map(|body| {
+                    encode_response(
+                        parsed.api_key,
+                        parsed.correlation_id,
+                        parsed.body_flexible,
+                        &body,
+                    )
+                }),
+            )
+        }
+        crate::handlers::DispatchKind::Produce(handler) => {
+            let ctx = crate::handlers::RequestContext::new(
+                principal_or_anonymous(auth),
+                peer,
+                parsed.client_id.unwrap_or(""),
+                false,
+                "",
+            );
+            let body_offset = frame.len() - parsed.body.len();
+            let body_bytes = frame.slice(body_offset..);
+            Some(
+                handler(
+                    broker,
+                    parsed.api_version,
+                    parsed.correlation_id,
+                    parsed.body,
+                    body_bytes,
+                    &ctx,
+                )
+                .await
+                .map(|body| {
+                    encode_response(
+                        parsed.api_key,
+                        parsed.correlation_id,
+                        parsed.body_flexible,
+                        &body,
+                    )
+                }),
+            )
+        }
+        crate::handlers::DispatchKind::Telemetry(handler) => {
+            let ctx = crate::handlers::TelemetryContext::new(
+                peer,
+                parsed.client_id.unwrap_or(""),
+                client_software_name,
+                client_software_version,
+            );
+            Some(
+                handler(
+                    broker,
+                    parsed.api_version,
+                    parsed.correlation_id,
+                    parsed.body,
+                    &ctx,
+                )
+                .await
+                .map(|body| {
+                    encode_response(
+                        parsed.api_key,
+                        parsed.correlation_id,
+                        parsed.body_flexible,
+                        &body,
+                    )
+                }),
+            )
+        }
+        crate::handlers::DispatchKind::Plain(_) => None,
+    }
 }
 
 /// Decode one request from the framed bytes, call the handler, build a
