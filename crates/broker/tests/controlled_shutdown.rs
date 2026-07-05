@@ -249,6 +249,15 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
 
     // Sanity: target leads everything before we start. Use the raft
     // leader's image since the target is about to be drained.
+    for (h, _, _) in &cluster {
+        h.wait_for_image(|img| {
+            (0..PARTITIONS).all(|p| {
+                img.partition(TOPIC, p)
+                    .is_some_and(|pr| pr.leader == target_node_id)
+            })
+        })
+        .await;
+    }
     assert!(
         leader_count(
             &cluster[raft_leader_idx].0,
@@ -279,13 +288,14 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
     // heartbeat client has observed should_shut_down=true. That means
     // the controller's image, at the moment of that response, had zero
     // partitions led by the target. Verify on a surviving broker.
-    let observer = &cluster[0].0;
-    observer
-        .wait_for_image(|img| {
-            (0..PARTITIONS)
-                .all(|p| img.partition(TOPIC, p).map(|pr| pr.leader) != Some(target_node_id))
-        })
-        .await;
+    for (observer, _, _) in &cluster {
+        observer
+            .wait_for_image(|img| {
+                (0..PARTITIONS)
+                    .all(|p| img.partition(TOPIC, p).map(|pr| pr.leader) != Some(target_node_id))
+            })
+            .await;
+    }
 
     // Tidy up surviving brokers.
     for (h, _, _) in cluster {

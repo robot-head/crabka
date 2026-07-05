@@ -377,6 +377,9 @@ async fn drained_streams_group_downgrades_and_preserves_offsets() {
     // ── Phase 1: form a streams group, commit offset 42, then leave. ──
     let (member_id, resp) =
         streams_join_and_converge(&streams_client, "g", topology("in"), 1, CONVERGE_TRIES).await;
+    broker
+        .wait_until_group_type("g", crabka_broker::coordinator::unified::GroupType::Streams)
+        .await;
     let group_type = broker.group_type_for_test("g");
     let empty_waiter_timed_out = tokio::time::timeout(
         std::time::Duration::from_millis(75),
@@ -412,6 +415,9 @@ async fn drained_streams_group_downgrades_and_preserves_offsets() {
 
     // ── Phase 2: classic JoinGroup for the same id → downgrade to classic. ──
     let (_cm, _gen) = classic_join_sync(&classic_client, "g").await;
+    broker
+        .wait_until_group_type("g", crabka_broker::coordinator::unified::GroupType::Classic)
+        .await;
     assert!(
         broker.group_type_for_test("g")
             == Some(crabka_broker::coordinator::unified::GroupType::Classic),
@@ -460,6 +466,13 @@ async fn streams_group_with_live_member_rejects_classic_join() {
     let (_mid, resp) =
         streams_join_and_converge(&streams_client, "g2", topology("in2"), 1, CONVERGE_TRIES).await;
     assert!(resp.error_code == ERR_NONE);
+    broker
+        .wait_until_group_type(
+            "g2",
+            crabka_broker::coordinator::unified::GroupType::Streams,
+        )
+        .await;
+    broker.wait_until_streams_group_member_count("g2", 1).await;
     assert!(
         broker.group_type_for_test("g2")
             == Some(crabka_broker::coordinator::unified::GroupType::Streams)
@@ -522,6 +535,13 @@ async fn converted_group_admin_views_respect_type_lock() {
     let (_sm, hb) =
         streams_join_and_converge(&streams_client, "g3", topology("in3"), 1, CONVERGE_TRIES).await;
     assert!(hb.error_code == ERR_NONE);
+    broker
+        .wait_until_group_type(
+            "g3",
+            crabka_broker::coordinator::unified::GroupType::Streams,
+        )
+        .await;
+    broker.wait_until_streams_group_member_count("g3", 1).await;
     assert!(
         broker.group_type_for_test("g3")
             == Some(crabka_broker::coordinator::unified::GroupType::Streams)
@@ -593,19 +613,28 @@ async fn downgrade_survives_restart() {
 
         // Downgrade: classic JoinGroup on drained streams group.
         let _ = classic_join_sync(&cc, "g4").await;
+        broker
+            .wait_until_group_type(
+                "g4",
+                crabka_broker::coordinator::unified::GroupType::Classic,
+            )
+            .await;
         assert!(
             broker.group_type_for_test("g4")
                 == Some(crabka_broker::coordinator::unified::GroupType::Classic)
         );
-        // Pre-shutdown flush: allow the raft log write for the classic
-        // group-type record to be flushed to disk before we shut down.
-        tokio::time::sleep(Duration::from_millis(300)).await;
         broker.shutdown().await;
     }
     {
         let broker = Broker::start(rejoin_config(log_dir)).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();
         let cc = connect(&bootstrap).await;
+        broker
+            .wait_until_group_type(
+                "g4",
+                crabka_broker::coordinator::unified::GroupType::Classic,
+            )
+            .await;
         // Replay must reconstruct g4 as Classic (k15 tombstoned), offset intact.
         assert!(
             broker.group_type_for_test("g4")

@@ -235,6 +235,23 @@ async fn wait_for_http_ok(http: &reqwest::Client, url: &str, what: &str) {
     }
 }
 
+async fn wait_for_grafana_datasource(http: &reqwest::Client, base: &str, uid: &str) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let url = format!("{base}/api/datasources/uid/{uid}");
+    loop {
+        if let Ok(resp) = http.get(&url).send().await
+            && resp.status().is_success()
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Grafana datasource {uid} was not provisioned ({url})"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 async fn retry_async<T, E, F, Fut>(what: &str, attempts: usize, delay: Duration, mut op: F) -> T
 where
     E: std::fmt::Debug,
@@ -442,6 +459,8 @@ async fn boot_stack() -> Stack {
         .expect("Grafana mapped port");
     let grafana_base = format!("http://127.0.0.1:{grafana_port}");
     wait_for_http_ok(&http, &format!("{grafana_base}/api/health"), "Grafana").await;
+    wait_for_grafana_datasource(&http, &grafana_base, CRABKA_UID).await;
+    wait_for_grafana_datasource(&http, &grafana_base, LOKI_UID).await;
 
     Stack {
         http,

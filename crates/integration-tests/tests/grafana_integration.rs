@@ -319,9 +319,18 @@ async fn push_crabka_payload(app: axum::Router, payload: &Value) {
 async fn wait_for_grafana_ready(http: &reqwest::Client, base: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
-        if let Ok(response) = http.get(format!("{base}/api/health")).send().await
-            && response.status() == reqwest::StatusCode::OK
-        {
+        let health_ok = http
+            .get(format!("{base}/api/health"))
+            .send()
+            .await
+            .is_ok_and(|response| response.status() == reqwest::StatusCode::OK);
+        let api_ok = http
+            .get(format!("{base}/api/org"))
+            .basic_auth(GRAFANA_USER, Some(GRAFANA_PASSWORD))
+            .send()
+            .await
+            .is_ok_and(|response| response.status() == reqwest::StatusCode::OK);
+        if health_ok && api_ok {
             return;
         }
         assert!(Instant::now() < deadline, "Grafana did not become ready");

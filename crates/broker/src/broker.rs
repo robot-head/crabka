@@ -1030,6 +1030,35 @@ impl BrokerHandle {
         self._broker.group_coordinator.group_type(group_id)
     }
 
+    /// Test-only: await until the coordinator's group-type lock for `group_id`
+    /// reaches `expected`. This replaces immediate assertions after protocol
+    /// requests that enqueue actor work and then asynchronously persist the
+    /// classic/streams type marker.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn wait_until_group_type(
+        &self,
+        group_id: &str,
+        expected: crate::coordinator::unified::GroupType,
+    ) {
+        let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
+            loop {
+                if self.group_type_for_test(group_id) == Some(expected) {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await;
+        assert!(
+            res.is_ok(),
+            "group {group_id} did not settle at type {expected:?} within {TEST_AWAITER_TIMEOUT:?}; \
+             last={:?}",
+            self.group_type_for_test(group_id)
+        );
+    }
+
     /// This broker's raft `node_id` (1-indexed broker id used in raft quorum
     /// and metadata records). Exposed so integration tests can build
     /// `IncrementalAlterConfigs` broker-resource requests targeting this
@@ -4815,16 +4844,18 @@ mod tests {
         server.set_nodelay(false).expect("clear TCP_NODELAY");
         sock.set_send_buffer_size(4096).expect("shrink send buffer");
         sock.set_recv_buffer_size(4096).expect("shrink recv buffer");
+        let send_before = sock.send_buffer_size().expect("read baseline send buffer");
+        let recv_before = sock.recv_buffer_size().expect("read baseline recv buffer");
 
         tune_accepted_socket(&server);
 
         check!(server.nodelay().expect("read TCP_NODELAY"));
-        // Linux clamps SO_SNDBUF/SO_RCVBUF at net.core.{w,r}mem_max (208 KiB
-        // by default, ~416 KiB after the kernel's readback doubling), so the
-        // 1 MiB request cannot be asserted verbatim; 128 KiB still proves the
-        // buffers grew far beyond the 4 KiB baseline set above.
-        check!(sock.send_buffer_size().expect("read send buffer") >= 128 * 1024);
-        check!(sock.recv_buffer_size().expect("read recv buffer") >= 128 * 1024);
+        // Kernels and containers clamp socket buffers differently (and Linux
+        // reports doubled values), so assert the portable invariant: tuning grows
+        // each buffer above the explicit tiny baseline instead of pinning a host
+        // sysctl-dependent absolute size.
+        check!(sock.send_buffer_size().expect("read send buffer") > send_before);
+        check!(sock.recv_buffer_size().expect("read recv buffer") > recv_before);
         drop(client);
     }
 

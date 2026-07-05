@@ -448,6 +448,11 @@ async fn send_offsets_to_transaction_atomic_with_records() {
                 .unwrap();
         }
         txn.commit().await.unwrap();
+        // Wait for the transactional data batches and commit marker to hit the
+        // local log before a read_committed verifier polls. `commit()` returns
+        // after the coordinator flow completes, but LSO advancement can lag on
+        // slow CI runners.
+        broker.wait_until_local_log_end_offset("output", 0, 5).await;
 
         input_consumer.close().await.unwrap();
         producer.close().await.unwrap();
@@ -522,6 +527,12 @@ async fn sasl_authenticated_transactional_flow_commits() {
         .await
         .unwrap();
     txn.commit().await.unwrap();
+    // The data records must be present in the log before the read_committed
+    // verifier starts polling; the consumer's isolation check still gates on
+    // the LSO/commit marker.
+    broker
+        .wait_until_local_log_end_offset("sasl-txn", 0, 3)
+        .await;
 
     // llvm-cov reliably exercises the SASL coordinator connections above, but
     // this final visibility poll can stall under coverage instrumentation.

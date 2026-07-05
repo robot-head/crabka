@@ -364,6 +364,9 @@ async fn drained_classic_group_converts_and_preserves_offsets() {
     assert!(lr.error_code == ERR_NONE, "LeaveGroup failed: {lr:?}");
 
     // Precondition: the group must be Classic-typed.
+    broker
+        .wait_until_group_type("g", crabka_broker::coordinator::unified::GroupType::Classic)
+        .await;
     assert!(
         broker.group_type_for_test("g")
             == Some(crabka_broker::coordinator::unified::GroupType::Classic),
@@ -386,6 +389,9 @@ async fn drained_classic_group_converts_and_preserves_offsets() {
     );
 
     // Group must now be Streams-typed.
+    broker
+        .wait_until_group_type("g", crabka_broker::coordinator::unified::GroupType::Streams)
+        .await;
     assert!(
         broker.group_type_for_test("g")
             == Some(crabka_broker::coordinator::unified::GroupType::Streams),
