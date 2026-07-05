@@ -1569,6 +1569,17 @@ async fn post_form_response(
     .unwrap()
 }
 
+fn assert_content_type(response: &axum::response::Response, expected: &str, context: &str) {
+    assert!(
+        response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            == Some(expected),
+        "{context} content-type"
+    );
+}
+
 #[tokio::test]
 async fn role_operations_routes_match_existing_behavior() {
     let distributor = build_service_router(
@@ -1598,10 +1609,20 @@ async fn role_operations_routes_match_existing_behavior() {
     ] {
         let response = get_response(app.clone(), "/ready").await;
         assert!(response.status() == StatusCode::OK, "{name} /ready status");
+        assert_content_type(
+            &response,
+            "text/plain; charset=utf-8",
+            &format!("{name} /ready"),
+        );
         assert!(text_body(response).await == "ready\n", "{name} /ready body");
 
         let response = get_response(app.clone(), "/config").await;
         assert!(response.status() == StatusCode::OK, "{name} /config status");
+        assert_content_type(
+            &response,
+            "application/yaml; charset=utf-8",
+            &format!("{name} /config"),
+        );
         assert!(
             text_body(response).await == "target: all\n",
             "{name} /config body"
@@ -1611,6 +1632,11 @@ async fn role_operations_routes_match_existing_behavior() {
         assert!(
             response.status() == StatusCode::OK,
             "{name} /config?mode=defaults status"
+        );
+        assert_content_type(
+            &response,
+            "application/yaml; charset=utf-8",
+            &format!("{name} /config?mode=defaults"),
         );
         assert!(
             text_body(response).await == "target: all\nauth_enabled: true\n",
@@ -1622,6 +1648,11 @@ async fn role_operations_routes_match_existing_behavior() {
             response.status() == StatusCode::INTERNAL_SERVER_ERROR,
             "{name} /config?mode=diff status"
         );
+        assert_content_type(
+            &response,
+            "text/plain; charset=utf-8",
+            &format!("{name} /config?mode=diff"),
+        );
         assert!(
             text_body(response).await == "unsupported type <nil>\n",
             "{name} /config?mode=diff body"
@@ -1632,14 +1663,31 @@ async fn role_operations_routes_match_existing_behavior() {
             response.status() == StatusCode::OK,
             "{name} /services status"
         );
-        let body = text_body(response).await;
-        assert!(
-            body.contains("server => Running"),
-            "{name} /services server row"
+        assert_content_type(
+            &response,
+            "text/plain; charset=utf-8",
+            &format!("{name} /services"),
         );
         assert!(
-            body.contains("distributor => Running"),
-            "{name} /services distributor row"
+            text_body(response).await
+                == "query-scheduler => Running\n\
+                    ingester-querier => Running\n\
+                    query-frontend => Running\n\
+                    server => Running\n\
+                    querier => Running\n\
+                    rule-evaluator => Running\n\
+                    memberlist-kv => Running\n\
+                    query-frontend-tripperware => Running\n\
+                    analytics => Running\n\
+                    ruler => Running\n\
+                    cache-generation-loader => Running\n\
+                    store => Running\n\
+                    ring => Running\n\
+                    ingester => Running\n\
+                    compactor => Running\n\
+                    distributor => Running\n\
+                    query-scheduler-ring => Running\n",
+            "{name} /services body"
         );
 
         let response = get_response(app.clone(), "/memberlist").await;
@@ -1647,6 +1695,7 @@ async fn role_operations_routes_match_existing_behavior() {
             response.status() == StatusCode::OK,
             "{name} /memberlist status"
         );
+        assert_content_type(&response, "text/plain", &format!("{name} /memberlist"));
         assert!(
             text_body(response).await == "This instance doesn't use memberlist.",
             "{name} /memberlist body"
@@ -1656,6 +1705,11 @@ async fn role_operations_routes_match_existing_behavior() {
         assert!(
             response.status() == StatusCode::OK,
             "{name} /metrics status"
+        );
+        assert_content_type(
+            &response,
+            "text/plain; version=0.0.4; charset=utf-8",
+            &format!("{name} /metrics"),
         );
         assert!(
             text_body(response).await.contains("# HELP"),
@@ -1667,8 +1721,13 @@ async fn role_operations_routes_match_existing_behavior() {
             response.status() == StatusCode::OK,
             "{name} buildinfo status"
         );
+        assert_content_type(&response, "application/json", &format!("{name} buildinfo"));
         assert!(
-            text_body(response).await.contains("crabka"),
+            text_body(response).await
+                == format!(
+                    "{{\"version\":\"{}\",\"revision\":\"unknown\",\"branch\":\"unknown\",\"buildDate\":\"\",\"buildUser\":\"crabka\",\"goVersion\":\"not-go\"}}",
+                    env!("CARGO_PKG_VERSION")
+                ),
             "{name} buildinfo body"
         );
 
@@ -1677,8 +1736,14 @@ async fn role_operations_routes_match_existing_behavior() {
             response.status() == StatusCode::BAD_REQUEST,
             "{name} invalid log_level status"
         );
+        assert_content_type(
+            &response,
+            "application/json",
+            &format!("{name} invalid log_level"),
+        );
         assert!(
-            text_body(response).await.contains("unrecognized log level"),
+            text_body(response).await
+                == "{\"status\":\"failed\",\"message\":\"unrecognized log level \\\"verbose\\\"\"}",
             "{name} invalid log_level body"
         );
     }
@@ -1717,6 +1782,7 @@ async fn role_ring_alias_routes_remain_available() {
     ] {
         let response = get_response(app, uri).await;
         assert!(response.status() == StatusCode::OK, "{uri} status");
+        assert_content_type(&response, "text/html; charset=utf-8", uri);
         assert!(text_body(response).await.contains(expected), "{uri} body");
     }
 }
