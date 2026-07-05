@@ -2,10 +2,10 @@
 //! Creusot can verify it. The host crate re-exports these; the stateright
 //! model in `crabka-log/src/compact_model.rs` drives these exact functions.
 
-use creusot_std::prelude::*;
-
 #[cfg(creusot)]
 use std::clone::Clone;
+
+use creusot_std::prelude::*;
 
 /// Per-record facts the retain decision needs.
 #[cfg_attr(creusot, derive(Clone, Copy, DeepModel))]

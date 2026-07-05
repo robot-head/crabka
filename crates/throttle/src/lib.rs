@@ -10,7 +10,6 @@ mod runtime;
 pub use ids::{
     AvailableTokens, BurstCapacity, GrantedTokens, NewAvailable, RefillTokens, RequestedTokens,
 };
-
 #[cfg(not(creusot))]
 pub use runtime::{ThrottleState, TokenBucket};
 

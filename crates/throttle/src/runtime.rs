@@ -4,8 +4,10 @@
 //! only thing the Creusot verifier ever sees (this module uses atomics and
 //! `dyn` trait objects, which Creusot cannot translate).
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering, Ordering::Relaxed};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering, Ordering::Relaxed},
+};
 
 use qubit_clock::{NanoClock, NanoMonotonicClock};
 
@@ -215,10 +217,14 @@ impl Default for ThrottleState {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
-    use std::sync::mpsc::RecvTimeoutError;
-    use std::time::Duration;
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering::Relaxed},
+            mpsc::RecvTimeoutError,
+        },
+        time::Duration,
+    };
 
     use assert2::{assert, check};
     use qubit_clock::MockTime;

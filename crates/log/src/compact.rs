@@ -23,15 +23,6 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use crabka_ids::{Offset, ProducerId};
 use crabka_protocol::records::RecordBatch;
-use tracing::instrument;
-
-use crate::{
-    error::LogError,
-    name,
-    segment::Segment,
-    txn_index::{AbortedTxn, TxnIndex},
-};
-
 // ---------------------------------------------------------------------------
 // KIP-534 pure decision cores
 //
@@ -40,8 +31,15 @@ use crate::{
 // boundaries explicit while `compact_model.rs` and `core_tests` keep driving
 // the exact production path.
 // ---------------------------------------------------------------------------
-
 pub(crate) use crabka_verified::{RecordMeta, RetainDecision, TxnDataState};
+use tracing::instrument;
+
+use crate::{
+    error::LogError,
+    name,
+    segment::Segment,
+    txn_index::{AbortedTxn, TxnIndex},
+};
 
 /// Per-batch facts the retain decision needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
