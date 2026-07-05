@@ -19,7 +19,7 @@ use crabka_admin_ui::server_fns::{
     AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow, UserRow,
 };
 use crabka_admin_ui::session::{SessionRecord, SessionStore};
-use crabka_admin_ui::views::{ReadRouteState, RoutePage, render_page};
+use crabka_admin_ui::views::{ReadRouteState, Route, RoutePage, render_page, render_route_html};
 use tower::ServiceExt as _;
 
 fn smoke_app() -> axum::Router {
@@ -211,52 +211,29 @@ async fn posting_login_sets_session_cookie_and_cookie_authenticates_protected_ro
 }
 
 #[tokio::test]
-async fn linked_admin_pages_render_shared_view_route_shells() {
-    for (path, heading, route_marker, empty_state) in [
-        (
-            "/topics",
-            "Topics",
-            "admin-section topics-section",
-            "Authentication required.",
-        ),
-        (
-            "/groups",
-            "Consumer Groups",
-            "admin-section groups-section",
-            "Authentication required.",
-        ),
-        (
-            "/acls",
-            "ACLs",
-            "admin-section acls-section",
-            "Authentication required.",
-        ),
-        (
-            "/users",
-            "SCRAM Users",
-            "admin-section users-section",
-            "Authentication required.",
-        ),
-        (
-            "/quotas",
-            "Quotas",
-            "admin-section quotas-section",
-            "Authentication required.",
-        ),
-        (
-            "/log-dirs",
-            "Log Dirs",
-            "admin-section log-dirs-section",
-            "Authentication required.",
-        ),
+async fn protected_http_routes_without_cookie_render_guarded_login_page() {
+    for (path, route) in [
+        ("/topics", Route::Topics),
+        ("/groups", Route::Groups),
+        ("/acls", Route::Acls),
+        ("/users", Route::Users),
+        ("/quotas", Route::Quotas),
+        ("/log-dirs", Route::LogDirs),
     ] {
         let response = get(path).await;
 
         assert_eq!(response.status(), StatusCode::OK, "{path} status");
         let body = response_text(response).await;
-        assert!(body.contains(heading), "{path} heading");
-        assert!(body.contains(route_marker), "{path} shared route marker");
-        assert!(body.contains(empty_state), "{path} empty state");
+        assert_eq!(body, render_route_html(route), "{path} guarded route HTML");
+        assert_eq!(body, render_page(&RoutePage::login()), "{path} login HTML");
+        assert!(
+            !body.contains("operations-shell"),
+            "{path} operations shell"
+        );
+        assert!(
+            !body.contains("Authentication required."),
+            "{path} auth shell copy"
+        );
     }
 }
 
@@ -384,10 +361,7 @@ async fn missing_or_invalid_cookie_does_not_call_injected_seams() {
 
             assert_eq!(response.status(), StatusCode::OK, "{path} status");
             let body = response_text(response).await;
-            assert!(
-                body.contains("Authentication required."),
-                "{path} auth state"
-            );
+            assert_eq!(body, render_page(&RoutePage::login()), "{path} login page");
         }
 
         assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);

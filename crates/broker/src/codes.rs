@@ -145,12 +145,12 @@ pub const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
 /// `RESOURCE_NOT_FOUND` (66) — per-user error when a deletion targets a
 /// credential that does not exist in the metadata image.
 pub const RESOURCE_NOT_FOUND: i16 = 66;
-/// `RESOURCE_NOT_FOUND` (83) — per-user error returned by
+/// `RESOURCE_NOT_FOUND` (91) — per-user error returned by
 /// `DescribeUserScramCredentials` when the requested user has no SCRAM
 /// credentials in the metadata image. The internal constant is API-scoped
 /// because this file already has the older delete-target-missing
 /// `RESOURCE_NOT_FOUND` code 66.
-pub const DESCRIBE_USER_SCRAM_RESOURCE_NOT_FOUND: i16 = 83;
+pub const DESCRIBE_USER_SCRAM_RESOURCE_NOT_FOUND: i16 = 91;
 /// `UNACCEPTABLE_CREDENTIAL` (78) — per-user error when an upsertion carries
 /// invalid SCRAM parameters (iterations < 4096, empty salt, `salted_password`
 /// of the wrong length, or an unknown mechanism). Canonical Apache Kafka
@@ -211,7 +211,7 @@ pub const INELIGIBLE_REPLICA: i16 = 92;
 
 // Leader election codes.
 pub const PREFERRED_LEADER_NOT_AVAILABLE: i16 = 80;
-pub const ELIGIBLE_LEADERS_NOT_AVAILABLE: i16 = 81;
+pub const ELIGIBLE_LEADERS_NOT_AVAILABLE: i16 = 83;
 pub const ELECTION_NOT_NEEDED: i16 = 84;
 
 // Partition reassignment codes (KIP-455).
@@ -230,9 +230,7 @@ pub const FETCH_SESSION_ID_NOT_FOUND: i16 = 70;
 pub const INVALID_FETCH_SESSION_EPOCH: i16 = 71;
 
 // KIP-48 delegation-token codes. Numbers from
-// org.apache.kafka.common.protocol.Errors. Note the existing
-// ELIGIBLE_LEADERS_NOT_AVAILABLE = 81 is incorrect (Kafka says 83);
-// flagged for a separate fix.
+// org.apache.kafka.common.protocol.Errors.
 pub const DELEGATION_TOKEN_AUTH_DISABLED: i16 = 61;
 pub const DELEGATION_TOKEN_NOT_FOUND: i16 = 62;
 pub const DELEGATION_TOKEN_OWNER_MISMATCH: i16 = 63;

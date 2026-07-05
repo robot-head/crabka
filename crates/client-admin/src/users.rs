@@ -902,4 +902,33 @@ mod tests {
                 ]
         );
     }
+
+    #[test]
+    fn users_describe_scram_unknown_user_preserves_resource_not_found_name() {
+        let resp = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
+            results: vec![
+                crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResult {
+                    user: "ghost".to_string(),
+                    error_code: 91,
+                    error_message: Some("no such SCRAM user".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let users = parse_describe_user_scram_credentials_response(resp)
+            .expect("per-user SCRAM describe errors should parse into rows");
+
+        check!(users.len() == 1);
+        check!(users[0].username == "ghost");
+        check!(
+            users[0].error
+                == Some(KafkaError {
+                    code: 91,
+                    name: "RESOURCE_NOT_FOUND",
+                    message: Some("no such SCRAM user".to_string()),
+                })
+        );
+    }
 }

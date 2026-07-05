@@ -118,7 +118,7 @@ where
 }
 
 async fn login() -> Html<String> {
-    Html(render_page(&RoutePage::login()))
+    login_page()
 }
 
 async fn post_login<F, B>(
@@ -168,16 +168,12 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page(&RoutePage::topics(
-            ReadRouteState::AuthenticationRequired,
-        )));
+        return login_page();
     };
 
     Html(match server_fns::list_topics_with_context(&context).await {
         Ok(rows) => render_page(&RoutePage::topics(ReadRouteState::Rows(rows))),
-        Err(UiError::NotAuthenticated) => {
-            render_page(&RoutePage::topics(ReadRouteState::AuthenticationRequired))
-        }
+        Err(UiError::NotAuthenticated) => render_login_page(),
         Err(_) => render_page(&RoutePage::topics(ReadRouteState::LoadFailed)),
     })
 }
@@ -192,16 +188,12 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page(&RoutePage::groups(
-            ReadRouteState::AuthenticationRequired,
-        )));
+        return login_page();
     };
 
     Html(match server_fns::list_groups_with_context(&context).await {
         Ok(rows) => render_page(&RoutePage::groups(ReadRouteState::Rows(rows))),
-        Err(UiError::NotAuthenticated) => {
-            render_page(&RoutePage::groups(ReadRouteState::AuthenticationRequired))
-        }
+        Err(UiError::NotAuthenticated) => render_login_page(),
         Err(_) => render_page(&RoutePage::groups(ReadRouteState::LoadFailed)),
     })
 }
@@ -213,16 +205,12 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page(&RoutePage::acls(
-            ReadRouteState::AuthenticationRequired,
-        )));
+        return login_page();
     };
 
     Html(match server_fns::list_acls(&context).await {
         Ok(rows) => render_page(&RoutePage::acls(ReadRouteState::Rows(rows))),
-        Err(UiError::NotAuthenticated) => {
-            render_page(&RoutePage::acls(ReadRouteState::AuthenticationRequired))
-        }
+        Err(UiError::NotAuthenticated) => render_login_page(),
         Err(_) => render_page(&RoutePage::acls(ReadRouteState::LoadFailed)),
     })
 }
@@ -237,16 +225,12 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page(&RoutePage::users(
-            ReadRouteState::AuthenticationRequired,
-        )));
+        return login_page();
     };
 
     Html(match server_fns::list_users(&context).await {
         Ok(rows) => render_page(&RoutePage::users(ReadRouteState::Rows(rows))),
-        Err(UiError::NotAuthenticated) => {
-            render_page(&RoutePage::users(ReadRouteState::AuthenticationRequired))
-        }
+        Err(UiError::NotAuthenticated) => render_login_page(),
         Err(_) => render_page(&RoutePage::users(ReadRouteState::LoadFailed)),
     })
 }
@@ -261,16 +245,12 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page(&RoutePage::quotas(
-            ReadRouteState::AuthenticationRequired,
-        )));
+        return login_page();
     };
 
     Html(match server_fns::list_quotas(&context).await {
         Ok(rows) => render_page(&RoutePage::quotas(ReadRouteState::Rows(rows))),
-        Err(UiError::NotAuthenticated) => {
-            render_page(&RoutePage::quotas(ReadRouteState::AuthenticationRequired))
-        }
+        Err(UiError::NotAuthenticated) => render_login_page(),
         Err(_) => render_page(&RoutePage::quotas(ReadRouteState::LoadFailed)),
     })
 }
@@ -285,20 +265,24 @@ where
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let Some(context) = context_from_headers(&state, &headers) else {
-        return Html(render_page(&RoutePage::log_dirs(
-            ReadRouteState::AuthenticationRequired,
-        )));
+        return login_page();
     };
 
     Html(
         match server_fns::list_log_dirs_with_context(&context).await {
             Ok(rows) => render_page(&RoutePage::log_dirs(ReadRouteState::Rows(rows))),
-            Err(UiError::NotAuthenticated) => {
-                render_page(&RoutePage::log_dirs(ReadRouteState::AuthenticationRequired))
-            }
+            Err(UiError::NotAuthenticated) => render_login_page(),
             Err(_) => render_page(&RoutePage::log_dirs(ReadRouteState::LoadFailed)),
         },
     )
+}
+
+fn login_page() -> Html<String> {
+    Html(render_login_page())
+}
+
+fn render_login_page() -> String {
+    render_page(&RoutePage::login())
 }
 
 fn context_from_headers<'a, F, B>(

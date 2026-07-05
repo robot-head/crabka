@@ -506,7 +506,8 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
         39 => "INVALID_REPLICA_ASSIGNMENT",
         40 => "INVALID_CONFIG",
         41 => "NOT_CONTROLLER",
-        83 => "RESOURCE_NOT_FOUND",
+        83 => "ELIGIBLE_LEADERS_NOT_AVAILABLE",
+        91 => "RESOURCE_NOT_FOUND",
         87 => "REASSIGNMENT_IN_PROGRESS",
         _ => "UNKNOWN",
     }
@@ -533,7 +534,8 @@ mod tests {
     fn users_kafka_error_name_includes_scram_describe_codes() {
         for (code, want) in [
             (31, "CLUSTER_AUTHORIZATION_FAILED"),
-            (83, "RESOURCE_NOT_FOUND"),
+            (83, "ELIGIBLE_LEADERS_NOT_AVAILABLE"),
+            (91, "RESOURCE_NOT_FOUND"),
         ] {
             assert!(kafka_error_name(code) == want);
         }

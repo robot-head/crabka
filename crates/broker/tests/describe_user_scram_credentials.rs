@@ -11,7 +11,7 @@
 //!    `submit_metadata_record_for_test`; describe with `users=None`; assert
 //!    mechanism=2 (SCRAM-SHA-512) in the response.
 //! 2. `describe_unknown_user_returns_error` — describe `users=[ghost]`; assert
-//!    per-user `error_code = 83` (RESOURCE_NOT_FOUND).
+//!    per-user `error_code = 91` (RESOURCE_NOT_FOUND).
 //!
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15/15b/16.
@@ -308,7 +308,7 @@ async fn describe_all_users_round_trip() {
 }
 
 /// Test 2: describe a user that does not exist (`ghost`); assert that the
-/// per-user row carries `error_code = 83` (RESOURCE_NOT_FOUND).
+/// per-user row carries `error_code = 91` (RESOURCE_NOT_FOUND).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_unknown_user_returns_error() {
     let (_handle, _dir, addr) =
@@ -329,8 +329,8 @@ async fn describe_unknown_user_returns_error() {
         .find(|(u, _, _)| u == "ghost")
         .expect("ghost must appear in response");
     assert!(
-        row.1 == 83, /* RESOURCE_NOT_FOUND */
-        "expected RESOURCE_NOT_FOUND (83) for unknown user ghost; got {}",
+        row.1 == 91, /* RESOURCE_NOT_FOUND */
+        "expected RESOURCE_NOT_FOUND (91) for unknown user ghost; got {}",
         row.1
     );
 }

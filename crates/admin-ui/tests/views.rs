@@ -123,13 +123,18 @@ fn every_route_renders_a_page() {
 
 #[test]
 fn protected_render_routes_use_shared_unauthenticated_page_by_default() {
-    for (route, old_placeholder) in [
-        (Route::Acls, "No ACLs loaded yet."),
-        (Route::Users, "No user operation selected."),
-        (Route::Quotas, "Search for a user to describe quotas."),
+    let expected_html = render_page(&RoutePage::login());
+    let expected_body = ssr_route_body(&RoutePage::login());
+
+    for route in [
+        Route::Overview,
+        Route::Topics,
+        Route::Groups,
+        Route::Acls,
+        Route::Users,
+        Route::Quotas,
+        Route::LogDirs,
     ] {
-        let expected_html = render_page(&RoutePage::for_unauthenticated_route(route));
-        let expected_body = ssr_route_body(&RoutePage::for_unauthenticated_route(route));
         let route_html = render_route_html(route);
 
         assert_eq!(route_html, expected_html, "{route:?} shared HTML");
@@ -138,7 +143,7 @@ fn protected_render_routes_use_shared_unauthenticated_page_by_default() {
             expected_body
         );
         assert!(route_html.contains("Sign in to Crabka Admin"));
-        assert!(!route_html.contains(old_placeholder));
+        assert!(!route_html.contains("operations-shell"));
     }
 }
 

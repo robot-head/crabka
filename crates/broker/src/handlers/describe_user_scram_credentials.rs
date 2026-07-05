@@ -252,7 +252,7 @@ mod tests {
         );
         let expected = vec![DescribeUserScramCredentialsResult {
             user: "ghost".to_string(),
-            error_code: DESCRIBE_USER_SCRAM_RESOURCE_NOT_FOUND,
+            error_code: 91,
             error_message: Some("no such SCRAM user".to_string()),
             credential_infos: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
