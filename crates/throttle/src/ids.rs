@@ -13,7 +13,7 @@
 //! would not type-check across distinct wrappers, so they are omitted.
 
 #[cfg(creusot)]
-use creusot_std::prelude::*;
+use creusot_std::prelude::DeepModel;
 use derive_more::{Display, From, Into};
 
 /// Tokens currently sitting in the bucket, available to grant.
