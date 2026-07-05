@@ -145,3 +145,120 @@ pub const fn retain_decision(
         None => RetainDecision::SetHorizon(compute_horizon(now_ms, delete_retention_ms)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::*;
+
+    const fn record(has_key: bool, has_value: bool) -> RecordMeta {
+        RecordMeta { has_key, has_value }
+    }
+
+    const fn batch(is_control: bool, existing_horizon: Option<i64>) -> BatchMeta {
+        BatchMeta {
+            is_control,
+            producer_id: -1,
+            existing_horizon,
+        }
+    }
+
+    #[test]
+    fn compute_horizon_saturates_at_i64_bounds() {
+        assert!(compute_horizon(100, 50) == 150);
+        assert!(compute_horizon(i64::MAX - 1, 50) == i64::MAX);
+        assert!(compute_horizon(i64::MIN + 1, -50) == i64::MIN);
+    }
+
+    #[test]
+    fn retain_decision_distinguishes_expired_and_live_horizons() {
+        let tombstone = record(true, false);
+        let live_value = record(true, true);
+
+        assert!(
+            retain_decision(
+                tombstone,
+                batch(false, Some(10)),
+                true,
+                TxnDataState::NotTransactional,
+                10,
+                50
+            ) == RetainDecision::Delete
+        );
+        assert!(
+            retain_decision(
+                tombstone,
+                batch(false, Some(10)),
+                true,
+                TxnDataState::NotTransactional,
+                9,
+                50
+            ) == RetainDecision::Keep
+        );
+        assert!(
+            retain_decision(
+                live_value,
+                batch(false, None),
+                true,
+                TxnDataState::NotTransactional,
+                100,
+                50
+            ) == RetainDecision::Keep
+        );
+        assert!(
+            retain_decision(
+                record(false, true),
+                batch(false, None),
+                true,
+                TxnDataState::NotTransactional,
+                100,
+                50
+            ) == RetainDecision::Delete
+        );
+    }
+
+    #[test]
+    fn retain_decision_stamps_new_tombstone_and_expired_control_marker() {
+        assert!(
+            retain_decision(
+                record(true, false),
+                batch(false, None),
+                true,
+                TxnDataState::NotTransactional,
+                100,
+                50
+            ) == RetainDecision::SetHorizon(150)
+        );
+        assert!(
+            retain_decision(
+                record(true, false),
+                batch(true, Some(10)),
+                false,
+                TxnDataState::DataFullyGone,
+                10,
+                50
+            ) == RetainDecision::Delete
+        );
+        assert!(
+            retain_decision(
+                record(true, false),
+                batch(true, Some(10)),
+                false,
+                TxnDataState::DataFullyGone,
+                9,
+                50
+            ) == RetainDecision::Keep
+        );
+        assert!(
+            retain_decision(
+                record(true, false),
+                batch(true, Some(10)),
+                false,
+                TxnDataState::DataSurvives,
+                10,
+                50
+            ) == RetainDecision::Keep
+        );
+    }
+}

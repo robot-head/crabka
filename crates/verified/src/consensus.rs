@@ -365,6 +365,13 @@ mod tests {
     }
 
     #[test]
+    fn jitter_uses_node_and_epoch_hash_inputs() {
+        assert!(election_jitter_ms(1, 0, 1000) == 485);
+        assert!(election_jitter_ms(2, 0, 1000) == 354);
+        assert!(election_jitter_ms(1, 1, 1000) == 446);
+    }
+
+    #[test]
     fn up_to_date_is_the_kip595_rule() {
         // higher epoch wins regardless of offset
         check!(log_is_up_to_date(5, 100, 6, 0));
@@ -383,5 +390,12 @@ mod tests {
         check!(recompute_high_watermark(10, &[3, 9], 2, 8, 5) == 9);
         // a fallen follower offset can't drag the HWM back down.
         check!(recompute_high_watermark(10, &[1, 1], 2, 0, 7) == 7);
+    }
+
+    #[test]
+    fn hwm_counts_leader_and_followers_until_majority() {
+        check!(recompute_high_watermark(10, &[9, 8], 2, 0, 0) == 9);
+        check!(recompute_high_watermark(10, &[10, 10], 3, 0, 0) == 10);
+        check!(recompute_high_watermark(10, &[4, 4], 3, 0, 0) == 4);
     }
 }

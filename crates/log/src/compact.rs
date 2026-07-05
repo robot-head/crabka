@@ -189,6 +189,13 @@ mod core_tests {
     }
 
     #[test]
+    fn compute_horizon_saturates_at_i64_bounds() {
+        assert!(compute_horizon(100, 50) == 150);
+        assert!(compute_horizon(i64::MAX - 1, 50) == i64::MAX);
+        assert!(compute_horizon(i64::MIN + 1, -50) == i64::MIN);
+    }
+
+    #[test]
     fn marker_retained_while_data_survives_then_ages() {
         let marker = data(true, false); // control records carry a key, no value
         for (existing_horizon, txn_state, now_ms, want) in [
