@@ -63,6 +63,8 @@ pub(crate) enum DispatchKind {
     DecodedContext(ContextHandler),
     EncodedContext(ContextHandler),
     Auth(AuthHandler),
+    Fetch,
+    SaslMetadata,
 }
 
 #[derive(Clone, Copy)]
@@ -158,6 +160,24 @@ impl DispatchEntry {
         }
     }
 
+    pub(crate) fn fetch(flexible_min: ApiVersion) -> Self {
+        Self {
+            api_key: ApiKey::Fetch,
+            flexible_min,
+            quota_policy: RequestQuotaPolicy::SelfAccounted,
+            kind: DispatchKind::Fetch,
+        }
+    }
+
+    pub(crate) fn sasl_metadata(api_key: ApiKey, flexible_min: ApiVersion) -> Self {
+        Self {
+            api_key,
+            flexible_min,
+            quota_policy: RequestQuotaPolicy::InlineExempt,
+            kind: DispatchKind::SaslMetadata,
+        }
+    }
+
     pub(crate) fn api_key(self) -> ApiKey {
         self.api_key
     }
@@ -197,6 +217,11 @@ impl DispatchRegistry {
             DispatchKind::Plain(handler) => Some(handler),
             _ => None,
         }
+    }
+
+    pub(crate) fn body_flexible(&self, api_key: ApiKeyCode, version: ApiVersion) -> bool {
+        self.get(api_key)
+            .is_some_and(|entry| entry.body_flexible(version))
     }
 }
 
@@ -928,6 +953,17 @@ pub(crate) fn build_registry() -> DispatchRegistry {
         crabka_protocol::owned::produce_request::FLEXIBLE_MIN,
         produce_adapter,
     ));
+    registry.register(DispatchEntry::fetch(
+        crabka_protocol::owned::fetch_request::FLEXIBLE_MIN,
+    ));
+    registry.register(DispatchEntry::sasl_metadata(
+        ApiKey::SaslHandshake,
+        i16::MAX,
+    ));
+    registry.register(DispatchEntry::sasl_metadata(
+        ApiKey::SaslAuthenticate,
+        crabka_protocol::owned::sasl_authenticate_request::FLEXIBLE_MIN,
+    ));
     registry.register(DispatchEntry::context(
         ApiKey::Metadata,
         crabka_protocol::owned::metadata_request::FLEXIBLE_MIN,
@@ -1369,6 +1405,34 @@ mod tests {
         let registry = build_registry();
 
         assert!(registry.get(9999).is_none());
+    }
+
+    #[test]
+    fn registry_body_flexible_matches_selected_schema_boundaries() {
+        use crabka_protocol::owned;
+
+        let registry = build_registry();
+        let cases = [
+            (0, owned::produce_request::FLEXIBLE_MIN - 1, false),
+            (0, owned::produce_request::FLEXIBLE_MIN, true),
+            (1, owned::fetch_request::FLEXIBLE_MIN - 1, false),
+            (1, owned::fetch_request::FLEXIBLE_MIN, true),
+            (
+                36,
+                owned::sasl_authenticate_request::FLEXIBLE_MIN - 1,
+                false,
+            ),
+            (36, owned::sasl_authenticate_request::FLEXIBLE_MIN, true),
+            (17, i16::MAX, false),
+            (999, 0, false),
+        ];
+
+        for (api_key, version, want) in cases {
+            assert!(
+                registry.body_flexible(api_key, version) == want,
+                "api_key {api_key} version {version}"
+            );
+        }
     }
 
     #[test]

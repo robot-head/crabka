@@ -1,5 +1,4 @@
 //! Borrowed Kafka request-header parsing for the broker dispatch loop.
-#![allow(dead_code)]
 
 use bytes::Buf;
 use crabka_protocol::primitives::string_bytes_borrowed::get_nullable_string_borrowed;
@@ -57,23 +56,6 @@ pub(crate) fn peek_api_key(frame: &[u8]) -> Result<ApiKeyCode, BrokerError> {
         return Err(protocol_invalid("request frame < 2 bytes"));
     }
     Ok(i16::from_be_bytes([frame[0], frame[1]]))
-}
-
-pub(crate) fn peek_client_id(frame: &[u8]) -> Option<&str> {
-    if frame.len() < 10 {
-        return None;
-    }
-    let cid_len = i16::from_be_bytes([frame[8], frame[9]]);
-    if cid_len <= 0 {
-        return None;
-    }
-    let n = usize::try_from(cid_len).ok()?;
-    let start = 10_usize;
-    let end = start.checked_add(n)?;
-    if frame.len() < end {
-        return None;
-    }
-    std::str::from_utf8(&frame[start..end]).ok()
 }
 
 fn protocol_invalid(message: &'static str) -> BrokerError {
@@ -215,16 +197,9 @@ mod tests {
     }
 
     #[test]
-    fn peek_helpers_match_existing_dispatch_behavior() {
+    fn peek_api_key_matches_existing_dispatch_behavior() {
         let present = request_frame(3, 8, 42, Some(b"client-a"), None, b"body");
-        let null = request_frame(3, 8, 42, None, None, b"body");
-        let empty = request_frame(3, 8, 42, Some(b""), None, b"body");
-        let invalid = request_frame(3, 8, 42, Some(&[0xff, 0xfe]), None, b"body");
 
         assert!(peek_api_key(&present).expect("api key") == 3);
-        assert!(peek_client_id(&present) == Some("client-a"));
-        assert!(peek_client_id(&null).is_none());
-        assert!(peek_client_id(&empty).is_none());
-        assert!(peek_client_id(&invalid).is_none());
     }
 }
