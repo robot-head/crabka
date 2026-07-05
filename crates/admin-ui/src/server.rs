@@ -20,6 +20,7 @@ use crate::session::SessionStore;
 use crate::views::{ReadRouteState, Route, RoutePage, render_page};
 
 pub const SESSION_COOKIE_NAME: &str = "crabka_admin_session";
+const MUTATION_JSON_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -499,9 +500,11 @@ where
         ));
     };
 
-    let body = to_bytes(request.into_body(), usize::MAX)
+    let body = to_bytes(request.into_body(), MUTATION_JSON_BODY_LIMIT_BYTES)
         .await
-        .map_err(|_| mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request"))?;
+        .map_err(|_| {
+            mutation_error_response(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+        })?;
     let request = parse_json_request(&body)
         .map_err(|_| mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request"))?;
 

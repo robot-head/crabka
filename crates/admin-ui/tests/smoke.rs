@@ -78,7 +78,7 @@ async fn post_form_from(
 async fn post_json_from(
     app: axum::Router,
     path: &str,
-    json_body: &'static str,
+    json_body: impl Into<Body>,
     cookie: Option<String>,
 ) -> axum::response::Response {
     let mut request = Request::builder()
@@ -89,7 +89,7 @@ async fn post_json_from(
         request = request.header(header::COOKIE, cookie);
     }
 
-    app.oneshot(request.body(Body::from(json_body)).expect("request builds"))
+    app.oneshot(request.body(json_body.into()).expect("request builds"))
         .await
         .expect("router responds")
 }
@@ -356,6 +356,27 @@ async fn post_mutation_routes_return_bad_request_for_authenticated_malformed_jso
     assert_eq!(factory.total_mutation_calls(), 0);
     let text = response_text(response).await;
     assert!(text.contains("invalid JSON request"));
+}
+
+#[tokio::test]
+async fn authenticated_post_mutation_routes_reject_oversized_body_before_deserializing() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+    let oversized_topic_name = "orders".repeat(180_000);
+    let oversized_body =
+        format!(r#"{{"name":"{oversized_topic_name}","partitions":3,"replicas":1,"configs":[]}}"#);
+
+    let response = post_json_from(app, "/topics/create", oversized_body, Some(cookie)).await;
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(factory.total_mutation_calls(), 0);
+    let text = response_text(response).await;
+    assert!(text.contains("request body too large"));
 }
 
 #[tokio::test]
