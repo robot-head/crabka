@@ -1,18 +1,19 @@
-use crabka_admin_ui::admin::{
-    acl_rows, group_rows, log_dir_rows, quota_rows, resource_outcome_rows, topic_rows,
+use std::collections::BTreeMap;
+
+use crabka_admin_ui::{
+    admin::{acl_rows, group_rows, log_dir_rows, quota_rows, resource_outcome_rows, topic_rows},
+    dto::{
+        ConfigEntryDto, CreateTopicRequestDto, KafkaErrorDto, LogDirMoveRequestDto,
+        ResourceOutcome, ScramUserUpsertDto,
+    },
+    error::UiError,
 };
-use crabka_admin_ui::dto::{
-    ConfigEntryDto, CreateTopicRequestDto, KafkaErrorDto, LogDirMoveRequestDto, ResourceOutcome,
-    ScramUserUpsertDto,
-};
-use crabka_admin_ui::error::UiError;
 use crabka_client_admin::{
     AclEntry, AclOperation, AdminError, AlterReplicaLogDirOutcome, CreatePartitionsOutcome,
     DeleteAclFilterOutcome, DeleteTopicOutcome, KafkaError, LogDirInfo, LogDirPartitionInfo,
     LogDirTopicInfo, PatternType, PermissionType, ResourceType, ScramUserOutcome, TopicMetadata,
     TopicMetadataEntry, UserScramCredential, UserScramCredentials,
 };
-use std::collections::BTreeMap;
 
 #[test]
 fn resource_outcome_reports_error_state() {

@@ -1,6 +1,4 @@
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::process::Command;
+use std::{net::SocketAddr, path::PathBuf, process::Command};
 
 use crabka_admin_ui::config::{AdminUiConfig, BrokerSecurityConfig, ConfigError};
 

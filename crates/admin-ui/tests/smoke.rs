@@ -1,25 +1,31 @@
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
-use axum::body::{Body, to_bytes};
-use axum::http::{Method, Request, StatusCode, header};
-use crabka_admin_ui::auth::LoginBroker;
-use crabka_admin_ui::config::AdminUiConfig;
-use crabka_admin_ui::dto::{
-    AclRequestDto, AlterConfigRequestDto, CreatePartitionsRequestDto, CreateTopicRequestDto,
-    DeleteTopicRequestDto, GroupRow, LogDirMoveRequestDto, LogDirRow, QuotaDeleteDto,
-    QuotaUpsertDto, ResourceOutcome, ScramUserDeleteDto, ScramUserUpsertDto, TopicRow,
+use axum::{
+    body::{Body, to_bytes},
+    http::{Method, Request, StatusCode, header},
 };
-use crabka_admin_ui::error::UiError;
-use crabka_admin_ui::server::{AppState, SESSION_COOKIE_NAME, router, router_with_factory};
-use crabka_admin_ui::server_fns::{
-    AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow, UserRow,
+use crabka_admin_ui::{
+    auth::LoginBroker,
+    config::AdminUiConfig,
+    dto::{
+        AclRequestDto, AlterConfigRequestDto, CreatePartitionsRequestDto, CreateTopicRequestDto,
+        DeleteTopicRequestDto, GroupRow, LogDirMoveRequestDto, LogDirRow, QuotaDeleteDto,
+        QuotaUpsertDto, ResourceOutcome, ScramUserDeleteDto, ScramUserUpsertDto, TopicRow,
+    },
+    error::UiError,
+    server::{AppState, SESSION_COOKIE_NAME, router, router_with_factory},
+    server_fns::{AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow, UserRow},
+    session::{SessionRecord, SessionStore},
+    views::{ReadRouteState, Route, RoutePage, render_page, render_route_html},
 };
-use crabka_admin_ui::session::{SessionRecord, SessionStore};
-use crabka_admin_ui::views::{ReadRouteState, Route, RoutePage, render_page, render_route_html};
 use tower::ServiceExt as _;
 
 fn smoke_app() -> axum::Router {

@@ -1,17 +1,17 @@
 //! Broker-backed login for the admin UI.
 
-use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
+use std::{fmt, future::Future, pin::Pin};
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_security::SaslMechanism;
 use serde::{Deserialize, Serialize};
 
-use crate::config::AdminUiConfig;
-use crate::error::UiError;
-use crate::session::{SessionCredentials, SessionStore, SessionUser};
+use crate::{
+    config::AdminUiConfig,
+    error::UiError,
+    session::{SessionCredentials, SessionStore, SessionUser},
+};
 
 #[derive(Clone, PartialEq, Eq, Deserialize)]
 pub struct LoginRequest {

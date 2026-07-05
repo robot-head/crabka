@@ -1,7 +1,6 @@
 //! Runtime configuration for one admin UI instance.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use crabka_client_core::security::TlsConnectorConfig;
 use crabka_security::ListenerProtocol;

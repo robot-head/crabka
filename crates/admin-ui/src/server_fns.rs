@@ -2,9 +2,7 @@
 
 #![allow(clippy::unused_async)]
 
-use std::collections::BTreeMap;
-use std::future::Future;
-use std::pin::Pin;
+use std::{collections::BTreeMap, future::Future, pin::Pin};
 
 use crabka_client_admin::{
     AclEntry, AclEntryFilter, AclOperation, AdminClient, CreatePartitionsOp, CreateTopicSpec,
@@ -13,19 +11,20 @@ use crabka_client_admin::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::admin::{AdminFacade, quota_mutation_outcome, resource_outcome_rows};
-use crate::auth::{LoginBroker, LoginRequest, LoginSuccess, build_scram_sha512_security};
-use crate::config::AdminUiConfig;
-use crate::dto::{
-    AclRequestDto, AlterConfigRequestDto, CreatePartitionsRequestDto, CreateTopicRequestDto,
-    DeleteTopicRequestDto, GroupRow, LogDirMoveRequestDto, LogDirRow, QuotaDeleteDto,
-    QuotaUpsertDto, ResourceOutcome, ScramUserDeleteDto, ScramUserUpsertDto, TopicRow,
-};
-use crate::error::UiError;
-use crate::server::AppState;
-use crate::session::{SessionId, SessionRecord, SessionStore};
-
 pub use crate::dto::{AclRow, QuotaRow, UserRow};
+use crate::{
+    admin::{AdminFacade, quota_mutation_outcome, resource_outcome_rows},
+    auth::{LoginBroker, LoginRequest, LoginSuccess, build_scram_sha512_security},
+    config::AdminUiConfig,
+    dto::{
+        AclRequestDto, AlterConfigRequestDto, CreatePartitionsRequestDto, CreateTopicRequestDto,
+        DeleteTopicRequestDto, GroupRow, LogDirMoveRequestDto, LogDirRow, QuotaDeleteDto,
+        QuotaUpsertDto, ResourceOutcome, ScramUserDeleteDto, ScramUserUpsertDto, TopicRow,
+    },
+    error::UiError,
+    server::AppState,
+    session::{SessionId, SessionRecord, SessionStore},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentSession {

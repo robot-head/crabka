@@ -1,23 +1,26 @@
 //! HTTP server helpers for the admin UI.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
-use axum::body::{Body, to_bytes};
-use axum::extract::State;
-use axum::http::{HeaderMap, Request, StatusCode, header};
-use axum::response::{Html, IntoResponse};
-use axum::routing::{get, post};
-use axum::{Form, Router};
+use axum::{
+    Form, Router,
+    body::{Body, to_bytes},
+    extract::State,
+    http::{HeaderMap, Request, StatusCode, header},
+    response::{Html, IntoResponse},
+    routing::{get, post},
+};
 use serde::de::DeserializeOwned;
 
-use crate::auth::{AdminClientLoginBroker, LoginBroker, LoginRequest};
-use crate::config::AdminUiConfig;
-use crate::dto::ResourceOutcome;
-use crate::error::UiError;
-use crate::server_fns::{self, AdminSeamFactory, BrokerAdminSeamFactory, ServerFunctionContext};
-use crate::session::SessionStore;
-use crate::views::{ReadRouteState, Route, RoutePage, render_page};
+use crate::{
+    auth::{AdminClientLoginBroker, LoginBroker, LoginRequest},
+    config::AdminUiConfig,
+    dto::ResourceOutcome,
+    error::UiError,
+    server_fns::{self, AdminSeamFactory, BrokerAdminSeamFactory, ServerFunctionContext},
+    session::SessionStore,
+    views::{ReadRouteState, Route, RoutePage, render_page},
+};
 
 pub const SESSION_COOKIE_NAME: &str = "crabka_admin_session";
 const MUTATION_JSON_BODY_LIMIT_BYTES: usize = 1024 * 1024;

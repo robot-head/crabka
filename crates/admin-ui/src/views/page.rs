@@ -1,6 +1,5 @@
-use crate::dto::{AclRow, GroupRow, LogDirRow, QuotaRow, TopicRow, UserRow};
-
 use super::Route;
+use crate::dto::{AclRow, GroupRow, LogDirRow, QuotaRow, TopicRow, UserRow};
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum ReadRouteState<T> {

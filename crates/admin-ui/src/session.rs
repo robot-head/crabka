@@ -1,6 +1,8 @@
-use std::collections::HashMap;
-use std::fmt;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    fmt,
+    time::{Duration, Instant},
+};
 
 use parking_lot::RwLock;
 use uuid::Uuid;
