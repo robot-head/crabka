@@ -1,6 +1,7 @@
 //! Borrowed Kafka request-header parsing for the broker dispatch loop.
+#![allow(dead_code)]
 
-use bytes::{Buf, BytesMut};
+use bytes::Buf;
 
 use crate::{
     error::BrokerError,
@@ -101,7 +102,7 @@ fn protocol_invalid(message: &'static str) -> BrokerError {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
-    use bytes::BufMut;
+    use bytes::{BufMut, BytesMut};
 
     use super::*;
 
