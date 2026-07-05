@@ -43,3 +43,79 @@ pub(crate) struct TelemetryContext<'a> {
     pub software_name: &'a str,
     pub software_version: &'a str,
 }
+
+impl<'a> RequestContext<'a> {
+    pub(crate) fn new(
+        principal: &'a Principal,
+        peer: &'a SocketAddr,
+        client_id: &'a str,
+        sendfile_capable: bool,
+        connection_listener_name: &'a str,
+    ) -> Self {
+        Self {
+            principal,
+            peer,
+            client_id,
+            sendfile_capable,
+            connection_listener_name,
+        }
+    }
+}
+
+impl<'a> TelemetryContext<'a> {
+    pub(crate) fn new(
+        peer: &'a SocketAddr,
+        client_id: &'a str,
+        software_name: &'a str,
+        software_version: &'a str,
+    ) -> Self {
+        Self {
+            client_id,
+            peer,
+            software_name,
+            software_version,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+    use crabka_security::{AuthMethod, Principal};
+
+    use super::*;
+
+    fn principal() -> Principal {
+        Principal {
+            name: "alice".to_string(),
+            auth_method: AuthMethod::SaslPlain,
+            groups: vec!["operators".to_string()],
+        }
+    }
+
+    #[test]
+    fn request_context_new_preserves_connection_fields() {
+        let principal = principal();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 9092));
+
+        let ctx = RequestContext::new(&principal, &peer, "client-a", true, "SASL_SSL");
+
+        assert!(ctx.principal.name == "alice");
+        assert!(ctx.peer == &peer);
+        assert!(ctx.client_id == "client-a");
+        assert!(ctx.sendfile_capable);
+        assert!(ctx.connection_listener_name == "SASL_SSL");
+    }
+
+    #[test]
+    fn telemetry_context_new_preserves_client_identity_fields() {
+        let peer = SocketAddr::from(([127, 0, 0, 1], 9092));
+
+        let ctx = TelemetryContext::new(&peer, "client-a", "crabka-test", "1.2.3");
+
+        assert!(ctx.peer == &peer);
+        assert!(ctx.client_id == "client-a");
+        assert!(ctx.software_name == "crabka-test");
+        assert!(ctx.software_version == "1.2.3");
+    }
+}
