@@ -20,9 +20,13 @@
 //! authorizer's super-user bypass short-circuits inside `authorize` → ALLOW
 //! when `super_users` is configured.
 //!
-//! Duplicate detection: the same user appearing twice in one request (either
-//! two upsertions, two deletions, or one of each) gets one per-user
-//! `DUPLICATE_RESOURCE` (92) result.
+//! Duplicate detection preserves Kafka's first per-user validation/resource
+//! error. If the first alteration for a user has already recorded an error,
+//! later alterations for that user are ignored and the original error remains.
+//! `DUPLICATE_RESOURCE` (92) is returned only when the prior same-user
+//! alteration was otherwise valid and pending in the request. An empty username
+//! is always an `UNACCEPTABLE_CREDENTIAL` (93) validation error unless the
+//! whole request is denied by authorization first.
 //!
 //! Deletion targets that are not present in the current metadata image get
 //! `RESOURCE_NOT_FOUND` (91).
@@ -234,10 +238,15 @@ fn stage_deletion(
     deletions: &mut HashMap<String, (ScramCredentialDeletion, SaslMechanism)>,
     errors: &mut HashMap<String, AlterationError>,
 ) {
+    // Kafka reports the first per-user validation/resource error. Once an
+    // error exists, later same-user rows must not replace it with DUPLICATE.
     if errors.contains_key(&deletion.name) {
         return;
     }
 
+    // A pending prior deletion means the previous same-user alteration was
+    // accepted so far; the second alteration converts that pending success
+    // into Kafka's DUPLICATE_RESOURCE result.
     if deletions.remove(&deletion.name).is_some() {
         errors.insert(deletion.name, duplicate_alteration_error());
         return;
@@ -260,10 +269,15 @@ fn stage_upsertion(
     upsertions: &mut HashMap<String, (ScramCredentialUpsertion, SaslMechanism)>,
     errors: &mut HashMap<String, AlterationError>,
 ) {
+    // Kafka reports the first per-user validation/resource error. Once an
+    // error exists, later same-user rows must not replace it with DUPLICATE.
     if errors.contains_key(&upsertion.name) {
         return;
     }
 
+    // A pending prior deletion/upsertion means the previous same-user
+    // alteration was accepted so far; the second alteration converts that
+    // pending success into Kafka's DUPLICATE_RESOURCE result.
     if deletions.remove(&upsertion.name).is_some() || upsertions.remove(&upsertion.name).is_some() {
         errors.insert(upsertion.name, duplicate_alteration_error());
         return;
