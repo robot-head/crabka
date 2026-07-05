@@ -31,6 +31,24 @@ use crabka_admin_ui::{
 const LOGIN_PASSWORD_SENTINEL: &str = "server-fn-password-sentinel";
 const SESSION_SENTINEL: &str = "server-fn-session-sentinel";
 
+#[tokio::test]
+async fn health_router_returns_ok() {
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+
+    let response = crabka_admin_ui::server::health_router()
+        .oneshot(
+            Request::builder()
+                .uri("/healthz")
+                .body(Body::empty())
+                .expect("health request builds"),
+        )
+        .await
+        .expect("health route responds");
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+}
+
 #[test]
 fn app_state_carries_config_and_sessions() {
     let cfg = AdminUiConfig {
