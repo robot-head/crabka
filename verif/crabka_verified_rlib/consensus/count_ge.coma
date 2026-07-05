@@ -1,0 +1,37 @@
+(* #"/work/crates/verified/src/consensus.rs" 34 0 34 57 *)
+
+let%span sconsensus = "/work/crates/verified/src/consensus.rs" 33 10 33 17
+let%span sconsensus'0 = "/work/crates/verified/src/consensus.rs" 19 10 19 15
+let%span sconsensus'1 = "/work/crates/verified/src/consensus.rs" 22 8 27 9
+let%span sconsensus'2 = "/work/crates/verified/src/consensus.rs" 13 8 13 48
+
+use creusot.int.Int64
+use seq.Seq
+use int.Int
+
+function hwm_member_at [#"/work/crates/verified/src/consensus.rs" 11 0 11 62] (log_end: int) (s: Seq.seq Int64.t) (k: int) : int
+ = [%#sconsensus'2] if k = 0 then log_end else Int64.to_int (Seq.get s (k - 1))
+
+function count_ge_prefix [#"/work/crates/verified/src/consensus.rs" 20 0 20 76] (log_end: int) (s: Seq.seq Int64.t) (v: int) (limit: int) : int
+
+axiom count_ge_prefix_def:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [count_ge_prefix log_end s v limit]. count_ge_prefix log_end s v limit
+    = ([%#sconsensus'1] if limit <= 0 then
+      0
+    else
+      count_ge_prefix log_end s v (limit - 1) + (if hwm_member_at log_end s (limit - 1) >= v then 1 else 0)
+    )
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+constant log_end : int
+
+constant s : Seq.seq Int64.t
+
+constant v : int
+
+function count_ge [#"/work/crates/verified/src/consensus.rs" 34 0 34 57] (log_end: int) (s: Seq.seq Int64.t) (v: int) : int
+
+goal vc_count_ge: true

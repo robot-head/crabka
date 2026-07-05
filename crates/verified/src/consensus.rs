@@ -8,24 +8,171 @@ use creusot_std::prelude::*;
 /// Members of `{log_end} U s` with value >= `v` (the majority-replication witness).
 #[cfg(creusot)]
 #[logic]
-#[variant(s.len())]
-fn count_ge(log_end: Int, s: Seq<i64>, v: Int) -> Int {
+pub fn hwm_member_at(log_end: Int, s: Seq<i64>, k: Int) -> Int {
     pearlite! {
-        (if log_end >= v { 1 } else { 0 }) + count_ge_seq(s, v)
+        if k == 0 { log_end } else { s[k - 1]@ }
+    }
+}
+
+#[cfg(creusot)]
+#[logic]
+#[variant(limit)]
+pub fn count_ge_prefix(log_end: Int, s: Seq<i64>, v: Int, limit: Int) -> Int {
+    pearlite! {
+        if limit <= 0 {
+            0
+        } else {
+            count_ge_prefix(log_end, s, v, limit - 1)
+                + (if hwm_member_at(log_end, s, limit - 1) >= v { 1 } else { 0 })
+        }
     }
 }
 
 #[cfg(creusot)]
 #[logic]
 #[variant(s.len())]
-fn count_ge_seq(s: Seq<i64>, v: Int) -> Int {
-    pearlite! {
-        if s.len() == 0 {
-            0
+pub fn count_ge(log_end: Int, s: Seq<i64>, v: Int) -> Int {
+    pearlite! { count_ge_prefix(log_end, s, v, s.len() + 1) }
+}
+
+#[cfg(creusot)]
+#[logic]
+#[requires(0 <= limit && limit <= s.len() + 1)]
+#[requires(low <= high)]
+#[ensures(count_ge_prefix(log_end, s, low, limit) >= count_ge_prefix(log_end, s, high, limit))]
+#[variant(limit)]
+pub fn lemma_count_ge_prefix_monotone(log_end: Int, s: Seq<i64>, low: Int, high: Int, limit: Int) {
+    if limit > 0 {
+        lemma_count_ge_prefix_monotone(log_end, s, low, high, limit - 1);
+    }
+}
+
+#[cfg(creusot)]
+#[logic]
+#[requires(0 <= limit && limit <= s.len() + 1)]
+#[ensures(count_ge_prefix(log_end, s, v, limit) >= 0)]
+#[variant(limit)]
+pub fn lemma_count_ge_prefix_nonnegative(log_end: Int, s: Seq<i64>, v: Int, limit: Int) {
+    if limit > 0 {
+        lemma_count_ge_prefix_nonnegative(log_end, s, v, limit - 1);
+    }
+}
+
+#[cfg(creusot)]
+#[logic]
+#[requires(0 < limit && limit <= s.len() + 1)]
+#[requires(count_ge_prefix(log_end, s, v, limit) >= 1)]
+#[ensures(0 <= result && result < limit)]
+#[ensures(hwm_member_at(log_end, s, result) >= v)]
+#[ensures(count_ge_prefix(log_end, s, hwm_member_at(log_end, s, result), limit)
+    >= count_ge_prefix(log_end, s, v, limit))]
+#[variant(limit)]
+pub fn least_hwm_member_ge_index(log_end: Int, s: Seq<i64>, v: Int, limit: Int) -> Int {
+    if limit <= 1 {
+        0
+    } else {
+        let last_index = limit - 1;
+        let last_member = hwm_member_at(log_end, s, last_index);
+        let previous_count = count_ge_prefix(log_end, s, v, last_index);
+        if last_member >= v {
+            if previous_count >= 1 {
+                let previous_index = least_hwm_member_ge_index(log_end, s, v, last_index);
+                let previous_member = hwm_member_at(log_end, s, previous_index);
+                if last_member <= previous_member {
+                    lemma_count_ge_prefix_monotone(
+                        log_end,
+                        s,
+                        last_member,
+                        previous_member,
+                        last_index,
+                    );
+                    proof_assert!(
+                        count_ge_prefix(log_end, s, last_member, last_index)
+                            >= count_ge_prefix(log_end, s, v, last_index)
+                    );
+                    proof_assert!(
+                        count_ge_prefix(log_end, s, last_member, limit)
+                            == count_ge_prefix(log_end, s, last_member, last_index) + 1
+                    );
+                    proof_assert!(
+                        count_ge_prefix(log_end, s, v, limit)
+                            == count_ge_prefix(log_end, s, v, last_index) + 1
+                    );
+                    proof_assert!(
+                        count_ge_prefix(log_end, s, last_member, limit)
+                            >= count_ge_prefix(log_end, s, v, limit)
+                    );
+                    last_index
+                } else {
+                    proof_assert!(previous_member <= last_member);
+                    proof_assert!(
+                        count_ge_prefix(log_end, s, previous_member, limit)
+                            == count_ge_prefix(log_end, s, previous_member, last_index) + 1
+                    );
+                    proof_assert!(
+                        count_ge_prefix(log_end, s, v, limit)
+                            == count_ge_prefix(log_end, s, v, last_index) + 1
+                    );
+                    proof_assert!(
+                        count_ge_prefix(log_end, s, previous_member, limit)
+                            >= count_ge_prefix(log_end, s, v, limit)
+                    );
+                    previous_index
+                }
+            } else {
+                lemma_count_ge_prefix_nonnegative(log_end, s, v, last_index);
+                lemma_count_ge_prefix_nonnegative(log_end, s, last_member, last_index);
+                proof_assert!(previous_count <= 0);
+                proof_assert!(previous_count == 0);
+                proof_assert!(
+                    count_ge_prefix(log_end, s, last_member, limit)
+                        == count_ge_prefix(log_end, s, last_member, last_index) + 1
+                );
+                proof_assert!(count_ge_prefix(log_end, s, last_member, limit) >= 1);
+                proof_assert!(
+                    count_ge_prefix(log_end, s, v, limit)
+                        == count_ge_prefix(log_end, s, v, last_index) + 1
+                );
+                proof_assert!(count_ge_prefix(log_end, s, v, limit) <= 1);
+                proof_assert!(count_ge_prefix(log_end, s, last_member, limit) >= 1
+                    && count_ge_prefix(log_end, s, v, limit) <= 1
+                    ==> count_ge_prefix(log_end, s, last_member, limit)
+                        >= count_ge_prefix(log_end, s, v, limit));
+                proof_assert!(
+                    count_ge_prefix(log_end, s, last_member, limit)
+                        >= count_ge_prefix(log_end, s, v, limit)
+                );
+                last_index
+            }
         } else {
-            (if s[0]@ >= v { 1 } else { 0 }) + count_ge_seq(s.subsequence(1, s.len()), v)
+            proof_assert!(count_ge_prefix(log_end, s, v, last_index) >= 1);
+            least_hwm_member_ge_index(log_end, s, v, last_index)
         }
     }
+}
+
+#[cfg(creusot)]
+#[requires(1 <= majority@ && majority@ <= s@.len() + 1)]
+#[ensures(forall<v: Int> count_ge(log_end@, s@, v) >= majority@
+    ==> exists<k: Int> 0 <= k && k < s@.len() + 1
+        && hwm_member_at(log_end@, s@, k) >= v
+        && count_ge(log_end@, s@, hwm_member_at(log_end@, s@, k)) >= majority@)]
+pub fn lemma_hwm_threshold_has_member(log_end: i64, s: &[i64], majority: usize) {
+    proof_assert!(forall<v: Int> count_ge(log_end@, s@, v) >= majority@ ==>
+        exists<k: Int> k == least_hwm_member_ge_index(log_end@, s@, v, s@.len() + 1)
+            && 0 <= k && k < s@.len() + 1
+            && hwm_member_at(log_end@, s@, k) >= v
+            && count_ge(log_end@, s@, hwm_member_at(log_end@, s@, k)) >= majority@);
+}
+
+#[cfg(creusot)]
+#[requires(1 <= majority@ && majority@ <= s@.len() + 1)]
+#[requires(forall<k: Int> 0 <= k && k < s@.len() + 1
+    && count_ge(log_end@, s@, hwm_member_at(log_end@, s@, k)) >= majority@
+    ==> hwm_member_at(log_end@, s@, k) <= best@)]
+#[ensures(forall<v: Int> count_ge(log_end@, s@, v) >= majority@ ==> v <= best@)]
+pub fn lemma_hwm_member_maximal(log_end: i64, s: &[i64], majority: usize, best: i64) {
+    lemma_hwm_threshold_has_member(log_end, s, majority);
 }
 
 /// Deterministic per-`(node, epoch)` election-timeout jitter in `[0, base_ms)`,
@@ -61,6 +208,39 @@ pub const fn log_is_up_to_date(
     cand_epoch > my_epoch || (cand_epoch == my_epoch && cand_offset >= my_end)
 }
 
+#[requires(1 <= majority@ && majority@ <= follower_offsets@.len() + 1)]
+#[ensures(result == (count_ge(log_end@, follower_offsets@, cand@) >= majority@))]
+fn candidate_has_majority(
+    log_end: i64,
+    follower_offsets: &[i64],
+    cand: i64,
+    majority: usize,
+) -> bool {
+    let mut count: usize = 0;
+    if log_end >= cand && count < majority {
+        count += 1;
+    }
+
+    let n = follower_offsets.len();
+    let mut j = 0;
+    #[invariant(j@ <= n@)]
+    #[invariant({
+        let seen = count_ge_prefix(log_end@, follower_offsets@, cand@, j@ + 1);
+        count@ == if seen < majority@ { seen } else { majority@ }
+    })]
+    #[invariant(count@ <= majority@)]
+    #[variant(n@ - j@)]
+    while j < n {
+        let x = follower_offsets[j];
+        if x >= cand && count < majority {
+            count += 1;
+        }
+        j += 1;
+    }
+
+    count >= majority
+}
+
 /// The HWM as the majority-th largest match offset across the leader's own
 /// log end and every follower's acknowledged fetch offset, gated on the
 /// leader-completeness rule (Raft Fig.8 / KIP-595): the HWM may only advance
@@ -93,33 +273,30 @@ pub fn recompute_high_watermark(
 ) -> i64 {
     let n = follower_offsets.len();
     let mut majority_offset = i64::MIN;
+    if candidate_has_majority(log_end, follower_offsets, log_end, majority) {
+        majority_offset = log_end;
+    }
+
     let mut i = 0;
-    while i <= n {
-        let cand = if i == 0 {
-            log_end
-        } else {
-            follower_offsets[i - 1]
-        };
-        if cand > majority_offset {
-            let mut count: usize = 0;
-            let mut j = 0;
-            while j <= n {
-                let x = if j == 0 {
-                    log_end
-                } else {
-                    follower_offsets[j - 1]
-                };
-                if x >= cand {
-                    count += 1;
-                }
-                j += 1;
-            }
-            if count >= majority {
-                majority_offset = cand;
-            }
+    #[invariant(i@ <= n@)]
+    #[invariant(majority_offset@ <= log_end@)]
+    #[invariant(majority_offset@ == -9223372036854775807 - 1
+        || count_ge(log_end@, follower_offsets@, majority_offset@) >= majority@)]
+    #[invariant(forall<k: Int> 0 <= k && k < i@ + 1
+        && count_ge(log_end@, follower_offsets@, hwm_member_at(log_end@, follower_offsets@, k)) >= majority@
+        ==> hwm_member_at(log_end@, follower_offsets@, k) <= majority_offset@)]
+    #[variant(n@ - i@)]
+    while i < n {
+        let cand = follower_offsets[i];
+        if cand > majority_offset
+            && candidate_has_majority(log_end, follower_offsets, cand, majority)
+        {
+            majority_offset = cand;
         }
         i += 1;
     }
+    #[cfg(creusot)]
+    lemma_hwm_member_maximal(log_end, follower_offsets, majority, majority_offset);
     let gated = if majority_offset > epoch_start_offset {
         majority_offset
     } else {

@@ -22,6 +22,10 @@ use creusot_std::prelude::*;
 pub fn offset_index_lookup(entries: &[(u32, u32)], target: u32) -> u32 {
     let mut lo = 0usize; // entries[..lo] all have rel <= target
     let mut hi = entries.len(); // entries[hi..] all have rel > target
+    #[invariant(lo@ <= hi@ && hi@ <= entries@.len())]
+    #[invariant(forall<i: Int> 0 <= i && i < lo@ ==> entries@[i].0@ <= target@)]
+    #[invariant(forall<i: Int> hi@ <= i && i < entries@.len() ==> entries@[i].0@ > target@)]
+    #[variant(hi - lo)]
     while lo < hi {
         let mid = lo + (hi - lo) / 2;
         if entries[mid].0 <= target {

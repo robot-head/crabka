@@ -1,0 +1,36 @@
+(* #"/work/crates/verified/src/consensus.rs" 20 0 20 76 *)
+
+let%span sconsensus = "/work/crates/verified/src/consensus.rs" 19 10 19 15
+let%span sconsensus'0 = "/work/crates/verified/src/consensus.rs" 13 8 13 48
+let%span swell_founded = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/well_founded.rs" 43 8 43 33
+
+use creusot.int.Int64
+use seq.Seq
+use int.Int
+
+predicate well_founded_relation_Int [@inline:trivial] (self: int) (other: int) =
+  [%#swell_founded] self >= 0 /\ self > other
+
+meta "rewrite_def" predicate well_founded_relation_Int
+
+function hwm_member_at [#"/work/crates/verified/src/consensus.rs" 11 0 11 62] (log_end: int) (s: Seq.seq Int64.t) (k: int) : int
+ = [%#sconsensus'0] if k = 0 then log_end else Int64.to_int (Seq.get s (k - 1))
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+constant log_end : int
+
+constant s : Seq.seq Int64.t
+
+constant v : int
+
+constant limit : int
+
+function count_ge_prefix [#"/work/crates/verified/src/consensus.rs" 20 0 20 76] (log_end: int) (s: Seq.seq Int64.t) (v: int) (limit: int) : int
+
+goal vc_count_ge_prefix: if limit <= 0 then
+    true
+  else
+    [@expl:variant decreases] well_founded_relation_Int ([%#sconsensus] limit) ([%#sconsensus] limit - 1)

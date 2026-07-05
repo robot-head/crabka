@@ -1,0 +1,8 @@
+{
+  "profile": [],
+  "proofs": {
+    "Coma": {
+      "vc_log_is_up_to_date": { "prover": "alt-ergo", "time": 0.008 }
+    }
+  }
+}

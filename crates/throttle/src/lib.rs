@@ -19,7 +19,7 @@ pub use runtime::{ThrottleState, TokenBucket};
 /// saturating sum would exceed `burst`, which is the only case that matters.
 #[cfg(creusot)]
 #[logic]
-fn capped(available: Int, refill: Int, burst: Int) -> Int {
+pub fn capped(available: Int, refill: Int, burst: Int) -> Int {
     if available + refill <= burst {
         available + refill
     } else {

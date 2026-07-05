@@ -4,9 +4,12 @@
 
 use creusot_std::prelude::*;
 
+#[cfg(creusot)]
+use std::clone::Clone;
+
 /// Per-record facts the retain decision needs.
-#[cfg_attr(creusot, derive(DeepModel))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(creusot, derive(Clone, Copy, DeepModel))]
+#[cfg_attr(not(creusot), derive(Clone, Copy, Debug, PartialEq, Eq))]
 pub struct RecordMeta {
     /// Whether the record has a key.
     pub has_key: bool,
@@ -15,8 +18,8 @@ pub struct RecordMeta {
 }
 
 /// Per-batch facts the retain decision needs.
-#[cfg_attr(creusot, derive(DeepModel))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(creusot, derive(Clone, Copy, DeepModel))]
+#[cfg_attr(not(creusot), derive(Clone, Copy, Debug, PartialEq, Eq))]
 pub struct BatchMeta {
     /// Whether the batch is a transactional control batch.
     pub is_control: bool,
@@ -28,8 +31,8 @@ pub struct BatchMeta {
 }
 
 /// Whether a producer's transactional DATA still survives compaction.
-#[cfg_attr(creusot, derive(DeepModel))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(creusot, derive(Clone, Copy, DeepModel))]
+#[cfg_attr(not(creusot), derive(Clone, Copy, Debug, PartialEq, Eq))]
 pub enum TxnDataState {
     /// `producer_id < 0`: not a transactional producer.
     NotTransactional,
@@ -40,8 +43,8 @@ pub enum TxnDataState {
 }
 
 /// What to do with a record during the rewrite pass.
-#[cfg_attr(creusot, derive(DeepModel))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(creusot, derive(Clone, Copy, DeepModel))]
+#[cfg_attr(not(creusot), derive(Clone, Copy, Debug, PartialEq, Eq))]
 pub enum RetainDecision {
     /// Keep the record as-is.
     Keep,
@@ -54,6 +57,21 @@ pub enum RetainDecision {
 
 /// Compute the delete horizon timestamp: `now + delete.retention.ms`. The
 /// tombstone/marker is retained until wall-clock reaches this value.
+#[cfg(creusot)]
+#[logic]
+pub fn compute_horizon_model(now_ms: i64, delete_retention_ms: i64) -> Int {
+    pearlite! {
+        if now_ms@ + delete_retention_ms@ > 9223372036854775807 {
+            9223372036854775807
+        } else if now_ms@ + delete_retention_ms@ < -9223372036854775807 - 1 {
+            -9223372036854775807 - 1
+        } else {
+            now_ms@ + delete_retention_ms@
+        }
+    }
+}
+
+#[ensures(result@ == compute_horizon_model(now_ms, delete_retention_ms))]
 #[ensures(result@ == if now_ms@ + delete_retention_ms@ > 9223372036854775807 {
     9223372036854775807
 } else if now_ms@ + delete_retention_ms@ < -9223372036854775807 - 1 {
@@ -76,7 +94,8 @@ pub const fn compute_horizon(now_ms: i64, delete_retention_ms: i64) -> i64 {
 #[ensures(batch.is_control && (txn == TxnDataState::DataSurvives || txn == TxnDataState::NotTransactional)
     ==> result == RetainDecision::Keep)]
 #[ensures(batch.is_control && txn == TxnDataState::DataFullyGone && batch.existing_horizon == None
-    ==> result == RetainDecision::SetHorizon(compute_horizon(now_ms, delete_retention_ms)))]
+    ==> exists<h: i64> result == RetainDecision::SetHorizon(h)
+        && h@ == compute_horizon_model(now_ms, delete_retention_ms))]
 #[ensures(forall<h: i64> batch.is_control && txn == TxnDataState::DataFullyGone
         && batch.existing_horizon == Some(h)
     ==> result == (if now_ms@ >= h@ { RetainDecision::Delete } else { RetainDecision::Keep }))]
@@ -86,7 +105,8 @@ pub const fn compute_horizon(now_ms: i64, delete_retention_ms: i64) -> i64 {
     ==> result == RetainDecision::Keep)]
 #[ensures(!batch.is_control && rec.has_key && is_newest_for_key && !rec.has_value
         && batch.existing_horizon == None
-    ==> result == RetainDecision::SetHorizon(compute_horizon(now_ms, delete_retention_ms)))]
+    ==> exists<h: i64> result == RetainDecision::SetHorizon(h)
+        && h@ == compute_horizon_model(now_ms, delete_retention_ms))]
 #[ensures(forall<h: i64> !batch.is_control && rec.has_key && is_newest_for_key && !rec.has_value
         && batch.existing_horizon == Some(h)
     ==> result == (if now_ms@ >= h@ { RetainDecision::Delete } else { RetainDecision::Keep }))]

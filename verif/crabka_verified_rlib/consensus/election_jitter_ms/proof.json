@@ -1,0 +1,10 @@
+{
+  "profile": [],
+  "proofs": {
+    "Coma": {
+      "vc_election_jitter_ms": { "prover": "alt-ergo", "time": 0.017 },
+      "vc_from_u64": { "prover": "alt-ergo", "time": 0.004 },
+      "vc_wrapping_mul": { "prover": "alt-ergo", "time": 0.004 }
+    }
+  }
+}
