@@ -67,21 +67,7 @@ pub fn scan(log_dir: &Path) -> Result<Vec<(String, i32)>, BrokerError> {
         std::fs::create_dir_all(log_dir)?;
         return Ok(Vec::new());
     }
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(log_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let Ok(name) = entry.file_name().into_string() else {
-            continue; // non-UTF-8 dir name: ignore
-        };
-        if let Some((topic, partition)) = parse_partition_dir(&name) {
-            out.push((topic, partition));
-        }
-    }
-    out.sort();
-    Ok(out)
+    scan_existing(log_dir, parse_partition_dir)
 }
 
 /// Walk `log_dir` and return every `(topic, partition)` whose
@@ -93,6 +79,13 @@ pub fn scan_future(log_dir: &Path) -> Result<Vec<(String, i32)>, BrokerError> {
     if !log_dir.exists() {
         return Ok(Vec::new());
     }
+    scan_existing(log_dir, parse_future_partition_dir)
+}
+
+fn scan_existing(
+    log_dir: &Path,
+    parse_dir_name: fn(&str) -> Option<(String, i32)>,
+) -> Result<Vec<(String, i32)>, BrokerError> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(log_dir)? {
         let entry = entry?;
@@ -102,7 +95,7 @@ pub fn scan_future(log_dir: &Path) -> Result<Vec<(String, i32)>, BrokerError> {
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if let Some((topic, partition)) = parse_future_partition_dir(&name) {
+        if let Some((topic, partition)) = parse_dir_name(&name) {
             out.push((topic, partition));
         }
     }
