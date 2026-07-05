@@ -2749,6 +2749,7 @@ version = "0.3.8"
 dependencies = [
  "assert2",
  "bytes",
+ "crabka-verified",
  "crabka-voters",
  "serde",
  "tracing",
@@ -2765,6 +2766,7 @@ dependencies = [
  "crabka-compression",
  "crabka-ids",
  "crabka-protocol",
+ "crabka-verified",
  "hex",
  "mutants",
  "proptest",
@@ -3474,6 +3476,7 @@ name = "crabka-throttle"
 version = "0.3.8"
 dependencies = [
  "assert2",
+ "creusot-std",
  "derive_more",
  "proptest",
  "qubit-clock",
@@ -3561,6 +3564,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-verified"
+version = "0.3.8"
+dependencies = [
+ "assert2",
+ "creusot-std",
+ "proptest",
+]
+
+[[package]]
 name = "crabka-voters"
 version = "0.3.8"
 dependencies = [
@@ -3586,6 +3598,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "creusot-std"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a77f30cd8e0bba94af3627c0652816b8541a03f79e08fec08a10994f460c778"
+dependencies = [
+ "creusot-std-proc",
+ "num-rational",
+]
+
+[[package]]
+name = "creusot-std-proc"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97c5a41f2030d728a025673cbf19e43fb5ff9c2856fadcb9de69d786cb231528"
+dependencies = [
+ "pearlite-syn",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
+ "uuid",
 ]
 
 [[package]]
@@ -8661,6 +8696,17 @@ dependencies = [
  "hmac",
  "kdf",
  "sha2 0.11.0",
+]
+
+[[package]]
+name = "pearlite-syn"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b14a6d97c13d0fc76502a3c380ad776324ab61a2966c1baac07c2510c2b5100e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.118",
 ]
 
 [[package]]

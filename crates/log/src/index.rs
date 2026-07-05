@@ -98,12 +98,7 @@ impl OffsetIndex {
     /// or 0 if no entries are present.
     #[must_use]
     pub fn lookup(&self, target: u32) -> u32 {
-        // Binary search for the largest entry <= target.
-        match self.entries.binary_search_by_key(&target, |&(rel, _)| rel) {
-            Ok(i) => self.entries[i].1,
-            Err(0) => 0,
-            Err(i) => self.entries[i - 1].1,
-        }
+        crabka_verified::offset_index_lookup(&self.entries, target)
     }
 
     /// Truncate entries (and the on-disk file) so that all entries with

@@ -31,8 +31,9 @@ sim = ["dep:serde"]
 # browser playground.
 [dependencies]
 crabka-voters = { version = "0.3.8", path = "../voters" }
+crabka-verified = { version = "0.3.8", path = "../verified" }
 bytes = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["js"] }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"], optional = true }
 

@@ -1,0 +1,18 @@
+(* #"/work/crates/verified/src/compaction.rs" 46 27 46 32 *)
+
+(* <compaction::RetainDecision as std::clone::Clone> *)
+
+use creusot.int.Int64
+use creusot.prelude.Any
+
+type t_RetainDecision = Keep | SetHorizon Int64.t | Delete
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let clone_RetainDecision [#"/work/crates/verified/src/compaction.rs" 46 27 46 32] (self: t_RetainDecision)
+  (return (x: t_RetainDecision)) = (! bb0
+  [ bb0 = s0 [ s0 = [ &_ret <- self ] s1 | s1 = return {_ret} ] ]
+  [ & _ret: t_RetainDecision = Any.any_l () | & self: t_RetainDecision = self ])
+  [ return (result: t_RetainDecision) -> (! return {result}) ]

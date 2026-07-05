@@ -1,0 +1,136 @@
+(* #"/work/crates/verified/src/consensus.rs" 213 0 218 9 *)
+
+let%span sconsensus = "/work/crates/verified/src/consensus.rs" 219 27 219 28
+let%span sconsensus'0 = "/work/crates/verified/src/consensus.rs" 221 17 221 18
+let%span sconsensus'1 = "/work/crates/verified/src/consensus.rs" 221 8 221 18
+let%span sconsensus'2 = "/work/crates/verified/src/consensus.rs" 224 12 224 34
+let%span sconsensus'3 = "/work/crates/verified/src/consensus.rs" 225 16 225 17
+let%span sconsensus'4 = "/work/crates/verified/src/consensus.rs" 232 14 232 21
+let%span sconsensus'5 = "/work/crates/verified/src/consensus.rs" 231 16 231 35
+let%span sconsensus'6 = "/work/crates/verified/src/consensus.rs" 228 8 228 79
+let%span sconsensus'7 = "/work/crates/verified/src/consensus.rs" 226 16 226 24
+let%span sconsensus'8 = "/work/crates/verified/src/consensus.rs" 234 16 234 35
+let%span sconsensus'9 = "/work/crates/verified/src/consensus.rs" 236 21 236 22
+let%span sconsensus'10 = "/work/crates/verified/src/consensus.rs" 236 12 236 22
+let%span sconsensus'11 = "/work/crates/verified/src/consensus.rs" 238 13 238 14
+let%span sconsensus'12 = "/work/crates/verified/src/consensus.rs" 238 8 238 14
+let%span sconsensus'13 = "/work/crates/verified/src/consensus.rs" 211 11 211 69
+let%span sconsensus'14 = "/work/crates/verified/src/consensus.rs" 212 10 212 79
+let%span sconsensus'15 = "/work/crates/verified/src/consensus.rs" 19 10 19 15
+let%span sconsensus'16 = "/work/crates/verified/src/consensus.rs" 22 8 27 9
+let%span sconsensus'17 = "/work/crates/verified/src/consensus.rs" 33 10 33 17
+let%span sconsensus'18 = "/work/crates/verified/src/consensus.rs" 35 16 35 59
+let%span sconsensus'19 = "/work/crates/verified/src/consensus.rs" 13 8 13 48
+let%span swell_founded = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/well_founded.rs" 43 8 43 33
+let%span sslice = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/std/slice.rs" 331 18 331 40
+
+use creusot.int.UInt64
+use creusot.int.Int64
+use creusot.slice.Slice64
+use seq.Seq
+use creusot.slice.Slice64Ops
+use creusot.prelude.Any
+use int.Int
+
+let len_i64 (self_: Slice64.slice Int64.t) (return (x: UInt64.t)) = any
+  [ return (result: UInt64.t) -> {[@stop_split] [@expl:len ensures] [%#sslice] Seq.length (Slice64.view self_)
+    = UInt64.t'int result}
+    (! return {result}) ]
+
+predicate well_founded_relation_Int [@inline:trivial] (self: int) (other: int) =
+  [%#swell_founded] self >= 0 /\ self > other
+
+meta "rewrite_def" predicate well_founded_relation_Int
+
+function hwm_member_at [#"/work/crates/verified/src/consensus.rs" 11 0 11 62] (log_end: int) (s: Seq.seq Int64.t) (k: int) : int
+ = [%#sconsensus'19] if k = 0 then log_end else Int64.to_int (Seq.get s (k - 1))
+
+function count_ge_prefix [#"/work/crates/verified/src/consensus.rs" 20 0 20 76] (log_end: int) (s: Seq.seq Int64.t) (v: int) (limit: int) : int
+
+axiom count_ge_prefix_def:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [count_ge_prefix log_end s v limit]. count_ge_prefix log_end s v limit
+    = ([%#sconsensus'16] if limit <= 0 then
+      0
+    else
+      count_ge_prefix log_end s v (limit - 1) + (if hwm_member_at log_end s (limit - 1) >= v then 1 else 0)
+    )
+
+function count_ge [#"/work/crates/verified/src/consensus.rs" 34 0 34 57] (log_end: int) (s: Seq.seq Int64.t) (v: int) : int
+
+axiom count_ge_def: forall log_end: int, s: Seq.seq Int64.t, v: int [count_ge log_end s v]. count_ge log_end s v
+    = ([%#sconsensus'18] count_ge_prefix log_end s v (Seq.length s + 1))
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let candidate_has_majority [#"/work/crates/verified/src/consensus.rs" 213 0 218 9] (log_end: Int64.t)
+  (follower_offsets: Slice64.slice Int64.t) (cand: Int64.t) (majority: UInt64.t) (return (x: bool)) =
+{[@stop_split] [@expl:candidate_has_majority requires] [%#sconsensus'13] 1 <= UInt64.t'int majority
+  /\ UInt64.t'int majority <= Seq.length (Slice64.view follower_offsets) + 1}
+  (! bb0
+  [ bb0 = s0
+    [ s0 = [ &count <- [%#sconsensus] (0: UInt64.t) ] s1
+    | s1 = [ &_15 <- Int64.ge log_end cand ] s2
+    | s2 = any [ br0 -> {_15 = false} (! bb6) | br1 -> {_15} (! bb1) ] ]
+  | bb1 = s0
+    [ s0 = [ &_18 <- UInt64.lt count majority ] s1 | s1 = any [ br0 -> {_18 = false} (! bb6) | br1 -> {_18} (! bb2) ] ]
+  | bb2 = s0
+    [ s0 = UInt64.add [%#sconsensus'1] {count} {[%#sconsensus'0] (1: UInt64.t)}
+        (fun (_x: UInt64.t) -> [ &count <- _x ] s1)
+    | s1 = bb6 ]
+  | bb6 = s0
+    [ s0 = len_i64 [%#sconsensus'2] {follower_offsets} (fun (_x: UInt64.t) -> [ &n <- _x ] s1)
+    | s1 = [ &j <- [%#sconsensus'3] (0: UInt64.t) ] s2
+    | s2 = bb8 ]
+  | bb8 = bb8invariant
+    [ bb8 = {[@expl:loop variant] well_founded_relation_Int variant_old_bb8 ([%#sconsensus'4] UInt64.t'int n
+      - UInt64.t'int j)}
+      bb8invariant
+    | bb8invariant = {[@expl:loop invariant #0] [%#sconsensus'7] UInt64.t'int j <= UInt64.t'int n}
+      {[@expl:loop invariant #1] [%#sconsensus'6] let seen = count_ge_prefix (Int64.to_int log_end) (Slice64.view follower_offsets) (Int64.to_int cand) (UInt64.t'int j
+      + 1) in UInt64.t'int count = (if seen < UInt64.t'int majority then seen else UInt64.t'int majority)}
+      {[@expl:loop invariant #2] [%#sconsensus'5] UInt64.t'int count <= UInt64.t'int majority}
+      (! [ &variant_old_bb8 <- [%#sconsensus'4] UInt64.t'int n - UInt64.t'int j ] s0)
+      [ s0 = [ &_43 <- UInt64.lt j n ] s1 | s1 = any [ br0 -> {_43 = false} (! bb18) | br1 -> {_43} (! bb10) ] ]
+      [ bb10 = s0
+        [ s0 = [ &_47 <- j ] s1
+        | s1 = [ &_48 <- Slice64Ops.length follower_offsets ] s2
+        | s2 = [ &_49 <- UInt64.lt _47 _48 ] s3
+        | s3 = {[@expl:index in bounds] [%#sconsensus'8] _49} s4
+        | s4 = Slice64Ops.get [%#sconsensus'8] <Int64.t> {follower_offsets} {_47} (fun (r: Int64.t) -> [ &x <- r ] s5)
+        | s5 = [ &_51 <- Int64.ge x cand ] s6
+        | s6 = any [ br0 -> {_51 = false} (! bb17) | br1 -> {_51} (! bb12) ] ]
+      | bb12 = s0
+        [ s0 = [ &_54 <- UInt64.lt count majority ] s1
+        | s1 = any [ br0 -> {_54 = false} (! bb17) | br1 -> {_54} (! bb13) ] ]
+      | bb13 = s0
+        [ s0 = UInt64.add [%#sconsensus'10] {count} {[%#sconsensus'9] (1: UInt64.t)}
+            (fun (_x: UInt64.t) -> [ &count <- _x ] s1)
+        | s1 = bb17 ]
+      | bb17 = s0
+        [ s0 = UInt64.add [%#sconsensus'12] {j} {[%#sconsensus'11] (1: UInt64.t)}
+            (fun (_x: UInt64.t) -> [ &j <- _x ] s1)
+        | s1 = bb8 ] ] ]
+  | bb18 = s0 [ s0 = [ &_ret <- UInt64.ge count majority ] s1 | s1 = return {_ret} ] ]
+  [ & _ret: bool = Any.any_l ()
+  | & log_end: Int64.t = log_end
+  | & follower_offsets: Slice64.slice Int64.t = follower_offsets
+  | & cand: Int64.t = cand
+  | & majority: UInt64.t = majority
+  | & count: UInt64.t = Any.any_l ()
+  | & _15: bool = Any.any_l ()
+  | & _18: bool = Any.any_l ()
+  | & n: UInt64.t = Any.any_l ()
+  | & j: UInt64.t = Any.any_l ()
+  | & _43: bool = Any.any_l ()
+  | & x: Int64.t = Any.any_l ()
+  | & _47: UInt64.t = Any.any_l ()
+  | & _48: UInt64.t = Any.any_l ()
+  | & _49: bool = Any.any_l ()
+  | & _51: bool = Any.any_l ()
+  | & _54: bool = Any.any_l ()
+  | & variant_old_bb8: int = Any.any_l () ])
+  [ return (result: bool) -> {[@stop_split] [@expl:candidate_has_majority ensures] [%#sconsensus'14] result
+    = (count_ge (Int64.to_int log_end) (Slice64.view follower_offsets) (Int64.to_int cand) >= UInt64.t'int majority)}
+    (! return {result}) ]

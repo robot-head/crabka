@@ -1,0 +1,82 @@
+name: publish-creusot-image
+
+# Publishes the pinned Creusot verifier image used by CI proof replay.
+# This is a dev/CI-only, single-arch x86_64 image. It is not a shipped
+# broker artifact and intentionally does not produce release attestations.
+#
+# GHCR packages are private by default after the first publish. Make
+# ghcr.io/robot-head/crabka-creusot public so unauthenticated CI pulls work.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.creusot-version'
+      - 'packaging/melange/creusot-toolchain.yaml'
+      - 'packaging/apko/creusot-toolchain.yaml'
+      - 'tools/build-creusot-image.sh'
+      - '.github/workflows/publish-creusot-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-creusot-image-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  MELANGE_VERSION: v0.54.0
+  APKO_VERSION: v1.2.17
+
+jobs:
+  publish:
+    name: Publish x86_64 dev/CI verifier image
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: Install melange and apko
+        run: |
+          set -euo pipefail
+          go install "chainguard.dev/melange@${MELANGE_VERSION}"
+          go install "chainguard.dev/apko@${APKO_VERSION}"
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve pinned image
+        id: image
+        run: |
+          set -euo pipefail
+          PIN="$(tr -d '[:space:]' < .creusot-version)"
+          if [[ -z "${PIN}" ]]; then
+            echo "::error::.creusot-version is empty" >&2
+            exit 1
+          fi
+
+          IMAGE="ghcr.io/robot-head/crabka-creusot:${PIN}"
+          echo "pin=${PIN}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Build, load, and smoke-test image
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          MELANGE_RUNNER: docker
+        run: ./tools/build-creusot-image.sh "${IMAGE}"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push pinned image
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: docker push "${IMAGE}"

@@ -1,0 +1,23 @@
+[package]
+name = "crabka-verified"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Formally verified pure kernels (Creusot) shared by Crabka's consensus and log crates"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-verified"
+keywords = ["kafka", "verification", "creusot", "crabka"]
+categories = ["algorithms"]
+
+[lints]
+workspace = true
+
+[dependencies]
+creusot-std = "0.12.0"
+
+[dev-dependencies]
+assert2 = { workspace = true }
+proptest = { workspace = true }

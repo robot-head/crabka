@@ -1,0 +1,228 @@
+(* #"/work/crates/verified/src/consensus.rs" 70 0 70 86 *)
+
+let%span sconsensus = "/work/crates/verified/src/consensus.rs" 69 10 69 15
+let%span sconsensus'0 = "/work/crates/verified/src/consensus.rs" 63 11 63 44
+let%span sconsensus'1 = "/work/crates/verified/src/consensus.rs" 64 11 64 53
+let%span sconsensus'2 = "/work/crates/verified/src/consensus.rs" 65 10 65 39
+let%span sconsensus'3 = "/work/crates/verified/src/consensus.rs" 66 10 66 48
+let%span sconsensus'4 = "/work/crates/verified/src/consensus.rs" 67 10 68 44
+let%span sconsensus'5 = "/work/crates/verified/src/consensus.rs" 40 11 40 45
+let%span sconsensus'6 = "/work/crates/verified/src/consensus.rs" 41 11 41 22
+let%span sconsensus'7 = "/work/crates/verified/src/consensus.rs" 42 10 42 93
+let%span sconsensus'8 = "/work/crates/verified/src/consensus.rs" 52 11 52 45
+let%span sconsensus'9 = "/work/crates/verified/src/consensus.rs" 53 10 53 52
+let%span sconsensus'10 = "/work/crates/verified/src/consensus.rs" 19 10 19 15
+let%span sconsensus'11 = "/work/crates/verified/src/consensus.rs" 22 8 27 9
+let%span sconsensus'12 = "/work/crates/verified/src/consensus.rs" 13 8 13 48
+let%span sconsensus'13 = "/work/crates/verified/src/consensus.rs" 43 10 43 15
+let%span sconsensus'14 = "/work/crates/verified/src/consensus.rs" 45 4 47 5
+let%span sconsensus'15 = "/work/crates/verified/src/consensus.rs" 54 10 54 15
+let%span sconsensus'16 = "/work/crates/verified/src/consensus.rs" 56 4 58 5
+let%span swell_founded = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/well_founded.rs" 43 8 43 33
+
+use creusot.int.Int64
+use seq.Seq
+use int.Int
+
+function hwm_member_at [#"/work/crates/verified/src/consensus.rs" 11 0 11 62] (log_end: int) (s: Seq.seq Int64.t) (k: int) : int
+ = [%#sconsensus'12] if k = 0 then log_end else Int64.to_int (Seq.get s (k - 1))
+
+function count_ge_prefix [#"/work/crates/verified/src/consensus.rs" 20 0 20 76] (log_end: int) (s: Seq.seq Int64.t) (v: int) (limit: int) : int
+
+axiom count_ge_prefix_def:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [count_ge_prefix log_end s v limit]. count_ge_prefix log_end s v limit
+    = ([%#sconsensus'11] if limit <= 0 then
+      0
+    else
+      count_ge_prefix log_end s v (limit - 1) + (if hwm_member_at log_end s (limit - 1) >= v then 1 else 0)
+    )
+
+predicate well_founded_relation_Int [@inline:trivial] (self: int) (other: int) =
+  [%#swell_founded] self >= 0 /\ self > other
+
+meta "rewrite_def" predicate well_founded_relation_Int
+
+function lemma_count_ge_prefix_monotone [#"/work/crates/verified/src/consensus.rs" 44 0 44 97] (log_end: int) (s: Seq.seq Int64.t) (low: int) (high: int) (limit: int) : ()
+
+axiom lemma_count_ge_prefix_monotone_def:
+  forall log_end: int, s: Seq.seq Int64.t, low: int, high: int, limit: int [lemma_count_ge_prefix_monotone log_end s low high limit]. ([%#sconsensus'5] 0
+        <= limit
+      /\ limit <= Seq.length s + 1)
+    -> ([%#sconsensus'6] low <= high)
+    -> lemma_count_ge_prefix_monotone log_end s low high limit
+    = ([%#sconsensus'14] if limit > 0 then
+      let _ = lemma_count_ge_prefix_monotone log_end s low high (limit - 1) in ()
+    else
+      ()
+    )
+
+axiom lemma_count_ge_prefix_monotone_spec:
+  forall log_end: int, s: Seq.seq Int64.t, low: int, high: int, limit: int. ([%#sconsensus'5] 0 <= limit
+      /\ limit <= Seq.length s + 1)
+    -> ([%#sconsensus'6] low <= high)
+    -> ([%#sconsensus'7] count_ge_prefix log_end s low limit >= count_ge_prefix log_end s high limit)
+
+function lemma_count_ge_prefix_nonnegative [#"/work/crates/verified/src/consensus.rs" 55 0 55 87] (log_end: int) (s: Seq.seq Int64.t) (v: int) (limit: int) : ()
+
+axiom lemma_count_ge_prefix_nonnegative_def:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [lemma_count_ge_prefix_nonnegative log_end s v limit]. ([%#sconsensus'8] 0
+        <= limit
+      /\ limit <= Seq.length s + 1)
+    -> lemma_count_ge_prefix_nonnegative log_end s v limit
+    = ([%#sconsensus'16] if limit > 0 then
+      let _ = lemma_count_ge_prefix_nonnegative log_end s v (limit - 1) in ()
+    else
+      ()
+    )
+
+axiom lemma_count_ge_prefix_nonnegative_spec:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int. ([%#sconsensus'8] 0 <= limit
+      /\ limit <= Seq.length s + 1) -> ([%#sconsensus'9] count_ge_prefix log_end s v limit >= 0)
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+constant log_end : int
+
+constant s : Seq.seq Int64.t
+
+constant v : int
+
+constant limit : int
+
+function least_hwm_member_ge_index [#"/work/crates/verified/src/consensus.rs" 70 0 70 86] (log_end: int) (s: Seq.seq Int64.t) (v: int) (limit: int) : int
+
+goal vc_least_hwm_member_ge_index: ([%#sconsensus'0] 0 < limit /\ limit <= Seq.length s + 1)
+  -> ([%#sconsensus'1] count_ge_prefix log_end s v limit >= 1)
+  -> (if limit <= 1 then
+    let result = 0 in [@stop_split] [@expl:least_hwm_member_ge_index ensures] ([@stop_split] [@expl:least_hwm_member_ge_index ensures #0] [%#sconsensus'2] 0
+        <= result
+      /\ result < limit)
+    /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #1] [%#sconsensus'3] hwm_member_at log_end s result >= v)
+    /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #2] [%#sconsensus'4] count_ge_prefix log_end s (hwm_member_at log_end s result) limit
+    >= count_ge_prefix log_end s v limit)
+  else
+    let last_index = limit
+    - 1 in let last_member = hwm_member_at log_end s last_index in let previous_count = count_ge_prefix log_end s v last_index in if last_member
+    >= v then
+      if previous_count >= 1 then
+        (([@stop_split] [@expl:least_hwm_member_ge_index requires] ([@stop_split] [@expl:least_hwm_member_ge_index requires #0] [%#sconsensus'0] 0
+                < last_index
+              /\ last_index <= Seq.length s + 1)
+            /\ ([@stop_split] [@expl:least_hwm_member_ge_index requires #1] [%#sconsensus'1] count_ge_prefix log_end s v last_index
+            >= 1))
+          /\ ([@expl:variant decreases] well_founded_relation_Int ([%#sconsensus] limit) ([%#sconsensus] last_index)))
+        /\ (([@stop_split] [@expl:least_hwm_member_ge_index ensures] ([@stop_split] [@expl:least_hwm_member_ge_index ensures #0] [%#sconsensus'2] 0
+              <= least_hwm_member_ge_index log_end s v last_index
+            /\ least_hwm_member_ge_index log_end s v last_index < last_index)
+          /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #1] [%#sconsensus'3] hwm_member_at log_end s (least_hwm_member_ge_index log_end s v last_index)
+            >= v)
+          /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #2] [%#sconsensus'4] count_ge_prefix log_end s (hwm_member_at log_end s (least_hwm_member_ge_index log_end s v last_index)) last_index
+          >= count_ge_prefix log_end s v last_index))
+        -> (let previous_index = least_hwm_member_ge_index log_end s v last_index in let previous_member = hwm_member_at log_end s previous_index in if last_member
+        <= previous_member then
+          ([@stop_split] [@expl:lemma_count_ge_prefix_monotone requires] ([@stop_split] [@expl:lemma_count_ge_prefix_monotone requires #0] [%#sconsensus'5] 0
+                <= last_index
+              /\ last_index <= Seq.length s + 1)
+            /\ ([@stop_split] [@expl:lemma_count_ge_prefix_monotone requires #1] [%#sconsensus'6] last_member
+            <= previous_member))
+          /\ (([@stop_split] [@expl:lemma_count_ge_prefix_monotone ensures] [%#sconsensus'7] count_ge_prefix log_end s last_member last_index
+            >= count_ge_prefix log_end s previous_member last_index)
+          -> (let _ = lemma_count_ge_prefix_monotone log_end s last_member previous_member last_index in count_ge_prefix log_end s last_member last_index
+            >= count_ge_prefix log_end s v last_index
+          && count_ge_prefix log_end s last_member limit = count_ge_prefix log_end s last_member last_index + 1
+          && count_ge_prefix log_end s v limit = count_ge_prefix log_end s v last_index + 1
+          && count_ge_prefix log_end s last_member limit >= count_ge_prefix log_end s v limit
+          && (let result = last_index in [@stop_split] [@expl:least_hwm_member_ge_index ensures] ([@stop_split] [@expl:least_hwm_member_ge_index ensures #0] [%#sconsensus'2] 0
+              <= result
+            /\ result < limit)
+          /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #1] [%#sconsensus'3] hwm_member_at log_end s result
+            >= v)
+          /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #2] [%#sconsensus'4] count_ge_prefix log_end s (hwm_member_at log_end s result) limit
+          >= count_ge_prefix log_end s v limit))))
+        else
+          previous_member <= last_member
+          && count_ge_prefix log_end s previous_member limit = count_ge_prefix log_end s previous_member last_index + 1
+          && count_ge_prefix log_end s v limit = count_ge_prefix log_end s v last_index + 1
+          && count_ge_prefix log_end s previous_member limit >= count_ge_prefix log_end s v limit
+          && (let result = previous_index in [@stop_split] [@expl:least_hwm_member_ge_index ensures] ([@stop_split] [@expl:least_hwm_member_ge_index ensures #0] [%#sconsensus'2] 0
+              <= result
+            /\ result < limit)
+          /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #1] [%#sconsensus'3] hwm_member_at log_end s result
+            >= v)
+          /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #2] [%#sconsensus'4] count_ge_prefix log_end s (hwm_member_at log_end s result) limit
+          >= count_ge_prefix log_end s v limit))
+        ))
+      else
+        ([@stop_split] [@expl:lemma_count_ge_prefix_nonnegative requires] [%#sconsensus'8] 0 <= last_index
+          /\ last_index <= Seq.length s + 1)
+        /\ (([@stop_split] [@expl:lemma_count_ge_prefix_nonnegative ensures] [%#sconsensus'9] count_ge_prefix log_end s v last_index
+          >= 0)
+        -> (let _ = lemma_count_ge_prefix_nonnegative log_end s v last_index in ([@stop_split] [@expl:lemma_count_ge_prefix_nonnegative requires] [%#sconsensus'8] 0
+            <= last_index
+          /\ last_index <= Seq.length s + 1)
+        /\ (([@stop_split] [@expl:lemma_count_ge_prefix_nonnegative ensures] [%#sconsensus'9] count_ge_prefix log_end s last_member last_index
+          >= 0)
+        -> (let _ = lemma_count_ge_prefix_nonnegative log_end s last_member last_index in previous_count <= 0
+        && previous_count = 0
+        && count_ge_prefix log_end s last_member limit = count_ge_prefix log_end s last_member last_index + 1
+        && count_ge_prefix log_end s last_member limit >= 1
+        && count_ge_prefix log_end s v limit = count_ge_prefix log_end s v last_index + 1
+        && count_ge_prefix log_end s v limit <= 1
+        && (if count_ge_prefix log_end s last_member limit >= 1 then
+          if count_ge_prefix log_end s v limit <= 1 then
+            count_ge_prefix log_end s last_member limit >= count_ge_prefix log_end s v limit
+            && count_ge_prefix log_end s last_member limit >= count_ge_prefix log_end s v limit
+            && (let result = last_index in [@stop_split] [@expl:least_hwm_member_ge_index ensures] ([@stop_split] [@expl:least_hwm_member_ge_index ensures #0] [%#sconsensus'2] 0
+                <= result
+              /\ result < limit)
+            /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #1] [%#sconsensus'3] hwm_member_at log_end s result
+              >= v)
+            /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #2] [%#sconsensus'4] count_ge_prefix log_end s (hwm_member_at log_end s result) limit
+            >= count_ge_prefix log_end s v limit))
+          else
+            count_ge_prefix log_end s last_member limit >= count_ge_prefix log_end s v limit
+            && (let result = last_index in [@stop_split] [@expl:least_hwm_member_ge_index ensures] ([@stop_split] [@expl:least_hwm_member_ge_index ensures #0] [%#sconsensus'2] 0
+                <= result
+              /\ result < limit)
+            /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #1] [%#sconsensus'3] hwm_member_at log_end s result
+              >= v)
+            /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #2] [%#sconsensus'4] count_ge_prefix log_end s (hwm_member_at log_end s result) limit
+            >= count_ge_prefix log_end s v limit))
+
+        else
+          count_ge_prefix log_end s last_member limit >= count_ge_prefix log_end s v limit
+          && (let result = last_index in [@stop_split] [@expl:least_hwm_member_ge_index ensures] ([@stop_split] [@expl:least_hwm_member_ge_index ensures #0] [%#sconsensus'2] 0
+              <= result
+            /\ result < limit)
+          /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #1] [%#sconsensus'3] hwm_member_at log_end s result
+            >= v)
+          /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #2] [%#sconsensus'4] count_ge_prefix log_end s (hwm_member_at log_end s result) limit
+          >= count_ge_prefix log_end s v limit))
+        )))))
+
+    else
+      count_ge_prefix log_end s v last_index >= 1
+      && (([@stop_split] [@expl:least_hwm_member_ge_index requires] ([@stop_split] [@expl:least_hwm_member_ge_index requires #0] [%#sconsensus'0] 0
+              < last_index
+            /\ last_index <= Seq.length s + 1)
+          /\ ([@stop_split] [@expl:least_hwm_member_ge_index requires #1] [%#sconsensus'1] count_ge_prefix log_end s v last_index
+          >= 1))
+        /\ ([@expl:variant decreases] well_founded_relation_Int ([%#sconsensus] limit) ([%#sconsensus] last_index)))
+      /\ (([@stop_split] [@expl:least_hwm_member_ge_index ensures] ([@stop_split] [@expl:least_hwm_member_ge_index ensures #0] [%#sconsensus'2] 0
+            <= least_hwm_member_ge_index log_end s v last_index
+          /\ least_hwm_member_ge_index log_end s v last_index < last_index)
+        /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #1] [%#sconsensus'3] hwm_member_at log_end s (least_hwm_member_ge_index log_end s v last_index)
+          >= v)
+        /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #2] [%#sconsensus'4] count_ge_prefix log_end s (hwm_member_at log_end s (least_hwm_member_ge_index log_end s v last_index)) last_index
+        >= count_ge_prefix log_end s v last_index))
+      -> (let result = least_hwm_member_ge_index log_end s v last_index in [@stop_split] [@expl:least_hwm_member_ge_index ensures] ([@stop_split] [@expl:least_hwm_member_ge_index ensures #0] [%#sconsensus'2] 0
+          <= result
+        /\ result < limit)
+      /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #1] [%#sconsensus'3] hwm_member_at log_end s result
+        >= v)
+      /\ ([@stop_split] [@expl:least_hwm_member_ge_index ensures #2] [%#sconsensus'4] count_ge_prefix log_end s (hwm_member_at log_end s result) limit
+      >= count_ge_prefix log_end s v limit)))
+
+  )

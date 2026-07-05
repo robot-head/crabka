@@ -1,0 +1,17 @@
+(* #"/work/crates/verified/src/compaction.rs" 11 27 11 32 *)
+
+(* <compaction::RecordMeta as std::clone::Clone> *)
+
+use creusot.prelude.Any
+
+type t_RecordMeta = { has_key: bool; has_value: bool }
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+let clone_RecordMeta [#"/work/crates/verified/src/compaction.rs" 11 27 11 32] (self: t_RecordMeta)
+  (return (x: t_RecordMeta)) = (! bb0
+  [ bb0 = s0 [ s0 = [ &_ret <- self ] s1 | s1 = return {_ret} ] ]
+  [ & _ret: t_RecordMeta = Any.any_l () | & self: t_RecordMeta = self ])
+  [ return (result: t_RecordMeta) -> (! return {result}) ]

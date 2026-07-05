@@ -1,0 +1,67 @@
+(* #"/work/crates/verified/src/consensus.rs" 44 0 44 97 *)
+
+let%span sconsensus = "/work/crates/verified/src/consensus.rs" 43 10 43 15
+let%span sconsensus'0 = "/work/crates/verified/src/consensus.rs" 40 11 40 45
+let%span sconsensus'1 = "/work/crates/verified/src/consensus.rs" 41 11 41 22
+let%span sconsensus'2 = "/work/crates/verified/src/consensus.rs" 42 10 42 93
+let%span sconsensus'3 = "/work/crates/verified/src/consensus.rs" 19 10 19 15
+let%span sconsensus'4 = "/work/crates/verified/src/consensus.rs" 22 8 27 9
+let%span sconsensus'5 = "/work/crates/verified/src/consensus.rs" 13 8 13 48
+let%span swell_founded = "/opt/creusot/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/creusot-std-0.12.0/src/logic/well_founded.rs" 43 8 43 33
+
+use creusot.int.Int64
+use seq.Seq
+use int.Int
+
+function hwm_member_at [#"/work/crates/verified/src/consensus.rs" 11 0 11 62] (log_end: int) (s: Seq.seq Int64.t) (k: int) : int
+ = [%#sconsensus'5] if k = 0 then log_end else Int64.to_int (Seq.get s (k - 1))
+
+function count_ge_prefix [#"/work/crates/verified/src/consensus.rs" 20 0 20 76] (log_end: int) (s: Seq.seq Int64.t) (v: int) (limit: int) : int
+
+axiom count_ge_prefix_def:
+  forall log_end: int, s: Seq.seq Int64.t, v: int, limit: int [count_ge_prefix log_end s v limit]. count_ge_prefix log_end s v limit
+    = ([%#sconsensus'4] if limit <= 0 then
+      0
+    else
+      count_ge_prefix log_end s v (limit - 1) + (if hwm_member_at log_end s (limit - 1) >= v then 1 else 0)
+    )
+
+predicate well_founded_relation_Int [@inline:trivial] (self: int) (other: int) =
+  [%#swell_founded] self >= 0 /\ self > other
+
+meta "rewrite_def" predicate well_founded_relation_Int
+
+meta "compute_max_steps" 1000000
+
+meta "select_lsinst" "all"
+
+constant log_end : int
+
+constant s : Seq.seq Int64.t
+
+constant low : int
+
+constant high : int
+
+constant limit : int
+
+function lemma_count_ge_prefix_monotone [#"/work/crates/verified/src/consensus.rs" 44 0 44 97] (log_end: int) (s: Seq.seq Int64.t) (low: int) (high: int) (limit: int) : ()
+
+goal vc_lemma_count_ge_prefix_monotone: ([%#sconsensus'0] 0 <= limit /\ limit <= Seq.length s + 1)
+  -> ([%#sconsensus'1] low <= high)
+  -> (if limit > 0 then
+    (([@stop_split] [@expl:lemma_count_ge_prefix_monotone requires] ([@stop_split] [@expl:lemma_count_ge_prefix_monotone requires #0] [%#sconsensus'0] 0
+            <= limit - 1
+          /\ limit - 1 <= Seq.length s + 1)
+        /\ ([@stop_split] [@expl:lemma_count_ge_prefix_monotone requires #1] [%#sconsensus'1] low <= high))
+      /\ ([@expl:variant decreases] well_founded_relation_Int ([%#sconsensus] limit) ([%#sconsensus] limit - 1)))
+    /\ (([@stop_split] [@expl:lemma_count_ge_prefix_monotone ensures] [%#sconsensus'2] count_ge_prefix log_end s low (limit
+        - 1)
+      >= count_ge_prefix log_end s high (limit - 1))
+    -> (let _ = lemma_count_ge_prefix_monotone log_end s low high (limit
+    - 1) in [@stop_split] [@expl:lemma_count_ge_prefix_monotone ensures] [%#sconsensus'2] count_ge_prefix log_end s low limit
+    >= count_ge_prefix log_end s high limit))
+  else
+    [@stop_split] [@expl:lemma_count_ge_prefix_monotone ensures] [%#sconsensus'2] count_ge_prefix log_end s low limit
+    >= count_ge_prefix log_end s high limit
+  )

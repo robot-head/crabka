@@ -27,6 +27,7 @@ sbom-*.spdx.json
 .tmp-*.log
 .worktree
 .worktrees/
+.superpowers/
 
 # OMB harness — upstream checkout fetched at run time
 .omb/
