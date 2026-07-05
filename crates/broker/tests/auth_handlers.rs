@@ -1772,6 +1772,10 @@ async fn plain_listener_session_lifetime_ms_is_zero_and_no_timer() {
 /// `1` = `SCRAM-SHA-256`, `2` = `SCRAM-SHA-512`.
 const WIRE_MECH_SCRAM_SHA_256: i8 = 1;
 const WIRE_MECH_SCRAM_SHA_512: i8 = 2;
+const KAFKA_UNSUPPORTED_SASL_MECHANISM: i16 = 33;
+const KAFKA_DUPLICATE_RESOURCE: i16 = 92;
+const KAFKA_UNACCEPTABLE_CREDENTIAL: i16 = 93;
+const KAFKA_MAX_SCRAM_ITERATIONS: i32 = 16_384;
 
 /// Happy path: a super-user authenticates over PLAIN, sends an
 /// `AlterUserScramCredentials` upsertion for `alice`, and the broker stores
@@ -1994,16 +1998,129 @@ async fn alter_scram_creds_low_iterations_rejected() {
     handle.shutdown().await;
     assert!(resp.results.len() == 1);
     assert!(
-        resp.results[0].error_code == 78, // UNACCEPTABLE_CREDENTIAL (canonical Kafka error code)
+        resp.results[0].error_code == KAFKA_UNACCEPTABLE_CREDENTIAL,
         "iterations < 4096 must get UNACCEPTABLE_CREDENTIAL, got {:?}",
         resp.results[0]
     );
 }
 
-/// Two upsertions for the same `(user, mechanism)` in one request: the
-/// second occurrence gets `DUPLICATE_RESOURCE` (84). The first occurrence
-/// is otherwise valid and its result row reflects whatever the validation
-/// would normally return — for the super-user happy path that's `0`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_high_iterations_rejected_but_max_allowed() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("admin".to_string(), "secret".to_string());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    let req = AlterUserScramCredentialsRequest {
+        upsertions: vec![
+            ScramCredentialUpsertion {
+                name: "too-high".to_string(),
+                mechanism: WIRE_MECH_SCRAM_SHA_512,
+                iterations: KAFKA_MAX_SCRAM_ITERATIONS + 1,
+                salt: bytes::Bytes::from(vec![0u8; 16]),
+                salted_password: bytes::Bytes::from(vec![0u8; 64]),
+                ..Default::default()
+            },
+            ScramCredentialUpsertion {
+                name: "max".to_string(),
+                mechanism: WIRE_MECH_SCRAM_SHA_512,
+                iterations: KAFKA_MAX_SCRAM_ITERATIONS,
+                salt: bytes::Bytes::from(vec![1u8; 16]),
+                salted_password: bytes::Bytes::from(vec![1u8; 64]),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
+        .await
+        .expect("PLAIN auth + AUSCR high iterations");
+
+    handle.shutdown().await;
+    assert!(resp.results.len() == 2, "one row per distinct username");
+    let too_high = resp
+        .results
+        .iter()
+        .find(|result| result.user == "too-high")
+        .expect("too-high row");
+    assert!(
+        too_high.error_code == KAFKA_UNACCEPTABLE_CREDENTIAL,
+        "iterations > 16384 must get UNACCEPTABLE_CREDENTIAL, got {:?}",
+        too_high
+    );
+    let max = resp
+        .results
+        .iter()
+        .find(|result| result.user == "max")
+        .expect("max row");
+    assert!(
+        max.error_code == 0,
+        "16384 iterations remains allowed: {max:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_unknown_mechanism_returns_unsupported_sasl_mechanism() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("admin".to_string(), "secret".to_string());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    let req = AlterUserScramCredentialsRequest {
+        upsertions: vec![ScramCredentialUpsertion {
+            name: "alice".to_string(),
+            mechanism: 99,
+            iterations: 4096,
+            salt: bytes::Bytes::from(vec![0u8; 16]),
+            salted_password: bytes::Bytes::from(vec![0u8; 64]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
+        .await
+        .expect("PLAIN auth + AUSCR unknown mechanism");
+
+    handle.shutdown().await;
+    assert!(resp.results.len() == 1);
+    assert!(
+        resp.results[0].error_code == KAFKA_UNSUPPORTED_SASL_MECHANISM,
+        "unknown SCRAM mechanism must get UNSUPPORTED_SASL_MECHANISM, got {:?}",
+        resp.results[0]
+    );
+}
+
+/// Two upsertions for the same user in one request: Kafka's response is
+/// per username, so the single row for that username gets
+/// `DUPLICATE_RESOURCE` (92) even when the mechanisms differ.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_scram_creds_duplicate_resource_rejected() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -2034,21 +2151,93 @@ async fn alter_scram_creds_duplicate_resource_rejected() {
         salted_password: bytes::Bytes::from(salted.to_vec()),
         ..Default::default()
     };
+    let mut upsert_sha256 = upsert.clone();
+    upsert_sha256.mechanism = WIRE_MECH_SCRAM_SHA_256;
+    upsert_sha256.salted_password = bytes::Bytes::from(vec![7; 32]);
     let req = AlterUserScramCredentialsRequest {
-        upsertions: vec![upsert.clone(), upsert],
+        upsertions: vec![upsert, upsert_sha256],
         ..Default::default()
     };
     let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
         .await
         .expect("PLAIN auth + AUSCR (duplicate)");
     handle.shutdown().await;
-    assert!(resp.results.len() == 2, "one result row per upsertion");
-    // First row may be 0 (accepted) or any validation code; the contract
-    // tested here is that the *second* occurrence is the duplicate.
+    assert!(resp.results.len() == 1, "one result row per username");
     assert!(
-        resp.results[1].error_code == 84, // DUPLICATE_RESOURCE
-        "second occurrence of (user, mech) must get DUPLICATE_RESOURCE, got {:?}",
-        resp.results[1]
+        resp.results[0].error_code == KAFKA_DUPLICATE_RESOURCE,
+        "duplicate username must get DUPLICATE_RESOURCE, got {:?}",
+        resp.results[0]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_duplicate_deletion_and_upsertion_rejected_per_user() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("admin".to_string(), "secret".to_string());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1ScramCredential(
+            crabka_metadata::ScramCredentialRecord {
+                user: "alice".into(),
+                mechanism: SaslMechanism::ScramSha512,
+                iterations: 4096,
+                salt: vec![1; 16],
+                server_key: vec![2; 64],
+                stored_key: vec![3; 64],
+            },
+        ))
+        .await
+        .expect("seed alice SCRAM credential");
+    handle
+        .wait_for_image(|image| {
+            image
+                .scram_credential("alice", SaslMechanism::ScramSha512)
+                .is_some()
+        })
+        .await;
+    let req = AlterUserScramCredentialsRequest {
+        deletions: vec![ScramCredentialDeletion {
+            name: "alice".to_string(),
+            mechanism: WIRE_MECH_SCRAM_SHA_512,
+            ..Default::default()
+        }],
+        upsertions: vec![ScramCredentialUpsertion {
+            name: "alice".to_string(),
+            mechanism: WIRE_MECH_SCRAM_SHA_256,
+            iterations: 4096,
+            salt: bytes::Bytes::from(vec![4u8; 16]),
+            salted_password: bytes::Bytes::from(vec![5u8; 32]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
+        .await
+        .expect("PLAIN auth + AUSCR duplicate deletion/upsertion");
+
+    handle.shutdown().await;
+    assert!(resp.results.len() == 1, "one result row per username");
+    assert!(resp.results[0].user == "alice");
+    assert!(
+        resp.results[0].error_code == KAFKA_DUPLICATE_RESOURCE,
+        "delete+upsert for same username must get DUPLICATE_RESOURCE, got {:?}",
+        resp.results[0]
     );
 }
 

@@ -500,6 +500,7 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
         17 => "INVALID_TOPIC_EXCEPTION",
         19 => "NOT_ENOUGH_REPLICAS",
         31 => "CLUSTER_AUTHORIZATION_FAILED",
+        33 => "UNSUPPORTED_SASL_MECHANISM",
         36 => "TOPIC_ALREADY_EXISTS",
         37 => "INVALID_PARTITIONS",
         38 => "INVALID_REPLICATION_FACTOR",
@@ -508,6 +509,8 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
         41 => "NOT_CONTROLLER",
         83 => "ELIGIBLE_LEADERS_NOT_AVAILABLE",
         91 => "RESOURCE_NOT_FOUND",
+        92 => "DUPLICATE_RESOURCE",
+        93 => "UNACCEPTABLE_CREDENTIAL",
         87 => "REASSIGNMENT_IN_PROGRESS",
         _ => "UNKNOWN",
     }
@@ -534,8 +537,11 @@ mod tests {
     fn users_kafka_error_name_includes_scram_describe_codes() {
         for (code, want) in [
             (31, "CLUSTER_AUTHORIZATION_FAILED"),
+            (33, "UNSUPPORTED_SASL_MECHANISM"),
             (83, "ELIGIBLE_LEADERS_NOT_AVAILABLE"),
             (91, "RESOURCE_NOT_FOUND"),
+            (92, "DUPLICATE_RESOURCE"),
+            (93, "UNACCEPTABLE_CREDENTIAL"),
         ] {
             assert!(kafka_error_name(code) == want);
         }

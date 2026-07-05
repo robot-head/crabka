@@ -146,16 +146,15 @@ pub const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
 /// KIP-554 uses this for missing SCRAM credentials in both Alter deletion and
 /// Describe per-user result rows.
 pub const RESOURCE_NOT_FOUND: i16 = 91;
-/// `UNACCEPTABLE_CREDENTIAL` (78) — per-user error when an upsertion carries
+/// `UNACCEPTABLE_CREDENTIAL` (93) — per-user error when an upsertion carries
 /// invalid SCRAM parameters (iterations < 4096, empty salt, `salted_password`
-/// of the wrong length, or an unknown mechanism). Canonical Apache Kafka
-/// assigns code 78 to this error; note that code 74 is already taken by
-/// `FENCED_LEADER_EPOCH` — `78` is correct.
-pub const UNACCEPTABLE_CREDENTIAL: i16 = 78;
-/// `DUPLICATE_RESOURCE` (84) — per-user error when the same
-/// `(user, mechanism)` appears twice in one `AlterUserScramCredentials`
-/// request (either two upsertions, two deletions, or one of each).
-pub const DUPLICATE_RESOURCE: i16 = 84;
+/// of the wrong length, or too many iterations). Canonical Apache Kafka
+/// assigns code 93 to this error.
+pub const UNACCEPTABLE_CREDENTIAL: i16 = 93;
+/// `DUPLICATE_RESOURCE` (92) — per-user error when the same user appears
+/// twice in one `AlterUserScramCredentials` or
+/// `DescribeUserScramCredentials` request.
+pub const DUPLICATE_RESOURCE: i16 = 92;
 
 /// `INVALID_UPDATE_VERSION` (95, KIP-584) — a feature-level update in
 /// `UpdateFeatures` is outside the broker's supported range, or attempts an
@@ -407,6 +406,21 @@ mod tests {
     fn not_enough_replicas_codes_have_expected_values() {
         assert!(NOT_ENOUGH_REPLICAS == 19);
         assert!(NOT_ENOUGH_REPLICAS_AFTER_APPEND == 20);
+    }
+
+    #[test]
+    fn scram_error_code_numbers_match_kafka() {
+        let cases = [
+            ("UNSUPPORTED_SASL_MECHANISM", UNSUPPORTED_SASL_MECHANISM, 33),
+            ("RESOURCE_NOT_FOUND", RESOURCE_NOT_FOUND, 91),
+            ("DUPLICATE_RESOURCE", DUPLICATE_RESOURCE, 92),
+            ("UNACCEPTABLE_CREDENTIAL", UNACCEPTABLE_CREDENTIAL, 93),
+            ("ELECTION_NOT_NEEDED", ELECTION_NOT_NEEDED, 84),
+            ("DELEGATION_TOKEN_EXPIRED", DELEGATION_TOKEN_EXPIRED, 66),
+        ];
+        for (name, code, want) in cases {
+            assert!(code == want, "{name}");
+        }
     }
 
     #[test]

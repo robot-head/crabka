@@ -931,4 +931,74 @@ mod tests {
                 })
         );
     }
+
+    #[test]
+    fn users_describe_scram_duplicate_user_preserves_duplicate_resource_name() {
+        let resp = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
+            results: vec![
+                crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResult {
+                    user: "alice".to_string(),
+                    error_code: 92,
+                    error_message: Some("duplicate user".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let users = parse_describe_user_scram_credentials_response(resp)
+            .expect("per-user SCRAM describe errors should parse into rows");
+
+        check!(users.len() == 1);
+        check!(users[0].username == "alice");
+        check!(
+            users[0].error
+                == Some(KafkaError {
+                    code: 92,
+                    name: "DUPLICATE_RESOURCE",
+                    message: Some("duplicate user".to_string()),
+                })
+        );
+    }
+
+    #[test]
+    fn users_alter_scram_preserves_scram_error_names() {
+        let resp = crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResponse {
+            results: vec![
+                crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResult {
+                    user: "alice".to_string(),
+                    error_code: 33,
+                    error_message: Some("unknown mechanism".to_string()),
+                    ..Default::default()
+                },
+                crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResult {
+                    user: "bob".to_string(),
+                    error_code: 93,
+                    error_message: Some("too many iterations".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let users = parse_alter_scram_results(resp);
+
+        check!(users.len() == 2);
+        check!(
+            users[0].error
+                == Some(KafkaError {
+                    code: 33,
+                    name: "UNSUPPORTED_SASL_MECHANISM",
+                    message: Some("unknown mechanism".to_string()),
+                })
+        );
+        check!(
+            users[1].error
+                == Some(KafkaError {
+                    code: 93,
+                    name: "UNACCEPTABLE_CREDENTIAL",
+                    message: Some("too many iterations".to_string()),
+                })
+        );
+    }
 }

@@ -2,21 +2,21 @@
 
 use bytes::Bytes;
 use crabka_metadata::{MetadataImage, ResourceType};
-use crabka_protocol::{
-    Encode,
-    owned::{
-        describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest,
-        describe_user_scram_credentials_response::{
-            CredentialInfo, DescribeUserScramCredentialsResponse,
-            DescribeUserScramCredentialsResult,
-        },
-    },
+use crabka_protocol::Encode;
+use crabka_protocol::owned::describe_user_scram_credentials_request::{
+    DescribeUserScramCredentialsRequest, UserName,
+};
+use crabka_protocol::owned::describe_user_scram_credentials_response::{
+    CredentialInfo, DescribeUserScramCredentialsResponse, DescribeUserScramCredentialsResult,
 };
 use crabka_security::SaslMechanism;
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
-use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, RESOURCE_NOT_FOUND};
+use crate::codes::{CLUSTER_AUTHORIZATION_FAILED, DUPLICATE_RESOURCE, RESOURCE_NOT_FOUND};
+
+const DESCRIBE_DUPLICATE_USER: &str =
+    "Cannot describe SCRAM credentials for the same user twice in a single request";
 
 #[allow(clippy::unused_async)]
 #[tracing::instrument(
@@ -57,14 +57,7 @@ pub(crate) async fn handle(
 
     let known_users: std::collections::HashSet<String> =
         image.scram_credentials_users().into_iter().collect();
-    let targets: Vec<String> = match req.users.as_deref() {
-        None | Some([]) => {
-            let mut v: Vec<String> = known_users.iter().cloned().collect();
-            v.sort();
-            v
-        }
-        Some(filter) => filter.iter().map(|u| u.name.clone()).collect(),
-    };
+    let targets = requested_targets(&known_users, req.users.as_deref());
 
     let results = build_results(&image, &known_users, targets);
 
@@ -81,11 +74,22 @@ pub(crate) async fn handle(
 fn build_results(
     image: &MetadataImage,
     known_users: &std::collections::HashSet<String>,
-    targets: Vec<String>,
+    targets: Vec<DescribeTarget>,
 ) -> Vec<DescribeUserScramCredentialsResult> {
     targets
         .into_iter()
-        .map(|user| {
+        .map(|target| {
+            let user = target.user;
+            if target.is_duplicate {
+                return DescribeUserScramCredentialsResult {
+                    error_message: Some(format!("{DESCRIBE_DUPLICATE_USER}: {user}")),
+                    user,
+                    error_code: DUPLICATE_RESOURCE,
+                    credential_infos: vec![],
+                    ..Default::default()
+                };
+            }
+
             let pairs = image.scram_credentials_for_user(&user);
             if pairs.is_empty() && !known_users.contains(&user) {
                 DescribeUserScramCredentialsResult {
@@ -112,6 +116,59 @@ fn build_results(
                     ..Default::default()
                 }
             }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DescribeTarget {
+    user: String,
+    is_duplicate: bool,
+}
+
+fn requested_targets(
+    known_users: &std::collections::HashSet<String>,
+    users_filter: Option<&[UserName]>,
+) -> Vec<DescribeTarget> {
+    let Some(filter) = users_filter else {
+        return all_known_user_targets(known_users);
+    };
+    if filter.is_empty() {
+        return all_known_user_targets(known_users);
+    }
+
+    let mut requested_users = Vec::new();
+    let mut duplicate_flags = std::collections::HashMap::new();
+    for requested_user in filter {
+        let user = requested_user.name.clone();
+        match duplicate_flags.entry(user.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(false);
+                requested_users.push(user);
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.insert(true);
+            }
+        }
+    }
+
+    requested_users
+        .into_iter()
+        .map(|user| DescribeTarget {
+            is_duplicate: duplicate_flags.get(&user).copied().unwrap_or(false),
+            user,
+        })
+        .collect()
+}
+
+fn all_known_user_targets(known_users: &std::collections::HashSet<String>) -> Vec<DescribeTarget> {
+    let mut users: Vec<String> = known_users.iter().cloned().collect();
+    users.sort();
+    users
+        .into_iter()
+        .map(|user| DescribeTarget {
+            user,
+            is_duplicate: false,
         })
         .collect()
 }
@@ -190,14 +247,7 @@ mod tests {
     ) -> DescribeUserScramCredentialsResponse {
         let known_users: std::collections::HashSet<String> =
             image.scram_credentials_users().into_iter().collect();
-        let targets: Vec<String> = match users_filter {
-            None | Some([]) => {
-                let mut v: Vec<String> = known_users.iter().cloned().collect();
-                v.sort();
-                v
-            }
-            Some(filter) => filter.iter().map(|u| u.name.clone()).collect(),
-        };
+        let targets = requested_targets(&known_users, users_filter);
         let results = build_results(image, &known_users, targets);
         DescribeUserScramCredentialsResponse {
             throttle_time_ms: 0,
@@ -279,6 +329,47 @@ mod tests {
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         }];
         assert!(resp.results == expected);
+    }
+
+    #[test]
+    fn duplicate_requested_user_returns_single_duplicate_resource_row() {
+        const KAFKA_DUPLICATE_RESOURCE: i16 = 92;
+
+        let resp = run_handle_filter(
+            Some(vec!["alice".into(), "bob".into(), "alice".into()]),
+            &[
+                ("alice", SaslMechanism::ScramSha512, 4096),
+                ("bob", SaslMechanism::ScramSha512, 8192),
+            ],
+        );
+
+        assert!(
+            resp.results.len() == 2,
+            "duplicate users collapse to one row"
+        );
+        let alice_rows: Vec<_> = resp.results.iter().filter(|r| r.user == "alice").collect();
+        assert!(
+            alice_rows.len() == 1,
+            "alice should appear once: {:?}",
+            resp.results
+        );
+        assert!(alice_rows[0].error_code == KAFKA_DUPLICATE_RESOURCE);
+        assert!(alice_rows[0].credential_infos.is_empty());
+
+        let bob = resp
+            .results
+            .iter()
+            .find(|r| r.user == "bob")
+            .expect("distinct users remain in the response");
+        assert!(bob.error_code == 0);
+        assert!(
+            bob.credential_infos
+                == vec![CredentialInfo {
+                    mechanism: 2,
+                    iterations: 8192,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }]
+        );
     }
 
     #[test]

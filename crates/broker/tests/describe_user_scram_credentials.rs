@@ -40,6 +40,9 @@ use tokio::{
     net::TcpStream,
 };
 
+const KAFKA_DUPLICATE_RESOURCE: i16 = 92;
+const WIRE_MECH_SCRAM_SHA_512: i8 = 2;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
 // Copied from `client_quotas.rs`.
@@ -219,6 +222,30 @@ async fn seed_cluster_acl(handle: &BrokerHandle, principal: &str, operation: Acl
         .await;
 }
 
+async fn seed_scram_credential(
+    handle: &BrokerHandle,
+    user: &str,
+    mechanism: SaslMechanism,
+    iterations: u32,
+) {
+    handle
+        .submit_metadata_record_for_test(MetadataRecord::V1ScramCredential(
+            crabka_metadata::ScramCredentialRecord {
+                user: user.into(),
+                mechanism,
+                iterations,
+                salt: vec![1, 2, 3, 4],
+                server_key: vec![5; 64],
+                stored_key: vec![6; 64],
+            },
+        ))
+        .await
+        .expect("seed SCRAM credential");
+    handle
+        .wait_for_image(|img| !img.scram_credentials_for_user(user).is_empty())
+        .await;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire driver for DescribeUserScramCredentials
 // ─────────────────────────────────────────────────────────────────────────────
@@ -364,6 +391,47 @@ async fn describe_unknown_user_returns_error() {
         "expected RESOURCE_NOT_FOUND (91) for unknown user ghost; got {}",
         row.1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_duplicate_requested_user_returns_single_duplicate_resource_row() {
+    let (handle, _dir, addr) =
+        start_single_broker_sasl_plaintext_with_users("admin", &[("admin", "admin-secret")]).await;
+    seed_scram_credential(&handle, "alice", SaslMechanism::ScramSha512, 4096).await;
+    seed_scram_credential(&handle, "bob", SaslMechanism::ScramSha512, 8192).await;
+
+    let (top_err, per_user) = drive_describe_user_scram_credentials_sasl(
+        addr,
+        "admin",
+        "admin-secret",
+        Some(vec!["alice".into(), "bob".into(), "alice".into()]),
+    )
+    .await;
+
+    handle.shutdown().await;
+    assert!(top_err == 0, "top-level error_code should be 0");
+    assert!(
+        per_user.len() == 2,
+        "duplicate request users collapse: {per_user:?}"
+    );
+
+    let alice_rows: Vec<_> = per_user
+        .iter()
+        .filter(|(user, _, _)| user == "alice")
+        .collect();
+    assert!(
+        alice_rows.len() == 1,
+        "alice should appear once: {per_user:?}"
+    );
+    assert!(alice_rows[0].1 == KAFKA_DUPLICATE_RESOURCE);
+    assert!(alice_rows[0].2.is_empty());
+
+    let bob = per_user
+        .iter()
+        .find(|(user, _, _)| user == "bob")
+        .expect("distinct users remain successful");
+    assert!(bob.1 == 0);
+    assert!(bob.2 == vec![(WIRE_MECH_SCRAM_SHA_512, 8192)]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

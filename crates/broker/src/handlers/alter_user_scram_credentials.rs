@@ -8,20 +8,21 @@
 //!
 //! Per-user validation (each upsertion is checked independently):
 //!
-//! - `iterations >= 4096` else `UNACCEPTABLE_CREDENTIAL` (78).
+//! - `iterations >= 4096` else `UNACCEPTABLE_CREDENTIAL` (93).
+//! - `iterations <= 16384` else `UNACCEPTABLE_CREDENTIAL`.
 //! - `salt` non-empty else `UNACCEPTABLE_CREDENTIAL`.
 //! - `salted_password.len()` matches the chosen mechanism's hash length
 //!   (32 for SHA-256, 64 for SHA-512) else `UNACCEPTABLE_CREDENTIAL`.
-//! - Unknown mechanism wire value → `UNACCEPTABLE_CREDENTIAL`.
+//! - Unknown mechanism wire value → `UNSUPPORTED_SASL_MECHANISM` (33).
 //!
 //! Authorization: `Alter` on `Cluster("kafka-cluster")`. On Deny,
 //! every per-user result is `CLUSTER_AUTHORIZATION_FAILED` (31). The
 //! authorizer's super-user bypass short-circuits inside `authorize` → ALLOW
 //! when `super_users` is configured.
 //!
-//! Duplicate detection: the same `(user, mechanism)` appearing twice in one
-//! request (either two upsertions, two deletions, or one of each) gets
-//! `DUPLICATE_RESOURCE` (84) on the second occurrence.
+//! Duplicate detection: the same user appearing twice in one request (either
+//! two upsertions, two deletions, or one of each) gets one per-user
+//! `DUPLICATE_RESOURCE` (92) result.
 //!
 //! Deletion targets that are not present in the current metadata image get
 //! `RESOURCE_NOT_FOUND` (91).
@@ -31,7 +32,7 @@
 //! `controller.submit_change`. A single batched commit keeps the metadata
 //! image consistent across multiple rows in the same request.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 
 use crabka_metadata::{
     AclOperation, DeleteScramCredentialRecord, MetadataRecord, ScramCredentialRecord,
@@ -55,6 +56,10 @@ use crate::{
 /// Lowest PBKDF2 iteration count accepted for a SCRAM credential (KIP-554);
 /// upsertions below this get `UNACCEPTABLE_CREDENTIAL`.
 const MIN_ITERATIONS: i32 = 4096;
+/// Highest PBKDF2 iteration count accepted by Kafka's SCRAM controller path.
+const MAX_ITERATIONS: i32 = 16_384;
+const DUPLICATE_ALTERATION_MESSAGE: &str =
+    "A user credential cannot be altered twice in the same request";
 
 /// KIP-554 wire byte identifying a SCRAM mechanism (see [`wire_to_mech`]).
 type MechanismWireByte = i8;
@@ -113,23 +118,10 @@ pub(crate) async fn handle(
         };
     }
 
-    let mut seen: HashSet<(String, MechanismWireByte)> = HashSet::new();
-    let mut user_results: Vec<AlterUserScramCredentialsResult> = Vec::new();
-    let mut records: Vec<MetadataRecord> = Vec::new();
-
-    for d in req.deletions {
-        user_results.push(process_deletion(
-            broker,
-            d,
-            authorized,
-            &mut seen,
-            &mut records,
-        ));
-    }
-
-    for u in req.upsertions {
-        user_results.push(process_upsertion(u, authorized, &mut seen, &mut records));
-    }
+    let AlterationPlan {
+        mut user_results,
+        records,
+    } = plan_alterations(broker, req, authorized);
 
     // Submit accepted records as a single batch. A submit failure converts
     // every pending "ok" row to a generic error (per-row errors already in
@@ -148,6 +140,135 @@ pub(crate) async fn handle(
     }
 }
 
+struct AlterationPlan {
+    user_results: Vec<AlterUserScramCredentialsResult>,
+    records: Vec<MetadataRecord>,
+}
+
+#[derive(Debug)]
+struct AlterationError {
+    code: i16,
+    message: &'static str,
+}
+
+fn plan_alterations(
+    broker: &Broker,
+    req: AlterUserScramCredentialsRequest,
+    authorized: bool,
+) -> AlterationPlan {
+    let mut user_order = Vec::new();
+    let mut deletions = HashMap::new();
+    let mut upsertions = HashMap::new();
+    let mut errors = HashMap::new();
+
+    for deletion in req.deletions {
+        remember_user(&mut user_order, &deletion.name);
+        stage_deletion(broker, deletion, authorized, &mut deletions, &mut errors);
+    }
+
+    for upsertion in req.upsertions {
+        remember_user(&mut user_order, &upsertion.name);
+        stage_upsertion(
+            upsertion,
+            authorized,
+            &mut deletions,
+            &mut upsertions,
+            &mut errors,
+        );
+    }
+
+    let mut user_results = Vec::with_capacity(user_order.len());
+    let mut records = Vec::new();
+    for user in user_order {
+        if let Some(error) = errors.remove(&user) {
+            user_results.push(err_result(user, error.code, error.message));
+            continue;
+        }
+
+        if let Some((deletion, mechanism)) = deletions.remove(&user) {
+            records.push(delete_record(&deletion, mechanism));
+            user_results.push(ok_result(deletion.name));
+            continue;
+        }
+
+        if let Some((upsertion, mechanism)) = upsertions.remove(&user) {
+            records.push(upsertion_record(&upsertion, mechanism));
+            user_results.push(ok_result(upsertion.name));
+        }
+    }
+
+    AlterationPlan {
+        user_results,
+        records,
+    }
+}
+
+fn remember_user(user_order: &mut Vec<String>, user: &str) {
+    if user_order.iter().any(|seen| seen == user) {
+        return;
+    }
+    user_order.push(user.to_string());
+}
+
+fn stage_deletion(
+    broker: &Broker,
+    deletion: ScramCredentialDeletion,
+    authorized: bool,
+    deletions: &mut HashMap<String, (ScramCredentialDeletion, SaslMechanism)>,
+    errors: &mut HashMap<String, AlterationError>,
+) {
+    if errors.contains_key(&deletion.name) {
+        return;
+    }
+
+    if deletions.remove(&deletion.name).is_some() {
+        errors.insert(deletion.name, duplicate_alteration_error());
+        return;
+    }
+
+    match validate_deletion(broker, &deletion, authorized) {
+        Ok(mechanism) => {
+            deletions.insert(deletion.name.clone(), (deletion, mechanism));
+        }
+        Err(error) => {
+            errors.insert(deletion.name, error);
+        }
+    }
+}
+
+fn stage_upsertion(
+    upsertion: ScramCredentialUpsertion,
+    authorized: bool,
+    deletions: &mut HashMap<String, (ScramCredentialDeletion, SaslMechanism)>,
+    upsertions: &mut HashMap<String, (ScramCredentialUpsertion, SaslMechanism)>,
+    errors: &mut HashMap<String, AlterationError>,
+) {
+    if errors.contains_key(&upsertion.name) {
+        return;
+    }
+
+    if deletions.remove(&upsertion.name).is_some() || upsertions.remove(&upsertion.name).is_some() {
+        errors.insert(upsertion.name, duplicate_alteration_error());
+        return;
+    }
+
+    match validate_upsertion(&upsertion, authorized) {
+        Ok(mechanism) => {
+            upsertions.insert(upsertion.name.clone(), (upsertion, mechanism));
+        }
+        Err(error) => {
+            errors.insert(upsertion.name, error);
+        }
+    }
+}
+
+fn duplicate_alteration_error() -> AlterationError {
+    AlterationError {
+        code: codes::DUPLICATE_RESOURCE,
+        message: DUPLICATE_ALTERATION_MESSAGE,
+    }
+}
+
 /// Validate and optionally accept a single deletion. Returns the per-user
 /// result row to push into the response; pushes the metadata record to
 /// `records` on accept.
@@ -155,37 +276,13 @@ fn process_deletion(
     broker: &Broker,
     d: ScramCredentialDeletion,
     authorized: bool,
-    seen: &mut HashSet<(String, MechanismWireByte)>,
     records: &mut Vec<MetadataRecord>,
 ) -> AlterUserScramCredentialsResult {
-    let key = (d.name.clone(), d.mechanism);
-    if !seen.insert(key) {
-        return err_result(d.name, codes::DUPLICATE_RESOURCE, "duplicate resource");
-    }
-    let Some(mech) = wire_to_mech(d.mechanism) else {
-        return err_result(d.name, codes::UNACCEPTABLE_CREDENTIAL, "unknown mechanism");
+    let mech = match validate_deletion(broker, &d, authorized) {
+        Ok(mech) => mech,
+        Err(error) => return err_result(d.name, error.code, error.message),
     };
-    if !authorized {
-        return err_result(
-            d.name,
-            codes::CLUSTER_AUTHORIZATION_FAILED,
-            "not super-user",
-        );
-    }
-    if broker
-        .controller
-        .current_image()
-        .scram_credential(&d.name, mech)
-        .is_none()
-    {
-        return err_result(d.name, codes::RESOURCE_NOT_FOUND, "credential not found");
-    }
-    records.push(MetadataRecord::V1DeleteScramCredential(
-        DeleteScramCredentialRecord {
-            user: d.name.clone(),
-            mechanism: mech,
-        },
-    ));
+    records.push(delete_record(&d, mech));
     ok_result(d.name)
 }
 
@@ -195,51 +292,116 @@ fn process_deletion(
 fn process_upsertion(
     u: ScramCredentialUpsertion,
     authorized: bool,
-    seen: &mut HashSet<(String, MechanismWireByte)>,
     records: &mut Vec<MetadataRecord>,
 ) -> AlterUserScramCredentialsResult {
-    let key = (u.name.clone(), u.mechanism);
-    if !seen.insert(key) {
-        return err_result(u.name, codes::DUPLICATE_RESOURCE, "duplicate resource");
-    }
-    let Some(mech) = wire_to_mech(u.mechanism) else {
-        return err_result(u.name, codes::UNACCEPTABLE_CREDENTIAL, "unknown mechanism");
+    let mech = match validate_upsertion(&u, authorized) {
+        Ok(mech) => mech,
+        Err(error) => return err_result(u.name, error.code, error.message),
     };
-    if u.iterations < MIN_ITERATIONS {
-        return err_result(u.name, codes::UNACCEPTABLE_CREDENTIAL, "iterations < 4096");
+    records.push(upsertion_record(&u, mech));
+    ok_result(u.name)
+}
+
+fn validate_deletion(
+    broker: &Broker,
+    deletion: &ScramCredentialDeletion,
+    authorized: bool,
+) -> Result<SaslMechanism, AlterationError> {
+    let Some(mech) = wire_to_mech(deletion.mechanism) else {
+        return Err(AlterationError {
+            code: codes::UNSUPPORTED_SASL_MECHANISM,
+            message: "unknown mechanism",
+        });
+    };
+    if !authorized {
+        return Err(AlterationError {
+            code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            message: "not super-user",
+        });
     }
-    if u.salt.is_empty() {
-        return err_result(u.name, codes::UNACCEPTABLE_CREDENTIAL, "empty salt");
+    if broker
+        .controller
+        .current_image()
+        .scram_credential(&deletion.name, mech)
+        .is_none()
+    {
+        return Err(AlterationError {
+            code: codes::RESOURCE_NOT_FOUND,
+            message: "credential not found",
+        });
+    }
+    Ok(mech)
+}
+
+fn validate_upsertion(
+    upsertion: &ScramCredentialUpsertion,
+    authorized: bool,
+) -> Result<SaslMechanism, AlterationError> {
+    let Some(mech) = wire_to_mech(upsertion.mechanism) else {
+        return Err(AlterationError {
+            code: codes::UNSUPPORTED_SASL_MECHANISM,
+            message: "unknown mechanism",
+        });
+    };
+    if upsertion.iterations < MIN_ITERATIONS {
+        return Err(AlterationError {
+            code: codes::UNACCEPTABLE_CREDENTIAL,
+            message: "iterations < 4096",
+        });
+    }
+    if upsertion.iterations > MAX_ITERATIONS {
+        return Err(AlterationError {
+            code: codes::UNACCEPTABLE_CREDENTIAL,
+            message: "iterations > 16384",
+        });
+    }
+    if upsertion.salt.is_empty() {
+        return Err(AlterationError {
+            code: codes::UNACCEPTABLE_CREDENTIAL,
+            message: "empty salt",
+        });
     }
     let expected_salted_len = crabka_security::scram_hash_len(mech);
-    if u.salted_password.len() != expected_salted_len {
-        return err_result(
-            u.name,
-            codes::UNACCEPTABLE_CREDENTIAL,
-            "wrong salted_password length",
-        );
+    if upsertion.salted_password.len() != expected_salted_len {
+        return Err(AlterationError {
+            code: codes::UNACCEPTABLE_CREDENTIAL,
+            message: "wrong salted_password length",
+        });
     }
     if !authorized {
-        return err_result(
-            u.name,
-            codes::CLUSTER_AUTHORIZATION_FAILED,
-            "not super-user",
-        );
+        return Err(AlterationError {
+            code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            message: "not super-user",
+        });
     }
+    Ok(mech)
+}
+
+fn delete_record(deletion: &ScramCredentialDeletion, mechanism: SaslMechanism) -> MetadataRecord {
+    MetadataRecord::V1DeleteScramCredential(DeleteScramCredentialRecord {
+        user: deletion.name.clone(),
+        mechanism,
+    })
+}
+
+fn upsertion_record(
+    upsertion: &ScramCredentialUpsertion,
+    mechanism: SaslMechanism,
+) -> MetadataRecord {
     // Per KIP-554 the wire `salted_password` is the PBKDF2 output (32
     // bytes for SHA-256, 64 for SHA-512); recompute `stored_key` and
     // `server_key` from it for storage in the metadata image.
     let (stored_key, server_key) =
-        crabka_security::derive_keys_from_salted(mech, &u.salted_password);
-    records.push(MetadataRecord::V1ScramCredential(ScramCredentialRecord {
-        user: u.name.clone(),
-        mechanism: mech,
-        salt: u.salt.to_vec(),
+        crabka_security::derive_keys_from_salted(mechanism, &upsertion.salted_password);
+    MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+        user: upsertion.name.clone(),
+        mechanism,
+        salt: upsertion.salt.to_vec(),
         stored_key,
         server_key,
-        iterations: u.iterations.try_into().unwrap_or(u32::MAX),
-    }));
-    ok_result(u.name)
+        iterations: u32::try_from(upsertion.iterations)
+            .expect("validated SCRAM iterations fit u32"),
+    })
 }
 
 /// Map the KIP-554 wire mechanism byte to a [`SaslMechanism`].
@@ -291,18 +453,26 @@ mod tests {
 
     use crate::{authorizer::Authorizer, test_support::DenyAll};
 
+    const KAFKA_DUPLICATE_RESOURCE: i16 = 92;
+    const KAFKA_UNSUPPORTED_SASL_MECHANISM: i16 = 33;
+    const KAFKA_UNACCEPTABLE_CREDENTIAL: i16 = 93;
+    const KAFKA_MAX_SCRAM_ITERATIONS: i32 = 16_384;
+
     fn valid_upsertion(name: &str) -> ScramCredentialUpsertion {
+        valid_upsertion_for_mechanism(name, 1, SaslMechanism::ScramSha256)
+    }
+
+    fn valid_upsertion_for_mechanism(
+        name: &str,
+        wire_mechanism: i8,
+        mechanism: SaslMechanism,
+    ) -> ScramCredentialUpsertion {
         ScramCredentialUpsertion {
             name: name.into(),
-            mechanism: 1,
+            mechanism: wire_mechanism,
             iterations: MIN_ITERATIONS,
             salt: Bytes::from_static(b"salt"),
-            salted_password: Bytes::from(vec![
-                7;
-                crabka_security::scram_hash_len(
-                    SaslMechanism::ScramSha256,
-                )
-            ]),
+            salted_password: Bytes::from(vec![7; crabka_security::scram_hash_len(mechanism)]),
             ..Default::default()
         }
     }
@@ -392,6 +562,54 @@ mod tests {
     }
 
     #[test]
+    fn process_upsertion_rejects_unknown_mechanism_with_unsupported_sasl_mechanism() {
+        let mut records = Vec::new();
+        let mut upsertion = valid_upsertion("alice");
+        upsertion.mechanism = 99;
+
+        let r = process_upsertion(upsertion, true, &mut records);
+
+        assert!(
+            r == expected_result(
+                "alice",
+                KAFKA_UNSUPPORTED_SASL_MECHANISM,
+                Some("unknown mechanism"),
+            )
+        );
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn process_upsertion_rejects_iterations_above_kafka_maximum() {
+        let mut records = Vec::new();
+        let mut upsertion = valid_upsertion("alice");
+        upsertion.iterations = KAFKA_MAX_SCRAM_ITERATIONS + 1;
+
+        let r = process_upsertion(upsertion, true, &mut records);
+
+        assert!(
+            r == expected_result(
+                "alice",
+                KAFKA_UNACCEPTABLE_CREDENTIAL,
+                Some("iterations > 16384"),
+            )
+        );
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn process_upsertion_allows_kafka_maximum_iterations() {
+        let mut records = Vec::new();
+        let mut upsertion = valid_upsertion("alice");
+        upsertion.iterations = KAFKA_MAX_SCRAM_ITERATIONS;
+
+        let r = process_upsertion(upsertion, true, &mut records);
+
+        assert!(r == expected_result("alice", 0, None));
+        assert!(records.len() == 1);
+    }
+
+    #[test]
     fn submit_error_rewrites_only_success_rows() {
         let mut results = vec![
             ok_result("alice".into()),
@@ -452,7 +670,6 @@ mod tests {
 
     #[test]
     fn process_upsertion_validates_boundaries_and_records_success() {
-        let mut seen = HashSet::new();
         let mut records = Vec::new();
 
         let rejections = [
@@ -483,7 +700,7 @@ mod tests {
         ];
         for (upsertion, msg) in rejections {
             let user = upsertion.name.clone();
-            let r = process_upsertion(upsertion, true, &mut seen, &mut records);
+            let r = process_upsertion(upsertion, true, &mut records);
             assert!(
                 r == expected_result(&user, codes::UNACCEPTABLE_CREDENTIAL, Some(msg)),
                 "case: {user}"
@@ -491,7 +708,7 @@ mod tests {
             assert!(records.is_empty(), "case: {user}");
         }
 
-        let r = process_upsertion(valid_upsertion("alice"), true, &mut seen, &mut records);
+        let r = process_upsertion(valid_upsertion("alice"), true, &mut records);
         assert!(r == expected_result("alice", 0, None));
         let (stored_key, server_key) = crabka_security::derive_keys_from_salted(
             SaslMechanism::ScramSha256,
@@ -509,24 +726,10 @@ mod tests {
     }
 
     #[test]
-    fn process_upsertion_rejects_duplicates_and_unauthorized_users() {
-        let mut seen = HashSet::new();
+    fn process_upsertion_rejects_unauthorized_users() {
         let mut records = Vec::new();
 
-        let r = process_upsertion(valid_upsertion("alice"), true, &mut seen, &mut records);
-        assert!(r.error_code == 0);
-        let r = process_upsertion(valid_upsertion("alice"), true, &mut seen, &mut records);
-        let expected = expected_result(
-            "alice",
-            codes::DUPLICATE_RESOURCE,
-            Some("duplicate resource"),
-        );
-        assert!(r == expected);
-        assert!(records.len() == 1);
-
-        let mut seen = HashSet::new();
-        let mut records = Vec::new();
-        let r = process_upsertion(valid_upsertion("bob"), false, &mut seen, &mut records);
+        let r = process_upsertion(valid_upsertion("bob"), false, &mut records);
         let expected = expected_result(
             "bob",
             codes::CLUSTER_AUTHORIZATION_FAILED,
@@ -537,14 +740,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_deletion_rejects_duplicates_and_missing_credentials() {
+    async fn process_deletion_rejects_missing_credentials() {
         let (broker_handle, _dir) =
             start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
         let broker = broker_handle.broker_arc_for_test();
-        let mut seen = HashSet::new();
         let mut records = Vec::new();
 
-        let r = process_deletion(&broker, deletion("alice"), true, &mut seen, &mut records);
+        let r = process_deletion(&broker, deletion("alice"), true, &mut records);
         assert!(
             r.error_code == 91,
             "missing SCRAM deletion target must use Kafka RESOURCE_NOT_FOUND (91), got {}",
@@ -557,15 +759,6 @@ mod tests {
         );
         assert!(r == expected);
         assert!(records.is_empty());
-
-        let r = process_deletion(&broker, deletion("alice"), true, &mut seen, &mut records);
-        let expected = expected_result(
-            "alice",
-            codes::DUPLICATE_RESOURCE,
-            Some("duplicate resource"),
-        );
-        assert!(r == expected);
-        assert!(records.is_empty());
         broker_handle.shutdown().await;
     }
 
@@ -574,10 +767,9 @@ mod tests {
         let (broker_handle, _dir) =
             start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
         let broker = broker_handle.broker_arc_for_test();
-        let mut seen = HashSet::new();
         let mut records = Vec::new();
 
-        let r = process_deletion(&broker, deletion("alice"), false, &mut seen, &mut records);
+        let r = process_deletion(&broker, deletion("alice"), false, &mut records);
         let expected = expected_result(
             "alice",
             codes::CLUSTER_AUTHORIZATION_FAILED,
@@ -585,6 +777,149 @@ mod tests {
         );
         assert!(r == expected);
         assert!(records.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn process_deletion_rejects_unknown_mechanism_with_unsupported_sasl_mechanism() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        let mut records = Vec::new();
+        let mut deletion = deletion("alice");
+        deletion.mechanism = 99;
+
+        let r = process_deletion(&broker, deletion, true, &mut records);
+
+        assert!(
+            r == expected_result(
+                "alice",
+                KAFKA_UNSUPPORTED_SASL_MECHANISM,
+                Some("unknown mechanism"),
+            )
+        );
+        assert!(records.is_empty());
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_duplicate_username_across_upsertion_mechanisms_returns_one_error_row() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterUserScramCredentialsRequest {
+            upsertions: vec![
+                valid_upsertion_for_mechanism("alice", 1, SaslMechanism::ScramSha256),
+                valid_upsertion_for_mechanism("alice", 2, SaslMechanism::ScramSha512),
+            ],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![expected_result(
+                "alice",
+                KAFKA_DUPLICATE_RESOURCE,
+                Some("A user credential cannot be altered twice in the same request"),
+            )],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+        let image = broker.controller.current_image();
+        assert!(
+            image
+                .scram_credential("alice", SaslMechanism::ScramSha256)
+                .is_none()
+        );
+        assert!(
+            image
+                .scram_credential("alice", SaslMechanism::ScramSha512)
+                .is_none()
+        );
+        broker_handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn handle_duplicate_username_between_deletion_and_upsertion_returns_one_error_row() {
+        let (broker_handle, _dir) =
+            start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer)).await;
+        let broker = broker_handle.broker_arc_for_test();
+        wait_for_leader(&broker).await;
+        broker
+            .controller
+            .submit_change(vec![MetadataRecord::V1ScramCredential(
+                ScramCredentialRecord {
+                    user: "alice".into(),
+                    mechanism: SaslMechanism::ScramSha512,
+                    salt: b"salt".to_vec(),
+                    stored_key: vec![1; 64],
+                    server_key: vec![2; 64],
+                    iterations: u32::try_from(MIN_ITERATIONS).expect("min fits"),
+                },
+            )])
+            .await
+            .expect("seed alice SCRAM credential");
+        broker_handle
+            .wait_for_image(|image| {
+                image
+                    .scram_credential("alice", SaslMechanism::ScramSha512)
+                    .is_some()
+            })
+            .await;
+        let principal = Principal {
+            name: "admin".into(),
+            auth_method: AuthMethod::Anonymous,
+            groups: Vec::new(),
+        };
+        let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+        let ctx = test_context(&principal, &peer);
+        let req = AlterUserScramCredentialsRequest {
+            deletions: vec![ScramCredentialDeletion {
+                name: "alice".into(),
+                mechanism: 2,
+                ..Default::default()
+            }],
+            upsertions: vec![valid_upsertion_for_mechanism(
+                "alice",
+                1,
+                SaslMechanism::ScramSha256,
+            )],
+            ..Default::default()
+        };
+
+        let resp = handle(&broker, req, &ctx).await;
+
+        let expected = AlterUserScramCredentialsResponse {
+            throttle_time_ms: 0,
+            results: vec![expected_result(
+                "alice",
+                KAFKA_DUPLICATE_RESOURCE,
+                Some("A user credential cannot be altered twice in the same request"),
+            )],
+            unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+        };
+        assert!(resp == expected);
+        let image = broker.controller.current_image();
+        assert!(
+            image
+                .scram_credential("alice", SaslMechanism::ScramSha512)
+                .is_some()
+        );
+        assert!(
+            image
+                .scram_credential("alice", SaslMechanism::ScramSha256)
+                .is_none()
+        );
         broker_handle.shutdown().await;
     }
 
