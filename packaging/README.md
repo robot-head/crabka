@@ -27,9 +27,17 @@ The observability demo image is published manually by
 | ------------- | -------------------------------- |
 | `crabka-demo` | `ghcr.io/robot-head/crabka-demo` |
 
+## Creusot verifier toolchain
+
+The `creusot-toolchain` recipe builds the dev/CI verifier image used for
+formal proofs. It is single-arch, runs as root, and is unattested by design
+because it never ships to users. See
+[`docs/verification.md`](../docs/verification.md) for verifier usage and
+pin-management details.
+
 ## Architectures
 
-Each image is a multi-arch OCI index covering:
+Each user-facing image is a multi-arch OCI index covering:
 
 | Platform      | apko arch | Runs natively on                              |
 | ------------- | --------- | --------------------------------------------- |
@@ -47,7 +55,7 @@ docker image inspect mirror.gcr.io/robothead/crabka-broker:latest --format '{{.A
 
 ## Attestations
 
-Every published image carries two cryptographically signed, keyless
+Every user-facing published image carries two cryptographically signed, keyless
 ([Sigstore](https://www.sigstore.dev/)) attestations:
 
 - **SLSA build provenance** — how, where, and from which commit the image was

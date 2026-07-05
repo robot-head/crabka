@@ -30,6 +30,7 @@ jobs:
       rust: ${{ steps.filter.outputs.rust }}
       jvm_differential: ${{ steps.filter.outputs.jvm_differential }}
       cargo_deny: ${{ steps.filter.outputs.cargo_deny }}
+      creusot: ${{ steps.filter.outputs.creusot }}
       helm_lint: ${{ steps.filter.outputs.helm_lint }}
       client_core: ${{ steps.filter.outputs.client_core }}
       log: ${{ steps.filter.outputs.log }}
@@ -73,6 +74,15 @@ jobs:
               - 'Cargo.lock'
               - 'crates/**/Cargo.toml'
               - '.github/workflows/ci.yml'
+            creusot:
+              - 'crates/verified/**'
+              - 'crates/throttle/**'
+              - 'packaging/melange/creusot-toolchain.yaml'
+              - 'packaging/apko/creusot-toolchain.yaml'
+              - '.creusot-version'
+              - '.github/workflows/ci.yml'
+              - 'verif/**'
+              - 'why3find.json'
             helm_lint:
               - 'charts/**'
               - 'deploy/**'
@@ -380,6 +390,34 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check advisories bans sources licenses
+
+  creusot-verify:
+    needs: changes
+    if: ${{ needs.changes.outputs.creusot == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Replay Creusot proof sessions
+        run: |
+          set -euo pipefail
+          PIN="$(cat .creusot-version)"
+          if [[ -z "${PIN}" ]]; then
+            echo "::error::.creusot-version is empty" >&2
+            exit 1
+          fi
+
+          IMAGE="ghcr.io/robot-head/crabka-creusot:${PIN}"
+          docker pull "${IMAGE}"
+
+          # Replay only: this must fail if checked-in proof sessions do not replay.
+          # Keep build artifacts inside the container instead of the host checkout.
+          docker run --rm \
+            -e CARGO_TARGET_DIR=/tmp/creusot-target \
+            -v "${PWD}:/workspace" \
+            -w /workspace \
+            "${IMAGE}" \
+            "cargo creusot --replay -p crabka-verified && cargo creusot --replay -p crabka-throttle"
 
   helm-lint:
     needs: changes
@@ -1080,6 +1118,7 @@ jobs:
       - rust
       - jvm-differential
       - cargo-deny
+      - creusot-verify
       - helm-lint
       - client-core-integration
       - log-integration
