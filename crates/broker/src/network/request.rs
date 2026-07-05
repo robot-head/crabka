@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use bytes::Buf;
+use crabka_protocol::primitives::string_bytes_borrowed::get_nullable_string_borrowed;
 
 use crate::{
     error::BrokerError,
@@ -35,23 +36,7 @@ where
     let correlation_id = cur.get_i32();
     let body_flexible = flexible_for(api_key, api_version);
 
-    if cur.remaining() < 2 {
-        return Err(protocol_invalid("request frame: missing client_id length"));
-    }
-    let cid_len = cur.get_i16();
-    let client_id = if cid_len > 0 {
-        let n = usize::try_from(cid_len).expect("positive i16 fits usize");
-        if cur.remaining() < n {
-            return Err(protocol_invalid(
-                "request frame: client_id length > available",
-            ));
-        }
-        let raw = &cur[..n];
-        cur.advance(n);
-        std::str::from_utf8(raw).ok()
-    } else {
-        None
-    };
+    let client_id = get_nullable_string_borrowed(&mut cur)?;
 
     if body_flexible {
         crabka_protocol::tagged_fields::read_tagged_fields(&mut cur, |_tag, _payload| Ok(false))?;
@@ -174,6 +159,28 @@ mod tests {
         check!(parsed.client_id == Some("client-a"));
         check!(parsed.body_flexible);
         check!(parsed.body == b"body".as_slice());
+    }
+
+    #[test]
+    fn parse_request_preserves_empty_client_id() {
+        let frame = request_frame(3, 8, 42, Some(b""), None, b"body");
+
+        let parsed = parse_request(&frame, |_, _| false).expect("parse request");
+
+        check!(parsed.client_id == Some(""));
+        check!(parsed.body == b"body".as_slice());
+    }
+
+    #[test]
+    fn parse_request_rejects_invalid_utf8_client_id() {
+        let frame = request_frame(3, 8, 42, Some(&[0xff, 0xfe]), None, b"body");
+
+        let err = parse_request(&frame, |_, _| false).expect_err("invalid utf8 client id");
+
+        assert!(matches!(
+            err,
+            BrokerError::Protocol(crabka_protocol::ProtocolError::InvalidUtf8(_))
+        ));
     }
 
     #[test]
