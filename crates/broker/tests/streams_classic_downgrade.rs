@@ -629,13 +629,13 @@ async fn downgrade_survives_restart() {
         let broker = Broker::start(rejoin_config(log_dir)).await.unwrap();
         let bootstrap = broker.listen_addr().to_string();
         let cc = connect(&bootstrap).await;
-        broker
-            .wait_until_group_type(
-                "g4",
-                crabka_broker::coordinator::unified::GroupType::Classic,
-            )
-            .await;
-        // Replay must reconstruct g4 as Classic (k15 tombstoned), offset intact.
+        // Replay must reconstruct g4 as a classic actor from the committed
+        // offset. Offset-only groups are Kafka-typeless, so they do not carry a
+        // Classic type lock in `group_type_for_test`.
+        assert!(
+            broker.classic_group_inspect_for_test("g4").await.is_some(),
+            "offset-only replay must seed a classic actor for g4"
+        );
         assert!(
             broker.group_type_for_test("g4")
                 != Some(crabka_broker::coordinator::unified::GroupType::Streams),
