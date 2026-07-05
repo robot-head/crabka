@@ -501,6 +501,7 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
         19 => "NOT_ENOUGH_REPLICAS",
         31 => "CLUSTER_AUTHORIZATION_FAILED",
         33 => "UNSUPPORTED_SASL_MECHANISM",
+        35 => "UNSUPPORTED_VERSION",
         36 => "TOPIC_ALREADY_EXISTS",
         37 => "INVALID_PARTITIONS",
         38 => "INVALID_REPLICATION_FACTOR",
@@ -540,6 +541,7 @@ mod tests {
         for (code, want) in [
             (31, "CLUSTER_AUTHORIZATION_FAILED"),
             (33, "UNSUPPORTED_SASL_MECHANISM"),
+            (35, "UNSUPPORTED_VERSION"),
             (66, "DELEGATION_TOKEN_EXPIRED"),
             (83, "ELIGIBLE_LEADERS_NOT_AVAILABLE"),
             (84, "ELECTION_NOT_NEEDED"),

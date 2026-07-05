@@ -3,14 +3,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{Html, IntoResponse};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Form, Router};
+use serde::de::DeserializeOwned;
 
 use crate::auth::{AdminClientLoginBroker, LoginBroker, LoginRequest};
 use crate::config::AdminUiConfig;
+use crate::dto::{
+    AclRequestDto, AlterConfigRequestDto, CreatePartitionsRequestDto, CreateTopicRequestDto,
+    DeleteTopicRequestDto, LogDirMoveRequestDto, QuotaDeleteDto, QuotaUpsertDto, ResourceOutcome,
+    ScramUserDeleteDto, ScramUserUpsertDto,
+};
 use crate::error::UiError;
 use crate::server_fns::{self, AdminSeamFactory, BrokerAdminSeamFactory, ServerFunctionContext};
 use crate::session::SessionStore;
@@ -65,6 +72,7 @@ pub fn router_with_factory<F>(state: AppState, seam_factory: F) -> Router
 where
     F: AdminSeamFactory + Clone + Send + Sync + 'static,
     for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
 {
     router_with_factory_and_login_broker(state, seam_factory, AdminClientLoginBroker)
 }
@@ -77,6 +85,7 @@ pub fn router_with_factory_and_login_broker<F, B>(
 where
     F: AdminSeamFactory + Clone + Send + Sync + 'static,
     for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
     B: LoginBroker + Clone + Send + Sync + 'static,
 {
     let router_state = AdminRouterState {
@@ -95,6 +104,17 @@ where
         .route("/users", get(users))
         .route("/quotas", get(quotas))
         .route("/log-dirs", get(log_dirs))
+        .route("/topics/create", post(post_create_topic::<F, B>))
+        .route("/topics/delete", post(post_delete_topic::<F, B>))
+        .route("/topics/partitions", post(post_create_partitions::<F, B>))
+        .route("/topics/configs", post(post_alter_configs::<F, B>))
+        .route("/acls/create", post(post_create_acl::<F, B>))
+        .route("/acls/delete", post(post_delete_acl::<F, B>))
+        .route("/users/scram/upsert", post(post_upsert_scram::<F, B>))
+        .route("/users/scram/delete", post(post_delete_scram::<F, B>))
+        .route("/quotas/upsert", post(post_upsert_quota::<F, B>))
+        .route("/quotas/delete", post(post_delete_quota::<F, B>))
+        .route("/log-dirs/move", post(post_move_log_dir::<F, B>))
         .with_state(router_state)
 }
 
@@ -269,6 +289,279 @@ where
             Err(_) => render_page(&RoutePage::log_dirs(ReadRouteState::LoadFailed)),
         },
     )
+}
+
+async fn post_create_topic<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<CreateTopicRequestDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::create_topic(&context, request).await)
+}
+
+async fn post_delete_topic<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<DeleteTopicRequestDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::delete_topic(&context, request).await)
+}
+
+async fn post_create_partitions<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<CreatePartitionsRequestDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::create_partitions(&context, request).await)
+}
+
+async fn post_alter_configs<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<AlterConfigRequestDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::alter_configs(&context, request).await)
+}
+
+async fn post_create_acl<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<AclRequestDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::create_acl(&context, request).await)
+}
+
+async fn post_delete_acl<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<AclRequestDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::delete_acl(&context, request).await)
+}
+
+async fn post_upsert_scram<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<ScramUserUpsertDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::upsert_scram_sha512_user(&context, request).await)
+}
+
+async fn post_delete_scram<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<ScramUserDeleteDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::delete_scram_user(&context, request).await)
+}
+
+async fn post_upsert_quota<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<QuotaUpsertDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::upsert_quota(&context, request).await)
+}
+
+async fn post_delete_quota<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<QuotaDeleteDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::delete_quota(&context, request).await)
+}
+
+async fn post_move_log_dir<F, B>(
+    State(state): State<AdminRouterState<F, B>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse
+where
+    F: AdminSeamFactory + Clone + Send + Sync + 'static,
+    for<'a> F::Reader<'a>: Send,
+    for<'a> F::Mutations<'a>: Send,
+    B: LoginBroker + Clone + Send + Sync + 'static,
+{
+    let Some(context) = context_from_headers(&state, &headers) else {
+        return mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated");
+    };
+    let Ok(request) = parse_json_request::<LogDirMoveRequestDto>(&body) else {
+        return mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request");
+    };
+
+    mutation_result_response(server_fns::move_log_dir(&context, request).await)
+}
+
+fn parse_json_request<T: DeserializeOwned>(body: &[u8]) -> Result<T, serde_json::Error> {
+    serde_json::from_slice(body)
+}
+
+fn mutation_result_response(
+    result: Result<Vec<ResourceOutcome>, UiError>,
+) -> axum::response::Response {
+    match result {
+        Ok(outcomes) => (StatusCode::OK, mutation_outcome_text(&outcomes)).into_response(),
+        Err(UiError::NotAuthenticated) => {
+            mutation_error_response(StatusCode::UNAUTHORIZED, "not authenticated")
+        }
+        Err(error) => {
+            mutation_error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
+        }
+    }
+}
+
+fn mutation_error_response(status: StatusCode, message: &str) -> axum::response::Response {
+    (status, format!("status=error\nmessage={message}\n")).into_response()
+}
+
+fn mutation_outcome_text(outcomes: &[ResourceOutcome]) -> String {
+    let mut text = String::from("status=ok\n");
+
+    for outcome in outcomes {
+        text.push_str("resource=");
+        text.push_str(&outcome.resource);
+        if let Some(error) = &outcome.error {
+            text.push_str("\tstatus=error\terror_code=");
+            text.push_str(&error.code.to_string());
+            text.push_str("\terror_name=");
+            text.push_str(&error.name);
+        } else {
+            text.push_str("\tstatus=ok");
+        }
+        text.push('\n');
+    }
+
+    text
 }
 
 fn login_page() -> Html<String> {

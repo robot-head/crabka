@@ -75,6 +75,25 @@ async fn post_form_from(
     .expect("router responds")
 }
 
+async fn post_json_from(
+    app: axum::Router,
+    path: &str,
+    json_body: &'static str,
+    cookie: Option<String>,
+) -> axum::response::Response {
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri(path)
+        .header(header::CONTENT_TYPE, "application/json");
+    if let Some(cookie) = cookie {
+        request = request.header(header::COOKIE, cookie);
+    }
+
+    app.oneshot(request.body(Body::from(json_body)).expect("request builds"))
+        .await
+        .expect("router responds")
+}
+
 async fn response_text(response: axum::response::Response) -> String {
     let bytes = to_bytes(response.into_body(), 64 * 1024)
         .await
@@ -208,6 +227,101 @@ async fn posting_login_sets_session_cookie_and_cookie_authenticates_protected_ro
     assert_eq!(protected_response.status(), StatusCode::OK);
     let protected_body = response_text(protected_response).await;
     assert!(protected_body.contains("orders"));
+}
+
+#[tokio::test]
+async fn authenticated_post_mutation_routes_call_admin_mutation_seam() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+
+    for (path, body, expected_resource) in [
+        (
+            "/topics/create",
+            r#"{"name":"orders","partitions":3,"replicas":1,"configs":[]}"#,
+            "orders",
+        ),
+        ("/topics/delete", r#"{"name":"orders"}"#, "orders"),
+        (
+            "/topics/partitions",
+            r#"{"topic":"orders","total_count":6}"#,
+            "orders",
+        ),
+        (
+            "/topics/configs",
+            r#"{"resource_type":"topic","resource_name":"orders","configs":[{"name":"cleanup.policy","value":"compact"}]}"#,
+            "orders",
+        ),
+        (
+            "/acls/create",
+            r#"{"resource_type":"topic","resource_name":"orders","principal":"User:alice","operation":"Read","permission":"Allow","host":"*"}"#,
+            "User:alice",
+        ),
+        (
+            "/acls/delete",
+            r#"{"resource_type":"topic","resource_name":"orders","principal":"User:alice","operation":"Read","permission":"Allow","host":"*"}"#,
+            "User:alice",
+        ),
+        (
+            "/users/scram/upsert",
+            r#"{"username":"alice","password":"secret","iterations":4096}"#,
+            "alice",
+        ),
+        ("/users/scram/delete", r#"{"username":"alice"}"#, "alice"),
+        (
+            "/quotas/upsert",
+            r#"{"entity":"user=alice","quota_type":"producer_byte_rate","value":1024.0}"#,
+            "user=alice",
+        ),
+        (
+            "/quotas/delete",
+            r#"{"entity":"user=alice","quota_type":"producer_byte_rate"}"#,
+            "user=alice",
+        ),
+        (
+            "/log-dirs/move",
+            r#"{"topic":"orders","partition":0,"destination_log_dir":"/var/lib/crabka-1"}"#,
+            "orders",
+        ),
+    ] {
+        let response = post_json_from(app.clone(), path, body, Some(cookie.clone())).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{path} should succeed");
+        let text = response_text(response).await;
+        assert!(text.contains("status=ok"), "{path} returned {text}");
+        assert!(text.contains(expected_resource), "{path} returned {text}");
+    }
+
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 11);
+    assert_eq!(factory.create_topic.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.delete_topic.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.create_partitions.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.alter_configs.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.create_acl.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.delete_acl.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.upsert_scram.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.delete_scram.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.upsert_quota.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.delete_quota.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.move_log_dir.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn post_mutation_routes_authenticate_before_decoding_request_body() {
+    let state = AppState::new(AdminUiConfig::default());
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+
+    let response = post_json_from(app, "/topics/create", "not-json", None).await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(factory.total_mutation_calls(), 0);
+    let text = response_text(response).await;
+    assert!(text.contains("not authenticated"));
 }
 
 #[tokio::test]
@@ -404,6 +518,34 @@ struct RecordingAdminSeamFactory {
     users: Arc<AtomicUsize>,
     quotas: Arc<AtomicUsize>,
     log_dirs: Arc<AtomicUsize>,
+    mutation_seam_calls: Arc<AtomicUsize>,
+    create_topic: Arc<AtomicUsize>,
+    delete_topic: Arc<AtomicUsize>,
+    create_partitions: Arc<AtomicUsize>,
+    alter_configs: Arc<AtomicUsize>,
+    create_acl: Arc<AtomicUsize>,
+    delete_acl: Arc<AtomicUsize>,
+    upsert_scram: Arc<AtomicUsize>,
+    delete_scram: Arc<AtomicUsize>,
+    upsert_quota: Arc<AtomicUsize>,
+    delete_quota: Arc<AtomicUsize>,
+    move_log_dir: Arc<AtomicUsize>,
+}
+
+impl RecordingAdminSeamFactory {
+    fn total_mutation_calls(&self) -> usize {
+        self.create_topic.load(Ordering::SeqCst)
+            + self.delete_topic.load(Ordering::SeqCst)
+            + self.create_partitions.load(Ordering::SeqCst)
+            + self.alter_configs.load(Ordering::SeqCst)
+            + self.create_acl.load(Ordering::SeqCst)
+            + self.delete_acl.load(Ordering::SeqCst)
+            + self.upsert_scram.load(Ordering::SeqCst)
+            + self.delete_scram.load(Ordering::SeqCst)
+            + self.upsert_quota.load(Ordering::SeqCst)
+            + self.delete_quota.load(Ordering::SeqCst)
+            + self.move_log_dir.load(Ordering::SeqCst)
+    }
 }
 
 impl AdminSeamFactory for RecordingAdminSeamFactory {
@@ -423,8 +565,10 @@ impl AdminSeamFactory for RecordingAdminSeamFactory {
     fn mutation_seam<'a>(
         &'a self,
         _cfg: &AdminUiConfig,
-        _record: &SessionRecord,
+        record: &SessionRecord,
     ) -> Result<Self::Mutations<'a>, UiError> {
+        assert_eq!(record.user.username, "alice");
+        self.mutation_seam_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.clone())
     }
 }
@@ -505,78 +649,111 @@ impl AdminReadSeam for RecordingAdminSeamFactory {
 impl AdminMutationSeam for RecordingAdminSeamFactory {
     fn create_topic<'a>(
         &'a self,
-        _request: CreateTopicRequestDto,
+        request: CreateTopicRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.create_topic.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.name)])
+        })
     }
 
     fn delete_topic<'a>(
         &'a self,
-        _request: DeleteTopicRequestDto,
+        request: DeleteTopicRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.delete_topic.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.name)])
+        })
     }
 
     fn create_partitions<'a>(
         &'a self,
-        _request: CreatePartitionsRequestDto,
+        request: CreatePartitionsRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.create_partitions.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.topic)])
+        })
     }
 
     fn alter_configs<'a>(
         &'a self,
-        _request: AlterConfigRequestDto,
+        request: AlterConfigRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.alter_configs.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.resource_name)])
+        })
     }
 
     fn create_acl<'a>(
         &'a self,
-        _request: AclRequestDto,
+        request: AclRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.create_acl.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.principal)])
+        })
     }
 
     fn delete_acl<'a>(
         &'a self,
-        _request: AclRequestDto,
+        request: AclRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.delete_acl.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.principal)])
+        })
     }
 
     fn upsert_scram_sha512_user<'a>(
         &'a self,
-        _request: ScramUserUpsertDto,
+        request: ScramUserUpsertDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.upsert_scram.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.username)])
+        })
     }
 
     fn delete_scram_user<'a>(
         &'a self,
-        _request: ScramUserDeleteDto,
+        request: ScramUserDeleteDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.delete_scram.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.username)])
+        })
     }
 
     fn upsert_quota<'a>(
         &'a self,
-        _request: QuotaUpsertDto,
+        request: QuotaUpsertDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.upsert_quota.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.entity)])
+        })
     }
 
     fn delete_quota<'a>(
         &'a self,
-        _request: QuotaDeleteDto,
+        request: QuotaDeleteDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.delete_quota.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.entity)])
+        })
     }
 
     fn move_log_dir<'a>(
         &'a self,
-        _request: LogDirMoveRequestDto,
+        request: LogDirMoveRequestDto,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<ResourceOutcome>, UiError>> + Send + 'a>> {
-        Box::pin(async { Ok(Vec::new()) })
+        Box::pin(async move {
+            self.move_log_dir.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![ResourceOutcome::ok(request.topic)])
+        })
     }
 }

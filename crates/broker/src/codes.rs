@@ -196,11 +196,11 @@ pub const FENCED_LEADER_EPOCH: i16 = 74;
 /// view. Metadata propagation lag — caller retries after a brief wait.
 pub const UNKNOWN_LEADER_EPOCH: i16 = 75;
 
-/// `INELIGIBLE_REPLICA` (92, KIP-903) — an `AlterPartition` proposed a new
+/// `INELIGIBLE_REPLICA` (107, KIP-903) — an `AlterPartition` proposed a new
 /// ISR containing at least one ineligible replica: a broker not currently
 /// registered, or one whose stamped broker epoch is stale relative to the
 /// controller's registration epoch. The partition's ISR is left unchanged.
-pub const INELIGIBLE_REPLICA: i16 = 92;
+pub const INELIGIBLE_REPLICA: i16 = 107;
 
 // Leader election codes.
 pub const PREFERRED_LEADER_NOT_AVAILABLE: i16 = 80;
@@ -436,5 +436,11 @@ mod tests {
         for (name, code, want) in cases {
             assert!(code == want, "{name}");
         }
+    }
+
+    #[test]
+    fn ineligible_replica_code_does_not_collide_with_duplicate_resource() {
+        assert!(DUPLICATE_RESOURCE == 92);
+        assert!(INELIGIBLE_REPLICA == 107);
     }
 }

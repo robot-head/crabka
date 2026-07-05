@@ -90,7 +90,7 @@ fn build_results(
                 };
             }
 
-            let pairs = image.scram_credentials_for_user(&user);
+            let mut pairs = image.scram_credentials_for_user(&user);
             if pairs.is_empty() && !known_users.contains(&user) {
                 DescribeUserScramCredentialsResult {
                     user,
@@ -100,6 +100,7 @@ fn build_results(
                     ..Default::default()
                 }
             } else {
+                pairs.sort_by_key(|(mech, _)| sasl_mechanism_to_byte(*mech));
                 let credential_infos: Vec<CredentialInfo> = pairs
                     .into_iter()
                     .map(|(mech, iters)| CredentialInfo {
@@ -370,6 +371,30 @@ mod tests {
                     unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
                 }]
         );
+    }
+
+    #[test]
+    fn credential_infos_are_ordered_by_kafka_scram_mechanism_type() {
+        let resp = run_handle_filter(
+            Some(vec!["alice".into()]),
+            &[
+                ("alice", SaslMechanism::ScramSha512, 8192),
+                ("alice", SaslMechanism::ScramSha256, 4096),
+            ],
+        );
+
+        let alice = resp
+            .results
+            .iter()
+            .find(|row| row.user == "alice")
+            .expect("alice result exists");
+        let mechanisms: Vec<i8> = alice
+            .credential_infos
+            .iter()
+            .map(|info| info.mechanism)
+            .collect();
+
+        assert!(mechanisms == vec![1, 2]);
     }
 
     #[test]
