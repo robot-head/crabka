@@ -325,6 +325,40 @@ async fn post_mutation_routes_authenticate_before_decoding_request_body() {
 }
 
 #[tokio::test]
+async fn post_mutation_routes_reject_stale_cookie_before_decoding_request_body() {
+    let state = AppState::new(AdminUiConfig::default());
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = format!("{SESSION_COOKIE_NAME}=stale-session");
+
+    let response = post_json_from(app, "/topics/create", "not-json", Some(cookie)).await;
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(factory.total_mutation_calls(), 0);
+    let text = response_text(response).await;
+    assert!(text.contains("not authenticated"));
+}
+
+#[tokio::test]
+async fn post_mutation_routes_return_bad_request_for_authenticated_malformed_json() {
+    let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
+    let session_id = sessions.create_user("alice", "User:alice");
+    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let factory = RecordingAdminSeamFactory::default();
+    let app = router_with_factory(state, factory.clone());
+    let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
+
+    let response = post_json_from(app, "/topics/create", "not-json", Some(cookie)).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(factory.total_mutation_calls(), 0);
+    let text = response_text(response).await;
+    assert!(text.contains("invalid JSON request"));
+}
+
+#[tokio::test]
 async fn protected_http_routes_without_cookie_render_guarded_login_page() {
     for (path, route) in [
         ("/topics", Route::Topics),

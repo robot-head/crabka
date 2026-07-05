@@ -245,22 +245,22 @@ impl AdminSeamFactory for BrokerAdminSeamFactory {
 pub struct ServerFunctionContext<'a, F = BrokerAdminSeamFactory> {
     pub cfg: &'a AdminUiConfig,
     pub sessions: &'a SessionStore,
-    pub raw_session_id: Option<&'a str>,
+    pub raw_session_id: Option<String>,
     pub seam_factory: &'a F,
 }
 
 impl<'a, F> ServerFunctionContext<'a, F> {
     #[must_use]
-    pub const fn new(
+    pub fn new(
         cfg: &'a AdminUiConfig,
         sessions: &'a SessionStore,
-        raw_session_id: Option<&'a str>,
+        raw_session_id: Option<&str>,
         seam_factory: &'a F,
     ) -> Self {
         Self {
             cfg,
             sessions,
-            raw_session_id,
+            raw_session_id: raw_session_id.map(str::to_owned),
             seam_factory,
         }
     }
@@ -286,7 +286,7 @@ pub async fn login_with_app_state<B: LoginBroker>(
 }
 
 pub async fn logout_with_context<F>(context: &ServerFunctionContext<'_, F>) -> Result<(), UiError> {
-    let session_id = require_session_id(context.sessions, context.raw_session_id)?;
+    let session_id = require_session_id(context.sessions, context.raw_session_id.as_deref())?;
 
     context.sessions.remove(&session_id);
     Ok(())
@@ -307,7 +307,7 @@ pub fn current_session_with_store(
 pub fn current_session_with_context<F>(
     context: &ServerFunctionContext<'_, F>,
 ) -> Result<CurrentSession, UiError> {
-    current_session_with_store(context.sessions, context.raw_session_id)
+    current_session_with_store(context.sessions, context.raw_session_id.as_deref())
 }
 
 pub async fn list_topics_with_reader<R: AdminReadSeam>(
@@ -979,7 +979,7 @@ fn require_session(
 fn read_seam_from_context<'a, F: AdminSeamFactory>(
     context: &'a ServerFunctionContext<'_, F>,
 ) -> Result<F::Reader<'a>, UiError> {
-    let record = require_session(context.sessions, context.raw_session_id)?;
+    let record = require_session(context.sessions, context.raw_session_id.as_deref())?;
 
     context.seam_factory.read_seam(context.cfg, &record)
 }
@@ -987,7 +987,7 @@ fn read_seam_from_context<'a, F: AdminSeamFactory>(
 fn mutation_seam_from_context<'a, F: AdminSeamFactory>(
     context: &'a ServerFunctionContext<'_, F>,
 ) -> Result<F::Mutations<'a>, UiError> {
-    let record = require_session(context.sessions, context.raw_session_id)?;
+    let record = require_session(context.sessions, context.raw_session_id.as_deref())?;
 
     context.seam_factory.mutation_seam(context.cfg, &record)
 }
