@@ -2717,27 +2717,25 @@ default_renew_period_ms = 7200000
     }
 
     #[test]
-    fn delegation_token_env_var_overrides_toml() {
-        let _g = env_lock().lock().unwrap();
-        temp_env::with_var(
-            "CRABKA_DELEGATION_TOKEN_SECRET_KEY",
-            Some("env-wins"),
-            || {
-                let toml = r#"
+    fn delegation_token_runtime_key_overrides_toml() {
+        let toml = r#"
 [delegation_token]
 secret_key = "toml-loses"
 "#;
-                let file: FileConfig = toml::from_str(toml).unwrap();
-                let mut cfg = crate::config::BrokerConfig::default();
-                file.apply_to(&mut cfg).unwrap();
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig {
+            delegation_token_secret_key: Some(crabka_security::SecretBytes::new(
+                b"runtime-wins".to_vec(),
+            )),
+            ..crate::config::BrokerConfig::default()
+        };
+        file.apply_to(&mut cfg).unwrap();
 
-                assert!(
-                    cfg.delegation_token_secret_key
-                        .as_ref()
-                        .map(|s| s.as_bytes().to_vec())
-                        == Some(b"env-wins".to_vec())
-                );
-            },
+        assert!(
+            cfg.delegation_token_secret_key
+                .as_ref()
+                .map(|s| s.as_bytes().to_vec())
+                == Some(b"runtime-wins".to_vec())
         );
     }
 
