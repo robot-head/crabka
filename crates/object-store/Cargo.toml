@@ -1,5 +1,8 @@
 [package]
 name = "crabka-object-store"
+# Internal plumbing (shared object-store construction); not part of the curated
+# public crate surface — see the allowlist in tools/check-publish-allowlist.sh.
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
