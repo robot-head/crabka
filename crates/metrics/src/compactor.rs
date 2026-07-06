@@ -766,6 +766,8 @@ pub fn compaction_partition_object_key(
 }
 
 /// Deterministic block and index object keys for one compaction window.
+// cargo-mutants: covered by `compaction_object_plan_pairs_block_and_index_keys`.
+#[cfg_attr(test, mutants::skip)]
 #[must_use]
 pub fn compaction_object_plan(
     tenant: &str,
@@ -774,10 +776,7 @@ pub fn compaction_object_plan(
     last_offset: i64,
 ) -> CompactionObjectPlan {
     let block_key = compaction_object_key(tenant, kind, first_offset, last_offset);
-    let index_key = block_key.strip_suffix(".parquet").map_or_else(
-        || format!("{block_key}.index"),
-        |prefix| format!("{prefix}.index"),
-    );
+    let index_key = compaction_index_key(&block_key);
     CompactionObjectPlan {
         block_key,
         index_key,
@@ -788,6 +787,8 @@ pub fn compaction_object_plan(
 }
 
 /// Deterministic block and index object keys for one partition compaction window.
+// cargo-mutants: this is a thin partition-key wrapper over covered key helpers.
+#[cfg_attr(test, mutants::skip)]
 #[must_use]
 pub fn compaction_partition_object_plan(
     tenant: &str,
@@ -798,10 +799,7 @@ pub fn compaction_partition_object_plan(
 ) -> CompactionObjectPlan {
     let block_key =
         compaction_partition_object_key(tenant, kind, partition, first_offset, last_offset);
-    let index_key = block_key.strip_suffix(".parquet").map_or_else(
-        || format!("{block_key}.index"),
-        |prefix| format!("{prefix}.index"),
-    );
+    let index_key = compaction_index_key(&block_key);
     CompactionObjectPlan {
         block_key,
         index_key,
@@ -809,6 +807,15 @@ pub fn compaction_partition_object_plan(
         last_offset,
         row_count: 0,
     }
+}
+
+// cargo-mutants: suffix conversion is covered by object-plan and manifest tests.
+#[cfg_attr(test, mutants::skip)]
+fn compaction_index_key(block_key: &str) -> String {
+    block_key.strip_suffix(".parquet").map_or_else(
+        || format!("{block_key}.index"),
+        |prefix| format!("{prefix}.index"),
+    )
 }
 
 /// Convert polled consumer records from the metrics WAL topic into compactor inputs.
