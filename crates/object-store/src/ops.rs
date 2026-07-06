@@ -317,7 +317,7 @@ mod tests {
         let store = Arc::new(CountingStore::new());
         let c = ObjectStoreClient::new(store.clone());
         let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(&vec![1u8; 7]).unwrap(); // len 7, threshold 8
+        f.write_all(&[1u8; 7]).unwrap(); // len 7, threshold 8
         c.put_from_path(&Path::from("b/under"), f.path(), 8, 4)
             .await
             .unwrap();
@@ -332,7 +332,7 @@ mod tests {
         let store = Arc::new(CountingStore::new());
         let c = ObjectStoreClient::new(store.clone());
         let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(&vec![2u8; 8]).unwrap(); // len 8 == threshold 8
+        f.write_all(&[2u8; 8]).unwrap(); // len 8 == threshold 8
         c.put_from_path(&Path::from("b/at"), f.path(), 8, 4)
             .await
             .unwrap();
