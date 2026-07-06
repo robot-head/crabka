@@ -1017,8 +1017,8 @@ mod tests {
         let s = scenario(1);
         let c = cfg(1);
         let out = empty_output(&s, &c, 42, vec!["a-note".into()], vec!["an-error".into()]);
-        check!(out.wallclock_start_unix_ms == WallclockMs(42));
-        check!(out.wallclock_end_unix_ms == WallclockMs(42));
+        check!(out.wallclock_start_unix_ms == 42);
+        check!(out.wallclock_end_unix_ms == 42);
         check!(out.topology.broker_count == 1);
         check!(out.notes == vec!["a-note"]);
         check!(out.errors == vec!["an-error"]);
@@ -1041,7 +1041,7 @@ mod tests {
         let mut s = scenario(3);
         s.mode_tag = ModeTag::Cluster;
         let out = run(s, cfg(1)).await.expect("run returned");
-        assert!(out.throughput.msgs_produced == MessageCount(0));
+        assert!(out.throughput.msgs_produced == 0);
         assert!(out.notes.iter().any(|n| n.contains("topology-mismatch")));
     }
 
