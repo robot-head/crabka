@@ -578,7 +578,7 @@ pub async fn start_n_node_with(
     let mut leader_rx = out[0].0.watch_leader_for_test();
     let elected = tokio::time::timeout(
         Duration::from_secs(30),
-        leader_rx.wait_for(|l| matches!(l, Some(id) if *id != NodeId(0))),
+        leader_rx.wait_for(|l| matches!(l, Some(id) if *id != 0)),
     )
     .await;
     let timed_out = match &elected {

@@ -452,12 +452,12 @@ impl Model for ShareModel {
                 },
             ),
             Property::always("spso_in_range", |m: &ShareModel, s: &ShareState| {
-                Offset(0) <= s.sm.start_offset
+                0 <= s.sm.start_offset
                     && s.sm.start_offset <= s.sm.end_offset
                     && s.sm.end_offset <= m.max_offset
             }),
             Property::sometimes("can_advance_spso", |_, s: &ShareState| {
-                s.sm.start_offset > Offset(0)
+                s.sm.start_offset > 0
             }),
             Property::sometimes("can_acknowledge", |_, s: &ShareState| {
                 s.sm.batches

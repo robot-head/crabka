@@ -356,7 +356,7 @@ mod tests {
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        assert!(part.log_end_offset() == Offset(0));
+        assert!(part.log_end_offset() == 0);
         partitions.insert("orders".to_string(), PartitionIndex(0), Arc::clone(&part));
 
         // Build a txn entry that names this partition.
@@ -372,7 +372,7 @@ mod tests {
 
         // The abort marker is a single control record → LEO advances to 1.
         assert!(
-            part.log_end_offset() == Offset(1),
+            part.log_end_offset() == 1,
             "abort marker must be appended (LEO 1), got {:?}",
             part.log_end_offset()
         );

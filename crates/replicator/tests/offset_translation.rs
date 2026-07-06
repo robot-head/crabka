@@ -156,11 +156,7 @@ async fn offset_translation_never_skips_unreplicated_data() {
         })
         // MM2 parity: the checkpoint stores the RENAMED (remote) topic that a
         // failed-over consumer reads on the target — `us-east.orders`, not `orders`.
-        .filter(|c| {
-            c.group == "analytics"
-                && c.topic == "us-east.orders"
-                && c.partition == PartitionIndex(0)
-        })
+        .filter(|c| c.group == "analytics" && c.topic == "us-east.orders" && c.partition == 0)
         .last()
         .expect("no checkpoint found for (analytics, us-east.orders, 0)");
 

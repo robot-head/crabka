@@ -136,7 +136,7 @@ impl Model for EpochModel {
 
                 // Contract: always a valid truncation target.
                 assert!(
-                    trunc >= Offset(0),
+                    trunc >= 0,
                     "truncation target {trunc} < 0 (requested={requested})"
                 );
                 // The resolved epoch never exceeds the requested epoch.
@@ -157,7 +157,7 @@ impl Model for EpochModel {
                     if latest == Some(requested) {
                         // Current epoch → keep up to the follower's log end.
                         assert!(
-                            found == requested && trunc == Offset(leo),
+                            found == requested && trunc == leo,
                             "latest-epoch probe must return (requested, leo): got ({found},{trunc})"
                         );
                     } else {
@@ -177,7 +177,7 @@ impl Model for EpochModel {
                              got ({found},{trunc}) want ({requested},{next_start})"
                         );
                         assert!(
-                            trunc <= Offset(leo),
+                            trunc <= leo,
                             "truncation {trunc} above follower log end {leo}"
                         );
                     }
@@ -186,7 +186,7 @@ impl Model for EpochModel {
                 // Record non-vacuity witnesses.
                 let mut s = last.clone();
                 let mut changed = false;
-                if trunc < Offset(leo) && !s.saw_truncation {
+                if trunc < leo && !s.saw_truncation {
                     s.saw_truncation = true;
                     changed = true;
                 }

@@ -2717,7 +2717,7 @@ mod tests {
             .await
             .unwrap();
         let committed = rx.await.unwrap();
-        assert!(committed.get(&("t".to_string(), 0)).unwrap().offset == Offset(42));
+        assert!(committed.get(&("t".to_string(), 0)).unwrap().offset == 42);
 
         // Classic offset-commit validate: a simple consumer (no member/instance)
         // is allowed. `ValidateCommit` dispatches on the live (classic) kind.
@@ -2814,7 +2814,7 @@ mod tests {
             .send(GroupActorMessage::FetchCommitted { reply: tx })
             .await
             .unwrap();
-        assert!(rx.await.unwrap().get(&("t".to_string(), 0)).unwrap().offset == Offset(7));
+        assert!(rx.await.unwrap().get(&("t".to_string(), 0)).unwrap().offset == 7);
         // Non-empty group cannot be deleted.
         assert!(
             coord.delete_group("g").await == Err(crate::coordinator::DeleteGroupError::NonEmpty)

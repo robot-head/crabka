@@ -698,22 +698,19 @@ mod tests {
         e.producer_epoch = 4;
         apply_complete_abort(&mut e, ProducerId(1000), 5, 42);
         check!(e.state == TxnState::CompleteAbort);
-        check!(e.producer_id == ProducerId(1000));
+        check!(e.producer_id == 1000);
         check!(e.producer_epoch == 5);
-        check!(
-            e.prev_producer_id == ProducerId(-1),
-            "no roll must not set prev"
-        );
+        check!(e.prev_producer_id == -1, "no roll must not set prev");
         check!(e.last_update_ms == 42);
 
         // Roll: fresh pid at epoch 0 → prior pid recorded as prev.
         let mut rolled = entry(1000, -1);
         rolled.state = TxnState::PrepareAbort;
         apply_complete_abort(&mut rolled, ProducerId(2000), 0, 43);
-        check!(rolled.producer_id == ProducerId(2000));
+        check!(rolled.producer_id == 2000);
         check!(rolled.producer_epoch == 0);
         check!(
-            rolled.prev_producer_id == ProducerId(1000),
+            rolled.prev_producer_id == 1000,
             "roll must record prior pid"
         );
     }

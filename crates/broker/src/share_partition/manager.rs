@@ -455,7 +455,7 @@ mod tests {
 
         let cell = mgr.get_or_load("g1", tid, 0).await;
         let st = cell.lock().await;
-        assert!(st.start_offset == Offset(0));
+        assert!(st.start_offset == 0);
         assert!(!st.dirty);
         drop(st);
         // A second call returns the same cached cell.

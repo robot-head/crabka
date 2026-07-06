@@ -568,7 +568,7 @@ mod tests {
         );
         s.acknowledge("m1", Offset(0), Offset(4), AckType::Accept, t0())
             .unwrap();
-        assert!(s.start_offset == Offset(5));
+        assert!(s.start_offset == 5);
     }
 
     #[test]
@@ -581,7 +581,7 @@ mod tests {
         let acq2 = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         assert!(acq2[0].delivery_count == 2);
         // Released records stay in the window; SPSO did not advance.
-        assert!(s.start_offset == Offset(0));
+        assert!(s.start_offset == 0);
     }
 
     #[test]
@@ -595,7 +595,7 @@ mod tests {
         }
         let acq = s.acquire("m1", 10, i32::MAX, t0() + Duration::from_secs(62), LOCK, 2);
         assert!(acq.is_empty()); // archived, not redelivered
-        assert!(s.start_offset == Offset(1)); // SPSO advanced past the poison pill
+        assert!(s.start_offset == 1); // SPSO advanced past the poison pill
     }
 
     #[test]
@@ -607,11 +607,11 @@ mod tests {
         // Accept only [0,3]; [4,9] remain Acquired.
         s.acknowledge("m1", Offset(0), Offset(3), AckType::Accept, t0())
             .unwrap();
-        assert!(s.start_offset == Offset(4));
+        assert!(s.start_offset == 4);
         // The remaining acquired range can still be acknowledged.
         s.acknowledge("m1", Offset(4), Offset(9), AckType::Accept, t0())
             .unwrap();
-        assert!(s.start_offset == Offset(10));
+        assert!(s.start_offset == 10);
     }
 
     #[test]
@@ -632,7 +632,7 @@ mod tests {
                 delivery_count: 2
             }]
         );
-        assert!(s.start_offset == Offset(0));
+        assert!(s.start_offset == 0);
     }
 
     #[test]
@@ -642,7 +642,7 @@ mod tests {
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         s.acknowledge("m1", Offset(0), Offset(2), AckType::Reject, t0())
             .unwrap();
-        assert!(s.start_offset == Offset(3)); // archived prefix dropped
+        assert!(s.start_offset == 3); // archived prefix dropped
         let acq = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         assert!(acq.is_empty()); // nothing left
     }
@@ -654,7 +654,7 @@ mod tests {
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         s.acknowledge("m1", Offset(0), Offset(1), AckType::Gap, t0())
             .unwrap();
-        assert!(s.start_offset == Offset(2));
+        assert!(s.start_offset == 2);
         let (_start, dcc, batches) = s.to_persist_batches();
         assert!(batches.is_empty()); // archived prefix dropped from window
         assert!(dcc == 2); // both offsets reached a terminal state
@@ -666,7 +666,7 @@ mod tests {
         s.materialize(Offset(5), 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         let (start, dcc, batches) = s.to_persist_batches();
-        check!(start == Offset(0));
+        check!(start == 0);
         check!(dcc == 0); // nothing terminal yet
         // Acquired persists as Available(0) but retains its delivery_count.
         check!(
@@ -689,12 +689,12 @@ mod tests {
         s.acknowledge("m1", Offset(0), Offset(3), AckType::Accept, t0())
             .unwrap(); // SPSO -> 4
         let (start, _dcc, batches) = s.to_persist_batches();
-        assert!(start == Offset(4));
+        assert!(start == 4);
 
         let mut reloaded = AcquisitionState::new(Offset(0));
         reloaded.load_from(start, 7, 3, 0, &batches);
-        check!(reloaded.start_offset == Offset(4));
-        check!(reloaded.end_offset == Offset(10));
+        check!(reloaded.start_offset == 4);
+        check!(reloaded.end_offset == 10);
         check!(reloaded.state_epoch == 7);
         check!(reloaded.leader_epoch == 3);
         check!(!reloaded.dirty);
@@ -722,10 +722,10 @@ mod tests {
     fn materialize_respects_max_inflight() {
         let mut s = AcquisitionState::new(Offset(0));
         s.materialize(Offset(100), 10); // hwm far ahead, but cap at 10 in flight
-        assert!(s.end_offset == Offset(10));
+        assert!(s.end_offset == 10);
         let acq = s.acquire("m1", 100, i32::MAX, t0(), LOCK, 5);
-        assert!(acq[0].first == Offset(0));
-        assert!(acq[0].last == Offset(9));
+        assert!(acq[0].first == 0);
+        assert!(acq[0].last == 9);
     }
 
     #[test]
@@ -734,10 +734,10 @@ mod tests {
         s.materialize(Offset(10), 100);
         let acq = s.acquire("m1", 4, i32::MAX, t0(), LOCK, 5);
         assert!(acq.len() == 1);
-        assert!(acq[0].first == Offset(0) && acq[0].last == Offset(3));
+        assert!(acq[0].first == 0 && acq[0].last == 3);
         // The remaining [4,9] is still Available.
         let acq2 = s.acquire("m2", 100, i32::MAX, t0(), LOCK, 5);
-        assert!(acq2[0].first == Offset(4) && acq2[0].last == Offset(9));
+        assert!(acq2[0].first == 4 && acq2[0].last == 9);
     }
 
     #[test]
@@ -784,7 +784,7 @@ mod tests {
             original_deadline,
         )
         .unwrap();
-        assert!(s.start_offset == Offset(4));
+        assert!(s.start_offset == 4);
     }
 
     #[test]

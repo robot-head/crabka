@@ -43,7 +43,7 @@ impl OffsetSyncStore {
         // The inner map is keyed by `UpstreamOffset`; `committed` lives in the
         // same (source) address space, so bound the range at the matching
         // upstream offset.
-        let (&up, &down) = m.range(..=UpstreamOffset(committed.0)).next_back()?;
+        let (&up, &down) = m.range(..=UpstreamOffset::from(committed)).next_back()?;
         // `committed - up` is a source-space delta; adding it to the paired
         // downstream offset yields the target offset. The arithmetic crosses
         // newtype boundaries, so unwrap via `.0` rather than deriving `Add`/`Sub`.

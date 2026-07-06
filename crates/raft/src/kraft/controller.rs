@@ -964,7 +964,7 @@ impl Engine {
                     // the `KraftLog` offset domain to compare against log bounds.
                     let fetch_offset = Offset(fetch_offset);
                     let log_start = self.log.log_start_offset();
-                    let snapshot_id = if fetch_offset >= Offset(0) && fetch_offset < log_start {
+                    let snapshot_id = if fetch_offset >= 0 && fetch_offset < log_start {
                         self.latest_snapshot_id()
                     } else {
                         None
@@ -2707,8 +2707,7 @@ mod tests {
                 "assigned_record_offset({base}, {count})"
             );
             assert!(
-                submit_waiter_need_offset(Offset(base), usize::try_from(count).unwrap())
-                    == Offset(want),
+                submit_waiter_need_offset(Offset(base), usize::try_from(count).unwrap()) == want,
                 "submit_waiter_need_offset({base}, {count})"
             );
         }
@@ -2782,7 +2781,7 @@ mod tests {
         for (prev_hwm, new_hwm, log_end, want) in [(2, 5, 4, 4), (2, 1, 4, 2), (2, 3, 4, 3)] {
             assert!(
                 expected_hwm_after_advance(Offset(prev_hwm), Offset(new_hwm), Offset(log_end))
-                    == Offset(want),
+                    == want,
                 "prev_hwm {prev_hwm}, new_hwm {new_hwm}, log_end {log_end}"
             );
         }
@@ -3072,7 +3071,7 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
         assert!(engine.commit_waiters.len() == 1);
-        check!(engine.commit_waiters[0].need_offset == Offset(6));
+        check!(engine.commit_waiters[0].need_offset == 6);
     }
 
     #[test]
@@ -3104,7 +3103,7 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
         assert!(engine.commit_waiters.len() == 1);
-        check!(engine.commit_waiters[0].need_offset == Offset(6));
+        check!(engine.commit_waiters[0].need_offset == 6);
     }
 
     #[test]
@@ -3137,7 +3136,7 @@ mod tests {
                     leader_id,
                     leader_epoch,
                 }) => {
-                    assert!(leader_id == NodeId(1));
+                    assert!(leader_id == 1);
                     assert!(leader_epoch == 4);
                 }
                 other => panic!("unexpected end quorum request: {other:?}"),
@@ -3335,7 +3334,7 @@ mod tests {
         engine.on_fetch_snapshot_response(NodeId(2), &error_body);
         assert!(engine.snapshot_fetch.is_none());
         let send = recv_peer_send_with_api(&mut sends, api_key::FETCH).await;
-        assert!(send.peer == NodeId(2));
+        assert!(send.peer == 2);
 
         engine.snapshot_fetch = Some(SnapshotFetchState::new((12, 3), NodeId(2)));
         let ok_body = wire::PeerResponse::FetchSnapshot {
@@ -3349,7 +3348,7 @@ mod tests {
         engine.on_fetch_snapshot_response(NodeId(3), &ok_body);
         assert!(engine.snapshot_fetch.is_none());
         let send = recv_peer_send_with_api(&mut sends, api_key::FETCH).await;
-        assert!(send.peer == NodeId(3));
+        assert!(send.peer == 3);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3449,7 +3448,7 @@ mod tests {
     #[tokio::test]
     async fn node_id_reports_configured_node() {
         let (ctrl, _dir) = build(NodeId(7), &[NodeId(7)]);
-        assert!(ctrl.node_id() == NodeId(7));
+        assert!(ctrl.node_id() == 7);
         ctrl.shutdown().await;
     }
 

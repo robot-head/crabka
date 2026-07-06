@@ -99,7 +99,7 @@ mod tests {
             state_batches: vec![batch(0, 9), batch(10, 19), batch(20, 29)],
         });
         assert!(s.state_epoch == 2);
-        assert!(s.start_offset == Offset(0));
+        assert!(s.start_offset == 0);
 
         // Advance SPSO past the first two batches and write a new one.
         s.apply_update(&ShareUpdateValue {
@@ -148,9 +148,9 @@ mod tests {
         let updated = s
             .state_batches
             .iter()
-            .find(|b| b.first_offset == Offset(10))
+            .find(|b| b.first_offset == 10)
             .unwrap();
-        assert!(updated.last_offset == Offset(25));
+        assert!(updated.last_offset == 25);
         assert!(updated.delivery_count == 5);
         // Sorted ascending by first_offset.
         let firsts: Vec<Offset> = s.state_batches.iter().map(|b| b.first_offset).collect();

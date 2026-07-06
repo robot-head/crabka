@@ -2497,7 +2497,7 @@ mod tests {
         let b = image
             .broker(NodeId(7))
             .expect("registered broker resolvable");
-        assert!(b.node_id == NodeId(7));
+        assert!(b.node_id == 7);
         assert!(image.broker(NodeId(404)).is_none());
     }
 

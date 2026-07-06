@@ -12,7 +12,7 @@ use tracing::warn;
 use crate::{
     config::NamingPolicy,
     error::ReplicatorError,
-    ids::{CommittedOffset, PartitionIndex, UpstreamOffset},
+    ids::{CommittedOffset, PartitionIndex},
     mm2::{Checkpoint, OffsetSync},
     naming::Renamer,
     offset_sync_store::OffsetSyncStore,
@@ -119,7 +119,7 @@ pub async fn run_once(
                 partition,
                 // A group's committed source offset is the upstream side of the
                 // checkpoint; the translated target offset is the downstream.
-                upstream: UpstreamOffset(committed.0),
+                upstream: committed.into(),
                 downstream,
                 metadata: String::new(),
             };
@@ -261,7 +261,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        ids::DownstreamOffset,
+        ids::{DownstreamOffset, UpstreamOffset},
         mm2::{Checkpoint, OffsetSync},
         offset_sync_store::OffsetSyncStore,
     };

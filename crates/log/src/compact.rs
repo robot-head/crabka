@@ -959,7 +959,7 @@ mod rewrite_tests {
         );
         let segs = vec![&seg0];
         let out = rewrite_simple(dir.path(), &segs);
-        assert!(out.new_base_offset == Offset(0));
+        assert!(out.new_base_offset == 0);
 
         // Decode the swap .log to verify contents.
         let bytes = fs::read(&out.log_swap).unwrap();
@@ -1009,8 +1009,8 @@ mod rewrite_tests {
         );
         let segs = vec![&seg0];
         let out = rewrite_simple(dir.path(), &segs);
-        assert!(out.new_base_offset == Offset(100));
-        assert!(out.new_last_offset == Offset(102));
+        assert!(out.new_base_offset == 100);
+        assert!(out.new_last_offset == 102);
 
         let bytes = std::fs::read(&out.log_swap).unwrap();
         let mut cursor = &bytes[..];
@@ -1247,7 +1247,7 @@ mod rewrite_tests {
         check!(bare.records.is_empty());
         check!(bare.last_offset_delta == 5);
         // new_last_offset covers the bare header's last absolute offset: 100+5.
-        assert!(out.new_last_offset == Offset(105));
+        assert!(out.new_last_offset == 105);
     }
 }
 

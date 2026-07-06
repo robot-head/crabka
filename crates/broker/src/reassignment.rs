@@ -422,7 +422,7 @@ mod tests {
         check!(pr.adding_replicas == Vec::<NodeId>::new());
         check!(pr.removing_replicas == Vec::<NodeId>::new());
         check!(pr.isr == vec![NodeId(1), NodeId(3)]);
-        check!(pr.leader == NodeId(1));
+        check!(pr.leader == 1);
         check!(pr.leader_epoch == crabka_metadata::LeaderEpoch(5));
         check!(pr.partition_epoch == 1);
     }
@@ -484,7 +484,7 @@ mod tests {
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         assert!(
-            pr.leader == NodeId(1) || pr.leader == NodeId(3),
+            pr.leader == 1 || pr.leader == 3,
             "leader was {}",
             pr.leader.0
         );
