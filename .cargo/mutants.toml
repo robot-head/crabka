@@ -77,6 +77,13 @@ exclude_globs = [
     "crates/profiles/src/bin/**",
     "crates/observability/src/bin/**",
     "crates/*/tests/**",
+    # In-source unit-test modules and test-only helpers are part of the test
+    # harness, not the production system under test. Large refactors that split
+    # `src/foo.rs` into `src/foo/tests.rs` otherwise make cargo-mutants spend CI
+    # time mutating assertions/fixtures and report survivors that do not reflect
+    # production-code coverage.
+    "crates/*/src/**/tests.rs",
+    "crates/*/src/**/test_*.rs",
     "crates/*/benches/**",
     "crates/bench-driver/**",
 ]

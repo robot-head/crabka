@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 //! Slice 8 hardening: multi-tenant read isolation over a real TCP socket.
 //!
 //! Boots the Prometheus query HTTP API on an ephemeral `127.0.0.1:0` socket and
