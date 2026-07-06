@@ -2833,6 +2833,48 @@ mod tests {
 
     const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
 
+    #[test]
+    fn metadata_range_expands_omitted_request_without_validation() {
+        let state = QuerierState::new_with_limits(
+            Arc::new(InMemoryProfileStore::new()),
+            Limits {
+                max_query_length_secs: 1,
+                ..Limits::default()
+            },
+        );
+
+        let range = MetadataRange::from_request(0, 0)
+            .validate(&state, "tenant-a")
+            .unwrap();
+
+        assert!(range.start_ms == 0);
+        assert!(range.end_ms == i64::MAX);
+        assert!(range.omitted);
+    }
+
+    #[test]
+    fn metadata_range_validates_explicit_request() {
+        let state = QuerierState::new_with_limits(
+            Arc::new(InMemoryProfileStore::new()),
+            Limits {
+                max_query_length_secs: 1,
+                ..Limits::default()
+            },
+        );
+
+        let range = MetadataRange::from_request(0, 1_000)
+            .validate(&state, "tenant-a")
+            .unwrap();
+        assert!(range.start_ms == 0);
+        assert!(range.end_ms == 1_000);
+        assert!(!range.omitted);
+
+        let Err(err) = MetadataRange::from_request(0, 2_000).validate(&state, "tenant-a") else {
+            panic!("explicit over-limit metadata range should be rejected");
+        };
+        assert!(err.to_string().contains("query length exceeded"), "{err}");
+    }
+
     fn store_with_frame(name: &str) -> InMemoryProfileStore {
         let mut store = InMemoryProfileStore::new();
         let name_ref = store.symbols_mut().intern_string(name);
