@@ -27,6 +27,7 @@ use crate::{
         transport::{PeerSender, api_key},
         types::NodeId,
     },
+    types::controller_endpoint_addr,
 };
 
 /// Outbound dialer the controller hands to the peer sender.
@@ -86,12 +87,7 @@ impl OutboundDialer for PlaintextDialer {
 /// convention the endpoint named `CONTROLLER`, falling back to the first.
 fn controller_addr(voters: &VoterSet, id: NodeId) -> Option<String> {
     let voter = voters.get(id)?;
-    let endpoint = voter
-        .endpoints
-        .iter()
-        .find(|e| e.name == "CONTROLLER")
-        .or_else(|| voter.endpoints.first())?;
-    Some(format!("{}:{}", endpoint.host, endpoint.port))
+    controller_endpoint_addr(&voter.endpoints)
 }
 
 /// KIP-595 api version per api key, matching the bodies the engine's transport
