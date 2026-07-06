@@ -502,7 +502,7 @@ mod tests {
             );
             let mut hs_body = request_body(&hs_req, false);
             let hs_decoded = SaslHandshakeRequest::decode(&mut hs_body, 1).unwrap();
-            assert!(hs_decoded.mechanism == "PLAIN");
+            assert_eq!(hs_decoded.mechanism, "PLAIN");
             assert!(hs_body.is_empty());
 
             // 2. SaslAuthenticate v2 → error_code 0 (flexible response header).
@@ -523,7 +523,7 @@ mod tests {
             );
             let mut au_body = request_body(&au_req, true);
             let au_decoded = SaslAuthenticateRequest::decode(&mut au_body, 2).unwrap();
-            assert!(au_decoded.auth_bytes.as_ref() == b"\0u\0p");
+            assert_eq!(au_decoded.auth_bytes.as_ref(), b"\0u\0p");
             assert!(au_body.is_empty());
         });
         let creds = SaslCredentials::Plain {
@@ -563,7 +563,7 @@ mod tests {
                 );
                 let mut body = request_body(&req, true);
                 let decoded = SaslAuthenticateRequest::decode(&mut body, 2).unwrap();
-                assert!(decoded.auth_bytes.as_ref() == expected_payload);
+                assert_eq!(decoded.auth_bytes.as_ref(), expected_payload);
                 assert!(body.is_empty());
             }
         });
@@ -572,11 +572,11 @@ mod tests {
         send_sasl_authenticate(&mut client, b"first".to_vec(), &mut corr_id)
             .await
             .unwrap();
-        assert!(corr_id == 8);
+        assert_eq!(corr_id, 8);
         send_sasl_authenticate(&mut client, b"second".to_vec(), &mut corr_id)
             .await
             .unwrap();
-        assert!(corr_id == 9);
+        assert_eq!(corr_id, 9);
         timeout(Duration::from_secs(1), server_task)
             .await
             .expect("server observed both authenticate frames")
@@ -604,7 +604,7 @@ mod tests {
             );
             let mut hs_body = request_body(&hs_req, false);
             let hs_decoded = SaslHandshakeRequest::decode(&mut hs_body, 1).unwrap();
-            assert!(hs_decoded.mechanism == "SCRAM-SHA-256");
+            assert_eq!(hs_decoded.mechanism, "SCRAM-SHA-256");
 
             let mut au = BytesMut::new();
             SaslAuthenticateResponse {
@@ -787,10 +787,10 @@ mod tests {
         check!(ApiVersion(i16::from_be_bytes([req[2], req[3]])) == api_version);
         check!(i32::from_be_bytes([req[4], req[5], req[6], req[7]]) == corr_id);
         let client_len = i16::from_be_bytes([req[8], req[9]]);
-        assert!(client_len == i16::try_from(OUTBOUND_CLIENT_ID.len()).unwrap());
-        assert!(&req[10..10 + OUTBOUND_CLIENT_ID.len()] == OUTBOUND_CLIENT_ID.as_bytes());
+        assert_eq!(client_len, i16::try_from(OUTBOUND_CLIENT_ID.len()).unwrap());
+        assert_eq!(&req[10..10 + OUTBOUND_CLIENT_ID.len()], OUTBOUND_CLIENT_ID.as_bytes());
         if flexible {
-            assert!(req[10 + OUTBOUND_CLIENT_ID.len()] == 0);
+            assert_eq!(req[10 + OUTBOUND_CLIENT_ID.len()], 0);
         }
     }
 

@@ -105,7 +105,7 @@ impl SymbolTable {
 
         let mut labels = Vec::with_capacity(refs.len() / 2);
         let mut names = HashSet::with_capacity(refs.len() / 2);
-        for pair in refs.chunks_exact(2) {
+        for pair in refs.as_chunks::<2>().0 {
             let name = self
                 .resolve(pair[0])
                 .ok_or(SymbolError::OutOfRange(pair[0], self.symbols.len()))?;

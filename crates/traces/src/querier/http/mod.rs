@@ -1148,7 +1148,7 @@ fn parse_seconds_to_ns(value: &str) -> Option<i64> {
     let (negative, value) = value
         .strip_prefix('-')
         .map_or((false, value), |rest| (true, rest));
-    let (whole, fraction) = value.split_once('.').map_or((value, ""), |parts| parts);
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
     if whole.is_empty()
         || !whole.bytes().all(|b| b.is_ascii_digit())
         || !fraction.bytes().all(|b| b.is_ascii_digit())
@@ -1317,7 +1317,7 @@ fn parse_go_duration_ns(value: &str) -> Result<u64, String> {
 }
 
 fn parse_duration_component_ns(number: &str, multiplier: u128) -> Result<u128, String> {
-    let (whole, fraction) = number.split_once('.').map_or((number, ""), |parts| parts);
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
     if whole.is_empty() && fraction.is_empty() {
         return Err(format!("invalid number {number:?}"));
     }

@@ -324,7 +324,7 @@ impl Tree {
     #[cfg(test)]
     fn node_at(&self, path: &[&str]) -> &Node {
         assert!(!path.is_empty());
-        assert!(path[0] == ROOT_NAME);
+        assert_eq!(path[0], ROOT_NAME);
         let mut idx = self.root;
         for name in &path[1..] {
             idx = *self.nodes[idx]
@@ -575,7 +575,7 @@ mod tests {
         let other = names_index(&fg, "other");
         let other_bar = fg.levels[2]
             .values
-            .chunks_exact(4)
+            .as_chunks::<4>().0.iter()
             .find(|chunk| chunk[3] == other)
             .unwrap();
 

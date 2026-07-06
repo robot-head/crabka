@@ -64,8 +64,8 @@ mod tests {
 
     #[test]
     fn admin_request_builders_use_default_request_shapes() {
-        assert!(describe_cluster_request() == DescribeClusterRequest::default());
-        assert!(list_reassignments_request() == ListPartitionReassignmentsRequest::default());
+        assert_eq!(describe_cluster_request(), DescribeClusterRequest::default());
+        assert_eq!(list_reassignments_request(), ListPartitionReassignmentsRequest::default());
     }
 
     #[tokio::test]

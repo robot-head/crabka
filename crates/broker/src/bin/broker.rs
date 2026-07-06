@@ -300,7 +300,7 @@ struct Args {
     )]
     delegation_token_default_renew_period_ms: i64,
 
-    /// RemoteLogManager copy/retention cadence in milliseconds.
+    /// `RemoteLogManager` copy/retention cadence in milliseconds.
     #[arg(
         long,
         env = "CRABKA_REMOTE_LOG_MANAGER_INTERVAL_MS",

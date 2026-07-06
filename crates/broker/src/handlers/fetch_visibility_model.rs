@@ -197,14 +197,14 @@ fn assert_fetch_contract(
     // Valid targets.
     assert!(limit_offset >= 0 && win_response_hw >= 0 && win_response_lso >= 0);
     // out_of_range / empty correctness.
-    assert!(w.out_of_range == (fetch_offset < s.log_start));
+    assert_eq!(w.out_of_range, (fetch_offset < s.log_start));
     let upper = if is_follower { s.log_end } else { s.hw };
     if !w.out_of_range {
-        assert!(w.empty == (fetch_offset >= upper));
+        assert_eq!(w.empty, (fetch_offset >= upper));
     }
     // Response single-source-of-truth contract (OOR and success paths share it).
-    assert!(win_response_hw == response_hw(is_follower, s.hw, s.log_end));
-    assert!(win_response_lso == response_lso(is_follower, read_committed, s.hw, s.lso, s.log_end));
+    assert_eq!(win_response_hw, response_hw(is_follower, s.hw, s.log_end));
+    assert_eq!(win_response_lso, response_lso(is_follower, read_committed, s.hw, s.lso, s.log_end));
     if is_follower {
         // Follower bound: serve up to the log-end (>= hw).
         assert!(limit_offset == s.log_end && limit_offset >= s.hw);
@@ -213,7 +213,7 @@ fn assert_fetch_contract(
         assert!(limit_offset <= s.hw, "consumer fetch exposed beyond HW");
         assert!(win_response_lso <= win_response_hw);
         if read_committed {
-            assert!(effective_lso == s.lso.min(s.hw));
+            assert_eq!(effective_lso, s.lso.min(s.hw));
             assert!(limit_offset <= s.lso.min(s.hw));
         }
     }

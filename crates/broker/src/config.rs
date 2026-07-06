@@ -647,7 +647,7 @@ pub const DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS: u64 = 10_000;
 /// Default TLS material reload polling interval, in milliseconds.
 pub const DEFAULT_TLS_RELOAD_INTERVAL_MS: u64 = 30_000;
 
-/// Default RemoteLogManager copy / retention cadence, in milliseconds.
+/// Default `RemoteLogManager` copy / retention cadence, in milliseconds.
 pub const DEFAULT_REMOTE_LOG_MANAGER_INTERVAL_MS: u64 = 30_000;
 
 /// KIP-460: default auto-rebalance tick cadence, in seconds. Matches Kafka's

@@ -4076,7 +4076,7 @@ impl ConnectionLimiter {
         // concurrent accepts can't both slip past the ceiling.
         let global_ok = self
             .total
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 (cur < self.max_connections).then_some(cur + 1)
             })
             .is_ok();

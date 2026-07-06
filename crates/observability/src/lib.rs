@@ -20940,8 +20940,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(first.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
-        assert!(second.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
+        assert_eq!(first.label_index.label_names(tenant), BTreeSet::from(["app".to_string()]));
+        assert_eq!(second.label_index.label_names(tenant), BTreeSet::from(["app".to_string()]));
 
         let shard_prefix =
             crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant).to_string();
@@ -21113,7 +21113,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(state.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
+        assert_eq!(state.label_index.label_names(tenant), BTreeSet::from(["app".to_string()]));
         let expected_offset =
             crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant)
                 .join(format!("time={}", query_start - (query_end - query_start)))
@@ -21204,7 +21204,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(scan.scanned_blocks.len() == 4);
+        assert_eq!(scan.scanned_blocks.len(), 4);
         assert!(
             store.max_active_gets() > 1,
             "expected cold block reads to overlap, max_active_gets={}",
@@ -21532,7 +21532,7 @@ mod tests {
                 key: key.to_string(),
                 value: value.map(<[u8]>::to_vec),
             };
-            assert!(has_native_kafka_log_headers(&[header]) == want);
+            assert_eq!(has_native_kafka_log_headers(&[header]), want);
         }
     }
 
@@ -21588,7 +21588,7 @@ mod tests {
             ("application/json; charset", None),
             ("application/json; charset=", None),
         ] {
-            assert!(is_loki_json_content_type(&loki_content_type(value)).ok() == want);
+            assert_eq!(is_loki_json_content_type(&loki_content_type(value)).ok(), want);
         }
     }
 
@@ -21647,10 +21647,10 @@ mod tests {
             ("terror", false),
             ("error_code", false),
         ] {
-            assert!(contains_log_level_token(line, "error") == want);
+            assert_eq!(contains_log_level_token(line, "error"), want);
         }
         for (byte, want) in [(b'a', true), (b'1', true), (b'_', true), (b'-', false)] {
-            assert!(is_log_level_word_byte(byte) == want);
+            assert_eq!(is_log_level_word_byte(byte), want);
         }
     }
 
@@ -21753,13 +21753,13 @@ mod tests {
                 false,
             ),
         ] {
-            assert!(delete_request_overlaps_filter(&request, &filter) == want);
+            assert_eq!(delete_request_overlaps_filter(&request, &filter), want);
         }
         for (right, want) in [
             (TimeRange::new(20, 30).unwrap(), true),
             (TimeRange::new(21, 30).unwrap(), false),
         ] {
-            assert!(ranges_overlap(TimeRange::new(10, 20).unwrap(), right) == want);
+            assert_eq!(ranges_overlap(TimeRange::new(10, 20).unwrap(), right), want);
         }
     }
 

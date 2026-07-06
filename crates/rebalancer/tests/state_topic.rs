@@ -51,7 +51,7 @@ async fn write_load_round_trip_via_real_broker() {
             .await
             .expect("connect"),
     );
-    let mut admin = AdminClient::connect(&[bootstrap.to_string()])
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .expect("admin connect");
 

@@ -454,7 +454,7 @@ mod tests {
     fn auto_join_connection_options_uses_joiner_client_id() {
         let opts = auto_join_connection_options();
 
-        assert!(opts.client_id == "crabka-auto-join");
+        assert_eq!(opts.client_id, "crabka-auto-join");
     }
 
     #[test]
@@ -564,7 +564,7 @@ mod tests {
             .await
             .expect("already-voter auto join returns without dialing");
 
-        assert!(source.controller_bound_addr_calls.load(Ordering::Relaxed) == 1);
-        assert!(source.current_image_calls.load(Ordering::Relaxed) == 1);
+        assert_eq!(source.controller_bound_addr_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(source.current_image_calls.load(Ordering::Relaxed), 1);
     }
 }

@@ -831,9 +831,9 @@ fn render_pvc_retention_policy(
     let delete_claim = match storage {
         Some(Storage::PersistentClaim(pc)) => pc.delete_claim,
         Some(Storage::Jbod(j)) => j.delete_claim,
-        _ => match tier_persistence {
-            Some(p) => p.delete_claim,
-            None => return None,
+        _ => {
+            let p = tier_persistence?;
+            p.delete_claim
         },
     };
     Some(json!({
