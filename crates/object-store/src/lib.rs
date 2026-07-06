@@ -7,9 +7,11 @@
 //! representation (verbatim Kafka segment bytes vs Parquet blocks) stays in the
 //! respective consumer crates.
 
+mod build;
 mod config;
 mod error;
 
+pub use build::build_object_store;
 pub use config::{
     DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, GcsConfig, ObjectStoreConfig,
     S3Config,
