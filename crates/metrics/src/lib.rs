@@ -4,6 +4,8 @@
 //! native-histogram codecs, `remote_write`/OTLP decode, distributor WAL append,
 //! and compactor block/index writes. Query execution lives in `crabka-promql`.
 
+mod arrow_codec;
+
 pub mod compactor;
 pub mod distributor;
 pub mod histogram;

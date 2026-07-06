@@ -13,11 +13,14 @@ use arrow::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::schema::{
-    COL_FINGERPRINT, COL_NH_COUNT, COL_NH_CUSTOM_VALUES, COL_NH_IS_FLOAT, COL_NH_NEG_COUNTS,
-    COL_NH_NEG_SPANS, COL_NH_POS_COUNTS, COL_NH_POS_SPANS, COL_NH_RESET_HINT, COL_NH_SCHEMA,
-    COL_NH_START_TS, COL_NH_SUM, COL_NH_ZERO_COUNT, COL_NH_ZERO_THRESHOLD, COL_TIMESTAMP,
-    native_histogram_schema,
+use crate::{
+    arrow_codec::{require_non_null, schema_mismatch, typed_column},
+    schema::{
+        COL_FINGERPRINT, COL_NH_COUNT, COL_NH_CUSTOM_VALUES, COL_NH_IS_FLOAT, COL_NH_NEG_COUNTS,
+        COL_NH_NEG_SPANS, COL_NH_POS_COUNTS, COL_NH_POS_SPANS, COL_NH_RESET_HINT, COL_NH_SCHEMA,
+        COL_NH_START_TS, COL_NH_SUM, COL_NH_ZERO_COUNT, COL_NH_ZERO_THRESHOLD, COL_TIMESTAMP,
+        native_histogram_schema,
+    },
 };
 
 /// A run of populated buckets.
@@ -238,44 +241,6 @@ pub fn encode_native_histograms(
     ];
 
     Ok(RecordBatch::try_new(native_histogram_schema(), columns)?)
-}
-
-fn schema_mismatch(column: &str) -> HistogramCodecError {
-    HistogramCodecError::SchemaMismatch(format!("column `{column}` missing or wrong type"))
-}
-
-fn column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ArrayRef, HistogramCodecError> {
-    batch
-        .column_by_name(name)
-        .ok_or_else(|| schema_mismatch(name))
-}
-
-fn typed_column<'a, T: 'static>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> Result<&'a T, HistogramCodecError> {
-    column(batch, name)?
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| schema_mismatch(name))
-}
-
-fn null_required_column(column: &str, row: usize) -> HistogramCodecError {
-    HistogramCodecError::SchemaMismatch(format!(
-        "column `{column}` contains null for required row {row}"
-    ))
-}
-
-fn require_non_null(
-    array: &dyn Array,
-    row: usize,
-    column: &str,
-) -> Result<(), HistogramCodecError> {
-    if array.is_null(row) {
-        Err(null_required_column(column, row))
-    } else {
-        Ok(())
-    }
 }
 
 fn read_spans(
