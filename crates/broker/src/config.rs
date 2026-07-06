@@ -1000,6 +1000,10 @@ impl BrokerConfig {
 }
 
 impl Default for BrokerConfig {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "BrokerConfig::default intentionally enumerates every runtime knob in one place."
+    )]
     fn default() -> Self {
         let addr: SocketAddr = "127.0.0.1:9092".parse().expect("hard-coded valid addr");
         let controller_addr: SocketAddr = "127.0.0.1:9093".parse().expect("hard-coded valid addr");
