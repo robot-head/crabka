@@ -26,13 +26,13 @@
 //! Keys mirror [`LocalTieredStorage`](crate::LocalTieredStorage)'s
 //! directory layout so the two backends are observationally equivalent.
 
-use std::{io::Read, path::Path, sync::Arc};
+use std::sync::Arc;
 
-use bytes::Bytes;
-use object_store::{
-    GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart,
-    path::Path as ObjectPath,
+use crabka_object_store::{
+    DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, ObjectOps, ObjectStoreClient,
+    ObjectStoreConfig, ObjectStoreError, S3Config, build_object_store,
 };
+use object_store::{GetRange, ObjectStore, path::Path as ObjectPath};
 use tracing::instrument;
 
 use crate::{
@@ -63,7 +63,7 @@ pub const DEFAULT_MULTIPART_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 /// production path that builds an `AmazonS3` client from credentials,
 /// endpoint, and bucket.
 pub struct S3RemoteStorage {
-    store: Arc<dyn ObjectStore>,
+    ops: ObjectStoreClient,
     /// Optional key prefix (joined with `/` to every object key). Lets
     /// multiple Crabka clusters share a bucket safely.
     prefix: Option<String>,
@@ -170,7 +170,7 @@ impl S3RemoteStorage {
     #[must_use]
     pub fn with_store(store: Arc<dyn ObjectStore>, prefix: Option<String>) -> Self {
         Self {
-            store,
+            ops: ObjectStoreClient::new(store),
             prefix,
             multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
             multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
@@ -238,76 +238,20 @@ impl S3RemoteStorage {
         self.segment_key(metadata, index_filename(index_type))
     }
 
-    /// Run an async `ObjectStore` call to completion on the current Tokio
-    /// runtime. Sync trait callers reach this through `spawn_blocking`,
-    /// inside which `Handle::current()` is always available.
-    fn block<T, F>(fut: F) -> Result<T, RemoteStorageError>
+    /// Run an async [`ObjectOps`] call to completion on the current Tokio
+    /// runtime. Sync trait callers reach this through `spawn_blocking`, inside
+    /// which `Handle::current()` is always available. The `block_on` bridge
+    /// lives here, never in the substrate.
+    fn block_os<T, F>(fut: F) -> Result<T, ObjectStoreError>
     where
-        F: std::future::Future<Output = Result<T, object_store::Error>>,
+        F: std::future::Future<Output = Result<T, ObjectStoreError>>,
     {
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
-            RemoteStorageError::Backend(
+            ObjectStoreError::Backend(
                 "S3RemoteStorage requires an active Tokio runtime; call from spawn_blocking".into(),
             )
         })?;
-        let result = tokio::task::block_in_place(|| handle.block_on(fut));
-        result.map_err(map_object_store_error)
-    }
-
-    #[instrument(
-        skip_all,
-        fields(key = %key, len = tracing::field::Empty, multipart = tracing::field::Empty),
-        err
-    )]
-    fn put_path(&self, key: &ObjectPath, path: &Path) -> Result<(), RemoteStorageError> {
-        let len = std::fs::metadata(path)?.len();
-        let span = tracing::Span::current();
-        span.record("len", len);
-        span.record("multipart", len >= self.multipart_threshold);
-        if len < self.multipart_threshold {
-            // Single-PUT path: read the whole file into memory, one request.
-            let bytes = std::fs::read(path)?;
-            Self::block(self.store.put(key, PutPayload::from(bytes)))?;
-            return Ok(());
-        }
-        self.put_path_multipart(key, path)
-    }
-
-    /// Streaming multipart upload for files at or above
-    /// [`Self::multipart_threshold`]. Reads the file in `multipart_chunk_size`
-    /// blocks and pushes each into the [`WriteMultipart`] buffer; `finish`
-    /// flushes the tail and completes the upload (aborting on failure so
-    /// we don't leak in-progress parts in the bucket).
-    #[instrument(skip_all, fields(key = %key, chunk_size = self.multipart_chunk_size), err)]
-    fn put_path_multipart(&self, key: &ObjectPath, path: &Path) -> Result<(), RemoteStorageError> {
-        let file = std::fs::File::open(path)?;
-        let store = Arc::clone(&self.store);
-        let key = key.clone();
-        let chunk_size = self.multipart_chunk_size;
-        Self::block(async move {
-            let upload = store.put_multipart(&key).await?;
-            let mut writer = WriteMultipart::new_with_chunk_size(upload, chunk_size);
-            let mut file = file;
-            let mut buf = vec![0u8; chunk_size];
-            loop {
-                let n =
-                    Read::read(&mut file, &mut buf).map_err(|e| object_store::Error::Generic {
-                        store: "S3RemoteStorage",
-                        source: Box::new(e),
-                    })?;
-                if n == 0 {
-                    break;
-                }
-                writer.write(&buf[..n]);
-            }
-            writer.finish().await.map(|_| ())
-        })
-    }
-
-    #[instrument(skip_all, fields(key = %key, len = bytes.len()), err)]
-    fn put_bytes(&self, key: &ObjectPath, bytes: Bytes) -> Result<(), RemoteStorageError> {
-        Self::block(self.store.put(key, PutPayload::from_bytes(bytes)))?;
-        Ok(())
+        tokio::task::block_in_place(|| handle.block_on(fut))
     }
 }
 
@@ -318,20 +262,6 @@ fn index_filename(index_type: IndexType) -> &'static str {
         IndexType::ProducerSnapshot => "producer_snapshot",
         IndexType::LeaderEpoch => "leader_epoch",
         IndexType::Transaction => "txn_index",
-    }
-}
-
-fn map_object_store_error(e: object_store::Error) -> RemoteStorageError {
-    match e {
-        object_store::Error::NotFound { .. } => {
-            // Caller-visible "not found" is signalled via SegmentNotFound
-            // at the trait level, but here we don't know which segment is
-            // missing — surface as a backend error and let the caller
-            // upgrade to SegmentNotFound where it has the metadata in
-            // hand.
-            RemoteStorageError::Backend(format!("not found: {e}"))
-        }
-        other => RemoteStorageError::Backend(other.to_string()),
     }
 }
 
@@ -352,24 +282,45 @@ impl RemoteStorageManager for S3RemoteStorage {
         metadata: &RemoteLogSegmentMetadata,
         data: &LogSegmentData,
     ) -> Result<Option<CustomMetadata>, RemoteStorageError> {
-        self.put_path(&self.log_key(metadata), &data.log_segment)?;
-        self.put_path(
+        let threshold = self.multipart_threshold;
+        let chunk_size = self.multipart_chunk_size;
+        Self::block_os(self.ops.put_from_path(
+            &self.log_key(metadata),
+            &data.log_segment,
+            threshold,
+            chunk_size,
+        ))?;
+        Self::block_os(self.ops.put_from_path(
             &self.index_key(metadata, IndexType::Offset),
             &data.offset_index,
-        )?;
-        self.put_path(
+            threshold,
+            chunk_size,
+        ))?;
+        Self::block_os(self.ops.put_from_path(
             &self.index_key(metadata, IndexType::Timestamp),
             &data.time_index,
-        )?;
+            threshold,
+            chunk_size,
+        ))?;
         if let Some(snap) = &data.producer_snapshot_index {
-            self.put_path(&self.index_key(metadata, IndexType::ProducerSnapshot), snap)?;
+            Self::block_os(self.ops.put_from_path(
+                &self.index_key(metadata, IndexType::ProducerSnapshot),
+                snap,
+                threshold,
+                chunk_size,
+            ))?;
         }
-        self.put_bytes(
+        Self::block_os(self.ops.put(
             &self.index_key(metadata, IndexType::LeaderEpoch),
             data.leader_epoch_index.clone(),
-        )?;
+        ))?;
         if let Some(txn) = &data.transaction_index {
-            self.put_path(&self.index_key(metadata, IndexType::Transaction), txn)?;
+            Self::block_os(self.ops.put_from_path(
+                &self.index_key(metadata, IndexType::Transaction),
+                txn,
+                threshold,
+                chunk_size,
+            ))?;
         }
         // The opaque CustomMetadata channel is unused — every object's
         // key is derivable from the segment metadata, so we don't need to
@@ -396,32 +347,25 @@ impl RemoteStorageManager for S3RemoteStorage {
         end_position: Option<u32>,
     ) -> Result<Vec<u8>, RemoteStorageError> {
         let key = self.log_key(metadata);
-        let opts = GetOptions {
-            range: Some(match end_position {
-                Some(end) => {
-                    if end < start_position {
-                        return Err(RemoteStorageError::InvalidArgument(format!(
-                            "end_position {end} < start_position {start_position}"
-                        )));
-                    }
-                    // GetRange::Bounded is half-open [start, end); the trait
-                    // contract is inclusive end, so add 1 and saturate.
-                    GetRange::Bounded(u64::from(start_position)..u64::from(end).saturating_add(1))
+        let range = match end_position {
+            Some(end) => {
+                if end < start_position {
+                    return Err(RemoteStorageError::InvalidArgument(format!(
+                        "end_position {end} < start_position {start_position}"
+                    )));
                 }
-                None => GetRange::Offset(u64::from(start_position)),
-            }),
-            ..Default::default()
-        };
-        let result = Self::block(self.store.get_opts(&key, opts));
-        match result {
-            Ok(get) => {
-                let bytes = Self::block(get.bytes())?;
-                Ok(bytes.to_vec())
+                // GetRange::Bounded is half-open [start, end); the trait
+                // contract is inclusive end, so add 1 and saturate.
+                GetRange::Bounded(u64::from(start_position)..u64::from(end).saturating_add(1))
             }
-            Err(RemoteStorageError::Backend(ref msg)) if msg.starts_with("not found:") => Err(
-                RemoteStorageError::SegmentNotFound(metadata.remote_log_segment_id().clone()),
-            ),
-            Err(other) => Err(other),
+            None => GetRange::Offset(u64::from(start_position)),
+        };
+        match Self::block_os(self.ops.get_range(&key, range)) {
+            Ok(bytes) => Ok(bytes.to_vec()),
+            Err(ObjectStoreError::NotFound(_)) => Err(RemoteStorageError::SegmentNotFound(
+                metadata.remote_log_segment_id().clone(),
+            )),
+            Err(other) => Err(other.into()),
         }
     }
 
@@ -442,16 +386,12 @@ impl RemoteStorageManager for S3RemoteStorage {
         index_type: IndexType,
     ) -> Result<Vec<u8>, RemoteStorageError> {
         let key = self.index_key(metadata, index_type);
-        let result = Self::block(self.store.get(&key));
-        match result {
-            Ok(get) => {
-                let bytes = Self::block(get.bytes())?;
-                Ok(bytes.to_vec())
-            }
-            Err(RemoteStorageError::Backend(ref msg)) if msg.starts_with("not found:") => Err(
-                RemoteStorageError::SegmentNotFound(metadata.remote_log_segment_id().clone()),
-            ),
-            Err(other) => Err(other),
+        match Self::block_os(self.ops.get(&key)) {
+            Ok(bytes) => Ok(bytes.to_vec()),
+            Err(ObjectStoreError::NotFound(_)) => Err(RemoteStorageError::SegmentNotFound(
+                metadata.remote_log_segment_id().clone(),
+            )),
+            Err(other) => Err(other.into()),
         }
     }
 
@@ -476,11 +416,10 @@ impl RemoteStorageManager for S3RemoteStorage {
             self.index_key(metadata, IndexType::LeaderEpoch),
             self.index_key(metadata, IndexType::Transaction),
         ] {
-            match Self::block(self.store.delete(&key)) {
-                Ok(()) => {}
+            match Self::block_os(self.ops.delete(&key)) {
                 // Idempotent: deleting an absent object succeeds.
-                Err(RemoteStorageError::Backend(msg)) if msg.starts_with("not found:") => {}
-                Err(e) => return Err(e),
+                Ok(()) | Err(ObjectStoreError::NotFound(_)) => {}
+                Err(e) => return Err(e.into()),
             }
         }
         Ok(())
@@ -492,6 +431,7 @@ mod tests {
     use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
     use assert2::{assert, check};
+    use bytes::Bytes;
     use crabka_ids::LeaderEpoch;
     use object_store::memory::InMemory;
     use tempfile::TempDir;

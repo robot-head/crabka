@@ -72,3 +72,17 @@ pub enum RemoteStorageError {
         partition: i32,
     },
 }
+
+impl From<crabka_object_store::ObjectStoreError> for RemoteStorageError {
+    fn from(err: crabka_object_store::ObjectStoreError) -> Self {
+        use crabka_object_store::ObjectStoreError as E;
+
+        match err {
+            E::Io(e) => Self::Io(e),
+            E::InvalidConfig(m) => Self::InvalidArgument(m),
+            // Engine methods with segment context match NotFound before converting.
+            E::NotFound(p) => Self::Backend(format!("not found: {p}")),
+            E::Backend(m) => Self::Backend(m),
+        }
+    }
+}
