@@ -10,10 +10,10 @@
 
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         find_coordinator_request::FindCoordinatorRequest,
         find_coordinator_response::{Coordinator, FindCoordinatorResponse},
@@ -25,6 +25,7 @@ use crate::{
     broker::Broker,
     codes,
     error::BrokerError,
+    handlers::parse_advertised_host_port as parse_host_port,
 };
 
 const KEY_TYPE_GROUP: i8 = 0;
@@ -394,9 +395,7 @@ pub(crate) async fn handle(
             coordinators,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
+        crate::handlers::encode_response(&resp, version)
     }
 }
 
@@ -420,9 +419,7 @@ fn encode_error_response(
         coordinators: vec![],
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Parse a share-coordinator key `"{group}:{topicId}:{partition}"` into its
@@ -458,19 +455,6 @@ fn local_advertised_for_listener(
         .into_iter()
         .find(|l| l.name == connection_listener_name && !l.advertised.ends_with(":0"))
         .map_or_else(|| config.advertised_listener.clone(), |l| l.advertised)
-}
-
-fn parse_host_port(addr: &str) -> (String, u16) {
-    if let Some((h, p)) = addr.rsplit_once(':')
-        && let Ok(port) = p.parse::<u16>()
-    {
-        return (h.to_string(), port);
-    }
-    tracing::warn!(
-        addr,
-        "advertised_listener not host:port; falling back to localhost:9092"
-    );
-    ("localhost".into(), 9092)
 }
 
 #[cfg(test)]

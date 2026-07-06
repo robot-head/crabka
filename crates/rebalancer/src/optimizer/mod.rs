@@ -11,6 +11,7 @@ use crate::{
         ClusterState, Movement, PartitionView, Proposal, ProposalStatus, ProposalSummary,
         validate_movement,
     },
+    time::now_ms,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -244,12 +245,6 @@ fn max_leaders_per_broker(parts: &[PartitionView]) -> usize {
         *counts.entry(p.leader).or_insert(0) += 1;
     }
     counts.values().copied().max().unwrap_or(0)
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

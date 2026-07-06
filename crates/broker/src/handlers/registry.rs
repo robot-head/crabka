@@ -428,9 +428,8 @@ fn alter_replica_log_dirs_adapter<'a>(
     Box::pin(async move {
         use std::collections::BTreeMap;
 
-        use bytes::BytesMut;
         use crabka_protocol::{
-            Decode, Encode,
+            Decode,
             owned::{
                 alter_replica_log_dirs_request::AlterReplicaLogDirsRequest,
                 alter_replica_log_dirs_response::{
@@ -495,9 +494,7 @@ fn alter_replica_log_dirs_adapter<'a>(
                 results,
                 ..Default::default()
             };
-            let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-            resp.encode(&mut buf, version)?;
-            return Ok(buf.freeze());
+            return crate::handlers::encode_response(&resp, version);
         }
 
         crate::handlers::alter_replica_log_dirs::handle(broker, version, correlation_id, body).await

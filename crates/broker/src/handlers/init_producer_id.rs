@@ -17,10 +17,10 @@
 
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         init_producer_id_request::InitProducerIdRequest,
         init_producer_id_response::InitProducerIdResponse,
@@ -195,9 +195,7 @@ pub(crate) async fn handle(
         }
     };
 
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
@@ -208,9 +206,7 @@ fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
         producer_epoch: -1,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Transactional sub-path: allocate or bump-epoch for `tid`.
@@ -325,7 +321,7 @@ mod tests {
 
     use assert2::assert;
     use crabka_ids::PartitionIndex;
-    use crabka_log::{Log, LogConfig, Offset, ProducerId};
+    use crabka_log::{Log, LogConfig, ProducerId};
 
     use super::*;
     use crate::txn::state::{TopicPartition, TxnEntry};
@@ -356,7 +352,7 @@ mod tests {
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        assert!(part.log_end_offset() == Offset(0));
+        assert!(part.log_end_offset() == 0);
         partitions.insert("orders".to_string(), PartitionIndex(0), Arc::clone(&part));
 
         // Build a txn entry that names this partition.
@@ -372,7 +368,7 @@ mod tests {
 
         // The abort marker is a single control record → LEO advances to 1.
         assert!(
-            part.log_end_offset() == Offset(1),
+            part.log_end_offset() == 1,
             "abort marker must be appended (LEO 1), got {:?}",
             part.log_end_offset()
         );

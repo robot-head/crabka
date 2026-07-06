@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crabka_metadata::MetadataImage;
 
-use super::{buckets::QuotaBuckets, lookup::lookup_quota_with_key};
+use super::{QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota};
 
 #[allow(
     clippy::cast_possible_truncation,
@@ -20,26 +20,19 @@ pub fn consume_producer_quota(
     qos_tier: &str,
     bytes: u64,
 ) -> Duration {
-    if bytes == 0 {
-        return Duration::ZERO;
-    }
-    let Some((mut entity_key, rate)) =
-        lookup_quota_with_key(image, principal, client_id, "producer_byte_rate")
-    else {
-        return Duration::ZERO;
-    };
-    if rate <= 0.0 {
-        return Duration::ZERO;
-    }
-    entity_key.push(("qos-tier".into(), Some(qos_tier.into())));
-    let bucket = buckets.get_or_create("producer_byte_rate", &entity_key, rate as u64);
-    let granted = bucket.try_consume(bytes);
-    if granted >= bytes {
-        return Duration::ZERO;
-    }
-    let overage = bytes - granted;
-    let delay_secs = overage as f64 / rate;
-    Duration::from_micros((delay_secs * 1_000_000.0) as u64).min(Duration::from_secs(1))
+    consume_configured_quota(
+        QuotaConsumption {
+            image,
+            buckets,
+            principal,
+            client_id,
+            quota_key: "producer_byte_rate",
+            amount: bytes,
+        },
+        |entity_key| entity_key.push(("qos-tier".into(), Some(qos_tier.into()))),
+        |rate| Some(rate as u64),
+        |overage, rate, _| Duration::from_micros(((overage as f64 / rate) * 1_000_000.0) as u64),
+    )
 }
 
 #[cfg(test)]
@@ -47,25 +40,13 @@ mod tests {
     use std::time::Duration;
 
     use assert2::{assert, check};
-    use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
+    use crabka_metadata::MetadataImage;
 
     use super::consume_producer_quota;
-    use crate::quota::QuotaBuckets;
+    use crate::quota::{QuotaBuckets, test_support::image_with_quota as quota_image};
 
     fn img_with_quota(entity: Vec<(&str, Option<&str>)>, rate: f64) -> MetadataImage {
-        let mut img = MetadataImage::new(uuid::Uuid::nil());
-        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
-            entity: entity
-                .into_iter()
-                .map(|(t, n)| QuotaEntity {
-                    entity_type: t.into(),
-                    entity_name: n.map(Into::into),
-                })
-                .collect(),
-            config_key: "producer_byte_rate".into(),
-            config_value: Some(rate),
-        }));
-        img
+        quota_image(entity, "producer_byte_rate", rate)
     }
 
     #[test]

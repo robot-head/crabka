@@ -7,6 +7,8 @@
 //!
 //! [newtype guidance]: ../../../docs/style_guides/code_style_guide.md
 
+use core::cmp::Ordering;
+
 use derive_more::{Add, AddAssign, Display, From, Into};
 
 /// Per-broker hash-chain sequence number stamped on each record (`seq` header).
@@ -34,3 +36,42 @@ pub struct SpoolBytes(pub u64);
 /// Configured upper bound on spool size in bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
 pub struct MaxSpoolBytes(pub u64);
+
+macro_rules! impl_primitive_cmp {
+    ($ty:ty, $inner:ty) => {
+        impl PartialEq<$inner> for $ty {
+            #[inline]
+            fn eq(&self, other: &$inner) -> bool {
+                self.0 == *other
+            }
+        }
+
+        impl PartialEq<$ty> for $inner {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool {
+                *self == other.0
+            }
+        }
+
+        impl PartialOrd<$inner> for $ty {
+            #[inline]
+            fn partial_cmp(&self, other: &$inner) -> Option<Ordering> {
+                self.0.partial_cmp(other)
+            }
+        }
+
+        impl PartialOrd<$ty> for $inner {
+            #[inline]
+            fn partial_cmp(&self, other: &$ty) -> Option<Ordering> {
+                self.partial_cmp(&other.0)
+            }
+        }
+    };
+}
+
+impl_primitive_cmp!(Seq, u64);
+impl_primitive_cmp!(EpochMs, i64);
+impl_primitive_cmp!(RecordCount, u64);
+impl_primitive_cmp!(CheckpointCount, u64);
+impl_primitive_cmp!(SpoolBytes, u64);
+impl_primitive_cmp!(MaxSpoolBytes, u64);

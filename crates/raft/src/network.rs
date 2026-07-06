@@ -27,6 +27,7 @@ use crate::{
         transport::{PeerSender, api_key},
         types::NodeId,
     },
+    types::controller_endpoint_addr,
 };
 
 /// Outbound dialer the controller hands to the peer sender.
@@ -86,12 +87,7 @@ impl OutboundDialer for PlaintextDialer {
 /// convention the endpoint named `CONTROLLER`, falling back to the first.
 fn controller_addr(voters: &VoterSet, id: NodeId) -> Option<String> {
     let voter = voters.get(id)?;
-    let endpoint = voter
-        .endpoints
-        .iter()
-        .find(|e| e.name == "CONTROLLER")
-        .or_else(|| voter.endpoints.first())?;
-    Some(format!("{}:{}", endpoint.host, endpoint.port))
+    controller_endpoint_addr(&voter.endpoints)
 }
 
 /// KIP-595 api version per api key, matching the bodies the engine's transport
@@ -330,10 +326,7 @@ mod tests {
             (api_key::FETCH, 17),
             (-123, 0),
         ] {
-            assert!(
-                api_version_for(ApiKey(key)) == ApiVersion(want),
-                "api_key {key}"
-            );
+            assert!(api_version_for(ApiKey(key)) == want, "api_key {key}");
         }
     }
 
@@ -348,7 +341,7 @@ mod tests {
 
             let api_versions = read_frame(&mut stream).await;
             let (key, _version, corr, client_id, _body) = parse_request_header(&api_versions);
-            assert!(key == ApiKey(18));
+            assert!(key == 18);
             assert!(client_id == "raft-client");
             write_response_frame(&mut stream, corr, false, &api_versions_response_v0()).await;
 

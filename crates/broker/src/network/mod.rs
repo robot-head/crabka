@@ -1,5 +1,9 @@
 //! TCP listener, per-connection task, and Kafka framing helpers.
 
+use crabka_protocol::api_key::ApiKey;
+
+use crate::handlers::ApiKeyCode;
+
 pub(crate) mod auth;
 /// Outbound inter-broker client (TLS + SASL). Public so peer crates
 /// inside this workspace can `use crabka_broker::network::client::*`.
@@ -13,3 +17,15 @@ pub(crate) mod fetch_writer;
 pub(crate) mod ktls_probe;
 pub(crate) mod listener;
 pub(crate) mod request;
+
+pub(crate) fn response_header_v1(api_key: ApiKeyCode, body_flexible: bool) -> bool {
+    body_flexible && api_key != ApiKey::ApiVersions as i16
+}
+
+pub(crate) fn response_header_len(api_key: ApiKeyCode, body_flexible: bool) -> usize {
+    if response_header_v1(api_key, body_flexible) {
+        5
+    } else {
+        4
+    }
+}

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crabka_metadata::MetadataImage;
 
-use super::{buckets::QuotaBuckets, lookup::lookup_quota_with_key};
+use super::{QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota};
 
 /// Consume `elapsed_micros` of request-handler time from the
 /// `request_percentage` bucket for `(principal, client_id)`. Returns the
@@ -28,53 +28,36 @@ pub fn consume_request_quota(
     client_id: &str,
     elapsed_micros: u64,
 ) -> Duration {
-    if elapsed_micros == 0 {
-        return Duration::ZERO;
-    }
-    let Some((entity_key, rate_pct)) =
-        lookup_quota_with_key(image, principal, client_id, "request_percentage")
-    else {
-        return Duration::ZERO;
-    };
-    if rate_pct <= 0.0 {
-        return Duration::ZERO;
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let rate_micros_per_sec = (rate_pct * 10_000.0) as u64;
-    if rate_micros_per_sec == 0 {
-        return Duration::ZERO;
-    }
-    let bucket = buckets.get_or_create("request_percentage", &entity_key, rate_micros_per_sec);
-    let granted = bucket.try_consume(elapsed_micros);
-    if granted >= elapsed_micros {
-        return Duration::ZERO;
-    }
-    let overage_micros = elapsed_micros - granted;
-    let delay_micros = overage_micros.saturating_mul(1_000_000) / rate_micros_per_sec;
-    Duration::from_micros(delay_micros).min(Duration::from_secs(1))
+    consume_configured_quota(
+        QuotaConsumption {
+            image,
+            buckets,
+            principal,
+            client_id,
+            quota_key: "request_percentage",
+            amount: elapsed_micros,
+        },
+        |_| {},
+        |rate_pct| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let rate_micros_per_sec = (rate_pct * 10_000.0) as u64;
+            (rate_micros_per_sec != 0).then_some(rate_micros_per_sec)
+        },
+        |overage_micros, _, rate_micros_per_sec| {
+            Duration::from_micros(overage_micros.saturating_mul(1_000_000) / rate_micros_per_sec)
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
 
     use super::*;
+    use crate::quota::test_support::image_with_quota as quota_image;
 
     fn img_with_quota(entity: Vec<(&str, Option<&str>)>, rate: f64) -> MetadataImage {
-        let mut img = MetadataImage::new(uuid::Uuid::nil());
-        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
-            entity: entity
-                .into_iter()
-                .map(|(t, n)| QuotaEntity {
-                    entity_type: t.into(),
-                    entity_name: n.map(Into::into),
-                })
-                .collect(),
-            config_key: "request_percentage".into(),
-            config_value: Some(rate),
-        }));
-        img
+        quota_image(entity, "request_percentage", rate)
     }
 
     #[test]
@@ -108,5 +91,17 @@ mod tests {
         let buckets = QuotaBuckets::new();
         let delay = consume_request_quota(&img, &buckets, "alice", "", 1_000_000);
         assert!(delay == Duration::from_secs(1));
+    }
+
+    #[test]
+    fn overage_returns_scaled_uncapped_delay() {
+        // rate=100% gives a 1_000_000 us/sec budget. The bucket starts with
+        // one second of burst, so 1_500_000 us leaves a 500_000 us overage.
+        let img = img_with_quota(vec![("user", Some("alice"))], 100.0);
+        let buckets = QuotaBuckets::new();
+
+        let delay = consume_request_quota(&img, &buckets, "alice", "", 1_500_000);
+
+        assert!(delay == Duration::from_millis(500));
     }
 }

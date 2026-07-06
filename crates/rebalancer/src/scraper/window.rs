@@ -68,6 +68,24 @@ struct Sample {
     value: f64,
 }
 
+fn series_key(broker_id: i32, topic: &str, partition: i32, metric: MetricKind) -> SeriesKey {
+    SeriesKey {
+        broker_id,
+        topic: topic.to_string(),
+        partition,
+        metric,
+    }
+}
+
+fn window_lower_bound(window: Window, now_ms: i64) -> i64 {
+    let window_ms = i64::try_from(window.as_duration().as_millis()).unwrap_or(i64::MAX);
+    now_ms - window_ms
+}
+
+fn sample_in_window(sample: &Sample, lower: i64, upper: i64) -> bool {
+    sample.at_ms >= lower && sample.at_ms <= upper
+}
+
 #[derive(Debug, Default)]
 struct RingBuffer {
     samples: VecDeque<Sample>,
@@ -194,20 +212,14 @@ impl UsageStore {
         window: Window,
         now_ms: i64,
     ) -> Option<f64> {
-        let key = SeriesKey {
-            broker_id,
-            topic: topic.to_string(),
-            partition,
-            metric: MetricKind::DiskBytes,
-        };
+        let key = series_key(broker_id, topic, partition, MetricKind::DiskBytes);
         let map = self.inner.read();
         let buf = map.get(&key)?;
-        let window_ms = i64::try_from(window.as_duration().as_millis()).unwrap_or(i64::MAX);
-        let lower = now_ms - window_ms;
+        let lower = window_lower_bound(window, now_ms);
         let mut sum = 0.0f64;
         let mut count = 0u64;
         for s in &buf.samples {
-            if s.at_ms >= lower && s.at_ms <= now_ms {
+            if sample_in_window(s, lower, now_ms) {
                 sum += s.value;
                 count += 1;
             }
@@ -229,22 +241,16 @@ impl UsageStore {
         window: Window,
         now_ms: i64,
     ) -> Option<f64> {
-        let key = SeriesKey {
-            broker_id,
-            topic: topic.to_string(),
-            partition,
-            metric,
-        };
+        let key = series_key(broker_id, topic, partition, metric);
         let map = self.inner.read();
         let buf = map.get(&key)?;
-        let window_ms = i64::try_from(window.as_duration().as_millis()).unwrap_or(i64::MAX);
-        let lower = now_ms - window_ms;
+        let lower = window_lower_bound(window, now_ms);
         // Clamp both ends to the requested window so stale or future-dated
         // samples retained in the ring do not dominate the rate.
         let mut in_window = buf
             .samples
             .iter()
-            .filter(|s| s.at_ms >= lower && s.at_ms <= now_ms)
+            .filter(|s| sample_in_window(s, lower, now_ms))
             .copied();
         let earliest = in_window.next()?;
         let latest = in_window.last().unwrap_or(earliest);

@@ -159,44 +159,37 @@ fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
     })
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ScramSha512Auth {
-    /// PBKDF2 iteration count. Defaults to 8192 on the controller side
-    /// (matches `crabka_client_admin::DEFAULT_SCRAM_ITERATIONS`); the
-    /// broker rejects values < 4096.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 4096, max = 1_000_000))]
-    pub iterations: Option<i32>,
+macro_rules! scram_auth {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+        #[serde(rename_all = "camelCase")]
+        pub struct $name {
+            /// PBKDF2 iteration count. Defaults to 8192 on the controller side
+            /// (matches `crabka_client_admin::DEFAULT_SCRAM_ITERATIONS`); the
+            /// broker rejects values < 4096.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            #[schemars(range(min = 4096, max = 1_000_000))]
+            pub iterations: Option<i32>,
 
-    /// Raw-password length (bytes) for the operator-generated secret.
-    /// Defaults to 32 bytes (44 base64 chars). Ignored on reconcile if
-    /// a Secret with key `password` already exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 16, max = 256))]
-    pub password_length: Option<u16>,
+            /// Raw-password length (bytes) for the operator-generated secret.
+            /// Defaults to 32 bytes (44 base64 chars). Ignored on reconcile if
+            /// a Secret with key `password` already exists.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            #[schemars(range(min = 16, max = 256))]
+            pub password_length: Option<u16>,
+        }
+    };
 }
 
-/// SCRAM-SHA-256 sibling of [`ScramSha512Auth`]. Same field
-/// shape; the only semantic difference is the wire mechanism + HMAC
-/// algorithm picked up by the reconciler's match arm.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ScramSha256Auth {
-    /// PBKDF2 iteration count. Defaults to 8192 on the controller side
-    /// (matches `crabka_client_admin::DEFAULT_SCRAM_ITERATIONS`); the
-    /// broker rejects values < 4096.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 4096, max = 1_000_000))]
-    pub iterations: Option<i32>,
+scram_auth!(ScramSha512Auth);
 
-    /// Raw-password length (bytes) for the operator-generated secret.
-    /// Defaults to 32 bytes (44 base64 chars). Ignored on reconcile if
-    /// a Secret with key `password` already exists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 16, max = 256))]
-    pub password_length: Option<u16>,
-}
+scram_auth!(
+    /// SCRAM-SHA-256 sibling of [`ScramSha512Auth`]. Same field
+    /// shape; the only semantic difference is the wire mechanism + HMAC
+    /// algorithm picked up by the reconciler's match arm.
+    ScramSha256Auth
+);
 
 /// mTLS authentication config. The operator generates an X.509 client
 /// cert signed by the per-cluster clients CA, stored in the

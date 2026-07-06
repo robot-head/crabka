@@ -4,24 +4,24 @@ use crabka_ids::{Offset, PartitionIndex};
 #[test]
 fn offset_serialises_as_bare_integer() {
     check!(serde_json::to_string(&Offset(42)).unwrap() == "42");
-    check!(serde_json::from_str::<Offset>("42").unwrap() == Offset(42));
+    check!(serde_json::from_str::<Offset>("42").unwrap() == 42);
 }
 
 #[test]
 fn partition_index_serialises_as_bare_integer() {
     check!(serde_json::to_string(&PartitionIndex(3)).unwrap() == "3");
-    check!(serde_json::from_str::<PartitionIndex>("3").unwrap() == PartitionIndex(3));
+    check!(serde_json::from_str::<PartitionIndex>("3").unwrap() == 3);
 }
 
 #[test]
 fn offset_advances_and_rewinds_by_a_count() {
     let base = Offset(100);
-    check!(base + 5 == Offset(105));
-    check!(base - 1 == Offset(99));
+    check!(base + 5 == 105);
+    check!(base - 1 == 99);
 
     let mut cursor = base;
     cursor += 3;
-    check!(cursor == Offset(103));
+    check!(cursor == 103);
 
     // Delta between two offsets is a plain count.
     check!((Offset(110).get() - base.get()) == 10);

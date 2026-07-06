@@ -11,6 +11,8 @@ use std::{
 
 use crabka_protocol::primitives::uuid::Uuid;
 
+use super::super::expired_member_ids;
+
 /// One member of a share group.
 #[derive(Debug, Clone)]
 pub struct ShareMemberState {
@@ -105,12 +107,13 @@ impl ShareGroupState {
     /// Remove members whose `last_seen` is older than `session_timeout`,
     /// returning the evicted member ids.
     pub fn evict_expired(&mut self, now: Instant, session_timeout: Duration) -> Vec<String> {
-        let expired: Vec<String> = self
-            .members
-            .iter()
-            .filter(|(_, m)| now.duration_since(m.last_seen) > session_timeout)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let expired = expired_member_ids(
+            self.members
+                .iter()
+                .map(|(id, member)| (id.as_str(), member.last_seen)),
+            now,
+            session_timeout,
+        );
         for id in &expired {
             self.members.remove(id);
         }

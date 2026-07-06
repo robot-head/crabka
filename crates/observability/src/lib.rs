@@ -465,6 +465,32 @@ const LOG_COMPACTION_ACCUMULATION_WINDOW: Duration = Duration::from_secs(2);
 const LOG_COMPACTION_ACCUMULATION_POLL_TIMEOUT: Duration = Duration::from_millis(250);
 const LOG_COMPACTION_MAX_RECORDS_PER_BATCH: usize = 4096;
 
+fn build_compactor_configured_object_store(
+    config: &ServiceConfig,
+    object_store: Option<&dyn ObjectStore>,
+) -> Result<Option<ConfiguredObjectStore>, ServiceConfigError> {
+    if object_store.is_some() {
+        return Ok(None);
+    }
+
+    build_configured_object_store(config)
+}
+
+fn compactor_object_store<'a>(
+    object_store: Option<&'a dyn ObjectStore>,
+    configured_store: Option<&'a ConfiguredObjectStore>,
+) -> Result<(&'a dyn ObjectStore, Option<&'a ObjectPath>), ServiceConfigError> {
+    if let Some(store) = object_store {
+        return Ok((store, None));
+    }
+
+    let configured_store = configured_store.ok_or(ServiceConfigError::MissingObjectStore)?;
+    Ok((
+        configured_store.store.as_ref(),
+        Some(&configured_store.prefix),
+    ))
+}
+
 #[cfg_attr(test, mutants::skip)]
 async fn connect_with_startup_retry<T, E, F, Fut>(
     what: &str,
@@ -598,23 +624,9 @@ pub async fn run_compactor_once(
     dependencies: ServiceDependencies,
     object_store: Option<&dyn ObjectStore>,
 ) -> Result<Option<BlockDescriptor>, ServiceRuntimeError> {
-    let configured_store = if object_store.is_none() {
-        build_configured_object_store(config)?
-    } else {
-        None
-    };
-    let (store, object_store_prefix): (&dyn ObjectStore, Option<&ObjectPath>) =
-        if let Some(store) = object_store {
-            (store, None)
-        } else {
-            let configured_store = configured_store
-                .as_ref()
-                .ok_or(ServiceConfigError::MissingObjectStore)?;
-            (
-                configured_store.store.as_ref(),
-                Some(&configured_store.prefix),
-            )
-        };
+    let configured_store = build_compactor_configured_object_store(config, object_store)?;
+    let (store, object_store_prefix) =
+        compactor_object_store(object_store, configured_store.as_ref())?;
     let index_prefix = config
         .index_prefix
         .as_deref()
@@ -655,23 +667,9 @@ pub async fn run_compactor_until_idle(
     dependencies: ServiceDependencies,
     object_store: Option<&dyn ObjectStore>,
 ) -> Result<Vec<BlockDescriptor>, ServiceRuntimeError> {
-    let configured_store = if object_store.is_none() {
-        build_configured_object_store(config)?
-    } else {
-        None
-    };
-    let (store, object_store_prefix): (&dyn ObjectStore, Option<&ObjectPath>) =
-        if let Some(store) = object_store {
-            (store, None)
-        } else {
-            let configured_store = configured_store
-                .as_ref()
-                .ok_or(ServiceConfigError::MissingObjectStore)?;
-            (
-                configured_store.store.as_ref(),
-                Some(&configured_store.prefix),
-            )
-        };
+    let configured_store = build_compactor_configured_object_store(config, object_store)?;
+    let (store, object_store_prefix) =
+        compactor_object_store(object_store, configured_store.as_ref())?;
     let index_prefix = config
         .index_prefix
         .as_deref()
@@ -727,23 +725,9 @@ pub async fn run_compactor_until_shutdown(
     object_store: Option<&dyn ObjectStore>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<Vec<BlockDescriptor>, ServiceRuntimeError> {
-    let configured_store = if object_store.is_none() {
-        build_configured_object_store(config)?
-    } else {
-        None
-    };
-    let (store, object_store_prefix): (&dyn ObjectStore, Option<&ObjectPath>) =
-        if let Some(store) = object_store {
-            (store, None)
-        } else {
-            let configured_store = configured_store
-                .as_ref()
-                .ok_or(ServiceConfigError::MissingObjectStore)?;
-            (
-                configured_store.store.as_ref(),
-                Some(&configured_store.prefix),
-            )
-        };
+    let configured_store = build_compactor_configured_object_store(config, object_store)?;
+    let (store, object_store_prefix) =
+        compactor_object_store(object_store, configured_store.as_ref())?;
     let index_prefix = config
         .index_prefix
         .as_deref()
@@ -5854,41 +5838,14 @@ async fn build_querier_state_with_object_store_prefix(
     let state = match config.querier_index_source {
         QuerierIndexSource::LocalManifest => QuerierState::from_manifest(config.data_root.clone())?,
         QuerierIndexSource::TenantObjectStoreManifest => {
-            let store = object_store.ok_or(ServiceConfigError::MissingObjectStore)?;
-            let tenant = config
-                .tenant
-                .as_deref()
-                .ok_or(ServiceConfigError::MissingTenant {
-                    index_source: config.querier_index_source,
-                })?;
-            let prefix =
-                config
-                    .index_prefix
-                    .as_deref()
-                    .ok_or(ServiceConfigError::MissingIndexPrefix {
-                        index_source: config.querier_index_source,
-                    })?;
-            let prefix = effective_object_store_prefix(object_store_prefix, prefix);
-
+            let (store, tenant, prefix) =
+                querier_object_store_inputs(config, object_store, object_store_prefix)?;
             QuerierState::from_tenant_object_store(config.data_root.clone(), store, &prefix, tenant)
                 .await?
         }
         QuerierIndexSource::TenantObjectStoreShards => {
-            let store = object_store.ok_or(ServiceConfigError::MissingObjectStore)?;
-            let tenant = config
-                .tenant
-                .as_deref()
-                .ok_or(ServiceConfigError::MissingTenant {
-                    index_source: config.querier_index_source,
-                })?;
-            let prefix =
-                config
-                    .index_prefix
-                    .as_deref()
-                    .ok_or(ServiceConfigError::MissingIndexPrefix {
-                        index_source: config.querier_index_source,
-                    })?;
-            let prefix = effective_object_store_prefix(object_store_prefix, prefix);
+            let (store, tenant, prefix) =
+                querier_object_store_inputs(config, object_store, object_store_prefix)?;
             let start_ns = config
                 .query_start_ns
                 .ok_or(ServiceConfigError::MissingQueryStartNs)?;
@@ -5930,6 +5887,27 @@ async fn build_querier_state_with_object_store_prefix(
     } else {
         state
     })
+}
+
+fn querier_object_store_inputs<'a>(
+    config: &'a ServiceConfig,
+    object_store: Option<&'a dyn ObjectStore>,
+    object_store_prefix: Option<&ObjectPath>,
+) -> Result<(&'a dyn ObjectStore, &'a str, ObjectPath), ServiceConfigError> {
+    let store = object_store.ok_or(ServiceConfigError::MissingObjectStore)?;
+    let tenant = config
+        .tenant
+        .as_deref()
+        .ok_or(ServiceConfigError::MissingTenant {
+            index_source: config.querier_index_source,
+        })?;
+    let prefix = querier_object_store_prefix(config, object_store_prefix)?.ok_or(
+        ServiceConfigError::MissingIndexPrefix {
+            index_source: config.querier_index_source,
+        },
+    )?;
+
+    Ok((store, tenant, prefix))
 }
 
 fn querier_object_store_prefix(
@@ -20414,6 +20392,29 @@ mod tests {
         ) -> object_store::Result<()> {
             self.inner.copy_opts(from, to, options).await
         }
+    }
+
+    #[test]
+    fn compactor_configured_object_store_builds_when_not_injected() {
+        let object_store_dir = tempfile::tempdir().unwrap();
+        let object_store_url = Url::from_directory_path(object_store_dir.path())
+            .expect("temporary directory should be representable as a file URL")
+            .to_string();
+        let config = ServiceConfig::parse_from([
+            "crabka-observability",
+            "--target",
+            "compactor",
+            "--object-store-url",
+            &object_store_url,
+        ]);
+
+        let configured_store = build_compactor_configured_object_store(&config, None)
+            .expect("valid object-store URL should configure a compactor store");
+
+        assert!(
+            configured_store.is_some(),
+            "compactor should build the configured object store when no store is injected"
+        );
     }
 
     /// The OTLP/HTTP logs handler must decompress `Content-Encoding: gzip`

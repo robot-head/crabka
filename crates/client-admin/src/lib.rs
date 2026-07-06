@@ -34,7 +34,7 @@ pub use topics::{
 pub use users::{
     AclEntry, AclEntryFilter, AclOperation, CreateAclOutcome, DEFAULT_SCRAM_ITERATIONS,
     DeleteAclFilterOutcome, PatternType, PermissionType, ResourceType, ScramDeletion,
-    ScramUpsertion, ScramUserOutcome,
+    ScramUpsertion, ScramUserOutcome, UserScramCredential, UserScramCredentials,
 };
 
 /// Test seam for `AdminClient`. The operator's reconcile only needs
@@ -366,6 +366,18 @@ pub struct KafkaError {
     pub message: Option<String>,
 }
 
+pub(crate) fn kafka_error_if(code: i16, message: Option<String>) -> Option<KafkaError> {
+    if code == 0 {
+        None
+    } else {
+        Some(KafkaError {
+            code,
+            name: kafka_error_name(code),
+            message,
+        })
+    }
+}
+
 /// Short-lived admin client targeting one cluster's controller.
 /// Optionally negotiates TLS/SASL via [`AdminClient::connect_secured`].
 pub struct AdminClient {
@@ -499,12 +511,22 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
         7 => "REQUEST_TIMED_OUT",
         17 => "INVALID_TOPIC_EXCEPTION",
         19 => "NOT_ENOUGH_REPLICAS",
+        31 => "CLUSTER_AUTHORIZATION_FAILED",
+        33 => "UNSUPPORTED_SASL_MECHANISM",
+        35 => "UNSUPPORTED_VERSION",
         36 => "TOPIC_ALREADY_EXISTS",
         37 => "INVALID_PARTITIONS",
         38 => "INVALID_REPLICATION_FACTOR",
         39 => "INVALID_REPLICA_ASSIGNMENT",
         40 => "INVALID_CONFIG",
         41 => "NOT_CONTROLLER",
+        66 => "DELEGATION_TOKEN_EXPIRED",
+        83 => "ELIGIBLE_LEADERS_NOT_AVAILABLE",
+        84 => "ELECTION_NOT_NEEDED",
+        91 => "RESOURCE_NOT_FOUND",
+        92 => "DUPLICATE_RESOURCE",
+        93 => "UNACCEPTABLE_CREDENTIAL",
+        107 => "INELIGIBLE_REPLICA",
         87 => "REASSIGNMENT_IN_PROGRESS",
         _ => "UNKNOWN",
     }
@@ -528,8 +550,47 @@ mod tests {
     }
 
     #[test]
+    fn users_kafka_error_name_includes_scram_describe_codes() {
+        for (code, want) in [
+            (31, "CLUSTER_AUTHORIZATION_FAILED"),
+            (33, "UNSUPPORTED_SASL_MECHANISM"),
+            (35, "UNSUPPORTED_VERSION"),
+            (66, "DELEGATION_TOKEN_EXPIRED"),
+            (83, "ELIGIBLE_LEADERS_NOT_AVAILABLE"),
+            (84, "ELECTION_NOT_NEEDED"),
+            (91, "RESOURCE_NOT_FOUND"),
+            (92, "DUPLICATE_RESOURCE"),
+            (93, "UNACCEPTABLE_CREDENTIAL"),
+        ] {
+            assert!(kafka_error_name(code) == want);
+        }
+    }
+
+    #[test]
+    fn users_kafka_error_name_includes_ineligible_replica() {
+        assert!(kafka_error_name(107) == "INELIGIBLE_REPLICA");
+    }
+
+    #[test]
     fn kafka_error_name_unknown_returns_unknown() {
         assert!(kafka_error_name(9999) == "UNKNOWN");
+    }
+
+    #[test]
+    fn kafka_error_if_zero_code_is_none() {
+        assert!(kafka_error_if(0, None).is_none());
+    }
+
+    #[test]
+    fn kafka_error_if_nonzero_carries_name() {
+        let e = kafka_error_if(36, Some("dup".into())).unwrap();
+        assert!(
+            e == KafkaError {
+                code: 36,
+                name: "TOPIC_ALREADY_EXISTS",
+                message: Some("dup".to_string()),
+            }
+        );
     }
 
     #[tokio::test]

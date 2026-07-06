@@ -10,9 +10,9 @@
 
 use std::collections::BTreeMap;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         common::streams_group_describe_response::{
             assignment::Assignment, key_value::KeyValue, task_ids::TaskIds, topic_info::TopicInfo,
@@ -108,9 +108,7 @@ pub(crate) fn handle(
             groups,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
+        crate::handlers::encode_response(&resp, version)
     })
 }
 

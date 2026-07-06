@@ -335,10 +335,7 @@ impl Consumer {
         // per Record, and bump next_offsets to the highest seen offset + 1.
         // Reverse-map topic_id → name. At Fetch v ≥ 13 the response carries
         // only `topic_id`; `topic.topic` is empty.
-        let id_to_name: HashMap<_, _> = topic_ids
-            .iter()
-            .map(|(name, id)| (*id, name.clone()))
-            .collect();
+        let id_to_name = crate::offset_wire::id_to_name(&topic_ids);
 
         // Re-snapshot the assignment: a cooperative rebalance may have
         // revoked partitions while this Fetch was in flight. Records for

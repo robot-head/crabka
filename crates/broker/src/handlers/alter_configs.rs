@@ -5,10 +5,10 @@
 //! single `V1TopicConfig` record. Replication-side propagation runs on
 //! every reconcile (see `ReplicatorSupervisor::reconcile`).
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, MetadataRecord, ResourceType, TopicConfigRecord};
 use crabka_protocol::{
-    Decode, Encode, UnknownTaggedFields,
+    Decode, UnknownTaggedFields,
     owned::{
         alter_configs_request::AlterConfigsRequest,
         alter_configs_response::{AlterConfigsResourceResponse, AlterConfigsResponse},
@@ -172,9 +172,7 @@ pub(crate) async fn handle(
         throttle_time_ms: 0,
         unknown_tagged_fields: UnknownTaggedFields::default(),
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]

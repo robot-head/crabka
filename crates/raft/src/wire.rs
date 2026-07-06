@@ -35,6 +35,29 @@ fn require_remaining(buf: &[u8], required: usize) -> Result<(), ProtocolError> {
     }
 }
 
+fn put_i32_len_prefixed_bytes(
+    out: &mut Vec<u8>,
+    bytes: &Bytes,
+    too_long: &'static str,
+) -> Result<(), ProtocolError> {
+    out.put_i32(i32::try_from(bytes.len()).map_err(|_| ProtocolError::InvalidValue(too_long))?);
+    out.put_slice(bytes);
+    Ok(())
+}
+
+fn get_i32_len_prefixed_bytes(
+    buf: &mut &[u8],
+    negative_len: &'static str,
+) -> Result<Bytes, ProtocolError> {
+    require_remaining(buf, I32_LEN)?;
+    let len = buf.get_i32();
+    let len = usize::try_from(len).map_err(|_| ProtocolError::InvalidValue(negative_len))?;
+    require_remaining(buf, len)?;
+    let bytes = Bytes::copy_from_slice(&buf[..len]);
+    buf.advance(len);
+    Ok(bytes)
+}
+
 /// Forward-to-leader payload. Body is opaque wincode bytes representing the
 /// `Vec<MetadataRecord>` to apply; the controller layer owns the serde details
 /// so the wire module stays metadata-agnostic.
@@ -45,22 +68,11 @@ pub struct CrabkaSubmitChangeRequest {
 
 impl CrabkaSubmitChangeRequest {
     pub fn encode_v0(&self, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
-        out.put_i32(
-            i32::try_from(self.records.len())
-                .map_err(|_| ProtocolError::InvalidValue("records length exceeds i32::MAX"))?,
-        );
-        out.put_slice(&self.records);
-        Ok(())
+        put_i32_len_prefixed_bytes(out, &self.records, "records length exceeds i32::MAX")
     }
 
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
-        require_remaining(buf, I32_LEN)?;
-        let len = buf.get_i32();
-        let len = usize::try_from(len)
-            .map_err(|_| ProtocolError::InvalidValue("negative records length"))?;
-        require_remaining(buf, len)?;
-        let records = Bytes::copy_from_slice(&buf[..len]);
-        buf.advance(len);
+        let records = get_i32_len_prefixed_bytes(buf, "negative records length")?;
         Ok(Self { records })
     }
 }
@@ -133,12 +145,7 @@ impl CrabkaMetadataFetchResponse {
         out.put_i64(self.leader_hint);
         out.put_i64(self.log_start_offset);
         out.put_i64(self.high_watermark);
-        out.put_i32(
-            i32::try_from(self.records.len())
-                .map_err(|_| ProtocolError::InvalidValue("records length exceeds i32::MAX"))?,
-        );
-        out.put_slice(&self.records);
-        Ok(())
+        put_i32_len_prefixed_bytes(out, &self.records, "records length exceeds i32::MAX")
     }
 
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
@@ -147,12 +154,7 @@ impl CrabkaMetadataFetchResponse {
         let leader_hint = buf.get_i64();
         let log_start_offset = buf.get_i64();
         let high_watermark = buf.get_i64();
-        let len = buf.get_i32();
-        let len = usize::try_from(len)
-            .map_err(|_| ProtocolError::InvalidValue("negative records length"))?;
-        require_remaining(buf, len)?;
-        let records = Bytes::copy_from_slice(&buf[..len]);
-        buf.advance(len);
+        let records = get_i32_len_prefixed_bytes(buf, "negative records length")?;
         Ok(Self {
             error_code,
             leader_hint,

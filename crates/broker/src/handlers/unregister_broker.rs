@@ -15,22 +15,17 @@
 //! shape (it surfaces `BrokerIdNotRegisteredException` as
 //! `INVALID_REQUEST`).
 
-use bytes::{Bytes, BytesMut};
-use crabka_metadata::{AclOperation, MetadataRecord, ResourceType, UnregisterBrokerRecord};
+use bytes::Bytes;
+use crabka_metadata::{MetadataRecord, UnregisterBrokerRecord};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         unregister_broker_request::UnregisterBrokerRequest,
         unregister_broker_response::UnregisterBrokerResponse,
     },
 };
 
-use crate::{
-    authorizer::{AuthorizationRequest, AuthorizationResult},
-    broker::Broker,
-    codes,
-    error::BrokerError,
-};
+use crate::{broker::Broker, codes, error::BrokerError, handlers::cluster_alter_denied};
 
 #[tracing::instrument(
     name = "handle_unregister_broker",
@@ -52,17 +47,7 @@ pub(crate) async fn handle(
     let image = broker.controller.current_image();
 
     // Cluster:Alter gate.
-    let allow = broker.config.authorizer.authorize(
-        &*image,
-        &AuthorizationRequest {
-            principal: ctx.principal,
-            host: ctx.peer,
-            resource_type: ResourceType::Cluster,
-            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
-            operation: AclOperation::Alter,
-        },
-    );
-    if allow == AuthorizationResult::Deny {
+    if cluster_alter_denied(broker.config.authorizer.as_ref(), &image, ctx) {
         let resp = response(
             codes::CLUSTER_AUTHORIZATION_FAILED,
             Some("unregister-broker denied".into()),
@@ -120,9 +105,7 @@ fn response(error_code: i16, error_message: Option<String>) -> UnregisterBrokerR
 }
 
 fn encode_resp(version: i16, resp: &UnregisterBrokerResponse) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(resp, version)
 }
 
 #[cfg(test)]

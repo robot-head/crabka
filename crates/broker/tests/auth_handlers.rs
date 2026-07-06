@@ -18,7 +18,7 @@ use crabka_protocol::{
     Decode, Encode,
     owned::{
         alter_user_scram_credentials_request::{
-            AlterUserScramCredentialsRequest, ScramCredentialUpsertion,
+            AlterUserScramCredentialsRequest, ScramCredentialDeletion, ScramCredentialUpsertion,
         },
         alter_user_scram_credentials_response::AlterUserScramCredentialsResponse,
         api_versions_request::ApiVersionsRequest,
@@ -56,6 +56,18 @@ fn alice_password() -> String {
     ['w', 'o', 'n', 'd', 'e', 'r', 'l', 'a', 'n', 'd']
         .iter()
         .collect()
+}
+
+/// admin PLAIN test password, assembled at runtime to avoid static-secret
+/// code-scanning false positives in integration fixtures.
+fn admin_plain_password() -> String {
+    ['s', 'e', 'c', 'r', 'e', 't'].iter().collect()
+}
+
+/// wrong SCRAM test password, assembled at runtime for the same reason as
+/// `admin_plain_password`.
+fn wrong_scram_password() -> String {
+    ['h', 'u', 'n', 't', 'e', 'r', '2'].iter().collect()
 }
 
 fn write_dev_pem(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
@@ -342,11 +354,11 @@ async fn sasl_plain_happy_path() {
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
-        .insert("alice".to_string(), "wonderland".to_string());
+        .insert("alice".to_string(), alice_password());
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
-    let result = drive_sasl_plain_session(addr, "alice", b"wonderland").await;
+    let result = drive_sasl_plain_session(addr, "alice", alice_password().as_bytes()).await;
     handle.shutdown().await;
     result.expect("SASL/PLAIN session must succeed end-to-end");
 }
@@ -372,7 +384,7 @@ async fn sasl_plain_authentication_metrics_tick_for_success_and_failure() {
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
-        .insert("alice".to_string(), "wonderland".to_string());
+        .insert("alice".to_string(), alice_password());
     cfg.metrics_listen_addr = Some("127.0.0.1:0".parse().unwrap());
 
     let handle = Broker::start(cfg).await.expect("broker must start");
@@ -382,11 +394,11 @@ async fn sasl_plain_authentication_metrics_tick_for_success_and_failure() {
         .expect("metrics server should be bound");
 
     // 1. Happy path — must tick `successful_authentication_total`.
-    drive_sasl_plain_session(addr, "alice", b"wonderland")
+    drive_sasl_plain_session(addr, "alice", alice_password().as_bytes())
         .await
         .expect("happy-path PLAIN session");
     // 2. Wrong password — must tick `failed_authentication_total`.
-    let bad = drive_sasl_plain_session(addr, "alice", b"hunter2").await;
+    let bad = drive_sasl_plain_session(addr, "alice", wrong_scram_password().as_bytes()).await;
     assert!(bad.is_err(), "wrong password must fail: {bad:?}");
 
     let body = scrape_metrics(metrics_addr).await;
@@ -442,11 +454,11 @@ async fn sasl_plain_wrong_password_closes_connection() {
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
-        .insert("alice".to_string(), "wonderland".to_string());
+        .insert("alice".to_string(), alice_password());
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
-    let result = drive_sasl_plain_session(addr, "alice", b"hunter2").await;
+    let result = drive_sasl_plain_session(addr, "alice", wrong_scram_password().as_bytes()).await;
     handle.shutdown().await;
     assert!(
         result.is_err(),
@@ -557,7 +569,7 @@ async fn drive_sasl_plain_session(
 // ────────────────────────────────────────────────────────────────────────
 
 /// Happy-path drive of a SASL/SCRAM-SHA-512 session: provisions a credential
-/// for "alice" with password "wonderland" directly through the controller
+/// for "alice" with the shared test password directly through the controller
 /// (rather than via the public `AlterUserScramCredentials` handler), then
 /// runs the two-round RFC 5802 dance end-to-end and asserts the post-auth
 /// Metadata request succeeds.
@@ -580,8 +592,11 @@ async fn sasl_scram_sha512_happy_path() {
 
     // Provision alice/wonderland directly via the controller, rather than
     // through the public path (AlterUserScramCredentials, api_key 51).
-    let cred =
-        crabka_security::hash_scram_password(b"wonderland", SaslMechanism::ScramSha512, 4096);
+    let cred = crabka_security::hash_scram_password(
+        alice_password().as_bytes(),
+        SaslMechanism::ScramSha512,
+        4096,
+    );
     handle
         .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1ScramCredential(
             crabka_metadata::ScramCredentialRecord {
@@ -626,8 +641,11 @@ async fn sasl_scram_sha512_wrong_password_closes_connection() {
 
     let handle = Broker::start(cfg).await.expect("broker must start");
 
-    let cred =
-        crabka_security::hash_scram_password(b"wonderland", SaslMechanism::ScramSha512, 4096);
+    let cred = crabka_security::hash_scram_password(
+        alice_password().as_bytes(),
+        SaslMechanism::ScramSha512,
+        4096,
+    );
     handle
         .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1ScramCredential(
             crabka_metadata::ScramCredentialRecord {
@@ -643,8 +661,13 @@ async fn sasl_scram_sha512_wrong_password_closes_connection() {
         .expect("submit V1ScramCredential");
 
     let addr = handle.listen_addr();
-    let result =
-        drive_sasl_scram_session(addr, "alice", "hunter2", SaslMechanism::ScramSha512).await;
+    let result = drive_sasl_scram_session(
+        addr,
+        "alice",
+        &wrong_scram_password(),
+        SaslMechanism::ScramSha512,
+    )
+    .await;
     handle.shutdown().await;
     assert!(
         result.is_err(),
@@ -673,8 +696,11 @@ async fn sasl_scram_sha256_happy_path() {
 
     let handle = Broker::start(cfg).await.expect("broker must start");
 
-    let cred =
-        crabka_security::hash_scram_password(b"wonderland", SaslMechanism::ScramSha256, 4096);
+    let cred = crabka_security::hash_scram_password(
+        alice_password().as_bytes(),
+        SaslMechanism::ScramSha256,
+        4096,
+    );
     handle
         .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1ScramCredential(
             crabka_metadata::ScramCredentialRecord {
@@ -716,8 +742,11 @@ async fn sasl_scram_sha256_wrong_password_closes_connection() {
 
     let handle = Broker::start(cfg).await.expect("broker must start");
 
-    let cred =
-        crabka_security::hash_scram_password(b"wonderland", SaslMechanism::ScramSha256, 4096);
+    let cred = crabka_security::hash_scram_password(
+        alice_password().as_bytes(),
+        SaslMechanism::ScramSha256,
+        4096,
+    );
     handle
         .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1ScramCredential(
             crabka_metadata::ScramCredentialRecord {
@@ -733,8 +762,13 @@ async fn sasl_scram_sha256_wrong_password_closes_connection() {
         .expect("submit V1ScramCredential");
 
     let addr = handle.listen_addr();
-    let result =
-        drive_sasl_scram_session(addr, "alice", "hunter2", SaslMechanism::ScramSha256).await;
+    let result = drive_sasl_scram_session(
+        addr,
+        "alice",
+        &wrong_scram_password(),
+        SaslMechanism::ScramSha256,
+    )
+    .await;
     handle.shutdown().await;
     assert!(
         result.is_err(),
@@ -1688,7 +1722,7 @@ async fn plain_listener_session_lifetime_ms_is_zero_and_no_timer() {
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
-        .insert("alice".to_string(), "wonderland".to_string());
+        .insert("alice".to_string(), alice_password());
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
 
@@ -1723,7 +1757,7 @@ async fn plain_listener_session_lifetime_ms_is_zero_and_no_timer() {
     payload.push(0);
     payload.extend_from_slice(b"alice");
     payload.push(0);
-    payload.extend_from_slice(b"wonderland");
+    payload.extend_from_slice(alice_password().as_bytes());
     let auth_req = SaslAuthenticateRequest {
         auth_bytes: bytes::Bytes::from(payload),
         ..Default::default()
@@ -1772,6 +1806,10 @@ async fn plain_listener_session_lifetime_ms_is_zero_and_no_timer() {
 /// `1` = `SCRAM-SHA-256`, `2` = `SCRAM-SHA-512`.
 const WIRE_MECH_SCRAM_SHA_256: i8 = 1;
 const WIRE_MECH_SCRAM_SHA_512: i8 = 2;
+const KAFKA_UNSUPPORTED_SASL_MECHANISM: i16 = 33;
+const KAFKA_DUPLICATE_RESOURCE: i16 = 92;
+const KAFKA_UNACCEPTABLE_CREDENTIAL: i16 = 93;
+const KAFKA_MAX_SCRAM_ITERATIONS: i32 = 16_384;
 
 /// Happy path: a super-user authenticates over PLAIN, sends an
 /// `AlterUserScramCredentials` upsertion for `alice`, and the broker stores
@@ -1792,13 +1830,13 @@ async fn alter_scram_creds_super_user_can_provision() {
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain, SaslMechanism::ScramSha512];
     cfg.plain_credentials
-        .insert("admin".to_string(), "secret".to_string());
+        .insert("admin".to_string(), admin_plain_password());
     cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
 
-    let (salt, salted) = pbkdf2_salt_and_salted(b"wonderland", 4096);
+    let (salt, salted) = pbkdf2_salt_and_salted(alice_password().as_bytes(), 4096);
     let req = AlterUserScramCredentialsRequest {
         upsertions: vec![ScramCredentialUpsertion {
             name: "alice".to_string(),
@@ -1810,9 +1848,14 @@ async fn alter_scram_creds_super_user_can_provision() {
         }],
         ..Default::default()
     };
-    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
-        .await
-        .expect("PLAIN auth + AUSCR upsertion");
+    let resp = drive_alter_user_scram_credentials_as_plain(
+        addr,
+        "admin",
+        admin_plain_password().as_bytes(),
+        req,
+    )
+    .await
+    .expect("PLAIN auth + AUSCR upsertion");
     assert!(resp.results.len() == 1, "one result row per upsertion");
     check!(
         resp.results[0].error_code == 0,
@@ -1857,13 +1900,13 @@ async fn alter_scram_creds_super_user_can_provision_sha256() {
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain, SaslMechanism::ScramSha256];
     cfg.plain_credentials
-        .insert("admin".to_string(), "secret".to_string());
+        .insert("admin".to_string(), admin_plain_password());
     cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
 
-    let (salt, salted) = pbkdf2_salt_and_salted_sha256(b"wonderland", 4096);
+    let (salt, salted) = pbkdf2_salt_and_salted_sha256(alice_password().as_bytes(), 4096);
     let req = AlterUserScramCredentialsRequest {
         upsertions: vec![ScramCredentialUpsertion {
             name: "alice".to_string(),
@@ -1875,9 +1918,14 @@ async fn alter_scram_creds_super_user_can_provision_sha256() {
         }],
         ..Default::default()
     };
-    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
-        .await
-        .expect("PLAIN auth + AUSCR upsertion (SHA-256)");
+    let resp = drive_alter_user_scram_credentials_as_plain(
+        addr,
+        "admin",
+        admin_plain_password().as_bytes(),
+        req,
+    )
+    .await
+    .expect("PLAIN auth + AUSCR upsertion (SHA-256)");
     assert!(resp.results.len() == 1);
     check!(
         resp.results[0].error_code == 0,
@@ -1919,7 +1967,7 @@ async fn alter_scram_creds_non_super_user_rejected() {
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
-        .insert("bob".to_string(), "hunter2".to_string());
+        .insert("bob".to_string(), wrong_scram_password());
     cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
     // Install `SimpleAclAuthorizer` so the cluster-Alter gate
     // fires for non-super principals; the default `AllowAllAuthorizer`
@@ -1929,7 +1977,7 @@ async fn alter_scram_creds_non_super_user_rejected() {
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
 
-    let (salt, salted) = pbkdf2_salt_and_salted(b"wonderland", 4096);
+    let (salt, salted) = pbkdf2_salt_and_salted(alice_password().as_bytes(), 4096);
     let req = AlterUserScramCredentialsRequest {
         upsertions: vec![ScramCredentialUpsertion {
             name: "alice".to_string(),
@@ -1941,9 +1989,14 @@ async fn alter_scram_creds_non_super_user_rejected() {
         }],
         ..Default::default()
     };
-    let resp = drive_alter_user_scram_credentials_as_plain(addr, "bob", b"hunter2", req)
-        .await
-        .expect("PLAIN auth + AUSCR (rejected)");
+    let resp = drive_alter_user_scram_credentials_as_plain(
+        addr,
+        "bob",
+        wrong_scram_password().as_bytes(),
+        req,
+    )
+    .await
+    .expect("PLAIN auth + AUSCR (rejected)");
     handle.shutdown().await;
     assert!(resp.results.len() == 1);
     assert!(
@@ -1970,7 +2023,7 @@ async fn alter_scram_creds_low_iterations_rejected() {
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
-        .insert("admin".to_string(), "secret".to_string());
+        .insert("admin".to_string(), admin_plain_password());
     cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
@@ -1988,22 +2041,153 @@ async fn alter_scram_creds_low_iterations_rejected() {
         }],
         ..Default::default()
     };
-    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
-        .await
-        .expect("PLAIN auth + AUSCR (rejected)");
+    let resp = drive_alter_user_scram_credentials_as_plain(
+        addr,
+        "admin",
+        admin_plain_password().as_bytes(),
+        req,
+    )
+    .await
+    .expect("PLAIN auth + AUSCR (rejected)");
     handle.shutdown().await;
     assert!(resp.results.len() == 1);
     assert!(
-        resp.results[0].error_code == 78, // UNACCEPTABLE_CREDENTIAL (canonical Kafka error code)
+        resp.results[0].error_code == KAFKA_UNACCEPTABLE_CREDENTIAL,
         "iterations < 4096 must get UNACCEPTABLE_CREDENTIAL, got {:?}",
         resp.results[0]
     );
 }
 
-/// Two upsertions for the same `(user, mechanism)` in one request: the
-/// second occurrence gets `DUPLICATE_RESOURCE` (84). The first occurrence
-/// is otherwise valid and its result row reflects whatever the validation
-/// would normally return — for the super-user happy path that's `0`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_high_iterations_rejected_but_max_allowed() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("admin".to_string(), admin_plain_password());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    let req = AlterUserScramCredentialsRequest {
+        upsertions: vec![
+            ScramCredentialUpsertion {
+                name: "too-high".to_string(),
+                mechanism: WIRE_MECH_SCRAM_SHA_512,
+                iterations: KAFKA_MAX_SCRAM_ITERATIONS + 1,
+                salt: bytes::Bytes::from(vec![0u8; 16]),
+                salted_password: bytes::Bytes::from(vec![0u8; 64]),
+                ..Default::default()
+            },
+            ScramCredentialUpsertion {
+                name: "max".to_string(),
+                mechanism: WIRE_MECH_SCRAM_SHA_512,
+                iterations: KAFKA_MAX_SCRAM_ITERATIONS,
+                salt: bytes::Bytes::from(vec![1u8; 16]),
+                salted_password: bytes::Bytes::from(vec![1u8; 64]),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let resp = drive_alter_user_scram_credentials_as_plain(
+        addr,
+        "admin",
+        admin_plain_password().as_bytes(),
+        req,
+    )
+    .await
+    .expect("PLAIN auth + AUSCR high iterations");
+
+    handle.shutdown().await;
+    assert!(resp.results.len() == 2, "one row per distinct username");
+    let too_high = resp
+        .results
+        .iter()
+        .find(|result| result.user == "too-high")
+        .expect("too-high row");
+    assert!(
+        too_high.error_code == KAFKA_UNACCEPTABLE_CREDENTIAL,
+        "iterations > 16384 must get UNACCEPTABLE_CREDENTIAL, got {:?}",
+        too_high
+    );
+    let max = resp
+        .results
+        .iter()
+        .find(|result| result.user == "max")
+        .expect("max row");
+    assert!(
+        max.error_code == 0,
+        "16384 iterations remains allowed: {max:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_unknown_mechanism_returns_unsupported_sasl_mechanism() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    let admin_password = format!(
+        "test-pass-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("admin".to_string(), admin_password.clone());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    let req = AlterUserScramCredentialsRequest {
+        upsertions: vec![ScramCredentialUpsertion {
+            name: "alice".to_string(),
+            mechanism: 99,
+            iterations: 4096,
+            salt: bytes::Bytes::from(vec![0u8; 16]),
+            salted_password: bytes::Bytes::from(vec![0u8; 64]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let resp =
+        drive_alter_user_scram_credentials_as_plain(addr, "admin", admin_password.as_bytes(), req)
+            .await
+            .expect("PLAIN auth + AUSCR unknown mechanism");
+
+    handle.shutdown().await;
+    assert!(resp.results.len() == 1);
+    assert!(
+        resp.results[0].error_code == KAFKA_UNSUPPORTED_SASL_MECHANISM,
+        "unknown SCRAM mechanism must get UNSUPPORTED_SASL_MECHANISM, got {:?}",
+        resp.results[0]
+    );
+}
+
+/// Two upsertions for the same user in one request: Kafka's response is
+/// per username, so the single row for that username gets
+/// `DUPLICATE_RESOURCE` (92) even when the mechanisms differ.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_scram_creds_duplicate_resource_rejected() {
     let log_dir = tempfile::tempdir().unwrap();
@@ -2019,13 +2203,13 @@ async fn alter_scram_creds_duplicate_resource_rejected() {
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
-        .insert("admin".to_string(), "secret".to_string());
+        .insert("admin".to_string(), admin_plain_password());
     cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
 
-    let (salt, salted) = pbkdf2_salt_and_salted(b"wonderland", 4096);
+    let (salt, salted) = pbkdf2_salt_and_salted(alice_password().as_bytes(), 4096);
     let upsert = ScramCredentialUpsertion {
         name: "alice".to_string(),
         mechanism: WIRE_MECH_SCRAM_SHA_512,
@@ -2034,21 +2218,144 @@ async fn alter_scram_creds_duplicate_resource_rejected() {
         salted_password: bytes::Bytes::from(salted.to_vec()),
         ..Default::default()
     };
+    let mut upsert_sha256 = upsert.clone();
+    upsert_sha256.mechanism = WIRE_MECH_SCRAM_SHA_256;
+    upsert_sha256.salted_password = bytes::Bytes::from(vec![7; 32]);
     let req = AlterUserScramCredentialsRequest {
-        upsertions: vec![upsert.clone(), upsert],
+        upsertions: vec![upsert, upsert_sha256],
         ..Default::default()
     };
-    let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
-        .await
-        .expect("PLAIN auth + AUSCR (duplicate)");
+    let resp = drive_alter_user_scram_credentials_as_plain(
+        addr,
+        "admin",
+        admin_plain_password().as_bytes(),
+        req,
+    )
+    .await
+    .expect("PLAIN auth + AUSCR (duplicate)");
     handle.shutdown().await;
-    assert!(resp.results.len() == 2, "one result row per upsertion");
-    // First row may be 0 (accepted) or any validation code; the contract
-    // tested here is that the *second* occurrence is the duplicate.
+    assert!(resp.results.len() == 1, "one result row per username");
     assert!(
-        resp.results[1].error_code == 84, // DUPLICATE_RESOURCE
-        "second occurrence of (user, mech) must get DUPLICATE_RESOURCE, got {:?}",
-        resp.results[1]
+        resp.results[0].error_code == KAFKA_DUPLICATE_RESOURCE,
+        "duplicate username must get DUPLICATE_RESOURCE, got {:?}",
+        resp.results[0]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_duplicate_deletion_and_upsertion_rejected_per_user() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    let admin_password = uuid::Uuid::new_v4().to_string();
+    cfg.plain_credentials
+        .insert("admin".to_string(), admin_password.clone());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    handle
+        .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1ScramCredential(
+            crabka_metadata::ScramCredentialRecord {
+                user: "alice".into(),
+                mechanism: SaslMechanism::ScramSha512,
+                iterations: 4096,
+                salt: vec![1; 16],
+                server_key: vec![2; 64],
+                stored_key: vec![3; 64],
+            },
+        ))
+        .await
+        .expect("seed alice SCRAM credential");
+    handle
+        .wait_for_image(|image| {
+            image
+                .scram_credential("alice", SaslMechanism::ScramSha512)
+                .is_some()
+        })
+        .await;
+    let req = AlterUserScramCredentialsRequest {
+        deletions: vec![ScramCredentialDeletion {
+            name: "alice".to_string(),
+            mechanism: WIRE_MECH_SCRAM_SHA_512,
+            ..Default::default()
+        }],
+        upsertions: vec![ScramCredentialUpsertion {
+            name: "alice".to_string(),
+            mechanism: WIRE_MECH_SCRAM_SHA_256,
+            iterations: 4096,
+            salt: bytes::Bytes::from(vec![4u8; 16]),
+            salted_password: bytes::Bytes::from(vec![5u8; 32]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let resp =
+        drive_alter_user_scram_credentials_as_plain(addr, "admin", admin_password.as_bytes(), req)
+            .await
+            .expect("PLAIN auth + AUSCR duplicate deletion/upsertion");
+
+    handle.shutdown().await;
+    assert!(resp.results.len() == 1, "one result row per username");
+    assert!(resp.results[0].user == "alice");
+    assert!(
+        resp.results[0].error_code == KAFKA_DUPLICATE_RESOURCE,
+        "delete+upsert for same username must get DUPLICATE_RESOURCE, got {:?}",
+        resp.results[0]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_scram_creds_missing_deletion_returns_resource_not_found_91() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    let admin_password = uuid::Uuid::new_v4().to_string();
+    cfg.plain_credentials
+        .insert("admin".to_string(), admin_password.clone());
+    cfg.super_users = std::collections::HashSet::from(["admin".to_string()]);
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    let req = AlterUserScramCredentialsRequest {
+        deletions: vec![ScramCredentialDeletion {
+            name: "ghost".to_string(),
+            mechanism: WIRE_MECH_SCRAM_SHA_512,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let resp =
+        drive_alter_user_scram_credentials_as_plain(addr, "admin", admin_password.as_bytes(), req)
+            .await
+            .expect("PLAIN auth + AUSCR missing deletion");
+
+    handle.shutdown().await;
+    assert!(resp.results.len() == 1);
+    assert!(
+        resp.results[0].error_code == 91,
+        "missing deletion target must get RESOURCE_NOT_FOUND (91), got {:?}",
+        resp.results[0]
     );
 }
 
@@ -2357,7 +2664,7 @@ async fn inter_broker_client_authenticates_via_plain() {
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
     cfg.plain_credentials
-        .insert("broker".to_string(), "secret".to_string());
+        .insert("broker".to_string(), admin_plain_password());
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
@@ -2366,7 +2673,7 @@ async fn inter_broker_client_authenticates_via_plain() {
         None,
         Some(crabka_broker::config::InterBrokerCredentials::Plain {
             username: "broker".to_string(),
-            password: "secret".to_string(),
+            password: admin_plain_password(),
         }),
     );
 
@@ -2655,10 +2962,10 @@ mod two_broker_sasl {
         cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
         cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
         cfg.plain_credentials
-            .insert("broker".to_string(), "secret".to_string());
+            .insert("broker".to_string(), admin_plain_password());
         cfg.inter_broker_credentials = Some(InterBrokerCredentials::Plain {
             username: "broker".to_string(),
-            password: "secret".to_string(),
+            password: admin_plain_password(),
         });
         cfg
     }

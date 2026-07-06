@@ -222,15 +222,19 @@ fn has_assigned_partitions(assigned_partitions: &[(String, i32)]) -> bool {
     !assigned_partitions.is_empty()
 }
 
-fn starting_offset(committed: i64, auto_offset_reset: AutoOffsetReset) -> i64 {
+pub(crate) fn starting_offset(committed: i64, auto_offset_reset: AutoOffsetReset) -> i64 {
     if committed >= 0 {
         committed
     } else {
-        match auto_offset_reset {
-            AutoOffsetReset::Earliest => 0,
-            // Resolved by poll() on first call.
-            AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
-        }
+        reset_starting_offset(auto_offset_reset)
+    }
+}
+
+pub(crate) fn reset_starting_offset(auto_offset_reset: AutoOffsetReset) -> i64 {
+    match auto_offset_reset {
+        AutoOffsetReset::Earliest => 0,
+        // Resolved by poll() on first call.
+        AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
     }
 }
 

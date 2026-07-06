@@ -15,9 +15,9 @@
 //! `INVALID_TOPIC_EXCEPTION` (17). A request whose `cluster_id` doesn't
 //! match this cluster gets a top-level `INCONSISTENT_CLUSTER_ID` (104).
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         fetch_snapshot_request::FetchSnapshotRequest,
         fetch_snapshot_response::{
@@ -66,9 +66,7 @@ pub(crate) fn handle(
             |position: i64, _max: i32| controller.read_snapshot_range(position, max_bytes);
         let local_cluster_id = controller.current_image().cluster_id();
         let resp = build_response(local_cluster_id, &req, &resolve);
-        let mut out = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut out, version)?;
-        Ok(out.freeze())
+        crate::handlers::encode_response(&resp, version)
     })
 }
 

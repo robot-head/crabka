@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
-use crabka_metadata::{MetadataRecord, ResourceType};
+use crabka_metadata::MetadataRecord;
 use crabka_protocol::{
     Encode,
     owned::{
@@ -22,10 +22,10 @@ use crabka_protocol::{
 use tokio::sync::oneshot;
 
 use crate::{
-    authorizer::{AuthorizationRequest, AuthorizationResult},
     broker::Broker,
     codes,
     config_keys::{RecoveryStrategy, resolve_recovery_strategy},
+    handlers::cluster_alter_denied,
     leader_election::{ElectError, ElectionType, select_new_leader_for_partition},
     unclean_recovery::{RecoveryJob, RecoveryOutcome},
 };
@@ -56,17 +56,7 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, crate::error::BrokerError> {
     // Authorize Cluster Alter — whole-request gate.
     let image = broker.controller.current_image();
-    let allow = broker.config.authorizer.authorize(
-        &*image,
-        &AuthorizationRequest {
-            principal: ctx.principal,
-            host: ctx.peer,
-            resource_type: ResourceType::Cluster,
-            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
-            operation: crabka_metadata::AclOperation::Alter,
-        },
-    );
-    if matches!(allow, AuthorizationResult::Deny) {
+    if cluster_alter_denied(broker.config.authorizer.as_ref(), &image, ctx) {
         return encode_whole_request_error(
             &req,
             codes::CLUSTER_AUTHORIZATION_FAILED,
@@ -316,8 +306,5 @@ fn encode_response<R: Encode>(
     resp: &R,
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
-    let mut body = Vec::new();
-    resp.encode(&mut body, api_version)
-        .map_err(|e| crate::error::BrokerError::Replication(format!("encode ElectLeaders: {e}")))?;
-    Ok(Bytes::from(body))
+    crate::handlers::encode_response_with_context(resp, api_version, "encode ElectLeaders")
 }

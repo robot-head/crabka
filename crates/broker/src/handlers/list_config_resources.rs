@@ -15,10 +15,10 @@
 //! `CLIENT_METRICS` enumerates configured subscription names from the
 //! metadata image (see `MetadataImage::client_metrics_subscriptions`).
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::AclOperation;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         list_config_resources_request::ListConfigResourcesRequest,
         list_config_resources_response::{ConfigResource, ListConfigResourcesResponse},
@@ -85,9 +85,7 @@ pub(crate) async fn handle(
             error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        return Ok(buf.freeze());
+        return crate::handlers::encode_response(&resp, version);
     }
 
     let resources = collect_resources(&image, version, &req.resource_types);
@@ -98,9 +96,7 @@ pub(crate) async fn handle(
         config_resources: resources,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Resolve the effective filter (v0 → client-metrics-only; v1 with empty

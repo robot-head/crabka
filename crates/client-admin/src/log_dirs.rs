@@ -14,7 +14,7 @@ use crabka_protocol::owned::{
     describe_log_dirs_request::{DescribableLogDirTopic, DescribeLogDirsRequest},
 };
 
-use crate::{AdminClient, AdminError, KafkaError, kafka_error_name};
+use crate::{AdminClient, AdminError, KafkaError, kafka_error_if};
 
 /// One row of an `AlterReplicaLogDirs` result.
 #[derive(Debug, Clone)]
@@ -80,15 +80,7 @@ impl AdminClient {
         let mut out = Vec::new();
         for topic in resp.results {
             for p in topic.partitions {
-                let error = if p.error_code == 0 {
-                    None
-                } else {
-                    Some(KafkaError {
-                        code: p.error_code,
-                        name: kafka_error_name(p.error_code),
-                        message: None,
-                    })
-                };
+                let error = kafka_error_if(p.error_code, None);
                 out.push(AlterReplicaLogDirOutcome {
                     topic: topic.topic_name.clone(),
                     partition: p.partition_index,
@@ -125,15 +117,7 @@ impl AdminClient {
 
         let mut out = Vec::new();
         for result in resp.results {
-            let error = if result.error_code == 0 {
-                None
-            } else {
-                Some(KafkaError {
-                    code: result.error_code,
-                    name: kafka_error_name(result.error_code),
-                    message: None,
-                })
-            };
+            let error = kafka_error_if(result.error_code, None);
             let topics = result
                 .topics
                 .into_iter()
@@ -158,5 +142,239 @@ impl AdminClient {
             });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::BTreeMap,
+        sync::{Arc, Mutex},
+    };
+
+    use assert2::assert;
+    use bytes::{Buf, BytesMut};
+    use crabka_client_core::MockBroker;
+    use crabka_protocol::{
+        Decode, Encode,
+        owned::{
+            alter_replica_log_dirs_request,
+            alter_replica_log_dirs_response::{
+                AlterReplicaLogDirPartitionResult, AlterReplicaLogDirTopicResult,
+                AlterReplicaLogDirsResponse,
+            },
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            describe_log_dirs_request,
+            describe_log_dirs_response::{
+                DescribeLogDirsPartition, DescribeLogDirsResponse, DescribeLogDirsResult,
+                DescribeLogDirsTopic,
+            },
+        },
+    };
+
+    use super::*;
+
+    fn encode_v0(resp: &impl Encode) -> Vec<u8> {
+        encode_at(resp, 0)
+    }
+
+    fn encode_at(resp: &impl Encode, version: i16) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        resp.encode(&mut buf, version).unwrap();
+        buf.to_vec()
+    }
+
+    fn api_versions_response(api_key: i16, version: i16) -> Vec<u8> {
+        encode_v0(&ApiVersionsResponse {
+            api_keys: vec![
+                ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 0,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key,
+                    min_version: version,
+                    max_version: version,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+    }
+
+    fn request_body_after_header(mut body: &[u8], flexible_header: bool) -> &[u8] {
+        let client_id_len = body.get_i16();
+        assert!(client_id_len >= 0);
+        body.advance(usize::try_from(client_id_len).expect("client id length is non-negative"));
+        if flexible_header {
+            assert!(body.get_u8() == 0);
+        }
+        body
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn alter_replica_log_dirs_maps_non_empty_partition_results() {
+        let seen_request = Arc::new(Mutex::new(None));
+        let captured_request = Arc::clone(&seen_request);
+        let mock = MockBroker::start(move |api_key, version, _corr_id, body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_response(
+                    alter_replica_log_dirs_request::API_KEY,
+                    1,
+                ));
+            }
+            if api_key == alter_replica_log_dirs_request::API_KEY {
+                let mut body = request_body_after_header(
+                    body,
+                    version >= alter_replica_log_dirs_request::FLEXIBLE_MIN,
+                );
+                let request = AlterReplicaLogDirsRequest::decode(&mut body, version)
+                    .expect("alter log dirs request decodes");
+                assert!(body.is_empty());
+                *captured_request.lock().expect("request capture lock") = Some(request);
+                return Some(encode_at(
+                    &AlterReplicaLogDirsResponse {
+                        results: vec![AlterReplicaLogDirTopicResult {
+                            topic_name: "orders".into(),
+                            partitions: vec![AlterReplicaLogDirPartitionResult {
+                                partition_index: 2,
+                                error_code: 56,
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    1,
+                ));
+            }
+            None
+        })
+        .await;
+        let mut admin = AdminClient::connect(&[mock.addr.to_string()])
+            .await
+            .expect("admin connects to mock broker");
+        let assignments = BTreeMap::from([(
+            "/var/lib/kafka-a".to_string(),
+            vec![("orders".to_string(), vec![2])],
+        )]);
+
+        let outcomes = admin
+            .alter_replica_log_dirs(&assignments)
+            .await
+            .expect("alter log dirs response maps");
+
+        assert!(outcomes.len() == 1);
+        assert!(outcomes[0].topic == "orders");
+        assert!(outcomes[0].partition == 2);
+        let error = outcomes[0]
+            .error
+            .as_ref()
+            .expect("broker error is surfaced");
+        assert!(error.code == 56);
+        let request = seen_request
+            .lock()
+            .expect("request capture lock")
+            .take()
+            .expect("alter log dirs request was captured");
+        assert!(
+            request
+                == AlterReplicaLogDirsRequest {
+                    dirs: vec![AlterReplicaLogDir {
+                        path: "/var/lib/kafka-a".into(),
+                        topics: vec![AlterReplicaLogDirTopic {
+                            name: "orders".into(),
+                            partitions: vec![2],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+        );
+        mock.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn describe_log_dirs_maps_non_empty_directory_tree() {
+        let seen_request = Arc::new(Mutex::new(None));
+        let captured_request = Arc::clone(&seen_request);
+        let mock = MockBroker::start(move |api_key, version, _corr_id, body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_response(describe_log_dirs_request::API_KEY, 1));
+            }
+            if api_key == describe_log_dirs_request::API_KEY {
+                let mut body = request_body_after_header(
+                    body,
+                    version >= describe_log_dirs_request::FLEXIBLE_MIN,
+                );
+                let request = DescribeLogDirsRequest::decode(&mut body, version)
+                    .expect("describe log dirs request decodes");
+                assert!(body.is_empty());
+                *captured_request.lock().expect("request capture lock") = Some(request);
+                return Some(encode_at(
+                    &DescribeLogDirsResponse {
+                        results: vec![DescribeLogDirsResult {
+                            log_dir: "/data/kafka".into(),
+                            topics: vec![DescribeLogDirsTopic {
+                                name: "orders".into(),
+                                partitions: vec![DescribeLogDirsPartition {
+                                    partition_index: 4,
+                                    partition_size: 123,
+                                    offset_lag: 7,
+                                    is_future_key: true,
+                                    ..Default::default()
+                                }],
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    1,
+                ));
+            }
+            None
+        })
+        .await;
+        let mut admin = AdminClient::connect(&[mock.addr.to_string()])
+            .await
+            .expect("admin connects to mock broker");
+        let filter = BTreeMap::from([("orders".to_string(), vec![4])]);
+
+        let dirs = admin
+            .describe_log_dirs(Some(&filter))
+            .await
+            .expect("describe log dirs response maps");
+
+        assert!(dirs.len() == 1);
+        assert!(dirs[0].log_dir == "/data/kafka");
+        assert!(dirs[0].topics.len() == 1);
+        assert!(dirs[0].topics[0].name == "orders");
+        let partition = &dirs[0].topics[0].partitions[0];
+        assert!(partition.partition_index == 4);
+        assert!(partition.partition_size == 123);
+        assert!(partition.offset_lag == 7);
+        assert!(partition.is_future_key);
+        let request = seen_request
+            .lock()
+            .expect("request capture lock")
+            .take()
+            .expect("describe log dirs request was captured");
+        assert!(
+            request
+                == DescribeLogDirsRequest {
+                    topics: Some(vec![DescribableLogDirTopic {
+                        topic: "orders".into(),
+                        partitions: vec![4],
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }
+        );
+        mock.stop();
     }
 }

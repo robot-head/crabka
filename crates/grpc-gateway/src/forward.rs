@@ -524,8 +524,8 @@ mod tests {
         let (status, result) = post_forward(forward_router(state), &forward_record("t")).await;
 
         check!(status == StatusCode::FORBIDDEN);
-        check!(result.partition == PartitionIndex(-1));
-        check!(result.offset == Offset(-1));
+        check!(result.partition == -1);
+        check!(result.offset == -1);
         broker.shutdown().await;
     }
 
@@ -545,8 +545,8 @@ mod tests {
         let (status, result) = post_forward(forward_router(state), &forward_record("t")).await;
 
         check!(status == StatusCode::FORBIDDEN);
-        check!(result.partition == PartitionIndex(-1));
-        check!(result.offset == Offset(-1));
+        check!(result.partition == -1);
+        check!(result.offset == -1);
         // Distinguish the deny arm from the TLS arm by its message shape.
         check!(result.error.unwrap().message == "Write Topic:t");
         broker.shutdown().await;
@@ -571,8 +571,8 @@ mod tests {
 
         check!(status == StatusCode::OK);
         check!(result.error.is_some());
-        check!(result.partition == PartitionIndex(-1));
-        check!(result.offset == Offset(-1));
+        check!(result.partition == -1);
+        check!(result.offset == -1);
         broker.shutdown().await;
     }
 }

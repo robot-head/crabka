@@ -1,14 +1,11 @@
 //! `Goal` trait and shared context. Concrete goals live in sibling
 //! modules.
 
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     capacity::BrokerCapacities,
-    model::{ClusterState, Movement},
+    model::{ClusterState, Movement, PartitionView},
     scraper::UsageStore,
 };
 
@@ -17,12 +14,146 @@ use crate::{
 /// excluded from the window. Saturates to 0 / `i64::MAX` on overflow.
 #[must_use]
 pub fn now_ms() -> i64 {
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis()),
-    )
-    .unwrap_or(i64::MAX)
+    crate::time::now_ms()
+}
+
+pub(crate) fn imbalance_pct_usize(counts: &HashMap<i32, usize>) -> u32 {
+    let values: Vec<usize> = counts.values().copied().collect();
+    let total: usize = values.iter().sum();
+    if total == 0 {
+        return 0;
+    }
+    let max = *values.iter().max().unwrap_or(&0);
+    let min = *values.iter().min().unwrap_or(&0);
+    u32::try_from((max - min) * 100 / total).unwrap_or(u32::MAX)
+}
+
+pub(crate) fn imbalance_pct_f64(totals: &HashMap<i32, f64>) -> u32 {
+    let vals: Vec<f64> = totals.values().copied().collect();
+    let total: f64 = vals.iter().sum();
+    if total <= 0.0 {
+        return 0;
+    }
+    let max = vals.iter().fold(0.0f64, |a, b| a.max(*b));
+    let min = vals.iter().fold(f64::INFINITY, |a, b| a.min(*b));
+    let pct = ((max - min) * 100.0 / total).clamp(0.0, f64::from(u32::MAX));
+    // Saturating cast: pct is clamped to [0, u32::MAX] above.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let out = pct as u32;
+    out
+}
+
+pub(crate) fn replica_totals(
+    partitions: &[PartitionView],
+    broker_ids: &[i32],
+    mut value: impl FnMut(i32, &str, i32) -> Option<f64>,
+) -> HashMap<i32, f64> {
+    let mut totals: HashMap<i32, f64> = broker_ids.iter().map(|b| (*b, 0.0)).collect();
+    for p in partitions {
+        for replica in &p.replicas {
+            if let Some(amount) = value(*replica, &p.topic, p.partition) {
+                *totals.entry(*replica).or_insert(0.0) += amount;
+            }
+        }
+    }
+    totals
+}
+
+pub(crate) fn leader_totals(
+    partitions: &[PartitionView],
+    broker_ids: &[i32],
+    mut value: impl FnMut(i32, &str, i32) -> Option<f64>,
+) -> HashMap<i32, f64> {
+    let mut totals: HashMap<i32, f64> = broker_ids.iter().map(|b| (*b, 0.0)).collect();
+    for p in partitions {
+        if let Some(amount) = value(p.leader, &p.topic, p.partition) {
+            *totals.entry(p.leader).or_insert(0.0) += amount;
+        }
+    }
+    totals
+}
+
+pub(crate) struct OriginalReplicaState {
+    replicas: HashMap<(String, i32), Vec<i32>>,
+    leaders: HashMap<(String, i32), i32>,
+}
+
+impl OriginalReplicaState {
+    pub(crate) fn from_partitions(partitions: &[PartitionView]) -> Self {
+        Self {
+            replicas: partitions
+                .iter()
+                .map(|p| ((p.topic.clone(), p.partition), p.replicas.clone()))
+                .collect(),
+            leaders: partitions
+                .iter()
+                .map(|p| ((p.topic.clone(), p.partition), p.leader))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn replace_replica(
+        &self,
+        partition: &mut PartitionView,
+        removed_broker: i32,
+        added_broker: i32,
+    ) -> Movement {
+        let key = (partition.topic.clone(), partition.partition);
+        let old_replicas = self
+            .replicas
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| partition.replicas.clone());
+        let old_leader = self.leaders.get(&key).copied().unwrap_or(partition.leader);
+
+        let pos = partition
+            .replicas
+            .iter()
+            .position(|r| *r == removed_broker)
+            .expect("removed broker present");
+        partition.replicas[pos] = added_broker;
+
+        let new_leader = if partition.leader == removed_broker {
+            *partition
+                .replicas
+                .iter()
+                .find(|r| partition.isr.contains(r))
+                .unwrap_or(&partition.replicas[0])
+        } else {
+            partition.leader
+        };
+
+        let movement = Movement {
+            topic: partition.topic.clone(),
+            partition: partition.partition,
+            old_replicas,
+            new_replicas: partition.replicas.clone(),
+            old_leader,
+            new_leader,
+        };
+        partition.leader = new_leader;
+        movement
+    }
+
+    pub(crate) fn change_leader(&self, partition: &mut PartitionView, new_leader: i32) -> Movement {
+        let key = (partition.topic.clone(), partition.partition);
+        let old_replicas = self
+            .replicas
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| partition.replicas.clone());
+        let old_leader = self.leaders.get(&key).copied().unwrap_or(partition.leader);
+
+        partition.leader = new_leader;
+        Movement {
+            topic: partition.topic.clone(),
+            partition: partition.partition,
+            old_replicas: old_replicas.clone(),
+            new_replicas: old_replicas,
+            old_leader,
+            new_leader,
+        }
+    }
 }
 
 pub mod cpu_capacity;

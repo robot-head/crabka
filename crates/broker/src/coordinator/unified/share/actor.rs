@@ -43,10 +43,13 @@ use super::{
 use crate::{
     codes,
     coordinator::unified::{
+        OffsetRecordBatchBuilder,
         actor::MetadataProvider,
         assignor::{MemberSubscription, TopicMetadata},
+        first_join_member_id,
         offsets_log::OffsetsLog,
         reconciler::ReconcileInput,
+        validate_member_epoch,
     },
 };
 
@@ -336,11 +339,7 @@ async fn handle_heartbeat(
     // as a first-join, adopting the client-supplied id; an empty id is
     // tolerated by minting a server-side UUID.
     if req.member_epoch == 0 && !state.members.contains_key(&req.member_id) {
-        let new_member_id = if req.member_id.is_empty() {
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            req.member_id.clone()
-        };
+        let new_member_id = first_join_member_id(&req.member_id);
         let m = build_member(&new_member_id, req, client_host, now);
         state.add_or_update_member(m);
         reconcile(state, metadata);
@@ -352,19 +351,13 @@ async fn handle_heartbeat(
     }
 
     // ─── Existing-member: validate epoch ─────────────────────────
-    let cur_epoch = state
-        .members
-        .get(&req.member_id)
-        .map_or(-2, |m| m.member_epoch);
-    if cur_epoch == -2 {
-        return Ok(error_resp(codes::UNKNOWN_MEMBER_ID, config));
-    }
-    if req.member_epoch < cur_epoch {
-        return Ok(error_resp(codes::STALE_MEMBER_EPOCH, config));
-    }
-    if req.member_epoch > cur_epoch {
-        return Ok(error_resp(codes::FENCED_MEMBER_EPOCH, config));
-    }
+    let cur_epoch = match validate_member_epoch(
+        state.members.get(&req.member_id).map(|m| m.member_epoch),
+        req.member_epoch,
+    ) {
+        Ok(epoch) => epoch,
+        Err(error_code) => return Ok(error_resp(error_code, config)),
+    };
 
     // ─── Steady-state: update subscription / last_seen ───────────
     let changed = update_member_state(state, metadata, req, now, cur_epoch);
@@ -727,8 +720,7 @@ fn apply_seed(state: &mut ShareGroupState, seed: super::super::ShareGroupSeed) {
 // encodes them as a single RecordBatch ready for OffsetsLog::append.
 // ---------------------------------------------------------------------------
 
-use bytes::Bytes;
-use crabka_protocol::records::{Record, RecordBatch};
+use crabka_protocol::records::RecordBatch;
 
 #[derive(Debug, Default)]
 pub(crate) struct PendingShareRecords {
@@ -754,20 +746,10 @@ impl PendingShareRecords {
     }
 
     pub fn into_batch(self, group_id: &str, now_ms: i64) -> RecordBatch {
-        let mut records: Vec<Record> = Vec::new();
-        let mut push = |key: Bytes, value: Option<Bytes>| {
-            let delta = i32::try_from(records.len()).expect("batch size fits i32");
-            records.push(Record {
-                offset_delta: delta,
-                timestamp_delta: 0,
-                key: Some(key),
-                value,
-                ..Default::default()
-            });
-        };
+        let mut batch = OffsetRecordBatchBuilder::default();
 
         if let Some(v) = self.group_metadata {
-            push(
+            batch.push(
                 encode_share_key(&ShareGroupKey::GroupMetadata {
                     group_id: group_id.into(),
                 }),
@@ -775,7 +757,7 @@ impl PendingShareRecords {
             );
         }
         for (member_id, v) in self.member_metadata {
-            push(
+            batch.push(
                 encode_share_key(&ShareGroupKey::MemberMetadata {
                     group_id: group_id.into(),
                     member_id,
@@ -784,7 +766,7 @@ impl PendingShareRecords {
             );
         }
         if let Some(v) = self.target_metadata {
-            push(
+            batch.push(
                 encode_share_key(&ShareGroupKey::TargetAssignmentMetadata {
                     group_id: group_id.into(),
                 }),
@@ -792,7 +774,7 @@ impl PendingShareRecords {
             );
         }
         for (member_id, v) in self.target_per_member {
-            push(
+            batch.push(
                 encode_share_key(&ShareGroupKey::TargetAssignmentMember {
                     group_id: group_id.into(),
                     member_id,
@@ -801,7 +783,7 @@ impl PendingShareRecords {
             );
         }
         for (member_id, v) in self.current_per_member {
-            push(
+            batch.push(
                 encode_share_key(&ShareGroupKey::CurrentMemberAssignment {
                     group_id: group_id.into(),
                     member_id,
@@ -810,7 +792,7 @@ impl PendingShareRecords {
             );
         }
         if let Some(v) = self.state_partition_metadata {
-            push(
+            batch.push(
                 encode_share_key(&ShareGroupKey::StatePartitionMetadata {
                     group_id: group_id.into(),
                 }),
@@ -818,13 +800,7 @@ impl PendingShareRecords {
             );
         }
 
-        let last_delta = i32::try_from(records.len().saturating_sub(1)).unwrap_or(0);
-        RecordBatch {
-            max_timestamp: now_ms,
-            records,
-            last_offset_delta: last_delta,
-            ..RecordBatch::default()
-        }
+        batch.finish(now_ms)
     }
 }
 
@@ -1231,6 +1207,39 @@ mod tests {
         )
         .await;
         assert!(resp.error_code == codes::FENCED_MEMBER_EPOCH);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn known_member_epoch_zero_is_stale_not_first_join() {
+        let (metadata, _id) = metadata_with_topic("t", 4);
+        let (coord, _log) = make_coordinator(metadata);
+        let handle = coord.get_or_create_share("g");
+        let joined = heartbeat(
+            &handle,
+            ShareGroupHeartbeatRequest {
+                group_id: "g".into(),
+                member_id: "m1".into(),
+                member_epoch: 0,
+                subscribed_topic_names: Some(vec!["t".into()]),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(joined.member_epoch == 1);
+
+        let resp = heartbeat(
+            &handle,
+            ShareGroupHeartbeatRequest {
+                group_id: "g".into(),
+                member_id: "m1".into(),
+                member_epoch: 0,
+                subscribed_topic_names: Some(vec!["t".into()]),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(resp.error_code == codes::STALE_MEMBER_EPOCH);
     }
 
     #[test]

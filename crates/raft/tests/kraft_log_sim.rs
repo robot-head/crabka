@@ -43,7 +43,7 @@ impl KraftBackedLog {
     /// simulation, so one batch per offset).
     fn decoded(&self) -> Vec<RecordBatch> {
         let end = self.log.log_end_offset();
-        if end <= Offset(0) {
+        if end <= 0 {
             return Vec::new();
         }
         self.log

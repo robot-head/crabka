@@ -88,11 +88,7 @@ impl AnomalyStore {
     ) -> (String, bool) {
         let result = {
             let mut q = self.inner.lock().expect("AnomalyStore mutex poisoned");
-            if let Some(existing) = q
-                .iter_mut()
-                .rev()
-                .find(|a| a.kind == kind && a.key == key && a.resolved_at_ms.is_none())
-            {
+            if let Some(existing) = q.iter_mut().rev().find(|a| is_open_match(a, kind, &key)) {
                 existing.last_seen_at_ms = now_ms;
                 existing.severity = severity;
                 existing.details = details;
@@ -124,11 +120,7 @@ impl AnomalyStore {
     pub fn mark_resolved(&self, kind: AnomalyKind, key: &AnomalyKey, now_ms: i64) -> bool {
         let flipped = {
             let mut q = self.inner.lock().expect("AnomalyStore mutex poisoned");
-            if let Some(a) = q
-                .iter_mut()
-                .rev()
-                .find(|a| a.kind == kind && &a.key == key && a.resolved_at_ms.is_none())
-            {
+            if let Some(a) = q.iter_mut().rev().find(|a| is_open_match(a, kind, key)) {
                 a.resolved_at_ms = Some(now_ms);
                 true
             } else {
@@ -162,7 +154,7 @@ impl AnomalyStore {
         let q = self.inner.lock().expect("AnomalyStore mutex poisoned");
         q.iter()
             .rev()
-            .find(|a| a.kind == kind && &a.key == key && a.resolved_at_ms.is_none())
+            .find(|a| is_open_match(a, kind, key))
             .cloned()
     }
 
@@ -208,6 +200,10 @@ impl AnomalyStore {
             }
         }
     }
+}
+
+fn is_open_match(a: &Anomaly, kind: AnomalyKind, key: &AnomalyKey) -> bool {
+    a.kind == kind && &a.key == key && a.resolved_at_ms.is_none()
 }
 
 fn write_atomic(path: &Path, on_disk: &OnDisk) -> Result<(), StoreError> {

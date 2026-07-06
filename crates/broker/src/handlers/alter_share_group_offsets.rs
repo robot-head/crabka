@@ -7,10 +7,10 @@
 //! Intercepted inline in `network::dispatch` for the per-group `Alter` ACL
 //! gate (principal + peer `SocketAddr`).
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         alter_share_group_offsets_request::AlterShareGroupOffsetsRequest,
         alter_share_group_offsets_response::{
@@ -142,9 +142,7 @@ pub(crate) async fn handle(
         responses,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Read the current durable state epoch for `(group, topic_id, partition)`,
@@ -181,9 +179,7 @@ fn encode_top_level(version: i16, error_code: i16) -> Result<Bytes, BrokerError>
         responses: Vec::new(),
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Returns `true` when the share group has no live members (or no actor at
@@ -425,9 +421,17 @@ mod tests {
 
     #[tokio::test]
     async fn reset_partition_bumps_existing_state_epoch_and_start_offset() {
-        let (broker_handle, _dir) =
+        let (broker_handle, dir) =
             start_broker(Arc::new(crate::authorizer::AllowAllAuthorizer), true).await;
         let broker = broker_handle.broker_arc_for_test();
+        crate::share_coordinator::handlers::test_support::open_all_state_partitions(
+            &broker.partitions,
+            dir.path(),
+        );
+        broker
+            .share_coordinator
+            .lead_all_partitions_for_test()
+            .await;
         let persister = broker
             .group_coordinator
             .share_persister()
@@ -435,10 +439,20 @@ mod tests {
             .expect("share persister");
         let topic_id = uuid::Uuid::from_u128(0xABCD);
 
-        persister
-            .initialize("g-reset", topic_id, 0, 4, crabka_log::Offset(10))
+        let initial_epoch = if let Some(state) = persister
+            .read_state("g-reset", topic_id, 0)
             .await
-            .expect("seed share state");
+            .expect("read initial share state")
+        {
+            state.state_epoch
+        } else {
+            persister
+                .initialize("g-reset", topic_id, 0, 4, crabka_log::Offset(10))
+                .await
+                .expect("seed share state");
+            4
+        };
+
         reset_partition(&persister, "g-reset", topic_id, 0, 33)
             .await
             .expect("reset partition");
@@ -448,7 +462,7 @@ mod tests {
             .expect("read state")
             .expect("state present");
 
-        assert!(state.state_epoch == 5);
+        assert!(state.state_epoch == initial_epoch + 1);
         assert!(state.start_offset == crabka_log::Offset(33));
         broker_handle.shutdown().await;
     }

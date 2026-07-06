@@ -1160,7 +1160,7 @@ mod tests {
         let b2 = sample_batch(3, 2, 2_000_000);
         seg.append(&b1, 4096).unwrap();
         seg.append(&b2, 4096).unwrap();
-        assert!(seg.last_offset() == Offset(4));
+        assert!(seg.last_offset() == 4);
         let read = seg.read(Offset(0), usize::MAX).unwrap();
         let record_counts: Vec<usize> = read.iter().map(|b| b.records.len()).collect();
         assert!(record_counts == [3, 2]);
@@ -1179,7 +1179,7 @@ mod tests {
         let position = seg.append(&sample_batch(2, 1, 300), 0).unwrap();
 
         assert!(position > 0);
-        assert!(seg.last_offset() == Offset(2));
+        assert!(seg.last_offset() == 2);
         let read = seg.read(Offset(0), usize::MAX).unwrap();
         let base_offsets: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
         assert!(base_offsets == [0, 1, 2]);
@@ -1210,7 +1210,7 @@ mod tests {
 
         // Reopen with validation: the tail scan must clip the garbage.
         let seg = Segment::open_active(dir.path(), Offset(0), true).unwrap();
-        assert!(seg.last_offset() == Offset(4));
+        assert!(seg.last_offset() == 4);
         assert!(
             seg.size_bytes() == valid_size,
             "garbage tail must be truncated: size {} != valid {valid_size}",
@@ -1232,7 +1232,7 @@ mod tests {
         seg.append(&sample_batch(100, 3, 100), 0).unwrap(); // offsets 100..=102
         seg.append(&sample_batch(103, 2, 200), 0).unwrap(); // offsets 103..=104
         seg.append(&sample_batch(105, 1, 300), 0).unwrap(); // offset 105
-        assert!(seg.last_offset() == Offset(105));
+        assert!(seg.last_offset() == 105);
 
         let read = seg.read(Offset(103), usize::MAX).unwrap();
         let bases: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
@@ -1258,7 +1258,7 @@ mod tests {
         let r = seg.read_raw(Offset(103), Offset(1000), usize::MAX).unwrap();
         assert!(!r.is_empty());
         assert!(
-            r.start_offset == Offset(103),
+            r.start_offset == 103,
             "read_raw(103) must start at offset 103; got {:?}",
             r.start_offset
         );
@@ -1300,7 +1300,7 @@ mod tests {
         let position = seg.append(&sample_batch(1, 1, 300), 0).unwrap();
 
         assert!(position == expected_position);
-        assert!(seg.last_offset() == Offset(1));
+        assert!(seg.last_offset() == 1);
         let read = seg.read(Offset(0), usize::MAX).unwrap();
         let base_offsets: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
         assert!(base_offsets == [0, 1]);
@@ -1319,12 +1319,12 @@ mod tests {
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         seg.append(&sample_batch(0, 3, 100), 0).unwrap(); // offsets 0..=2
         seg.append(&sample_batch(3, 3, 200), 0).unwrap(); // offsets 3..=5
-        assert!(seg.last_offset() == Offset(5));
+        assert!(seg.last_offset() == 5);
 
         // target_abs = base(0) + rel(3) = 3. Drop batches with last >= 3.
         seg.truncate_to_relative(3).unwrap();
         assert!(
-            seg.last_offset() == Offset(2),
+            seg.last_offset() == 2,
             "only batch A (last 2) must remain; got {:?}",
             seg.last_offset()
         );
@@ -1413,8 +1413,8 @@ mod tests {
         let r = seg
             .read_raw(Offset(0), Offset(3), 10 * 1024 * 1024)
             .unwrap();
-        check!(r.start_offset == Offset(0));
-        check!(r.last_offset == Offset(2));
+        check!(r.start_offset == 0);
+        check!(r.last_offset == 2);
         check!(
             &r.bytes[..] == &wire[..],
             "raw bytes must equal the on-disk concatenation"
@@ -1438,7 +1438,7 @@ mod tests {
         let r = seg
             .read_raw(Offset(0), Offset(2), 10 * 1024 * 1024)
             .unwrap();
-        assert!(r.last_offset == Offset(1));
+        assert!(r.last_offset == 1);
         drop(dir);
     }
 
@@ -1447,8 +1447,8 @@ mod tests {
         let (dir, mut seg) = test_segment();
         seg.append(&test_batch_at(0), 0).unwrap();
         let r = seg.read_raw(Offset(0), Offset(1), 1).unwrap();
-        check!(r.start_offset == Offset(0));
-        check!(r.last_offset == Offset(0));
+        check!(r.start_offset == 0);
+        check!(r.last_offset == 0);
         check!(!r.bytes.is_empty());
         drop(dir);
     }
@@ -1565,7 +1565,7 @@ mod tests {
             0,
         )
         .unwrap();
-        assert!(seg.last_offset() == Offset(0));
+        assert!(seg.last_offset() == 0);
 
         // Read back the raw .log bytes.
         let mut on_disk = Vec::new();
@@ -1607,7 +1607,7 @@ mod tests {
 
         seg.append_verbatim(&wire, Offset(0), 2, 5_000, LeaderEpoch(0), 0)
             .unwrap();
-        assert!(seg.last_offset() == Offset(2));
+        assert!(seg.last_offset() == 2);
         assert!(seg.max_timestamp() == 5_000);
         // Reading at offset 2 (inside the batch) returns the batch.
         let read = seg.read(Offset(2), usize::MAX).unwrap();

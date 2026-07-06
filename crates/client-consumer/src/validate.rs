@@ -244,16 +244,16 @@ mod tests {
     fn leader_epoch_update_marks_only_real_advances_with_consumed_epoch() {
         let mut p = pos(2, 2, false);
         update_leader_epoch(&mut p, LeaderEpoch(2));
-        assert!(p.leader_epoch == LeaderEpoch(2));
+        assert!(p.leader_epoch == 2);
         assert!(!p.awaiting_validation);
 
         update_leader_epoch(&mut p, LeaderEpoch(3));
-        assert!(p.leader_epoch == LeaderEpoch(3));
+        assert!(p.leader_epoch == 3);
         assert!(p.awaiting_validation);
 
         let mut never_consumed = pos(-1, -1, false);
         update_leader_epoch(&mut never_consumed, LeaderEpoch(0));
-        assert!(never_consumed.leader_epoch == LeaderEpoch(0));
+        assert!(never_consumed.leader_epoch == 0);
         assert!(!never_consumed.awaiting_validation);
 
         let mut equal_but_consumed = pos(2, 3, false);
@@ -308,7 +308,7 @@ mod tests {
     fn validation_error_resets_epoch_and_keeps_partition_flagged() {
         let mut p = pos(2, 7, false);
         mark_validation_error(&mut p);
-        assert!(p.leader_epoch == LeaderEpoch(-1));
+        assert!(p.leader_epoch == -1);
         assert!(p.awaiting_validation);
     }
 }

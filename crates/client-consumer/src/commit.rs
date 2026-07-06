@@ -5,9 +5,14 @@ use std::{
     sync::{Arc, atomic::Ordering},
 };
 
-use crabka_protocol::owned::{
-    offset_commit_request::OffsetCommitRequest, offset_commit_response::OffsetCommitResponse,
+use crabka_protocol::{
+    owned::{
+        offset_commit_request::{OffsetCommitRequest, OffsetCommitRequestTopic},
+        offset_commit_response::OffsetCommitResponse,
+    },
+    primitives::uuid::Uuid as WireUuid,
 };
+use tokio::sync::Mutex;
 
 use crate::{
     consumer::Consumer,
@@ -47,6 +52,23 @@ fn commit_offsets(
             (k, (v, epoch))
         })
         .collect()
+}
+
+async fn snapshot_commit_topics(
+    offsets: &Arc<Mutex<HashMap<(String, i32), i64>>>,
+    positions: &Arc<Mutex<HashMap<(String, i32), PartitionPosition>>>,
+    topic_ids: &Arc<Mutex<HashMap<String, WireUuid>>>,
+) -> Option<(usize, Vec<OffsetCommitRequestTopic>)> {
+    let raw_offsets = offsets.lock().await.clone();
+    if raw_offsets.is_empty() {
+        return None;
+    }
+    let partitions = raw_offsets.len();
+    let pos = positions.lock().await;
+    let offsets = commit_offsets(raw_offsets, &pos);
+    drop(pos);
+    let topic_ids = topic_ids.lock().await.clone();
+    Some((partitions, build_commit_topics(offsets, &topic_ids)))
 }
 
 fn build_commit_request(
@@ -105,16 +127,12 @@ impl Consumer {
         err
     )]
     pub async fn commit_sync(&self) -> Result<(), ConsumerError> {
-        let raw_offsets = self.next_offsets.lock().await.clone();
-        if raw_offsets.is_empty() {
+        let Some((partitions, topics)) =
+            snapshot_commit_topics(&self.next_offsets, &self.positions, &self.topic_ids).await
+        else {
             return Ok(());
-        }
-        tracing::Span::current().record("partitions", raw_offsets.len());
-        let pos = self.positions.lock().await;
-        let offsets = commit_offsets(raw_offsets, &pos);
-        drop(pos);
-        let topic_ids = self.topic_ids.lock().await.clone();
-        let topics = build_commit_topics(offsets, &topic_ids);
+        };
+        tracing::Span::current().record("partitions", partitions);
 
         // OffsetCommit is a coordinator RPC: route it to the coordinator broker
         // (discovered at build time, kept current by the coordinator task), and
@@ -197,15 +215,10 @@ impl Consumer {
         let topic_ids = Arc::clone(&self.topic_ids);
         let coordinator_id = Arc::clone(&self.coordinator_id);
         tokio::spawn(async move {
-            let raw_snapshot = offsets.lock().await.clone();
-            if raw_snapshot.is_empty() {
+            let Some((_, topics)) = snapshot_commit_topics(&offsets, &positions, &topic_ids).await
+            else {
                 return;
-            }
-            let pos = positions.lock().await;
-            let snapshot = commit_offsets(raw_snapshot, &pos);
-            drop(pos);
-            let topic_ids = topic_ids.lock().await.clone();
-            let topics = build_commit_topics(snapshot, &topic_ids);
+            };
             // Route to the coordinator broker. If it returns a moved/cold
             // coordinator code (or the socket is gone), re-discover once and
             // retry — but don't block a background commit on the full retry
@@ -253,7 +266,7 @@ mod tests {
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
-            offset_commit_request::OffsetCommitRequestPartition,
+            offset_commit_request::{OffsetCommitRequestPartition, OffsetCommitRequestTopic},
             offset_commit_response::{OffsetCommitResponsePartition, OffsetCommitResponseTopic},
         },
         primitives::uuid::Uuid,
@@ -313,6 +326,66 @@ mod tests {
         let offsets = commit_offsets(raw, &positions);
         assert!(offsets.get(&("known".into(), 0)) == Some(&(11, 7)));
         assert!(offsets.get(&("unknown".into(), 1)) == Some(&(22, -1)));
+    }
+
+    #[tokio::test]
+    async fn snapshot_commit_topics_returns_none_for_empty_offsets() {
+        let offsets = Arc::new(Mutex::new(HashMap::new()));
+        let positions = Arc::new(Mutex::new(HashMap::new()));
+        let topic_ids = Arc::new(Mutex::new(HashMap::new()));
+
+        let snapshot = snapshot_commit_topics(&offsets, &positions, &topic_ids).await;
+
+        assert!(snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_commit_topics_preserves_count_topics_offsets_and_epochs() {
+        let offsets = Arc::new(Mutex::new(HashMap::from([
+            (("alpha".to_string(), 0), 10),
+            (("alpha".to_string(), 1), 20),
+        ])));
+        let positions = Arc::new(Mutex::new(HashMap::from([(
+            ("alpha".to_string(), 1),
+            PartitionPosition {
+                offset_epoch: crabka_ids::LeaderEpoch(7),
+                ..Default::default()
+            },
+        )])));
+        let topic_id = Uuid([1; 16]);
+        let topic_ids = Arc::new(Mutex::new(HashMap::from([("alpha".to_string(), topic_id)])));
+
+        let (partition_count, topics) = snapshot_commit_topics(&offsets, &positions, &topic_ids)
+            .await
+            .expect("non-empty offsets are snapshotted");
+        let mut topics = topics;
+        topics[0].partitions.sort_by_key(|p| p.partition_index);
+
+        assert!(partition_count == 2);
+        assert!(
+            topics
+                == vec![OffsetCommitRequestTopic {
+                    name: "alpha".into(),
+                    topic_id,
+                    partitions: vec![
+                        OffsetCommitRequestPartition {
+                            partition_index: 0,
+                            committed_offset: 10,
+                            committed_leader_epoch: -1,
+                            committed_metadata: Some(String::new()),
+                            unknown_tagged_fields: UnknownTaggedFields::default(),
+                        },
+                        OffsetCommitRequestPartition {
+                            partition_index: 1,
+                            committed_offset: 20,
+                            committed_leader_epoch: 7,
+                            committed_metadata: Some(String::new()),
+                            unknown_tagged_fields: UnknownTaggedFields::default(),
+                        },
+                    ],
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }]
+        );
     }
 
     #[test]

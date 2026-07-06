@@ -53,7 +53,9 @@ jobs:
               - 'crates/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'release-plz.toml'
               - 'rust-toolchain.toml'
+              - 'tools/check-publish-allowlist.sh'
               - '.config/nextest.toml'
               - '.cargo/mutants.toml'
               - '.github/workflows/ci.yml'
@@ -257,6 +259,9 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
+      - name: Published crate allowlist
+        if: matrix.os == 'ubuntu-latest'
+        run: ./tools/check-publish-allowlist.sh
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.os }}-rust
@@ -351,6 +356,8 @@ jobs:
       # `host.docker.internal` (only set up in `broker-jvm-acceptance`), so it
       # fails to connect. The gateway's coverage comes from the
       # `grpc-gateway-integration` job's non-ignored tests.
+      # `--exclude crabka-admin-ui` skips its ignored browser e2e tests; they
+      # require CRABKA_ADMIN_UI_E2E_URL to point at a running admin UI.
       - name: JVM differential coverage
         run: |
           mkdir -p coverage
@@ -359,6 +366,7 @@ jobs:
             --exclude crabka-log \
             --exclude crabka-broker \
             --exclude crabka-grpc-gateway \
+            --exclude crabka-admin-ui \
             --filterset 'not binary(capture_corpus)' \
             --lcov --output-path coverage/jvm-differential.lcov \
             -- --include-ignored

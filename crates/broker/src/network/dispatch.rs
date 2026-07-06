@@ -1150,12 +1150,11 @@ fn encode_response(
     body_flexible: bool,
     body: &[u8],
 ) -> Bytes {
-    let header_v1 = body_flexible && api_key != API_VERSIONS_KEY;
-    let header_len = if header_v1 { 5 } else { 4 };
+    let header_len = crate::network::response_header_len(api_key, body_flexible);
     debug_assert!(body.len() < MAX_FRAME_BYTES);
     let mut buf = BytesMut::with_capacity(header_len + body.len());
     buf.put_i32(correlation_id);
-    if header_v1 {
+    if crate::network::response_header_v1(api_key, body_flexible) {
         buf.put_u8(0); // empty tagged fields
     }
     buf.put_slice(body);
@@ -1207,8 +1206,7 @@ fn patch_leading_throttle(
     body_flexible: bool,
     delay_ms: i32,
 ) -> Bytes {
-    let header_v1 = body_flexible && api_key != API_VERSIONS_KEY;
-    let off = if header_v1 { 5 } else { 4 };
+    let off = crate::network::response_header_len(api_key, body_flexible);
     if resp.len() < off + 4 {
         return resp;
     }

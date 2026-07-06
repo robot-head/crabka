@@ -16,10 +16,10 @@
 //! enum already matches the JVM names verbatim (`Empty`, `Ongoing`, ...)
 //! so the mapping is trivial.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         list_transactions_request::ListTransactionsRequest,
         list_transactions_response::{ListTransactionsResponse, TransactionState},
@@ -146,9 +146,7 @@ pub(crate) async fn handle(
         transaction_states: out,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]

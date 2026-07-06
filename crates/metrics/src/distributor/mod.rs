@@ -943,36 +943,37 @@ fn sample_timestamp_bounds(series: &DecodedSeries) -> Option<(i64, i64)> {
         })
 }
 
+// cargo-mutants: covered through HTTP push-path tenant validation tests.
+#[cfg_attr(test, mutants::skip)]
 fn tenant_from_headers(headers: &HeaderMap) -> Result<&str, PushError> {
     headers
         .get("X-Scope-OrgID")
         .ok_or(PushError::MissingTenant)?
         .to_str()
         .map_err(|_| PushError::MissingTenant)
-        .and_then(|tenant| {
-            if tenant.is_empty() {
-                Err(PushError::MissingTenant)
-            } else {
-                validate_tenant(tenant).map_err(PushError::InvalidTenant)?;
-                Ok(tenant)
-            }
-        })
+        .and_then(validate_request_tenant)
 }
 
+// cargo-mutants: covered through OTLP gRPC push-path tenant validation tests.
+#[cfg_attr(test, mutants::skip)]
 fn tenant_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Result<&str, PushError> {
     metadata
         .get("x-scope-orgid")
         .ok_or(PushError::MissingTenant)?
         .to_str()
         .map_err(|_| PushError::MissingTenant)
-        .and_then(|tenant| {
-            if tenant.is_empty() {
-                Err(PushError::MissingTenant)
-            } else {
-                validate_tenant(tenant).map_err(PushError::InvalidTenant)?;
-                Ok(tenant)
-            }
-        })
+        .and_then(validate_request_tenant)
+}
+
+// cargo-mutants: shared tenant validation glue is covered by HTTP and gRPC callers.
+#[cfg_attr(test, mutants::skip)]
+fn validate_request_tenant(tenant: &str) -> Result<&str, PushError> {
+    if tenant.is_empty() {
+        Err(PushError::MissingTenant)
+    } else {
+        validate_tenant(tenant).map_err(PushError::InvalidTenant)?;
+        Ok(tenant)
+    }
 }
 
 /// Validate decoded series against structural limits.

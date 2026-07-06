@@ -155,7 +155,7 @@ mod tests {
         let cases = [(0, 0), (4096, 0), (4097, 1), (8192, 4096)];
         for (log_end_offset, want) in cases {
             assert!(
-                tail_window_start(Offset(log_end_offset)) == Offset(want),
+                tail_window_start(Offset(log_end_offset)) == want,
                 "log_end_offset {log_end_offset}"
             );
         }

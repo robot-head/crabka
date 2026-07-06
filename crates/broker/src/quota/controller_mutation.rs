@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use crabka_metadata::MetadataImage;
 
-use super::{buckets::QuotaBuckets, lookup::lookup_quota_with_key};
+use super::{QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota};
 
 /// Consume `mutations` from the `controller_mutation_rate` bucket for
 /// `(principal, client_id)`. Returns the throttle delay to apply
@@ -19,55 +19,42 @@ pub fn consume_controller_mutation_quota(
     client_id: &str,
     mutations: u64,
 ) -> Duration {
-    if mutations == 0 {
-        return Duration::ZERO;
-    }
-    let Some((entity_key, rate)) =
-        lookup_quota_with_key(image, principal, client_id, "controller_mutation_rate")
-    else {
-        return Duration::ZERO;
-    };
-    if rate <= 0.0 {
-        return Duration::ZERO;
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let initial_rate = rate as u64;
-    let bucket = buckets.get_or_create("controller_mutation_rate", &entity_key, initial_rate);
-    let granted = bucket.try_consume(mutations);
-    if granted >= mutations {
-        return Duration::ZERO;
-    }
-    let overage = mutations - granted;
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss
-    )]
-    let delay_micros = ((overage as f64 / rate) * 1_000_000.0) as u64;
-    Duration::from_micros(delay_micros).min(Duration::from_secs(1))
+    consume_configured_quota(
+        QuotaConsumption {
+            image,
+            buckets,
+            principal,
+            client_id,
+            quota_key: "controller_mutation_rate",
+            amount: mutations,
+        },
+        |_| {},
+        |rate| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let initial_rate = rate as u64;
+            Some(initial_rate)
+        },
+        |overage, rate, _| {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let delay_micros = ((overage as f64 / rate) * 1_000_000.0) as u64;
+            Duration::from_micros(delay_micros)
+        },
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
 
     use super::*;
+    use crate::quota::test_support::image_with_quota as quota_image;
 
     fn img_with_quota(entity: Vec<(&str, Option<&str>)>, rate: f64) -> MetadataImage {
-        let mut img = MetadataImage::new(uuid::Uuid::nil());
-        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
-            entity: entity
-                .into_iter()
-                .map(|(t, n)| QuotaEntity {
-                    entity_type: t.into(),
-                    entity_name: n.map(Into::into),
-                })
-                .collect(),
-            config_key: "controller_mutation_rate".into(),
-            config_value: Some(rate),
-        }));
-        img
+        quota_image(entity, "controller_mutation_rate", rate)
     }
 
     #[test]

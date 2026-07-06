@@ -1492,8 +1492,8 @@ mod tests {
         // All three commits present — the second batch is only reached when the
         // cursor arithmetic `base_offset + last_offset_delta + 1` is exact.
         check!(committed.len() == 3);
-        check!(committed[&("t".to_string(), 0)].offset == Offset(100));
-        check!(committed[&("t".to_string(), 1)].offset == Offset(101));
-        check!(committed[&("t".to_string(), 2)].offset == Offset(202));
+        check!(committed[&("t".to_string(), 0)].offset == 100);
+        check!(committed[&("t".to_string(), 1)].offset == 101);
+        check!(committed[&("t".to_string(), 2)].offset == 202);
     }
 }

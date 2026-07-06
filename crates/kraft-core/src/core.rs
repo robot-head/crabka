@@ -603,7 +603,7 @@ impl QuorumStateMachine {
         // reply, exactly as the JVM does. Only enforce once the addressing field
         // is meaningful: a `-1`/unset `voter_id` (decoded as 0) and the
         // bootstrap case where we have no voter set yet are not rejected here.
-        if voter_id != self.me && voter_id != NodeId(0) {
+        if voter_id != self.me && voter_id != 0 {
             tracing::warn!(
                 addressed_to = voter_id.0,
                 me = self.me.0,

@@ -34,6 +34,7 @@ use crate::{
         proposal::{Proposal, ProposalStatus},
         store::ProposalStore,
     },
+    time::now_ms,
 };
 
 /// Configuration controlling the executor's polling cadence and chunking.
@@ -389,12 +390,6 @@ enum WaitOutcome {
     Cancelled,
     DeadlineExceeded,
     Error(PhaseError),
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

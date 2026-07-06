@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 use crate::{
     metrics::RebalancerMetrics,
     model::{BrokerView, ClusterState, InFlightReassignment, PartitionView},
+    time::now_ms,
 };
 
 pub type SharedSnapshot = Arc<ArcSwap<Option<ClusterState>>>;
@@ -145,12 +146,6 @@ fn normalize_cluster_id(cluster_id: &str) -> Option<String> {
     Some(cluster_id.to_string()).filter(|s| !s.is_empty())
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
-}
-
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -186,20 +181,5 @@ mod tests {
     fn normalize_cluster_id_drops_empty_ids_only() {
         assert!(normalize_cluster_id("").is_none());
         assert!(normalize_cluster_id("cluster-a").as_deref() == Some("cluster-a"));
-    }
-
-    #[test]
-    fn now_ms_tracks_wall_clock_millis() {
-        let before = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        let got = now_ms();
-        let after = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis();
-        assert!(got >= i64::try_from(before).unwrap());
-        assert!(got <= i64::try_from(after).unwrap_or(i64::MAX));
     }
 }
