@@ -949,14 +949,7 @@ fn tenant_from_headers(headers: &HeaderMap) -> Result<&str, PushError> {
         .ok_or(PushError::MissingTenant)?
         .to_str()
         .map_err(|_| PushError::MissingTenant)
-        .and_then(|tenant| {
-            if tenant.is_empty() {
-                Err(PushError::MissingTenant)
-            } else {
-                validate_tenant(tenant).map_err(PushError::InvalidTenant)?;
-                Ok(tenant)
-            }
-        })
+        .and_then(validate_request_tenant)
 }
 
 fn tenant_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Result<&str, PushError> {
@@ -965,14 +958,16 @@ fn tenant_from_metadata(metadata: &tonic::metadata::MetadataMap) -> Result<&str,
         .ok_or(PushError::MissingTenant)?
         .to_str()
         .map_err(|_| PushError::MissingTenant)
-        .and_then(|tenant| {
-            if tenant.is_empty() {
-                Err(PushError::MissingTenant)
-            } else {
-                validate_tenant(tenant).map_err(PushError::InvalidTenant)?;
-                Ok(tenant)
-            }
-        })
+        .and_then(validate_request_tenant)
+}
+
+fn validate_request_tenant(tenant: &str) -> Result<&str, PushError> {
+    if tenant.is_empty() {
+        Err(PushError::MissingTenant)
+    } else {
+        validate_tenant(tenant).map_err(PushError::InvalidTenant)?;
+        Ok(tenant)
+    }
 }
 
 /// Validate decoded series against structural limits.

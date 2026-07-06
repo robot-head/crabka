@@ -4,13 +4,14 @@ use std::sync::Arc;
 
 use arrow::{
     array::{
-        Array, ArrayRef, Float64Array, Float64Builder, Int64Array, Int64Builder, UInt64Array,
+        ArrayRef, Float64Array, Float64Builder, Int64Array, Int64Builder, UInt64Array,
         UInt64Builder,
     },
     record_batch::RecordBatch,
 };
 
 use crate::{
+    arrow_codec::{require_non_null, typed_column},
     histogram::HistogramCodecError,
     schema::{COL_FINGERPRINT, COL_TIMESTAMP, float_sample_schema},
 };
@@ -37,44 +38,6 @@ pub fn encode_float_samples(rows: &[(u64, i64, f64)]) -> Result<RecordBatch, His
     ];
 
     Ok(RecordBatch::try_new(float_sample_schema(), columns)?)
-}
-
-fn schema_mismatch(column: &str) -> HistogramCodecError {
-    HistogramCodecError::SchemaMismatch(format!("column `{column}` missing or wrong type"))
-}
-
-fn column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a ArrayRef, HistogramCodecError> {
-    batch
-        .column_by_name(name)
-        .ok_or_else(|| schema_mismatch(name))
-}
-
-fn typed_column<'a, T: 'static>(
-    batch: &'a RecordBatch,
-    name: &str,
-) -> Result<&'a T, HistogramCodecError> {
-    column(batch, name)?
-        .as_any()
-        .downcast_ref::<T>()
-        .ok_or_else(|| schema_mismatch(name))
-}
-
-fn null_required_column(column: &str, row: usize) -> HistogramCodecError {
-    HistogramCodecError::SchemaMismatch(format!(
-        "column `{column}` contains null for required row {row}"
-    ))
-}
-
-fn require_non_null(
-    array: &dyn Array,
-    row: usize,
-    column: &str,
-) -> Result<(), HistogramCodecError> {
-    if array.is_null(row) {
-        Err(null_required_column(column, row))
-    } else {
-        Ok(())
-    }
 }
 
 /// Decode a float-sample `RecordBatch` into `(fingerprint, timestamp, value)`

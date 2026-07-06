@@ -7,7 +7,7 @@ use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
 use prost::Message;
 use thiserror::Error;
 
-use crate::wire::pb::v1;
+use crate::wire::{decoded::snappy_block_decode_raw, pb::v1};
 
 /// Default decompressed-body cap for `remote_read` requests when a caller does
 /// not supply its own. Mirrors the distributor's ingest default so a single
@@ -34,19 +34,12 @@ pub fn decode_read_request(
     snappy_body: &[u8],
     max_output: usize,
 ) -> Result<v1::ReadRequest, RemoteReadError> {
-    // Reject a decompression bomb on the block's *declared* uncompressed length
-    // before `snap` pre-allocates the declared buffer.
-    let declared = snap::raw::decompress_len(snappy_body)
-        .map_err(|error| RemoteReadError::SnappyDecode(error.to_string()))?;
-    if declared > max_output {
-        return Err(RemoteReadError::SnappyOutputTooLarge(max_output));
-    }
-    let raw = snap::raw::Decoder::new()
-        .decompress_vec(snappy_body)
-        .map_err(|error| RemoteReadError::SnappyDecode(error.to_string()))?;
-    if raw.len() > max_output {
-        return Err(RemoteReadError::SnappyOutputTooLarge(max_output));
-    }
+    let raw = snappy_block_decode_raw(
+        snappy_body,
+        max_output,
+        RemoteReadError::SnappyDecode,
+        RemoteReadError::SnappyOutputTooLarge,
+    )?;
     v1::ReadRequest::decode(raw.as_slice())
         .map_err(|error| RemoteReadError::Decode(error.to_string()))
 }

@@ -142,16 +142,30 @@ fn proto_param_value(param: &str) -> Option<String> {
 /// *before* decompressing, so a decompression bomb (tiny payload declaring a
 /// huge length) is rejected without `snap` pre-allocating the declared buffer.
 pub fn snappy_block_decode(body: &[u8], max_output: usize) -> Result<Vec<u8>, WireError> {
-    let declared = snap::raw::decompress_len(body)
-        .map_err(|error| WireError::SnappyDecode(error.to_string()))?;
+    snappy_block_decode_raw(
+        body,
+        max_output,
+        WireError::SnappyDecode,
+        WireError::SnappyOutputTooLarge,
+    )
+}
+
+pub(super) fn snappy_block_decode_raw<E>(
+    body: &[u8],
+    max_output: usize,
+    snappy_decode: impl Fn(String) -> E,
+    output_too_large: impl Fn(usize) -> E,
+) -> Result<Vec<u8>, E> {
+    let declared =
+        snap::raw::decompress_len(body).map_err(|error| snappy_decode(error.to_string()))?;
     if declared > max_output {
-        return Err(WireError::SnappyOutputTooLarge(max_output));
+        return Err(output_too_large(max_output));
     }
     let out = snap::raw::Decoder::new()
         .decompress_vec(body)
-        .map_err(|error| WireError::SnappyDecode(error.to_string()))?;
+        .map_err(|error| snappy_decode(error.to_string()))?;
     if out.len() > max_output {
-        return Err(WireError::SnappyOutputTooLarge(max_output));
+        return Err(output_too_large(max_output));
     }
     Ok(out)
 }
