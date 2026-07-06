@@ -18,8 +18,8 @@ Three verified facts shape every slice boundary:
 
 ## The slices
 
-### PG-1 — Safekeeper ingest (physical WAL → quorum WAL group)
-A walreceiver front-end speaking `START_REPLICATION … PHYSICAL` to a **stock, unpatched** Postgres primary; the byte-addressed LSN stream wrapped as sequential opaque records (LSN range carried per record) appended via `append_durable` into a per-database WAL group; an LSN→offset index for reads; standby feedback (`restart_lsn` advance) driven by the quorum-durable watermark so the primary can recycle WAL. **Reuses:** the payload-blind kernel, the flush/index path — unchanged. **Net-new:** the replication-protocol client, the LSN↔offset framing adapter, the feedback loop. **Gated on** the diskless WAL slices (1–6, spec-only); the front-end + framing can be built earlier against the slice-1 `LocalFsyncWal` shape.
+### PG-1 — Safekeeper ingest (physical WAL → an internal topic)
+A standalone component speaking `START_REPLICATION … PHYSICAL` to a **stock, unpatched** Postgres primary and **producing** contiguity-guarded `PGW1`-framed WAL records to an internal topic `__pg_wal.<cluster>` with `acks=all` over the ordinary Kafka wire — zero broker changes. *(Refined during the PG-1 design — the WAL-slice gate dissolved: the produce path IS the `WalStore::append_durable` path once diskless slice 1 lands, entered over the wire; the durability tier is inherited from the topic and upgrades transparently — classic today (dev-grade, documented), fsync at slice 1, quorum at 6a — with no safekeeper code change. The LSN→offset index moved out to the future live-pageserver-ingest slice; feedback is tier-qualified.)* **Buildable today**; gate: the stored stream decodes cleanly through PG-2's decoder.
 
 ### PG-2 — WAL decode + page-shard *(the first spec — no unbuilt prerequisites)*
 A sans-IO `XLogRecord` parser over an LSN-addressed byte stream (segment/page framing, contrecords, CRC-32C, block references, FPIs) and a page-shard router keying decoded records by `(RelTag, block) @ LSN` — the exact shape PG-3's delta layers ingest. Differentially verified against `pg_waldump` over fixture WAL. 100% net-new, pure Rust, buildable today.
@@ -39,12 +39,13 @@ Copy-on-write timelines at LSN via layer-map indirection. Pure layer-store lever
 ## Dependency graph & the two-track schedule
 
 ```
-diskless WAL slices 1–6 (separate track, spec-only) ──► PG-1 ──┐
-                                                               ├──► PG-5 (end-to-end gate) ──► PG-6
-fixture WAL (stock PG) ──► PG-2 ──► PG-3 ──► PG-4 ─────────────┘
+PG-1 (buildable today; durability tier inherits from the topic —
+      classic now, fsync at diskless slice 1, quorum at 6a) ──┐
+                                                              ├──► PG-5 (end-to-end gate, needs PG-4b) ──► PG-6
+fixture WAL (stock PG) ──► PG-2 ──► PG-3 ──► PG-4 ────────────┘
 ```
 
-**PG-2 → PG-3 → PG-4 — the hard 80% — have no unbuilt prerequisites.** They develop against fixture WAL and a local bucket while the diskless WAL slices land independently; PG-1 joins the tracks when the substrate exists. This is what makes the "multi-quarter net-new IP" schedule honest rather than serialized behind the WAL program.
+**Every slice through PG-4 — including PG-1 after its design refinement — has no unbuilt prerequisites.** PG-2→3→4 develop against fixture WAL and a local bucket; PG-1 produces over the ordinary Kafka wire and inherits durability upgrades from the diskless track without code changes. This is what makes the "multi-quarter net-new IP" schedule honest rather than serialized behind the WAL program.
 
 ## Honest framing (carried from the vision doc, non-negotiable)
 
