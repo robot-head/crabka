@@ -10,6 +10,7 @@ use bytes::Bytes;
 use object_store::{
     GetOptions, GetRange, ObjectMeta, ObjectStoreExt as _, PutPayload, WriteMultipart, path::Path,
 };
+use tokio::io::AsyncReadExt as _;
 
 use crate::error::ObjectStoreError;
 
@@ -83,18 +84,26 @@ impl ObjectOps for ObjectStoreClient {
         threshold: u64,
         chunk_size: usize,
     ) -> Result<(), ObjectStoreError> {
-        let len = std::fs::metadata(src)?.len();
+        if chunk_size == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "multipart chunk size must be greater than zero",
+            )
+            .into());
+        }
+
+        let len = tokio::fs::metadata(src).await?.len();
         if len < threshold {
-            let bytes = std::fs::read(src)?;
+            let bytes = tokio::fs::read(src).await?;
             self.inner.put(key, PutPayload::from(bytes)).await?;
             return Ok(());
         }
         let upload = self.inner.put_multipart(key).await?;
         let mut writer = WriteMultipart::new_with_chunk_size(upload, chunk_size);
-        let mut file = std::fs::File::open(src)?;
+        let mut file = tokio::fs::File::open(src).await?;
         let mut buf = vec![0u8; chunk_size];
         loop {
-            let n = std::io::Read::read(&mut file, &mut buf)?;
+            let n = file.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
@@ -212,6 +221,21 @@ mod tests {
         let key = Path::from("seg/big");
         c.put_from_path(&key, f.path(), 8, 4).await.unwrap();
         assert!(c.get(&key).await.unwrap()[..] == payload[..]);
+    }
+
+    #[tokio::test]
+    async fn put_from_path_rejects_zero_chunk_size() {
+        let c = client();
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"tiny").unwrap();
+        let key = Path::from("seg/bad");
+
+        let err = c.put_from_path(&key, f.path(), 8, 0).await.unwrap_err();
+
+        assert!(matches!(
+            err,
+            ObjectStoreError::Io(e) if e.kind() == std::io::ErrorKind::InvalidInput
+        ));
     }
 
     #[tokio::test]
