@@ -1,10 +1,10 @@
 //! `DeleteGroups` (`api_key=42`). Drops empty groups from the in-memory
 //! registry. Non-empty groups are rejected with `NON_EMPTY_GROUP`.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         delete_groups_request::DeleteGroupsRequest,
         delete_groups_response::{DeletableGroupResult, DeleteGroupsResponse},
@@ -76,9 +76,7 @@ pub(crate) async fn handle(
         results,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]

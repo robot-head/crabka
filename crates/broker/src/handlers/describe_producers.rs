@@ -21,10 +21,10 @@
 //! txn" sentinel). When transactional in-flight tracking lands, only
 //! the row builder needs to look those up.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::AclOperation;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         describe_producers_request::DescribeProducersRequest,
         describe_producers_response::{
@@ -157,7 +157,5 @@ pub(crate) async fn handle(
         topics: topics_out,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }

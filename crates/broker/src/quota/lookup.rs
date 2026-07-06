@@ -110,30 +110,17 @@ fn first_matching_quota(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
+    use crabka_metadata::{ClientQuotaRecord, MetadataImage};
 
     use super::*;
+    use crate::quota::test_support::{image_with_quotas, quota_record};
 
     fn img_with(records: Vec<ClientQuotaRecord>) -> MetadataImage {
-        let mut img = MetadataImage::new(uuid::Uuid::nil());
-        for r in records {
-            img.apply(&MetadataRecord::V1ClientQuota(r));
-        }
-        img
+        image_with_quotas(records)
     }
 
     fn rec(entity: Vec<(&str, Option<&str>)>, key: &str, value: f64) -> ClientQuotaRecord {
-        ClientQuotaRecord {
-            entity: entity
-                .into_iter()
-                .map(|(t, n)| QuotaEntity {
-                    entity_type: t.into(),
-                    entity_name: n.map(Into::into),
-                })
-                .collect(),
-            config_key: key.into(),
-            config_value: Some(value),
-        }
+        quota_record(entity, key, value)
     }
 
     #[test]
@@ -223,22 +210,11 @@ mod tests {
     }
 
     fn rec_ip(ip: Option<&str>, key: &str, value: f64) -> ClientQuotaRecord {
-        ClientQuotaRecord {
-            entity: vec![QuotaEntity {
-                entity_type: "ip".into(),
-                entity_name: ip.map(Into::into),
-            }],
-            config_key: key.into(),
-            config_value: Some(value),
-        }
+        quota_record(vec![("ip", ip)], key, value)
     }
 
     fn img_with_ip(records: Vec<ClientQuotaRecord>) -> MetadataImage {
-        let mut img = MetadataImage::new(uuid::Uuid::nil());
-        for r in records {
-            img.apply(&MetadataRecord::V1ClientQuota(r));
-        }
-        img
+        image_with_quotas(records)
     }
 
     #[test]

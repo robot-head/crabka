@@ -77,28 +77,17 @@ fn persisted_quota_entity_key(entity_key: &EntityKey) -> EntityKey {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_metadata::{ClientQuotaRecord, EntityKey, MetadataRecord, QuotaEntity};
+    use crabka_metadata::EntityKey;
 
     use super::*;
+    use crate::quota::test_support::image_with_quota as quota_image;
 
     fn img_with_quota(
         entity: Vec<(&str, Option<&str>)>,
         key: &str,
         value: f64,
     ) -> Arc<MetadataImage> {
-        let mut img = MetadataImage::new(uuid::Uuid::nil());
-        img.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
-            entity: entity
-                .into_iter()
-                .map(|(t, n)| QuotaEntity {
-                    entity_type: t.into(),
-                    entity_name: n.map(Into::into),
-                })
-                .collect(),
-            config_key: key.into(),
-            config_value: Some(value),
-        }));
-        Arc::new(img)
+        Arc::new(quota_image(entity, key, value))
     }
 
     #[test]

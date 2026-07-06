@@ -3,9 +3,9 @@
 //! subscriptions, and returns the computed subscription (metrics, interval,
 //! id). See `client_metrics::manager`.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest,
         get_telemetry_subscriptions_response::GetTelemetrySubscriptionsResponse,
@@ -71,7 +71,5 @@ pub(crate) async fn handle(
         requested_metrics: assignment.metrics,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }

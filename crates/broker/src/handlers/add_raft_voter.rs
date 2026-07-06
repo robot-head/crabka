@@ -16,10 +16,10 @@
 //! - `ReconfigRejected` → `INVALID_REQUEST (42)`
 //! - any other raft error → `UNKNOWN_SERVER_ERROR (-1)`
 
-use bytes::{Bytes, BytesMut};
-use crabka_metadata::{AclOperation, ResourceType, Voter, VoterEndpoint};
+use bytes::Bytes;
+use crabka_metadata::{Voter, VoterEndpoint};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         add_raft_voter_request::AddRaftVoterRequest, add_raft_voter_response::AddRaftVoterResponse,
     },
@@ -29,12 +29,7 @@ use crabka_raft::{
     reconfig::{AddVoter, ReconfigOutcome},
 };
 
-use crate::{
-    authorizer::{AuthorizationRequest, AuthorizationResult},
-    broker::Broker,
-    codes,
-    error::BrokerError,
-};
+use crate::{broker::Broker, codes, error::BrokerError, handlers::cluster_alter_denied};
 
 #[tracing::instrument(
     name = "handle_add_raft_voter",
@@ -57,17 +52,7 @@ pub(crate) async fn handle(
 
     // Cluster:Alter gate — KIP-853 reconfiguration is a cluster-wide
     // mutation, same gate as UnregisterBroker.
-    let allow = broker.config.authorizer.authorize(
-        &*image,
-        &AuthorizationRequest {
-            principal: ctx.principal,
-            host: ctx.peer,
-            resource_type: ResourceType::Cluster,
-            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
-            operation: AclOperation::Alter,
-        },
-    );
-    if allow == AuthorizationResult::Deny {
+    if cluster_alter_denied(broker.config.authorizer.as_ref(), &image, ctx) {
         return encode_resp(
             version,
             &AddRaftVoterResponse {
@@ -150,9 +135,7 @@ pub(crate) fn outcome_to_code(
 }
 
 fn encode_resp(version: i16, resp: &AddRaftVoterResponse) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(resp, version)
 }
 
 #[cfg(test)]

@@ -12,10 +12,10 @@
 //! The `configuration_keys` filter on the request is honored: if the client
 //! supplies an explicit key list, only those keys are returned.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         describe_configs_request::DescribeConfigsRequest,
         describe_configs_response::{
@@ -264,9 +264,7 @@ pub(crate) async fn handle(
             results,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
+        crate::handlers::encode_response(&resp, version)
     }
 }
 

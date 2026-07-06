@@ -112,11 +112,11 @@ fn encode_response<R: Encode>(
     resp: &R,
     api_version: i16,
 ) -> Result<Bytes, crate::error::BrokerError> {
-    let mut body = Vec::new();
-    resp.encode(&mut body, api_version).map_err(|e| {
-        crate::error::BrokerError::Replication(format!("encode ListPartitionReassignments: {e}"))
-    })?;
-    Ok(Bytes::from(body))
+    crate::handlers::encode_response_with_context(
+        resp,
+        api_version,
+        "encode ListPartitionReassignments",
+    )
 }
 
 #[cfg(test)]

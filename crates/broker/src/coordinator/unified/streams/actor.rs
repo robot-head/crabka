@@ -49,7 +49,9 @@ use super::{
     topology::{self, status as topo_status},
 };
 use crate::{
-    codes, coordinator::unified::offsets_log::OffsetsLog, metadata_source::MetadataSource,
+    codes,
+    coordinator::unified::{first_join_member_id, offsets_log::OffsetsLog, validate_member_epoch},
+    metadata_source::MetadataSource,
 };
 
 /// Messages accepted by a [`StreamsGroupActorHandle`].
@@ -258,12 +260,11 @@ async fn actor_loop(
                         let result: Result<(), i16> = if member_id.is_empty() {
                             Ok(())
                         } else {
-                            match actor.state.members.get(&member_id) {
-                                None => Err(codes::UNKNOWN_MEMBER_ID),
-                                Some(m) if member_epoch < m.member_epoch => Err(codes::STALE_MEMBER_EPOCH),
-                                Some(m) if member_epoch > m.member_epoch => Err(codes::FENCED_MEMBER_EPOCH),
-                                Some(_) => Ok(()),
-                            }
+                            validate_member_epoch(
+                                actor.state.members.get(&member_id).map(|m| m.member_epoch),
+                                member_epoch,
+                            )
+                            .map(|_| ())
                         };
                         let _ = reply.send(result);
                     }
@@ -344,11 +345,7 @@ async fn handle_heartbeat(
     // KIP-1071 mirrors KIP-848: epoch 0 from an unknown member is a first
     // join. The client may supply its own id; an empty id mints a server UUID.
     if req.member_epoch == 0 && !actor.state.members.contains_key(&req.member_id) {
-        let new_member_id = if req.member_id.is_empty() {
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            req.member_id.clone()
-        };
+        let new_member_id = first_join_member_id(&req.member_id);
         let m = build_member(&new_member_id, req, client_id, client_host, now);
         actor.state.add_or_update_member(m);
         // Topology supplied on first join is accepted before reconcile.
@@ -364,20 +361,17 @@ async fn handle_heartbeat(
     }
 
     // ─── Existing-member: validate epoch ─────────────────────────
-    let cur_epoch = actor
-        .state
-        .members
-        .get(&req.member_id)
-        .map_or(-2, |m| m.member_epoch);
-    if cur_epoch == -2 {
-        return Ok(error_resp(codes::UNKNOWN_MEMBER_ID, config));
-    }
-    if req.member_epoch < cur_epoch {
-        return Ok(error_resp(codes::STALE_MEMBER_EPOCH, config));
-    }
-    if req.member_epoch > cur_epoch {
-        return Ok(error_resp(codes::FENCED_MEMBER_EPOCH, config));
-    }
+    let cur_epoch = match validate_member_epoch(
+        actor
+            .state
+            .members
+            .get(&req.member_id)
+            .map(|m| m.member_epoch),
+        req.member_epoch,
+    ) {
+        Ok(epoch) => epoch,
+        Err(error_code) => return Ok(error_resp(error_code, config)),
+    };
 
     // ─── Steady state ────────────────────────────────────────────
     let mut changed = update_member_steady_state(actor, req, now);

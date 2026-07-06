@@ -9,10 +9,10 @@
 //! principal may perform; rows that auth-fail or aren't found stay at
 //! the `i32::MIN` "not present" sentinel.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         describe_groups_request::DescribeGroupsRequest,
         describe_groups_response::{DescribeGroupsResponse, DescribedGroup, DescribedGroupMember},
@@ -158,9 +158,7 @@ pub(crate) async fn handle(
         throttle_time_ms: 0,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 fn state_to_str(s: GroupState) -> &'static str {

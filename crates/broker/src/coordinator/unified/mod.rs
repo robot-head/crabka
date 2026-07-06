@@ -19,10 +19,15 @@ pub mod reconciler;
 pub mod share;
 pub mod streams;
 
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use actor::{GroupActorHandle, GroupActorMessage, GroupKindTag, MetadataProvider};
+use bytes::Bytes;
 use config::NextGenConfig;
+use crabka_protocol::records::{Record, RecordBatch};
 use dashmap::DashMap;
 use group::Group;
 use offsets_log::OffsetsLog;
@@ -36,7 +41,70 @@ use streams::{
 };
 use tokio::sync::oneshot;
 
-use crate::coordinator::{DeleteGroupError, GroupSnapshot};
+use crate::{
+    codes,
+    coordinator::{DeleteGroupError, GroupSnapshot},
+};
+
+pub(crate) fn first_join_member_id(request_member_id: &str) -> String {
+    if request_member_id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        request_member_id.to_string()
+    }
+}
+
+pub(crate) fn validate_member_epoch(
+    current_epoch: Option<i32>,
+    requested_epoch: i32,
+) -> Result<i32, i16> {
+    match current_epoch {
+        None => Err(codes::UNKNOWN_MEMBER_ID),
+        Some(epoch) if requested_epoch < epoch => Err(codes::STALE_MEMBER_EPOCH),
+        Some(epoch) if requested_epoch > epoch => Err(codes::FENCED_MEMBER_EPOCH),
+        Some(epoch) => Ok(epoch),
+    }
+}
+
+pub(crate) fn expired_member_ids<'a>(
+    members: impl IntoIterator<Item = (&'a str, Instant)>,
+    now: Instant,
+    session_timeout: Duration,
+) -> Vec<String> {
+    members
+        .into_iter()
+        .filter(|(_, last_seen)| now.duration_since(*last_seen) > session_timeout)
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
+#[derive(Default)]
+pub(crate) struct OffsetRecordBatchBuilder {
+    records: Vec<Record>,
+}
+
+impl OffsetRecordBatchBuilder {
+    pub(crate) fn push(&mut self, key: Bytes, value: Option<Bytes>) {
+        let delta = i32::try_from(self.records.len()).expect("batch size fits i32");
+        self.records.push(Record {
+            offset_delta: delta,
+            timestamp_delta: 0,
+            key: Some(key),
+            value,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn finish(self, now_ms: i64) -> RecordBatch {
+        let last_delta = i32::try_from(self.records.len().saturating_sub(1)).unwrap_or(0);
+        RecordBatch {
+            max_timestamp: now_ms,
+            records: self.records,
+            last_offset_delta: last_delta,
+            ..RecordBatch::default()
+        }
+    }
+}
 
 /// Locked protocol identity for a `group_id`. Classic/next-gen actors enforce
 /// their lock via the actor's [`GroupKindTag`]; share groups (KIP-932) live in

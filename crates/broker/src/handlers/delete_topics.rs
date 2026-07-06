@@ -4,10 +4,10 @@
 
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, DeleteTopicRecord, MetadataRecord};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         delete_topics_request::DeleteTopicsRequest,
         delete_topics_response::{DeletableTopicResult, DeleteTopicsResponse},
@@ -303,9 +303,7 @@ pub(crate) async fn handle(
     }
 
     let resp = delete_topics_response(results, throttle_time_ms);
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]

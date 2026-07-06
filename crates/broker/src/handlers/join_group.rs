@@ -4,10 +4,10 @@
 //! all-members-joined early-complete, or a membership change), so the
 //! connection blocks here exactly as long as the old `Notify`-based wait.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         join_group_request::JoinGroupRequest,
         join_group_response::{JoinGroupResponse, JoinGroupResponseMember},
@@ -156,7 +156,5 @@ pub(crate) async fn handle(
 }
 
 fn encode(version: i16, resp: &JoinGroupResponse) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(resp, version)
 }

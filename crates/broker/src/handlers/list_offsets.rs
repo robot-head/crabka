@@ -11,10 +11,10 @@
 //! `EARLIEST_LOCAL_TIMESTAMP` (-4) sentinels are resolved against the
 //! local log.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         list_offsets_request::ListOffsetsRequest,
         list_offsets_response::{
@@ -230,9 +230,7 @@ pub(crate) async fn handle(
             topics: topics_out,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
+        crate::handlers::encode_response(&resp, version)
     }
 }
 
@@ -241,7 +239,11 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
-    use crabka_protocol::owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic};
+    use bytes::BytesMut;
+    use crabka_protocol::{
+        Encode,
+        owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsTopic},
+    };
 
     use crate::test_support::{DenyAll, peer, principal};
 

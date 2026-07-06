@@ -7,10 +7,10 @@
 //! storage stays name-keyed, so topic ids are resolved to names at the wire
 //! boundary and echoed back on the response.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         offset_fetch_request::OffsetFetchRequest,
         offset_fetch_response::{
@@ -77,9 +77,7 @@ pub(crate) async fn handle(
                 throttle_time_ms: 0,
                 ..Default::default()
             };
-            let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-            resp.encode(&mut buf, version)?;
-            return Ok(buf.freeze());
+            return crate::handlers::encode_response(&resp, version);
         }
     }
 
@@ -261,9 +259,7 @@ pub(crate) async fn handle(
         throttle_time_ms: 0,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// v8+ per-group fetch. Processes `req.groups` into `resp.groups`, leaving
@@ -521,9 +517,7 @@ async fn handle_groups(
         groups: groups_out,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]

@@ -15,11 +15,11 @@
 
 use std::time::Instant;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_log::Offset;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         share_acknowledge_request::ShareAcknowledgeRequest,
         share_acknowledge_response::{
@@ -175,9 +175,7 @@ pub(crate) async fn handle(
         responses,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Encode a top-level-error `ShareAcknowledgeResponse` (feature-gate or session
@@ -195,9 +193,7 @@ fn encode_error_response(
         responses: Vec::new(),
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]

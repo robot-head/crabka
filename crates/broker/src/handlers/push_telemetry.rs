@@ -2,10 +2,10 @@
 //! client's subscription + throttle state, decompresses + decodes the OTLP
 //! payload, and fans it out to the Prometheus + OTLP sinks.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_compression::CompressionType;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         push_telemetry_request::PushTelemetryRequest,
         push_telemetry_response::PushTelemetryResponse,
@@ -100,9 +100,7 @@ pub(crate) async fn handle(
         error_code,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Flatten an OTLP `MetricsData` into Prometheus data points (Sum/Gauge

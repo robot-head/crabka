@@ -3,11 +3,11 @@
 //! via the existing `OFFSET_OUT_OF_RANGE` recovery path — matching the
 //! Apache Kafka model.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_log::Offset;
 use crabka_metadata::AclOperation;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         delete_records_request::DeleteRecordsRequest,
         delete_records_response::{
@@ -206,9 +206,7 @@ pub(crate) async fn handle(
     }
 
     let resp = delete_records_response(topic_results);
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]

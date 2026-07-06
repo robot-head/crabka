@@ -14,10 +14,10 @@
 
 use std::sync::atomic::Ordering;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         offset_for_leader_epoch_request::OffsetForLeaderEpochRequest,
         offset_for_leader_epoch_response::{
@@ -152,15 +152,15 @@ pub(crate) async fn handle(
             topics: topics_out,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
+        crate::handlers::encode_response(&resp, version)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use bytes::BytesMut;
+    use crabka_protocol::Encode;
 
     use super::*;
 
