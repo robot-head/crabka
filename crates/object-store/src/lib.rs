@@ -8,8 +8,10 @@
 //! respective consumer crates.
 
 mod config;
+mod error;
 
 pub use config::{
     DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, GcsConfig, ObjectStoreConfig,
     S3Config,
 };
+pub use error::ObjectStoreError;
