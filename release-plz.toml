@@ -185,6 +185,11 @@ publish = false
 release = false
 
 [[package]]
+name = "crabka-object-store"
+publish = false
+release = false
+
+[[package]]
 name = "crabka-observability"
 publish = false
 release = false
