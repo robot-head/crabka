@@ -31,7 +31,7 @@ use serde_json::json;
 
 use crate::{
     context::Context,
-    controller::common::{FIELD_MANAGER, ReconcileError, condition},
+    controller::common::{self, FIELD_MANAGER, ReconcileError, condition},
     crd::{KafkaRebalance, OptimizationResult},
     rebalancer_client::{ProposalStatus, RebalancerError, RebalancerProposal},
 };
@@ -466,16 +466,12 @@ pub async fn reconcile(
     obj: Arc<KafkaRebalance>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
-    let started = std::time::Instant::now();
-    let result = reconcile_inner(obj, ctx.clone()).await;
-    let outcome = if result.is_ok() {
-        crate::telemetry::ReconcileResult::Ok
-    } else {
-        crate::telemetry::ReconcileResult::Error
-    };
-    ctx.metrics
-        .record_reconcile("KafkaRebalance", outcome, started.elapsed().as_secs_f64());
-    result
+    common::record_reconcile(
+        &ctx,
+        "KafkaRebalance",
+        Box::pin(reconcile_inner(obj, ctx.clone())),
+    )
+    .await
 }
 
 async fn reconcile_inner(

@@ -24,27 +24,23 @@ pub enum MetricsType {
     Prometheus,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PodMonitorSpec {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scrape_timeout: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
+macro_rules! monitor_spec {
+    ($name:ident) => {
+        #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+        #[serde(rename_all = "camelCase")]
+        pub struct $name {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub interval: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub scrape_timeout: Option<String>,
+            #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+            pub labels: BTreeMap<String, String>,
+        }
+    };
 }
 
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct ServiceMonitorSpec {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub interval: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scrape_timeout: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-}
+monitor_spec!(PodMonitorSpec);
+monitor_spec!(ServiceMonitorSpec);
 
 #[cfg(test)]
 mod tests {

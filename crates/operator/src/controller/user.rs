@@ -37,7 +37,7 @@ use serde_json::json;
 use crate::{
     context::Context,
     controller::{
-        common::{FIELD_MANAGER, ReconcileError, condition},
+        common::{self, FIELD_MANAGER, ReconcileError, condition},
         topic::internal_listener_bootstrap,
         user_delegation_token::{self, KubeKafkaUserStatusWriter, KubeSecretWriter},
         user_tls,
@@ -89,16 +89,12 @@ pub fn error_policy(_obj: Arc<KafkaUser>, err: &ReconcileError, _ctx: Arc<Contex
     )
 )]
 pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
-    let started = std::time::Instant::now();
-    let result = reconcile_inner(obj, ctx.clone()).await;
-    let outcome = if result.is_ok() {
-        crate::telemetry::ReconcileResult::Ok
-    } else {
-        crate::telemetry::ReconcileResult::Error
-    };
-    ctx.metrics
-        .record_reconcile("KafkaUser", outcome, started.elapsed().as_secs_f64());
-    result
+    common::record_reconcile(
+        &ctx,
+        "KafkaUser",
+        Box::pin(reconcile_inner(obj, ctx.clone())),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines)] // linear pipeline; extraction hurts more than helps

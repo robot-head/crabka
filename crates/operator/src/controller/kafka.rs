@@ -796,16 +796,7 @@ async fn patch_status_with_condition(
     )
 )]
 pub async fn reconcile(obj: Arc<Kafka>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
-    let started = std::time::Instant::now();
-    let result = reconcile_inner(obj, ctx.clone()).await;
-    let elapsed = started.elapsed().as_secs_f64();
-    let outcome = if result.is_ok() {
-        crate::telemetry::ReconcileResult::Ok
-    } else {
-        crate::telemetry::ReconcileResult::Error
-    };
-    ctx.metrics.record_reconcile("Kafka", outcome, elapsed);
-    result
+    common::record_reconcile(&ctx, "Kafka", Box::pin(reconcile_inner(obj, ctx.clone()))).await
 }
 
 #[allow(clippy::too_many_lines)] // linear pipeline; the three branches (invalid / pending / ready) need direct condition + status binding
