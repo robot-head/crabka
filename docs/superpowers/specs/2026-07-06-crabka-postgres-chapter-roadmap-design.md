@@ -33,8 +33,8 @@ Materialization: (latest image ≤ LSN) ⊕ (deltas ≤ LSN via redo), plus imag
 ### PG-5 — Compute integration
 Structured as **PG-5a** (pageserver readiness: timeline seeding from an `initdb` import, live topic ingest, LSN-wait on `GetPage`, a `Basebackup` RPC) + **PG-5b** (the compute image: a minimal vendored smgr-hook patch over pinned PG-17 sources — no forked repo — plus a C extension whose smgr calls **`crabka-compute-client`, a Rust cdylib behind a C ABI**; that client shape was **resolved in PG-5's cycle** and establishes the workspace's one sanctioned `unsafe` boundary — one crate, one `ffi.rs`, cbindgen, style-guide-codified). The compute is a stock-shaped primary (FPW on); PG-1's safekeeper attaches unchanged, closing the WAL loop. **The keystone conformance gate:** pgbench boots and runs against the disaggregated stack (Tier 1, **blocked on PG-4b** for SLRUs), then page-image differential vs stock Postgres at matched LSNs (Tier 2) — the PG-differential analogue of the JVM-differential culture.
 
-### PG-6 — Branching / PITR
-Copy-on-write timelines at LSN via layer-map indirection. Pure layer-store leverage once PG-3/PG-4 exist.
+### PG-6 — Branching / PITR (designed)
+Copy-on-write timelines: write-once `timeline.meta` ancestry (the one justified manifest — ancestry can't be derived from a listing), ancestry-aware reconstruction (ancestor owns `(0, bl]`, child owns `(bl, ∞)`; recursion at `min(lsn, branch_lsn)`), descendant-aware GC pinning released by child image coverage (property-tested: GC never changes any read), `CreateBranch`/`ListTimelines`/`DeleteTimeline` + a `timeline` field amending the page-service requests, and a **promote-and-diverge** fixture strategy (a promoted standby yields genuinely forked WAL with per-side standby oracles). PITR = branch-at-LSN. Storage/service complete here; live branched-compute validation rides PG-5's harness.
 
 ## Dependency graph & the two-track schedule
 
