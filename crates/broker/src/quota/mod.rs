@@ -235,7 +235,7 @@ mod tests {
             |_| Some(1),
             |overage, rate, initial_rate| {
                 check!(overage == 9);
-                check!(rate == 1.0);
+                check!((rate - 1.0).abs() < f64::EPSILON);
                 check!(initial_rate == 1);
                 Duration::from_secs(10)
             },

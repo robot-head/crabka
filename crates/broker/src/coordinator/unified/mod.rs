@@ -109,9 +109,15 @@ mod helper_tests {
     fn expired_member_ids_returns_only_members_past_timeout() {
         let now = Instant::now();
         let session_timeout = Duration::from_secs(10);
-        let expired = now - Duration::from_secs(11);
-        let active = now - Duration::from_secs(10);
-        let future = now + Duration::from_secs(1);
+        let expired = now
+            .checked_sub(Duration::from_secs(11))
+            .expect("past instant");
+        let active = now
+            .checked_sub(Duration::from_secs(10))
+            .expect("past instant");
+        let future = now
+            .checked_add(Duration::from_secs(1))
+            .expect("future instant");
 
         let expired = expired_member_ids(
             [("expired", expired), ("active", active), ("future", future)],
