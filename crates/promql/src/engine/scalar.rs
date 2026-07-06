@@ -1,0 +1,300 @@
+use time::OffsetDateTime;
+
+#[cfg(feature = "experimental-functions")]
+use super::{QUERY_RANGE_CONTEXT, planned::PlannedInstant};
+use super::{histogram::scaled_native_histogram, labels::labels_without_metric_name};
+#[cfg(test)]
+use crate::planner::label_ops::SortOrder;
+use crate::{
+    PromqlError,
+    error::Result,
+    result::{QueryResult, SampleValue},
+};
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(super) enum ClampKind {
+    Both,
+    Min,
+    Max,
+}
+
+#[cfg(test)]
+impl ClampKind {
+    pub(super) fn argument_count(self) -> usize {
+        match self {
+            Self::Both => 3,
+            Self::Min | Self::Max => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum CalendarFn {
+    Year,
+    Month,
+    DayOfMonth,
+    DayOfWeek,
+    DayOfYear,
+    DaysInMonth,
+    Hour,
+    Minute,
+}
+
+impl CalendarFn {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "PromQL calendar functions interpret float sample values as Unix seconds"
+    )]
+    pub(super) fn apply(self, unix_seconds: f64) -> f64 {
+        if !unix_seconds.is_finite() {
+            return f64::NAN;
+        }
+        let Ok(timestamp) = OffsetDateTime::from_unix_timestamp(unix_seconds as i64) else {
+            return f64::NAN;
+        };
+        match self {
+            Self::Year => f64::from(timestamp.year()),
+            Self::Month => f64::from(timestamp.month() as u8),
+            Self::DayOfMonth => f64::from(timestamp.day()),
+            Self::DayOfWeek => f64::from(timestamp.weekday().number_days_from_sunday()),
+            Self::DayOfYear => f64::from(timestamp.ordinal()),
+            Self::DaysInMonth => {
+                f64::from(days_in_month(timestamp.year(), timestamp.month() as u8))
+            }
+            Self::Hour => f64::from(timestamp.hour()),
+            Self::Minute => f64::from(timestamp.minute()),
+        }
+    }
+}
+
+/// Map a `PromQL` calendar-function name to its `CalendarFn` variant, mirroring
+/// the calendar arms of `PromqlEngine::eval_instant_call`. Returns `None` for
+/// any other function so the planner dispatch falls through.
+pub(super) fn calendar_fn_from_function_name(name: &str) -> Option<CalendarFn> {
+    Some(match name {
+        "year" => CalendarFn::Year,
+        "month" => CalendarFn::Month,
+        "day_of_month" => CalendarFn::DayOfMonth,
+        "day_of_week" => CalendarFn::DayOfWeek,
+        "day_of_year" => CalendarFn::DayOfYear,
+        "days_in_month" => CalendarFn::DaysInMonth,
+        "hour" => CalendarFn::Hour,
+        "minute" => CalendarFn::Minute,
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(super) enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+#[cfg(test)]
+impl From<SortDirection> for SortOrder {
+    fn from(direction: SortDirection) -> Self {
+        match direction {
+            SortDirection::Ascending => Self::Ascending,
+            SortDirection::Descending => Self::Descending,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(super) enum UnaryFloatFn {
+    Ceil,
+    Floor,
+    Sgn,
+    Abs,
+    Sqrt,
+    Exp,
+    Ln,
+    Log2,
+    Log10,
+    Sin,
+    Sinh,
+    Cos,
+    Cosh,
+    Tan,
+    Tanh,
+    Asin,
+    Asinh,
+    Acos,
+    Acosh,
+    Atan,
+    Atanh,
+    Deg,
+    Rad,
+}
+
+#[cfg(test)]
+impl UnaryFloatFn {
+    pub(super) fn apply(self, value: f64) -> f64 {
+        match self {
+            Self::Ceil => value.ceil(),
+            Self::Floor => value.floor(),
+            Self::Abs => value.abs(),
+            Self::Sqrt => value.sqrt(),
+            Self::Exp => value.exp(),
+            Self::Ln => value.ln(),
+            Self::Log2 => value.log2(),
+            Self::Log10 => value.log10(),
+            Self::Sin => value.sin(),
+            Self::Sinh => value.sinh(),
+            Self::Cos => value.cos(),
+            Self::Cosh => value.cosh(),
+            Self::Tan => value.tan(),
+            Self::Tanh => value.tanh(),
+            Self::Asin => value.asin(),
+            Self::Asinh => value.asinh(),
+            Self::Acos => value.acos(),
+            Self::Acosh => value.acosh(),
+            Self::Atan => value.atan(),
+            Self::Atanh => value.atanh(),
+            Self::Deg => value.to_degrees(),
+            Self::Rad => value.to_radians(),
+            Self::Sgn => {
+                if value.is_nan() {
+                    f64::NAN
+                } else if value > 0.0 {
+                    1.0
+                } else if value < 0.0 {
+                    -1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+pub(super) fn clamp_float(value: f64, min: Option<f64>, max: Option<f64>) -> f64 {
+    if min.is_some_and(f64::is_nan) || max.is_some_and(f64::is_nan) {
+        return f64::NAN;
+    }
+    if let Some(min) = min
+        && value < min
+    {
+        return min;
+    }
+    if let Some(max) = max
+        && value > max
+    {
+        return max;
+    }
+    value
+}
+
+#[cfg(test)]
+pub(super) fn round_to_nearest(value: f64, to_nearest: f64) -> f64 {
+    (value / to_nearest + 0.5).floor() * to_nearest
+}
+
+fn days_in_month(year: i32, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+#[cfg(feature = "experimental-functions")]
+#[derive(Clone, Copy)]
+pub(super) enum ScalarExtremaFn {
+    Max,
+    Min,
+}
+
+#[cfg(feature = "experimental-functions")]
+impl ScalarExtremaFn {
+    pub(super) fn apply(self, left: f64, right: f64) -> f64 {
+        match self {
+            Self::Max => left.max(right),
+            Self::Min => left.min(right),
+        }
+    }
+}
+
+/// Wrap a scalar `QueryResult` from a delegated interpreter call into a
+/// `PlannedInstant::PrecomputedScalar`. A non-scalar result is impossible for
+/// these callers but is mapped to a canonical error defensively rather than
+/// panicking.
+#[cfg(feature = "experimental-functions")]
+pub(super) fn scalar_call_to_planned(result: &QueryResult) -> Result<PlannedInstant> {
+    match *result {
+        QueryResult::Scalar { ts_ms, value } => {
+            Ok(PlannedInstant::PrecomputedScalar { ts_ms, value })
+        }
+        _ => Err(PromqlError::Plan(
+            "expected a scalar result from an experimental scalar call".to_string(),
+        )),
+    }
+}
+
+/// Negate an already-evaluated instant query result, mirroring the `PromQL` unary
+/// `-` operator: a scalar flips sign; an instant vector flips each sample
+/// (floats by negation, native histograms by `scaled_native_histogram(_, -1.0)`)
+/// and drops `__name__`; a range-matrix / string input is a hard error. Both the
+/// interpreter and the operator path route through this, so they cannot diverge.
+pub(super) fn negate_query_result(operand: QueryResult) -> Result<QueryResult> {
+    match operand {
+        QueryResult::Scalar { ts_ms, value } => Ok(QueryResult::Scalar {
+            ts_ms,
+            value: -value,
+        }),
+        QueryResult::InstantVector(samples) => Ok(QueryResult::InstantVector(
+            samples
+                .into_iter()
+                .map(|mut sample| {
+                    sample.value = match sample.value {
+                        SampleValue::Float(value) => SampleValue::Float(-value),
+                        SampleValue::Histogram(histogram) => {
+                            SampleValue::Histogram(scaled_native_histogram(&histogram, -1.0))
+                        }
+                    };
+                    sample.labels = labels_without_metric_name(&sample.labels);
+                    sample
+                })
+                .collect(),
+        )),
+        QueryResult::RangeMatrix(_) => Err(PromqlError::Plan(
+            "unary expression requires scalar or instant-vector input".to_string(),
+        )),
+        QueryResult::Str { .. } => Err(PromqlError::Plan(
+            "unary expression does not support string input".to_string(),
+        )),
+    }
+}
+
+#[cfg(feature = "experimental-functions")]
+#[derive(Clone, Copy)]
+pub(super) enum DurationHelper {
+    Range,
+    Step,
+    Start,
+    End,
+}
+
+#[cfg(feature = "experimental-functions")]
+impl DurationHelper {
+    pub(super) fn value_ms(self) -> i64 {
+        QUERY_RANGE_CONTEXT
+            .try_with(|context| match self {
+                Self::Range => context.end.saturating_sub(context.start),
+                Self::Step => context.step,
+                Self::Start => context.start,
+                Self::End => context.end,
+            })
+            .unwrap_or(0)
+    }
+}

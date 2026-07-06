@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use axum::{
