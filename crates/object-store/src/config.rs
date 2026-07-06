@@ -11,7 +11,7 @@ pub const DEFAULT_MULTIPART_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 /// Selects and parameterises the object-store backend to construct.
 #[derive(Clone, Debug)]
 pub enum ObjectStoreConfig {
-    /// Any S3-compatible endpoint (AWS S3, MinIO, Cloudflare R2).
+    /// Any S3-compatible endpoint (AWS S3, `MinIO`, Cloudflare R2).
     S3(S3Config),
     /// Native Google Cloud Storage (supports keyless GKE Workload Identity).
     Gcs(GcsConfig),
@@ -40,7 +40,7 @@ pub struct S3Config {
     pub access_key_id: Option<String>,
     /// Optional explicit secret access key (falls back to the AWS credential chain).
     pub secret_access_key: Option<String>,
-    /// Allow plaintext HTTP (required by MinIO without TLS).
+    /// Allow plaintext HTTP (required by `MinIO` without TLS).
     pub allow_http: bool,
     /// Files at least this large upload via multipart. Defaults to [`DEFAULT_MULTIPART_THRESHOLD`].
     pub multipart_threshold: u64,
