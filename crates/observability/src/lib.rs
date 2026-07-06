@@ -20940,8 +20940,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(first.label_index.label_names(tenant), BTreeSet::from(["app".to_string()]));
-        assert_eq!(second.label_index.label_names(tenant), BTreeSet::from(["app".to_string()]));
+        assert_eq!(
+            first.label_index.label_names(tenant),
+            BTreeSet::from(["app".to_string()])
+        );
+        assert_eq!(
+            second.label_index.label_names(tenant),
+            BTreeSet::from(["app".to_string()])
+        );
 
         let shard_prefix =
             crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant).to_string();
@@ -21113,7 +21119,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(state.label_index.label_names(tenant), BTreeSet::from(["app".to_string()]));
+        assert_eq!(
+            state.label_index.label_names(tenant),
+            BTreeSet::from(["app".to_string()])
+        );
         let expected_offset =
             crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant)
                 .join(format!("time={}", query_start - (query_end - query_start)))
@@ -21588,7 +21597,10 @@ mod tests {
             ("application/json; charset", None),
             ("application/json; charset=", None),
         ] {
-            assert_eq!(is_loki_json_content_type(&loki_content_type(value)).ok(), want);
+            assert_eq!(
+                is_loki_json_content_type(&loki_content_type(value)).ok(),
+                want
+            );
         }
     }
 

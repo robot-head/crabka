@@ -564,7 +564,10 @@ mod tests {
             .await
             .expect("already-voter auto join returns without dialing");
 
-        assert_eq!(source.controller_bound_addr_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            source.controller_bound_addr_calls.load(Ordering::Relaxed),
+            1
+        );
         assert_eq!(source.current_image_calls.load(Ordering::Relaxed), 1);
     }
 }

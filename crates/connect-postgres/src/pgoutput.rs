@@ -584,7 +584,9 @@ fn coerce_bytea(text: &str) -> Result<Vec<u8>, PostgresConnectError> {
     }
 
     hex.as_bytes()
-        .as_chunks::<2>().0.iter()
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| {
             let pair = std::str::from_utf8(chunk).map_err(|error| {
                 PostgresConnectError::Backend(format!(

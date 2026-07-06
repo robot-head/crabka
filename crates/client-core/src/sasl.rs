@@ -766,7 +766,10 @@ mod tests {
         check!(i32::from_be_bytes([req[4], req[5], req[6], req[7]]) == corr_id);
         let client_len = i16::from_be_bytes([req[8], req[9]]);
         assert_eq!(client_len, i16::try_from(OUTBOUND_CLIENT_ID.len()).unwrap());
-        assert_eq!(&req[10..10 + OUTBOUND_CLIENT_ID.len()], OUTBOUND_CLIENT_ID.as_bytes());
+        assert_eq!(
+            &req[10..10 + OUTBOUND_CLIENT_ID.len()],
+            OUTBOUND_CLIENT_ID.as_bytes()
+        );
         if flexible {
             assert_eq!(req[10 + OUTBOUND_CLIENT_ID.len()], 0);
         }

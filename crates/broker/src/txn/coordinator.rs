@@ -651,7 +651,10 @@ mod tests {
             map.get(&ProducerId(1000)).is_none(),
             "stale pre-roll pid must be evicted"
         );
-        assert_eq!(map.get(&ProducerId(2000)).map(|e| e.value().clone()), Some("tid-a".into()));
+        assert_eq!(
+            map.get(&ProducerId(2000)).map(|e| e.value().clone()),
+            Some("tid-a".into())
+        );
     }
 
     #[test]

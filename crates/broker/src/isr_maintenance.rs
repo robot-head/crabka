@@ -750,11 +750,12 @@ mod tests {
         let targets = alter_partition_targets(&image, Some(NodeId(2)));
 
         assert_eq!(
-            targets, vec![
-                    (NodeId(2), "b2:9092".to_string()),
-                    (NodeId(0), "b0:9092".to_string()),
-                    (NodeId(1), "b1:9092".to_string()),
-                ]
+            targets,
+            vec![
+                (NodeId(2), "b2:9092".to_string()),
+                (NodeId(0), "b0:9092".to_string()),
+                (NodeId(1), "b1:9092".to_string()),
+            ]
         );
     }
 
@@ -767,10 +768,11 @@ mod tests {
         let targets = alter_partition_targets(&image, Some(NodeId(9)));
 
         assert_eq!(
-            targets, vec![
-                    (NodeId(0), "b0:9092".to_string()),
-                    (NodeId(1), "b1:9092".to_string())
-                ]
+            targets,
+            vec![
+                (NodeId(0), "b0:9092".to_string()),
+                (NodeId(1), "b1:9092".to_string())
+            ]
         );
     }
 

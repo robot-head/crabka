@@ -575,7 +575,9 @@ mod tests {
         let other = names_index(&fg, "other");
         let other_bar = fg.levels[2]
             .values
-            .as_chunks::<4>().0.iter()
+            .as_chunks::<4>()
+            .0
+            .iter()
             .find(|chunk| chunk[3] == other)
             .unwrap();
 

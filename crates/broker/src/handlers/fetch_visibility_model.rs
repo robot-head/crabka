@@ -204,7 +204,10 @@ fn assert_fetch_contract(
     }
     // Response single-source-of-truth contract (OOR and success paths share it).
     assert_eq!(win_response_hw, response_hw(is_follower, s.hw, s.log_end));
-    assert_eq!(win_response_lso, response_lso(is_follower, read_committed, s.hw, s.lso, s.log_end));
+    assert_eq!(
+        win_response_lso,
+        response_lso(is_follower, read_committed, s.hw, s.lso, s.log_end)
+    );
     if is_follower {
         // Follower bound: serve up to the log-end (>= hw).
         assert!(limit_offset == s.log_end && limit_offset >= s.hw);

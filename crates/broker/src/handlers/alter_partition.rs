@@ -187,7 +187,7 @@ fn handle_partition(
     // `new_isr: Vec<i32>`; v3 sends `new_isr_with_epochs` instead and
     // leaves `new_isr` empty. Fall back to extracting broker_ids from
     // `new_isr_with_epochs` when the v2 field is absent.
-    
+
     let fallback_isr_i32: Vec<i32>;
     let effective_isr_i32: &[i32] = if new_isr_i32.is_empty() && !new_isr_with_epochs.is_empty() {
         fallback_isr_i32 = new_isr_with_epochs.iter().map(|bs| bs.broker_id).collect();

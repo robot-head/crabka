@@ -834,7 +834,7 @@ fn render_pvc_retention_policy(
         _ => {
             let p = tier_persistence?;
             p.delete_claim
-        },
+        }
     };
     Some(json!({
         "whenDeleted": if delete_claim { "Delete" } else { "Retain" },
