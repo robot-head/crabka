@@ -128,10 +128,8 @@ async fn heap_profile(Query(q): Query<HeapQuery>) -> axum::response::Response {
         tokio::time::sleep(Duration::from_secs(seconds)).await;
     }
     let dump = ctl.dump_pprof();
-    if activated_here {
-        if let Err(e) = ctl.deactivate() {
-            tracing::warn!(error = %e, "could not deactivate jemalloc profiling after heap dump");
-        }
+    if activated_here && let Err(e) = ctl.deactivate() {
+        tracing::warn!(error = %e, "could not deactivate jemalloc profiling after heap dump");
     }
     match dump {
         Ok(pprof) => (

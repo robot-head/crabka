@@ -31,12 +31,16 @@
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_protocol::{
+    api_key::ApiKey,
     owned::fetch_response::{FetchResponse, FetchWriteOp},
     records::RecordsPayload,
 };
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-use crate::{error::BrokerError, network::codec::MAX_FRAME_BYTES};
+use crate::{
+    error::BrokerError,
+    network::{codec::MAX_FRAME_BYTES, response_header_len, response_header_v1},
+};
 
 crate::sendfile_cfg! {
     /// Records runs at or above this size on a plaintext connection take the
@@ -123,8 +127,8 @@ where
     // The response header is v1 (a trailing empty tagged-fields byte) iff the
     // body is flexible. The `encode_response` exception for ApiVersions
     // (api_key 18) never applies here — this is always Fetch (api_key 1).
-    let header_v1 = body_flexible;
-    let header_len = if header_v1 { 5 } else { 4 };
+    let header_v1 = response_header_v1(ApiKey::Fetch as i16, body_flexible);
+    let header_len = response_header_len(ApiKey::Fetch as i16, body_flexible);
 
     let proto_plan = resp.write_plan(version)?;
     let body_len: usize = proto_plan.iter().map(FetchWriteOp::len).sum();
@@ -716,8 +720,8 @@ mod tests {
             // Old path: encode the body, then the response header, then frame.
             let mut body = BytesMut::new();
             resp.encode(&mut body, version).unwrap();
-            let header_v1 = body_flexible; // Fetch is never ApiVersions
-            let header_len = if header_v1 { 5 } else { 4 };
+            let header_v1 = response_header_v1(ApiKey::Fetch as i16, body_flexible);
+            let header_len = response_header_len(ApiKey::Fetch as i16, body_flexible);
             let frame_body_len = header_len + body.len();
             let mut old_bytes = BytesMut::new();
             old_bytes.put_u32(u32::try_from(frame_body_len).unwrap());

@@ -10,7 +10,7 @@ use bytes::Bytes;
 use crabka_protocol::primitives::uuid::Uuid;
 use regex::Regex;
 
-use super::persistence_next_gen::MemberAssignmentState;
+use super::{expired_member_ids, persistence_next_gen::MemberAssignmentState};
 
 /// Classic-protocol state for a member hosted inside an *upgraded* consumer
 /// group during KIP-848 upgrade. `None` on a native consumer-protocol member; `Some`
@@ -210,12 +210,13 @@ impl GroupState {
     }
 
     pub fn evict_expired(&mut self, now: Instant, session_timeout: Duration) -> Vec<String> {
-        let evicted: Vec<String> = self
-            .members
-            .iter()
-            .filter(|(_, m)| now.duration_since(m.last_seen) > session_timeout)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let evicted = expired_member_ids(
+            self.members
+                .iter()
+                .map(|(id, member)| (id.as_str(), member.last_seen)),
+            now,
+            session_timeout,
+        );
         for id in &evicted {
             self.remove_member(id);
         }

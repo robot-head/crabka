@@ -3953,19 +3953,17 @@ pub(crate) fn spawn_partition(
 /// `:` so IPv6 literals do not break on inner colons (we still expect
 /// IPv6 callers to wrap in `[...]`).
 fn parse_advertised_host_port(addr: &str) -> (String, u16) {
-    /// Kafka's canonical default plaintext port, used only as the fallback
-    /// when an advertised address fails to parse as `host:port`.
-    const DEFAULT_KAFKA_PORT: u16 = 9092;
-    if let Some((h, p)) = addr.rsplit_once(':')
-        && let Ok(port) = p.parse::<u16>()
-    {
-        return (h.to_string(), port);
+    if let Some(host_port) = crate::host_port::parse_host_port(addr) {
+        return host_port;
     }
     tracing::warn!(
         addr,
         "advertised not host:port; falling back to localhost:9092"
     );
-    ("localhost".into(), DEFAULT_KAFKA_PORT)
+    (
+        crate::host_port::DEFAULT_KAFKA_HOST.into(),
+        crate::host_port::DEFAULT_KAFKA_PORT,
+    )
 }
 
 /// Build the KIP-595 static controller [`VoterSet`](crabka_metadata::VoterSet)

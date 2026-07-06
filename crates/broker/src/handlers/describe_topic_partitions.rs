@@ -26,10 +26,10 @@
 //! Every Allow row carries `topic_authorized_operations` — the v0 schema
 //! always encodes this field (no opt-in flag, unlike Metadata).
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         describe_topic_partitions_request::DescribeTopicPartitionsRequest,
         describe_topic_partitions_response::{
@@ -263,9 +263,7 @@ pub(crate) async fn handle(
         next_cursor,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]

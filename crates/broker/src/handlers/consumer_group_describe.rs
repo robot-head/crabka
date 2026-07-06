@@ -1,9 +1,9 @@
 //! `ConsumerGroupDescribe` (`api_key` 69) — returns one `DescribedGroup` per
 //! requested `group_id`. Uses the actor's `Describe` view to render.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         consumer_group_describe_request::ConsumerGroupDescribeRequest,
         consumer_group_describe_response::{ConsumerGroupDescribeResponse, DescribedGroup},
@@ -91,9 +91,7 @@ pub(crate) fn handle(
             }
         }
         let resp = response(described);
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
+        crate::handlers::encode_response(&resp, version)
     })
 }
 
@@ -133,7 +131,9 @@ fn response(groups: Vec<DescribedGroup>) -> ConsumerGroupDescribeResponse {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use bytes::BytesMut;
     use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
+    use crabka_protocol::Encode;
 
     use super::*;
 

@@ -14,10 +14,10 @@
 
 use std::collections::BTreeMap;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         describe_transactions_request::DescribeTransactionsRequest,
         describe_transactions_response::{
@@ -146,9 +146,7 @@ pub(crate) async fn handle(
         transaction_states: rows,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]

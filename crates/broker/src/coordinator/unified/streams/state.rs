@@ -33,6 +33,8 @@ use std::{
 
 use crabka_log::Offset;
 
+use super::super::expired_member_ids;
+
 /// The reconciliation state of a single streams-group member's **active** task
 /// set, mirroring KIP-848's `MemberAssignmentState`. Standby/warmup tasks do
 /// not participate in this dance.
@@ -288,12 +290,13 @@ impl StreamsGroupState {
     /// returning the evicted member ids. Marks the group dirty if any were
     /// removed.
     pub fn evict_expired(&mut self, now: Instant, session_timeout: Duration) -> Vec<String> {
-        let evicted: Vec<String> = self
-            .members
-            .iter()
-            .filter(|(_, m)| now.duration_since(m.last_seen) > session_timeout)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let evicted = expired_member_ids(
+            self.members
+                .iter()
+                .map(|(id, member)| (id.as_str(), member.last_seen)),
+            now,
+            session_timeout,
+        );
         for id in &evicted {
             self.members.remove(id);
         }

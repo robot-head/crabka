@@ -9,15 +9,14 @@
 //! (Kafka does not support online streams migration), so there is no
 //! hosted-classic-member translation here.
 
-use bytes::Bytes;
-use crabka_protocol::records::{Record, RecordBatch};
+use crabka_protocol::records::RecordBatch;
 
 use super::persistence::{
     encode_current_member_assignment_key, encode_group_metadata_key, encode_member_metadata_key,
     encode_partition_metadata_key, encode_target_assignment_member_key,
     encode_target_assignment_metadata_key, encode_topology_key,
 };
-use crate::coordinator::unified::actor::PendingRecords;
+use crate::coordinator::unified::{OffsetRecordBatchBuilder, actor::PendingRecords};
 
 /// Result of inspecting a `group_id` for classic→streams conversion.
 #[derive(Debug, PartialEq, Eq)]
@@ -71,7 +70,7 @@ pub(crate) fn streams_records_tombstone_batch(
     member_ids: &[String],
     now_ms: i64,
 ) -> RecordBatch {
-    let mut keys: Vec<Bytes> = vec![
+    let mut keys = vec![
         encode_group_metadata_key(group_id),
         encode_topology_key(group_id),
         encode_partition_metadata_key(group_id),
@@ -82,24 +81,12 @@ pub(crate) fn streams_records_tombstone_batch(
         keys.push(encode_target_assignment_member_key(group_id, mid));
         keys.push(encode_current_member_assignment_key(group_id, mid));
     }
-    let records: Vec<Record> = keys
-        .into_iter()
-        .enumerate()
-        .map(|(i, key)| Record {
-            offset_delta: i32::try_from(i).expect("batch size fits i32"),
-            timestamp_delta: 0,
-            key: Some(key),
-            value: None, // tombstone
-            ..Default::default()
-        })
-        .collect();
-    let last_offset_delta = i32::try_from(records.len().saturating_sub(1)).unwrap_or(0);
-    RecordBatch {
-        max_timestamp: now_ms,
-        records,
-        last_offset_delta,
-        ..RecordBatch::default()
+
+    let mut batch = OffsetRecordBatchBuilder::default();
+    for key in keys {
+        batch.push(key, None);
     }
+    batch.finish(now_ms)
 }
 
 #[cfg(test)]

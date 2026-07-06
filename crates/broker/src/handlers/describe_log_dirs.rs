@@ -9,10 +9,10 @@
 
 use std::collections::BTreeMap;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         describe_log_dirs_request::DescribeLogDirsRequest,
         describe_log_dirs_response::{
@@ -204,9 +204,7 @@ pub(crate) async fn handle(
             results,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
+        crate::handlers::encode_response(&resp, version)
     }
 }
 
@@ -237,9 +235,7 @@ fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
         results: Vec::new(),
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// `LEO − HW`, clamped to ≥ 0, for a loaded current log; 0 when the

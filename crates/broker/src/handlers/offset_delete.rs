@@ -20,10 +20,10 @@
 
 use std::collections::HashSet;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         consumer_protocol_subscription::ConsumerProtocolSubscription,
         offset_delete_request::OffsetDeleteRequest,
@@ -375,9 +375,7 @@ fn now_ms() -> i64 {
 }
 
 fn encode(version: i16, resp: &OffsetDeleteResponse) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(resp, version)
 }
 
 #[cfg(test)]
@@ -387,7 +385,7 @@ mod tests {
     use assert2::{assert, check};
     use bytes::BufMut;
     use crabka_protocol::{
-        UnknownTaggedFields,
+        Encode, UnknownTaggedFields,
         owned::{
             consumer_protocol_subscription::ConsumerProtocolSubscription,
             offset_delete_request::{OffsetDeleteRequestPartition, OffsetDeleteRequestTopic},

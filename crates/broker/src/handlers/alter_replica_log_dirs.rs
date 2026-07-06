@@ -18,9 +18,9 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         alter_replica_log_dirs_request::AlterReplicaLogDirsRequest,
         alter_replica_log_dirs_response::{
@@ -112,9 +112,7 @@ pub(crate) fn handle(
             results,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
+        crate::handlers::encode_response(&resp, version)
     })
 }
 

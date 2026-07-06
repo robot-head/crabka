@@ -19,15 +19,15 @@
 use std::collections::BTreeMap;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crabka_protocol::{
-    ProtocolError,
-    records::{Record, RecordBatch},
-};
+use crabka_protocol::{ProtocolError, records::RecordBatch};
 
 use crate::{
-    coordinator::unified::persistence::{
-        get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes,
-        put_nullable_string, put_string,
+    coordinator::unified::{
+        OffsetRecordBatchBuilder,
+        persistence::{
+            get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes,
+            put_nullable_string, put_string,
+        },
     },
     error::BrokerError,
 };
@@ -742,59 +742,43 @@ impl PendingStreamsRecords {
 
     #[must_use]
     pub fn into_batch(self, group_id: &str, now_ms: i64) -> RecordBatch {
-        let mut records: Vec<Record> = Vec::new();
-        let mut push = |key: Bytes, value: Option<Bytes>| {
-            let delta = i32::try_from(records.len()).expect("batch size fits i32");
-            records.push(Record {
-                offset_delta: delta,
-                timestamp_delta: 0,
-                key: Some(key),
-                value,
-                ..Default::default()
-            });
-        };
+        let mut batch = OffsetRecordBatchBuilder::default();
 
         if let Some(v) = self.group_metadata {
-            push(encode_group_metadata_key(group_id), Some(v.encode()));
+            batch.push(encode_group_metadata_key(group_id), Some(v.encode()));
         }
         for (member_id, v) in self.member_metadata {
-            push(
+            batch.push(
                 encode_member_metadata_key(group_id, &member_id),
                 v.map(|x| x.encode()),
             );
         }
         if let Some(v) = self.topology {
-            push(encode_topology_key(group_id), Some(v.encode()));
+            batch.push(encode_topology_key(group_id), Some(v.encode()));
         }
         if let Some(v) = self.partition_metadata {
-            push(encode_partition_metadata_key(group_id), Some(v.encode()));
+            batch.push(encode_partition_metadata_key(group_id), Some(v.encode()));
         }
         if let Some(v) = self.target_metadata {
-            push(
+            batch.push(
                 encode_target_assignment_metadata_key(group_id),
                 Some(v.encode()),
             );
         }
         for (member_id, v) in self.target_per_member {
-            push(
+            batch.push(
                 encode_target_assignment_member_key(group_id, &member_id),
                 v.map(|x| x.encode()),
             );
         }
         for (member_id, v) in self.current_per_member {
-            push(
+            batch.push(
                 encode_current_member_assignment_key(group_id, &member_id),
                 v.map(|x| x.encode()),
             );
         }
 
-        let last_delta = i32::try_from(records.len().saturating_sub(1)).unwrap_or(0);
-        RecordBatch {
-            max_timestamp: now_ms,
-            records,
-            last_offset_delta: last_delta,
-            ..RecordBatch::default()
-        }
+        batch.finish(now_ms)
     }
 }
 

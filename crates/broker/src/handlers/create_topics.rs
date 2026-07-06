@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{
     AclOperation, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
 };
@@ -111,9 +111,7 @@ fn audit_created_topics(
 }
 
 fn encode_response<R: Encode>(resp: &R, version: i16) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(resp, version)
 }
 
 fn should_materialize_locally(

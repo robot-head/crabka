@@ -2,10 +2,9 @@
 //! group protocol. Routes the request to the per-group actor in
 //! `GroupCoordinator`.
 
-use bytes::{Bytes, BytesMut};
-use crabka_metadata::{AclOperation, ResourceType};
+use bytes::Bytes;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest,
         consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse,
@@ -14,11 +13,11 @@ use crabka_protocol::{
 use tokio::sync::oneshot;
 
 use crate::{
-    authorizer::{AuthorizationRequest, AuthorizationResult},
     broker::Broker,
     codes,
     coordinator::unified::actor::{GroupActorMessage, GroupKindTag},
     error::BrokerError,
+    handlers::group_read_denied,
 };
 
 #[tracing::instrument(
@@ -47,22 +46,24 @@ pub(crate) async fn handle(
         if group_read_denied(
             broker.config.authorizer.as_ref(),
             &image,
-            ctx.principal,
-            ctx.peer,
+            ctx,
             &req.group_id,
         ) {
-            return encode(version, &error(codes::GROUP_AUTHORIZATION_FAILED));
+            return crate::handlers::encode_response(
+                &error(codes::GROUP_AUTHORIZATION_FAILED),
+                version,
+            );
         }
 
         // KIP-848 / KIP-584: the next-gen protocol is gated on a finalized
         // group.version >= 1. Below that — including UNFINALIZED, which means
         // disabled — reject so the client falls back to the classic protocol.
         if group_version_disabled(&image) {
-            return encode(version, &error(codes::UNSUPPORTED_VERSION));
+            return crate::handlers::encode_response(&error(codes::UNSUPPORTED_VERSION), version);
         }
 
         if next_gen_config_disabled(coordinator.config.next_gen_enabled()) {
-            return encode(version, &error(codes::GROUP_ID_NOT_FOUND));
+            return crate::handlers::encode_response(&error(codes::GROUP_ID_NOT_FOUND), version);
         }
 
         // Route to the one actor for this id, spawning a consumer-kind actor if
@@ -82,33 +83,16 @@ pub(crate) async fn handle(
             .await
             .is_err()
         {
-            return encode(version, &error(codes::COORDINATOR_LOAD_IN_PROGRESS));
+            return crate::handlers::encode_response(
+                &error(codes::COORDINATOR_LOAD_IN_PROGRESS),
+                version,
+            );
         }
         let resp = rx
             .await
             .unwrap_or_else(|_| error(codes::UNKNOWN_SERVER_ERROR));
-        encode(version, &resp)
+        crate::handlers::encode_response(&resp, version)
     }
-}
-
-/// `Read` on `Group(group_id)` gate. Returns `true` when denied.
-fn group_read_denied(
-    authorizer: &dyn crate::authorizer::Authorizer,
-    image: &crabka_metadata::MetadataImage,
-    principal: &crabka_security::Principal,
-    host: &std::net::SocketAddr,
-    group_id: &str,
-) -> bool {
-    authorizer.authorize(
-        image,
-        &AuthorizationRequest {
-            principal,
-            host,
-            resource_type: ResourceType::Group,
-            resource_name: group_id,
-            operation: AclOperation::Read,
-        },
-    ) == AuthorizationResult::Deny
 }
 
 fn group_version_disabled(image: &crabka_metadata::MetadataImage) -> bool {
@@ -130,18 +114,14 @@ fn error(code: i16) -> ConsumerGroupHeartbeatResponse {
     }
 }
 
-fn encode(version: i16, resp: &ConsumerGroupHeartbeatResponse) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use assert2::assert;
+    use bytes::BytesMut;
     use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
+    use crabka_protocol::Encode;
 
     const VERSION: i16 = crabka_protocol::owned::consumer_group_heartbeat_request::MAX_VERSION;
 
@@ -226,17 +206,13 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert!(group_read_denied(
-            &authorizer,
-            &image,
-            &principal,
-            &peer,
-            "g"
-        ));
+        let ctx = crate::test_support::request_context(&principal, &peer, "consumer-client");
 
-        let bytes = encode(
-            consumer_group_heartbeat_response::MAX_VERSION,
+        assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
+
+        let bytes = crate::handlers::encode_response(
             &error(codes::GROUP_AUTHORIZATION_FAILED),
+            consumer_group_heartbeat_response::MAX_VERSION,
         )
         .expect("encode");
         let mut cur: &[u8] = &bytes;
@@ -253,12 +229,12 @@ mod tests {
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
         let principal = anonymous_principal();
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+        let ctx = crate::test_support::request_context(&principal, &peer, "consumer-client");
 
         assert!(!group_read_denied(
             &crate::authorizer::AllowAllAuthorizer,
             &image,
-            &principal,
-            &peer,
+            &ctx,
             "g"
         ));
     }

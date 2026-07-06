@@ -8,10 +8,9 @@
 //!
 //! Outcome → error code mapping is shared with [`super::add_raft_voter`].
 
-use bytes::{Bytes, BytesMut};
-use crabka_metadata::{AclOperation, ResourceType};
+use bytes::Bytes;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         remove_raft_voter_request::RemoveRaftVoterRequest,
         remove_raft_voter_response::RemoveRaftVoterResponse,
@@ -20,11 +19,10 @@ use crabka_protocol::{
 use crabka_raft::reconfig::RemoveVoter;
 
 use crate::{
-    authorizer::{AuthorizationRequest, AuthorizationResult},
     broker::Broker,
     codes,
     error::BrokerError,
-    handlers::add_raft_voter::outcome_to_code,
+    handlers::{add_raft_voter::outcome_to_code, cluster_alter_denied},
 };
 
 #[tracing::instrument(
@@ -46,17 +44,7 @@ pub(crate) async fn handle(
 
     let image = broker.controller.current_image();
 
-    let allow = broker.config.authorizer.authorize(
-        &*image,
-        &AuthorizationRequest {
-            principal: ctx.principal,
-            host: ctx.peer,
-            resource_type: ResourceType::Cluster,
-            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
-            operation: AclOperation::Alter,
-        },
-    );
-    if allow == AuthorizationResult::Deny {
+    if cluster_alter_denied(broker.config.authorizer.as_ref(), &image, ctx) {
         return encode_resp(
             version,
             &RemoveRaftVoterResponse {
@@ -102,9 +90,7 @@ pub(crate) async fn handle(
 }
 
 fn encode_resp(version: i16, resp: &RemoveRaftVoterResponse) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(resp, version)
 }
 
 #[cfg(test)]

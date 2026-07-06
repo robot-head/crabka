@@ -23,7 +23,7 @@ use bytes::{Bytes, BytesMut};
 use crabka_log::Offset;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         share_fetch_request::{FetchPartition, ShareFetchRequest},
         share_fetch_response::{
@@ -260,9 +260,7 @@ pub(crate) async fn handle(
         responses,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Collect the piggybacked acknowledgement batches off a request partition into
@@ -566,9 +564,7 @@ fn encode_error_response(
         acquisition_lock_timeout_ms: lock_timeout_ms,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]

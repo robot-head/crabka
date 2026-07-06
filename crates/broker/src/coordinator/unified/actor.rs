@@ -33,15 +33,17 @@ use tokio::{
 };
 
 use super::{
-    classic_ops,
+    OffsetRecordBatchBuilder, classic_ops,
     classic_state::{Group as ClassicState, GroupState as ClassicGroupState, OffsetEntry},
     config::NextGenConfig,
     consumer_state::{GroupState, MemberState},
+    first_join_member_id,
     group::{Group, GroupKind},
     migration,
     offsets_log::OffsetsLog,
     persistence_next_gen::MemberAssignmentState,
     reconciler::{self, ReconcileInput},
+    validate_member_epoch,
 };
 use crate::{
     codes,
@@ -1178,11 +1180,7 @@ pub(crate) fn step_heartbeat(
     // id. An empty `member_id` is tolerated as a fallback (raw-RPC / older
     // callers) by minting a server-side UUID.
     if req.member_epoch == 0 && !state.members.contains_key(&req.member_id) {
-        let new_member_id = if req.member_id.is_empty() {
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            req.member_id.clone()
-        };
+        let new_member_id = first_join_member_id(&req.member_id);
         if let Some(iid) = req.instance_id.as_deref()
             && state
                 .current_member_for_instance(iid)
@@ -1208,28 +1206,18 @@ pub(crate) fn step_heartbeat(
     }
 
     // ─── Existing-member: validate epoch ─────────────────────────
-    let cur_epoch = state
-        .members
-        .get(&req.member_id)
-        .map_or(-2, |m| m.member_epoch);
-    if cur_epoch == -2 {
-        return HeartbeatStep {
-            response: error_resp(codes::UNKNOWN_MEMBER_ID, config),
-            pending: PendingRecords::default(),
-        };
-    }
-    if req.member_epoch < cur_epoch {
-        return HeartbeatStep {
-            response: error_resp(codes::STALE_MEMBER_EPOCH, config),
-            pending: PendingRecords::default(),
-        };
-    }
-    if req.member_epoch > cur_epoch {
-        return HeartbeatStep {
-            response: error_resp(codes::FENCED_MEMBER_EPOCH, config),
-            pending: PendingRecords::default(),
-        };
-    }
+    let cur_epoch = match validate_member_epoch(
+        state.members.get(&req.member_id).map(|m| m.member_epoch),
+        req.member_epoch,
+    ) {
+        Ok(epoch) => epoch,
+        Err(error_code) => {
+            return HeartbeatStep {
+                response: error_resp(error_code, config),
+                pending: PendingRecords::default(),
+            };
+        }
+    };
 
     // ─── Steady-state: update last_seen / subscription / owned ───
     let any_change = update_member_state(state, config, metadata, req, now, cur_epoch);
@@ -1514,7 +1502,7 @@ fn build_describe(state: &GroupState) -> DescribeView {
 // encodes them as a single RecordBatch ready for OffsetsLog::append.
 // ---------------------------------------------------------------------------
 
-use crabka_protocol::records::{Record, RecordBatch};
+use crabka_protocol::records::RecordBatch;
 
 use super::persistence_next_gen::{
     CurrentMemberAssignmentValue, GroupMetadataValue, MemberMetadataValue, NextGenKey,
@@ -1555,20 +1543,10 @@ impl PendingRecords {
     }
 
     pub fn into_batch(self, group_id: &str, now_ms: i64) -> RecordBatch {
-        let mut records: Vec<Record> = Vec::new();
-        let mut push = |key: Bytes, value: Option<Bytes>| {
-            let delta = i32::try_from(records.len()).expect("batch size fits i32");
-            records.push(Record {
-                offset_delta: delta,
-                timestamp_delta: 0,
-                key: Some(key),
-                value,
-                ..Default::default()
-            });
-        };
+        let mut batch = OffsetRecordBatchBuilder::default();
 
         if let Some(v) = self.group_metadata {
-            push(
+            batch.push(
                 encode_key(&NextGenKey::GroupMetadata {
                     group_id: group_id.into(),
                 }),
@@ -1576,7 +1554,7 @@ impl PendingRecords {
             );
         }
         for (member_id, v) in self.member_metadata {
-            push(
+            batch.push(
                 encode_key(&NextGenKey::MemberMetadata {
                     group_id: group_id.into(),
                     member_id,
@@ -1585,7 +1563,7 @@ impl PendingRecords {
             );
         }
         if let Some(v) = self.target_metadata {
-            push(
+            batch.push(
                 encode_key(&NextGenKey::TargetAssignmentMetadata {
                     group_id: group_id.into(),
                 }),
@@ -1593,7 +1571,7 @@ impl PendingRecords {
             );
         }
         for (member_id, v) in self.target_per_member {
-            push(
+            batch.push(
                 encode_key(&NextGenKey::TargetAssignmentMember {
                     group_id: group_id.into(),
                     member_id,
@@ -1602,7 +1580,7 @@ impl PendingRecords {
             );
         }
         for (member_id, v) in self.current_per_member {
-            push(
+            batch.push(
                 encode_key(&NextGenKey::CurrentMemberAssignment {
                     group_id: group_id.into(),
                     member_id,
@@ -1611,7 +1589,7 @@ impl PendingRecords {
             );
         }
         if self.classic_group_metadata_tombstone {
-            push(
+            batch.push(
                 crate::coordinator::unified::persistence::encode_key(
                     &crate::coordinator::unified::persistence::Key::GroupMetadata {
                         group_id: group_id.into(),
@@ -1621,7 +1599,7 @@ impl PendingRecords {
             );
         }
         if self.next_gen_group_metadata_tombstone {
-            push(
+            batch.push(
                 encode_key(&NextGenKey::GroupMetadata {
                     group_id: group_id.into(),
                 }),
@@ -1629,7 +1607,7 @@ impl PendingRecords {
             );
         }
         if self.next_gen_target_metadata_tombstone {
-            push(
+            batch.push(
                 encode_key(&NextGenKey::TargetAssignmentMetadata {
                     group_id: group_id.into(),
                 }),
@@ -1637,7 +1615,7 @@ impl PendingRecords {
             );
         }
         if let Some(v) = self.classic_group_metadata {
-            push(
+            batch.push(
                 crate::coordinator::unified::persistence::encode_key(
                     &crate::coordinator::unified::persistence::Key::GroupMetadata {
                         group_id: group_id.into(),
@@ -1647,13 +1625,7 @@ impl PendingRecords {
             );
         }
 
-        let last_delta = i32::try_from(records.len().saturating_sub(1)).unwrap_or(0);
-        RecordBatch {
-            max_timestamp: now_ms,
-            records,
-            last_offset_delta: last_delta,
-            ..RecordBatch::default()
-        }
+        batch.finish(now_ms)
     }
 }
 

@@ -1,20 +1,16 @@
 //! `Heartbeat` (`api_key=12`). Validates `(generation, member)` and
 //! refreshes the member's `last_heartbeat` clock inside the group's actor.
 
-use bytes::{Bytes, BytesMut};
-use crabka_metadata::{AclOperation, ResourceType};
+use bytes::Bytes;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{heartbeat_request::HeartbeatRequest, heartbeat_response::HeartbeatResponse},
 };
 use tokio::sync::oneshot;
 
 use crate::{
-    authorizer::{AuthorizationRequest, AuthorizationResult},
-    broker::Broker,
-    codes,
-    coordinator::unified::actor::GroupActorMessage,
-    error::BrokerError,
+    broker::Broker, codes, coordinator::unified::actor::GroupActorMessage, error::BrokerError,
+    handlers::group_read_denied,
 };
 
 #[tracing::instrument(
@@ -44,8 +40,7 @@ pub(crate) async fn handle(
             if group_read_denied(
                 broker.config.authorizer.as_ref(),
                 &image,
-                ctx.principal,
-                ctx.peer,
+                ctx,
                 &req.group_id,
             ) {
                 return encode_denied(version);
@@ -74,30 +69,8 @@ pub(crate) async fn handle(
             throttle_time_ms: 0,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        Ok(buf.freeze())
+        crate::handlers::encode_response(&resp, version)
     }
-}
-
-/// `Read` on `Group(group_id)` gate. Returns `true` when denied.
-fn group_read_denied(
-    authorizer: &dyn crate::authorizer::Authorizer,
-    image: &crabka_metadata::MetadataImage,
-    principal: &crabka_security::Principal,
-    host: &std::net::SocketAddr,
-    group_id: &str,
-) -> bool {
-    authorizer.authorize(
-        image,
-        &AuthorizationRequest {
-            principal,
-            host,
-            resource_type: ResourceType::Group,
-            resource_name: group_id,
-            operation: AclOperation::Read,
-        },
-    ) == AuthorizationResult::Deny
 }
 
 /// Whole-response `GROUP_AUTHORIZATION_FAILED (30)` response built on Deny.
@@ -107,9 +80,7 @@ fn encode_denied(version: i16) -> Result<Bytes, BrokerError> {
         throttle_time_ms: 0,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]
@@ -131,14 +102,9 @@ mod tests {
             groups: vec![],
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+        let ctx = crate::test_support::request_context(&principal, &peer, "heartbeat-client");
 
-        assert!(group_read_denied(
-            &authorizer,
-            &image,
-            &principal,
-            &peer,
-            "g"
-        ));
+        assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
 
         let bytes = encode_denied(heartbeat_response::MAX_VERSION).expect("encode");
         let mut cur: &[u8] = &bytes;

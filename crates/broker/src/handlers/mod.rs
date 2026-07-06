@@ -45,6 +45,17 @@ pub(crate) fn encode_response<R: Encode>(
     Ok(buf.freeze())
 }
 
+pub(crate) fn encode_response_with_context<R: Encode>(
+    resp: &R,
+    version: ApiVersion,
+    context: &'static str,
+) -> Result<Bytes, BrokerError> {
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)
+        .map_err(|e| BrokerError::Replication(format!("{context}: {e}")))?;
+    Ok(buf.freeze())
+}
+
 pub(crate) fn acl_denied(
     authorizer: &dyn crate::authorizer::Authorizer,
     image: &crabka_metadata::MetadataImage,
@@ -63,6 +74,51 @@ pub(crate) fn acl_denied(
             operation,
         },
     ) == crate::authorizer::AuthorizationResult::Deny
+}
+
+pub(crate) fn group_read_denied(
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &crabka_metadata::MetadataImage,
+    ctx: &RequestContext<'_>,
+    group_id: &str,
+) -> bool {
+    acl_denied(
+        authorizer,
+        image,
+        ctx,
+        crabka_metadata::ResourceType::Group,
+        group_id,
+        crabka_metadata::AclOperation::Read,
+    )
+}
+
+pub(crate) fn cluster_alter_denied(
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &crabka_metadata::MetadataImage,
+    ctx: &RequestContext<'_>,
+) -> bool {
+    acl_denied(
+        authorizer,
+        image,
+        ctx,
+        crabka_metadata::ResourceType::Cluster,
+        acl_wire::CLUSTER_RESOURCE_NAME,
+        crabka_metadata::AclOperation::Alter,
+    )
+}
+
+pub(crate) fn parse_advertised_host_port(addr: &str) -> (String, u16) {
+    if let Some(host_port) = crate::host_port::parse_host_port(addr) {
+        return host_port;
+    }
+    tracing::warn!(
+        addr,
+        "advertised_listener not host:port; falling back to localhost:9092"
+    );
+    (
+        crate::host_port::DEFAULT_KAFKA_HOST.into(),
+        crate::host_port::DEFAULT_KAFKA_PORT,
+    )
 }
 
 pub(crate) mod acl_wire;

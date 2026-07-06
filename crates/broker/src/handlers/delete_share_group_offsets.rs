@@ -10,10 +10,10 @@
 //! Intercepted inline in `network::dispatch` for the per-group `Delete` ACL
 //! gate (principal + peer `SocketAddr`).
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest,
         delete_share_group_offsets_response::{
@@ -156,9 +156,7 @@ pub(crate) async fn handle(
         responses,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 fn encode_top_level(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
@@ -168,9 +166,7 @@ fn encode_top_level(version: i16, error_code: i16) -> Result<Bytes, BrokerError>
         responses: Vec::new(),
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]
