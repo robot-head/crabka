@@ -4,41 +4,81 @@
 [![Docs.rs](https://docs.rs/crabka-log/badge.svg)](https://docs.rs/crabka-log)
 [![CI](https://github.com/robot-head/crabka/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-head/crabka/actions/workflows/ci.yml)
 
-Byte-compatible reader/writer for Apache Kafka's on-disk log format.
+Byte-compatible reader and writer for Apache Kafka's on-disk log format.
 
-This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation of Kafka-compatible infrastructure and clients.
+Part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation
+of Apache Kafka-compatible infrastructure and clients.
+
+## Overview
+
+`crabka-log` is the storage layer used by the Crabka broker. It opens,
+recovers, appends, reads, truncates, compacts, and exports Kafka-format log
+directories while preserving Kafka's segment naming and index formats.
+
+The crate works at the single-partition log directory level. Broker-level topic
+configuration, leader/follower ownership, remote-tier scheduling, transaction
+visibility policy, and write serialization are applied by higher layers.
+
+## Capabilities
+
+- Open and recover Kafka-format log directories.
+- Append `RecordBatch` values or verbatim record-batch bytes.
+- Read decoded batches or raw bytes from an absolute offset.
+- Manage sparse `.index`, `.timeindex`, and `.txnindex` files.
+- Roll segments and apply size/time retention.
+- Truncate, trim, and reset logs during replication or leader changes.
+- Maintain leader-epoch checkpoints for truncation decisions.
+- Compact eligible segments and expose tierable segment descriptors.
+
+## Kafka Storage Scope
+
+The crate targets Kafka 4.x log directories: 20-digit zero-padded segment file
+names, append-only `.log` files containing v2 `RecordBatch` streams, sparse
+offset/time indexes, transaction indexes, and leader-epoch checkpoints.
+
+`read` returns decoded `RecordBatch` values. Use `read_raw` when a caller needs
+verbatim bytes for network or tiered-storage transfer.
 
 ## Install
 
 ```sh
 cargo add crabka-log
+cargo add crabka-protocol
 ```
 
-For workspace development, use the path dependency from this repository instead.
+For workspace development, use the path dependency from this repository.
 
-## Usage example
+## Usage
 
 Open a Kafka-compatible log directory, append a batch, and read it back:
 
 ```rust,no_run
-use crabka_log::{Log, LogConfig};
+use crabka_log::{Log, LogConfig, Offset};
 use crabka_protocol::records::RecordBatch;
 
 # fn run() -> Result<(), Box<dyn std::error::Error>> {
 let mut log = Log::open("./target/orders-0", LogConfig::default())?;
 let mut batch = RecordBatch::default();
-// Fill the RecordBatch with records before appending in production code.
+
 let base_offset = log.append(&mut batch)?;
-let bytes = log.read(base_offset, 1024 * 1024)?;
-println!("read {} bytes", bytes.bytes.len());
+let output = log.read(Offset(0), 1024 * 1024)?;
+
+println!("wrote at {base_offset:?}; read {} batches", output.batches.len());
 # Ok(())
 # }
 ```
 
+## Cargo Features
+
+- `test-helpers` - exposes test-only helpers for downstream crate tests.
+
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-log](https://docs.rs/crabka-log). The repository README contains project-wide setup, development, and release notes.
+- [API documentation](https://docs.rs/crabka-log)
+- [Crabka repository](https://github.com/robot-head/crabka)
+- [Kafka compatibility matrix](https://github.com/robot-head/crabka/blob/main/docs/KIP_MATRIX.md)
 
 ## License
 
-Apache-2.0. See the repository `LICENSE` and `NOTICE` files for details.
+Apache-2.0. Derivative work of [Apache Kafka](https://kafka.apache.org); see
+[NOTICE](https://github.com/robot-head/crabka/blob/main/NOTICE).
