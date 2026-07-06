@@ -7,7 +7,6 @@
   <a href="https://codspeed.io/robot-head/crabka?utm_source=badge"><img src="https://img.shields.io/endpoint?url=https://codspeed.io/badge.json" alt="CodSpeed"></a>
   <a href="https://codecov.io/gh/robot-head/crabka"><img src="https://codecov.io/gh/robot-head/crabka/graph/badge.svg?token=EU56CZE3DU" alt="codecov"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0"></a>
-  <a href="rust-toolchain.toml"><img src="https://img.shields.io/badge/rust-1.96.0-orange.svg" alt="Rust 1.96.0"></a>
 </p>
 
 # Crabka
@@ -24,8 +23,8 @@ operators, rebalancing, replication, and observability services.
 
 ## Project Status
 
-Crabka is **beta**, pre-1.0 software. The workspace version is currently
-`0.3.8`.
+Crabka is **beta**, pre-1.0 software. The workspace version is defined in
+[Cargo.toml](Cargo.toml).
 
 The project is still greenfield infrastructure: there are no production users,
 and on-disk compatibility across Crabka versions is not promised yet. Use it for
@@ -83,7 +82,7 @@ For the detailed per-KIP breakdown, see
 ## Install
 
 Crabka is a Rust workspace. The pinned toolchain is in
-[rust-toolchain.toml](rust-toolchain.toml) and currently uses Rust `1.96.0`.
+[rust-toolchain.toml](rust-toolchain.toml).
 
 ```bash
 git clone https://github.com/robot-head/crabka.git
