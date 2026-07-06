@@ -2068,6 +2068,7 @@ dependencies = [
  "arrow",
  "assert2",
  "async-trait",
+ "crabka-object-store",
  "datafusion",
  "futures",
  "object_store",
