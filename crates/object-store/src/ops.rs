@@ -223,6 +223,123 @@ mod tests {
         assert!(c.get(&key).await.unwrap()[..] == payload[..]);
     }
 
+    /// A delegating spy that counts which upload path `put_from_path` takes.
+    /// Both paths produce identical object bytes, so only call counts can pin
+    /// the threshold comparison (`len < threshold`) at its boundary.
+    #[derive(Debug)]
+    struct CountingStore {
+        inner: object_store::memory::InMemory,
+        puts: std::sync::atomic::AtomicUsize,
+        multiparts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl CountingStore {
+        fn new() -> Self {
+            Self {
+                inner: object_store::memory::InMemory::new(),
+                puts: std::sync::atomic::AtomicUsize::new(0),
+                multiparts: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl std::fmt::Display for CountingStore {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "CountingStore({})", self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl object_store::ObjectStore for CountingStore {
+        async fn put_opts(
+            &self,
+            location: &Path,
+            payload: object_store::PutPayload,
+            opts: object_store::PutOptions,
+        ) -> object_store::Result<object_store::PutResult> {
+            self.puts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &Path,
+            opts: object_store::PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+            self.multiparts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &Path,
+            options: object_store::GetOptions,
+        ) -> object_store::Result<object_store::GetResult> {
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: futures::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<Path>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&Path>,
+        ) -> futures::stream::BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&Path>,
+        ) -> object_store::Result<object_store::ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &Path,
+            to: &Path,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    /// Pins the `len < threshold` boundary: one byte under the threshold must
+    /// take the single-PUT path (never multipart).
+    #[tokio::test]
+    async fn put_from_path_at_threshold_minus_one_takes_single_put() {
+        let store = Arc::new(CountingStore::new());
+        let c = ObjectStoreClient::new(store.clone());
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&vec![1u8; 7]).unwrap(); // len 7, threshold 8
+        c.put_from_path(&Path::from("b/under"), f.path(), 8, 4)
+            .await
+            .unwrap();
+        assert!(store.puts.load(std::sync::atomic::Ordering::SeqCst) == 1);
+        assert!(store.multiparts.load(std::sync::atomic::Ordering::SeqCst) == 0);
+    }
+
+    /// Pins the boundary's other side: exactly the threshold must take the
+    /// multipart path (the comparison is strict `<`, not `<=`).
+    #[tokio::test]
+    async fn put_from_path_at_exact_threshold_takes_multipart() {
+        let store = Arc::new(CountingStore::new());
+        let c = ObjectStoreClient::new(store.clone());
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&vec![2u8; 8]).unwrap(); // len 8 == threshold 8
+        c.put_from_path(&Path::from("b/at"), f.path(), 8, 4)
+            .await
+            .unwrap();
+        assert!(store.puts.load(std::sync::atomic::Ordering::SeqCst) == 0);
+        assert!(store.multiparts.load(std::sync::atomic::Ordering::SeqCst) == 1);
+    }
+
     #[tokio::test]
     async fn put_from_path_rejects_zero_chunk_size() {
         let c = client();
