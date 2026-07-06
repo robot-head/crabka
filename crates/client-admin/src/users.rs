@@ -405,7 +405,7 @@ fn parse_describe_user_scram_credentials_response(
                     iterations: credential.iterations,
                 })
                 .collect(),
-            error: error_if(result.error_code, result.error_message),
+            error: kafka_error_if(result.error_code, result.error_message),
         })
         .collect())
 }
