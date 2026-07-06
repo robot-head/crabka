@@ -25,10 +25,10 @@ A walreceiver front-end speaking `START_REPLICATION … PHYSICAL` to a **stock, 
 A sans-IO `XLogRecord` parser over an LSN-addressed byte stream (segment/page framing, contrecords, CRC-32C, block references, FPIs) and a page-shard router keying decoded records by `(RelTag, block) @ LSN` — the exact shape PG-3's delta layers ingest. Differentially verified against `pg_waldump` over fixture WAL. 100% net-new, pure Rust, buildable today.
 
 ### PG-3 — Layer store (versioned pages on the bucket)
-Image + delta layers keyed `(rel, blk) @ LSN`, the layer map, LSN-visibility queries ("layers covering key K at LSN L"), compaction/GC. Reuses object-store plumbing and Parquet/index-persistence *patterns*; the versioned-page data model is net-new (grounded: the blockstore's cannot express it). Developable today atop PG-2's output + a local/`InMemory` bucket.
+Image + delta layer *formats*, the layer map, LSN-visibility queries ("layers covering key K at LSN L"), ingest with idempotent flush, and **structural** (non-materializing) L0→L1 compaction. Reuses object-store plumbing and index-persistence *patterns*; the versioned-page data model is net-new (grounded: the blockstore's cannot express it). Developable today atop PG-2's output + a local/`InMemory` bucket. *(Refined during the PG-3 design: image-layer **creation** and GC require redo, so they live in PG-4.)*
 
-### PG-4 — Redo + `get_page@LSN` + page service
-Materialization: (latest image ≤ LSN) ⊕ (deltas ≤ LSN via redo), served over a pagestream RPC. **Carries the chapter's crux decision** — sandboxed Postgres walredo sidecar vs native Rust redo vs Neon's hybrid — presented as approaches in its own design cycle. Differential page-image verification against stock Postgres.
+### PG-4 — Redo + `get_page@LSN` + page service (+ materializing compaction, GC)
+Materialization: (latest image ≤ LSN) ⊕ (deltas ≤ LSN via redo), served over a pagestream RPC — plus image-layer creation and GC (both need redo; re-homed from PG-3). **Carries the chapter's crux decision** — sandboxed Postgres walredo sidecar vs native Rust redo vs Neon's hybrid — presented as approaches in its own design cycle. Differential page-image verification against stock Postgres.
 
 ### PG-5 — Compute integration
 The patched-Postgres compute image (`smgr` → pagestream), one maintained patch set per supported PG major (containerized — operationally an OCI image, like Neon's compute). **The keystone conformance gate:** pgbench boots and runs against the disaggregated stack (PG-1 ingest live), with differential page-image checks vs stock Postgres — the PG-differential analogue of the JVM-differential culture.
