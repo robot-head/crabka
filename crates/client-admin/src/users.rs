@@ -19,6 +19,7 @@ use crabka_protocol::owned::{
     create_acls_request::{AclCreation, CreateAclsRequest},
     delete_acls_request::{DeleteAclsFilter, DeleteAclsRequest},
     describe_acls_request::DescribeAclsRequest,
+    describe_user_scram_credentials_request::{DescribeUserScramCredentialsRequest, UserName},
 };
 use crabka_security::SaslMechanism;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -117,6 +118,19 @@ pub struct ScramUserOutcome {
     pub error: Option<KafkaError>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserScramCredential {
+    pub mechanism: String,
+    pub iterations: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserScramCredentials {
+    pub username: String,
+    pub credentials: Vec<UserScramCredential>,
+    pub error: Option<KafkaError>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CreateAclOutcome {
     pub error: Option<KafkaError>,
@@ -187,6 +201,27 @@ impl AdminClient {
             Err(error) => return Err(AdminError::from(error)),
         };
         parse_describe_acls(resp)
+    }
+
+    pub async fn describe_user_scram_credentials(
+        &mut self,
+        users: Option<&[String]>,
+    ) -> Result<Vec<UserScramCredentials>, AdminError> {
+        let req = DescribeUserScramCredentialsRequest {
+            users: users.map(|users| {
+                users
+                    .iter()
+                    .map(|name| UserName {
+                        name: name.clone(),
+                        ..Default::default()
+                    })
+                    .collect()
+            }),
+            ..Default::default()
+        };
+        let resp = self.conn.send(req).await?;
+
+        parse_describe_user_scram_credentials_response(resp)
     }
 
     /// Create the supplied ACLs.
@@ -355,6 +390,44 @@ fn parse_alter_scram_results(
             error: error_if(r.error_code, r.error_message),
         })
         .collect()
+}
+
+fn parse_describe_user_scram_credentials_response(
+    resp: <DescribeUserScramCredentialsRequest as crabka_protocol::ProtocolRequest>::Response,
+) -> Result<Vec<UserScramCredentials>, AdminError> {
+    if resp.error_code != 0 {
+        return Err(AdminError::Broker {
+            api: "DescribeUserScramCredentials",
+            code: resp.error_code,
+            name: kafka_error_name(resp.error_code),
+            message: resp.error_message,
+        });
+    }
+
+    Ok(resp
+        .results
+        .into_iter()
+        .map(|result| UserScramCredentials {
+            username: result.user,
+            credentials: result
+                .credential_infos
+                .into_iter()
+                .map(|credential| UserScramCredential {
+                    mechanism: scram_mechanism_name(credential.mechanism).to_string(),
+                    iterations: credential.iterations,
+                })
+                .collect(),
+            error: error_if(result.error_code, result.error_message),
+        })
+        .collect())
+}
+
+fn scram_mechanism_name(mechanism: i8) -> &'static str {
+    match mechanism {
+        SCRAM_SHA_256_WIRE => "SCRAM-SHA-256",
+        SCRAM_SHA_512_WIRE => "SCRAM-SHA-512",
+        _ => "UNKNOWN",
+    }
 }
 
 fn filter_to_describe_request(f: &AclEntryFilter) -> DescribeAclsRequest {
@@ -756,6 +829,176 @@ mod tests {
                 permission_type: 1,
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
             }
+        );
+    }
+
+    #[test]
+    fn users_describe_scram_top_level_error_returns_broker_error() {
+        let resp = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
+            error_code: 31,
+            error_message: Some("cluster auth denied".to_string()),
+            ..Default::default()
+        };
+
+        let err = parse_describe_user_scram_credentials_response(resp)
+            .expect_err("top-level SCRAM describe errors must fail the request");
+
+        match err {
+            AdminError::Broker {
+                api,
+                code,
+                name,
+                message,
+            } => {
+                check!(api == "DescribeUserScramCredentials");
+                check!(code == 31);
+                check!(name == "CLUSTER_AUTHORIZATION_FAILED");
+                check!(message == Some("cluster auth denied".to_string()));
+            }
+            other => panic!("expected broker error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn users_describe_scram_preserves_credential_iterations() {
+        let resp = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
+            results: vec![
+                crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResult {
+                    user: "alice".to_string(),
+                    credential_infos: vec![
+                        crabka_protocol::owned::describe_user_scram_credentials_response::CredentialInfo {
+                            mechanism: 1,
+                            iterations: 4096,
+                            ..Default::default()
+                        },
+                        crabka_protocol::owned::describe_user_scram_credentials_response::CredentialInfo {
+                            mechanism: 2,
+                            iterations: 8192,
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let users = parse_describe_user_scram_credentials_response(resp)
+            .expect("valid SCRAM describe response should parse");
+
+        assert!(users.len() == 1);
+        check!(users[0].username == "alice");
+        check!(
+            users[0].credentials
+                == vec![
+                    UserScramCredential {
+                        mechanism: "SCRAM-SHA-256".to_string(),
+                        iterations: 4096,
+                    },
+                    UserScramCredential {
+                        mechanism: "SCRAM-SHA-512".to_string(),
+                        iterations: 8192,
+                    },
+                ]
+        );
+    }
+
+    #[test]
+    fn users_describe_scram_unknown_user_preserves_resource_not_found_name() {
+        let resp = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
+            results: vec![
+                crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResult {
+                    user: "ghost".to_string(),
+                    error_code: 91,
+                    error_message: Some("no such SCRAM user".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let users = parse_describe_user_scram_credentials_response(resp)
+            .expect("per-user SCRAM describe errors should parse into rows");
+
+        check!(users.len() == 1);
+        check!(users[0].username == "ghost");
+        check!(
+            users[0].error
+                == Some(KafkaError {
+                    code: 91,
+                    name: "RESOURCE_NOT_FOUND",
+                    message: Some("no such SCRAM user".to_string()),
+                })
+        );
+    }
+
+    #[test]
+    fn users_describe_scram_duplicate_user_preserves_duplicate_resource_name() {
+        let resp = crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
+            results: vec![
+                crabka_protocol::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResult {
+                    user: "alice".to_string(),
+                    error_code: 92,
+                    error_message: Some("duplicate user".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let users = parse_describe_user_scram_credentials_response(resp)
+            .expect("per-user SCRAM describe errors should parse into rows");
+
+        check!(users.len() == 1);
+        check!(users[0].username == "alice");
+        check!(
+            users[0].error
+                == Some(KafkaError {
+                    code: 92,
+                    name: "DUPLICATE_RESOURCE",
+                    message: Some("duplicate user".to_string()),
+                })
+        );
+    }
+
+    #[test]
+    fn users_alter_scram_preserves_scram_error_names() {
+        let resp = crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResponse {
+            results: vec![
+                crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResult {
+                    user: "alice".to_string(),
+                    error_code: 33,
+                    error_message: Some("unknown mechanism".to_string()),
+                    ..Default::default()
+                },
+                crabka_protocol::owned::alter_user_scram_credentials_response::AlterUserScramCredentialsResult {
+                    user: "bob".to_string(),
+                    error_code: 93,
+                    error_message: Some("too many iterations".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+
+        let users = parse_alter_scram_results(resp);
+
+        check!(users.len() == 2);
+        check!(
+            users[0].error
+                == Some(KafkaError {
+                    code: 33,
+                    name: "UNSUPPORTED_SASL_MECHANISM",
+                    message: Some("unknown mechanism".to_string()),
+                })
+        );
+        check!(
+            users[1].error
+                == Some(KafkaError {
+                    code: 93,
+                    name: "UNACCEPTABLE_CREDENTIAL",
+                    message: Some("too many iterations".to_string()),
+                })
         );
     }
 }

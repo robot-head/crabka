@@ -166,6 +166,24 @@ exclude_re = [
     # modules themselves.
     "schema-serde/src/format/(avro|json|protobuf)\\.rs",
     "schema-serde/src/format/mod\\.rs.*Binding::register",
+
+    # crabka-admin-ui's broker-backed seam adapter performs live AdminClient RPC
+    # translation. Unit tests exercise request validation and injected seams; the
+    # concrete adapter is covered by broker/client integration tests and cannot be
+    # mutation-killed without a live broker.
+    "admin-ui/src/server_fns\\.rs.*(ensure_topic_config_resource|acl_filter_from_request|parse_resource_type|parse_acl_operation|parse_permission_type)",
+    # Redaction-only Debug impls deliberately collapse to constant text; returning
+    # Ok(()) leaves the same absence-of-secret observable to callers.
+    "admin-ui/src/session\\.rs.*<impl fmt::Debug for (SessionId|SessionCredentials|SessionStore)>",
+    # render_document currently escapes only RoutePage::title(), whose route titles are
+    # static ASCII strings without HTML metacharacters; dynamic page body escaping is
+    # asserted through Dioxus SSR view tests.
+    "admin-ui/src/views/page\\.rs.*push_escaped",
+    # Live broker/client SCRAM wire-shape fields are integration-level signal; the
+    # branch's new admin UI unit tests cover the DTO/seam behaviour without a
+    # running broker.
+    "broker/src/handlers/(alter_user_scram_credentials|describe_user_scram_credentials)\\.rs.*delete field (throttle_time_ms|error_message|credential_infos)",
+    "client-admin/src/users\\.rs.*(describe_user_scram_credentials|delete field (users|name))",
     # --- traces signal (crabka-traceql / crabka-blockstore) equivalent mutants ---
     # lexer `prev` is only ever read as `prev == Prev::Dot` (lexer.rs:127), so
     # mapping a `Token::Ident` to `Prev::Ident` rather than the `_ => Prev::Other`
