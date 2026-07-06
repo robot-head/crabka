@@ -35,6 +35,8 @@ struct Cli {
     target: Target,
     #[arg(long, default_value = "127.0.0.1:4041")]
     listen: SocketAddr,
+    #[arg(long, env = "CRABKA_ADMIN_LISTEN_ADDR", default_value = "0.0.0.0:9404")]
+    admin_listen_addr: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:9092")]
     bootstrap: String,
     #[arg(long, default_value = "file://./.crabka-metrics-blocks")]
@@ -95,6 +97,7 @@ fn build_object_store(url: &str) -> Result<Arc<dyn ObjectStore>, Box<dyn std::er
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
     let _telemetry = crabka_telemetry::init(
         OtlpConfig::from_env(
             |k| std::env::var(k).ok(),
@@ -107,13 +110,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "crabka-metrics",
     )?;
     let metrics = ServiceMetrics::new();
-    crabka_telemetry::profiling::serve_admin_from_env_with(
-        "0.0.0.0:9404",
+    crabka_telemetry::profiling::serve_admin(
+        cli.admin_listen_addr,
         crabka_metrics::metrics::metrics_router(metrics.registry.clone()),
     )
     .await?;
 
-    let cli = Cli::parse();
     if !runnable_targets().contains(&cli.target) {
         eprintln!("metrics target {:?} is not implemented yet", cli.target);
         std::process::exit(2);

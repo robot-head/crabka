@@ -401,6 +401,11 @@ pub struct BrokerConfig {
     /// `for_tests` so unit tests don't fight over port allocation.
     pub metrics_listen_addr: Option<SocketAddr>,
 
+    /// Optional OTLP endpoint for KIP-714 client metrics forwarding.
+    /// Populated by binaries from their parsed runtime configuration rather
+    /// than read from the environment inside [`Broker::start`].
+    pub client_metrics_otlp_endpoint: Option<String>,
+
     /// KIP-227: maximum number of incremental-fetch sessions kept in the
     /// per-broker cache. Each session tracks the (topic, partition) set a
     /// client is subscribed to so subsequent fetches can be deltas. When
@@ -611,10 +616,14 @@ pub const DEFAULT_REPLICA_LAG_TIME_MAX_MS: u64 = 30_000;
 /// `metadata.log.max.record.bytes.between.snapshots`.
 pub const DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS: u64 = 20 * 1024 * 1024;
 
+/// Default time cap between metadata-log snapshots in milliseconds: 1 hour,
+/// matching Kafka's `metadata.log.max.snapshot.interval.ms`.
+pub const DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL_MS: u64 = 60 * 60 * 1_000;
+
 /// Default time cap between metadata-log snapshots: 1 hour, matching Kafka's
 /// `metadata.log.max.snapshot.interval.ms`.
 pub const DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL: std::time::Duration =
-    std::time::Duration::from_hours(1);
+    std::time::Duration::from_millis(DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL_MS);
 
 /// KIP-630: default committed-record gap between metadata-log snapshots.
 pub const DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS: u64 = 10_000;
@@ -622,6 +631,24 @@ pub const DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS: u64 = 10_000;
 /// KIP-853: default maximum log-entry lag at which an observer is still
 /// promotable to a quorum voter.
 pub const DEFAULT_OBSERVER_LAG_BOUND: u64 = 100;
+
+/// Default controller election timeout, in milliseconds.
+pub const DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS: u64 = 5_000;
+
+/// Default controller heartbeat interval, in milliseconds.
+pub const DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS: u64 = 500;
+
+/// Default controlled-shutdown leadership drain timeout, in milliseconds.
+pub const DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS: u64 = 20_000;
+
+/// Default idle-transaction abort cleanup interval, in milliseconds.
+pub const DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS: u64 = 10_000;
+
+/// Default TLS material reload polling interval, in milliseconds.
+pub const DEFAULT_TLS_RELOAD_INTERVAL_MS: u64 = 30_000;
+
+/// Default RemoteLogManager copy / retention cadence, in milliseconds.
+pub const DEFAULT_REMOTE_LOG_MANAGER_INTERVAL_MS: u64 = 30_000;
 
 /// KIP-460: default auto-rebalance tick cadence, in seconds. Matches Kafka's
 /// `leader.imbalance.check.interval.seconds`.
@@ -776,6 +803,7 @@ impl BrokerConfig {
             // setting this to `Some(127.0.0.1:0)`; sharing a default
             // port would race in parallel test runs.
             metrics_listen_addr: None,
+            client_metrics_otlp_endpoint: None,
             // Disable the disk scanner by default in tests so the
             // background task doesn't tick during short-lived fixtures.
             // Integration tests enable this explicitly when needed.
@@ -995,8 +1023,12 @@ impl Default for BrokerConfig {
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
             heartbeat_timeout_ms: DEFAULT_HEARTBEAT_TIMEOUT_MS,
             replica_lag_time_max_ms: DEFAULT_REPLICA_LAG_TIME_MAX_MS,
-            controller_election_timeout: std::time::Duration::from_secs(5),
-            controller_heartbeat_interval: std::time::Duration::from_millis(500),
+            controller_election_timeout: std::time::Duration::from_millis(
+                DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS,
+            ),
+            controller_heartbeat_interval: std::time::Duration::from_millis(
+                DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS,
+            ),
             metadata_max_bytes_between_snapshots: DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
             metadata_max_snapshot_interval: DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL,
             metadata_snapshot_interval_records: DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
@@ -1033,7 +1065,9 @@ impl Default for BrokerConfig {
             transaction_two_phase_commit_enable: false,
             // KIP-98/KIP-939 idle-transaction reaper cadence (Kafka's
             // `transaction.abort.timed.out.transaction.cleanup.interval.ms`).
-            txn_abort_cleanup_interval: std::time::Duration::from_secs(10),
+            txn_abort_cleanup_interval: std::time::Duration::from_millis(
+                DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS,
+            ),
             next_gen_consumer_group: Box::new(
                 crate::coordinator::unified::config::NextGenConfig::default(),
             ),
@@ -1050,7 +1084,7 @@ impl Default for BrokerConfig {
             leader_imbalance_per_broker_percentage: DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE,
             #[cfg(any(test, feature = "test-helpers"))]
             cleaner_interval_override: None,
-            tls_reload_interval: std::time::Duration::from_secs(30),
+            tls_reload_interval: std::time::Duration::from_millis(DEFAULT_TLS_RELOAD_INTERVAL_MS),
             // Default to `None` so multi-broker library users (and
             // multi-broker tests) don't race on a fixed port. The
             // `crabka-broker` binary opts in to `Some(0.0.0.0:9404)`
@@ -1058,6 +1092,7 @@ impl Default for BrokerConfig {
             // sets that via env, so production deployments still get
             // metrics by default.
             metrics_listen_addr: None,
+            client_metrics_otlp_endpoint: None,
             partition_disk_scan_interval_secs: 60,
             max_incremental_fetch_session_cache_slots:
                 DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS,
@@ -1076,7 +1111,9 @@ impl Default for BrokerConfig {
             // Tiered storage off by default. Operators enable it
             // via `[remote_storage] storage_dir` in `broker.toml`.
             remote_storage_backend: None,
-            remote_log_manager_interval: std::time::Duration::from_secs(30),
+            remote_log_manager_interval: std::time::Duration::from_millis(
+                DEFAULT_REMOTE_LOG_MANAGER_INTERVAL_MS,
+            ),
             // Production default: topic-backed RLMM. `bootstrap` and
             // `snapshot_dir` are empty; the broker derives them at startup.
             remote_log_metadata: RlmmKind::TopicBacked(KafkaRlmmConfig::default()),
@@ -1233,8 +1270,14 @@ mod tests {
     #[test]
     fn defaults_use_conservative_raft_timings() {
         let c = BrokerConfig::default();
-        assert!(c.controller_election_timeout == std::time::Duration::from_secs(5));
-        assert!(c.controller_heartbeat_interval == std::time::Duration::from_millis(500));
+        assert!(
+            c.controller_election_timeout
+                == std::time::Duration::from_millis(DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS)
+        );
+        assert!(
+            c.controller_heartbeat_interval
+                == std::time::Duration::from_millis(DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS)
+        );
     }
 
     #[test]

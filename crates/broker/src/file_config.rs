@@ -1166,16 +1166,15 @@ impl FileConfig {
         }
 
         // KIP-48: delegation-token master key + lifetime knobs.
-        // `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var wins over the TOML
-        // `secret_key`; when neither source provides a key the broker
-        // leaves the field as `None` and the four DT RPCs return
-        // `DELEGATION_TOKEN_AUTH_DISABLED`.
-        let env_key = std::env::var("CRABKA_DELEGATION_TOKEN_SECRET_KEY").ok();
-        let toml_key = self
-            .delegation_token
-            .as_ref()
-            .and_then(|d| d.secret_key.clone());
-        if let Some(k) = env_key.or(toml_key) {
+        // The binary seeds `delegation_token_secret_key` from its parsed
+        // CLI/env args before applying TOML. Preserve that runtime value when
+        // present; otherwise fall back to the TOML `secret_key`.
+        if cfg.delegation_token_secret_key.is_none()
+            && let Some(k) = self
+                .delegation_token
+                .as_ref()
+                .and_then(|d| d.secret_key.clone())
+        {
             cfg.delegation_token_secret_key =
                 Some(crabka_security::SecretBytes::new(k.into_bytes()));
         }

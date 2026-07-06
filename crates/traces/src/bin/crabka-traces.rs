@@ -50,6 +50,8 @@ struct Cli {
     target: Target,
     #[arg(long, default_value = "127.0.0.1:3200")]
     listen: String,
+    #[arg(long, env = "CRABKA_ADMIN_LISTEN_ADDR", default_value = "0.0.0.0:9404")]
+    admin_listen_addr: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:4317")]
     grpc_listen: String,
     #[arg(long, default_value = "127.0.0.1:4318")]
@@ -185,8 +187,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "crabka-traces",
     )?;
     let metrics = ServiceMetrics::new();
-    crabka_telemetry::profiling::serve_admin_from_env_with(
-        "0.0.0.0:9404",
+    crabka_telemetry::profiling::serve_admin(
+        cli.admin_listen_addr,
         crabka_traces::metrics::metrics_router(metrics.registry.clone()),
     )
     .await?;
