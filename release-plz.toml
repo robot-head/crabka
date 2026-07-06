@@ -75,6 +75,11 @@ release = true
 # Internal services, domain crates, build/dev tooling, demos, and experiments are
 # never published to crates.io and are not released independently.
 [[package]]
+name = "crabka-admin-ui"
+publish = false
+release = false
+
+[[package]]
 name = "crabka-audit"
 publish = false
 release = false
