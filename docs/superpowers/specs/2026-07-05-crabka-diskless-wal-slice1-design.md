@@ -106,7 +106,7 @@ A per-topic `diskless` boolean, resolved from the metadata image (greenfield: ad
 - **`crates/broker/src/partition.rs`** — `ProduceData`/`ProduceJob`/`WriterMessage` (`:50-69`) and `await_hw_at_least` (`:538`) unchanged; the `Partition` gains a handle to its `WalStore` (a `dyn WalStore` for diskless topics).
 - **`crates/broker/src/replica_state.rs`** — add `recompute_hw_for_wal_durable(offset)` alongside `recompute_hw_for_leader_append`; `compute_hw` (`:135`) unchanged.
 - **`crates/broker/src/wal/`** — new module: `WalStore` trait + `LocalFsyncWal`.
-- **`crates/log`** — no source change; `LocalFsyncWal` uses existing `Log::append*` + `Segment::flush`/`sync_data`.
+- **`crates/log`** — one small addition: a public `Log::sync()` that `fsync`s the active segment on demand (mirroring the existing `flush_on_append` flush at `log.rs:579`), independent of the `flush_on_append` config. `LocalFsyncWal` calls it. Offset assignment (`Log::append*`) is otherwise unchanged.
 - **Metadata/config** — a `diskless` per-topic flag on the topic config in the metadata image.
 - **`crates/broker/src/data_path_model.rs`** — add the `wal_acked` ghost, `WalAppend`/`WalCommit` model actions, and the no-loss invariant; keep `data_clean` (`:540`) green.
 
