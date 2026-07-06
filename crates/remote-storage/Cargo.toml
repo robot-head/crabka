@@ -20,6 +20,7 @@ workspace = true
 [dependencies]
 bytes = { workspace = true }
 crabka-ids = { version = "0.3.8", path = "../ids" }
+crabka-object-store = { version = "0.3.8", path = "../object-store" }
 object_store = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
