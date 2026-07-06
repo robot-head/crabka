@@ -1209,6 +1209,39 @@ mod tests {
         assert!(resp.error_code == codes::FENCED_MEMBER_EPOCH);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn known_member_epoch_zero_is_stale_not_first_join() {
+        let (metadata, _id) = metadata_with_topic("t", 4);
+        let (coord, _log) = make_coordinator(metadata);
+        let handle = coord.get_or_create_share("g");
+        let joined = heartbeat(
+            &handle,
+            ShareGroupHeartbeatRequest {
+                group_id: "g".into(),
+                member_id: "m1".into(),
+                member_epoch: 0,
+                subscribed_topic_names: Some(vec!["t".into()]),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert!(joined.member_epoch == 1);
+
+        let resp = heartbeat(
+            &handle,
+            ShareGroupHeartbeatRequest {
+                group_id: "g".into(),
+                member_id: "m1".into(),
+                member_epoch: 0,
+                subscribed_topic_names: Some(vec!["t".into()]),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        assert!(resp.error_code == codes::STALE_MEMBER_EPOCH);
+    }
+
     #[test]
     fn pending_records_tombstone_omits_value() {
         let p = PendingShareRecords {

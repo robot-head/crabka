@@ -92,4 +92,16 @@ mod tests {
         let delay = consume_request_quota(&img, &buckets, "alice", "", 1_000_000);
         assert!(delay == Duration::from_secs(1));
     }
+
+    #[test]
+    fn overage_returns_scaled_uncapped_delay() {
+        // rate=100% gives a 1_000_000 us/sec budget. The bucket starts with
+        // one second of burst, so 1_500_000 us leaves a 500_000 us overage.
+        let img = img_with_quota(vec![("user", Some("alice"))], 100.0);
+        let buckets = QuotaBuckets::new();
+
+        let delay = consume_request_quota(&img, &buckets, "alice", "", 1_500_000);
+
+        assert!(delay == Duration::from_millis(500));
+    }
 }

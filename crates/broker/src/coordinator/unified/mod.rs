@@ -139,7 +139,6 @@ impl OffsetRecordBatchBuilder {
         let delta = i32::try_from(self.records.len()).expect("batch size fits i32");
         self.records.push(Record {
             offset_delta: delta,
-            timestamp_delta: 0,
             key: Some(key),
             value,
             ..Default::default()
