@@ -7,7 +7,7 @@
 //! SSA / merge-patch wrappers, and the labels / owner-ref helpers are
 //! shared verbatim.
 
-use std::{collections::BTreeMap, fmt::Debug};
+use std::{collections::BTreeMap, fmt::Debug, future::Future, pin::Pin};
 
 use k8s_openapi::{
     ByteString,
@@ -21,12 +21,16 @@ use kube::{
     Resource,
     api::{Api, DynamicObject, Patch, PatchParams, PostParams},
     core::{ApiResource, GroupVersionKind},
+    runtime::controller::Action,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::crd::{Kafka, KafkaCondition};
+use crate::{
+    context::Context,
+    crd::{Kafka, KafkaCondition},
+};
 
 pub(crate) const FIELD_MANAGER: &str = "crabka-operator";
 
@@ -138,6 +142,52 @@ pub(crate) fn condition(type_: &str, status: &str, reason: &str, message: &str) 
         message: message.into(),
         last_transition_time: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ParentVersionGate<'a> {
+    Cleared,
+    Invalid(&'a KafkaCondition),
+    Waiting,
+}
+
+/// Shared parent-Kafka version gate. Clears when the parent has either
+/// `KafkaVersionValid=True` or a finalized `status.metadataVersion`.
+pub(crate) fn parent_version_gate(parent: &Kafka) -> ParentVersionGate<'_> {
+    let status = parent.status.as_ref();
+    let version_cond =
+        status.and_then(|s| s.conditions.iter().find(|c| c.type_ == "KafkaVersionValid"));
+    let finalized = status.and_then(|s| s.metadata_version.as_deref());
+
+    if finalized.is_some() || version_cond.is_some_and(|c| c.status == "True") {
+        return ParentVersionGate::Cleared;
+    }
+
+    match version_cond {
+        Some(condition) => ParentVersionGate::Invalid(condition),
+        None => ParentVersionGate::Waiting,
+    }
+}
+
+/// Time a reconcile future and record the shared reconcile metric.
+pub(crate) async fn record_reconcile<E, F>(
+    ctx: &Context,
+    kind: &'static str,
+    reconcile: Pin<Box<F>>,
+) -> Result<Action, E>
+where
+    F: Future<Output = Result<Action, E>> + ?Sized,
+{
+    let started = std::time::Instant::now();
+    let result = reconcile.await;
+    let outcome = if result.is_ok() {
+        crate::telemetry::ReconcileResult::Ok
+    } else {
+        crate::telemetry::ReconcileResult::Error
+    };
+    ctx.metrics
+        .record_reconcile(kind, outcome, started.elapsed().as_secs_f64());
+    result
 }
 
 /// Server-side apply a typed object. Field manager is `crabka-operator`,
