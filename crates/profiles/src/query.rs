@@ -46,6 +46,43 @@ fn is_internal_label(name: &str) -> bool {
     name == PROFILE_ID_LABEL
 }
 
+#[derive(Clone, Copy)]
+struct MetadataRange {
+    start_ms: i64,
+    end_ms: i64,
+    omitted: bool,
+}
+
+impl MetadataRange {
+    fn from_request(start_ms: i64, end_ms: i64) -> Self {
+        let omitted = start_ms == 0 && end_ms == 0;
+        if omitted {
+            Self {
+                start_ms: 0,
+                end_ms: i64::MAX,
+                omitted,
+            }
+        } else {
+            Self {
+                start_ms,
+                end_ms,
+                omitted,
+            }
+        }
+    }
+
+    fn validate<S: ProfileStore>(
+        self,
+        state: &QuerierState<S>,
+        tenant: &str,
+    ) -> Result<Self, ProfileError> {
+        if !self.omitted {
+            state.validate_query_range(tenant, self.start_ms, self.end_ms)?;
+        }
+        Ok(self)
+    }
+}
+
 pub type DefaultStore = InMemoryProfileStore;
 type SeriesKey = Vec<(String, String)>;
 type SpanExemplarsBySeries = BTreeMap<SeriesKey, BTreeMap<i64, Vec<pb::types::v1::Exemplar>>>;
@@ -1232,20 +1269,12 @@ where
 {
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let req = req.0;
-    let range_omitted = req.start == 0 && req.end == 0;
-    let (start, end) = if range_omitted {
-        (0, i64::MAX)
-    } else {
-        (req.start, req.end)
-    };
-    if !range_omitted {
-        state
-            .validate_query_range(&tenant, start, end)
-            .map_err(connect_error)?;
-    }
+    let range = MetadataRange::from_request(req.start, req.end)
+        .validate(&state, &tenant)
+        .map_err(connect_error)?;
     let types = state
         .store
-        .profile_types(&tenant, start, end)
+        .profile_types(&tenant, range.start_ms, range.end_ms)
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(
@@ -1295,21 +1324,12 @@ where
 {
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
-    // Omitted range (start == end == 0) means "unbounded" (see `series_inner`).
-    let range_omitted = req.0.start == 0 && req.0.end == 0;
-    let (start, end) = if range_omitted {
-        (0, i64::MAX)
-    } else {
-        (req.0.start, req.0.end)
-    };
-    if !range_omitted {
-        state
-            .validate_query_range(&tenant, start, end)
-            .map_err(connect_error)?;
-    }
+    let range = MetadataRange::from_request(req.0.start, req.0.end)
+        .validate(&state, &tenant)
+        .map_err(connect_error)?;
     let mut names = state
         .store
-        .label_names(&tenant, &matchers, start, end)
+        .label_names(&tenant, &matchers, range.start_ms, range.end_ms)
         .await
         .map_err(connect_error)?;
     names.retain(|name| !is_internal_label(name));
@@ -1345,18 +1365,9 @@ where
 {
     let tenant = tenant_from_headers(&headers).map_err(connect_error)?;
     let matchers = parse_matchers(&req.0.matchers).map_err(connect_error)?;
-    // Omitted range (start == end == 0) means "unbounded" (see `series_inner`).
-    let range_omitted = req.0.start == 0 && req.0.end == 0;
-    let (start, end) = if range_omitted {
-        (0, i64::MAX)
-    } else {
-        (req.0.start, req.0.end)
-    };
-    if !range_omitted {
-        state
-            .validate_query_range(&tenant, start, end)
-            .map_err(connect_error)?;
-    }
+    let range = MetadataRange::from_request(req.0.start, req.0.end)
+        .validate(&state, &tenant)
+        .map_err(connect_error)?;
     if is_internal_label(&req.0.name) {
         return Ok(ConnectResponse::new(pb::querier::v1::LabelValuesResponse {
             names: Vec::new(),
@@ -1364,7 +1375,13 @@ where
     }
     let names = state
         .store
-        .label_values(&tenant, &req.0.name, &matchers, start, end)
+        .label_values(
+            &tenant,
+            &req.0.name,
+            &matchers,
+            range.start_ms,
+            range.end_ms,
+        )
         .await
         .map_err(connect_error)?;
     Ok(ConnectResponse::new(pb::querier::v1::LabelValuesResponse {
@@ -1399,20 +1416,18 @@ where
     // expand to the full range and skip the range-limit check (mirrors
     // `profile_types_inner`). Honoring [0, 0] literally filters out every row
     // and leaves the drilldown with no series to chart.
-    let range_omitted = req.0.start == 0 && req.0.end == 0;
-    let (start, end) = if range_omitted {
-        (0, i64::MAX)
-    } else {
-        (req.0.start, req.0.end)
-    };
-    if !range_omitted {
-        state
-            .validate_query_range(&tenant, start, end)
-            .map_err(connect_error)?;
-    }
+    let range = MetadataRange::from_request(req.0.start, req.0.end)
+        .validate(&state, &tenant)
+        .map_err(connect_error)?;
     let labels_set = state
         .store
-        .series(&tenant, &matchers, &req.0.label_names, start, end)
+        .series(
+            &tenant,
+            &matchers,
+            &req.0.label_names,
+            range.start_ms,
+            range.end_ms,
+        )
         .await
         .map_err(connect_error)?
         .into_iter()
