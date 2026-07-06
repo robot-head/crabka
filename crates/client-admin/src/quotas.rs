@@ -122,13 +122,10 @@ fn op_to_wire(op: &QuotaOp) -> AlterOp {
         QuotaOp::Set { key, value } => AlterOp {
             key: key.clone(),
             value: *value,
-            remove: false,
             ..Default::default()
         },
         QuotaOp::Remove { key } => AlterOp {
             key: key.clone(),
-            // Wire requires a value field even on remove; broker ignores it.
-            value: 0.0,
             remove: true,
             ..Default::default()
         },
@@ -160,10 +157,63 @@ pub fn diff_user_quotas(current: &UserQuotaConfig, desired: &UserQuotaConfig) ->
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use assert2::assert;
-    use crabka_protocol::UnknownTaggedFields;
+    use bytes::{Buf, BytesMut};
+    use crabka_client_core::MockBroker;
+    use crabka_protocol::{
+        Decode, Encode, UnknownTaggedFields,
+        owned::{
+            alter_client_quotas_request,
+            alter_client_quotas_response::{AlterClientQuotasResponse, EntityData, EntryData},
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            describe_client_quotas_request,
+            describe_client_quotas_response::{
+                DescribeClientQuotasResponse, EntityData as DescribeEntityData,
+                EntryData as DescribeEntryData, ValueData as DescribeValueData,
+            },
+        },
+    };
 
     use super::*;
+
+    fn encode_v0(resp: &impl Encode) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        resp.encode(&mut buf, 0).unwrap();
+        buf.to_vec()
+    }
+
+    fn api_versions_response(api_key: i16, version: i16) -> Vec<u8> {
+        encode_v0(&ApiVersionsResponse {
+            api_keys: vec![
+                ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 0,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key,
+                    min_version: version,
+                    max_version: version,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+    }
+
+    fn request_body_after_header(mut body: &[u8], flexible_header: bool) -> &[u8] {
+        let client_id_len = body.get_i16();
+        assert!(client_id_len >= 0);
+        body.advance(usize::try_from(client_id_len).expect("client id length is non-negative"));
+        if flexible_header {
+            assert!(body.get_u8() == 0);
+        }
+        body
+    }
 
     #[test]
     fn diff_no_change_returns_empty() {
@@ -285,5 +335,172 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
             }
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn describe_user_quotas_sends_strict_user_component() {
+        let seen_request = Arc::new(Mutex::new(None));
+        let captured_request = Arc::clone(&seen_request);
+        let mock = MockBroker::start(move |api_key, version, _corr_id, body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_response(
+                    describe_client_quotas_request::API_KEY,
+                    0,
+                ));
+            }
+            if api_key == describe_client_quotas_request::API_KEY {
+                let mut body = request_body_after_header(
+                    body,
+                    version >= describe_client_quotas_request::FLEXIBLE_MIN,
+                );
+                let request = DescribeClientQuotasRequest::decode(&mut body, version)
+                    .expect("describe quotas request decodes");
+                assert!(body.is_empty());
+                *captured_request.lock().expect("request capture lock") = Some(request);
+                return Some(encode_v0(&DescribeClientQuotasResponse {
+                    entries: Some(vec![DescribeEntryData {
+                        entity: vec![DescribeEntityData {
+                            entity_type: "user".into(),
+                            entity_name: Some("alice".into()),
+                            ..Default::default()
+                        }],
+                        values: vec![DescribeValueData {
+                            key: "producer_byte_rate".into(),
+                            value: 1024.0,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }));
+            }
+            None
+        })
+        .await;
+        let mut admin = AdminClient::connect(&[mock.addr.to_string()])
+            .await
+            .expect("admin connects to mock broker");
+
+        let quotas = admin
+            .describe_user_quotas("alice")
+            .await
+            .expect("describe quotas response maps");
+
+        assert!(quotas.get("producer_byte_rate") == Some(&1024.0));
+        let request = seen_request
+            .lock()
+            .expect("request capture lock")
+            .take()
+            .expect("describe quotas request was captured");
+        assert!(
+            request
+                == DescribeClientQuotasRequest {
+                    components: vec![ComponentData {
+                        entity_type: "user".into(),
+                        match_type: MATCH_TYPE_EXACT,
+                        match_: Some("alice".into()),
+                        ..Default::default()
+                    }],
+                    strict: true,
+                    ..Default::default()
+                }
+        );
+        mock.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn alter_user_quotas_surfaces_broker_entry_error() {
+        let seen_request = Arc::new(Mutex::new(None));
+        let captured_request = Arc::clone(&seen_request);
+        let mock = MockBroker::start(move |api_key, version, _corr_id, body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_response(
+                    alter_client_quotas_request::API_KEY,
+                    0,
+                ));
+            }
+            if api_key == alter_client_quotas_request::API_KEY {
+                let mut body = request_body_after_header(
+                    body,
+                    version >= alter_client_quotas_request::FLEXIBLE_MIN,
+                );
+                let request = AlterClientQuotasRequest::decode(&mut body, version)
+                    .expect("alter quotas request decodes");
+                assert!(body.is_empty());
+                *captured_request.lock().expect("request capture lock") = Some(request);
+                return Some(encode_v0(&AlterClientQuotasResponse {
+                    entries: vec![EntryData {
+                        error_code: 40,
+                        error_message: Some("invalid quota".into()),
+                        entity: vec![EntityData {
+                            entity_type: "user".into(),
+                            entity_name: Some("alice".into()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }));
+            }
+            None
+        })
+        .await;
+        let mut admin = AdminClient::connect(&[mock.addr.to_string()])
+            .await
+            .expect("admin connects to mock broker");
+
+        let error = admin
+            .alter_user_quotas(
+                "alice",
+                &[
+                    QuotaOp::Set {
+                        key: "producer_byte_rate".into(),
+                        value: 1024.0,
+                    },
+                    QuotaOp::Remove {
+                        key: "consumer_byte_rate".into(),
+                    },
+                ],
+                true,
+            )
+            .await
+            .expect("alter quotas maps broker entry")
+            .expect("non-zero broker error is returned");
+
+        assert!(error.code == 40);
+        assert!(error.message == Some("invalid quota".into()));
+        let request = seen_request
+            .lock()
+            .expect("request capture lock")
+            .take()
+            .expect("alter quotas request was captured");
+        assert!(
+            request
+                == AlterClientQuotasRequest {
+                    entries: vec![AlterEntry {
+                        entity: vec![AlterEntity {
+                            entity_type: "user".into(),
+                            entity_name: Some("alice".into()),
+                            ..Default::default()
+                        }],
+                        ops: vec![
+                            AlterOp {
+                                key: "producer_byte_rate".into(),
+                                value: 1024.0,
+                                ..Default::default()
+                            },
+                            AlterOp {
+                                key: "consumer_byte_rate".into(),
+                                remove: true,
+                                ..Default::default()
+                            },
+                        ],
+                        ..Default::default()
+                    }],
+                    validate_only: true,
+                    ..Default::default()
+                }
+        );
+        mock.stop();
     }
 }

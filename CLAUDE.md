@@ -34,6 +34,8 @@ A "conflict" between parallel implementers requires the same file being edited b
 
 Tests must exercise behavior, not source text. Do not read source files in tests (for example with `include_str!`/`fs::read_to_string`) and assert against their contents. If a behavior is hard to test, introduce a narrow helper or seam and test that behavior directly.
 
+When checking generated protocol records or other structured values in tests, prefer comparing the whole expected struct over long chains of field-by-field assertions. Use table-driven or parameterized tests for repeated scenarios that differ only by inputs, protocol version, or expected request shape.
+
 ## Release Process
 
 - Uses **release-plz** for automated semantic versioning
