@@ -55,48 +55,12 @@ async fn broker_started_event_is_written_to_audit_topic() {
         .wait_for_metrics("audit event written", |m| m.audit_events_total.get() >= 1)
         .await;
 
-    let topic_id = support::topic_id_for(&p.client, AUDIT_TOPIC).await;
-    let fr = p
-        .client
-        .send(FetchRequest {
-            max_wait_ms: 200,
-            min_bytes: 1,
-            max_bytes: 1 << 20,
-            topics: vec![FetchTopic {
-                topic: AUDIT_TOPIC.into(),
-                topic_id,
-                partitions: vec![FetchPartition {
-                    partition: 0,
-                    fetch_offset: 0,
-                    partition_max_bytes: 1 << 20,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-
-    let part = &fr.responses[0].partitions[0];
-    assert2::check!(part.error_code == 0);
-    let batches = part
-        .records
-        .as_ref()
-        .and_then(|r| r.as_v2())
-        .expect("v2 records");
-    let mut saw_started = false;
-    for b in batches {
-        for r in &b.records {
-            if let Some(v) = &r.value {
-                let j: serde_json::Value = serde_json::from_slice(v).unwrap();
-                if j["class_uid"] == 6002 && j["activity_name"] == "BrokerStarted" {
-                    saw_started = true;
-                }
-            }
-        }
-    }
-    assert2::check!(saw_started);
+    // Fetch visibility (the high watermark) can lag the durable write, so retry
+    // until the record is consumable rather than single-shot fetching.
+    support::wait_for_audit_record(&p.client, "BrokerStarted", |j| {
+        j["class_uid"] == 6002 && j["activity_name"] == "BrokerStarted"
+    })
+    .await;
 
     p.broker.shutdown().await;
 }
@@ -132,14 +96,15 @@ async fn successful_create_topics_is_audited() {
         })
         .await;
 
-    let recs = support::consume_audit_records(&p.client).await;
-    let saw = recs.iter().any(|j| {
+    // Fetch visibility (the high watermark) can lag the durable write, so retry
+    // until the record is consumable rather than single-shot fetching.
+    support::wait_for_audit_record(&p.client, "CreateTopics admin audit", |j| {
         j["class_uid"] == 6003
             && j["api"]["operation"] == "CreateTopics"
             && j["status_id"] == 1
             && j["resources"][0]["name"] == "audited-orders"
-    });
-    assert2::check!(saw);
+    })
+    .await;
 
     p.broker.shutdown().await;
 }
