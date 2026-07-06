@@ -6,3 +6,10 @@
 //! `ObjectStoreConfig` into an `object_store::ObjectStore` handle. Data
 //! representation (verbatim Kafka segment bytes vs Parquet blocks) stays in the
 //! respective consumer crates.
+
+mod config;
+
+pub use config::{
+    DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, GcsConfig, ObjectStoreConfig,
+    S3Config,
+};
