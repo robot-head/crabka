@@ -16,6 +16,17 @@ pub enum Compression {
 }
 
 impl Compression {
+    #[must_use]
+    pub(crate) fn compression_type(self) -> crabka_compression::CompressionType {
+        match self {
+            Compression::None => crabka_compression::CompressionType::None,
+            Compression::Gzip => crabka_compression::CompressionType::Gzip,
+            Compression::Snappy => crabka_compression::CompressionType::Snappy,
+            Compression::Lz4 => crabka_compression::CompressionType::Lz4,
+            Compression::Zstd => crabka_compression::CompressionType::Zstd,
+        }
+    }
+
     /// The 3-bit `compression_type` field that goes into the `RecordBatch`
     /// v2 `attributes` (bits 0..3).
     #[must_use]
@@ -32,15 +43,7 @@ impl Compression {
     /// Compress the encoded record body. Returns the byte payload that
     /// goes into the `RecordBatch.records_body` slot.
     pub fn compress(self, raw: &[u8]) -> Result<Bytes, ProducerError> {
-        use crabka_compression::CompressionType;
-        let ct = match self {
-            Compression::None => CompressionType::None,
-            Compression::Gzip => CompressionType::Gzip,
-            Compression::Snappy => CompressionType::Snappy,
-            Compression::Lz4 => CompressionType::Lz4,
-            Compression::Zstd => CompressionType::Zstd,
-        };
-        Ok(crabka_compression::compress(ct, raw)?)
+        Ok(crabka_compression::compress(self.compression_type(), raw)?)
     }
 }
 

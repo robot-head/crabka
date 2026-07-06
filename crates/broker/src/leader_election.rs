@@ -829,8 +829,8 @@ mod tests {
         let new_pr = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, NodeId(1))
             .await
             .expect("should pick replacement");
-        assert!(new_pr.leader == NodeId(3));
-        assert!(new_pr.leader_epoch == LeaderEpoch(6));
+        assert!(new_pr.leader == 3);
+        assert!(new_pr.leader_epoch == 6);
     }
 
     #[tokio::test]
@@ -968,12 +968,9 @@ mod tests {
         .await;
 
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == NodeId(2));
+        assert!(pr.leader == 2);
         assert!(pr.isr == vec![NodeId(2), NodeId(3)]);
-        assert!(
-            pr.leader_epoch == LeaderEpoch(6),
-            "leader_epoch must bump on election"
-        );
+        assert!(pr.leader_epoch == 6, "leader_epoch must bump on election");
     }
 
     #[tokio::test]
@@ -1135,7 +1132,7 @@ mod tests {
         .await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == NodeId(3));
+        assert!(pr.leader == 3);
         assert!(pr.isr == vec![NodeId(3)]);
     }
 
@@ -1159,7 +1156,7 @@ mod tests {
         .await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == NodeId(2));
+        assert!(pr.leader == 2);
         assert!(
             pr.isr == vec![NodeId(2)],
             "clean ISR-only election keeps the surviving ISR member, not a singleton-of-some-other-replica"
@@ -1224,7 +1221,7 @@ mod tests {
         let batches = source.submitted_batches().await;
         assert!(batches.len() == 1);
         let pr = one_partition_change(&batches[0]);
-        assert!(pr.leader == NodeId(2));
+        assert!(pr.leader == 2);
         assert!(pr.partition_epoch == 1);
     }
 
@@ -1584,10 +1581,7 @@ mod tests {
             "strategy None must not enqueue an offset-aware recovery",
         );
         let pr = one_partition_change(&plan.changes);
-        assert!(
-            pr.leader == NodeId(2),
-            "legacy path picks first alive replica"
-        );
+        assert!(pr.leader == 2, "legacy path picks first alive replica");
         assert!(pr.isr == vec![NodeId(2)]);
     }
 }

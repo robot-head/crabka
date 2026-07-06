@@ -20,6 +20,10 @@ workspace = true
 name = "crabka-admin-ui"
 path = "src/main.rs"
 
+[features]
+default = []
+e2e = ["dep:playwright-rs"]
+
 [dependencies]
 anyhow.workspace = true
 axum = { workspace = true, features = ["json", "query"] }
@@ -38,9 +42,9 @@ tower = { workspace = true, features = ["util"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
+playwright-rs = { version = "0.14.0", optional = true }
 
 [dev-dependencies]
 assert2.workspace = true
 mutants.workspace = true
 tempfile.workspace = true
-playwright-rs = "0.14.0"

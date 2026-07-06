@@ -24,6 +24,8 @@
 //!
 //! [newtype guidance]: ../../../docs/style_guides/code_style_guide.md
 
+use std::cmp::Ordering;
+
 /// The canonical cross-crate `PartitionIndex`, as carried in offset-syncs,
 /// checkpoints, and replicated records. The MM2 offset newtypes below stay
 /// crate-local — they encode source-vs-target-cluster distinctions specific to
@@ -51,3 +53,54 @@ pub struct CommittedOffset(pub i64);
 /// A record timestamp in epoch milliseconds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Display, From, Into)]
 pub struct Timestamp(pub i64);
+
+macro_rules! impl_primitive_cmp {
+    ($ty:ty, $inner:ty) => {
+        impl PartialEq<$inner> for $ty {
+            #[inline]
+            fn eq(&self, other: &$inner) -> bool {
+                self.0 == *other
+            }
+        }
+
+        impl PartialEq<$ty> for $inner {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool {
+                *self == other.0
+            }
+        }
+
+        impl PartialOrd<$inner> for $ty {
+            #[inline]
+            fn partial_cmp(&self, other: &$inner) -> Option<Ordering> {
+                self.0.partial_cmp(other)
+            }
+        }
+
+        impl PartialOrd<$ty> for $inner {
+            #[inline]
+            fn partial_cmp(&self, other: &$ty) -> Option<Ordering> {
+                self.partial_cmp(&other.0)
+            }
+        }
+    };
+}
+
+impl_primitive_cmp!(UpstreamOffset, i64);
+impl_primitive_cmp!(DownstreamOffset, i64);
+impl_primitive_cmp!(CommittedOffset, i64);
+impl_primitive_cmp!(Timestamp, i64);
+
+impl From<Offset> for UpstreamOffset {
+    #[inline]
+    fn from(value: Offset) -> Self {
+        Self(value.0)
+    }
+}
+
+impl From<CommittedOffset> for UpstreamOffset {
+    #[inline]
+    fn from(value: CommittedOffset) -> Self {
+        Self(value.0)
+    }
+}

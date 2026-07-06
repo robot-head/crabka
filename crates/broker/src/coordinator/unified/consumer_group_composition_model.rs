@@ -563,7 +563,7 @@ impl Model for CgcModel {
             // ----- non-vacuity witnesses -----
             // A current-epoch commit was accepted (the fence's accept path fires).
             Property::sometimes("offset_advanced", |_, s: &CgcState| {
-                s.committed.iter().any(|&(_, o)| o > Offset(0))
+                s.committed.iter().any(|&(_, o)| o > 0)
             }),
             // The reconciliation actually advanced a member's epoch past its first
             // generation — so `Stale`/`Forward` commits are genuinely distinct from

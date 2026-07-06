@@ -1339,7 +1339,7 @@ mod tests {
         for sample in crabka
             .samples
             .iter_mut()
-            .filter(|sample| sample.t_offset_ms >= TimeOffsetMs(4_000))
+            .filter(|sample| sample.t_offset_ms >= 4_000)
         {
             sample.producer_msgs_per_sec = 8_500.0;
         }
@@ -1347,7 +1347,7 @@ mod tests {
         for sample in kafka
             .samples
             .iter_mut()
-            .filter(|sample| sample.t_offset_ms >= TimeOffsetMs(4_000))
+            .filter(|sample| sample.t_offset_ms >= 4_000)
         {
             sample.producer_msgs_per_sec = 8_500.0;
         }

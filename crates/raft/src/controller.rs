@@ -29,7 +29,7 @@ use crate::{
     kraft::KraftController,
     network::{OutboundDialer, PlaintextDialer, RealPeerSender},
     server,
-    types::{Node, NodeId},
+    types::{Node, NodeId, controller_endpoint_addr as endpoint_addr_from_endpoints},
 };
 
 /// Crabka-native view of the controller's current quorum state. Surfaced by
@@ -414,12 +414,7 @@ impl ControllerHandle {
 /// `parse()` returned `None` and the forward was skipped.
 fn controller_endpoint_addr(voters: &crabka_metadata::VoterSet, node_id: NodeId) -> Option<String> {
     let voter = voters.get(node_id)?;
-    let endpoint = voter
-        .endpoints
-        .iter()
-        .find(|e| e.name == "CONTROLLER")
-        .or_else(|| voter.endpoints.first())?;
-    Some(format!("{}:{}", endpoint.host, endpoint.port))
+    endpoint_addr_from_endpoints(&voter.endpoints)
 }
 
 /// The single un-mockable step of leader-forwarding a `submit_change`: dial the
@@ -605,12 +600,8 @@ fn load_latest_checkpoint(dir: &std::path::Path) -> Option<((i64, i32), Vec<u8>)
         .filter_map(|entry| {
             let name = entry.file_name();
             let name = name.to_str()?;
-            let stem = name.strip_suffix(".checkpoint")?;
-            let (off, ep) = stem.split_once('-')?;
-            let (Ok(off), Ok(ep)) = (off.parse::<i64>(), ep.parse::<i32>()) else {
-                return None;
-            };
-            Some(((off, ep), entry.path()))
+            let id = crate::kraft::controller::parse_checkpoint_name(name)?;
+            Some((id, entry.path()))
         })
         .max_by_key(|(id, _)| *id)?;
     let bytes = std::fs::read(&path).ok()?;
@@ -1210,7 +1201,7 @@ mod bootstrap_mode_tests {
         transport
             .expect_send_submit_change()
             .withf(move |leader, addr, body| {
-                *leader == NodeId(7) && addr == "leader-host:9093" && body == &expected_body
+                *leader == 7 && addr == "leader-host:9093" && body == &expected_body
             })
             .times(1)
             .returning(|_, _, _| Ok(submit_change_response_bytes(0, -1)));

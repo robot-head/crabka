@@ -641,7 +641,7 @@ mod tests {
 
         let st = coord.read("g", tid, 0).await.expect("present");
         assert!(st.state_epoch == 5);
-        assert!(st.start_offset == Offset(100));
+        assert!(st.start_offset == 100);
         let summary = coord.read_summary("g", tid, 0).await.expect("present");
         assert!(summary == (5, 0, Offset(100), 0));
     }
@@ -677,7 +677,7 @@ mod tests {
         let st = coord.read("g", tid, 0).await.expect("present");
         check!(st.state_epoch == 1);
         check!(st.leader_epoch == 2);
-        check!(st.start_offset == Offset(50));
+        check!(st.start_offset == 50);
         check!(st.delivery_complete_count == 7);
         check!(st.state_batches == vec![batch(50, 59)]);
 
@@ -801,7 +801,7 @@ mod tests {
         let st = recovered.read("g", tid, 0).await.expect("recovered");
         check!(st.state_epoch == 2);
         check!(st.leader_epoch == 3);
-        check!(st.start_offset == Offset(20));
+        check!(st.start_offset == 20);
         check!(st.delivery_complete_count == 4);
         check!(st.state_batches == vec![batch(20, 29)]);
     }
@@ -905,16 +905,16 @@ mod tests {
         // Batch B is the final snapshot — proves the inter-batch cursor advanced
         // past batch A (base_offset + last_offset_delta + 1 == 2).
         check!(st.leader_epoch == 9);
-        check!(st.start_offset == Offset(50));
+        check!(st.start_offset == 50);
         check!(st.delivery_complete_count == 8);
         check!(st.state_batches == vec![batch(50, 59)]);
         // Batch B's snapshot sits at base_offset 2 (single record, delta 0).
-        check!(st.last_snapshot_offset == Offset(2));
+        check!(st.last_snapshot_offset == 2);
     }
 
     /// Replaying ONLY batch A pins the per-record offset arithmetic in
     /// isolation: the snapshot at `offset_delta 1` over `base_offset 0` records
-    /// `last_snapshot_offset == Offset(1)`, not `Offset(-1)`.
+    /// `last_snapshot_offset == 1`, not `Offset(-1)`.
     #[tokio::test]
     async fn replay_snapshot_offset_is_base_plus_delta() {
         let dir = tempdir().unwrap();
@@ -982,9 +982,9 @@ mod tests {
 
         let st = coord.read("g", tid, 0).await.expect("recovered");
         check!(st.leader_epoch == 3);
-        check!(st.start_offset == Offset(20));
+        check!(st.start_offset == 20);
         // The snapshot record sits at base_offset(0) + offset_delta(1) == 1.
-        check!(st.last_snapshot_offset == Offset(1));
+        check!(st.last_snapshot_offset == 1);
     }
 
     /// After a snapshot fold, `maybe_prune` must trim the state-partition log
@@ -1028,6 +1028,6 @@ mod tests {
         // which is > 0 and exceeds the log's initial start (0), so the prune
         // advanced the prefix. Without pruning the start stays at 0.
         let start = part.log_start_offset();
-        check!(start > Offset(0));
+        check!(start > 0);
     }
 }

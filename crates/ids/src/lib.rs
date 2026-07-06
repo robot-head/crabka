@@ -396,7 +396,7 @@ mod tests {
         check!(Offset(5) != 6);
         check!(Offset(5) > 3);
         check!(3 < Offset(5));
-        check!(Offset(0) >= 0);
+        check!(Offset::ZERO >= 0);
         check!(NodeId(7) == 7);
         check!(ApiKey(18) == 18);
     }

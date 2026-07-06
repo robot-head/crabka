@@ -279,8 +279,8 @@ mod tests {
 
         let payload = rec.value.unwrap();
         check!(payload.topic == "orders");
-        check!(payload.partition == PartitionIndex(0));
-        check!(payload.offset == Offset(0));
+        check!(payload.partition == 0);
+        check!(payload.offset == 0);
         check!(payload.value.as_deref() == Some(b"v".as_slice()));
 
         // The checkpoint position is the NEXT offset to read: `last_offset + 1`.

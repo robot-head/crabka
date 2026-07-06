@@ -5,10 +5,10 @@
 
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, MetadataImage, MetadataRecord, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         broker_heartbeat_request::BrokerHeartbeatRequest,
         broker_heartbeat_response::BrokerHeartbeatResponse,
@@ -170,9 +170,7 @@ fn denied_response_body() -> BrokerHeartbeatResponse {
 }
 
 fn encode_response(version: i16, resp: &BrokerHeartbeatResponse) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(resp, version)
 }
 
 /// `ClusterAction` on `Cluster("kafka-cluster")` gate. Returns `true`
@@ -300,8 +298,9 @@ mod tests {
     };
 
     use assert2::assert;
+    use bytes::BytesMut;
     use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
-    use crabka_protocol::primitives::uuid::Uuid as ProtocolUuid;
+    use crabka_protocol::{Encode, primitives::uuid::Uuid as ProtocolUuid};
     use crabka_raft::{
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,

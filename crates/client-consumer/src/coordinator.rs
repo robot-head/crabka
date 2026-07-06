@@ -51,6 +51,7 @@ use crate::{
         AutoOffsetReset, decode_assignment, decode_subscription, encode_assignment,
         encode_subscription,
     },
+    consumer::{reset_starting_offset, starting_offset},
     error::ConsumerError,
     offset_wire::{build_commit_topics, build_offset_fetch, id_to_name, parse_offset_fetch},
 };
@@ -1287,21 +1288,6 @@ async fn prime_offsets(
         }
     }
     Ok(())
-}
-
-fn starting_offset(committed: i64, reset: AutoOffsetReset) -> i64 {
-    if committed >= 0 {
-        committed
-    } else {
-        reset_starting_offset(reset)
-    }
-}
-
-fn reset_starting_offset(reset: AutoOffsetReset) -> i64 {
-    match reset {
-        AutoOffsetReset::Earliest => 0,
-        AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
-    }
 }
 
 fn should_prime_missing_partition(seen: bool) -> bool {

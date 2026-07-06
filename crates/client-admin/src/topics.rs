@@ -13,7 +13,7 @@ use crabka_protocol::{
 };
 use uuid::Uuid;
 
-use crate::{AdminClient, AdminError, KafkaError, NOT_CONTROLLER, kafka_error_name};
+use crate::{AdminClient, AdminError, KafkaError, NOT_CONTROLLER, kafka_error_if};
 
 #[derive(Debug, Clone)]
 pub struct CreateTopicSpec {
@@ -238,7 +238,7 @@ fn parse_create_topics(
         .map(|t| CreateTopicOutcome {
             name: t.name,
             topic_id: proto_uuid_to_opt(t.topic_id),
-            error: error_if(t.error_code, t.error_message),
+            error: kafka_error_if(t.error_code, t.error_message),
         })
         .collect()
 }
@@ -250,7 +250,7 @@ fn parse_delete_topics(
         .into_iter()
         .map(|t| DeleteTopicOutcome {
             name: t.name.unwrap_or_default(),
-            error: error_if(t.error_code, t.error_message),
+            error: kafka_error_if(t.error_code, t.error_message),
         })
         .collect()
 }
@@ -262,7 +262,7 @@ fn parse_create_partitions(
         .into_iter()
         .map(|t| CreatePartitionsOutcome {
             name: t.name,
-            error: error_if(t.error_code, t.error_message),
+            error: kafka_error_if(t.error_code, t.error_message),
         })
         .collect()
 }
@@ -283,7 +283,7 @@ fn parse_metadata(
                 topic_id: proto_uuid_to_opt(t.topic_id),
                 partition_count,
                 replication_factor,
-                error: error_if(t.error_code, None),
+                error: kafka_error_if(t.error_code, None),
             }
         })
         .collect();
@@ -308,18 +308,6 @@ fn proto_uuid_to_opt(u: ProtoUuid) -> Option<Uuid> {
         None
     } else {
         Some(Uuid::from_bytes(u.0))
-    }
-}
-
-fn error_if(code: i16, message: Option<String>) -> Option<KafkaError> {
-    if code == 0 {
-        None
-    } else {
-        Some(KafkaError {
-            code,
-            name: kafka_error_name(code),
-            message,
-        })
     }
 }
 
@@ -360,23 +348,6 @@ mod tests {
                 timeout_ms: 5_000,
                 validate_only: false,
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
-            }
-        );
-    }
-
-    #[test]
-    fn error_if_zero_code_is_none() {
-        assert!(error_if(0, None).is_none());
-    }
-
-    #[test]
-    fn error_if_nonzero_carries_name() {
-        let e = error_if(36, Some("dup".into())).unwrap();
-        assert!(
-            e == KafkaError {
-                code: 36,
-                name: "TOPIC_ALREADY_EXISTS",
-                message: Some("dup".to_string()),
             }
         );
     }

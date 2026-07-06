@@ -3,10 +3,10 @@
 //! Metadata is sourced from `controller.current_image()` — the
 //! quorum-replicated snapshot — rather than a local in-memory struct.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         metadata_request::MetadataRequest,
         metadata_response::{
@@ -292,9 +292,7 @@ pub(crate) async fn handle(
         resp_topics = ?resp.topics.iter().map(|t| format!("{}={:?}/p{}", t.name.as_deref().unwrap_or("?"), t.error_code, t.partitions.len())).collect::<Vec<_>>(),
         "metadata response"
     );
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Project a stored [`crabka_metadata::BrokerRegistrationRecord`] into a
@@ -358,16 +356,8 @@ pub(crate) fn pick_endpoint_host_port(
 }
 
 fn parse_host_port(addr: &str) -> (String, i32) {
-    if let Some((h, p)) = addr.rsplit_once(':')
-        && let Ok(port) = p.parse::<u16>()
-    {
-        return (h.to_string(), i32::from(port));
-    }
-    tracing::warn!(
-        addr,
-        "advertised_listener not host:port; falling back to localhost:9092"
-    );
-    ("localhost".into(), 9092)
+    let (host, port) = crate::handlers::parse_advertised_host_port(addr);
+    (host, i32::from(port))
 }
 
 #[cfg(test)]

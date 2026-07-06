@@ -4,7 +4,7 @@
 //! coordinator use.
 
 pub use crabka_ids::NodeId;
-use crabka_metadata::MetadataRecord;
+use crabka_metadata::{MetadataRecord, VoterEndpoint};
 use serde::{Deserialize, Serialize};
 
 /// KIP-853 voter node identity used by controller membership.
@@ -30,13 +30,16 @@ impl Node {
     /// `controller.rs`; mirrors `controller_addr` in `network.rs`).
     #[must_use]
     pub fn controller_addr(&self) -> Option<String> {
-        let endpoint = self
-            .endpoints
-            .iter()
-            .find(|e| e.name == "CONTROLLER")
-            .or_else(|| self.endpoints.first())?;
-        Some(format!("{}:{}", endpoint.host, endpoint.port))
+        controller_endpoint_addr(&self.endpoints)
     }
+}
+
+pub(crate) fn controller_endpoint_addr(endpoints: &[VoterEndpoint]) -> Option<String> {
+    let endpoint = endpoints
+        .iter()
+        .find(|e| e.name == "CONTROLLER")
+        .or_else(|| endpoints.first())?;
+    Some(format!("{}:{}", endpoint.host, endpoint.port))
 }
 
 /// What we ask Raft to replicate. A batch of `MetadataRecord`s so

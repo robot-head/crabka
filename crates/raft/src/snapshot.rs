@@ -58,13 +58,11 @@ impl SnapshotWriter {
             last_contained_log_timestamp,
             ..Default::default()
         };
-        let mut header_body = BytesMut::new();
-        header.encode(&mut header_body, SNAPSHOT_CONTROL_RECORD_VERSION)?;
-        out.put_slice(&encode_control_batch(
+        out.put_slice(&snapshot_control_batch(
             SNAPSHOT_HEADER_BASE_OFFSET,
-            control_record_key(ControlRecordType::SnapshotHeader),
-            header_body.freeze(),
-        ));
+            ControlRecordType::SnapshotHeader,
+            &header,
+        )?);
 
         // (2) Data batch at base_offset 1: one record per KIP-631 value blob.
         // Each `MetadataRecord` is translated against the very image being
@@ -122,16 +120,28 @@ impl SnapshotWriter {
         let footer_base_offset = SNAPSHOT_DATA_BASE_OFFSET
             .saturating_add(i64::try_from(total_blobs).unwrap_or(i64::MAX));
         let footer = SnapshotFooterRecord::default();
-        let mut footer_body = BytesMut::new();
-        footer.encode(&mut footer_body, SNAPSHOT_CONTROL_RECORD_VERSION)?;
-        out.put_slice(&encode_control_batch(
+        out.put_slice(&snapshot_control_batch(
             footer_base_offset,
-            control_record_key(ControlRecordType::SnapshotFooter),
-            footer_body.freeze(),
-        ));
+            ControlRecordType::SnapshotFooter,
+            &footer,
+        )?);
 
         Ok(out.freeze())
     }
+}
+
+fn snapshot_control_batch<R: Encode>(
+    base_offset: i64,
+    record_type: ControlRecordType,
+    record: &R,
+) -> Result<Bytes, RaftError> {
+    let mut body = BytesMut::new();
+    record.encode(&mut body, SNAPSHOT_CONTROL_RECORD_VERSION)?;
+    Ok(encode_control_batch(
+        base_offset,
+        control_record_key(record_type),
+        body.freeze(),
+    ))
 }
 
 /// Reads a canonical `.checkpoint` byte stream back into the sequence of

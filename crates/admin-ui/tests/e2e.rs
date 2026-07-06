@@ -1,3 +1,5 @@
+#![cfg(feature = "e2e")]
+
 const ADMIN_UI_E2E_URL_ENV: &str = "CRABKA_ADMIN_UI_E2E_URL";
 
 #[tokio::test]

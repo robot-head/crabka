@@ -8,9 +8,7 @@ use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
-use crabka_grpc_gateway::{
-    codec::RawCodec, ids::PartitionIndex, produce::ProduceCore, types::GatewayRecord,
-};
+use crabka_grpc_gateway::{codec::RawCodec, produce::ProduceCore, types::GatewayRecord};
 use tempfile::TempDir;
 
 async fn boot() -> (BrokerHandle, String, TempDir) {
@@ -68,7 +66,7 @@ async fn produce_plain_then_read_back() {
         )
         .await
         .expect("produce");
-    check!(outcome.partition == PartitionIndex(0));
+    check!(outcome.partition == 0);
     check!(outcome.deduplicated == false);
 
     let mut consumer = Consumer::builder()

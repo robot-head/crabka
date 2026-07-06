@@ -277,32 +277,10 @@ impl Connection {
         );
         req.encode(&mut frame, version)?;
 
-        // 4. Register the oneshot before dispatching (avoids a race).
-        let (tx, rx) = oneshot::channel::<Result<Bytes, ClientError>>();
-        self.inner.pending.insert(corr_id, tx);
+        // 4. Dispatch request and await response.
+        let body_bytes = self.dispatch_request(corr_id, frame).await?;
 
-        // 5. Dispatch to writer.
-        self.inner
-            .writer_tx
-            .send(DispatchItem {
-                bytes: frame.freeze(),
-            })
-            .await
-            .map_err(|_| ClientError::Disconnected)?;
-
-        // 6. Await response with timeout.
-        let body_bytes = match tokio::time::timeout(self.inner.options.request_timeout, rx).await {
-            Ok(Ok(Ok(b))) => b,
-            Ok(Ok(Err(e))) => return Err(e),
-            Ok(Err(_recv_closed)) => return Err(ClientError::Disconnected),
-            Err(_timeout) => {
-                // Evict the pending entry so the reader won't try to fulfil it.
-                self.inner.pending.remove(&corr_id);
-                return Err(ClientError::Timeout(self.inner.options.request_timeout));
-            }
-        };
-
-        // 7. Decode the response.
+        // 5. Decode the response.
         //
         // The reader has already stripped the 4-byte correlation_id prefix.
         // What remains is: [ResponseHeader fields after corr_id] + [response body].
@@ -367,26 +345,7 @@ impl Connection {
         );
         frame.put_slice(&body);
 
-        let (tx, rx) = oneshot::channel::<Result<Bytes, ClientError>>();
-        self.inner.pending.insert(corr_id, tx);
-
-        self.inner
-            .writer_tx
-            .send(DispatchItem {
-                bytes: frame.freeze(),
-            })
-            .await
-            .map_err(|_| ClientError::Disconnected)?;
-
-        let body_bytes = match tokio::time::timeout(self.inner.options.request_timeout, rx).await {
-            Ok(Ok(Ok(b))) => b,
-            Ok(Ok(Err(e))) => return Err(e),
-            Ok(Err(_recv_closed)) => return Err(ClientError::Disconnected),
-            Err(_timeout) => {
-                self.inner.pending.remove(&corr_id);
-                return Err(ClientError::Timeout(self.inner.options.request_timeout));
-            }
-        };
+        let body_bytes = self.dispatch_request(corr_id, frame).await?;
 
         // ResponseHeader v1: 1-byte empty-tagged-fields marker after the
         // already-stripped correlation id. Drop it if present.
@@ -413,6 +372,29 @@ impl Connection {
     pub fn close(self) {
         self.inner.shutdown.cancel();
         // The Arc gets dropped when `self` does; `JoinHandle`s abort naturally.
+    }
+
+    async fn dispatch_request(&self, corr_id: i32, frame: BytesMut) -> Result<Bytes, ClientError> {
+        let (tx, rx) = oneshot::channel::<Result<Bytes, ClientError>>();
+        self.inner.pending.insert(corr_id, tx);
+
+        self.inner
+            .writer_tx
+            .send(DispatchItem {
+                bytes: frame.freeze(),
+            })
+            .await
+            .map_err(|_| ClientError::Disconnected)?;
+
+        match tokio::time::timeout(self.inner.options.request_timeout, rx).await {
+            Ok(Ok(Ok(bytes))) => Ok(bytes),
+            Ok(Ok(Err(err))) => Err(err),
+            Ok(Err(_recv_closed)) => Err(ClientError::Disconnected),
+            Err(_timeout) => {
+                self.inner.pending.remove(&corr_id);
+                Err(ClientError::Timeout(self.inner.options.request_timeout))
+            }
+        }
     }
 }
 

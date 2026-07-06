@@ -6,10 +6,10 @@
 //!
 //! Leader-only (`NOT_CONTROLLER` otherwise), mirroring `alter_partition`.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{MetadataImage, MetadataRecord, PartitionDirAssignmentRecord};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         assign_replicas_to_dirs_request::AssignReplicasToDirsRequest,
         assign_replicas_to_dirs_response::{
@@ -182,16 +182,16 @@ fn encode_resp(
     version: crate::handlers::ApiVersion,
     resp: &AssignReplicasToDirsResponse,
 ) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(resp, version)
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use bytes::BytesMut;
     use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
     use crabka_protocol::{
+        Encode,
         owned::assign_replicas_to_dirs_request::{
             DirectoryData as ReqDirData, PartitionData as ReqPartData, TopicData as ReqTopicData,
         },

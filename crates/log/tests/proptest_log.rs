@@ -44,7 +44,7 @@ proptest! {
         let log_end = log.log_end_offset();
         // `arb_batches(1, 6)` guarantees at least one batch with >= 1
         // record, so `log_end >= 1`.
-        prop_assume!(log_end >= Offset(1));
+        prop_assume!(log_end >= 1);
         let trunc_to = Offset(i64::try_from(seed).unwrap_or(i64::MAX) % log_end.0);
         log.truncate_to(trunc_to).unwrap();
         let after = log.log_end_offset();

@@ -24,10 +24,10 @@
 //! gets `INVALID_TOPIC_EXCEPTION` (17) — matches the JVM behavior on
 //! a non-metadata topic.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::AclOperation;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         common::describe_quorum_response::replica_state::ReplicaState,
         describe_quorum_request::DescribeQuorumRequest,
@@ -92,9 +92,7 @@ pub(crate) async fn handle(
             error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        return Ok(buf.freeze());
+        return crate::handlers::encode_response(&resp, version);
     }
 
     // Snapshot raft state once — cheap clone of openraft's metrics
@@ -117,9 +115,7 @@ pub(crate) async fn handle(
         nodes,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Build a `TopicData` row per requested topic. The metadata raft topic

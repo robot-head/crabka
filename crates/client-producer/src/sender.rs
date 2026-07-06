@@ -39,7 +39,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crabka_compression::CompressionType;
 use crabka_protocol::{
     owned::{
         produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
@@ -999,17 +998,9 @@ fn build_record_batch(
     base_sequence: i32,
     txn_snapshot: Option<(i64, i16)>,
 ) -> RecordBatch {
-    let codec = match cfg.compression {
-        Compression::None => CompressionType::None,
-        Compression::Gzip => CompressionType::Gzip,
-        Compression::Snappy => CompressionType::Snappy,
-        Compression::Lz4 => CompressionType::Lz4,
-        Compression::Zstd => CompressionType::Zstd,
-    };
-
     let is_transactional = txn_snapshot.is_some();
     let attributes = Attributes::default()
-        .with_compression(codec)
+        .with_compression(cfg.compression.compression_type())
         .with_transactional(is_transactional);
 
     // Use the txn pid/epoch when inside a transaction; fall back to the

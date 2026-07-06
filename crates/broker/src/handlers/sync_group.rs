@@ -9,20 +9,16 @@
 
 use std::time::Duration;
 
-use bytes::{Bytes, BytesMut};
-use crabka_metadata::{AclOperation, ResourceType};
+use bytes::Bytes;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{sync_group_request::SyncGroupRequest, sync_group_response::SyncGroupResponse},
 };
 use tokio::sync::oneshot;
 
 use crate::{
-    authorizer::{AuthorizationRequest, AuthorizationResult},
-    broker::Broker,
-    codes,
-    coordinator::unified::actor::GroupActorMessage,
-    error::BrokerError,
+    broker::Broker, codes, coordinator::unified::actor::GroupActorMessage, error::BrokerError,
+    handlers::group_read_denied,
 };
 
 /// Upper bound on how long a follower's `SyncGroup` is parked waiting for the
@@ -58,8 +54,7 @@ pub(crate) async fn handle(
             if group_read_denied(
                 broker.config.authorizer.as_ref(),
                 &image,
-                ctx.principal,
-                ctx.peer,
+                ctx,
                 &req.group_id,
             ) {
                 return encode_err(version, codes::GROUP_AUTHORIZATION_FAILED, None, None);
@@ -93,28 +88,8 @@ pub(crate) async fn handle(
             protocol_name: result.protocol_name,
             ..Default::default()
         };
-        encode(version, &resp)
+        crate::handlers::encode_response(&resp, version)
     }
-}
-
-/// `Read` on `Group(group_id)` gate. Returns `true` when denied.
-fn group_read_denied(
-    authorizer: &dyn crate::authorizer::Authorizer,
-    image: &crabka_metadata::MetadataImage,
-    principal: &crabka_security::Principal,
-    host: &std::net::SocketAddr,
-    group_id: &str,
-) -> bool {
-    authorizer.authorize(
-        image,
-        &AuthorizationRequest {
-            principal,
-            host,
-            resource_type: ResourceType::Group,
-            resource_name: group_id,
-            operation: AclOperation::Read,
-        },
-    ) == AuthorizationResult::Deny
 }
 
 fn encode_err(
@@ -129,16 +104,7 @@ fn encode_err(
         protocol_name,
         ..Default::default()
     };
-    encode(version, &resp)
-}
-
-fn encode(
-    version: crate::handlers::ApiVersion,
-    resp: &SyncGroupResponse,
-) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 #[cfg(test)]
@@ -257,14 +223,9 @@ mod tests {
             groups: vec![],
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+        let ctx = crate::test_support::request_context(&principal, &peer, "sync-client");
 
-        assert!(group_read_denied(
-            &authorizer,
-            &image,
-            &principal,
-            &peer,
-            "g"
-        ));
+        assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
 
         let bytes = encode_err(
             sync_group_response::MAX_VERSION,

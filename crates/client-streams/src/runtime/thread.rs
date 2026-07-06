@@ -548,7 +548,6 @@ impl StreamThread {
             store::iq::Iq2Failure,
         };
 
-        let had_tasks = !self.tasks.is_empty();
         let mut per_partition = Vec::new();
 
         // Phase 1 (sync): gate every task and collect the runnable store views
@@ -600,10 +599,7 @@ impl StreamThread {
             };
             per_partition.push((partition, pos, outcome));
         }
-        let _ = req.reply.send(Iq2Outcome {
-            per_partition,
-            had_tasks,
-        });
+        let _ = req.reply.send(Iq2Outcome { per_partition });
     }
 
     /// Commit + drop all tasks (on Fenced / shutdown).

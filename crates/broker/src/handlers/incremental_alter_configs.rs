@@ -11,13 +11,13 @@
 //!   whitelisted keys are list-valued, so we reject these with
 //!   `INVALID_CONFIG`.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{
     AclOperation, BrokerConfigRecord, ClientMetricsConfigRecord, MetadataImage, MetadataRecord,
     NodeId, ResourceType, TopicConfigRecord,
 };
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         incremental_alter_configs_request::{AlterConfigsResource, IncrementalAlterConfigsRequest},
         incremental_alter_configs_response::{
@@ -258,9 +258,7 @@ pub(crate) async fn handle(
         throttle_time_ms: 0,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 fn handle_broker_scoped(

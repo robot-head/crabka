@@ -267,6 +267,17 @@ pub mod wire {
     const FETCH_VERSION: i16 = 17;
     const FETCH_SNAPSHOT_VERSION: i16 = 1;
 
+    fn records_payload_to_bytes(payload: &RecordsPayload) -> Bytes {
+        match payload {
+            RecordsPayload::Raw(bytes) => bytes.clone(),
+            other => {
+                let mut out = BytesMut::new();
+                let _ = other.encode_to(&mut out);
+                out.freeze()
+            }
+        }
+    }
+
     /// A peer RPC request body, as encoded by the sending engine and decoded by
     /// the receiving engine's inbound dispatch.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -782,15 +793,10 @@ pub mod wire {
             } else {
                 None
             };
-            let records = match &p.records {
-                Some(RecordsPayload::Raw(b)) => b.clone(),
-                Some(other) => {
-                    let mut out = BytesMut::new();
-                    let _ = other.encode_to(&mut out);
-                    out.freeze()
-                }
-                None => Bytes::new(),
-            };
+            let records = p
+                .records
+                .as_ref()
+                .map_or_else(Bytes::new, records_payload_to_bytes);
             Some(PeerResponse::Fetch {
                 leader_id,
                 leader_epoch,
@@ -807,14 +813,7 @@ pub mod wire {
             let mut cur = buf;
             let resp = FetchSnapshotResponse::decode(&mut cur, FETCH_SNAPSHOT_VERSION).ok()?;
             let p = resp.topics.first()?.partitions.first()?;
-            let bytes = match &p.unaligned_records {
-                RecordsPayload::Raw(b) => b.clone(),
-                other => {
-                    let mut o = BytesMut::new();
-                    let _ = other.encode_to(&mut o);
-                    o.freeze()
-                }
-            };
+            let bytes = records_payload_to_bytes(&p.unaligned_records);
             Some(PeerResponse::FetchSnapshot {
                 snapshot_id: (p.snapshot_id.end_offset, p.snapshot_id.epoch),
                 size: p.size,

@@ -5,10 +5,10 @@
 //! is a non-empty subset of the partition's replicas, and submits the updated
 //! `PartitionRecord` via `controller.submit_change`.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord, ResourceType};
 use crabka_protocol::{
-    Decode, Encode, UnknownTaggedFields,
+    Decode, UnknownTaggedFields,
     owned::{
         alter_partition_request::AlterPartitionRequest,
         alter_partition_response::{
@@ -314,9 +314,7 @@ fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
 }
 
 fn encode_resp(version: i16, resp: &AlterPartitionResponse) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(resp, version)
 }
 
 #[cfg(test)]

@@ -24,7 +24,7 @@ use crabka_protocol::owned::{
 use crabka_security::SaslMechanism;
 use ring::rand::{SecureRandom, SystemRandom};
 
-use crate::{AdminClient, AdminError, KafkaError, kafka_error_name};
+use crate::{AdminClient, AdminError, KafkaError, kafka_error_if, kafka_error_name};
 
 /// KIP-554 wire byte for SCRAM-SHA-512. SHA-256 is byte `1`.
 const SCRAM_SHA_512_WIRE: i8 = 2;
@@ -238,7 +238,7 @@ impl AdminClient {
             .results
             .into_iter()
             .map(|r| CreateAclOutcome {
-                error: error_if(r.error_code, r.error_message),
+                error: kafka_error_if(r.error_code, r.error_message),
             })
             .collect())
     }
@@ -257,7 +257,7 @@ impl AdminClient {
         let resp = self.conn.send(req).await?;
         let mut out = Vec::with_capacity(resp.filter_results.len());
         for fr in resp.filter_results {
-            if let Some(err) = error_if(fr.error_code, fr.error_message) {
+            if let Some(err) = kafka_error_if(fr.error_code, fr.error_message) {
                 out.push(DeleteAclFilterOutcome {
                     error: Some(err),
                     matched: Vec::new(),
@@ -292,18 +292,6 @@ impl AdminClient {
             });
         }
         Ok(out)
-    }
-}
-
-fn error_if(code: i16, message: Option<String>) -> Option<KafkaError> {
-    if code == 0 {
-        None
-    } else {
-        Some(KafkaError {
-            code,
-            name: kafka_error_name(code),
-            message,
-        })
     }
 }
 
@@ -387,7 +375,7 @@ fn parse_alter_scram_results(
         .into_iter()
         .map(|r| ScramUserOutcome {
             username: r.user,
-            error: error_if(r.error_code, r.error_message),
+            error: kafka_error_if(r.error_code, r.error_message),
         })
         .collect()
 }
@@ -417,7 +405,7 @@ fn parse_describe_user_scram_credentials_response(
                     iterations: credential.iterations,
                 })
                 .collect(),
-            error: error_if(result.error_code, result.error_message),
+            error: kafka_error_if(result.error_code, result.error_message),
         })
         .collect())
 }
@@ -431,14 +419,15 @@ fn scram_mechanism_name(mechanism: i8) -> &'static str {
 }
 
 fn filter_to_describe_request(f: &AclEntryFilter) -> DescribeAclsRequest {
+    let wire = acl_filter_wire_fields(f);
     DescribeAclsRequest {
-        resource_type_filter: f.resource_type.map_or(WIRE_ANY, resource_type_to_wire),
-        resource_name_filter: f.resource_name.clone(),
-        pattern_type_filter: f.pattern_type.map_or(WIRE_ANY, pattern_type_to_wire),
-        principal_filter: f.principal.clone(),
-        host_filter: f.host.clone(),
-        operation: f.operation.map_or(WIRE_ANY, operation_to_wire),
-        permission_type: f.permission_type.map_or(WIRE_ANY, permission_to_wire),
+        resource_type_filter: wire.resource_type_filter,
+        resource_name_filter: wire.resource_name_filter,
+        pattern_type_filter: wire.pattern_type_filter,
+        principal_filter: wire.principal_filter,
+        host_filter: wire.host_filter,
+        operation: wire.operation,
+        permission_type: wire.permission_type,
         ..Default::default()
     }
 }
@@ -491,7 +480,31 @@ pub(crate) fn acl_to_creation(e: &AclEntry) -> AclCreation {
 /// Pure: serialize an `AclEntryFilter` to the wire `DeleteAcls` filter.
 /// `None` axes use the wire ANY discriminant.
 pub(crate) fn acl_filter_to_wire(f: &AclEntryFilter) -> DeleteAclsFilter {
+    let wire = acl_filter_wire_fields(f);
     DeleteAclsFilter {
+        resource_type_filter: wire.resource_type_filter,
+        resource_name_filter: wire.resource_name_filter,
+        pattern_type_filter: wire.pattern_type_filter,
+        principal_filter: wire.principal_filter,
+        host_filter: wire.host_filter,
+        operation: wire.operation,
+        permission_type: wire.permission_type,
+        ..Default::default()
+    }
+}
+
+struct AclFilterWireFields {
+    resource_type_filter: i8,
+    resource_name_filter: Option<String>,
+    pattern_type_filter: i8,
+    principal_filter: Option<String>,
+    host_filter: Option<String>,
+    operation: i8,
+    permission_type: i8,
+}
+
+fn acl_filter_wire_fields(f: &AclEntryFilter) -> AclFilterWireFields {
+    AclFilterWireFields {
         resource_type_filter: f.resource_type.map_or(WIRE_ANY, resource_type_to_wire),
         resource_name_filter: f.resource_name.clone(),
         pattern_type_filter: f.pattern_type.map_or(WIRE_ANY, pattern_type_to_wire),
@@ -499,7 +512,6 @@ pub(crate) fn acl_filter_to_wire(f: &AclEntryFilter) -> DeleteAclsFilter {
         host_filter: f.host.clone(),
         operation: f.operation.map_or(WIRE_ANY, operation_to_wire),
         permission_type: f.permission_type.map_or(WIRE_ANY, permission_to_wire),
-        ..Default::default()
     }
 }
 
@@ -513,63 +525,64 @@ pub(crate) fn acl_filter_to_wire(f: &AclEntryFilter) -> DeleteAclsFilter {
 /// "match anything" placeholder on filter requests.
 const WIRE_ANY: i8 = 1;
 
-fn resource_type_to_wire(rt: ResourceType) -> i8 {
-    match rt {
+macro_rules! acl_wire_enum {
+    ($to_wire:ident, $from_wire:ident, $ty:ty, $unknown:literal, {$($variant:path => $wire:literal),+ $(,)?}) => {
+        fn $to_wire(value: $ty) -> i8 {
+            match value {
+                $($variant => $wire,)+
+            }
+        }
+
+        fn $from_wire(value: i8) -> Result<$ty, AdminError> {
+            match value {
+                $($wire => Ok($variant),)+
+                _ => Err(AdminError::Protocol(format!(concat!($unknown, ": {}"), value))),
+            }
+        }
+    };
+}
+
+acl_wire_enum!(
+    resource_type_to_wire,
+    wire_to_resource_type,
+    ResourceType,
+    "unknown ACL resource_type discriminant",
+    {
         ResourceType::Topic => 2,
         ResourceType::Group => 3,
         ResourceType::Cluster => 4,
         ResourceType::TransactionalId => 5,
     }
-}
+);
 
-fn wire_to_resource_type(b: i8) -> Result<ResourceType, AdminError> {
-    match b {
-        2 => Ok(ResourceType::Topic),
-        3 => Ok(ResourceType::Group),
-        4 => Ok(ResourceType::Cluster),
-        5 => Ok(ResourceType::TransactionalId),
-        _ => Err(AdminError::Protocol(format!(
-            "unknown ACL resource_type discriminant: {b}",
-        ))),
-    }
-}
-
-fn pattern_type_to_wire(pt: PatternType) -> i8 {
-    match pt {
+acl_wire_enum!(
+    pattern_type_to_wire,
+    wire_to_pattern_type,
+    PatternType,
+    "unknown ACL pattern_type discriminant",
+    {
         PatternType::Literal => 3,
         PatternType::Prefixed => 4,
     }
-}
+);
 
-fn wire_to_pattern_type(b: i8) -> Result<PatternType, AdminError> {
-    match b {
-        3 => Ok(PatternType::Literal),
-        4 => Ok(PatternType::Prefixed),
-        _ => Err(AdminError::Protocol(format!(
-            "unknown ACL pattern_type discriminant: {b}",
-        ))),
-    }
-}
-
-fn permission_to_wire(pt: PermissionType) -> i8 {
-    match pt {
+acl_wire_enum!(
+    permission_to_wire,
+    wire_to_permission,
+    PermissionType,
+    "unknown ACL permission discriminant",
+    {
         PermissionType::Deny => 2,
         PermissionType::Allow => 3,
     }
-}
+);
 
-fn wire_to_permission(b: i8) -> Result<PermissionType, AdminError> {
-    match b {
-        2 => Ok(PermissionType::Deny),
-        3 => Ok(PermissionType::Allow),
-        _ => Err(AdminError::Protocol(format!(
-            "unknown ACL permission discriminant: {b}",
-        ))),
-    }
-}
-
-fn operation_to_wire(op: AclOperation) -> i8 {
-    match op {
+acl_wire_enum!(
+    operation_to_wire,
+    wire_to_operation,
+    AclOperation,
+    "unknown ACL operation discriminant",
+    {
         AclOperation::All => 2,
         AclOperation::Read => 3,
         AclOperation::Write => 4,
@@ -583,34 +596,73 @@ fn operation_to_wire(op: AclOperation) -> i8 {
         AclOperation::IdempotentWrite => 12,
         AclOperation::TwoPhaseCommit => 15,
     }
-}
-
-fn wire_to_operation(b: i8) -> Result<AclOperation, AdminError> {
-    match b {
-        2 => Ok(AclOperation::All),
-        3 => Ok(AclOperation::Read),
-        4 => Ok(AclOperation::Write),
-        5 => Ok(AclOperation::Create),
-        6 => Ok(AclOperation::Delete),
-        7 => Ok(AclOperation::Alter),
-        8 => Ok(AclOperation::Describe),
-        9 => Ok(AclOperation::ClusterAction),
-        10 => Ok(AclOperation::DescribeConfigs),
-        11 => Ok(AclOperation::AlterConfigs),
-        12 => Ok(AclOperation::IdempotentWrite),
-        15 => Ok(AclOperation::TwoPhaseCommit),
-        _ => Err(AdminError::Protocol(format!(
-            "unknown ACL operation discriminant: {b}",
-        ))),
-    }
-}
+);
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use assert2::{assert, check};
-    use crabka_protocol::UnknownTaggedFields;
+    use bytes::{Buf, BytesMut};
+    use crabka_client_core::MockBroker;
+    use crabka_protocol::{
+        Decode, Encode, UnknownTaggedFields,
+        owned::{
+            alter_user_scram_credentials_response::{
+                AlterUserScramCredentialsResponse, AlterUserScramCredentialsResult,
+            },
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            create_acls_request,
+            create_acls_response::{AclCreationResult, CreateAclsResponse},
+            delete_acls_request,
+            delete_acls_response::{
+                DeleteAclsFilterResult, DeleteAclsMatchingAcl, DeleteAclsResponse,
+            },
+        },
+    };
 
     use super::*;
+
+    fn encode_v0(resp: &impl Encode) -> Vec<u8> {
+        encode_at(resp, 0)
+    }
+
+    fn encode_at(resp: &impl Encode, version: i16) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        resp.encode(&mut buf, version).unwrap();
+        buf.to_vec()
+    }
+
+    fn api_versions_response(api_key: i16, version: i16) -> Vec<u8> {
+        encode_v0(&ApiVersionsResponse {
+            api_keys: vec![
+                ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 0,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key,
+                    min_version: version,
+                    max_version: version,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+    }
+
+    fn request_body_after_header(mut body: &[u8], flexible_header: bool) -> &[u8] {
+        let client_id_len = body.get_i16();
+        assert!(client_id_len >= 0);
+        body.advance(usize::try_from(client_id_len).expect("client id length is non-negative"));
+        if flexible_header {
+            assert!(body.get_u8() == 0);
+        }
+        body
+    }
 
     fn sample_entry() -> AclEntry {
         AclEntry {
@@ -689,13 +741,16 @@ mod tests {
 
     #[test]
     fn acl_to_creation_matches_discriminants() {
-        let e = sample_entry();
+        let e = AclEntry {
+            pattern_type: PatternType::Prefixed,
+            ..sample_entry()
+        };
         let c = acl_to_creation(&e);
         assert!(
             c == AclCreation {
                 resource_type: 2,
                 resource_name: "orders".to_string(),
-                resource_pattern_type: 3,
+                resource_pattern_type: 4,
                 principal: "User:alice".to_string(),
                 host: "*".to_string(),
                 operation: 3,
@@ -703,6 +758,80 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
             }
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn create_acls_maps_non_empty_broker_results() {
+        let seen_request = Arc::new(Mutex::new(None));
+        let captured_request = Arc::clone(&seen_request);
+        let mock = MockBroker::start(move |api_key, version, _corr_id, body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_response(create_acls_request::API_KEY, 1));
+            }
+            if api_key == create_acls_request::API_KEY {
+                let mut body =
+                    request_body_after_header(body, version >= create_acls_request::FLEXIBLE_MIN);
+                let request = CreateAclsRequest::decode(&mut body, version)
+                    .expect("create ACLs request decodes");
+                assert!(body.is_empty());
+                *captured_request.lock().expect("request capture lock") = Some(request);
+                return Some(encode_at(
+                    &CreateAclsResponse {
+                        results: vec![AclCreationResult {
+                            error_code: 36,
+                            error_message: Some("acl exists".into()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    1,
+                ));
+            }
+            None
+        })
+        .await;
+        let mut admin = AdminClient::connect(&[mock.addr.to_string()])
+            .await
+            .expect("admin connects to mock broker");
+        let creation = AclEntry {
+            pattern_type: PatternType::Prefixed,
+            ..sample_entry()
+        };
+
+        let outcomes = admin
+            .create_acls(&[creation])
+            .await
+            .expect("create ACL response maps");
+
+        assert!(outcomes.len() == 1);
+        let error = outcomes[0]
+            .error
+            .as_ref()
+            .expect("broker error is surfaced");
+        assert!(error.code == 36);
+        assert!(error.message == Some("acl exists".into()));
+        let request = seen_request
+            .lock()
+            .expect("request capture lock")
+            .take()
+            .expect("create ACLs request was captured");
+        assert!(
+            request
+                == CreateAclsRequest {
+                    creations: vec![AclCreation {
+                        resource_type: resource_type_to_wire(ResourceType::Topic),
+                        resource_name: "orders".into(),
+                        resource_pattern_type: pattern_type_to_wire(PatternType::Prefixed),
+                        principal: "User:alice".into(),
+                        host: "*".into(),
+                        operation: operation_to_wire(AclOperation::Read),
+                        permission_type: permission_to_wire(PermissionType::Allow),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+        );
+        mock.stop();
     }
 
     #[test]
@@ -748,6 +877,104 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
             }
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delete_acls_maps_non_empty_matched_acls() {
+        let seen_request = Arc::new(Mutex::new(None));
+        let captured_request = Arc::clone(&seen_request);
+        let mock = MockBroker::start(move |api_key, version, _corr_id, body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_response(delete_acls_request::API_KEY, 1));
+            }
+            if api_key == delete_acls_request::API_KEY {
+                let mut body =
+                    request_body_after_header(body, version >= delete_acls_request::FLEXIBLE_MIN);
+                let request = DeleteAclsRequest::decode(&mut body, version)
+                    .expect("delete ACLs request decodes");
+                assert!(body.is_empty());
+                *captured_request.lock().expect("request capture lock") = Some(request);
+                return Some(encode_at(
+                    &DeleteAclsResponse {
+                        filter_results: vec![DeleteAclsFilterResult {
+                            matching_acls: vec![DeleteAclsMatchingAcl {
+                                resource_type: resource_type_to_wire(ResourceType::Topic),
+                                resource_name: "orders".into(),
+                                pattern_type: pattern_type_to_wire(PatternType::Literal),
+                                principal: "User:alice".into(),
+                                host: "*".into(),
+                                operation: operation_to_wire(AclOperation::Read),
+                                permission_type: permission_to_wire(PermissionType::Allow),
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                    1,
+                ));
+            }
+            None
+        })
+        .await;
+        let mut admin = AdminClient::connect(&[mock.addr.to_string()])
+            .await
+            .expect("admin connects to mock broker");
+        let filter = AclEntryFilter {
+            resource_type: Some(ResourceType::Topic),
+            resource_name: Some("orders".into()),
+            ..Default::default()
+        };
+
+        let outcomes = admin
+            .delete_acls(&[filter])
+            .await
+            .expect("delete ACL response maps");
+
+        assert!(outcomes.len() == 1);
+        assert!(outcomes[0].error.is_none());
+        assert!(outcomes[0].matched == vec![sample_entry()]);
+        let request = seen_request
+            .lock()
+            .expect("request capture lock")
+            .take()
+            .expect("delete ACLs request was captured");
+        assert!(
+            request
+                == DeleteAclsRequest {
+                    filters: vec![DeleteAclsFilter {
+                        resource_type_filter: resource_type_to_wire(ResourceType::Topic),
+                        resource_name_filter: Some("orders".into()),
+                        pattern_type_filter: WIRE_ANY,
+                        principal_filter: None,
+                        host_filter: None,
+                        operation: WIRE_ANY,
+                        permission_type: WIRE_ANY,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }
+        );
+        mock.stop();
+    }
+
+    #[test]
+    fn parse_alter_scram_results_preserves_usernames_and_errors() {
+        let outcomes = parse_alter_scram_results(AlterUserScramCredentialsResponse {
+            results: vec![AlterUserScramCredentialsResult {
+                user: "alice".into(),
+                error_code: 42,
+                error_message: Some("bad credentials".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        assert!(outcomes.len() == 1);
+        assert!(outcomes[0].username == "alice");
+        let error = outcomes[0].error.as_ref().expect("error is preserved");
+        assert!(error.code == 42);
+        assert!(error.message == Some("bad credentials".into()));
     }
 
     #[test]
@@ -999,6 +1226,34 @@ mod tests {
                     name: "UNACCEPTABLE_CREDENTIAL",
                     message: Some("too many iterations".to_string()),
                 })
+        );
+    }
+
+    #[test]
+    fn describe_request_passes_resource_name_and_host_filters_through() {
+        let f = AclEntryFilter {
+            resource_type: Some(ResourceType::Topic),
+            resource_name: Some("orders".into()),
+            pattern_type: Some(PatternType::Literal),
+            principal: Some("User:alice".into()),
+            host: Some("10.0.0.0".into()),
+            operation: Some(AclOperation::Read),
+            permission_type: Some(PermissionType::Allow),
+        };
+
+        let r = filter_to_describe_request(&f);
+
+        assert!(
+            r == DescribeAclsRequest {
+                resource_type_filter: 2,
+                resource_name_filter: Some("orders".to_string()),
+                pattern_type_filter: 3,
+                principal_filter: Some("User:alice".to_string()),
+                host_filter: Some("10.0.0.0".to_string()),
+                operation: 3,
+                permission_type: 3,
+                unknown_tagged_fields: UnknownTaggedFields(vec![]),
+            }
         );
     }
 }

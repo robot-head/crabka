@@ -341,7 +341,7 @@ mod tests {
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
         c.append(LeaderEpoch(0), Offset(0)).unwrap();
         c.append(LeaderEpoch(1), Offset(50)).unwrap();
-        assert!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(100)) == Offset(100));
+        assert!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(100)) == 100);
     }
 
     #[test]
@@ -351,8 +351,8 @@ mod tests {
         c.append(LeaderEpoch(0), Offset(0)).unwrap();
         c.append(LeaderEpoch(1), Offset(50)).unwrap();
         c.append(LeaderEpoch(2), Offset(100)).unwrap();
-        assert!(c.end_offset_for_epoch(LeaderEpoch(0), Offset(200)) == Offset(50));
-        assert!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(200)) == Offset(100));
+        assert!(c.end_offset_for_epoch(LeaderEpoch(0), Offset(200)) == 50);
+        assert!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(200)) == 100);
     }
 
     #[test]
@@ -360,7 +360,7 @@ mod tests {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
         c.append(LeaderEpoch(0), Offset(0)).unwrap();
-        assert!(c.end_offset_for_epoch(LeaderEpoch(7), Offset(200)) == Offset(-1));
+        assert!(c.end_offset_for_epoch(LeaderEpoch(7), Offset(200)) == -1);
     }
 
     #[test]
@@ -372,9 +372,9 @@ mod tests {
         c.truncate_from_end(Offset(4)).unwrap();
         check!(c.latest_epoch() == Some(LeaderEpoch(1)));
         // Epoch 7 began at offset 4 (>= end_offset), so it is gone.
-        check!(c.end_offset_for_epoch(LeaderEpoch(7), Offset(4)) == Offset(-1));
+        check!(c.end_offset_for_epoch(LeaderEpoch(7), Offset(4)) == -1);
         // Epoch 1 survives; its end is now the log end (4).
-        check!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(4)) == Offset(4));
+        check!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(4)) == 4);
     }
 
     #[test]
@@ -680,7 +680,7 @@ mod fuzz {
                         next_start,
                         "older epoch truncates to next epoch start"
                     );
-                    prop_assert!(trunc <= Offset(leo), "truncation {} above log end {}", trunc, leo);
+                    prop_assert!(trunc <= leo, "truncation {} above log end {}", trunc, leo);
                 }
             } else if requested == UNDEFINED_EPOCH {
                 // No last epoch → no truncation this round.

@@ -5,7 +5,7 @@
 //! and gets used verbatim — matching the JVM `kafka-topics
 //! --alter --partitions N --replica-assignment 0:1,1:2,...` flow.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord};
 use crabka_protocol::{
     Decode, Encode,
@@ -127,9 +127,7 @@ fn create_partitions_response(
 }
 
 fn encode_response<R: Encode>(resp: &R, version: i16) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(resp, version)
 }
 
 fn should_materialize_locally(replicas: &[NodeId], node_id: NodeId) -> bool {

@@ -1,6 +1,6 @@
 //! KIP-853 reconfiguration coordinator: single-voter add/remove/update with safety guards.
 
-use crabka_metadata::{Voter, VoterSet};
+use crabka_metadata::{MetadataRecord, Voter, VoterSet, VotersRecord};
 
 use crate::{NodeId, RaftError};
 
@@ -66,6 +66,24 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
         }
     }
 
+    fn not_leader_outcome(&self) -> Option<ReconfigOutcome> {
+        (!self.ops.is_leader()).then(|| ReconfigOutcome::NotLeader {
+            leader: self.ops.leader(),
+        })
+    }
+
+    fn try_reconfig_lock(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, RaftError> {
+        self.lock
+            .try_lock()
+            .map_err(|_| RaftError::ReconfigInProgress)
+    }
+
+    async fn submit_voters(&self, voters: VoterSet) -> Result<(), RaftError> {
+        self.ops
+            .submit_records(vec![MetadataRecord::V1Voters(VotersRecord { voters })])
+            .await
+    }
+
     /// Add a single voter. The candidate is first registered as a learner and
     /// must be caught up within `observer_lag_bound` before promotion. On
     /// success the new membership is committed and an authoritative
@@ -78,15 +96,10 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
     /// - Any error surfaced by the underlying raft operations.
     #[tracing::instrument(level = "info", skip_all, fields(voter = req.voter.id.0), err)]
     pub async fn add_voter(&self, req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
-        if !self.ops.is_leader() {
-            return Ok(ReconfigOutcome::NotLeader {
-                leader: self.ops.leader(),
-            });
+        if let Some(outcome) = self.not_leader_outcome() {
+            return Ok(outcome);
         }
-        let _guard = self
-            .lock
-            .try_lock()
-            .map_err(|_| RaftError::ReconfigInProgress)?;
+        let _guard = self.try_reconfig_lock()?;
         let current = self.ops.current_voters();
         if current.contains(req.voter.id) {
             return Ok(ReconfigOutcome::Committed); // idempotent
@@ -109,11 +122,7 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
         }
         let next = current.with_voter(req.voter.clone());
         self.ops.change_membership(next.ids()).await?;
-        self.ops
-            .submit_records(vec![crabka_metadata::MetadataRecord::V1Voters(
-                crabka_metadata::VotersRecord { voters: next },
-            )])
-            .await?;
+        self.submit_voters(next).await?;
         Ok(ReconfigOutcome::Committed)
     }
 
@@ -126,15 +135,10 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
     /// - Any error surfaced by the underlying raft operations.
     #[tracing::instrument(level = "info", skip_all, fields(voter = req.id.0), err)]
     pub async fn remove_voter(&self, req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
-        if !self.ops.is_leader() {
-            return Ok(ReconfigOutcome::NotLeader {
-                leader: self.ops.leader(),
-            });
+        if let Some(outcome) = self.not_leader_outcome() {
+            return Ok(outcome);
         }
-        let _guard = self
-            .lock
-            .try_lock()
-            .map_err(|_| RaftError::ReconfigInProgress)?;
+        let _guard = self.try_reconfig_lock()?;
         let current = self.ops.current_voters();
         match current.get(req.id) {
             // No voter with this id: already absent, idempotent no-op.
@@ -154,11 +158,7 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
             ));
         }
         self.ops.change_membership(next.ids()).await?;
-        self.ops
-            .submit_records(vec![crabka_metadata::MetadataRecord::V1Voters(
-                crabka_metadata::VotersRecord { voters: next },
-            )])
-            .await?;
+        self.submit_voters(next).await?;
         Ok(ReconfigOutcome::Committed)
     }
 
@@ -171,25 +171,16 @@ impl<'a, O: ReconfigOps> Coordinator<'a, O> {
     /// - Any error surfaced by the underlying raft operations.
     #[tracing::instrument(level = "info", skip_all, fields(voter = req.voter.id.0), err)]
     pub async fn update_voter(&self, req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
-        if !self.ops.is_leader() {
-            return Ok(ReconfigOutcome::NotLeader {
-                leader: self.ops.leader(),
-            });
+        if let Some(outcome) = self.not_leader_outcome() {
+            return Ok(outcome);
         }
-        let _guard = self
-            .lock
-            .try_lock()
-            .map_err(|_| RaftError::ReconfigInProgress)?;
+        let _guard = self.try_reconfig_lock()?;
         let current = self.ops.current_voters();
         if !current.contains(req.voter.id) {
             return Err(RaftError::ReconfigRejected("unknown voter".into()));
         }
         let next = current.with_voter(req.voter);
-        self.ops
-            .submit_records(vec![crabka_metadata::MetadataRecord::V1Voters(
-                crabka_metadata::VotersRecord { voters: next },
-            )])
-            .await?;
+        self.submit_voters(next).await?;
         Ok(ReconfigOutcome::Committed)
     }
 }

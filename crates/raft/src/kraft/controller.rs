@@ -258,6 +258,23 @@ fn assigned_record_offset(assign_base: Offset, delta: i64) -> i64 {
     assign_base.0.saturating_add(delta)
 }
 
+fn metadata_record_batch(leader_epoch: Epoch, blobs: &[bytes::Bytes]) -> RecordBatch {
+    let records: Vec<Record> = blobs
+        .iter()
+        .map(|blob| Record {
+            value: Some(blob.clone()),
+            ..Default::default()
+        })
+        .collect();
+
+    RecordBatch {
+        partition_leader_epoch: i32::try_from(leader_epoch).unwrap_or(i32::MAX),
+        last_offset_delta: i32::try_from(blobs.len().saturating_sub(1)).unwrap_or(0),
+        records,
+        ..Default::default()
+    }
+}
+
 fn append_result_is_consistent(
     expected_base: Offset,
     returned_base: Offset,
@@ -964,7 +981,7 @@ impl Engine {
                     // the `KraftLog` offset domain to compare against log bounds.
                     let fetch_offset = Offset(fetch_offset);
                     let log_start = self.log.log_start_offset();
-                    let snapshot_id = if fetch_offset >= Offset(0) && fetch_offset < log_start {
+                    let snapshot_id = if fetch_offset >= 0 && fetch_offset < log_start {
                         self.latest_snapshot_id()
                     } else {
                         None
@@ -1297,19 +1314,7 @@ impl Engine {
         }
 
         let leader_epoch = self.core.quorum_state().leader_epoch;
-        let kafka_records: Vec<Record> = value_blobs
-            .iter()
-            .map(|blob| Record {
-                value: Some(blob.clone()),
-                ..Default::default()
-            })
-            .collect();
-        let mut batch = RecordBatch {
-            partition_leader_epoch: i32::try_from(leader_epoch).unwrap_or(i32::MAX),
-            last_offset_delta: i32::try_from(value_blobs.len().saturating_sub(1)).unwrap_or(0),
-            records: kafka_records,
-            ..Default::default()
-        };
+        let mut batch = metadata_record_batch(leader_epoch, &value_blobs);
         let base = match self.log.append(&mut batch) {
             Ok(off) => off,
             Err(e) => {
@@ -1358,19 +1363,7 @@ impl Engine {
             }
             scratch.apply(r);
         }
-        let kafka_records: Vec<Record> = blobs
-            .iter()
-            .map(|blob| Record {
-                value: Some(blob.clone()),
-                ..Default::default()
-            })
-            .collect();
-        let mut batch = RecordBatch {
-            partition_leader_epoch: i32::try_from(leader_epoch).unwrap_or(i32::MAX),
-            last_offset_delta: i32::try_from(blobs.len().saturating_sub(1)).unwrap_or(0),
-            records: kafka_records,
-            ..Default::default()
-        };
+        let mut batch = metadata_record_batch(leader_epoch, &blobs);
         let expected_base = self.log.log_end_offset();
         let base = match self.log.append(&mut batch) {
             Ok(off) => off,
@@ -2259,7 +2252,7 @@ fn write_checkpoint(
     bytes: &[u8],
 ) -> Result<(), RaftError> {
     std::fs::create_dir_all(dir).map_err(crabka_log::LogError::Io)?;
-    let name = format!("{end_offset:020}-{epoch:010}.checkpoint");
+    let name = checkpoint_name(end_offset, epoch);
     let path = dir.join(name);
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes).map_err(crabka_log::LogError::Io)?;
@@ -2276,9 +2269,19 @@ fn load_latest_checkpoint(dir: &std::path::Path) -> Result<Option<Vec<u8>>, Raft
     let Some((end_offset, epoch)) = latest_checkpoint_id(dir) else {
         return Ok(None);
     };
-    let name = format!("{end_offset:020}-{epoch:010}.checkpoint");
-    let bytes = std::fs::read(dir.join(name)).map_err(crabka_log::LogError::Io)?;
+    let bytes = std::fs::read(dir.join(checkpoint_name(end_offset, epoch)))
+        .map_err(crabka_log::LogError::Io)?;
     Ok(Some(bytes))
+}
+
+fn checkpoint_name(end_offset: i64, epoch: i32) -> String {
+    format!("{end_offset:020}-{epoch:010}.checkpoint")
+}
+
+pub(crate) fn parse_checkpoint_name(name: &str) -> Option<(i64, i32)> {
+    let stem = name.strip_suffix(".checkpoint")?;
+    let (off, ep) = stem.split_once('-')?;
+    Some((off.parse().ok()?, ep.parse().ok()?))
 }
 
 /// Scan `dir` for `<end_offset>-<epoch>.checkpoint` artifacts and return the
@@ -2290,13 +2293,7 @@ fn latest_checkpoint_id(dir: &std::path::Path) -> Option<(i64, i32)> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(stem) = name.strip_suffix(".checkpoint") else {
-            continue;
-        };
-        let Some((off, ep)) = stem.split_once('-') else {
-            continue;
-        };
-        let (Ok(off), Ok(ep)) = (off.parse::<i64>(), ep.parse::<i32>()) else {
+        let Some((off, ep)) = parse_checkpoint_name(name) else {
             continue;
         };
         if best.is_none_or(|cur| checkpoint_id_is_newer((off, ep), cur)) {
@@ -2323,13 +2320,7 @@ fn retain_latest_checkpoint(dir: &std::path::Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(stem) = name.strip_suffix(".checkpoint") else {
-            continue;
-        };
-        let Some((off, ep)) = stem.split_once('-') else {
-            continue;
-        };
-        let (Ok(off), Ok(ep)) = (off.parse::<i64>(), ep.parse::<i32>()) else {
+        let Some((off, ep)) = parse_checkpoint_name(name) else {
             continue;
         };
         if (off, ep) != latest {
@@ -2341,8 +2332,7 @@ fn retain_latest_checkpoint(dir: &std::path::Path) {
 /// Read a specific checkpoint `<end_offset>-<epoch>.checkpoint` by id, or `None`
 /// if it is absent (the leader's `FetchSnapshot` serve path).
 fn load_checkpoint_by_id(dir: &std::path::Path, end_offset: i64, epoch: i32) -> Option<Vec<u8>> {
-    let name = format!("{end_offset:020}-{epoch:010}.checkpoint");
-    std::fs::read(dir.join(name)).ok()
+    std::fs::read(dir.join(checkpoint_name(end_offset, epoch))).ok()
 }
 
 #[cfg(test)]
@@ -2707,8 +2697,7 @@ mod tests {
                 "assigned_record_offset({base}, {count})"
             );
             assert!(
-                submit_waiter_need_offset(Offset(base), usize::try_from(count).unwrap())
-                    == Offset(want),
+                submit_waiter_need_offset(Offset(base), usize::try_from(count).unwrap()) == want,
                 "submit_waiter_need_offset({base}, {count})"
             );
         }
@@ -2782,7 +2771,7 @@ mod tests {
         for (prev_hwm, new_hwm, log_end, want) in [(2, 5, 4, 4), (2, 1, 4, 2), (2, 3, 4, 3)] {
             assert!(
                 expected_hwm_after_advance(Offset(prev_hwm), Offset(new_hwm), Offset(log_end))
-                    == Offset(want),
+                    == want,
                 "prev_hwm {prev_hwm}, new_hwm {new_hwm}, log_end {log_end}"
             );
         }
@@ -3072,7 +3061,7 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
         assert!(engine.commit_waiters.len() == 1);
-        check!(engine.commit_waiters[0].need_offset == Offset(6));
+        check!(engine.commit_waiters[0].need_offset == 6);
     }
 
     #[test]
@@ -3104,7 +3093,7 @@ mod tests {
             Err(oneshot::error::TryRecvError::Empty)
         ));
         assert!(engine.commit_waiters.len() == 1);
-        check!(engine.commit_waiters[0].need_offset == Offset(6));
+        check!(engine.commit_waiters[0].need_offset == 6);
     }
 
     #[test]
@@ -3137,7 +3126,7 @@ mod tests {
                     leader_id,
                     leader_epoch,
                 }) => {
-                    assert!(leader_id == NodeId(1));
+                    assert!(leader_id == 1);
                     assert!(leader_epoch == 4);
                 }
                 other => panic!("unexpected end quorum request: {other:?}"),
@@ -3335,7 +3324,7 @@ mod tests {
         engine.on_fetch_snapshot_response(NodeId(2), &error_body);
         assert!(engine.snapshot_fetch.is_none());
         let send = recv_peer_send_with_api(&mut sends, api_key::FETCH).await;
-        assert!(send.peer == NodeId(2));
+        assert!(send.peer == 2);
 
         engine.snapshot_fetch = Some(SnapshotFetchState::new((12, 3), NodeId(2)));
         let ok_body = wire::PeerResponse::FetchSnapshot {
@@ -3349,7 +3338,7 @@ mod tests {
         engine.on_fetch_snapshot_response(NodeId(3), &ok_body);
         assert!(engine.snapshot_fetch.is_none());
         let send = recv_peer_send_with_api(&mut sends, api_key::FETCH).await;
-        assert!(send.peer == NodeId(3));
+        assert!(send.peer == 3);
     }
 
     #[tokio::test(start_paused = true)]
@@ -3449,7 +3438,7 @@ mod tests {
     #[tokio::test]
     async fn node_id_reports_configured_node() {
         let (ctrl, _dir) = build(NodeId(7), &[NodeId(7)]);
-        assert!(ctrl.node_id() == NodeId(7));
+        assert!(ctrl.node_id() == 7);
         ctrl.shutdown().await;
     }
 

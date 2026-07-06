@@ -121,9 +121,7 @@ pub(crate) async fn handle(
         let entry = entry_mutex.lock().await;
         // `req.producer_id` is the raw wire `i64`; wrap it to compare with the
         // coordinator's `ProducerId`.
-        if entry.producer_id != ProducerId(req.producer_id)
-            || entry.producer_epoch != req.producer_epoch
-        {
+        if entry.producer_id != req.producer_id || entry.producer_epoch != req.producer_epoch {
             return encode_err(version, codes::INVALID_PRODUCER_EPOCH);
         }
     }
@@ -735,7 +733,7 @@ mod tests {
         // (monotonic from PID_BASE) and the epoch resets to 0. No panic.
         let (new_pid, new_epoch) =
             next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX, &ids);
-        assert!(new_pid != ProducerId(7));
+        assert!(new_pid != 7);
         assert!(new_epoch == 0);
         // The allocator hands out a distinct pid on the next overflow too.
         let (next_pid, _) =

@@ -181,6 +181,7 @@ pub mod file_config;
 pub(crate) mod future_log;
 mod handlers;
 pub(crate) mod heartbeat;
+pub(crate) mod host_port;
 pub(crate) mod incarnation;
 pub(crate) mod isr_maintenance;
 pub(crate) mod kafka_hash;

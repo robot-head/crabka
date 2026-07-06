@@ -405,15 +405,18 @@ impl Producer {
     /// `coordinators` array introduced in version 4.
     #[tracing::instrument(level = "debug", skip_all, fields(transactional_id = %tid), err)]
     async fn find_txn_coordinator(&self, tid: &str) -> Result<String, ProducerError> {
+        self.find_coordinator(tid, 1).await
+    }
+
+    async fn find_coordinator(&self, key: &str, key_type: i8) -> Result<String, ProducerError> {
         let resp = self
             .client
             .send(FindCoordinatorRequest {
                 // v0-3: the `key` field carries the lookup key
-                key: tid.to_owned(),
-                // key_type = 1 → TRANSACTION (vs 0 = GROUP)
-                key_type: 1,
+                key: key.to_owned(),
+                key_type,
                 // v4+: repeated coordinator_keys list
-                coordinator_keys: vec![tid.to_owned()],
+                coordinator_keys: vec![key.to_owned()],
                 ..Default::default()
             })
             .await?;
@@ -550,30 +553,7 @@ impl Producer {
     /// [`find_txn_coordinator`]: Self::find_txn_coordinator
     #[tracing::instrument(level = "debug", skip_all, fields(group_id = %group_id), err)]
     async fn find_group_coordinator(&self, group_id: &str) -> Result<String, ProducerError> {
-        let resp = self
-            .client
-            .send(FindCoordinatorRequest {
-                key: group_id.to_owned(),
-                // key_type = 0 → GROUP
-                key_type: 0,
-                coordinator_keys: vec![group_id.to_owned()],
-                ..Default::default()
-            })
-            .await?;
-
-        // v4+ returns a `coordinators` array; prefer it when present.
-        if let Some(coord) = resp.coordinators.first() {
-            if coord.error_code != 0 {
-                return Err(ProducerError::Server(coord.error_code));
-            }
-            return Ok(format!("{}:{}", coord.host, coord.port));
-        }
-
-        // Fallback: legacy top-level host/port (versions 0–3).
-        if resp.error_code != 0 {
-            return Err(ProducerError::Server(resp.error_code));
-        }
-        Ok(format!("{}:{}", resp.host, resp.port))
+        self.find_coordinator(group_id, 0).await
     }
 
     // ── Internal lifecycle ───────────────────────────────────────────────────
@@ -840,4 +820,184 @@ fn build_topics_payload(offsets: &[((String, i32), i64)]) -> Vec<TxnOffsetCommit
             ..Default::default()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use bytes::BytesMut;
+    use crabka_client_core::MockBroker;
+    use crabka_protocol::{
+        Decode, Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            find_coordinator_request::{self, FindCoordinatorRequest},
+            find_coordinator_response::{self, Coordinator, FindCoordinatorResponse},
+        },
+    };
+
+    use super::Producer;
+
+    const CLIENT_ID: &str = "producer-test";
+
+    fn encode_v0(resp: &impl Encode) -> Vec<u8> {
+        let mut buf = BytesMut::new();
+        resp.encode(&mut buf, 0).unwrap();
+        buf.to_vec()
+    }
+
+    fn encode_find_coordinator_response(version: i16) -> Vec<u8> {
+        let resp = if version >= 4 {
+            FindCoordinatorResponse {
+                coordinators: vec![Coordinator {
+                    key: "group-a".into(),
+                    node_id: 1,
+                    host: "127.0.0.1".into(),
+                    port: 19092,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        } else {
+            FindCoordinatorResponse {
+                node_id: 1,
+                host: "127.0.0.1".into(),
+                port: 19092,
+                ..Default::default()
+            }
+        };
+        let mut buf = BytesMut::new();
+        if version >= find_coordinator_response::FLEXIBLE_MIN {
+            buf.extend_from_slice(&[0]);
+        }
+        resp.encode(&mut buf, version).unwrap();
+        buf.to_vec()
+    }
+
+    fn api_versions_response(find_coordinator_version: i16) -> Vec<u8> {
+        encode_v0(&ApiVersionsResponse {
+            api_keys: vec![
+                ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 0,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key: find_coordinator_request::API_KEY,
+                    min_version: find_coordinator_version,
+                    max_version: find_coordinator_version,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+    }
+
+    fn decode_request_body(body: &[u8], version: i16) -> FindCoordinatorRequest {
+        let header_len = 2 + CLIENT_ID.len() + usize::from(version >= 3);
+        let mut request_body = &body[header_len..];
+        FindCoordinatorRequest::decode(&mut request_body, version).unwrap()
+    }
+
+    async fn producer_with_find_coordinator_version(
+        version: i16,
+        seen: Arc<Mutex<Vec<FindCoordinatorRequest>>>,
+    ) -> (MockBroker, Producer) {
+        let seen_by_handler = Arc::clone(&seen);
+        let find_coordinator_version = version;
+        let mock = MockBroker::start(move |api_key, version, _corr_id, body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_response(find_coordinator_version));
+            }
+            if api_key == find_coordinator_request::API_KEY {
+                seen_by_handler
+                    .lock()
+                    .unwrap()
+                    .push(decode_request_body(body, version));
+                return Some(encode_find_coordinator_response(version));
+            }
+            None
+        })
+        .await;
+        let producer = Producer::builder()
+            .bootstrap(mock.addr.to_string())
+            .client_id(CLIENT_ID)
+            .enable_idempotence(false)
+            .build()
+            .await
+            .expect("producer connects to mock broker");
+        (mock, producer)
+    }
+
+    #[derive(Clone, Copy)]
+    enum LookupKind {
+        Group,
+        Transaction,
+    }
+
+    async fn find_coordinator(producer: &Producer, kind: LookupKind, key: &str) -> String {
+        match kind {
+            LookupKind::Group => producer.find_group_coordinator(key).await,
+            LookupKind::Transaction => producer.find_txn_coordinator(key).await,
+        }
+        .expect("coordinator is returned")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn find_coordinator_sends_expected_request_for_legacy_and_batched_versions() {
+        for (version, kind, key, expected_request) in [
+            (
+                3,
+                LookupKind::Group,
+                "group-a",
+                FindCoordinatorRequest {
+                    key: "group-a".into(),
+                    ..Default::default()
+                },
+            ),
+            (
+                4,
+                LookupKind::Group,
+                "group-a",
+                FindCoordinatorRequest {
+                    coordinator_keys: vec!["group-a".into()],
+                    ..Default::default()
+                },
+            ),
+            (
+                3,
+                LookupKind::Transaction,
+                "txn-a",
+                FindCoordinatorRequest {
+                    key: "txn-a".into(),
+                    key_type: 1,
+                    ..Default::default()
+                },
+            ),
+            (
+                4,
+                LookupKind::Transaction,
+                "txn-a",
+                FindCoordinatorRequest {
+                    key_type: 1,
+                    coordinator_keys: vec!["txn-a".into()],
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let (mock, producer) =
+                producer_with_find_coordinator_version(version, Arc::clone(&seen)).await;
+
+            let addr = find_coordinator(&producer, kind, key).await;
+
+            assert!(addr == "127.0.0.1:19092");
+            let requests = seen.lock().unwrap();
+            assert!(*requests == vec![expected_request]);
+            mock.stop();
+        }
+    }
 }

@@ -287,10 +287,7 @@ async fn bare_majority_two_of_three_elects_with_uniform_timeouts() {
     let (leader, epoch) =
         await_single_leader(&net, &[NodeId(1), NodeId(2)], Duration::from_secs(8)).await;
     assert!(epoch >= 1);
-    assert!(
-        leader == NodeId(1) || leader == NodeId(2),
-        "leader must be a live voter"
-    );
+    assert!(leader == 1 || leader == 2, "leader must be a live voter");
 
     for &id in &[NodeId(1), NodeId(2)] {
         net.get(id).unwrap().shutdown().await;

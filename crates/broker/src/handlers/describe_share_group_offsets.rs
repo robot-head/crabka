@@ -7,10 +7,10 @@
 //! per-connection principal + peer `SocketAddr` for the per-group `Describe`
 //! ACL gate.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         describe_share_group_offsets_request::DescribeShareGroupOffsetsRequest,
         describe_share_group_offsets_response::{
@@ -63,9 +63,7 @@ pub(crate) async fn handle(
             groups,
             ..Default::default()
         };
-        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-        resp.encode(&mut buf, version)?;
-        return Ok(buf.freeze());
+        return crate::handlers::encode_response(&resp, version);
     }
 
     let image = broker.controller.current_image();
@@ -133,9 +131,7 @@ pub(crate) async fn handle(
         throttle_time_ms: 0,
         ..Default::default()
     };
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
+    crate::handlers::encode_response(&resp, version)
 }
 
 /// Build one response topic: resolve `name → id` (unknown ⇒ per-partition

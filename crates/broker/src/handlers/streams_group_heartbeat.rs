@@ -8,10 +8,9 @@
 //! oneshot, encode. Gated on BOTH the finalized `streams.version >= 1` feature
 //! (KIP-1071 early access) AND the `streams_group.enable` config kill-switch.
 
-use bytes::{Bytes, BytesMut};
-use crabka_metadata::{AclOperation, ResourceType};
+use bytes::Bytes;
 use crabka_protocol::{
-    Decode, Encode,
+    Decode,
     owned::{
         streams_group_heartbeat_request::StreamsGroupHeartbeatRequest,
         streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
@@ -20,12 +19,8 @@ use crabka_protocol::{
 use tokio::sync::oneshot;
 
 use crate::{
-    authorizer::{AuthorizationRequest, AuthorizationResult},
-    broker::Broker,
-    codes,
-    coordinator::unified::streams::actor::StreamsGroupActorMessage,
-    error::BrokerError,
-    time_util::now_ms,
+    broker::Broker, codes, coordinator::unified::streams::actor::StreamsGroupActorMessage,
+    error::BrokerError, handlers::group_read_denied, time_util::now_ms,
 };
 
 #[tracing::instrument(
@@ -56,11 +51,13 @@ pub(crate) async fn handle(
         if group_read_denied(
             broker.config.authorizer.as_ref(),
             &image,
-            ctx.principal,
-            ctx.peer,
+            ctx,
             &req.group_id,
         ) {
-            return encode(version, &error(codes::GROUP_AUTHORIZATION_FAILED));
+            return crate::handlers::encode_response(
+                &error(codes::GROUP_AUTHORIZATION_FAILED),
+                version,
+            );
         }
 
         // KIP-1071: the streams protocol is gated on a finalized
@@ -70,7 +67,7 @@ pub(crate) async fn handle(
         if !crate::features::feature_enabled(&image, crate::features::STREAMS_VERSION, 1)
             || !streams_enabled
         {
-            return encode(version, &error(codes::UNSUPPORTED_VERSION));
+            return crate::handlers::encode_response(&error(codes::UNSUPPORTED_VERSION), version);
         }
 
         // KIP-1071 cold upgrade: a StreamsGroupHeartbeat for a drained classic group
@@ -83,7 +80,10 @@ pub(crate) async fn handle(
             Ok(
                 crate::coordinator::unified::streams::migration::ConvertOutcome::RejectLiveMembers,
             ) => {
-                return encode(version, &error(codes::GROUP_ID_NOT_FOUND));
+                return crate::handlers::encode_response(
+                    &error(codes::GROUP_ID_NOT_FOUND),
+                    version,
+                );
             }
             Ok(_) => {} // NotClassic | Converted → serve normally below
             Err(e) => return Err(e),
@@ -105,33 +105,16 @@ pub(crate) async fn handle(
             .await
             .is_err()
         {
-            return encode(version, &error(codes::COORDINATOR_LOAD_IN_PROGRESS));
+            return crate::handlers::encode_response(
+                &error(codes::COORDINATOR_LOAD_IN_PROGRESS),
+                version,
+            );
         }
         let resp = rx
             .await
             .unwrap_or_else(|_| error(codes::UNKNOWN_SERVER_ERROR));
-        encode(version, &resp)
+        crate::handlers::encode_response(&resp, version)
     }
-}
-
-/// `Read` on `Group(group_id)` gate. Returns `true` when denied.
-fn group_read_denied(
-    authorizer: &dyn crate::authorizer::Authorizer,
-    image: &crabka_metadata::MetadataImage,
-    principal: &crabka_security::Principal,
-    host: &std::net::SocketAddr,
-    group_id: &str,
-) -> bool {
-    authorizer.authorize(
-        image,
-        &AuthorizationRequest {
-            principal,
-            host,
-            resource_type: ResourceType::Group,
-            resource_name: group_id,
-            operation: AclOperation::Read,
-        },
-    ) == AuthorizationResult::Deny
 }
 
 /// Response returned when the streams protocol is disabled on this broker
@@ -145,12 +128,6 @@ fn error(code: i16) -> StreamsGroupHeartbeatResponse {
         error_code: code,
         ..Default::default()
     }
-}
-
-fn encode(version: i16, resp: &StreamsGroupHeartbeatResponse) -> Result<Bytes, BrokerError> {
-    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
-    resp.encode(&mut buf, version)?;
-    Ok(buf.freeze())
 }
 
 #[cfg(test)]
@@ -289,18 +266,13 @@ mod tests {
             groups: vec![],
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+        let ctx = crate::test_support::request_context(&principal, &peer, "streams-client");
 
-        assert!(group_read_denied(
-            &authorizer,
-            &image,
-            &principal,
-            &peer,
-            "g"
-        ));
+        assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
 
-        let bytes = encode(
-            streams_group_heartbeat_response::MAX_VERSION,
+        let bytes = crate::handlers::encode_response(
             &error(codes::GROUP_AUTHORIZATION_FAILED),
+            streams_group_heartbeat_response::MAX_VERSION,
         )
         .expect("encode");
         let mut cur: &[u8] = &bytes;
