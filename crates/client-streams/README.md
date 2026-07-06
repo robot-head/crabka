@@ -4,9 +4,49 @@
 [![Docs.rs](https://docs.rs/crabka-client-streams/badge.svg)](https://docs.rs/crabka-client-streams)
 [![CI](https://github.com/robot-head/crabka/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-head/crabka/actions/workflows/ci.yml)
 
-KIP-1071 Kafka Streams rebalance-protocol client for Apache Kafka in Rust.
+Kafka Streams-style topology, state-store, and membership runtime for Rust.
 
-This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation of Kafka-compatible infrastructure and clients.
+Part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation
+of Apache Kafka-compatible infrastructure and clients.
+
+## Overview
+
+`crabka-client-streams` provides a Kafka Streams-inspired API on top of Crabka's
+producer, consumer, and protocol crates. It includes a typed topology DSL,
+processor API, state stores, broker-free topology tests, KIP-1071 streams-group
+membership, and a managed `KafkaStreams` runtime.
+
+Use this crate when an application needs streaming joins, tables, windows,
+stateful processors, or local interactive queries instead of plain producer and
+consumer loops.
+
+## Capabilities
+
+- Typed `Topology` and `StreamsBuilder` APIs for source, processor, table, and
+  sink graphs.
+- `KStream` and `KTable` operators, including joins, cogrouping, windows,
+  suppression, and fixed-key processors.
+- State stores with changelog metadata and local read-only query handles.
+- Broker-free `TopologyTestDriver` for deterministic topology tests.
+- KIP-1071 streams-group membership through `StreamsMembership`.
+- Managed `KafkaStreams` runtime with configurable processing guarantee and
+  state backend.
+- Schema-aware serdes via `crabka-schema-serde`.
+- Optional dataframe and columnar serde/topology support.
+
+## Kafka Scope
+
+The crate tracks Kafka Streams semantics including KIP-1071 streams-group
+membership, KIP-447 EOS v2 integration, KIP-213 foreign-key joins, KIP-150
+cogroup, KIP-450 sliding windows, KIP-633 stream-stream left/outer emission,
+KIP-820 fixed-key processors, KIP-825 suppression, KIP-889 versioned stores,
+KIP-914 versioned join behavior, and KIP-923 stream-table join grace.
+
+The default processing guarantee is at-least-once. Exactly-once v2 must be
+selected explicitly. The default state backend is in-memory; persistent stores
+require selecting a durable backend and state directory. Interactive queries are
+local active-store queries and can fail during rebalance or when a store is not
+local to the process.
 
 ## Install
 
@@ -14,207 +54,103 @@ This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust imp
 cargo add crabka-client-streams
 ```
 
-For workspace development, use the path dependency from this repository instead.
+For workspace development, use the path dependency from this repository.
 
-## Usage example
+## Usage
 
-Build and run a simple source-to-sink topology using the KIP-1071 membership client:
+Build and join a streams group for a simple source-to-sink topology:
 
 ```rust,no_run
 use std::sync::Arc;
+
 use crabka_client_streams::{StreamsEvent, StreamsMembership, Topology};
 
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let mut topo = Topology::new();
-    let src = topo.add_source::<String, String>("src", ["input-topic"]);
-    topo.add_sink("snk", "output-topic", [&src]);
-    let built = topo.build("orders-stream")?;
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let mut topology = Topology::new();
+let source = topology.add_source::<String, String>("source", ["orders"]);
+topology.add_sink("sink", "orders-copy", [&source]);
+let built = topology.build("orders-stream")?;
 
-    let mut membership = StreamsMembership::builder()
-        .bootstrap("127.0.0.1:9092")
-        .group_id("orders-stream")
-        .topology(Arc::new(built))
-        .build()
-        .await?;
+let mut membership = StreamsMembership::builder()
+    .bootstrap("127.0.0.1:9092")
+    .group_id("orders-stream")
+    .topology(Arc::new(built))
+    .build()
+    .await?;
 
-    if let StreamsEvent::Assigned(assignment) = membership.next_event().await? {
-        println!("active tasks: {:?}", assignment.active);
-    }
-    Ok(())
+if let StreamsEvent::Assigned(assignment) = membership.next_event().await? {
+    println!("active tasks: {:?}", assignment.active);
 }
+# Ok(())
+# }
 ```
 
-## Schema-aware payloads (Avro / Protobuf / JSON)
+## Testing Topologies
 
-Read and write **Confluent-framed** payloads whose schemas are
-registered/validated against a Confluent-compatible Schema Registry (e.g.
-`crabka-schema-registry`) — built in, no feature flag. The typed serdes from
-[`crabka-schema-serde`](../schema-serde) plug straight into the Streams
-`Serde<T>` boundary.
-
-The serdes are **topic-aware** (like JVM Kafka's `serialize(topic, data)`): a serde
-carries its key/value role and derives its subject (`<topic>-value` / `<topic>-key`)
-from the topic. Declare a type's default serde once and use the plain
-`add_source`/`add_sink`:
+Use `TopologyTestDriver` for broker-free tests. It can pipe typed input records
+through a topology and read typed output from sink topics without opening Kafka
+connections.
 
 ```rust,no_run
-use std::sync::Arc;
-use apache_avro::AvroSchema;
-use serde::{Deserialize, Serialize};
-use crabka_client_streams::{DefaultSerde, SchemaPrewarm, SchemaSerde, StreamsMembership, Topology};
-use crabka_schema_serde::{RegistryClient, set_default_registry, cache::{CacheConfig, SchemaCache}, format::avro::AvroSerde};
+use crabka_client_streams::{Topology, TopologyTestDriver};
 
-#[derive(Clone, Serialize, Deserialize, AvroSchema)]
-struct Order { id: String, total: f64 }
+let mut topology = Topology::new();
+let source = topology.add_source::<String, String>("source", ["orders"]);
+topology.add_sink("sink", "orders-copy", [&source]);
 
-// Order's default serde: Avro values from the process default registry.
-impl DefaultSerde for Order {
-    type Serde = SchemaSerde<Order, AvroSerde<Order>>;
-}
-
-async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let cache = SchemaCache::new(RegistryClient::new("http://127.0.0.1:8081"), CacheConfig::default());
-    set_default_registry(cache.clone());
-
-    let mut topo = Topology::new();
-    let src = topo.add_source::<String, Order>("src", ["orders"]);
-    topo.add_sink("snk", "orders-copy", [&src]);
-    let built = topo.build("orders-avro")?;
-
-    // `schema_prewarm` resolves/registers schema ids once at membership start.
-    let mut membership = StreamsMembership::builder()
-        .bootstrap("127.0.0.1:9092")
-        .group_id("orders-avro")
-        .topology(Arc::new(built))
-        .maybe_schema_prewarm(Some(cache as Arc<dyn SchemaPrewarm>))
-        .build()
-        .await?;
-
-    Ok(())
-}
+let built = topology.build("orders-test")?;
+let mut driver = TopologyTestDriver::new(&built)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-For keys, per-topic subjects, or validation, construct the serde explicitly
-(`AvroSerde::<T>::value(&cache)` / `::key(&cache)`) and use
-`add_source_explicit`/`add_sink_explicit` with `(key_serde, value_serde)`.
+## Schema-Aware Payloads
 
-Runnable per-format pipelines live under [`examples/`](examples) — run them
-against a live broker + registry:
+The `SchemaSerde<T, S>` bridge lets streams read and write Confluent-framed
+Avro, Protobuf, or JSON Schema payloads through `crabka-schema-serde`. Serdes
+are topic-aware, matching Kafka's `serialize(topic, value)` shape: key/value
+roles derive `<topic>-key` or `<topic>-value` subjects from the topic passed at
+runtime.
 
-```bash
+Runnable examples live under `examples/`:
+
+```sh
 cargo run -p crabka-client-streams --example avro_pipeline
 cargo run -p crabka-client-streams --example protobuf_pipeline
 cargo run -p crabka-client-streams --example json_pipeline
 ```
 
-## Columnar / DataFrame support
+## Optional Columnar Support
 
-Process records as columns instead of one-at-a-time rows. This is **opt-in**
-behind three cargo features, all **off by default**:
+Columnar and dataframe support is opt-in:
 
-- `polars` — polars `DataFrame` serde and the native columnar topology.
-- `arrow` — arrow-rs `RecordBatch` serde. (The original design called for
-  `minarrow`, but it was substituted with arrow-rs because `minarrow` requires
-  nightly Rust; this crate stays on stable.)
-- `columnar` — native serde for [frankmcsherry's `columnar`](https://crates.io/crates/columnar)
-  types.
+- `polars` - Polars `DataFrame` serde and native columnar topology support.
+- `arrow` - Arrow `RecordBatch` serde.
+- `columnar` - serde for `columnar::Columnar` values.
 
 ```sh
 cargo add crabka-client-streams --features polars
 ```
 
-### Columnar serdes
+Columnar topologies operate on batches within a consumed batch. Cross-batch
+stateful operations such as accumulated joins and windows require the normal
+streams state-store APIs.
 
-Three serdes plug straight into the Streams `Serde<T>` boundary, each
-**topic-aware** like the schema serdes (`serialize(topic, data)`):
+## Cargo Features
 
-- `PolarsIpcSerde` — `Serde<DataFrame>`, Arrow-IPC framed (feature `polars`).
-- `ArrowIpcSerde` — `Serde<RecordBatch>`, Arrow-IPC framed (feature `arrow`).
-- `ColumnarSerde<T>` — `Serde<T>` for any `columnar::Columnar` type (feature `columnar`).
+- `polars` - enables Polars dataframe serde and topology helpers.
+- `arrow` - enables Arrow IPC `RecordBatch` serde.
+- `columnar` - enables native `columnar` crate serde support.
 
-```rust,no_run
-use crabka_client_streams::Serde;
-use crabka_client_streams::columnar::serde::polars::PolarsIpcSerde;
-use polars::prelude::*;
-
-let df = df!("id" => ["a", "b"], "total" => [1.0_f64, 2.5]).unwrap();
-let bytes = PolarsIpcSerde.serialize("orders", &df);
-let back = PolarsIpcSerde.deserialize("orders", &bytes).unwrap();
-assert!(back.equals(&df));
-```
-
-### Native columnar topology (feature `polars`)
-
-`ColumnarTopology` builds a source → operator → sink graph whose **edges carry
-polars `DataFrame`s**. A `BatchCodec` bridges Kafka records ↔ `DataFrame` at
-each source/sink; two are provided:
-
-- `RowCodec` — rows stay standard Kafka records (key/value decoded via a
-  `RowBridge`, e.g. `JsonRowBridge`); the codec assembles a column-per-field
-  `DataFrame` for a batch.
-- `BlobCodec` — each record's *value* is itself an Arrow-IPC `DataFrame`; the
-  codec vstacks per-record frames into the batch frame and re-chunks output to
-  stay under Kafka's record-size limit.
-
-Every assembled `DataFrame` carries reserved metadata columns —
-`__key`, `__timestamp`, `__partition`, `__offset` — so the sink codec can
-faithfully reconstruct records and the runtime can commit offsets. Payload
-columns may not use these names.
-
-Operators are expressed with polars `Expr`s via `BuiltinOp`: `Filter`,
-`Select`, `WithColumns`, and `GroupByAgg { keys, aggs }`. The topology runs on
-the existing broker runtime through `run_partition_once`, or broker-free in
-tests with `ColumnarTestDriver`:
-
-```rust,no_run
-use crabka_client_streams::Serde;
-use crabka_client_streams::columnar::serde::polars::PolarsIpcSerde;
-use crabka_client_streams::columnar::topology::codec::{BlobCodec, ConsumedRecord};
-use crabka_client_streams::columnar::topology::operator::BuiltinOp;
-use crabka_client_streams::columnar::topology::{ColumnarTestDriver, ColumnarTopology};
-use polars::prelude::*;
-
-let mut topo = ColumnarTopology::new();
-let src = topo.add_source("src", ["txns"], BlobCodec::default());
-let agg = topo.add_operator(
-    "sum-by-user",
-    BuiltinOp::GroupByAgg {
-        keys: vec![col("user")],
-        aggs: vec![col("amount").sum().alias("total")],
-    },
-    src,
-);
-topo.add_sink("out", "txn-totals", BlobCodec::default(), agg);
-
-let mut driver = ColumnarTestDriver::new(&topo).unwrap();
-let df = df!("user" => ["a", "a", "b"], "amount" => [5_i64, 3, 9]).unwrap();
-driver
-    .pipe_batch("txns", vec![ConsumedRecord {
-        key: None,
-        value: PolarsIpcSerde.serialize("txns", &df),
-        timestamp: 0,
-        partition: 0,
-        offset: 0,
-    }])
-    .unwrap();
-```
-
-> **Within-batch only.** Operators apply to one consumed batch at a time.
-> Cross-batch *stateful* operations — joins, windows, and aggregations that
-> accumulate across batches — are **not yet implemented** and are a named
-> follow-up. `GroupByAgg` aggregates only the rows present in the current batch.
-
-### Examples
-
-```bash
-cargo run -p crabka-client-streams --features polars --example dataframe_serde
-cargo run -p crabka-client-streams --features polars --example polars_pipeline
-```
+No optional feature is enabled by default.
 
 ## Documentation
 
-API documentation is published on [docs.rs/crabka-client-streams](https://docs.rs/crabka-client-streams). The repository README contains project-wide setup, development, and release notes.
+- [API documentation](https://docs.rs/crabka-client-streams)
+- [Schema serde crate](https://crates.io/crates/crabka-schema-serde)
+- [Crabka repository](https://github.com/robot-head/crabka)
+- [Kafka compatibility matrix](https://github.com/robot-head/crabka/blob/main/docs/KIP_MATRIX.md)
 
 ## License
 
-Apache-2.0. See the repository `LICENSE` and `NOTICE` files for details.
+Apache-2.0. Derivative work of [Apache Kafka](https://kafka.apache.org); see
+[NOTICE](https://github.com/robot-head/crabka/blob/main/NOTICE).

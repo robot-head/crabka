@@ -1,68 +1,116 @@
 # crabka-connect
 
-The connector-framework SPI for Crabka: the keystone traits every CDC source
-and telemetry sink builds on.
+[![Crates.io](https://img.shields.io/crates/v/crabka-connect.svg)](https://crates.io/crates/crabka-connect)
+[![Docs.rs](https://docs.rs/crabka-connect/badge.svg)](https://docs.rs/crabka-connect)
+[![CI](https://github.com/robot-head/crabka/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-head/crabka/actions/workflows/ci.yml)
 
-- [`Source<K, V>`](src/source.rs) — pull records out of an external system one
-  at a time (`poll`), snapshot the read position (`checkpoint`), and restore it
-  on restart (`seek`).
-- [`Sink<K, V>`](src/sink.rs) — push records into an external system in batches
-  (`put`), durably commit them (`flush`), and optionally gate writes behind a
-  transaction for exactly-once delivery (`begin` / `commit` / `abort`).
-- [`Converter<T>`](src/convert.rs) — bridge a connector's typed payload `T` to
-  and from the raw `Bytes` that travel on the Kafka wire. Ships with
-  [`ByteIdentity`] (byte-for-byte passthrough) and [`SchemaConverter`]
-  (Confluent schema-registry serdes via `crabka-schema-serde`).
-- [`ConnectorRuntime`](src/runtime.rs) — the embeddable, single-process driver
-  that owns a `Source` + `Sink` pair and pipes records between them. It polls
-  into bounded batches (backpressure), brackets each non-empty commit in the
-  sink's transactional gate (lazy `begin` → `put` → `commit`), and advances the
-  source checkpoint only after the sink commit is durable. Built
-  programmatically — `ConnectorRuntime::new().add_source(…).add_sink(…).run()` —
-  and driven through a `ConnectorHandle` (`pause` / `resume` / graceful
-  `shutdown`). No Connect worker protocol, no REST: the single-binary edge shape.
+Connector-framework SPI for Crabka sources, sinks, converters, and embedded
+runtimes.
 
-The transport traits mirror the Streams runtime I/O traits
-(`RecordFetcher` / `RecordProducer`) and the remote-storage `RemoteStorageManager`
-SPI; the converter layer mirrors Kafka Connect's `Converter`.
+Part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation
+of Apache Kafka-compatible infrastructure and clients.
 
-## Connector configuration
+## Overview
 
-Connector implementations can declare a ConfigDef-style schema and derive typed
-config extraction. This example uses `serde_json` to build raw JSON config, so
-consumers using this style should add `serde_json = "1"` as a direct
-dependency.
+`crabka-connect` defines the traits and data model for connector authors. It is
+the shared SPI for CDC sources, telemetry sinks, byte converters, typed schema
+converters, connector configuration, and the single-process runtime that pipes a
+source into a sink.
 
-```rust
-use crabka_connect::{
-    ConfigDef, ConnectorConfig, EnvSecretResolver, SecretString,
-};
+The crate is intentionally embeddable: there is no Kafka Connect worker
+protocol and no REST management server. Build connectors programmatically and
+run them inside the process that owns their lifecycle.
+
+## Capabilities
+
+- `Source<K, V>` for polling records from an external system, checkpointing
+  read position, seeking on restart, and acknowledging committed checkpoints.
+- `Sink<K, V>` for writing batches, flushing, and optionally bracketing writes
+  in transactions.
+- `ConnectRecord<K, V>` with optional key/value, timestamp, headers, and source
+  offset metadata.
+- `Converter<T>` for crossing between typed connector payloads and Kafka wire
+  bytes.
+- `ByteIdentity` for byte-for-byte passthrough.
+- `SchemaConverter<T>` for Confluent-framed Avro, Protobuf, or JSON payloads via
+  `crabka-schema-serde`.
+- `ConnectorRuntime` for the sequential `poll -> put -> commit -> checkpoint ->
+  acknowledge` loop.
+- `ConfigDef`, `ConnectorConfig`, secret resolution, typed config extraction,
+  and a default derive macro.
+
+## Runtime Model
+
+`ConnectorRuntime` owns one source and one sink. Each interval polls a bounded
+batch, writes it to the sink, commits or flushes the sink, persists the source
+checkpoint, then acknowledges the source only after the checkpoint is durable.
+
+This keeps the source from running ahead of records the sink has committed. The
+included `InMemoryCheckpointStore` is useful for tests and short-lived tools;
+production connectors should provide a durable `CheckpointStore`.
+
+## Install
+
+```sh
+cargo add crabka-connect
+cargo add serde_json
+```
+
+For workspace development, use the path dependency from this repository.
+
+## Usage
+
+Define typed connector configuration with the default `derive` feature:
+
+```rust,no_run
+use crabka_connect::{ConfigDef, ConnectorConfig, EnvSecretResolver, SecretString};
 use serde_json::json;
 
 #[derive(ConnectorConfig)]
 struct PostgresSourceConfig {
     #[config(required)]
     database_url: String,
+
     #[config(secret)]
     password: SecretString,
+
     #[config(default = "public")]
     schema: String,
 }
 
-async fn build() -> crabka_connect::ConfigResult<PostgresSourceConfig> {
-    let raw: serde_json::Map<String, serde_json::Value> = serde_json::Map::from_iter([
-        ("database_url".to_string(), json!("postgres://localhost/app")),
-        (
-            "password".to_string(),
-            json!({ "from": "env", "name": "POSTGRES_PASSWORD" }),
-        ),
-    ]);
-    let def: ConfigDef = PostgresSourceConfig::config_def();
-    let resolved = def.resolve(raw, &EnvSecretResolver).await?;
-    let config: PostgresSourceConfig = ConnectorConfig::from_resolved(&resolved)?;
-    Ok(config)
-}
+# async fn build() -> crabka_connect::ConfigResult<PostgresSourceConfig> {
+let raw = serde_json::Map::from_iter([
+    ("database_url".to_string(), json!("postgres://localhost/app")),
+    (
+        "password".to_string(),
+        json!({ "from": "env", "name": "POSTGRES_PASSWORD" }),
+    ),
+]);
+
+let def: ConfigDef = PostgresSourceConfig::config_def();
+let resolved = def.resolve(raw, &EnvSecretResolver).await?;
+let config = PostgresSourceConfig::from_resolved(&resolved)?;
+# Ok(config)
+# }
 ```
 
 Secret fields resolve through `SecretResolver` implementations and are redacted
-by `Debug` and `Display`.
+by `Debug` and `Display`. Literal secrets are rejected unless explicitly allowed
+with `ResolveOptions`.
+
+## Cargo Features
+
+- `derive` - enables and reexports `crabka-connect-derive::ConnectorConfig`.
+  This feature is enabled by default.
+
+## Documentation
+
+- [API documentation](https://docs.rs/crabka-connect)
+- [Derive macro crate](https://crates.io/crates/crabka-connect-derive)
+- [Schema serdes](https://crates.io/crates/crabka-schema-serde)
+- [Crabka repository](https://github.com/robot-head/crabka)
+
+## License
+
+Apache-2.0. Derivative work of [Apache Kafka](https://kafka.apache.org); see
+[NOTICE](https://github.com/robot-head/crabka/blob/main/NOTICE).

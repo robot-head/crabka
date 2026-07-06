@@ -1,5 +1,6 @@
 [package]
 name = "crabka-remote-storage-topic"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
