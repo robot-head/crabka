@@ -24,7 +24,9 @@ use serde_json::json;
 use crate::{
     context::Context,
     controller::{
-        common::{FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref, patch_status},
+        common::{
+            self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref, patch_status,
+        },
         topic::internal_listener_bootstrap,
     },
     crd::{
@@ -79,16 +81,12 @@ pub async fn reconcile(
     obj: Arc<SchemaRegistry>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
-    let started = std::time::Instant::now();
-    let result = reconcile_inner(obj, ctx.clone()).await;
-    let outcome = if result.is_ok() {
-        crate::telemetry::ReconcileResult::Ok
-    } else {
-        crate::telemetry::ReconcileResult::Error
-    };
-    ctx.metrics
-        .record_reconcile("SchemaRegistry", outcome, started.elapsed().as_secs_f64());
-    result
+    common::record_reconcile(
+        &ctx,
+        "SchemaRegistry",
+        Box::pin(reconcile_inner(obj, ctx.clone())),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines)]

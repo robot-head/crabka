@@ -54,7 +54,10 @@ use crate::{
     context::Context,
     controller::{
         cluster_ca::{cluster_ca_cert_name, cluster_ca_key_name, renew_if_expiring},
-        common::{ReconcileError, apply_object, condition, owner_ref, patch_status, read_pem_key},
+        common::{
+            self, ReconcileError, apply_object, condition, owner_ref, parent_version_gate,
+            patch_status, read_pem_key,
+        },
     },
     crd::{
         Kafka, KafkaCondition, KafkaGrpcGateway, KafkaGrpcGatewayStatus,
@@ -842,16 +845,9 @@ async fn resolve_all_secret_refs(
 /// as `kafka_node_pool::version_gate`: cleared when the parent carries
 /// `KafkaVersionValid=True` OR a finalized `status.metadataVersion`.
 fn version_gate(parent: &Kafka) -> Option<KafkaCondition> {
-    let status = parent.status.as_ref();
-    let version_cond =
-        status.and_then(|s| s.conditions.iter().find(|c| c.type_ == "KafkaVersionValid"));
-    let finalized = status.and_then(|s| s.metadata_version.as_deref());
-    let cleared = finalized.is_some() || version_cond.is_some_and(|c| c.status == "True");
-    if cleared {
-        return None;
-    }
-    let cond = match version_cond {
-        Some(c) => condition(
+    let cond = match parent_version_gate(parent) {
+        common::ParentVersionGate::Cleared => return None,
+        common::ParentVersionGate::Invalid(c) => condition(
             "Ready",
             "False",
             "KafkaVersionInvalid",
@@ -863,7 +859,7 @@ fn version_gate(parent: &Kafka) -> Option<KafkaCondition> {
                 c.message
             ),
         ),
-        None => condition(
+        common::ParentVersionGate::Waiting => condition(
             "Ready",
             "False",
             "WaitingForVersionValidation",
@@ -974,16 +970,12 @@ pub async fn reconcile(
     gw: Arc<KafkaGrpcGateway>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
-    let started = std::time::Instant::now();
-    let result = reconcile_inner(gw, ctx.clone()).await;
-    let outcome = if result.is_ok() {
-        crate::telemetry::ReconcileResult::Ok
-    } else {
-        crate::telemetry::ReconcileResult::Error
-    };
-    ctx.metrics
-        .record_reconcile("KafkaGrpcGateway", outcome, started.elapsed().as_secs_f64());
-    result
+    common::record_reconcile(
+        &ctx,
+        "KafkaGrpcGateway",
+        Box::pin(reconcile_inner(gw, ctx.clone())),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_lines)] // linear 7-step controller flow; each step is independent
