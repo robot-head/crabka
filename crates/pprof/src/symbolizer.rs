@@ -136,10 +136,18 @@ pub struct DebuginfodResolver {
     base_urls: Vec<reqwest::Url>,
     client: reqwest::blocking::Client,
     cache: Mutex<HashMap<String, Option<ObjectSymbolResolver>>>,
+    max_debuginfo_bytes: u64,
 }
 
 impl DebuginfodResolver {
     pub fn new(base_urls: Vec<String>) -> Result<Self, String> {
+        Self::with_max_debuginfo_bytes(base_urls, MAX_DEBUGINFO_BYTES)
+    }
+
+    fn with_max_debuginfo_bytes(
+        base_urls: Vec<String>,
+        max_debuginfo_bytes: u64,
+    ) -> Result<Self, String> {
         let base_urls = base_urls
             .into_iter()
             .filter(|url| !url.trim().is_empty())
@@ -162,6 +170,7 @@ impl DebuginfodResolver {
             base_urls,
             client,
             cache: Mutex::new(HashMap::new()),
+            max_debuginfo_bytes,
         })
     }
 
@@ -210,10 +219,10 @@ impl DebuginfodResolver {
             // Reject artifacts whose advertised length already exceeds the cap,
             // then read the body with a hard byte ceiling so a server that
             // lies about (or omits) Content-Length still cannot exhaust memory.
-            if !content_length_within_cap(response.content_length(), MAX_DEBUGINFO_BYTES) {
+            if !content_length_within_cap(response.content_length(), self.max_debuginfo_bytes) {
                 continue;
             }
-            let Some(bytes) = read_capped(response, MAX_DEBUGINFO_BYTES) else {
+            let Some(bytes) = read_capped(response, self.max_debuginfo_bytes) else {
                 continue;
             };
             if let Ok(resolver) = ObjectSymbolResolver::from_bytes(bytes) {
@@ -644,6 +653,7 @@ mod tests {
         };
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let max_debuginfo_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         let served = Arc::new(AtomicUsize::new(0));
         let served_clone = Arc::clone(&served);
         let server_thread = std::thread::spawn(move || {
@@ -661,7 +671,9 @@ mod tests {
             std::io::Write::write_all(&mut stream, header.as_bytes()).unwrap();
             std::io::Write::write_all(&mut stream, &bytes).unwrap();
         });
-        let resolver = DebuginfodResolver::new(vec![base_url]).unwrap();
+        let resolver =
+            DebuginfodResolver::with_max_debuginfo_bytes(vec![base_url], max_debuginfo_bytes)
+                .unwrap();
 
         let first = resolver
             .symbolize(&SymbolizeRequest {
