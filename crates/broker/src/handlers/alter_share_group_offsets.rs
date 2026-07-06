@@ -438,21 +438,18 @@ mod tests {
             .cloned()
             .expect("share persister");
         let topic_id = uuid::Uuid::from_u128(0xABCD);
+        
+        let initial_epoch = if let Some(state) = persister
+             .read_state("g-reset", topic_id, 0)
+             .await
+             .expect("read initial share state") { state.state_epoch } else {
+             persister
+                 .initialize("g-reset", topic_id, 0, 4, crabka_log::Offset(10))
+                 .await
+                 .expect("seed share state");
+             4
+         };
 
-        let initial_epoch = match persister
-            .read_state("g-reset", topic_id, 0)
-            .await
-            .expect("read initial share state")
-        {
-            Some(state) => state.state_epoch,
-            None => {
-                persister
-                    .initialize("g-reset", topic_id, 0, 4, crabka_log::Offset(10))
-                    .await
-                    .expect("seed share state");
-                4
-            }
-        };
         reset_partition(&persister, "g-reset", topic_id, 0, 33)
             .await
             .expect("reset partition");
