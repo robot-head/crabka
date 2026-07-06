@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use tracing::warn;
 
 use crate::{
-    goals::{Goal, GoalContext, GoalPriority},
+    goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
 };
 
@@ -43,16 +43,7 @@ impl Goal for RackAware {
 
         // Snapshot original old_replicas / old_leader to avoid drift
         // when the same partition is touched twice.
-        let original_replicas: HashMap<(String, i32), Vec<i32>> = state
-            .partitions
-            .iter()
-            .map(|p| ((p.topic.clone(), p.partition), p.replicas.clone()))
-            .collect();
-        let original_leader: HashMap<(String, i32), i32> = state
-            .partitions
-            .iter()
-            .map(|p| ((p.topic.clone(), p.partition), p.leader))
-            .collect();
+        let originals = OriginalReplicaState::from_partitions(&state.partitions);
 
         let mut warned_partitions: HashSet<(String, i32)> = HashSet::new();
 
@@ -69,37 +60,7 @@ impl Goal for RackAware {
             };
 
             let p = &mut working[idx];
-            let key = (p.topic.clone(), p.partition);
-            let pos = p
-                .replicas
-                .iter()
-                .position(|r| *r == donor)
-                .expect("donor present");
-            p.replicas[pos] = target;
-            let new_leader = if p.leader == donor {
-                *p.replicas
-                    .iter()
-                    .find(|r| p.isr.contains(r))
-                    .unwrap_or(&p.replicas[0])
-            } else {
-                p.leader
-            };
-
-            let old_replicas = original_replicas
-                .get(&key)
-                .cloned()
-                .unwrap_or_else(|| p.replicas.clone());
-            let old_leader = original_leader.get(&key).copied().unwrap_or(p.leader);
-
-            out.push(Movement {
-                topic: p.topic.clone(),
-                partition: p.partition,
-                old_replicas,
-                new_replicas: p.replicas.clone(),
-                old_leader,
-                new_leader,
-            });
-            p.leader = new_leader;
+            out.push(originals.replace_replica(p, donor, target));
 
             if out.len() >= ctx.max_movements_per_proposal {
                 break;

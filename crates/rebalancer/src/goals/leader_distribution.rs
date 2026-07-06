@@ -24,14 +24,7 @@ impl LeaderDistribution {
     }
 
     fn imbalance_pct(counts: &HashMap<i32, usize>) -> u32 {
-        let values: Vec<usize> = counts.values().copied().collect();
-        let total: usize = values.iter().sum();
-        if total == 0 {
-            return 0;
-        }
-        let max = *values.iter().max().unwrap_or(&0);
-        let min = *values.iter().min().unwrap_or(&0);
-        u32::try_from((max - min) * 100 / total).unwrap_or(u32::MAX)
+        crate::goals::imbalance_pct_usize(counts)
     }
 }
 

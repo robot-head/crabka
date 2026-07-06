@@ -198,39 +198,37 @@ fn build_alter_throttle_request(
 fn build_submit_reassignments_request(
     movements: &[Movement],
 ) -> AlterPartitionReassignmentsRequest {
-    let mut topics_map: BTreeMap<String, Vec<ReassignablePartition>> = BTreeMap::new();
-    for m in movements {
-        topics_map
-            .entry(m.topic.clone())
-            .or_default()
-            .push(ReassignablePartition {
-                partition_index: m.partition,
-                replicas: Some(m.new_replicas.clone()),
-                ..Default::default()
-            });
-    }
-    build_reassignments_request(topics_map)
+    build_reassignments_request(
+        movements
+            .iter()
+            .map(|m| (m.topic.clone(), m.partition, Some(m.new_replicas.clone()))),
+    )
 }
 
 fn build_cancel_reassignments_request(
     partitions: &[(String, i32)],
 ) -> AlterPartitionReassignmentsRequest {
-    let mut topics_map: BTreeMap<String, Vec<ReassignablePartition>> = BTreeMap::new();
-    for (topic, partition) in partitions {
-        topics_map
-            .entry(topic.clone())
-            .or_default()
-            .push(ReassignablePartition {
-                partition_index: *partition,
-                ..Default::default()
-            });
-    }
-    build_reassignments_request(topics_map)
+    build_reassignments_request(
+        partitions
+            .iter()
+            .map(|(topic, partition)| (topic.clone(), *partition, None)),
+    )
 }
 
 fn build_reassignments_request(
-    topics_map: BTreeMap<String, Vec<ReassignablePartition>>,
+    partitions: impl IntoIterator<Item = (String, i32, Option<Vec<i32>>)>,
 ) -> AlterPartitionReassignmentsRequest {
+    let mut topics_map: BTreeMap<String, Vec<ReassignablePartition>> = BTreeMap::new();
+    for (topic, partition, replicas) in partitions {
+        topics_map
+            .entry(topic)
+            .or_default()
+            .push(ReassignablePartition {
+                partition_index: partition,
+                replicas,
+                ..Default::default()
+            });
+    }
     let topics: Vec<ReassignableTopic> = topics_map
         .into_iter()
         .map(|(name, partitions)| ReassignableTopic {

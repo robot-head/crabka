@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    goals::{Goal, GoalContext, GoalPriority},
+    goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
 };
 
@@ -113,16 +113,7 @@ impl Goal for ReplicaCapacity {
         let mut working: Vec<PartitionView> = state.partitions.clone();
         let mut out: Vec<Movement> = Vec::new();
 
-        let original_replicas: HashMap<(String, i32), Vec<i32>> = state
-            .partitions
-            .iter()
-            .map(|p| ((p.topic.clone(), p.partition), p.replicas.clone()))
-            .collect();
-        let original_leader: HashMap<(String, i32), i32> = state
-            .partitions
-            .iter()
-            .map(|p| ((p.topic.clone(), p.partition), p.leader))
-            .collect();
+        let originals = OriginalReplicaState::from_partitions(&state.partitions);
 
         loop {
             let counts = Self::counts(&working, &broker_ids);
@@ -153,37 +144,7 @@ impl Goal for ReplicaCapacity {
             };
 
             let p = &mut working[idx];
-            let key = (p.topic.clone(), p.partition);
-            let pos = p
-                .replicas
-                .iter()
-                .position(|r| *r == hot)
-                .expect("hot present");
-            p.replicas[pos] = cold;
-            let new_leader = if p.leader == hot {
-                *p.replicas
-                    .iter()
-                    .find(|r| p.isr.contains(r))
-                    .unwrap_or(&p.replicas[0])
-            } else {
-                p.leader
-            };
-
-            let old_replicas = original_replicas
-                .get(&key)
-                .cloned()
-                .unwrap_or_else(|| p.replicas.clone());
-            let old_leader = original_leader.get(&key).copied().unwrap_or(p.leader);
-
-            out.push(Movement {
-                topic: p.topic.clone(),
-                partition: p.partition,
-                old_replicas,
-                new_replicas: p.replicas.clone(),
-                old_leader,
-                new_leader,
-            });
-            p.leader = new_leader;
+            out.push(originals.replace_replica(p, hot, cold));
 
             if out.len() >= ctx.max_movements_per_proposal {
                 break;

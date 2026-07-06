@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::{Rule, RuleCtx, RuleHit};
+use super::{Rule, RuleCtx, RuleHit, sustained_memo};
 use crate::detector::{AnomalyKey, AnomalyKind, AnomalySeverity};
 
 pub struct UnderReplicatedPartitions;
@@ -36,15 +36,9 @@ impl Rule for UnderReplicatedPartitions {
             return Vec::new();
         }
 
-        let threshold_ms =
-            i64::try_from(ctx.cfg.under_replicated_threshold.as_millis()).unwrap_or(i64::MAX);
-        let cutoff = ctx.now_ms.saturating_sub(threshold_ms);
-        let Some(memo) = ctx.history.oldest_since(cutoff) else {
+        let Some(memo) = sustained_memo(ctx, ctx.cfg.under_replicated_threshold) else {
             return Vec::new(); // no history old enough
         };
-        if memo.snapshot_at_ms > cutoff {
-            return Vec::new();
-        }
 
         // Per-topic under-replication ratio for severity gating.
         let mut topic_under: HashMap<String, usize> = HashMap::new();

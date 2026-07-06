@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use super::{Rule, RuleCtx, RuleHit};
+use super::{Rule, RuleCtx, RuleHit, sustained_memo};
 use crate::detector::{AnomalyKey, AnomalyKind, AnomalySeverity};
 
 pub struct BrokerDeath;
@@ -27,17 +27,11 @@ impl Rule for BrokerDeath {
             return Vec::new();
         }
 
-        let threshold_ms =
-            i64::try_from(ctx.cfg.broker_death_threshold.as_millis()).unwrap_or(i64::MAX);
-        let cutoff = ctx.now_ms.saturating_sub(threshold_ms);
         // Need at least one memo old enough to confirm the absence is
         // sustained — guards against snapshot lag firing on a single tick.
-        let Some(memo) = ctx.history.oldest_since(cutoff) else {
+        let Some(memo) = sustained_memo(ctx, ctx.cfg.broker_death_threshold) else {
             return Vec::new();
         };
-        if memo.snapshot_at_ms > cutoff {
-            return Vec::new();
-        }
         let old_live: HashSet<i32> = memo.broker_ids.iter().copied().collect();
 
         let mut ids: Vec<i32> = missing_now

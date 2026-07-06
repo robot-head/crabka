@@ -28,6 +28,7 @@ use crate::{
     ingest::SharedSnapshot,
     model::{ClusterState, ProposalStore},
     scraper::UsageStore,
+    time::now_ms,
 };
 
 #[derive(Debug, Clone)]
@@ -316,16 +317,6 @@ impl Detector {
             }
         }
     }
-}
-
-fn now_ms() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    i64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_millis()),
-    )
-    .unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
