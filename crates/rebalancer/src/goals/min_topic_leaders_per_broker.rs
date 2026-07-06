@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::{
-    goals::{Goal, GoalContext, GoalPriority},
+    goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
 };
 
@@ -44,16 +44,7 @@ impl Goal for MinTopicLeadersPerBroker {
         let topics: BTreeSet<String> = state.partitions.iter().map(|p| p.topic.clone()).collect();
         let broker_ids: Vec<i32> = state.brokers.iter().map(|b| b.id).collect();
 
-        let original_replicas: HashMap<(String, i32), Vec<i32>> = state
-            .partitions
-            .iter()
-            .map(|p| ((p.topic.clone(), p.partition), p.replicas.clone()))
-            .collect();
-        let original_leader: HashMap<(String, i32), i32> = state
-            .partitions
-            .iter()
-            .map(|p| ((p.topic.clone(), p.partition), p.leader))
-            .collect();
+        let originals = OriginalReplicaState::from_partitions(&state.partitions);
 
         loop {
             let mut under: Option<(i32, String, usize)> = None;
@@ -101,22 +92,7 @@ impl Goal for MinTopicLeadersPerBroker {
             };
 
             let p = &mut working[idx];
-            let key = (p.topic.clone(), p.partition);
-            let old_leader = original_leader.get(&key).copied().unwrap_or(p.leader);
-            let old_replicas = original_replicas
-                .get(&key)
-                .cloned()
-                .unwrap_or_else(|| p.replicas.clone());
-
-            p.leader = under_broker;
-            out.push(Movement {
-                topic: p.topic.clone(),
-                partition: p.partition,
-                old_replicas: old_replicas.clone(),
-                new_replicas: old_replicas,
-                old_leader,
-                new_leader: under_broker,
-            });
+            out.push(originals.change_leader(p, under_broker));
 
             if out.len() >= ctx.max_movements_per_proposal {
                 break;

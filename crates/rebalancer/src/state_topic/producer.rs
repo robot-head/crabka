@@ -19,19 +19,7 @@ use crabka_protocol::{
 };
 use tracing::debug;
 
-use crate::state_topic::error::StateTopicError;
-
-/// Transient produce error codes that mean "topic exists in metadata
-/// but the partition isn't fully realized yet" — almost always a brief
-/// window right after `ensure_topic` returns. Matches the loader's
-/// equivalent softness in `loader::poll_once`.
-///
-/// - 3: `UNKNOWN_TOPIC_OR_PARTITION` — metadata not yet propagated
-/// - 5: `LEADER_NOT_AVAILABLE` — leader election in progress
-/// - 9: `REPLICA_NOT_AVAILABLE` — follower fetch lag
-fn is_transient_produce_code(code: i16) -> bool {
-    matches!(code, 3 | 5 | 9)
-}
+use crate::state_topic::error::{StateTopicError, is_transient_topic_partition_code};
 
 const PRODUCE_RETRY_ATTEMPTS: usize = 50;
 const PRODUCE_RETRY_BACKOFF: Duration = Duration::from_millis(200);
@@ -39,7 +27,7 @@ const PRODUCE_RETRY_BACKOFF: Duration = Duration::from_millis(200);
 /// Produce a single record to `(topic, partition=0)`. `value=None` is
 /// a tombstone (null value), matching Kafka compaction semantics.
 /// `acks=all`, `timeout_ms=10_000`. Transient error codes (see
-/// [`is_transient_produce_code`]) retry with a short backoff for up
+/// [`is_transient_topic_partition_code`]) retry with a short backoff for up
 /// to `PRODUCE_RETRY_ATTEMPTS * PRODUCE_RETRY_BACKOFF` total wait.
 pub(crate) async fn produce_state(
     client: &Client,
@@ -177,7 +165,9 @@ fn classify_send_result(
 ) -> Result<Option<i16>, StateTopicError> {
     match result {
         Ok(()) => Ok(None),
-        Err(StateTopicError::ProduceErrorCode { code }) if is_transient_produce_code(code) => {
+        Err(StateTopicError::ProduceErrorCode { code })
+            if is_transient_topic_partition_code(code) =>
+        {
             Ok(Some(code))
         }
         Err(e) => Err(e),
@@ -223,16 +213,6 @@ mod tests {
             .build()
             .await
             .expect("client build does not connect")
-    }
-
-    #[test]
-    fn transient_produce_codes_are_exact() {
-        for code in [3, 5, 9] {
-            assert!(is_transient_produce_code(code));
-        }
-        for code in [0, 1, 42] {
-            assert!(!is_transient_produce_code(code));
-        }
     }
 
     #[test]

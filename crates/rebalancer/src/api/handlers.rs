@@ -25,6 +25,7 @@ use crate::{
     metrics::RebalancerMetrics,
     model::{ClusterState, ProposalStore, proposal::ProposalStatus},
     optimizer, pb,
+    time::now_ms,
 };
 
 /// State shared across all RPC handlers. Wired into axum via an
@@ -498,12 +499,6 @@ pub async fn get_anomalies(
     Ok(ConnectResponse::new(pb::GetAnomaliesResponse {
         anomalies: proto,
     }))
-}
-
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

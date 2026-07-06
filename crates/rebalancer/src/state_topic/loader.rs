@@ -16,18 +16,11 @@ use crabka_protocol::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::state_topic::{LoadedState, STATE_KEY, error::StateTopicError, serde_format};
-
-/// Kafka partition error codes treated as "topic exists but has no records
-/// visible yet" — counts as a quiet poll rather than a hard error. Covers
-/// transient windows between `ensure_topic` returning and the partition log
-/// accepting consumer fetches (`LEADER_NOT_AVAILABLE`, `UNKNOWN_TOPIC_OR_PARTITION`
-/// if the local router hasn't caught up yet).
-const TRANSIENT_EMPTY_CODES: &[i16] = &[
-    3, // UNKNOWN_TOPIC_OR_PARTITION — topic just created, router not yet updated
-    5, // LEADER_NOT_AVAILABLE — leader election in progress
-    9, // REPLICA_NOT_AVAILABLE — partition replica not yet available
-];
+use crate::state_topic::{
+    LoadedState, STATE_KEY,
+    error::{StateTopicError, is_transient_topic_partition_code},
+    serde_format,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const QUIET_POLLS_TO_DECLARE_LOADED: u32 = 5;
@@ -140,7 +133,7 @@ fn fetched_records_from_response(
     for t in &resp.responses {
         for p in &t.partitions {
             if p.error_code != 0 {
-                if TRANSIENT_EMPTY_CODES.contains(&p.error_code) {
+                if is_transient_topic_partition_code(p.error_code) {
                     // Transient: topic/partition not yet visible to this
                     // broker. Treat as empty — the caller counts it as a
                     // quiet poll.

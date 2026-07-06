@@ -8,12 +8,14 @@ pub mod disk_pressure;
 pub mod slow_broker;
 pub mod under_replicated;
 
+use std::time::Duration;
+
 pub use broker_death::BrokerDeath;
 pub use disk_pressure::DiskPressure;
 pub use slow_broker::SlowBroker;
 pub use under_replicated::UnderReplicatedPartitions;
 
-use super::DetectorConfig;
+use super::{DetectorConfig, SnapshotMemo};
 use crate::{
     capacity::BrokerCapacities,
     detector::{AnomalyKey, AnomalyKind, AnomalySeverity, SnapshotHistory},
@@ -47,4 +49,15 @@ pub struct RuleHit {
     pub key: AnomalyKey,
     pub severity: AnomalySeverity,
     pub details: String,
+}
+
+pub(super) fn sustained_memo<'a>(
+    ctx: &'a RuleCtx<'_>,
+    threshold: Duration,
+) -> Option<&'a SnapshotMemo> {
+    let threshold_ms = i64::try_from(threshold.as_millis()).unwrap_or(i64::MAX);
+    let cutoff = ctx.now_ms.saturating_sub(threshold_ms);
+    ctx.history
+        .oldest_since(cutoff)
+        .filter(|memo| memo.snapshot_at_ms <= cutoff)
 }

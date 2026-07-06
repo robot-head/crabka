@@ -21,15 +21,10 @@ pub struct BrokerCapacities {
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct BrokerCapacity {
-    #[serde(default)]
     pub max_replicas: Option<u32>,
-    #[serde(default)]
     pub disk_bytes: Option<u64>,
-    #[serde(default)]
     pub network_in_bytes_per_sec: Option<u64>,
-    #[serde(default)]
     pub network_out_bytes_per_sec: Option<u64>,
-    #[serde(default)]
     pub cpu_cores: Option<f64>,
 }
 

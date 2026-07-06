@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    goals::{Goal, GoalContext, GoalPriority},
+    goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
 };
 
@@ -27,14 +27,7 @@ impl ReplicaDistribution {
     }
 
     fn imbalance_pct(counts: &HashMap<i32, usize>) -> u32 {
-        let values: Vec<usize> = counts.values().copied().collect();
-        let total: usize = values.iter().sum();
-        if total == 0 {
-            return 0;
-        }
-        let max = *values.iter().max().unwrap_or(&0);
-        let min = *values.iter().min().unwrap_or(&0);
-        u32::try_from((max - min) * 100 / total).unwrap_or(u32::MAX)
+        crate::goals::imbalance_pct_usize(counts)
     }
 }
 
@@ -59,16 +52,7 @@ impl Goal for ReplicaDistribution {
         // state. The optimizer's last-writer-wins coalesce keeps the
         // later Movement, so without this snapshot operators would see
         // an intermediate "before" state in the proposal.
-        let original_replicas: HashMap<(String, i32), Vec<i32>> = state
-            .partitions
-            .iter()
-            .map(|p| ((p.topic.clone(), p.partition), p.replicas.clone()))
-            .collect();
-        let original_leader: HashMap<(String, i32), i32> = state
-            .partitions
-            .iter()
-            .map(|p| ((p.topic.clone(), p.partition), p.leader))
-            .collect();
+        let originals = OriginalReplicaState::from_partitions(&state.partitions);
 
         loop {
             // Recompute counts from `working`.
@@ -101,37 +85,7 @@ impl Goal for ReplicaDistribution {
                 break;
             };
             let p = &mut working[idx];
-            let key = (p.topic.clone(), p.partition);
-            // Use the originally-captured pre-loop state, not the mutated
-            // working copy, so a partition swapped twice still reports
-            // its true original `old_replicas` / `old_leader`.
-            let old_replicas = original_replicas
-                .get(&key)
-                .cloned()
-                .unwrap_or_else(|| p.replicas.clone());
-            let old_leader = original_leader.get(&key).copied().unwrap_or(p.leader);
-            let pos = p.replicas.iter().position(|r| *r == hot).unwrap();
-            p.replicas[pos] = cold;
-            // If the leader was `hot`, choose a new leader from the new replica set.
-            // Prefer staying with whatever's left of the prior ISR; fall back to the
-            // first member of the new replica set.
-            let new_leader = if p.leader == hot {
-                *p.replicas
-                    .iter()
-                    .find(|r| p.isr.contains(r))
-                    .unwrap_or(&p.replicas[0])
-            } else {
-                p.leader
-            };
-            out.push(Movement {
-                topic: p.topic.clone(),
-                partition: p.partition,
-                old_replicas,
-                new_replicas: p.replicas.clone(),
-                old_leader,
-                new_leader,
-            });
-            p.leader = new_leader;
+            out.push(originals.replace_replica(p, hot, cold));
 
             if out.len() >= ctx.max_movements_per_proposal {
                 break;
