@@ -3278,6 +3278,7 @@ dependencies = [
  "assert2",
  "bytes",
  "crabka-ids",
+ "crabka-object-store",
  "object_store",
  "tempfile",
  "thiserror 2.0.18",
