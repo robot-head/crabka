@@ -56,13 +56,13 @@ impl Transaction<'_> {
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
     pub async fn commit(self) -> Result<(), EndTransactionError<Self>> {
-        match self.producer.end_transaction(true).await {
-            Ok(()) => Ok(()),
-            Err(source) => Err(EndTransactionError {
+        self.producer
+            .end_transaction(true)
+            .await
+            .map_err(|source| EndTransactionError {
                 transaction: self,
                 source,
-            }),
-        }
+            })
     }
 
     /// Abort this transaction.
@@ -73,13 +73,13 @@ impl Transaction<'_> {
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
     pub async fn abort(self) -> Result<(), EndTransactionError<Self>> {
-        match self.producer.end_transaction(false).await {
-            Ok(()) => Ok(()),
-            Err(source) => Err(EndTransactionError {
+        self.producer
+            .end_transaction(false)
+            .await
+            .map_err(|source| EndTransactionError {
                 transaction: self,
                 source,
-            }),
-        }
+            })
     }
 }
 
@@ -106,13 +106,13 @@ impl OwnedTransaction {
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
     pub async fn commit(self) -> Result<(), EndTransactionError<Self>> {
-        match self.producer.end_transaction(true).await {
-            Ok(()) => Ok(()),
-            Err(source) => Err(EndTransactionError {
+        self.producer
+            .end_transaction(true)
+            .await
+            .map_err(|source| EndTransactionError {
                 transaction: self,
                 source,
-            }),
-        }
+            })
     }
 
     /// Abort this transaction.
@@ -123,13 +123,13 @@ impl OwnedTransaction {
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
     pub async fn abort(self) -> Result<(), EndTransactionError<Self>> {
-        match self.producer.end_transaction(false).await {
-            Ok(()) => Ok(()),
-            Err(source) => Err(EndTransactionError {
+        self.producer
+            .end_transaction(false)
+            .await
+            .map_err(|source| EndTransactionError {
                 transaction: self,
                 source,
-            }),
-        }
+            })
     }
 }
 
@@ -231,96 +231,74 @@ mod tests {
         (mock, producer)
     }
 
-    /// `CONCURRENT_TRANSACTIONS (49)` on `EndTxn` proves `commit` actually
-    /// drives the broker round trip (a body replaced with `Ok(())` would
-    /// never observe the error), and the guard handed back in
-    /// `EndTransactionError::transaction` must still be usable once the
-    /// broker clears the condition.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn transaction_commit_reports_broker_error_and_retries_on_the_same_guard() {
-        let end_txn_error = Arc::new(AtomicI16::new(49));
-        let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
+    macro_rules! end_txn_retry_test {
+        ($name:ident, borrowed, $finish:ident) => {
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn $name() {
+                let end_txn_error = Arc::new(AtomicI16::new(49));
+                let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
+                let txn = producer
+                    .begin_transaction()
+                    .await
+                    .expect("begin_transaction");
 
-        let txn = producer
-            .begin_transaction()
-            .await
-            .expect("begin_transaction");
-        let err = txn
-            .commit()
-            .await
-            .expect_err("broker reported CONCURRENT_TRANSACTIONS");
-        assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
+                let err = txn
+                    .$finish()
+                    .await
+                    .expect_err("broker reported CONCURRENT_TRANSACTIONS");
+                assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
 
-        end_txn_error.store(0, Ordering::SeqCst);
-        err.transaction.commit().await.expect("retry succeeds");
+                end_txn_error.store(0, Ordering::SeqCst);
+                err.transaction.$finish().await.expect("retry succeeds");
+                mock.stop();
+            }
+        };
+        ($name:ident, owned, $finish:ident) => {
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn $name() {
+                let end_txn_error = Arc::new(AtomicI16::new(49));
+                let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
+                let producer = Arc::new(producer);
+                let txn = producer
+                    .clone()
+                    .begin_transaction_owned()
+                    .await
+                    .expect("begin_transaction_owned");
 
-        mock.stop();
+                let err = txn
+                    .$finish()
+                    .await
+                    .expect_err("broker reported CONCURRENT_TRANSACTIONS");
+                assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
+
+                end_txn_error.store(0, Ordering::SeqCst);
+                err.transaction.$finish().await.expect("retry succeeds");
+                mock.stop();
+            }
+        };
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn transaction_abort_reports_broker_error_and_retries_on_the_same_guard() {
-        let end_txn_error = Arc::new(AtomicI16::new(49));
-        let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
-
-        let txn = producer
-            .begin_transaction()
-            .await
-            .expect("begin_transaction");
-        let err = txn
-            .abort()
-            .await
-            .expect_err("broker reported CONCURRENT_TRANSACTIONS");
-        assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
-
-        end_txn_error.store(0, Ordering::SeqCst);
-        err.transaction.abort().await.expect("retry succeeds");
-
-        mock.stop();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn owned_transaction_commit_reports_broker_error_and_retries_on_the_same_guard() {
-        let end_txn_error = Arc::new(AtomicI16::new(49));
-        let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
-        let producer = Arc::new(producer);
-
-        let txn = producer
-            .clone()
-            .begin_transaction_owned()
-            .await
-            .expect("begin_transaction_owned");
-        let err = txn
-            .commit()
-            .await
-            .expect_err("broker reported CONCURRENT_TRANSACTIONS");
-        assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
-
-        end_txn_error.store(0, Ordering::SeqCst);
-        err.transaction.commit().await.expect("retry succeeds");
-
-        mock.stop();
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn owned_transaction_abort_reports_broker_error_and_retries_on_the_same_guard() {
-        let end_txn_error = Arc::new(AtomicI16::new(49));
-        let (mock, producer) = transactional_producer(end_txn_error.clone()).await;
-        let producer = Arc::new(producer);
-
-        let txn = producer
-            .clone()
-            .begin_transaction_owned()
-            .await
-            .expect("begin_transaction_owned");
-        let err = txn
-            .abort()
-            .await
-            .expect_err("broker reported CONCURRENT_TRANSACTIONS");
-        assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
-
-        end_txn_error.store(0, Ordering::SeqCst);
-        err.transaction.abort().await.expect("retry succeeds");
-
-        mock.stop();
-    }
+    // CONCURRENT_TRANSACTIONS (49) proves `commit`/`abort` drive the broker
+    // round trip, and the returned guard remains usable once the broker clears
+    // the condition.
+    end_txn_retry_test!(
+        transaction_commit_reports_broker_error_and_retries_on_the_same_guard,
+        borrowed,
+        commit
+    );
+    end_txn_retry_test!(
+        transaction_abort_reports_broker_error_and_retries_on_the_same_guard,
+        borrowed,
+        abort
+    );
+    end_txn_retry_test!(
+        owned_transaction_commit_reports_broker_error_and_retries_on_the_same_guard,
+        owned,
+        commit
+    );
+    end_txn_retry_test!(
+        owned_transaction_abort_reports_broker_error_and_retries_on_the_same_guard,
+        owned,
+        abort
+    );
 }

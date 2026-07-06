@@ -30,12 +30,6 @@ type PartitionEntry = (i32, Position, Result<Box<dyn Any + Send>, FailureReason>
 pub(crate) struct Iq2Outcome {
     /// `(partition, position, Ok(boxed R) | Err(failure))` for each responding task.
     pub per_partition: Vec<PartitionEntry>,
-    /// Whether the instance had any tasks (distinguishes rebalancing from
-    /// absent). Carried for parity with the v1 IQ path; `assemble` does not
-    /// consume it yet (a query against an empty instance simply yields an empty
-    /// per-partition map), so it is wired but unread.
-    #[allow(dead_code)]
-    pub had_tasks: bool,
 }
 
 /// Downcast each partition's boxed result into `R` and build the typed
@@ -78,7 +72,6 @@ mod tests {
                 (0, Position::default(), Ok(ok)),
                 (1, Position::default(), Err(FailureReason::NotUpToBound)),
             ],
-            had_tasks: true,
         };
         let res = assemble::<Option<i64>>(outcome);
         assert_eq!(res.partition_results().len(), 2);
@@ -94,7 +87,6 @@ mod tests {
         let wrong: Box<dyn std::any::Any + Send> = Box::new("not an i64".to_string());
         let outcome = Iq2Outcome {
             per_partition: vec![(0, Position::default(), Ok(wrong))],
-            had_tasks: true,
         };
         let res = assemble::<Option<i64>>(outcome);
         assert_eq!(
