@@ -100,20 +100,10 @@ impl Parser {
     fn parse_pipeline_stage(&mut self) -> Result<Pipeline> {
         let name = self.expect_ident()?;
         match name.as_str() {
-            "count" => {
-                self.expect(&Token::LParen)?;
-                self.expect(&Token::RParen)?;
-                Ok(Pipeline::Aggregate(Aggregate::Count))
-            }
-            "rate" => {
-                self.expect(&Token::LParen)?;
-                self.expect(&Token::RParen)?;
-                Ok(Pipeline::Aggregate(Aggregate::Rate))
-            }
+            "count" => self.parse_empty_pipeline_stage(Pipeline::Aggregate(Aggregate::Count)),
+            "rate" => self.parse_empty_pipeline_stage(Pipeline::Aggregate(Aggregate::Rate)),
             "count_over_time" => {
-                self.expect(&Token::LParen)?;
-                self.expect(&Token::RParen)?;
-                Ok(Pipeline::Aggregate(Aggregate::CountOverTime))
+                self.parse_empty_pipeline_stage(Pipeline::Aggregate(Aggregate::CountOverTime))
             }
             "sum_over_time" | "avg_over_time" | "min_over_time" | "max_over_time" => {
                 self.parse_field_over_time(&name)
@@ -132,24 +122,8 @@ impl Parser {
                     quantiles,
                 }))
             }
-            "sum" | "avg" | "max" | "min" => {
-                self.expect(&Token::LParen)?;
-                let field = self.parse_field()?;
-                self.expect(&Token::RParen)?;
-                let agg = match name.as_str() {
-                    "sum" => Aggregate::Sum(field),
-                    "avg" => Aggregate::Avg(field),
-                    "max" => Aggregate::Max(field),
-                    _ => Aggregate::Min(field),
-                };
-                Ok(Pipeline::Aggregate(agg))
-            }
-            "by" => {
-                self.expect(&Token::LParen)?;
-                let fields = self.parse_field_list()?;
-                self.expect(&Token::RParen)?;
-                Ok(Pipeline::By(fields))
-            }
+            "sum" | "avg" | "max" | "min" => self.parse_field_aggregate(&name),
+            "by" => Ok(Pipeline::By(self.parse_parenthesized_field_list()?)),
             "topk" => {
                 self.expect(&Token::LParen)?;
                 let k = self.parse_rank_limit()?;
@@ -163,20 +137,31 @@ impl Parser {
                 Ok(Pipeline::BottomK(k))
             }
             "compare" => self.parse_compare(),
-            "coalesce" => {
-                self.expect(&Token::LParen)?;
-                self.expect(&Token::RParen)?;
-                Ok(Pipeline::Coalesce)
-            }
-            "select" => {
-                self.expect(&Token::LParen)?;
-                let fields = self.parse_field_list()?;
-                self.expect(&Token::RParen)?;
-                Ok(Pipeline::Select(fields))
-            }
+            "coalesce" => self.parse_empty_pipeline_stage(Pipeline::Coalesce),
+            "select" => Ok(Pipeline::Select(self.parse_parenthesized_field_list()?)),
             "with" => self.parse_with_pipeline(),
             other => Err(Self::err(format!("unsupported pipeline stage {other:?}"))),
         }
+    }
+
+    fn parse_empty_pipeline_stage(&mut self, stage: Pipeline) -> Result<Pipeline> {
+        self.expect(&Token::LParen)?;
+        self.expect(&Token::RParen)?;
+        Ok(stage)
+    }
+
+    fn parse_field_aggregate(&mut self, name: &str) -> Result<Pipeline> {
+        self.expect(&Token::LParen)?;
+        let field = self.parse_field()?;
+        self.expect(&Token::RParen)?;
+        let aggregate = match name {
+            "sum" => Aggregate::Sum(field),
+            "avg" => Aggregate::Avg(field),
+            "max" => Aggregate::Max(field),
+            "min" => Aggregate::Min(field),
+            _ => unreachable!("matched aggregate is exhaustive"),
+        };
+        Ok(Pipeline::Aggregate(aggregate))
     }
 
     /// Parses Tempo's attribute-comparison metric:
@@ -285,10 +270,14 @@ impl Parser {
             return Ok(None);
         }
         self.pos += 1;
+        Ok(Some(Pipeline::By(self.parse_parenthesized_field_list()?)))
+    }
+
+    fn parse_parenthesized_field_list(&mut self) -> Result<Vec<Field>> {
         self.expect(&Token::LParen)?;
         let fields = self.parse_field_list()?;
         self.expect(&Token::RParen)?;
-        Ok(Some(Pipeline::By(fields)))
+        Ok(fields)
     }
 
     fn parse_rank_limit(&mut self) -> Result<usize> {

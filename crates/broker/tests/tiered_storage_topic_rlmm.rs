@@ -144,6 +144,10 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
 
     let client = build_client(&broker).await;
     copy_then_fetch_round_trip(&broker, &client, remote_dir.path(), TOPIC).await;
+    // Close the test client before broker shutdown; shutdown drains active
+    // listener connections, so leaving the client alive can make nextest
+    // report this test as slow while waiting for connection tasks to exit.
+    drop(client);
     broker.shutdown().await;
 }
 
@@ -560,6 +564,9 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
         "expected no tiered objects while RLMM not ready, found {tiered}"
     );
 
+    // Close the test client before broker shutdown for the same reason as
+    // `topic_rlmm_copy_then_fetch_round_trip`.
+    drop(client);
     broker.shutdown().await;
 }
 
@@ -589,5 +596,8 @@ async fn topic_rlmm_sasl_loopback_copy_then_fetch_round_trip() {
     };
     let client = build_client_secured(&broker, Some(security)).await;
     copy_then_fetch_round_trip(&broker, &client, remote_dir.path(), TOPIC).await;
+    // Close the test client before broker shutdown for the same reason as
+    // `topic_rlmm_copy_then_fetch_round_trip`.
+    drop(client);
     broker.shutdown().await;
 }
