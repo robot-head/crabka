@@ -2918,6 +2918,10 @@ name = "crabka-object-store"
 version = "0.3.8"
 dependencies = [
  "assert2",
+ "async-trait",
+ "bytes",
+ "futures",
+ "mockall",
  "object_store",
  "tempfile",
  "thiserror 2.0.18",
