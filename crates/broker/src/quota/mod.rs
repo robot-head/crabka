@@ -101,3 +101,147 @@ mod test_support {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
+    use assert2::{assert, check};
+
+    use super::{test_support::image_with_quota, *};
+
+    #[test]
+    fn consume_configured_quota_returns_zero_without_mutating_bucket_for_zero_amount() {
+        let image = image_with_quota(vec![("user", Some("alice"))], "request_percentage", 100.0);
+        let buckets = QuotaBuckets::new();
+        let bucket_entity_key_called = Arc::new(AtomicBool::new(false));
+        let initial_rate_called = Arc::new(AtomicBool::new(false));
+        let delay_for_overage_called = Arc::new(AtomicBool::new(false));
+
+        let delay = consume_configured_quota(
+            QuotaConsumption {
+                image: &image,
+                buckets: &buckets,
+                principal: "alice",
+                client_id: "",
+                quota_key: "request_percentage",
+                amount: 0,
+            },
+            {
+                let called = Arc::clone(&bucket_entity_key_called);
+                move |_| called.store(true, Ordering::Relaxed)
+            },
+            {
+                let called = Arc::clone(&initial_rate_called);
+                move |_| {
+                    called.store(true, Ordering::Relaxed);
+                    Some(100)
+                }
+            },
+            {
+                let called = Arc::clone(&delay_for_overage_called);
+                move |_, _, _| {
+                    called.store(true, Ordering::Relaxed);
+                    Duration::from_secs(1)
+                }
+            },
+        );
+
+        check!(delay == Duration::ZERO);
+        check!(buckets.is_empty());
+        check!(!bucket_entity_key_called.load(Ordering::Relaxed));
+        check!(!initial_rate_called.load(Ordering::Relaxed));
+        assert!(!delay_for_overage_called.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn consume_configured_quota_ignores_non_positive_rates() {
+        for rate in [-1.0, 0.0] {
+            let image = image_with_quota(vec![("user", Some("alice"))], "producer_byte_rate", rate);
+            let buckets = QuotaBuckets::new();
+            let initial_rate_called = Arc::new(AtomicBool::new(false));
+
+            let delay = consume_configured_quota(
+                QuotaConsumption {
+                    image: &image,
+                    buckets: &buckets,
+                    principal: "alice",
+                    client_id: "",
+                    quota_key: "producer_byte_rate",
+                    amount: 1,
+                },
+                |_| {},
+                {
+                    let called = Arc::clone(&initial_rate_called);
+                    move |_| {
+                        called.store(true, Ordering::Relaxed);
+                        Some(1)
+                    }
+                },
+                |_, _, _| Duration::from_secs(1),
+            );
+
+            check!(delay == Duration::ZERO);
+            check!(buckets.is_empty());
+            assert!(!initial_rate_called.load(Ordering::Relaxed));
+        }
+    }
+
+    #[test]
+    fn consume_configured_quota_skips_unrepresentable_initial_rate() {
+        let image = image_with_quota(
+            vec![("user", Some("alice"))],
+            "controller_mutation_rate",
+            0.5,
+        );
+        let buckets = QuotaBuckets::new();
+
+        let delay = consume_configured_quota(
+            QuotaConsumption {
+                image: &image,
+                buckets: &buckets,
+                principal: "alice",
+                client_id: "",
+                quota_key: "controller_mutation_rate",
+                amount: 1,
+            },
+            |_| {},
+            |_| None,
+            |_, _, _| Duration::from_secs(1),
+        );
+
+        check!(delay == Duration::ZERO);
+        assert!(buckets.is_empty());
+    }
+
+    #[test]
+    fn consume_configured_quota_caps_overage_delay() {
+        let image = image_with_quota(vec![("user", Some("alice"))], "producer_byte_rate", 1.0);
+        let buckets = QuotaBuckets::new();
+
+        let delay = consume_configured_quota(
+            QuotaConsumption {
+                image: &image,
+                buckets: &buckets,
+                principal: "alice",
+                client_id: "",
+                quota_key: "producer_byte_rate",
+                amount: 10,
+            },
+            |entity_key| entity_key.push(("qos-tier".into(), Some("bulk".into()))),
+            |_| Some(1),
+            |overage, rate, initial_rate| {
+                check!(overage == 9);
+                check!(rate == 1.0);
+                check!(initial_rate == 1);
+                Duration::from_secs(10)
+            },
+        );
+
+        check!(delay == Duration::from_secs(1));
+        assert!(buckets.len() == 1);
+    }
+}
