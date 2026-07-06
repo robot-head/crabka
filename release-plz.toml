@@ -11,7 +11,109 @@ semver_check = false
 pr_branch_prefix = "release-plz-"
 pr_labels = ["release"]
 
-# Internal build/dev tooling — never published to crates.io and not released.
+# Public crates: useful as standalone libraries outside the Crabka repository.
+[[package]]
+name = "crabka-client-admin"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-client-consumer"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-client-core"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-client-producer"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-client-streams"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-compression"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-connect"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-connect-derive"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-log"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-protocol"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-schema-serde"
+publish = true
+release = true
+
+[[package]]
+name = "crabka-security"
+publish = true
+release = true
+
+# Internal services, domain crates, build/dev tooling, demos, and experiments are
+# never published to crates.io and are not released independently.
+[[package]]
+name = "crabka-audit"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-authz"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-bench-driver"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-blockstore"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-broker"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-broker-test-helpers"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-cli"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-connect-postgres"
+publish = false
+release = false
+
 [[package]]
 name = "crabka-protocol-codegen"
 publish = false
@@ -23,16 +125,161 @@ publish = false
 release = false
 
 [[package]]
+name = "crabka-grpc-gateway"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-ids"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-integration-tests"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-kafka-tap"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-kraft-core"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-logfmt"
+publish = false
+release = false
+
+[[package]]
 name = "crabka-log-iobench"
 publish = false
 release = false
 
 [[package]]
-name = "crabka-compression"
-publish = true
-release = true
+name = "crabka-logql"
+publish = false
+release = false
 
 [[package]]
-name = "crabka-protocol"
-publish = true
-release = true
+name = "crabka-metadata"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-metrics"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-metrics-service"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-observability"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-observability-spike"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-operator"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-playground"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-pprof"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-profiles"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-promql"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-raft"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-rebalancer"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-records-legacy"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-remote-storage"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-remote-storage-topic"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-replicator"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-schema-registry"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-telemetry"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-throttle"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-traceql"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-traces"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-verified"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-voters"
+publish = false
+release = false
+
+[[package]]
+name = "observability-demo-app"
+publish = false
+release = false
