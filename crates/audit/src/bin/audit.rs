@@ -3,7 +3,7 @@
 use std::{path::PathBuf, process::ExitCode};
 
 use clap::{Parser, Subcommand};
-use crabka_audit::{CheckpointCount, RecordCount, TrustedKeys, verify_partition_dir};
+use crabka_audit::{TrustedKeys, verify_partition_dir};
 
 #[derive(Parser)]
 #[command(name = "crabka-audit", about = "Crabka audit-log tools (FedRAMP MLA)")]
@@ -69,14 +69,11 @@ fn main() -> ExitCode {
                     );
                     ExitCode::FAILURE
                 }
-                Ok(report) if report.records == RecordCount(0) => {
+                Ok(report) if report.records == 0 => {
                     println!("OK: empty partition");
                     ExitCode::SUCCESS
                 }
-                Ok(report)
-                    if report.checkpoints == CheckpointCount(0)
-                        || report.unanchored_records > RecordCount(0) =>
-                {
+                Ok(report) if report.checkpoints == 0 || report.unanchored_records > 0 => {
                     eprintln!(
                         "INCOMPLETE ATTESTATION: chain continuous over {} records, but {} \
                         record(s) are not covered by a signed checkpoint ({} checkpoint(s) \

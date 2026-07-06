@@ -326,10 +326,7 @@ mod tests {
             (api_key::FETCH, 17),
             (-123, 0),
         ] {
-            assert!(
-                api_version_for(ApiKey(key)) == ApiVersion(want),
-                "api_key {key}"
-            );
+            assert!(api_version_for(ApiKey(key)) == want, "api_key {key}");
         }
     }
 
@@ -344,7 +341,7 @@ mod tests {
 
             let api_versions = read_frame(&mut stream).await;
             let (key, _version, corr, client_id, _body) = parse_request_header(&api_versions);
-            assert!(key == ApiKey(18));
+            assert!(key == 18);
             assert!(client_id == "raft-client");
             write_response_frame(&mut stream, corr, false, &api_versions_response_v0()).await;
 

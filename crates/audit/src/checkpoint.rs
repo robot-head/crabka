@@ -160,7 +160,7 @@ mod tests {
         );
         let value: serde_json::Value = serde_json::from_slice(&rec.value).unwrap();
         let parsed = Checkpoint::from_value(&value).expect("parse");
-        check!(parsed.seq_high == Seq(41));
+        check!(parsed.seq_high == 41);
         check!(parsed.chain_head == head);
         check!(parsed.verify(&pubkey));
     }

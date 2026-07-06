@@ -627,7 +627,7 @@ mod tests {
         .await
         .expect("future log should catch up and swap");
 
-        assert!(part.log_end_offset() == Offset(3));
+        assert!(part.log_end_offset() == 3);
         assert!(
             canonicalize_or_self(&part.log_dir.load_full()) == canonicalize_or_self(target.path())
         );
@@ -671,7 +671,7 @@ mod tests {
         .await
         .expect("future log should keep copying after a partial catch-up pass");
 
-        assert!(part.log_end_offset() == Offset(4));
+        assert!(part.log_end_offset() == 4);
     }
 
     #[tokio::test]

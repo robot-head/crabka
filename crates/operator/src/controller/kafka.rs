@@ -101,7 +101,7 @@ pub(crate) fn aggregate_pool_status<'a>(
 pub(crate) fn rolling_condition_from_rollup(
     rollup: &ClusterRollup,
 ) -> (bool, &'static str, String) {
-    if rollup.pool_count > 0 && rollup.ready_replicas.0 < rollup.replicas.0 {
+    if rollup.pool_count > 0 && rollup.ready_replicas < rollup.replicas.0 {
         (
             true,
             "RollingUpdate",
@@ -129,7 +129,7 @@ pub(crate) fn rollup_condition(rollup: &ClusterRollup) -> (bool, &'static str, S
             "NoNodePools",
             "no KafkaNodePool with label crabka.io/cluster=<name>".into(),
         )
-    } else if rollup.ready_replicas.0 == rollup.replicas.0 && rollup.replicas.0 > 0 {
+    } else if rollup.ready_replicas == rollup.replicas.0 && rollup.replicas > 0 {
         (
             true,
             "Available",
@@ -1935,7 +1935,7 @@ mod tests {
     }
 
     // Boundary: a pool that exists but reports zero replicas (ready==replicas==0)
-    // is PartiallyReady, not Available. Pins `replicas.0 > 0` so a `>=` mutant
+    // is PartiallyReady, not Available. Pins `replicas > 0` so a `>=` mutant
     // (which would call an all-zero cluster "Available") fails here.
     #[test]
     fn rollup_condition_zero_replicas_is_partially_ready() {

@@ -7,7 +7,6 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crabka_ids::{ApiKey, ApiVersion};
 use crabka_kafka_tap::{Recorder, frame::CapturedFrame, spawn};
 
 fn framed(body: &[u8]) -> Vec<u8> {
@@ -59,10 +58,10 @@ fn relays_and_records() {
         let frames = recorder.lock().unwrap().clone();
         let req = frames
             .iter()
-            .any(|f| f.is_request && f.api_key == ApiKey(3) && f.version == ApiVersion(12));
+            .any(|f| f.is_request && f.api_key == 3 && f.version == 12);
         let resp = frames
             .iter()
-            .any(|f| !f.is_request && f.api_key == ApiKey(3) && f.version == ApiVersion(12));
+            .any(|f| !f.is_request && f.api_key == 3 && f.version == 12);
         if (req && resp) || std::time::Instant::now() >= deadline {
             break;
         }
@@ -76,11 +75,11 @@ fn relays_and_records() {
     assert!(
         frames
             .iter()
-            .any(|f| f.is_request && f.api_key == ApiKey(3) && f.version == ApiVersion(12))
+            .any(|f| f.is_request && f.api_key == 3 && f.version == 12)
     );
     assert!(
         frames
             .iter()
-            .any(|f| !f.is_request && f.api_key == ApiKey(3) && f.version == ApiVersion(12))
+            .any(|f| !f.is_request && f.api_key == 3 && f.version == 12)
     );
 }

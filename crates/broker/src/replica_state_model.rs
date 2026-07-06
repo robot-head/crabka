@@ -255,16 +255,16 @@ impl Model for IsrModel {
             Property::always("leo_clamped", |_, s: &IsrState| {
                 s.rs.per_follower.values().all(|st| st.leo <= s.leader_leo)
             }),
-            Property::always("hw_nonneg", |_, s: &IsrState| s.rs.hw >= Offset(0)),
+            Property::always("hw_nonneg", |_, s: &IsrState| s.rs.hw >= 0),
             Property::always("leader_in_isr", |m: &IsrModel, s: &IsrState| {
                 s.rs.isr.contains(&m.leader())
             }),
-            Property::sometimes("can_advance_hw", |_, s: &IsrState| s.rs.hw > Offset(0)),
+            Property::sometimes("can_advance_hw", |_, s: &IsrState| s.rs.hw > 0),
             Property::sometimes("can_reach_leader_leo", |_, s: &IsrState| {
-                s.leader_leo > Offset(0) && s.rs.hw == s.leader_leo
+                s.leader_leo > 0 && s.rs.hw == s.leader_leo
             }),
             Property::sometimes("can_pin_below_leader", |_, s: &IsrState| {
-                s.rs.hw > Offset(0) && s.rs.hw < s.leader_leo
+                s.rs.hw > 0 && s.rs.hw < s.leader_leo
             }),
             Property::sometimes("can_shrink_isr", |m: &IsrModel, s: &IsrState| {
                 let leader = m.leader();

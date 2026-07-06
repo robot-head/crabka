@@ -235,7 +235,7 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
                     key: r.key.clone(),
                     value: r.value.clone(),
                     headers,
-                    timestamp_ms: Some(r.timestamp.0),
+                    timestamp_ms: Some(r.timestamp.into()),
                 })
                 .await;
 
@@ -244,7 +244,7 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
                 topic: r.topic,
                 partition: r.partition,
                 // The record's source offset is the upstream side of the sync.
-                upstream: UpstreamOffset(r.offset.0),
+                upstream: r.offset.into(),
             });
             accepted += 1;
         }
@@ -385,9 +385,11 @@ mod tests {
         assert!(crate::test_util::topic_record_count(&target, "us-east.secret").await == 0);
 
         let syncs = sink.drain_offset_syncs();
-        assert!(syncs.iter().any(|s| s.topic == "orders"
-            && s.partition == PartitionIndex(0)
-            && s.upstream == UpstreamOffset(5)));
+        assert!(
+            syncs
+                .iter()
+                .any(|s| s.topic == "orders" && s.partition == 0 && s.upstream == 5)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -801,8 +801,8 @@ mod tests {
             let (api_key, api_version, correlation_id, body) =
                 super::read_one_request(&mut server).await.expect("decode");
 
-            check!(api_key == ApiKey(52), "case: {case}");
-            check!(api_version == ApiVersion(2), "case: {case}");
+            check!(api_key == 52, "case: {case}");
+            check!(api_version == 2, "case: {case}");
             check!(correlation_id == 123, "case: {case}");
             check!(body.as_ref() == want_body, "case: {case}");
             writer.await.unwrap();

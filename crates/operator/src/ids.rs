@@ -26,6 +26,8 @@
 //! count newtypes need no serde impls; they convert to/from the raw
 //! `Option<i32>` read out of pool status at the aggregation boundary.
 
+use core::cmp::Ordering;
+
 use derive_more::{Add, AddAssign, Display, From, Into};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -205,3 +207,44 @@ pub struct ReplicaCount(pub i32);
     Into,
 )]
 pub struct ReadyReplicaCount(pub i32);
+
+macro_rules! impl_primitive_cmp {
+    ($ty:ty, $inner:ty) => {
+        impl PartialEq<$inner> for $ty {
+            #[inline]
+            fn eq(&self, other: &$inner) -> bool {
+                self.0 == *other
+            }
+        }
+
+        impl PartialEq<$ty> for $inner {
+            #[inline]
+            fn eq(&self, other: &$ty) -> bool {
+                *self == other.0
+            }
+        }
+
+        impl PartialOrd<$inner> for $ty {
+            #[inline]
+            fn partial_cmp(&self, other: &$inner) -> Option<Ordering> {
+                self.0.partial_cmp(other)
+            }
+        }
+
+        impl PartialOrd<$ty> for $inner {
+            #[inline]
+            fn partial_cmp(&self, other: &$ty) -> Option<Ordering> {
+                self.partial_cmp(&other.0)
+            }
+        }
+    };
+}
+
+impl_primitive_cmp!(ReplicaMovementCount, i32);
+impl_primitive_cmp!(LeaderMovementCount, i32);
+impl_primitive_cmp!(MaxReplicasCount, i32);
+impl_primitive_cmp!(MaxLeadersCount, i32);
+impl_primitive_cmp!(CertGeneration, u64);
+impl_primitive_cmp!(KeyGeneration, u64);
+impl_primitive_cmp!(ReplicaCount, i32);
+impl_primitive_cmp!(ReadyReplicaCount, i32);

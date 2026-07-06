@@ -680,7 +680,7 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&cps[0].value).unwrap();
         let cp = Checkpoint::from_value(&v).unwrap();
         check!(cp.verify(&pubkey));
-        check!(cp.seq_high == Seq(2)); // last chained seq (records 0,1,2)
+        check!(cp.seq_high == 2); // last chained seq (records 0,1,2)
     }
 
     #[tokio::test]

@@ -380,12 +380,12 @@ mod tests {
         let trusted = TrustedKeys::single("k1".into(), pubkey);
         let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
         check!(report.ok);
-        check!(report.records == RecordCount(3));
-        check!(report.checkpoints == CheckpointCount(1));
+        check!(report.records == 3);
+        check!(report.checkpoints == 1);
         check!(report.first_break.is_none());
         // build_partition writes 3 records (seq 0..2) + 1 checkpoint (seq_high=2)
         // → all records are covered → 0 unanchored
-        check!(report.unanchored_records == RecordCount(0));
+        check!(report.unanchored_records == 0);
     }
 
     #[test]
@@ -451,9 +451,9 @@ mod tests {
         let trusted = TrustedKeys::single("k1".into(), pubkey);
         let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
         check!(report.ok);
-        check!(report.checkpoints == CheckpointCount(1));
-        check!(report.records == RecordCount(5));
-        check!(report.unanchored_records == RecordCount(2));
+        check!(report.checkpoints == 1);
+        check!(report.records == 5);
+        check!(report.unanchored_records == 2);
     }
 
     /// Chain-only partition (no signing key, no checkpoints) — all records are unanchored.
@@ -479,9 +479,9 @@ mod tests {
         let trusted = TrustedKeys::default();
         let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
         check!(report.ok);
-        check!(report.checkpoints == CheckpointCount(0));
-        check!(report.records == RecordCount(3));
-        check!(report.unanchored_records == RecordCount(3));
+        check!(report.checkpoints == 0);
+        check!(report.records == 3);
+        check!(report.unanchored_records == 3);
     }
 
     // ── Fix 2 tests: direct tamper-detection (chain-inconsistent fixtures) ────

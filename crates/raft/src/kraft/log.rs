@@ -206,9 +206,9 @@ mod tests {
     #[test]
     fn opens_empty_at_offset_zero() {
         let (log, _dir) = open_tmp();
-        check!(log.log_start_offset() == Offset(0));
-        check!(log.log_end_offset() == Offset(0));
-        check!(log.hwm() == Offset(0));
+        check!(log.log_start_offset() == 0);
+        check!(log.log_end_offset() == 0);
+        check!(log.hwm() == 0);
     }
 
     #[test]
@@ -216,8 +216,8 @@ mod tests {
         let (mut log, _dir) = open_tmp();
         let off0 = log.append(&mut batch(0, 1, b"a")).unwrap();
         let off1 = log.append(&mut batch(0, 1, b"b")).unwrap();
-        assert!(off0 == Offset(0) && off1 == Offset(1));
-        assert!(log.log_end_offset() == Offset(2));
+        assert!(off0 == 0 && off1 == 1);
+        assert!(log.log_end_offset() == 2);
         // read back decoded
         let out = log.read_decoded(Offset(0), 1 << 20).unwrap();
         assert!(out.len() == 2);
@@ -232,8 +232,8 @@ mod tests {
         let second = log.append(&mut batch(0, 1, b"b")).unwrap();
         let decoded = log.read_decoded(Offset(0), 1 << 20).unwrap();
 
-        check!(first == Offset(0));
-        check!(second == Offset(1));
+        check!(first == 0);
+        check!(second == 1);
         assert!(decoded.len() == 2);
         check!(decoded[0].base_offset == first);
         check!(decoded[1].base_offset == second);
@@ -248,12 +248,12 @@ mod tests {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         }
         log.advance_hwm(Offset(2));
-        assert!(log.hwm() == Offset(2));
+        assert!(log.hwm() == 2);
 
         log.install_snapshot(Offset(9)).unwrap();
-        check!(log.hwm() == Offset(9));
-        check!(log.log_start_offset() == Offset(9));
-        check!(log.log_end_offset() == Offset(9));
+        check!(log.hwm() == 9);
+        check!(log.log_start_offset() == 9);
+        check!(log.log_end_offset() == 9);
     }
 
     #[test]
@@ -261,7 +261,7 @@ mod tests {
         let (mut log, _dir) = open_tmp();
         // follower applies a leader-assigned batch at offset 0
         log.append_at(&mut batch(0, 2, b"x"), Offset(0)).unwrap();
-        assert!(log.log_end_offset() == Offset(1));
+        assert!(log.log_end_offset() == 1);
         assert!(log.read_decoded(Offset(0), 1 << 20).unwrap()[0].partition_leader_epoch == 2);
     }
 
@@ -307,7 +307,7 @@ mod tests {
         let decoded = log.read_decoded(Offset(0), 1 << 20).unwrap();
         let committed: Vec<_> = decoded.into_iter().filter(|b| b.base_offset < 3).collect();
         check!(committed.len() == 3);
-        check!(r.start_offset == Offset(0));
+        check!(r.start_offset == 0);
         // total committed bytes equals the size of the first 3 batches
         check!(!r.bytes.is_empty());
     }
@@ -317,9 +317,9 @@ mod tests {
         let (mut log, _dir) = open_tmp();
         log.append(&mut batch(0, 1, b"x")).unwrap(); // log_end = 1
         log.advance_hwm(Offset(5)); // clamp to log_end
-        assert!(log.hwm() == Offset(1));
+        assert!(log.hwm() == 1);
         log.advance_hwm(Offset(0)); // never regress
-        assert!(log.hwm() == Offset(1));
+        assert!(log.hwm() == 1);
     }
 
     #[test]
@@ -329,11 +329,11 @@ mod tests {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         }
         log.advance_hwm(log.log_end_offset());
-        assert!(log.log_start_offset() == Offset(0));
+        assert!(log.log_start_offset() == 0);
         log.prune_to(Offset(3)).unwrap();
-        assert!(log.log_start_offset() == Offset(3));
+        assert!(log.log_start_offset() == 3);
         log.prune_to(Offset(2)).unwrap(); // <= current start: no-op
-        assert!(log.log_start_offset() == Offset(3));
+        assert!(log.log_start_offset() == 3);
     }
 
     #[test]
@@ -343,11 +343,11 @@ mod tests {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         }
         log.install_snapshot(Offset(100)).unwrap();
-        check!(log.log_start_offset() == Offset(100));
-        check!(log.log_end_offset() == Offset(100));
-        check!(log.hwm() == Offset(100));
+        check!(log.log_start_offset() == 100);
+        check!(log.log_end_offset() == 100);
+        check!(log.hwm() == 100);
         let base = log.append(&mut batch(0, 1, b"x")).unwrap();
-        assert!(base == Offset(100));
+        assert!(base == 100);
     }
 
     #[test]
@@ -358,7 +358,7 @@ mod tests {
         }
         log.advance_hwm(Offset(5));
         log.truncate_to(Offset(2)).unwrap();
-        assert!(log.log_end_offset() == Offset(2));
-        assert!(log.hwm() == Offset(2)); // hwm clamped down to the truncation point
+        assert!(log.log_end_offset() == 2);
+        assert!(log.hwm() == 2); // hwm clamped down to the truncation point
     }
 }

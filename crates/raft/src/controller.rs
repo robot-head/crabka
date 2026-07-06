@@ -1201,7 +1201,7 @@ mod bootstrap_mode_tests {
         transport
             .expect_send_submit_change()
             .withf(move |leader, addr, body| {
-                *leader == NodeId(7) && addr == "leader-host:9093" && body == &expected_body
+                *leader == 7 && addr == "leader-host:9093" && body == &expected_body
             })
             .times(1)
             .returning(|_, _, _| Ok(submit_change_response_bytes(0, -1)));

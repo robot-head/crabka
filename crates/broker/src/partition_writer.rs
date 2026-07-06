@@ -648,7 +648,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert!(assigned == Offset(0));
+        assert!(assigned == 0);
 
         // Second append assigns offset 3.
         let (ack, ack_rx) = oneshot::channel();
@@ -658,7 +658,7 @@ mod tests {
         }))
         .await
         .expect("send job 2");
-        assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == Offset(3));
+        assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -702,7 +702,7 @@ mod tests {
 
         let mut acks = acks.into_iter();
         let first = acks.next().expect("first ack");
-        assert!(first.await.expect("ack 0").expect("append 0 ok") == Offset(0));
+        assert!(first.await.expect("ack 0").expect("append 0 ok") == 0);
         for (idx, mut ack) in acks.enumerate() {
             let assigned = ack
                 .try_recv()
@@ -751,7 +751,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert!(assigned == Offset(0));
+        assert!(assigned == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -807,7 +807,7 @@ mod tests {
         .await
         .expect("send verbatim job");
         let assigned = ack_rx.await.expect("ack").expect("append ok");
-        assert!(assigned == Offset(0));
+        assert!(assigned == 0);
 
         // Read back: bytes 21.. must equal the producer's, only offset+epoch changed.
         let r = log
@@ -847,8 +847,8 @@ mod tests {
         let (results, leo) = append_produce_batch(&log, vec![ProduceData::Owned(original)]);
         assert!(results.len() == 1);
         let assigned = results.into_iter().next().unwrap().expect("append ok");
-        assert!(assigned == Offset(0));
-        assert!(leo == Offset(2));
+        assert!(assigned == 0);
+        assert!(leo == 2);
 
         let read = log
             .lock()
@@ -1083,7 +1083,7 @@ mod tests {
             .await
             .expect("hw_advance_notify did not fire");
 
-        assert!(replica_state.lock().await.hw == Offset(2));
+        assert!(replica_state.lock().await.hw == 2);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1135,7 +1135,7 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert!(replica_state.lock().await.hw == Offset(0));
+        assert!(replica_state.lock().await.hw == 0);
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), waiter)
                 .await
@@ -1234,7 +1234,7 @@ mod tests {
         .await
         .expect("send");
         let new_start = ack_rx.await.expect("ack").expect("trim ok");
-        assert!(new_start >= Offset(3));
+        assert!(new_start >= 3);
         assert!(log.lock().expect("lock").log_start_offset() == new_start);
 
         drop(tx);
@@ -1292,7 +1292,7 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert!(replica_state.lock().await.hw == Offset(0));
+        assert!(replica_state.lock().await.hw == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1328,7 +1328,7 @@ mod tests {
             (guard.log_end_offset(), guard.dir().to_path_buf())
         };
         check!(result == SwapOutcome::Swapped);
-        check!(leo == Offset(2));
+        check!(leo == 2);
         check!(log_dir_now == target_partition_path.clone());
         check!(log_dir.load().as_ref().clone() == target_dir);
         check!(!source_partition.exists());
@@ -1365,7 +1365,7 @@ mod tests {
             (guard.log_end_offset(), guard.dir().to_path_buf())
         };
         check!(result == SwapOutcome::NotCaughtUp);
-        check!(leo == Offset(2));
+        check!(leo == 2);
         check!(log_dir_now == source_partition.clone());
         check!(log_dir.load().as_ref().clone() == source_dir);
         check!(source_partition.exists());
