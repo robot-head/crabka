@@ -29,6 +29,10 @@
 use std::{io::Read, path::Path, sync::Arc};
 
 use bytes::Bytes;
+use crabka_object_store::{
+    DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, ObjectStoreConfig, S3Config,
+    build_object_store,
+};
 use object_store::{
     GetOptions, GetRange, ObjectStore, ObjectStoreExt, PutPayload, WriteMultipart,
     path::Path as ObjectPath,
@@ -40,21 +44,6 @@ use crate::{
     metadata::{CustomMetadata, RemoteLogSegmentMetadata},
     storage_manager::{IndexType, LogSegmentData, RemoteStorageManager},
 };
-
-/// Default threshold above which `S3RemoteStorage::put_path` switches
-/// from a single PUT to a streaming multipart upload. 100 MiB. AWS's hard
-/// cap on single-PUT objects is 5 GiB; defaulting well below that keeps
-/// us comfortably inside the single-PUT regime for the common segment
-/// sizes (Kafka's default `segment.bytes` is 1 GiB) while ensuring
-/// segments at the upper end (or operator-bumped `segment.bytes`) never
-/// silently exceed the cap.
-pub const DEFAULT_MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024;
-
-/// Default per-part size for multipart uploads. 16 MiB. AWS requires every
-/// part except the last to be at least 5 MiB and caps the total parts at
-/// 10 000, so 16 MiB scales to a ~160 GiB segment before bumping into the
-/// part-count limit — far beyond any realistic Kafka segment.
-pub const DEFAULT_MULTIPART_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 
 /// A [`RemoteStorageManager`] backed by any S3-compatible object store.
 ///
@@ -78,85 +67,6 @@ impl std::fmt::Debug for S3RemoteStorage {
         f.debug_struct("S3RemoteStorage")
             .field("prefix", &self.prefix)
             .finish_non_exhaustive()
-    }
-}
-
-/// Connection / bucket parameters for [`S3RemoteStorage::from_s3_config`].
-///
-/// Either `access_key_id` + `secret_access_key` or the standard AWS SDK
-/// credential chain (env vars, instance profile, …) supplies credentials.
-/// When both fields are `None`, `object_store` falls back to the
-/// environment-variable chain.
-#[derive(Clone)]
-pub struct S3Config {
-    /// S3 bucket name.
-    pub bucket: String,
-    /// Optional key prefix inside the bucket (no leading or trailing slash).
-    pub prefix: Option<String>,
-    /// AWS region. Required by AWS S3; ignored by `MinIO`/R2 when an
-    /// `endpoint` is provided but `object_store` still wants a value here
-    /// (use `"us-east-1"` as a placeholder).
-    pub region: String,
-    /// Optional custom endpoint URL (e.g. `http://minio:9000` for `MinIO`,
-    /// `https://<account>.r2.cloudflarestorage.com` for R2). When `None`,
-    /// `object_store` uses the AWS S3 endpoint for the configured region.
-    pub endpoint: Option<String>,
-    /// Optional explicit access key id. Falls back to the AWS credential
-    /// chain when `None`.
-    pub access_key_id: Option<String>,
-    /// Optional explicit secret access key. Falls back to the AWS
-    /// credential chain when `None`.
-    pub secret_access_key: Option<String>,
-    /// Allow plaintext HTTP (off-by-default; required by `MinIO` running
-    /// without TLS).
-    pub allow_http: bool,
-    /// Files at least this large are uploaded via S3 multipart instead of
-    /// a single PUT. Defaults to [`DEFAULT_MULTIPART_THRESHOLD`] (100 MiB).
-    /// Lower this in tests to exercise the multipart path against
-    /// segment-sized fixtures.
-    pub multipart_threshold: u64,
-    /// Per-part size used when multipart upload kicks in. Defaults to
-    /// [`DEFAULT_MULTIPART_CHUNK_SIZE`] (16 MiB). Must be ≥ 5 MiB (AWS
-    /// minimum) except for the last part; smaller values are accepted by
-    /// `MinIO` and convenient in tests.
-    pub multipart_chunk_size: usize,
-}
-
-impl std::fmt::Debug for S3Config {
-    /// Redacts the credential fields so a stray `{:?}` / tracing call never
-    /// leaks them. Mirrors the hand-written `Debug` on [`S3RemoteStorage`].
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redact = |opt: &Option<String>| opt.as_ref().map(|_| "***");
-        f.debug_struct("S3Config")
-            .field("bucket", &self.bucket)
-            .field("prefix", &self.prefix)
-            .field("region", &self.region)
-            .field("endpoint", &self.endpoint)
-            .field("access_key_id", &redact(&self.access_key_id))
-            .field("secret_access_key", &redact(&self.secret_access_key))
-            .field("allow_http", &self.allow_http)
-            .field("multipart_threshold", &self.multipart_threshold)
-            .field("multipart_chunk_size", &self.multipart_chunk_size)
-            .finish()
-    }
-}
-
-impl Default for S3Config {
-    /// Produces a placeholder `S3Config` so callers can use `..Default::default()`
-    /// to fill in just the tuning knobs. The bucket / region / endpoint /
-    /// credential fields are stubs — every real caller overrides them.
-    fn default() -> Self {
-        Self {
-            bucket: String::new(),
-            prefix: None,
-            region: String::new(),
-            endpoint: None,
-            access_key_id: None,
-            secret_access_key: None,
-            allow_http: false,
-            multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
-            multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
-        }
     }
 }
 
@@ -195,25 +105,10 @@ impl S3RemoteStorage {
     /// region / endpoint combination is rejected by `object_store`'s
     /// builder.
     pub fn from_s3_config(cfg: &S3Config) -> Result<Self, RemoteStorageError> {
-        let mut builder = object_store::aws::AmazonS3Builder::new()
-            .with_bucket_name(&cfg.bucket)
-            .with_region(&cfg.region)
-            .with_allow_http(cfg.allow_http);
-        if let Some(endpoint) = &cfg.endpoint {
-            builder = builder.with_endpoint(endpoint);
-        }
-        if let (Some(k), Some(s)) = (&cfg.access_key_id, &cfg.secret_access_key) {
-            builder = builder.with_access_key_id(k).with_secret_access_key(s);
-        }
-        let store = builder
-            .build()
-            .map_err(|e| RemoteStorageError::InvalidArgument(format!("S3 builder: {e}")))?;
-        Ok(Self {
-            store: Arc::new(store),
-            prefix: cfg.prefix.clone(),
-            multipart_threshold: cfg.multipart_threshold,
-            multipart_chunk_size: cfg.multipart_chunk_size,
-        })
+        let store = build_object_store(&ObjectStoreConfig::S3(cfg.clone()))
+            .map_err(|e| RemoteStorageError::InvalidArgument(e.to_string()))?;
+        Ok(Self::with_store(store, cfg.prefix.clone())
+            .with_multipart_tuning(cfg.multipart_threshold, cfg.multipart_chunk_size))
     }
 
     fn segment_key(&self, metadata: &RemoteLogSegmentMetadata, suffix: &str) -> ObjectPath {
@@ -504,32 +399,6 @@ mod tests {
 
     fn rsm(prefix: Option<&str>) -> S3RemoteStorage {
         S3RemoteStorage::with_store(Arc::new(InMemory::new()), prefix.map(str::to_string))
-    }
-
-    #[test]
-    fn s3_config_debug_redacts_credentials() {
-        let cfg = S3Config {
-            bucket: "logs".to_string(),
-            region: "us-east-1".to_string(),
-            access_key_id: Some("AKIAEXAMPLEKEYID".to_string()),
-            secret_access_key: Some("super-secret-key-value".to_string()),
-            ..Default::default()
-        };
-        let dbg = format!("{cfg:?}");
-        check!(!dbg.contains("super-secret-key-value"));
-        check!(!dbg.contains("AKIAEXAMPLEKEYID"));
-        check!(dbg.contains("***"));
-        // Non-secret fields are still printed.
-        check!(dbg.contains("logs"));
-        check!(dbg.contains("us-east-1"));
-    }
-
-    #[test]
-    fn multipart_size_constants() {
-        // Pin the multipart threshold/part-size (mutants flip the `*` in the
-        // `N * 1024 * 1024` products to `+`/`/`).
-        assert!(DEFAULT_MULTIPART_THRESHOLD == 104_857_600); // 100 MiB
-        assert!(DEFAULT_MULTIPART_CHUNK_SIZE == 16_777_216); // 16 MiB
     }
 
     #[test]
