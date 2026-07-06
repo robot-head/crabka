@@ -325,7 +325,7 @@ mod tests {
 
     use assert2::assert;
     use crabka_ids::PartitionIndex;
-    use crabka_log::{Log, LogConfig, Offset, ProducerId};
+    use crabka_log::{Log, LogConfig, ProducerId};
 
     use super::*;
     use crate::txn::state::{TopicPartition, TxnEntry};

@@ -24,13 +24,14 @@
 //!
 //! [newtype guidance]: ../../../docs/style_guides/code_style_guide.md
 
+use std::cmp::Ordering;
+
 /// The canonical cross-crate `PartitionIndex`, as carried in offset-syncs,
 /// checkpoints, and replicated records. The MM2 offset newtypes below stay
 /// crate-local — they encode source-vs-target-cluster distinctions specific to
 /// MirrorMaker-2 that have no meaning outside this crate.
 pub use crabka_ids::{Offset, PartitionIndex};
 use derive_more::{Display, From, Into};
-use std::cmp::Ordering;
 
 /// An offset on the **source** cluster, as recorded in an offset-sync or
 /// checkpoint (`upstream` in the JVM MM2 codecs).
