@@ -5,6 +5,9 @@ use object_store::path::Path as ObjectPath;
 /// Errors raised by the object-store substrate.
 #[derive(Debug, thiserror::Error)]
 pub enum ObjectStoreError {
+    /// A local-filesystem I/O failure (e.g. reading a segment file to upload).
+    #[error("object store I/O error: {0}")]
+    Io(#[from] std::io::Error),
     /// The backend builder rejected the config (bad bucket/region/endpoint/credentials).
     #[error("invalid object store config: {0}")]
     InvalidConfig(String),
@@ -31,6 +34,13 @@ mod tests {
     use assert2::assert;
 
     use super::*;
+
+    #[test]
+    fn io_error_converts_via_from() {
+        let io = std::io::Error::new(std::io::ErrorKind::NotFound, "nope");
+        let err: ObjectStoreError = io.into();
+        assert!(matches!(err, ObjectStoreError::Io(_)));
+    }
 
     #[test]
     fn not_found_maps_to_structured_variant() {
