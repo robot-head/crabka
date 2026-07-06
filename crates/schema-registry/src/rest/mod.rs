@@ -18,7 +18,7 @@ use axum::{
     routing::{get, post},
 };
 
-use crate::kafkastore::KafkaStore;
+use crate::{error::SrError, ids::SchemaVersion, kafkastore::KafkaStore};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -31,6 +31,21 @@ pub struct AppState {
 pub struct DeletedQ {
     #[serde(default)]
     pub deleted: bool,
+}
+
+/// `latest` -> `None`; a positive integer -> `Some(n)`; else 42202.
+fn parse_optional_version(v: &str) -> Result<Option<SchemaVersion>, SrError> {
+    if v == "latest" {
+        return Ok(None);
+    }
+    parse_concrete_version(v).map(Some)
+}
+
+fn parse_concrete_version(v: &str) -> Result<SchemaVersion, SrError> {
+    match v.parse::<i32>() {
+        Ok(n) if n >= 1 => Ok(SchemaVersion(n)),
+        _ => Err(SrError::InvalidVersion(v.to_string())),
+    }
 }
 
 pub fn router(state: AppState) -> Router {

@@ -11,8 +11,7 @@ use crate::{
     compat,
     error::SrError,
     format::SchemaType,
-    ids::SchemaVersion,
-    rest::{AppState, response::ok_json},
+    rest::{AppState, parse_optional_version as parse_version, response::ok_json},
 };
 
 #[derive(Deserialize)]
@@ -70,22 +69,12 @@ pub async fn check(
     }
 }
 
-/// `latest` -> None; a positive integer -> Some(n); else 42202.
-fn parse_version(v: &str) -> Result<Option<SchemaVersion>, SrError> {
-    if v == "latest" {
-        return Ok(None);
-    }
-    match v.parse::<i32>() {
-        Ok(n) if n >= 1 => Ok(Some(SchemaVersion(n))),
-        _ => Err(SrError::InvalidVersion(v.to_string())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use assert2::check;
 
     use super::*;
+    use crate::ids::SchemaVersion;
 
     #[test]
     fn parse_version_latest_is_none() {

@@ -8,21 +8,13 @@ use serde::Deserialize;
 
 use crate::{
     error::SrError,
-    ids::SchemaVersion,
-    rest::{AppState, response::ok_json},
+    rest::{AppState, parse_concrete_version, response::ok_json},
 };
 
 #[derive(Deserialize, Default)]
 pub struct PermanentQ {
     #[serde(default)]
     permanent: bool,
-}
-
-fn parse_concrete_version(v: &str) -> Result<SchemaVersion, SrError> {
-    match v.parse::<i32>() {
-        Ok(n) if n >= 1 => Ok(SchemaVersion(n)),
-        _ => Err(SrError::InvalidVersion(v.to_string())),
-    }
 }
 
 /// `DELETE /subjects/{subject}/versions/{version}[?permanent=true] -> <version:int>`
@@ -70,6 +62,7 @@ mod tests {
     use assert2::check;
 
     use super::*;
+    use crate::ids::SchemaVersion;
 
     #[test]
     fn parse_concrete_version_positive_is_ok() {

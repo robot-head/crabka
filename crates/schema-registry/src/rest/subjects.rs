@@ -12,7 +12,7 @@ use crate::{
     ids::{SchemaId, SchemaVersion},
     kafkastore::RegisterSchema,
     rest::{
-        AppState, DeletedQ,
+        AppState, DeletedQ, parse_optional_version,
         response::{ok_json, ok_raw},
     },
 };
@@ -174,16 +174,6 @@ pub async fn versions(
     Ok(ok_json(&vs))
 }
 
-fn parse_version(v: &str) -> Result<Option<SchemaVersion>, SrError> {
-    if v == "latest" {
-        return Ok(None);
-    }
-    match v.parse::<i32>() {
-        Ok(n) if n >= 1 => Ok(Some(SchemaVersion(n))),
-        _ => Err(SrError::InvalidVersion(v.to_string())),
-    }
-}
-
 /// GET /subjects/{subject}/versions/{version}
 #[tracing::instrument(level = "debug", name = "sr.get_version", skip_all, fields(subject = %subject, version = %version, deleted = q.deleted), err)]
 pub async fn get_version(
@@ -191,7 +181,7 @@ pub async fn get_version(
     Path((subject, version)): Path<(String, String)>,
     Query(q): Query<DeletedQ>,
 ) -> Result<Response, SrError> {
-    let want = parse_version(&version)?;
+    let want = parse_optional_version(&version)?;
     let s = st.store.store.read();
     if s.versions(&subject, q.deleted).is_none() {
         return Err(SrError::SubjectNotFound(subject));
@@ -226,7 +216,7 @@ pub async fn get_version_schema(
     Path((subject, version)): Path<(String, String)>,
     Query(q): Query<DeletedQ>,
 ) -> Result<Response, SrError> {
-    let want = parse_version(&version)?;
+    let want = parse_optional_version(&version)?;
     let s = st.store.store.read();
     if s.versions(&subject, q.deleted).is_none() {
         return Err(SrError::SubjectNotFound(subject));
@@ -244,7 +234,7 @@ pub async fn referencedby(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,
 ) -> Result<Response, SrError> {
-    let want = parse_version(&version)?;
+    let want = parse_optional_version(&version)?;
     let s = st.store.store.read();
     if s.versions(&subject, true).is_none() {
         return Err(SrError::SubjectNotFound(subject));
