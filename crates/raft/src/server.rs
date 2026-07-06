@@ -244,17 +244,7 @@ async fn write_response<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut frame = BytesMut::with_capacity(4 + 1 + body.len());
-    frame.put_i32(correlation_id);
-    frame.put_u8(0); // empty tagged_fields (ResponseHeader v1)
-    frame.put_slice(&body);
-
-    let mut len_prefix = [0u8; 4];
-    len_prefix.copy_from_slice(&i32::try_from(frame.len()).unwrap_or(i32::MAX).to_be_bytes());
-    stream.write_all(&len_prefix).await.map_err(io_err)?;
-    stream.write_all(&frame).await.map_err(io_err)?;
-    stream.flush().await.map_err(io_err)?;
-    Ok(())
+    write_response_frame(stream, correlation_id, body, true).await
 }
 
 /// Write a response without the leading tagged-fields byte. Used only by the
@@ -267,8 +257,23 @@ async fn write_response_no_tagged_fields<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut frame = BytesMut::with_capacity(4 + body.len());
+    write_response_frame(stream, correlation_id, body, false).await
+}
+
+async fn write_response_frame<S>(
+    stream: &mut S,
+    correlation_id: CorrelationId,
+    body: Bytes,
+    include_tagged_fields: bool,
+) -> Result<(), RaftError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let mut frame = BytesMut::with_capacity(4 + usize::from(include_tagged_fields) + body.len());
     frame.put_i32(correlation_id);
+    if include_tagged_fields {
+        frame.put_u8(0); // empty tagged_fields (ResponseHeader v1)
+    }
     frame.put_slice(&body);
 
     let mut len_prefix = [0u8; 4];

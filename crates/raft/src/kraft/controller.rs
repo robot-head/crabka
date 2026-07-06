@@ -258,6 +258,23 @@ fn assigned_record_offset(assign_base: Offset, delta: i64) -> i64 {
     assign_base.0.saturating_add(delta)
 }
 
+fn metadata_record_batch(leader_epoch: Epoch, blobs: &[bytes::Bytes]) -> RecordBatch {
+    let records: Vec<Record> = blobs
+        .iter()
+        .map(|blob| Record {
+            value: Some(blob.clone()),
+            ..Default::default()
+        })
+        .collect();
+
+    RecordBatch {
+        partition_leader_epoch: i32::try_from(leader_epoch).unwrap_or(i32::MAX),
+        last_offset_delta: i32::try_from(blobs.len().saturating_sub(1)).unwrap_or(0),
+        records,
+        ..Default::default()
+    }
+}
+
 fn append_result_is_consistent(
     expected_base: Offset,
     returned_base: Offset,
@@ -1297,19 +1314,7 @@ impl Engine {
         }
 
         let leader_epoch = self.core.quorum_state().leader_epoch;
-        let kafka_records: Vec<Record> = value_blobs
-            .iter()
-            .map(|blob| Record {
-                value: Some(blob.clone()),
-                ..Default::default()
-            })
-            .collect();
-        let mut batch = RecordBatch {
-            partition_leader_epoch: i32::try_from(leader_epoch).unwrap_or(i32::MAX),
-            last_offset_delta: i32::try_from(value_blobs.len().saturating_sub(1)).unwrap_or(0),
-            records: kafka_records,
-            ..Default::default()
-        };
+        let mut batch = metadata_record_batch(leader_epoch, &value_blobs);
         let base = match self.log.append(&mut batch) {
             Ok(off) => off,
             Err(e) => {
@@ -1358,19 +1363,7 @@ impl Engine {
             }
             scratch.apply(r);
         }
-        let kafka_records: Vec<Record> = blobs
-            .iter()
-            .map(|blob| Record {
-                value: Some(blob.clone()),
-                ..Default::default()
-            })
-            .collect();
-        let mut batch = RecordBatch {
-            partition_leader_epoch: i32::try_from(leader_epoch).unwrap_or(i32::MAX),
-            last_offset_delta: i32::try_from(blobs.len().saturating_sub(1)).unwrap_or(0),
-            records: kafka_records,
-            ..Default::default()
-        };
+        let mut batch = metadata_record_batch(leader_epoch, &blobs);
         let expected_base = self.log.log_end_offset();
         let base = match self.log.append(&mut batch) {
             Ok(off) => off,
@@ -2259,7 +2252,7 @@ fn write_checkpoint(
     bytes: &[u8],
 ) -> Result<(), RaftError> {
     std::fs::create_dir_all(dir).map_err(crabka_log::LogError::Io)?;
-    let name = format!("{end_offset:020}-{epoch:010}.checkpoint");
+    let name = checkpoint_name(end_offset, epoch);
     let path = dir.join(name);
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes).map_err(crabka_log::LogError::Io)?;
@@ -2276,9 +2269,19 @@ fn load_latest_checkpoint(dir: &std::path::Path) -> Result<Option<Vec<u8>>, Raft
     let Some((end_offset, epoch)) = latest_checkpoint_id(dir) else {
         return Ok(None);
     };
-    let name = format!("{end_offset:020}-{epoch:010}.checkpoint");
-    let bytes = std::fs::read(dir.join(name)).map_err(crabka_log::LogError::Io)?;
+    let bytes = std::fs::read(dir.join(checkpoint_name(end_offset, epoch)))
+        .map_err(crabka_log::LogError::Io)?;
     Ok(Some(bytes))
+}
+
+fn checkpoint_name(end_offset: i64, epoch: i32) -> String {
+    format!("{end_offset:020}-{epoch:010}.checkpoint")
+}
+
+pub(crate) fn parse_checkpoint_name(name: &str) -> Option<(i64, i32)> {
+    let stem = name.strip_suffix(".checkpoint")?;
+    let (off, ep) = stem.split_once('-')?;
+    Some((off.parse().ok()?, ep.parse().ok()?))
 }
 
 /// Scan `dir` for `<end_offset>-<epoch>.checkpoint` artifacts and return the
@@ -2290,13 +2293,7 @@ fn latest_checkpoint_id(dir: &std::path::Path) -> Option<(i64, i32)> {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(stem) = name.strip_suffix(".checkpoint") else {
-            continue;
-        };
-        let Some((off, ep)) = stem.split_once('-') else {
-            continue;
-        };
-        let (Ok(off), Ok(ep)) = (off.parse::<i64>(), ep.parse::<i32>()) else {
+        let Some((off, ep)) = parse_checkpoint_name(name) else {
             continue;
         };
         if best.is_none_or(|cur| checkpoint_id_is_newer((off, ep), cur)) {
@@ -2323,13 +2320,7 @@ fn retain_latest_checkpoint(dir: &std::path::Path) {
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
-        let Some(stem) = name.strip_suffix(".checkpoint") else {
-            continue;
-        };
-        let Some((off, ep)) = stem.split_once('-') else {
-            continue;
-        };
-        let (Ok(off), Ok(ep)) = (off.parse::<i64>(), ep.parse::<i32>()) else {
+        let Some((off, ep)) = parse_checkpoint_name(name) else {
             continue;
         };
         if (off, ep) != latest {
@@ -2341,8 +2332,7 @@ fn retain_latest_checkpoint(dir: &std::path::Path) {
 /// Read a specific checkpoint `<end_offset>-<epoch>.checkpoint` by id, or `None`
 /// if it is absent (the leader's `FetchSnapshot` serve path).
 fn load_checkpoint_by_id(dir: &std::path::Path, end_offset: i64, epoch: i32) -> Option<Vec<u8>> {
-    let name = format!("{end_offset:020}-{epoch:010}.checkpoint");
-    std::fs::read(dir.join(name)).ok()
+    std::fs::read(dir.join(checkpoint_name(end_offset, epoch))).ok()
 }
 
 #[cfg(test)]
