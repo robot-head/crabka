@@ -142,24 +142,18 @@ pub const INVALID_RESOURCE_TYPE: i16 = INVALID_REQUEST;
 /// `AlterUserScramCredentials` handler when the request principal is not the
 /// configured super-user.
 pub const CLUSTER_AUTHORIZATION_FAILED: i16 = 31;
-/// `RESOURCE_NOT_FOUND` (66) — per-user error when a deletion targets a
-/// credential that does not exist in the metadata image.
-pub const RESOURCE_NOT_FOUND: i16 = 66;
-/// `RESOURCE_NOT_FOUND_USER` (83) — per-user error returned by
-/// `DescribeUserScramCredentials` when the requested user has no SCRAM
-/// credentials in the metadata image. Apache Kafka uses error code 83 for
-/// this case (distinct from the deletion-target-missing code 66).
-pub const RESOURCE_NOT_FOUND_USER: i16 = 83;
-/// `UNACCEPTABLE_CREDENTIAL` (78) — per-user error when an upsertion carries
-/// invalid SCRAM parameters (iterations < 4096, empty salt, `salted_password`
-/// of the wrong length, or an unknown mechanism). Canonical Apache Kafka
-/// assigns code 78 to this error; note that code 74 is already taken by
-/// `FENCED_LEADER_EPOCH` — `78` is correct.
-pub const UNACCEPTABLE_CREDENTIAL: i16 = 78;
-/// `DUPLICATE_RESOURCE` (84) — per-user error when the same
-/// `(user, mechanism)` appears twice in one `AlterUserScramCredentials`
-/// request (either two upsertions, two deletions, or one of each).
-pub const DUPLICATE_RESOURCE: i16 = 84;
+/// `RESOURCE_NOT_FOUND` (91) — resource named by the request does not exist.
+/// KIP-554 uses this for missing SCRAM credentials in both Alter deletion and
+/// Describe per-user result rows.
+pub const RESOURCE_NOT_FOUND: i16 = 91;
+/// `UNACCEPTABLE_CREDENTIAL` (93) — per-user error when an upsertion carries
+/// invalid SCRAM parameters (iterations < 4096, too many iterations, or an
+/// empty username). Canonical Apache Kafka assigns code 93 to this error.
+pub const UNACCEPTABLE_CREDENTIAL: i16 = 93;
+/// `DUPLICATE_RESOURCE` (92) — per-user error when the same user appears
+/// twice in one `AlterUserScramCredentials` or
+/// `DescribeUserScramCredentials` request.
+pub const DUPLICATE_RESOURCE: i16 = 92;
 
 /// `INVALID_UPDATE_VERSION` (95, KIP-584) — a feature-level update in
 /// `UpdateFeatures` is outside the broker's supported range, or attempts an
@@ -202,15 +196,15 @@ pub const FENCED_LEADER_EPOCH: i16 = 74;
 /// view. Metadata propagation lag — caller retries after a brief wait.
 pub const UNKNOWN_LEADER_EPOCH: i16 = 75;
 
-/// `INELIGIBLE_REPLICA` (92, KIP-903) — an `AlterPartition` proposed a new
+/// `INELIGIBLE_REPLICA` (107, KIP-903) — an `AlterPartition` proposed a new
 /// ISR containing at least one ineligible replica: a broker not currently
 /// registered, or one whose stamped broker epoch is stale relative to the
 /// controller's registration epoch. The partition's ISR is left unchanged.
-pub const INELIGIBLE_REPLICA: i16 = 92;
+pub const INELIGIBLE_REPLICA: i16 = 107;
 
 // Leader election codes.
 pub const PREFERRED_LEADER_NOT_AVAILABLE: i16 = 80;
-pub const ELIGIBLE_LEADERS_NOT_AVAILABLE: i16 = 81;
+pub const ELIGIBLE_LEADERS_NOT_AVAILABLE: i16 = 83;
 pub const ELECTION_NOT_NEEDED: i16 = 84;
 
 // Partition reassignment codes (KIP-455).
@@ -229,9 +223,7 @@ pub const FETCH_SESSION_ID_NOT_FOUND: i16 = 70;
 pub const INVALID_FETCH_SESSION_EPOCH: i16 = 71;
 
 // KIP-48 delegation-token codes. Numbers from
-// org.apache.kafka.common.protocol.Errors. Note the existing
-// ELIGIBLE_LEADERS_NOT_AVAILABLE = 81 is incorrect (Kafka says 83);
-// flagged for a separate fix.
+// org.apache.kafka.common.protocol.Errors.
 pub const DELEGATION_TOKEN_AUTH_DISABLED: i16 = 61;
 pub const DELEGATION_TOKEN_NOT_FOUND: i16 = 62;
 pub const DELEGATION_TOKEN_OWNER_MISMATCH: i16 = 63;
@@ -416,6 +408,21 @@ mod tests {
     }
 
     #[test]
+    fn scram_error_code_numbers_match_kafka() {
+        let cases = [
+            ("UNSUPPORTED_SASL_MECHANISM", UNSUPPORTED_SASL_MECHANISM, 33),
+            ("RESOURCE_NOT_FOUND", RESOURCE_NOT_FOUND, 91),
+            ("DUPLICATE_RESOURCE", DUPLICATE_RESOURCE, 92),
+            ("UNACCEPTABLE_CREDENTIAL", UNACCEPTABLE_CREDENTIAL, 93),
+            ("ELECTION_NOT_NEEDED", ELECTION_NOT_NEEDED, 84),
+            ("DELEGATION_TOKEN_EXPIRED", DELEGATION_TOKEN_EXPIRED, 66),
+        ];
+        for (name, code, want) in cases {
+            assert!(code == want, "{name}");
+        }
+    }
+
+    #[test]
     fn kip516_error_code_numbers_match_kafka() {
         let cases = [
             ("UNKNOWN_TOPIC_ID", super::UNKNOWN_TOPIC_ID, 100),
@@ -429,5 +436,11 @@ mod tests {
         for (name, code, want) in cases {
             assert!(code == want, "{name}");
         }
+    }
+
+    #[test]
+    fn ineligible_replica_code_does_not_collide_with_duplicate_resource() {
+        assert!(DUPLICATE_RESOURCE == 92);
+        assert!(INELIGIBLE_REPLICA == 107);
     }
 }

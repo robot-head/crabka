@@ -39,7 +39,7 @@ use crate::{
     context::Context,
     controller::common::{
         self, APP_LABEL, BROKER_PORT, DEFAULT_BROKER_IMAGE, ReconcileError, apply_object,
-        common_labels, condition, derive_status, owner_ref,
+        common_labels, condition, derive_status, owner_ref, parent_version_gate,
     },
     crd::{
         JbodVolume, Kafka, KafkaCondition, KafkaNodePool, KafkaNodePoolStatus, NodeRole, Storage,
@@ -1416,21 +1416,12 @@ enum VersionGate {
 /// the Kafka controller holds the previous finalized version and simply
 /// declines to advance it (see `kafka.rs` status patch).
 fn version_gate(parent: &Kafka) -> VersionGate {
-    let status = parent.status.as_ref();
-    let version_cond =
-        status.and_then(|s| s.conditions.iter().find(|c| c.type_ == "KafkaVersionValid"));
-    let finalized = status.and_then(|s| s.metadata_version.as_deref());
-
-    let cleared = finalized.is_some() || version_cond.is_some_and(|c| c.status == "True");
-    if cleared {
-        return VersionGate::Cleared;
-    }
-
     // Not cleared. Distinguish "the parent declared the version invalid"
     // from "the parent hasn't published a verdict yet" so admins can tell
     // a misconfiguration from a transient ordering gap.
-    let cond = match version_cond {
-        Some(c) => condition(
+    let cond = match parent_version_gate(parent) {
+        common::ParentVersionGate::Cleared => return VersionGate::Cleared,
+        common::ParentVersionGate::Invalid(c) => condition(
             "Ready",
             "False",
             "KafkaVersionInvalid",
@@ -1442,7 +1433,7 @@ fn version_gate(parent: &Kafka) -> VersionGate {
                 c.message
             ),
         ),
-        None => condition(
+        common::ParentVersionGate::Waiting => condition(
             "Ready",
             "False",
             "WaitingForVersionValidation",
@@ -1489,16 +1480,12 @@ pub async fn reconcile(
     pool: Arc<KafkaNodePool>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
-    let started = std::time::Instant::now();
-    let result = reconcile_inner(pool, ctx.clone()).await;
-    let outcome = if result.is_ok() {
-        crate::telemetry::ReconcileResult::Ok
-    } else {
-        crate::telemetry::ReconcileResult::Error
-    };
-    ctx.metrics
-        .record_reconcile("KafkaNodePool", outcome, started.elapsed().as_secs_f64());
-    result
+    common::record_reconcile(
+        &ctx,
+        "KafkaNodePool",
+        Box::pin(reconcile_inner(pool, ctx.clone())),
+    )
+    .await
 }
 
 async fn reconcile_inner(

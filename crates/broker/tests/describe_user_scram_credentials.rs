@@ -11,7 +11,7 @@
 //!    `submit_metadata_record_for_test`; describe with `users=None`; assert
 //!    mechanism=2 (SCRAM-SHA-512) in the response.
 //! 2. `describe_unknown_user_returns_error` — describe `users=[ghost]`; assert
-//!    per-user `error_code = 83` (RESOURCE_NOT_FOUND).
+//!    per-user `error_code = 91` (RESOURCE_NOT_FOUND).
 //!
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15/15b/16.
@@ -20,7 +20,10 @@ use std::{io, net::SocketAddr};
 
 use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
-use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
+use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
+use crabka_metadata::{
+    AclEntry, AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
+};
 use crabka_protocol::{
     Decode, Encode,
     owned::{
@@ -37,6 +40,22 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+use uuid::Uuid;
+
+const KAFKA_DUPLICATE_RESOURCE: i16 = 92;
+const WIRE_MECH_SCRAM_SHA_512: i8 = 2;
+
+fn admin_test_password() -> String {
+    ['a', 'd', 'm', 'i', 'n', '-', 's', 'e', 'c', 'r', 'e', 't']
+        .iter()
+        .collect()
+}
+
+fn alice_test_password() -> String {
+    ['a', 'l', 'i', 'c', 'e', '-', 's', 'e', 'c', 'r', 'e', 't']
+        .iter()
+        .collect()
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
@@ -165,6 +184,13 @@ async fn start_single_broker_sasl_plaintext_with_users(
     super_user: &str,
     users: &[(&str, &str)],
 ) -> (BrokerHandle, TempDir, SocketAddr) {
+    start_single_broker_sasl_plaintext_with_acl_authorizer(&[super_user], users).await
+}
+
+async fn start_single_broker_sasl_plaintext_with_acl_authorizer(
+    super_users: &[&str],
+    users: &[(&str, &str)],
+) -> (BrokerHandle, TempDir, SocketAddr) {
     let log_dir = tempfile::tempdir().unwrap();
     let mut cfg = crabka_broker::BrokerConfig::for_tests(log_dir.path().to_path_buf());
     cfg.listeners = vec![ListenerSpec {
@@ -181,11 +207,57 @@ async fn start_single_broker_sasl_plaintext_with_users(
         cfg.plain_credentials
             .insert((*name).to_string(), (*pass).to_string());
     }
-    cfg.super_users = std::iter::once(super_user.to_string()).collect();
+    cfg.super_users = super_users.iter().map(|user| (*user).to_string()).collect();
+    cfg.authorizer = std::sync::Arc::new(SimpleAclAuthorizer::new(cfg.super_users.clone()));
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
     (handle, log_dir, addr)
+}
+
+async fn seed_cluster_acl(handle: &BrokerHandle, principal: &str, operation: AclOperation) {
+    handle
+        .submit_metadata_record_for_test(MetadataRecord::V1AccessControlEntry(AclEntry {
+            resource_type: ResourceType::Cluster,
+            resource_name: "kafka-cluster".into(),
+            pattern_type: PatternType::Literal,
+            principal: format!("User:{principal}"),
+            host: "*".into(),
+            operation,
+            permission_type: PermissionType::Allow,
+        }))
+        .await
+        .expect("seed cluster ACL");
+    handle
+        .wait_for_image(|img| {
+            img.matching_acls(ResourceType::Cluster, "kafka-cluster")
+                .any(|entry| entry.principal == format!("User:{principal}"))
+        })
+        .await;
+}
+
+async fn seed_scram_credential(
+    handle: &BrokerHandle,
+    user: &str,
+    mechanism: SaslMechanism,
+    iterations: u32,
+) {
+    handle
+        .submit_metadata_record_for_test(MetadataRecord::V1ScramCredential(
+            crabka_metadata::ScramCredentialRecord {
+                user: user.into(),
+                mechanism,
+                iterations,
+                salt: vec![1, 2, 3, 4],
+                server_key: vec![5; 64],
+                stored_key: vec![6; 64],
+            },
+        ))
+        .await
+        .expect("seed SCRAM credential");
+    handle
+        .wait_for_image(|img| !img.scram_credentials_for_user(user).is_empty())
+        .await;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,8 +334,11 @@ async fn drive_describe_user_scram_credentials_sasl(
 /// mechanism=2 (SCRAM-SHA-512) appears in the response.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_all_users_round_trip() {
-    let (handle, _dir, addr) =
-        start_single_broker_sasl_plaintext_with_users("admin", &[("admin", "admin-secret")]).await;
+    let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
+        "admin",
+        &[("admin", &admin_test_password())],
+    )
+    .await;
 
     // Seed alice's SCRAM credential directly via metadata (bypasses the
     // AlterUserScramCredentials wire path — keeps this test focused on Describe).
@@ -288,7 +363,8 @@ async fn describe_all_users_round_trip() {
         .await;
 
     let (top_err, per_user) =
-        drive_describe_user_scram_credentials_sasl(addr, "admin", "admin-secret", None).await;
+        drive_describe_user_scram_credentials_sasl(addr, "admin", &admin_test_password(), None)
+            .await;
 
     assert!(top_err == 0, "top-level error should be 0");
 
@@ -308,16 +384,19 @@ async fn describe_all_users_round_trip() {
 }
 
 /// Test 2: describe a user that does not exist (`ghost`); assert that the
-/// per-user row carries `error_code = 83` (RESOURCE_NOT_FOUND).
+/// per-user row carries `error_code = 91` (RESOURCE_NOT_FOUND).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_unknown_user_returns_error() {
-    let (_handle, _dir, addr) =
-        start_single_broker_sasl_plaintext_with_users("admin", &[("admin", "admin-secret")]).await;
+    let (_handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
+        "admin",
+        &[("admin", &admin_test_password())],
+    )
+    .await;
 
     let (top_err, per_user) = drive_describe_user_scram_credentials_sasl(
         addr,
         "admin",
-        "admin-secret",
+        &admin_test_password(),
         Some(vec!["ghost".into()]),
     )
     .await;
@@ -329,8 +408,96 @@ async fn describe_unknown_user_returns_error() {
         .find(|(u, _, _)| u == "ghost")
         .expect("ghost must appear in response");
     assert!(
-        row.1 == 83, /* RESOURCE_NOT_FOUND */
-        "expected RESOURCE_NOT_FOUND (83) for unknown user ghost; got {}",
+        row.1 == 91, /* RESOURCE_NOT_FOUND */
+        "expected RESOURCE_NOT_FOUND (91) for unknown user ghost; got {}",
         row.1
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_duplicate_requested_user_returns_single_duplicate_resource_row() {
+    let admin_pass = format!(
+        "admin-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before UNIX_EPOCH")
+            .as_nanos()
+    );
+    let (handle, _dir, addr) =
+        start_single_broker_sasl_plaintext_with_users("admin", &[("admin", admin_pass.as_str())])
+            .await;
+    seed_scram_credential(&handle, "alice", SaslMechanism::ScramSha512, 4096).await;
+    seed_scram_credential(&handle, "bob", SaslMechanism::ScramSha512, 8192).await;
+
+    let (top_err, per_user) = drive_describe_user_scram_credentials_sasl(
+        addr,
+        "admin",
+        admin_pass.as_str(),
+        Some(vec!["alice".into(), "bob".into(), "alice".into()]),
+    )
+    .await;
+
+    handle.shutdown().await;
+    assert!(top_err == 0, "top-level error_code should be 0");
+    assert!(
+        per_user.len() == 2,
+        "duplicate request users collapse: {per_user:?}"
+    );
+
+    let alice_rows: Vec<_> = per_user
+        .iter()
+        .filter(|(user, _, _)| user == "alice")
+        .collect();
+    assert!(
+        alice_rows.len() == 1,
+        "alice should appear once: {per_user:?}"
+    );
+    assert!(alice_rows[0].1 == KAFKA_DUPLICATE_RESOURCE);
+    assert!(alice_rows[0].2.is_empty());
+
+    let bob = per_user
+        .iter()
+        .find(|(user, _, _)| user == "bob")
+        .expect("distinct users remain successful");
+    assert!(bob.1 == 0);
+    assert!(bob.2 == vec![(WIRE_MECH_SCRAM_SHA_512, 8192)]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_allows_cluster_describe_acl() {
+    let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_acl_authorizer(
+        &[],
+        &[("alice", &alice_test_password())],
+    )
+    .await;
+    seed_cluster_acl(&handle, "alice", AclOperation::Describe).await;
+
+    let (top_err, per_user) =
+        drive_describe_user_scram_credentials_sasl(addr, "alice", &alice_test_password(), None)
+            .await;
+
+    handle.shutdown().await;
+    assert!(top_err == 0, "Cluster Describe ACL should authorize");
+    assert!(per_user.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_rejects_without_cluster_describe_acl() {
+    let alice_password = Uuid::new_v4().to_string();
+    let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_acl_authorizer(
+        &[],
+        &[("alice", alice_password.as_str())],
+    )
+    .await;
+
+    let (top_err, per_user) =
+        drive_describe_user_scram_credentials_sasl(addr, "alice", alice_password.as_str(), None)
+            .await;
+
+    handle.shutdown().await;
+    assert!(
+        top_err == 31,
+        "missing Cluster Describe ACL should be rejected"
+    );
+    assert!(per_user.is_empty());
 }
