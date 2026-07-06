@@ -95,9 +95,12 @@ mod metadata_manager;
 mod s3;
 mod storage_manager;
 
+pub use crabka_object_store::{
+    DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, GcsConfig, ObjectStoreConfig,
+    S3Config,
+};
 pub use dump::{PartitionDump, RlmmCacheDump};
 pub use error::RemoteStorageError;
-pub use gcs::GcsConfig;
 pub use inmemory::InmemoryRemoteLogMetadataManager;
 pub use local::LocalTieredStorage;
 pub use metadata::{
@@ -106,7 +109,5 @@ pub use metadata::{
     TopicIdPartition,
 };
 pub use metadata_manager::RemoteLogMetadataManager;
-pub use s3::{
-    DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, S3Config, S3RemoteStorage,
-};
+pub use s3::S3RemoteStorage;
 pub use storage_manager::{IndexType, LogSegmentData, RemoteStorageManager};
