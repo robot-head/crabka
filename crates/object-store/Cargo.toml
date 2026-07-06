@@ -25,6 +25,7 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util"] }
 
 [dev-dependencies]
 assert2 = { workspace = true }
