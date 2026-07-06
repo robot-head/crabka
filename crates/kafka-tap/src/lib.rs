@@ -81,22 +81,29 @@ fn pump(
         }
         let mut body = vec![0u8; n as usize];
         src.read_exact(&mut body)?;
-        dst.write_all(&len_buf)?;
-        dst.write_all(&body)?;
-        dst.flush()?;
-        if is_request {
-            if let Some(p) = parse_request_prefix(&body) {
+
+        let request_prefix = if is_request {
+            parse_request_prefix(&body).inspect(|p| {
                 pending
                     .lock()
                     .unwrap()
                     .record(p.correlation_id, p.api_key, p.api_version);
-                recorder(CapturedFrame {
-                    api_key: p.api_key,
-                    version: p.api_version,
-                    is_request: true,
-                    body,
-                });
-            }
+            })
+        } else {
+            None
+        };
+
+        dst.write_all(&len_buf)?;
+        dst.write_all(&body)?;
+        dst.flush()?;
+
+        if let Some(p) = request_prefix {
+            recorder(CapturedFrame {
+                api_key: p.api_key,
+                version: p.api_version,
+                is_request: true,
+                body,
+            });
         } else if let Some(corr) = read_correlation_id(&body)
             && let Some((api_key, version)) = pending.lock().unwrap().take(corr)
         {
