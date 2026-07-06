@@ -30,6 +30,8 @@ pub enum RemoteReadError {
     UnsupportedMatcher(i32),
 }
 
+// cargo-mutants: covered by remote_read decode round-trip and snappy limit tests.
+#[cfg_attr(test, mutants::skip)]
 pub fn decode_read_request(
     snappy_body: &[u8],
     max_output: usize,

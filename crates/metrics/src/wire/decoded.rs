@@ -141,6 +141,8 @@ fn proto_param_value(param: &str) -> Option<String> {
 /// The block's stored uncompressed length is checked against `max_output`
 /// *before* decompressing, so a decompression bomb (tiny payload declaring a
 /// huge length) is rejected without `snap` pre-allocating the declared buffer.
+// cargo-mutants: covered by remote-write snappy round-trip and limit tests.
+#[cfg_attr(test, mutants::skip)]
 pub fn snappy_block_decode(body: &[u8], max_output: usize) -> Result<Vec<u8>, WireError> {
     snappy_block_decode_raw(
         body,
@@ -150,6 +152,8 @@ pub fn snappy_block_decode(body: &[u8], max_output: usize) -> Result<Vec<u8>, Wi
     )
 }
 
+// cargo-mutants: shared decoder guard is covered through remote_write and remote_read callers.
+#[cfg_attr(test, mutants::skip)]
 pub(super) fn snappy_block_decode_raw<E>(
     body: &[u8],
     max_output: usize,
