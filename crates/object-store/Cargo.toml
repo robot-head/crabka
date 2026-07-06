@@ -22,8 +22,12 @@ workspace = true
 [dependencies]
 object_store = { workspace = true }
 thiserror = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+mockall = { workspace = true }
