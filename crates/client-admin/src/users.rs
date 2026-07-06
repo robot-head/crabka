@@ -525,63 +525,64 @@ fn acl_filter_wire_fields(f: &AclEntryFilter) -> AclFilterWireFields {
 /// "match anything" placeholder on filter requests.
 const WIRE_ANY: i8 = 1;
 
-fn resource_type_to_wire(rt: ResourceType) -> i8 {
-    match rt {
+macro_rules! acl_wire_enum {
+    ($to_wire:ident, $from_wire:ident, $ty:ty, $unknown:literal, {$($variant:path => $wire:literal),+ $(,)?}) => {
+        fn $to_wire(value: $ty) -> i8 {
+            match value {
+                $($variant => $wire,)+
+            }
+        }
+
+        fn $from_wire(value: i8) -> Result<$ty, AdminError> {
+            match value {
+                $($wire => Ok($variant),)+
+                _ => Err(AdminError::Protocol(format!(concat!($unknown, ": {}"), value))),
+            }
+        }
+    };
+}
+
+acl_wire_enum!(
+    resource_type_to_wire,
+    wire_to_resource_type,
+    ResourceType,
+    "unknown ACL resource_type discriminant",
+    {
         ResourceType::Topic => 2,
         ResourceType::Group => 3,
         ResourceType::Cluster => 4,
         ResourceType::TransactionalId => 5,
     }
-}
+);
 
-fn wire_to_resource_type(b: i8) -> Result<ResourceType, AdminError> {
-    match b {
-        2 => Ok(ResourceType::Topic),
-        3 => Ok(ResourceType::Group),
-        4 => Ok(ResourceType::Cluster),
-        5 => Ok(ResourceType::TransactionalId),
-        _ => Err(AdminError::Protocol(format!(
-            "unknown ACL resource_type discriminant: {b}",
-        ))),
-    }
-}
-
-fn pattern_type_to_wire(pt: PatternType) -> i8 {
-    match pt {
+acl_wire_enum!(
+    pattern_type_to_wire,
+    wire_to_pattern_type,
+    PatternType,
+    "unknown ACL pattern_type discriminant",
+    {
         PatternType::Literal => 3,
         PatternType::Prefixed => 4,
     }
-}
+);
 
-fn wire_to_pattern_type(b: i8) -> Result<PatternType, AdminError> {
-    match b {
-        3 => Ok(PatternType::Literal),
-        4 => Ok(PatternType::Prefixed),
-        _ => Err(AdminError::Protocol(format!(
-            "unknown ACL pattern_type discriminant: {b}",
-        ))),
-    }
-}
-
-fn permission_to_wire(pt: PermissionType) -> i8 {
-    match pt {
+acl_wire_enum!(
+    permission_to_wire,
+    wire_to_permission,
+    PermissionType,
+    "unknown ACL permission discriminant",
+    {
         PermissionType::Deny => 2,
         PermissionType::Allow => 3,
     }
-}
+);
 
-fn wire_to_permission(b: i8) -> Result<PermissionType, AdminError> {
-    match b {
-        2 => Ok(PermissionType::Deny),
-        3 => Ok(PermissionType::Allow),
-        _ => Err(AdminError::Protocol(format!(
-            "unknown ACL permission discriminant: {b}",
-        ))),
-    }
-}
-
-fn operation_to_wire(op: AclOperation) -> i8 {
-    match op {
+acl_wire_enum!(
+    operation_to_wire,
+    wire_to_operation,
+    AclOperation,
+    "unknown ACL operation discriminant",
+    {
         AclOperation::All => 2,
         AclOperation::Read => 3,
         AclOperation::Write => 4,
@@ -595,27 +596,7 @@ fn operation_to_wire(op: AclOperation) -> i8 {
         AclOperation::IdempotentWrite => 12,
         AclOperation::TwoPhaseCommit => 15,
     }
-}
-
-fn wire_to_operation(b: i8) -> Result<AclOperation, AdminError> {
-    match b {
-        2 => Ok(AclOperation::All),
-        3 => Ok(AclOperation::Read),
-        4 => Ok(AclOperation::Write),
-        5 => Ok(AclOperation::Create),
-        6 => Ok(AclOperation::Delete),
-        7 => Ok(AclOperation::Alter),
-        8 => Ok(AclOperation::Describe),
-        9 => Ok(AclOperation::ClusterAction),
-        10 => Ok(AclOperation::DescribeConfigs),
-        11 => Ok(AclOperation::AlterConfigs),
-        12 => Ok(AclOperation::IdempotentWrite),
-        15 => Ok(AclOperation::TwoPhaseCommit),
-        _ => Err(AdminError::Protocol(format!(
-            "unknown ACL operation discriminant: {b}",
-        ))),
-    }
-}
+);
 
 #[cfg(test)]
 mod tests {

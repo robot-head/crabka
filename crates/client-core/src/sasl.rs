@@ -480,6 +480,22 @@ mod tests {
         req
     }
 
+    macro_rules! decode_sasl_authenticate_frame {
+        ($req:expr, $corr_id:expr) => {{
+            assert_request_header(
+                &$req,
+                ApiKey(API_KEY_SASL_AUTHENTICATE),
+                ApiVersion(2),
+                $corr_id,
+                true,
+            );
+            let mut body = request_body(&$req, true);
+            let decoded = SaslAuthenticateRequest::decode(&mut body, 2).unwrap();
+            assert!(body.is_empty());
+            decoded
+        }};
+    }
+
     #[tokio::test]
     async fn outbound_plain_completes() {
         let (mut client, mut server) = tokio::io::duplex(8192);
@@ -514,17 +530,8 @@ mod tests {
             .encode(&mut au, 2)
             .unwrap();
             let au_req = reply_frame(&mut server, &au, true).await;
-            assert_request_header(
-                &au_req,
-                ApiKey(API_KEY_SASL_AUTHENTICATE),
-                ApiVersion(2),
-                2,
-                true,
-            );
-            let mut au_body = request_body(&au_req, true);
-            let au_decoded = SaslAuthenticateRequest::decode(&mut au_body, 2).unwrap();
+            let au_decoded = decode_sasl_authenticate_frame!(au_req, 2);
             assert!(au_decoded.auth_bytes.as_ref() == b"\0u\0p");
-            assert!(au_body.is_empty());
         });
         let creds = SaslCredentials::Plain {
             username: "u".into(),
@@ -554,17 +561,8 @@ mod tests {
                 .encode(&mut au, 2)
                 .unwrap();
                 let req = reply_frame(&mut server, &au, true).await;
-                assert_request_header(
-                    &req,
-                    ApiKey(API_KEY_SASL_AUTHENTICATE),
-                    ApiVersion(2),
-                    expected_corr,
-                    true,
-                );
-                let mut body = request_body(&req, true);
-                let decoded = SaslAuthenticateRequest::decode(&mut body, 2).unwrap();
+                let decoded = decode_sasl_authenticate_frame!(req, expected_corr);
                 assert!(decoded.auth_bytes.as_ref() == expected_payload);
-                assert!(body.is_empty());
             }
         });
 
@@ -615,13 +613,7 @@ mod tests {
             .encode(&mut au, 2)
             .unwrap();
             let au_req = reply_frame(&mut server, &au, true).await;
-            assert_request_header(
-                &au_req,
-                ApiKey(API_KEY_SASL_AUTHENTICATE),
-                ApiVersion(2),
-                2,
-                true,
-            );
+            let _ = decode_sasl_authenticate_frame!(au_req, 2);
         });
 
         let creds = SaslCredentials::Scram {
@@ -665,15 +657,7 @@ mod tests {
             let first_req_len = server.read_u32().await.unwrap();
             let mut first_req = vec![0u8; first_req_len as usize];
             server.read_exact(&mut first_req).await.unwrap();
-            assert_request_header(
-                &first_req,
-                ApiKey(API_KEY_SASL_AUTHENTICATE),
-                ApiVersion(2),
-                2,
-                true,
-            );
-            let mut first_body = request_body(&first_req, true);
-            let first_auth = SaslAuthenticateRequest::decode(&mut first_body, 2).unwrap();
+            let first_auth = decode_sasl_authenticate_frame!(first_req, 2);
             let server_first = match scram_server.step(&first_auth.auth_bytes) {
                 StepResult::Continue(bytes, _next) => bytes,
                 other => panic!("server first SCRAM step must continue, got {other:?}"),
@@ -698,13 +682,7 @@ mod tests {
             .encode(&mut second_resp, 2)
             .unwrap();
             let second_req = reply_frame(&mut server, &second_resp, true).await;
-            assert_request_header(
-                &second_req,
-                ApiKey(API_KEY_SASL_AUTHENTICATE),
-                ApiVersion(2),
-                3,
-                true,
-            );
+            let _ = decode_sasl_authenticate_frame!(second_req, 3);
         });
 
         let creds = SaslCredentials::Scram {
