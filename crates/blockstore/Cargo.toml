@@ -22,6 +22,7 @@ workspace = true
 arrow = { workspace = true }
 parquet = { workspace = true }
 datafusion = { workspace = true }
+crabka-object-store = { path = "../object-store" }
 object_store = { workspace = true }
 url = { workspace = true }
 async-trait = { workspace = true }
