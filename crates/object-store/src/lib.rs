@@ -10,6 +10,7 @@
 mod build;
 mod config;
 mod error;
+mod ops;
 
 pub use build::build_object_store;
 pub use config::{
@@ -17,3 +18,4 @@ pub use config::{
     S3Config,
 };
 pub use error::ObjectStoreError;
+pub use ops::{ObjectOps, ObjectStoreClient};
