@@ -554,7 +554,7 @@ mod tests {
         p
     }
 
-    /// Files at or above `multipart_threshold` flow through the ObjectOps
+    /// Files at or above `multipart_threshold` flow through the `ObjectOps`
     /// multipart path. We pick a chunk size that yields multiple
     /// non-trailing parts so the inner loop's tail-flush + finish path is
     /// exercised. The `InMemory` backend implements `put_multipart` /
