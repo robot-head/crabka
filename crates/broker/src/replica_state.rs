@@ -128,6 +128,16 @@ impl ReplicaState {
         self.hw
     }
 
+    /// Recompute the high watermark after the WAL has made records durable up
+    /// to `durable_leo`. Identical HW arithmetic to
+    /// [`Self::recompute_hw_for_leader_append`], but named separately because
+    /// the diskless path advances the HW only AFTER an `fsync` -- durability,
+    /// not mere append, is what the `acks=all` gate then observes.
+    pub(crate) fn recompute_hw_for_wal_durable(&mut self, durable_leo: Offset) -> Offset {
+        self.hw = self.compute_hw(durable_leo);
+        self.hw
+    }
+
     // `< min_leo` vs `<= min_leo` is equivalent: the only effect is `min_leo =
     // stats.leo`, a no-op when the values are already equal, so both operators
     // compute the same minimum. No test can distinguish them.
@@ -332,6 +342,13 @@ mod tests {
         s.install_isr(&[NodeId(1)], &[NodeId(1)], NodeId(1), now());
         let hw = s.recompute_hw_for_leader_append(o(42));
         assert!(hw == o(42));
+    }
+
+    #[test]
+    fn wal_durable_advances_hw_to_durable_offset_for_singleton_isr() {
+        let mut s = fresh();
+        let hw = s.recompute_hw_for_wal_durable(o(5));
+        assert!(hw == o(5));
     }
 
     #[test]
