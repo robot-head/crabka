@@ -1,6 +1,6 @@
 //! Slice-1 WAL medium: a single-node, `fsync`-durable WAL that reuses the
 //! partition's existing local `Log`. Offsets are assigned locally (Slice 2
-//! moves them to KRaft); durability is a local `fsync` (Slice 6 upgrades to a
+//! moves them to `KRaft`); durability is a local `fsync` (Slice 6 upgrades to a
 //! cross-AZ quorum). Survives crash-restart, NOT node/disk loss.
 
 use std::sync::{Arc, Mutex};
