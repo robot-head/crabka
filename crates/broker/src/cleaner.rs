@@ -174,7 +174,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
-            None,
+            false,
         );
         part.current_leader.store(leader.0, Ordering::Relaxed);
         part

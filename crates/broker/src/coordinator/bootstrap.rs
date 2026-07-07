@@ -261,7 +261,7 @@ pub async fn bootstrap(
         log,
         log_dir_status.clone(),
         producer_state.clone(),
-        None,
+        false,
     );
     partitions.insert(
         OFFSETS_TOPIC.into(),

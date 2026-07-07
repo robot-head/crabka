@@ -204,6 +204,7 @@ pub(crate) async fn handle(
         };
 
         let existing = topic_rec.partitions;
+        let diskless = crate::broker::diskless_topic_config(image.topic_config(&t.name));
         if t.count <= existing {
             out.error_code = codes::INVALID_PARTITIONS;
             out.error_message = Some(format!(
@@ -259,6 +260,7 @@ pub(crate) async fn handle(
                         log_dir_status: &log_dir_status,
                         producer_state: &producer_state,
                         node_id,
+                        diskless,
                     },
                     &t.name,
                     &new_partition_indices,
@@ -326,6 +328,7 @@ struct MaterializeContext<'a> {
     log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
     producer_state: &'a std::sync::Arc<crate::producer_state::ProducerState>,
     node_id: NodeId,
+    diskless: bool,
 }
 
 async fn materialize_new_partitions(
@@ -346,6 +349,7 @@ async fn materialize_new_partitions(
             context.log_config,
             context.log_dir_status,
             context.producer_state,
+            context.diskless,
         ) {
             tracing::error!(topic, partition = *index, error = %error,
                 "CreatePartitions: materialize after quorum commit failed");

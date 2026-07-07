@@ -80,6 +80,7 @@ pub(crate) fn materialize_partition(
     log_config: &LogConfig,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
     producer_state: &Arc<crate::producer_state::ProducerState>,
+    diskless: bool,
 ) -> Result<(), String> {
     // `materialize_if_vacant` runs `build` under the per-key write lock —
     // only one thread can be inside it for a given key at a time,
@@ -102,7 +103,7 @@ pub(crate) fn materialize_partition(
             log,
             log_dir_status.clone(),
             producer_state.clone(),
-            None,
+            diskless,
         ))
     })
 }
@@ -471,7 +472,7 @@ impl ReplicatorSupervisor {
         image: &MetadataImage,
     ) {
         for key in local_set {
-            if let Err(e) = self.materialize_local_partition(&key.0, key.1) {
+            if let Err(e) = self.materialize_local_partition(image, &key.0, key.1) {
                 warn!(
                     topic = %key.0, partition = key.1, error = %e,
                     "failed to materialize local partition"
@@ -545,7 +546,12 @@ impl ReplicatorSupervisor {
     /// Open (or recover) the on-disk `Partition` for `(topic, partition)`
     /// and insert it into the broker's shared `partitions` map.
     /// Idempotent: a no-op if the partition is already present.
-    fn materialize_local_partition(&self, topic: &str, partition: i32) -> Result<(), String> {
+    fn materialize_local_partition(
+        &self,
+        image: &MetadataImage,
+        topic: &str,
+        partition: i32,
+    ) -> Result<(), String> {
         materialize_partition(
             &self.partitions,
             topic,
@@ -554,6 +560,7 @@ impl ReplicatorSupervisor {
             &self.log_config,
             &self.log_dir_status,
             &self.producer_state,
+            crate::broker::diskless_topic_config(image.topic_config(topic)),
         )
     }
 
@@ -923,6 +930,7 @@ mod tests {
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
             &Arc::new(crate::producer_state::ProducerState::new()),
+            false,
         )
         .expect("materialize");
         let part = partitions.get("t", PartitionIndex(0)).expect("part");
@@ -1135,7 +1143,9 @@ mod tests {
             partition_record("t", 0, NodeId(2), vec![NodeId(2)], 0),
         ]);
         let (supervisor, partitions, reporter, _dir) = supervisor_fixture(img.clone());
-        supervisor.materialize_local_partition("t", 0).unwrap();
+        supervisor
+            .materialize_local_partition(&img, "t", 0)
+            .unwrap();
         let mut local_set = HashSet::new();
         local_set.insert(("t".to_string(), 0));
 
@@ -1161,9 +1171,11 @@ mod tests {
     #[tokio::test]
     async fn materialize_local_partition_inserts_partition() {
         let img = MetadataImage::new(Uuid::nil());
-        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img);
+        let (supervisor, partitions, _reporter, _dir) = supervisor_fixture(img.clone());
 
-        supervisor.materialize_local_partition("t", 0).unwrap();
+        supervisor
+            .materialize_local_partition(&img, "t", 0)
+            .unwrap();
 
         assert!(partitions.contains("t", PartitionIndex(0)));
     }
@@ -1231,6 +1243,7 @@ mod tests {
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
             &Arc::new(crate::producer_state::ProducerState::new()),
+            false,
         )
         .expect("materialize");
 
@@ -1294,6 +1307,7 @@ mod tests {
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
             &Arc::new(crate::producer_state::ProducerState::new()),
+            false,
         )
         .expect("materialize");
 
@@ -1358,6 +1372,7 @@ mod tests {
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
             &Arc::new(crate::producer_state::ProducerState::new()),
+            false,
         )
         .expect("materialize");
 

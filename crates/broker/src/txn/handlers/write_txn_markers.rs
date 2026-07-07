@@ -156,7 +156,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
-            None,
+            false,
         );
         broker
             .partitions
