@@ -347,6 +347,7 @@ mod tests {
     #[test]
     fn wal_durable_advances_hw_to_durable_offset_for_singleton_isr() {
         let mut s = fresh();
+        s.install_isr(&[NodeId(1)], &[NodeId(1)], NodeId(1), now());
         let hw = s.recompute_hw_for_wal_durable(o(5));
         assert!(hw == o(5));
     }
