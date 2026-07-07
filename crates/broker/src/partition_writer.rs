@@ -160,6 +160,7 @@ async fn handle_produce(
         &Arc<tokio::sync::Mutex<ReplicaState>>,
         &Arc<Notify>,
     ),
+    wal: Option<&crate::wal::SharedWal>,
 ) {
     let (log, log_dir, log_dir_status) = storage;
     let (append_notify, replica_state, hw_advance_notify) = signals;
@@ -182,7 +183,12 @@ async fn handle_produce(
         datas.push(data);
     }
 
-    let (results, leo) = match run_produce_append_batch(Arc::clone(log), datas).await {
+    let append_result = if let Some(wal) = wal {
+        wal.append(datas).await
+    } else {
+        run_produce_append_batch(Arc::clone(log), datas).await
+    };
+    let (results, leo) = match append_result {
         Ok(value) => value,
         Err(err) => {
             flag_storage_failure(&err, log_dir, log_dir_status);
@@ -209,7 +215,19 @@ async fn handle_produce(
 
     if any_ok {
         append_notify.notify_waiters();
-        let advanced = {
+        let advanced = if let Some(wal) = wal {
+            match wal.sync_durable(leo).await {
+                Ok(durable) => {
+                    let mut state = replica_state.lock().await;
+                    let previous = state.hw;
+                    state.recompute_hw_for_wal_durable(durable) > previous
+                }
+                Err(error) => {
+                    flag_storage_failure(&error, log_dir, log_dir_status);
+                    false
+                }
+            }
+        } else {
             let mut state = replica_state.lock().await;
             let previous = state.hw;
             state.recompute_hw_for_leader_append(leo) > previous
@@ -401,7 +419,6 @@ pub async fn run(
     let (log, log_dir) = storage;
     let (append_notify, replica_state, hw_advance_notify) = signals;
     let (log_dir_status, producer_state, wal) = services;
-    let _ = &wal;
     // `pending` holds a non-Produce message that was pulled off the channel
     // while group-draining Produce jobs (see the Produce arm). It is handled on
     // the next iteration so control messages are never reordered ahead of the
@@ -423,6 +440,7 @@ pub async fn run(
                     &mut pending,
                     (&log, &log_dir, &log_dir_status),
                     (&append_notify, &replica_state, &hw_advance_notify),
+                    wal.as_ref(),
                 )
                 .await;
             }
@@ -613,6 +631,53 @@ mod tests {
         b
     }
 
+    struct GatedWal {
+        log: Arc<Mutex<Log>>,
+        sync_started: Mutex<Option<oneshot::Sender<()>>>,
+        release_sync: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl GatedWal {
+        fn new(
+            log: Arc<Mutex<Log>>,
+            sync_started: oneshot::Sender<()>,
+            release_sync: oneshot::Receiver<()>,
+        ) -> Self {
+            Self {
+                log,
+                sync_started: Mutex::new(Some(sync_started)),
+                release_sync: tokio::sync::Mutex::new(Some(release_sync)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::wal::WalStore for GatedWal {
+        async fn append(
+            &self,
+            datas: Vec<ProduceData>,
+        ) -> Result<
+            (Vec<Result<Offset, crate::error::BrokerError>>, Offset),
+            crate::error::BrokerError,
+        > {
+            run_produce_append_batch(self.log.clone(), datas).await
+        }
+
+        async fn sync_durable(&self, leo: Offset) -> Result<Offset, crate::error::BrokerError> {
+            if let Some(started) = self.sync_started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            let release = self
+                .release_sync
+                .lock()
+                .await
+                .take()
+                .expect("sync release receiver present");
+            release.await.expect("sync release sent");
+            Ok(leo)
+        }
+    }
+
     fn open_log_with_records(path: &std::path::Path, records: i32) -> Log {
         let mut log = Log::open(path, LogConfig::default()).expect("open log");
         if records > 0 {
@@ -697,6 +762,86 @@ mod tests {
         .await
         .expect("send job 2");
         assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
+
+        drop(tx);
+        writer.await.expect("writer join");
+    }
+
+    #[tokio::test]
+    async fn diskless_writer_acks_all_gates_on_durable_hw() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            Log::open(dir.path(), LogConfig::default()).expect("open log"),
+        ));
+        let (sync_started_tx, sync_started_rx) = oneshot::channel();
+        let (release_sync_tx, release_sync_rx) = oneshot::channel();
+        let wal: Option<crate::wal::SharedWal> = Some(Arc::new(GatedWal::new(
+            log.clone(),
+            sync_started_tx,
+            release_sync_rx,
+        )));
+        let (tx, rx) = mpsc::channel(1);
+        let append_notify = Arc::new(Notify::new());
+        let replica_state = Arc::new(tokio::sync::Mutex::new(ReplicaState::new()));
+        {
+            let mut st = replica_state.lock().await;
+            st.install_isr(
+                &[crabka_audit::NodeId(1)],
+                &[crabka_audit::NodeId(1)],
+                crabka_audit::NodeId(1),
+                std::time::Instant::now(),
+            );
+        }
+        let hw_advance_notify = Arc::new(Notify::new());
+        let writer = tokio::spawn(run(
+            ("t".to_string(), PartitionIndex(0)),
+            (
+                log.clone(),
+                Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            ),
+            rx,
+            (
+                append_notify,
+                replica_state.clone(),
+                hw_advance_notify.clone(),
+            ),
+            (
+                crate::log_dir_status::LogDirRegistry::default(),
+                Arc::new(ProducerState::new()),
+                wal,
+            ),
+        ));
+
+        let hw_waiter = hw_advance_notify.notified();
+        tokio::pin!(hw_waiter);
+
+        let (ack, ack_rx) = oneshot::channel();
+        tx.send(WriterMessage::Produce(ProduceJob {
+            data: ProduceData::Owned(sample_batch(3)),
+            ack,
+        }))
+        .await
+        .expect("send job");
+
+        let assigned = ack_rx.await.expect("ack recv").expect("append ok");
+        assert!(assigned == 0);
+        tokio::time::timeout(std::time::Duration::from_secs(1), sync_started_rx)
+            .await
+            .expect("wal sync_durable did not start")
+            .expect("sync start signal sent");
+
+        assert!(replica_state.lock().await.hw == 0);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), &mut hw_waiter)
+                .await
+                .is_err()
+        );
+
+        release_sync_tx.send(()).expect("release sync");
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut hw_waiter)
+            .await
+            .expect("hw_advance_notify did not fire");
+        assert!(replica_state.lock().await.hw == 3);
 
         drop(tx);
         writer.await.expect("writer join");
