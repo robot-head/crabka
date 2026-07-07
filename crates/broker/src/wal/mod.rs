@@ -4,8 +4,6 @@
 //! [`local_fsync::LocalFsyncWal`]; later slices swap it for a replicated /
 //! object-store-backed WAL without changing the writer or the ack gate.
 
-#![allow(dead_code)]
-
 mod local_fsync;
 
 use std::sync::Arc;
@@ -25,6 +23,7 @@ use crate::{error::BrokerError, partition::ProduceData};
 ///    WITHOUT waiting for durability.
 /// 2. [`WalStore::sync_durable`] makes everything up to `leo` durable and
 ///    returns the (monotonic) durable LEO.
+#[allow(dead_code)] // Staged diskless WAL seam; partition integration lands later.
 #[async_trait]
 pub trait WalStore: Send + Sync {
     /// Append a group of batches, assigning offsets. Not yet durable.
@@ -39,4 +38,5 @@ pub trait WalStore: Send + Sync {
 }
 
 /// Convenience alias for an injected WAL medium (present only for diskless topics).
+#[allow(dead_code)]
 pub type SharedWal = Arc<dyn WalStore>;
