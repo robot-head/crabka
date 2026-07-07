@@ -11,6 +11,7 @@ mod build;
 mod config;
 mod error;
 mod ops;
+mod read;
 
 pub use build::build_object_store;
 pub use config::{
@@ -19,3 +20,4 @@ pub use config::{
 };
 pub use error::ObjectStoreError;
 pub use ops::{ObjectOps, ObjectStoreClient};
+pub use read::read_capped;
