@@ -33,11 +33,11 @@ name = "crabka-schema-compat-check"
 path = "src/bin/schema-compat-check.rs"
 
 [dependencies]
-crabka-client-core = { version = "0.3.8", path = "../client-core" }
-crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
-crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
-crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
-crabka-security = { version = "0.3.8", path = "../security" }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
+crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
+crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
+crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
+crabka-security = { version = "0.3.9", path = "../security" }
 crabka-authz = { version = "0.3.8", path = "../authz" }
 crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }

@@ -19,7 +19,7 @@ workspace = true
 
 [dependencies]
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
-crabka-security = { version = "0.3.8", path = "../security" }
+crabka-security = { version = "0.3.9", path = "../security" }
 tracing = { workspace = true }
 
 [dev-dependencies]

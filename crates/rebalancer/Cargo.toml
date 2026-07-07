@@ -22,10 +22,10 @@ name = "crabka-rebalancer"
 path = "src/bin/rebalancer.rs"
 
 [dependencies]
-crabka-client-core = { version = "0.3.8", path = "../client-core" }
-crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
+crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
 bytes.workspace = true
-crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
+crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
 connectrpc-axum.workspace = true
 prost.workspace = true

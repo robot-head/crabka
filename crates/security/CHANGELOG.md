@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [0.3.9] — 2026-07-07
+
+
+### <!-- 0 -->🚀 Features
+
+
+- Cross-service demo traces + codebase-wide instrumentation ([#706](https://github.com/robot-head/crabka/pull/706))
+
+
+### <!-- 6 -->🧪 Testing
+
+
+- Harden broker mutant coverage ([#713](https://github.com/robot-head/crabka/pull/713))
+
 ## [0.3.8] — 2026-06-23
 
 
