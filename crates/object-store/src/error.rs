@@ -15,6 +15,17 @@ pub enum ObjectStoreError {
     /// their own domain error without string-matching).
     #[error("object not found: {0}")]
     NotFound(ObjectPath),
+    /// An object exceeded a caller-supplied size cap during a buffered read
+    /// (guards against OOM on a corrupt or malicious oversized object).
+    #[error("object `{key}` is {size} bytes, exceeds cap of {max_bytes} bytes")]
+    TooLarge {
+        /// The object that breached the cap.
+        key: object_store::path::Path,
+        /// The object's actual size in bytes.
+        size: u64,
+        /// The cap in bytes.
+        max_bytes: u64,
+    },
     /// Any other backend error, stringified so the public surface stays stable.
     #[error("object store backend error: {0}")]
     Backend(String),
@@ -52,6 +63,18 @@ mod tests {
         assert!(
             matches!(&mapped, ObjectStoreError::NotFound(p) if p.to_string() == "tenant/block")
         );
+    }
+
+    #[test]
+    fn too_large_display_includes_sizes() {
+        let err = ObjectStoreError::TooLarge {
+            key: object_store::path::Path::from("index/snapshot.json"),
+            size: 1000,
+            max_bytes: 256,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("1000"));
+        assert!(msg.contains("256"));
     }
 
     #[test]
