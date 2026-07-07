@@ -618,7 +618,7 @@ pub const DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS: u64 = 20 * 1024 * 1024;
 
 /// Default time cap between metadata-log snapshots in milliseconds: 1 hour,
 /// matching Kafka's `metadata.log.max.snapshot.interval.ms`.
-pub const DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL_MS: u64 = 60 * 60 * 1_000;
+pub const DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL_MS: u64 = 3_600_000;
 
 /// Default time cap between metadata-log snapshots: 1 hour, matching Kafka's
 /// `metadata.log.max.snapshot.interval.ms`.
