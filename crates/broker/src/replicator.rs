@@ -162,6 +162,7 @@ fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
                 log,
                 cfg.log_dir_status.clone(),
                 cfg.producer_state.clone(),
+                None,
             ))
         })
 }

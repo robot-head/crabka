@@ -2375,6 +2375,7 @@ impl Broker {
                     log,
                     log_dir_status.clone(),
                     producer_state.clone(),
+                    None,
                 );
                 partitions.insert(topic.clone(), PartitionIndex(partition_id), part);
             }
@@ -3911,6 +3912,7 @@ pub(crate) fn spawn_partition(
     log: crabka_log::Log,
     log_dir_status: crate::log_dir_status::LogDirRegistry,
     producer_state: Arc<crate::producer_state::ProducerState>,
+    wal: Option<crate::wal::SharedWal>,
 ) -> Arc<Partition> {
     /// Depth of the per-partition writer mpsc queue: bounds how many
     /// produce/replication appends may be in flight to one partition before
@@ -3937,6 +3939,7 @@ pub(crate) fn spawn_partition(
         hw_advance_notify.clone(),
         log_dir_status,
         producer_state,
+        wal,
     ));
     Arc::new(Partition {
         topic,
@@ -4435,6 +4438,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
+            None,
         );
         if !values.is_empty() {
             let mut batch = crabka_protocol::records::RecordBatch {

@@ -109,6 +109,7 @@ pub(crate) fn materialize_partition(
             log,
             log_dir_status.clone(),
             producer_state.clone(),
+            None,
         ))
     })
 }

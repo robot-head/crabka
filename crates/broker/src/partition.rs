@@ -677,6 +677,7 @@ mod tests {
             hw_advance_notify.clone(),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
+            None,
         ));
         let p = Partition {
             topic: "t".into(),

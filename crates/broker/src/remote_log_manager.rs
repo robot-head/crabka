@@ -923,6 +923,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
+            None,
         );
         partition.current_leader.store(1, Ordering::Relaxed);
         partition.current_leader_epoch.store(0, Ordering::Release);

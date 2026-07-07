@@ -398,6 +398,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
+            None,
         );
         registry.insert(
             OFFSETS_TOPIC.to_string(),
