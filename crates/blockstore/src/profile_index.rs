@@ -895,7 +895,15 @@ mod tests {
         assert2::assert!(size > 1);
 
         let got = ProfileIndex::load_with_cap(&store, "index/profiles.json", 1).await;
-        assert2::assert!(got.is_err());
+        let Err(BlockStoreError::InvalidBlock(msg)) = got else {
+            panic!("expected InvalidBlock for oversized profile index snapshot");
+        };
+        assert2::assert!(
+            msg
+                == format!(
+                    "profile index snapshot `index/profiles.json` is {size} bytes, exceeds cap of 1 bytes"
+                )
+        );
 
         // A cap at/above the real size still loads.
         let loaded = ProfileIndex::load_with_cap(

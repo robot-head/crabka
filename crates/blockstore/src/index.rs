@@ -1540,7 +1540,15 @@ mod tests {
         assert2::assert!(size > 1);
 
         let got = Index::load_with_cap(&store, "index/snapshot.json", 1).await;
-        assert2::assert!(got.is_err());
+        let Err(BlockStoreError::InvalidBlock(msg)) = got else {
+            panic!("expected InvalidBlock for oversized index snapshot");
+        };
+        assert2::assert!(
+            msg
+                == format!(
+                    "index snapshot `index/snapshot.json` is {size} bytes, exceeds cap of 1 bytes"
+                )
+        );
 
         // A cap at/above the real size still loads.
         let loaded = Index::load_with_cap(
