@@ -135,9 +135,16 @@ async fn await_activation(broker: &BrokerHandle) {
         .await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn topic_backed_rlmm_loopback_scenarios() {
+    topic_rlmm_activates_against_loopback().await;
+    topic_rlmm_copy_then_fetch_round_trip().await;
+    copy_task_skips_tiering_while_rlmm_not_ready().await;
+    topic_rlmm_sasl_loopback_copy_then_fetch_round_trip().await;
+}
+
 /// The bootstrap completes against the loopback listener: the activation
 /// gauge flips and the `__remote_log_metadata` topic is provisioned.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topic_rlmm_activates_against_loopback() {
     let (broker, _log_dir, _remote_dir) = start_broker_with_topic_rlmm().await;
 
@@ -154,7 +161,6 @@ async fn topic_rlmm_activates_against_loopback() {
 /// tier one through the topic-backed RLMM (which publishes `CopySegment*`
 /// events to `__remote_log_metadata` over the loopback and consumes them
 /// back to update its cache), then read the records back at offset 0.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topic_rlmm_copy_then_fetch_round_trip() {
     const TOPIC: &str = "tiered-topic-rlmm-itest";
 
@@ -447,7 +453,6 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
 /// The topic config and produce volume mirror
 /// [`topic_rlmm_copy_then_fetch_round_trip`] exactly, so "0 tiered objects"
 /// is genuinely discriminating: the analogous loopback test tiers ≥ 1.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn copy_task_skips_tiering_while_rlmm_not_ready() {
     const TOPIC: &str = "tiered-not-ready-itest";
 
@@ -574,7 +579,6 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
 /// topic, publish/consume `CopySegment` events, and serve the read-back —
 /// proving the secured metadata client works end-to-end. The test's own
 /// client authenticates with the same credentials.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn topic_rlmm_sasl_loopback_copy_then_fetch_round_trip() {
     use crabka_client_core::security::{ClientSecurity, SaslCredentials};
     use crabka_security::ListenerProtocol;
