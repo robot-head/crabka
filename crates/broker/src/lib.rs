@@ -226,6 +226,7 @@ pub(crate) mod tls_reload;
 pub(crate) mod topic_resolve;
 mod txn;
 pub(crate) mod unclean_recovery;
+mod wal;
 
 pub use broker::{Broker, BrokerHandle};
 pub use config::{BootstrapMode, BrokerConfig, KafkaRlmmConfig, RemoteStorageBackend, RlmmKind};
