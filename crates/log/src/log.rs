@@ -274,7 +274,11 @@ impl Log {
         }
 
         let (active, dir_sync_needed) = match active {
-            Some(s) => (s, false),
+            // We cannot know whether the process that created this segment
+            // fsynced the parent directory before crashing. Conservatively
+            // require one directory fsync on the next explicit `sync()` so a
+            // diskless WAL ack never relies only on file data durability.
+            Some(s) => (s, true),
             None => (Segment::create(&dir, Offset(0))?, true),
         };
 
@@ -1898,6 +1902,20 @@ mod tests {
     #[test]
     fn sync_fsyncs_parent_dir_for_initial_segment_creation() {
         let dir = tempfile::tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        sync_observer::take_dir_syncs();
+
+        log.sync().unwrap();
+
+        assert2::assert!(sync_observer::take_dir_syncs() == vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn sync_fsyncs_parent_dir_after_reopen_before_prior_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        drop(log);
+
         let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
         sync_observer::take_dir_syncs();
 
