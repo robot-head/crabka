@@ -108,16 +108,27 @@ impl RawRead {
 mod sync_observer {
     use std::{cell::RefCell, path::PathBuf};
 
+    use crabka_ids::Offset;
+
     thread_local! {
         static DIR_SYNCS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+        static SEGMENT_FLUSHES: RefCell<Vec<Offset>> = const { RefCell::new(Vec::new()) };
     }
 
     pub(super) fn take_dir_syncs() -> Vec<PathBuf> {
         DIR_SYNCS.take()
     }
 
+    pub(super) fn take_segment_flushes() -> Vec<Offset> {
+        SEGMENT_FLUSHES.take()
+    }
+
     pub(super) fn record_dir_sync(dir: PathBuf) {
         DIR_SYNCS.with_borrow_mut(|synced| synced.push(dir));
+    }
+
+    pub(super) fn record_segment_flush(base: Offset) {
+        SEGMENT_FLUSHES.with_borrow_mut(|flushed| flushed.push(base));
     }
 }
 
@@ -567,6 +578,9 @@ impl Log {
     /// # Errors
     /// Returns a [`LogError`] if the underlying segment or directory flush fails.
     pub fn sync(&mut self) -> Result<(), LogError> {
+        for segment in &mut self.segments {
+            Self::segment_flush(segment)?;
+        }
         self.active_segment_flush()?;
         if self.dir_sync_needed {
             Self::sync_log_dir(&self.dir)?;
@@ -588,7 +602,13 @@ impl Log {
             .active
             .as_mut()
             .expect("active segment must exist after Log::open");
-        active.flush()
+        Self::segment_flush(active)
+    }
+
+    fn segment_flush(segment: &mut Segment) -> Result<(), LogError> {
+        #[cfg(test)]
+        sync_observer::record_segment_flush(segment.base_offset());
+        segment.flush()
     }
 
     /// Verbatim counterpart of [`Log::append_preserving_offset`]: roll if
@@ -1920,6 +1940,27 @@ mod tests {
         log.sync().unwrap();
 
         assert2::assert!(sync_observer::take_dir_syncs() == vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn sync_flushes_sealed_and_active_segments_after_rollover() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_bytes: 1,
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        log.append(&mut sample_batch(1)).unwrap();
+        log.sync().unwrap();
+        sync_observer::take_segment_flushes();
+
+        log.append(&mut sample_batch(1)).unwrap();
+        log.sync().unwrap();
+
+        assert2::assert!(sync_observer::take_segment_flushes() == vec![Offset(0), Offset(1)]);
     }
 
     #[test]
