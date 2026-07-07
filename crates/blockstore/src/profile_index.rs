@@ -367,7 +367,7 @@ impl ProfileIndex {
     #[instrument(
         level = "debug",
         skip_all,
-        fields(path = %path, size = tracing::field::Empty),
+        fields(path = %path),
         err
     )]
     async fn load_path_with_cap(
@@ -375,15 +375,16 @@ impl ProfileIndex {
         path: &Path,
         max_bytes: usize,
     ) -> Result<Self> {
-        let meta = store.head(path).await?;
-        tracing::Span::current().record("size", meta.size);
-        if meta.size > max_bytes as u64 {
-            return Err(BlockStoreError::InvalidBlock(format!(
-                "profile index snapshot `{}` is {} bytes, exceeds cap of {max_bytes} bytes",
-                path, meta.size
-            )));
-        }
-        let bytes = store.get(path).await?.bytes().await?;
+        let bytes = crabka_object_store::read_capped(store, path, max_bytes as u64)
+            .await
+            .map_err(|e| match e {
+                crabka_object_store::ObjectStoreError::TooLarge { size, max_bytes, .. } => {
+                    BlockStoreError::InvalidBlock(format!(
+                        "profile index snapshot `{path}` is {size} bytes, exceeds cap of {max_bytes} bytes"
+                    ))
+                }
+                other => BlockStoreError::ObjectStore(other.to_string()),
+            })?;
         Ok(serde_json::from_slice(&bytes)?)
     }
 }
