@@ -350,6 +350,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
+            None,
         );
         assert!(part.log_end_offset() == 0);
         partitions.insert("orders".to_string(), PartitionIndex(0), Arc::clone(&part));
