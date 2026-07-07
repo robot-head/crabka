@@ -2531,7 +2531,7 @@ fn flamegraph_dot(flamegraph: &crabka_pprof::FlameGraph) -> String {
     for level in &flamegraph.levels {
         let mut current = Vec::new();
         let mut previous_end = 0_i64;
-        for bar in level.values.chunks_exact(4) {
+        for bar in level.values.as_chunks::<4>().0 {
             let x_start = previous_end + bar[0];
             let total = bar[1];
             let self_ = bar[2];

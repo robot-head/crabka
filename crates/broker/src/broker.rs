@@ -2856,16 +2856,9 @@ impl Broker {
         // KIP-714 client-metrics: build the bundle (manager + Prometheus
         // collector + OTLP forwarder) and register the collector into the
         // shared metrics registry so it appears on the `/metrics` scrape.
-        let otlp_metrics_endpoint = crate::telemetry::OtlpConfig::from_env(
-            |k| std::env::var(k).ok(),
-            "",
-            "",
-            "crabka-broker",
-        )
-        .map(|c| c.endpoint);
         let client_metrics = Arc::new(crate::client_metrics::ClientMetrics::new(
             crate::client_metrics::DEFAULT_TELEMETRY_MAX_BYTES,
-            otlp_metrics_endpoint,
+            config.client_metrics_otlp_endpoint.clone(),
         ));
         {
             let mut reg = metrics.registry.lock().await;
@@ -4081,7 +4074,7 @@ impl ConnectionLimiter {
         // concurrent accepts can't both slip past the ceiling.
         let global_ok = self
             .total
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
                 (cur < self.max_connections).then_some(cur + 1)
             })
             .is_ok();

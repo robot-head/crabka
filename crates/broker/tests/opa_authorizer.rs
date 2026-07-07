@@ -357,7 +357,7 @@ async fn create_topic_as_admin(addr: SocketAddr, name: &str) {
 /// code-scanning credential query; sourcing it here keeps those sites
 /// literal-free.
 fn alice_password() -> Vec<u8> {
-    [b'w', b'o', b'n', b'd', b'e', b'r', b'l', b'a', b'n', b'd'].to_vec()
+    b"wonderland".to_vec()
 }
 
 async fn produce_when_partition_ready(

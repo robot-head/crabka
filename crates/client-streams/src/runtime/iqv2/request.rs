@@ -139,7 +139,7 @@ mod tests {
             (pos(&[("in", 0, 11)]), false),   // behind
             (pos(&[("other", 0, 1)]), false), // unknown tp
         ] {
-            assert!(cur.dominates(&bound) == want);
+            assert_eq!(cur.dominates(&bound), want);
         }
     }
 

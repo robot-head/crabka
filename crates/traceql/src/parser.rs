@@ -903,7 +903,7 @@ fn parse_duration_nanos(s: &str) -> Result<i64> {
 }
 
 fn parse_duration_component_nanos(number: &str, multiplier: i128, original: &str) -> Result<i128> {
-    let (whole, fraction) = number.split_once('.').map_or((number, ""), |parts| parts);
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
     if whole.is_empty() && fraction.is_empty() {
         return Err(TraceqlError::Parse(format!(
             "invalid duration number {number:?}"

@@ -246,11 +246,8 @@ impl Model for ClassicModel {
                 s.g.add_member(mk_member(mid, Some(iid), s.clock));
             }
             Act::Heartbeat(mid) => {
-                if let Some(m) = s.g.members.get_mut(mid) {
-                    m.last_heartbeat = at(s.clock);
-                } else {
-                    return None;
-                }
+                let m = s.g.members.get_mut(mid)?;
+                m.last_heartbeat = at(s.clock);
             }
             Act::Leave(mid) => {
                 if !s.g.members.contains_key(mid) {

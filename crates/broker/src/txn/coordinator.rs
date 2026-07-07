@@ -651,7 +651,10 @@ mod tests {
             map.get(&ProducerId(1000)).is_none(),
             "stale pre-roll pid must be evicted"
         );
-        assert!(map.get(&ProducerId(2000)).map(|e| e.value().clone()) == Some("tid-a".into()));
+        assert_eq!(
+            map.get(&ProducerId(2000)).map(|e| e.value().clone()),
+            Some("tid-a".into())
+        );
     }
 
     #[test]
@@ -685,8 +688,8 @@ mod tests {
         e.state = TxnState::Ongoing;
         e.last_update_ms = 1;
         apply_prepare_abort(&mut e, 999);
-        assert!(e.state == TxnState::PrepareAbort);
-        assert!(e.last_update_ms == 999);
+        assert_eq!(e.state, TxnState::PrepareAbort);
+        assert_eq!(e.last_update_ms, 999);
     }
 
     #[test]
@@ -778,7 +781,7 @@ mod tests {
             TxnVersion::Verified,
         )
         .await;
-        assert!(out == vec!["tid-a".to_owned()]);
+        assert_eq!(out, vec!["tid-a".to_owned()]);
     }
 
     #[tokio::test]
@@ -873,6 +876,6 @@ mod tests {
             TxnVersion::Verified,
         )
         .await;
-        assert!(out == vec!["tid-a".to_owned()]);
+        assert_eq!(out, vec!["tid-a".to_owned()]);
     }
 }

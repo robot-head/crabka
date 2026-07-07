@@ -1166,16 +1166,15 @@ impl FileConfig {
         }
 
         // KIP-48: delegation-token master key + lifetime knobs.
-        // `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var wins over the TOML
-        // `secret_key`; when neither source provides a key the broker
-        // leaves the field as `None` and the four DT RPCs return
-        // `DELEGATION_TOKEN_AUTH_DISABLED`.
-        let env_key = std::env::var("CRABKA_DELEGATION_TOKEN_SECRET_KEY").ok();
-        let toml_key = self
-            .delegation_token
-            .as_ref()
-            .and_then(|d| d.secret_key.clone());
-        if let Some(k) = env_key.or(toml_key) {
+        // The binary seeds `delegation_token_secret_key` from its parsed
+        // CLI/env args before applying TOML. Preserve that runtime value when
+        // present; otherwise fall back to the TOML `secret_key`.
+        if cfg.delegation_token_secret_key.is_none()
+            && let Some(k) = self
+                .delegation_token
+                .as_ref()
+                .and_then(|d| d.secret_key.clone())
+        {
             cfg.delegation_token_secret_key =
                 Some(crabka_security::SecretBytes::new(k.into_bytes()));
         }
@@ -2718,27 +2717,25 @@ default_renew_period_ms = 7200000
     }
 
     #[test]
-    fn delegation_token_env_var_overrides_toml() {
-        let _g = env_lock().lock().unwrap();
-        temp_env::with_var(
-            "CRABKA_DELEGATION_TOKEN_SECRET_KEY",
-            Some("env-wins"),
-            || {
-                let toml = r#"
+    fn delegation_token_runtime_key_overrides_toml() {
+        let toml = r#"
 [delegation_token]
 secret_key = "toml-loses"
 "#;
-                let file: FileConfig = toml::from_str(toml).unwrap();
-                let mut cfg = crate::config::BrokerConfig::default();
-                file.apply_to(&mut cfg).unwrap();
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig {
+            delegation_token_secret_key: Some(crabka_security::SecretBytes::new(
+                b"runtime-wins".to_vec(),
+            )),
+            ..crate::config::BrokerConfig::default()
+        };
+        file.apply_to(&mut cfg).unwrap();
 
-                assert!(
-                    cfg.delegation_token_secret_key
-                        .as_ref()
-                        .map(|s| s.as_bytes().to_vec())
-                        == Some(b"env-wins".to_vec())
-                );
-            },
+        assert!(
+            cfg.delegation_token_secret_key
+                .as_ref()
+                .map(|s| s.as_bytes().to_vec())
+                == Some(b"runtime-wins".to_vec())
         );
     }
 

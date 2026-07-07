@@ -156,7 +156,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(partition0_leader_id(&md, "bench-topic") == Some(2));
+        assert_eq!(partition0_leader_id(&md, "bench-topic"), Some(2));
     }
 
     #[test]
@@ -166,9 +166,9 @@ mod tests {
             "demo-broker-1-0".to_string(),
             "demo-broker-2-0".to_string(),
         ];
-        assert!(
-            choose_target_pod(&crabka_multi, Stack::Crabka, Some(1)).as_deref()
-                == Some("demo-broker-1-0")
+        assert_eq!(
+            choose_target_pod(&crabka_multi, Stack::Crabka, Some(1)).as_deref(),
+            Some("demo-broker-1-0")
         );
 
         let crabka_single_pool = vec![
@@ -176,9 +176,9 @@ mod tests {
             "demo-brokers-1".to_string(),
             "demo-brokers-2".to_string(),
         ];
-        assert!(
-            choose_target_pod(&crabka_single_pool, Stack::Crabka, Some(2)).as_deref()
-                == Some("demo-brokers-2")
+        assert_eq!(
+            choose_target_pod(&crabka_single_pool, Stack::Crabka, Some(2)).as_deref(),
+            Some("demo-brokers-2")
         );
 
         let kafka = vec![
@@ -186,8 +186,9 @@ mod tests {
             "demo-kafka-1".to_string(),
             "demo-kafka-2".to_string(),
         ];
-        assert!(
-            choose_target_pod(&kafka, Stack::Kafka, Some(1)).as_deref() == Some("demo-kafka-1")
+        assert_eq!(
+            choose_target_pod(&kafka, Stack::Kafka, Some(1)).as_deref(),
+            Some("demo-kafka-1")
         );
     }
 
@@ -199,6 +200,9 @@ mod tests {
             "demo-kafka-1".to_string(),
         ];
 
-        assert!(choose_target_pod(&pods, Stack::Kafka, None).as_deref() == Some("demo-kafka-0"));
+        assert_eq!(
+            choose_target_pod(&pods, Stack::Kafka, None).as_deref(),
+            Some("demo-kafka-0")
+        );
     }
 }

@@ -14,7 +14,23 @@ use std::{
 };
 
 use clap::Parser;
-use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
+use crabka_broker::{
+    BootstrapMode, Broker, BrokerConfig,
+    config::{
+        DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS, DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS,
+        DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS,
+        DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
+        DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS, DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
+        DEFAULT_HEARTBEAT_INTERVAL_MS, DEFAULT_HEARTBEAT_TIMEOUT_MS,
+        DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS,
+        DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE,
+        DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS,
+        DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS, DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL_MS,
+        DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS, DEFAULT_OBSERVER_LAG_BOUND,
+        DEFAULT_REMOTE_LOG_MANAGER_INTERVAL_MS, DEFAULT_REPLICA_LAG_TIME_MAX_MS,
+        DEFAULT_TLS_RELOAD_INTERVAL_MS, DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS,
+    },
+};
 use crabka_log::LogConfig;
 
 /// Parse `--process-roles` string values into `NodeRole`s.
@@ -135,6 +151,245 @@ struct Args {
     /// observer. Maps to Kafka's `controller.quorum.auto.join.enable`.
     #[arg(long, env = "CRABKA_CONTROLLER_AUTO_JOIN")]
     controller_auto_join: bool,
+
+    /// KIP-853 observer promotion lag bound.
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVER_LAG_BOUND",
+        default_value_t = DEFAULT_OBSERVER_LAG_BOUND
+    )]
+    observer_lag_bound: u64,
+
+    /// Broker heartbeat interval in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_HEARTBEAT_INTERVAL_MS",
+        default_value_t = DEFAULT_HEARTBEAT_INTERVAL_MS
+    )]
+    heartbeat_interval_ms: u64,
+
+    /// Broker heartbeat timeout in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_HEARTBEAT_TIMEOUT_MS",
+        default_value_t = DEFAULT_HEARTBEAT_TIMEOUT_MS
+    )]
+    heartbeat_timeout_ms: u64,
+
+    /// Follower lag timeout in milliseconds before ISR shrink.
+    #[arg(
+        long,
+        env = "CRABKA_REPLICA_LAG_TIME_MAX_MS",
+        default_value_t = DEFAULT_REPLICA_LAG_TIME_MAX_MS
+    )]
+    replica_lag_time_max_ms: u64,
+
+    /// Controller election timeout in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_CONTROLLER_ELECTION_TIMEOUT_MS",
+        default_value_t = DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS
+    )]
+    controller_election_timeout_ms: u64,
+
+    /// Controller heartbeat interval in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_CONTROLLER_HEARTBEAT_INTERVAL_MS",
+        default_value_t = DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS
+    )]
+    controller_heartbeat_interval_ms: u64,
+
+    /// Controlled-shutdown leadership drain timeout in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS",
+        default_value_t = DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS
+    )]
+    controlled_shutdown_drain_timeout_ms: u64,
+
+    /// Maximum bytes between metadata-log snapshots.
+    #[arg(
+        long,
+        env = "CRABKA_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS",
+        default_value_t = DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS
+    )]
+    metadata_max_bytes_between_snapshots: u64,
+
+    /// Maximum milliseconds between metadata-log snapshots; `0` disables the interval cap.
+    #[arg(
+        long,
+        env = "CRABKA_METADATA_MAX_SNAPSHOT_INTERVAL_MS",
+        default_value_t = DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL_MS
+    )]
+    metadata_max_snapshot_interval_ms: u64,
+
+    /// Committed-record gap between metadata-log snapshots.
+    #[arg(
+        long,
+        env = "CRABKA_METADATA_SNAPSHOT_INTERVAL_RECORDS",
+        default_value_t = DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS
+    )]
+    metadata_snapshot_interval_records: u64,
+
+    /// Idle-transaction abort cleanup interval in milliseconds; `0` disables the reaper.
+    #[arg(
+        long,
+        env = "CRABKA_TXN_ABORT_CLEANUP_INTERVAL_MS",
+        default_value_t = DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS
+    )]
+    txn_abort_cleanup_interval_ms: u64,
+
+    /// Auto preferred-replica election scan cadence, in seconds.
+    #[arg(
+        long,
+        env = "CRABKA_LEADER_IMBALANCE_CHECK_INTERVAL_SECS",
+        default_value_t = DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS
+    )]
+    leader_imbalance_check_interval_secs: u64,
+
+    /// Minimum per-broker leader imbalance percentage before auto-rebalance acts.
+    #[arg(
+        long,
+        env = "CRABKA_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE",
+        default_value_t = DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE
+    )]
+    leader_imbalance_per_broker_percentage: u32,
+
+    /// TLS cert/key reload polling interval in milliseconds; `0` disables the watcher.
+    #[arg(long, env = "CRABKA_TLS_RELOAD_INTERVAL_MS", default_value_t = DEFAULT_TLS_RELOAD_INTERVAL_MS)]
+    tls_reload_interval_ms: u64,
+
+    /// Maximum incremental fetch-session cache slots.
+    #[arg(
+        long,
+        env = "CRABKA_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS",
+        default_value_t = DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS
+    )]
+    max_incremental_fetch_session_cache_slots: usize,
+
+    /// Maximum live broker connections across all listeners.
+    #[arg(long, env = "CRABKA_MAX_CONNECTIONS", default_value_t = usize::MAX)]
+    max_connections: usize,
+
+    /// Maximum live broker connections from any single client IP.
+    #[arg(long, env = "CRABKA_MAX_CONNECTIONS_PER_IP", default_value_t = usize::MAX)]
+    max_connections_per_ip: usize,
+
+    /// Delegation-token maximum lifetime in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_DELEGATION_TOKEN_MAX_LIFETIME_MS",
+        default_value_t = DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS
+    )]
+    delegation_token_max_lifetime_ms: i64,
+
+    /// Delegation-token expiry sweep interval in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS",
+        default_value_t = DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS
+    )]
+    delegation_token_expiry_check_interval_ms: i64,
+
+    /// Delegation-token default renew period in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_DELEGATION_TOKEN_RENEW_PERIOD_MS",
+        default_value_t = DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS
+    )]
+    delegation_token_default_renew_period_ms: i64,
+
+    /// `RemoteLogManager` copy/retention cadence in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_REMOTE_LOG_MANAGER_INTERVAL_MS",
+        default_value_t = DEFAULT_REMOTE_LOG_MANAGER_INTERVAL_MS
+    )]
+    remote_log_manager_interval_ms: u64,
+
+    /// Delegation-token HMAC master key. Prefer secrets managers over shell history.
+    #[arg(
+        long,
+        env = "CRABKA_DELEGATION_TOKEN_SECRET_KEY",
+        hide_env_values = true
+    )]
+    delegation_token_secret_key: Option<String>,
+
+    /// Disable OpenTelemetry SDK/exporters when truthy.
+    #[arg(long, env = "OTEL_SDK_DISABLED")]
+    otel_sdk_disabled: Option<String>,
+
+    /// CRABKA-specific OTLP endpoint override.
+    #[arg(long, env = "CRABKA_OTLP_ENDPOINT")]
+    crabka_otlp_endpoint: Option<String>,
+
+    /// OpenTelemetry traces endpoint override.
+    #[arg(long, env = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")]
+    otel_exporter_otlp_traces_endpoint: Option<String>,
+
+    /// OpenTelemetry endpoint override shared by signals.
+    #[arg(long, env = "OTEL_EXPORTER_OTLP_ENDPOINT")]
+    otel_exporter_otlp_endpoint: Option<String>,
+
+    /// Enable OTLP export without setting an endpoint.
+    #[arg(long, env = "CRABKA_OTLP_ENABLED")]
+    crabka_otlp_enabled: Option<String>,
+
+    /// OTLP protocol (`grpc` or `http/protobuf`).
+    #[arg(long, env = "CRABKA_OTLP_PROTOCOL")]
+    crabka_otlp_protocol: Option<String>,
+
+    /// OpenTelemetry exporter protocol (`grpc` or `http/protobuf`).
+    #[arg(long, env = "OTEL_EXPORTER_OTLP_PROTOCOL")]
+    otel_exporter_otlp_protocol: Option<String>,
+
+    /// OTLP head sampling ratio in `[0.0, 1.0]`.
+    #[arg(long, env = "CRABKA_OTLP_SAMPLE_RATIO")]
+    crabka_otlp_sample_ratio: Option<String>,
+
+    /// OpenTelemetry sampler argument used as the trace sample ratio.
+    #[arg(long, env = "OTEL_TRACES_SAMPLER_ARG")]
+    otel_traces_sampler_arg: Option<String>,
+
+    /// OpenTelemetry service name.
+    #[arg(long, env = "OTEL_SERVICE_NAME")]
+    otel_service_name: Option<String>,
+
+    /// CRABKA-specific OTLP timeout in seconds.
+    #[arg(long, env = "CRABKA_OTLP_TIMEOUT_SECS")]
+    crabka_otlp_timeout_secs: Option<String>,
+
+    /// OpenTelemetry exporter timeout in seconds.
+    #[arg(long, env = "OTEL_EXPORTER_OTLP_TIMEOUT_SECS")]
+    otel_exporter_otlp_timeout_secs: Option<String>,
+
+    /// OTLP heartbeat interval in seconds; `0` disables heartbeats.
+    #[arg(long, env = "CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS")]
+    crabka_otlp_heartbeat_interval_secs: Option<String>,
+}
+
+impl Args {
+    fn telemetry_value(&self, key: &str) -> Option<String> {
+        match key {
+            "OTEL_SDK_DISABLED" => self.otel_sdk_disabled.clone(),
+            "CRABKA_OTLP_ENDPOINT" => self.crabka_otlp_endpoint.clone(),
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" => self.otel_exporter_otlp_traces_endpoint.clone(),
+            "OTEL_EXPORTER_OTLP_ENDPOINT" => self.otel_exporter_otlp_endpoint.clone(),
+            "CRABKA_OTLP_ENABLED" => self.crabka_otlp_enabled.clone(),
+            "CRABKA_OTLP_PROTOCOL" => self.crabka_otlp_protocol.clone(),
+            "OTEL_EXPORTER_OTLP_PROTOCOL" => self.otel_exporter_otlp_protocol.clone(),
+            "CRABKA_OTLP_SAMPLE_RATIO" => self.crabka_otlp_sample_ratio.clone(),
+            "OTEL_TRACES_SAMPLER_ARG" => self.otel_traces_sampler_arg.clone(),
+            "OTEL_SERVICE_NAME" => self.otel_service_name.clone(),
+            "CRABKA_OTLP_TIMEOUT_SECS" => self.crabka_otlp_timeout_secs.clone(),
+            "OTEL_EXPORTER_OTLP_TIMEOUT_SECS" => self.otel_exporter_otlp_timeout_secs.clone(),
+            "CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS" => {
+                self.crabka_otlp_heartbeat_interval_secs.clone()
+            }
+            _ => None,
+        }
+    }
 }
 
 #[tokio::main]
@@ -147,11 +402,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // opts in (see `crabka_broker::telemetry`). Built here, inside the
     // tokio runtime, so the gRPC exporter captures the runtime handle.
     let otlp = crabka_broker::telemetry::OtlpConfig::from_env(
-        |k| std::env::var(k).ok(),
+        |k| args.telemetry_value(k),
         &args.broker_id.to_string(),
         env!("CARGO_PKG_VERSION"),
         "crabka-broker",
     );
+    let client_metrics_otlp_endpoint = otlp.as_ref().map(|cfg| cfg.endpoint.clone());
     let telemetry = crabka_broker::telemetry::init(
         otlp,
         "crabka_broker=info,crabka_log=info,info",
@@ -209,17 +465,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // `crabka format`) once `log_dir` is resolved against the TOML.
         directory_id: uuid::Uuid::nil(),
         auto_join: args.controller_auto_join,
-        observer_lag_bound: 100,
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        observer_lag_bound: args.observer_lag_bound,
+        heartbeat_interval_ms: args.heartbeat_interval_ms,
+        heartbeat_timeout_ms: args.heartbeat_timeout_ms,
+        replica_lag_time_max_ms: args.replica_lag_time_max_ms,
+        controller_election_timeout: std::time::Duration::from_millis(
+            args.controller_election_timeout_ms,
+        ),
+        controller_heartbeat_interval: std::time::Duration::from_millis(
+            args.controller_heartbeat_interval_ms,
+        ),
+        metadata_max_bytes_between_snapshots: args.metadata_max_bytes_between_snapshots,
+        metadata_max_snapshot_interval: std::time::Duration::from_millis(
+            args.metadata_max_snapshot_interval_ms,
+        ),
+        metadata_snapshot_interval_records: args.metadata_snapshot_interval_records,
+        txn_abort_cleanup_interval: std::time::Duration::from_millis(
+            args.txn_abort_cleanup_interval_ms,
+        ),
+        leader_imbalance_check_interval_secs: args.leader_imbalance_check_interval_secs,
+        leader_imbalance_per_broker_percentage: args.leader_imbalance_per_broker_percentage,
+        tls_reload_interval: std::time::Duration::from_millis(args.tls_reload_interval_ms),
+        max_incremental_fetch_session_cache_slots: args.max_incremental_fetch_session_cache_slots,
+        max_connections: args.max_connections,
+        max_connections_per_ip: args.max_connections_per_ip,
+        delegation_token_max_lifetime_ms: args.delegation_token_max_lifetime_ms,
+        delegation_token_expiry_check_interval_ms: args.delegation_token_expiry_check_interval_ms,
+        delegation_token_default_renew_period_ms: args.delegation_token_default_renew_period_ms,
+        remote_log_manager_interval: std::time::Duration::from_millis(
+            args.remote_log_manager_interval_ms,
+        ),
         // Placeholder — overwritten after `apply_to` against the final `log_dir`.
         bootstrap_mode: BootstrapMode::Bootstrap,
         cluster_id: args.cluster_id,
         metrics_listen_addr,
+        client_metrics_otlp_endpoint,
         partition_disk_scan_interval_secs: args.partition_disk_scan_interval_secs,
+        delegation_token_secret_key: args
+            .delegation_token_secret_key
+            .map(|key| crabka_security::SecretBytes::new(key.into_bytes())),
         ..BrokerConfig::default()
     };
     if !args.process_roles.is_empty() {
@@ -272,7 +556,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // seconds). Bounded well under the pod's terminationGracePeriod (30s); on
     // timeout `controlled_shutdown` falls back to a hard stop internally.
     match handle
-        .controlled_shutdown(CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT)
+        .controlled_shutdown(std::time::Duration::from_millis(
+            args.controlled_shutdown_drain_timeout_ms,
+        ))
         .await
     {
         Ok(()) => tracing::info!("controlled shutdown complete (leadership drained)"),
@@ -282,12 +568,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     telemetry.shutdown();
     Ok(())
 }
-
-/// How long controlled shutdown waits for the controller to drain this
-/// broker's partition leaderships before falling back to a hard stop. Kept
-/// well under the pod `terminationGracePeriodSeconds` (30s) so the hard-stop
-/// fallback + process exit still complete before the Kubernetes SIGKILL.
-const CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Block until a process-termination signal arrives, returning its name for
 /// logging. On Unix this is SIGINT (Ctrl-C) **or SIGTERM** — `kubectl delete

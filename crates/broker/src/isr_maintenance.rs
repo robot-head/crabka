@@ -648,8 +648,8 @@ mod tests {
 
         shutdown.cancel();
         task.await.unwrap();
-        assert!(metrics.isr_shrinks_total.get() == 1);
-        assert!(metrics.isr_expands_total.get() == 0);
+        assert_eq!(metrics.isr_shrinks_total.get(), 1);
+        assert_eq!(metrics.isr_expands_total.get(), 0);
     }
 
     #[test]
@@ -711,7 +711,7 @@ mod tests {
 
         let req = build_alter_partition_request(&image, 5, "orders", 0, &[NodeId(5)], 3);
 
-        assert!(req.broker_epoch == 5);
+        assert_eq!(req.broker_epoch, 5);
     }
 
     #[tokio::test]
@@ -724,7 +724,7 @@ mod tests {
             .await
             .expect_err("missing controller leader should reject the send");
 
-        assert!(err == "no controller leader");
+        assert_eq!(err, "no controller leader");
     }
 
     #[tokio::test]
@@ -749,13 +749,13 @@ mod tests {
 
         let targets = alter_partition_targets(&image, Some(NodeId(2)));
 
-        assert!(
-            targets
-                == vec![
-                    (NodeId(2), "b2:9092".to_string()),
-                    (NodeId(0), "b0:9092".to_string()),
-                    (NodeId(1), "b1:9092".to_string()),
-                ]
+        assert_eq!(
+            targets,
+            vec![
+                (NodeId(2), "b2:9092".to_string()),
+                (NodeId(0), "b0:9092".to_string()),
+                (NodeId(1), "b1:9092".to_string()),
+            ]
         );
     }
 
@@ -767,12 +767,12 @@ mod tests {
 
         let targets = alter_partition_targets(&image, Some(NodeId(9)));
 
-        assert!(
-            targets
-                == vec![
-                    (NodeId(0), "b0:9092".to_string()),
-                    (NodeId(1), "b1:9092".to_string())
-                ]
+        assert_eq!(
+            targets,
+            vec![
+                (NodeId(0), "b0:9092".to_string()),
+                (NodeId(1), "b1:9092".to_string())
+            ]
         );
     }
 

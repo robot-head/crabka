@@ -44,8 +44,9 @@ mod tests {
     #[test]
     fn for_group_is_simple_consumer_shape() {
         let m = ConsumerGroupMetadata::for_group("g");
-        assert!(
-            m == ConsumerGroupMetadata {
+        assert_eq!(
+            m,
+            ConsumerGroupMetadata {
                 group_id: "g".into(),
                 generation_id: -1,
                 member_id: String::new(),

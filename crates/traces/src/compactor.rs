@@ -979,8 +979,8 @@ mod tests {
 
         let tenant_a = index.candidate_blocks("tenant-a", 0, 2_000);
         let tenant_b = index.candidate_blocks("tenant-b", 0, 2_000);
-        assert!(tenant_a.len() == 1);
-        assert!(tenant_b.len() == 1);
+        assert_eq!(tenant_a.len(), 1);
+        assert_eq!(tenant_b.len(), 1);
         check!(tenant_a[0].contains("traces/tenant-a/"));
         check!(tenant_b[0].contains("traces/tenant-b/"));
     }

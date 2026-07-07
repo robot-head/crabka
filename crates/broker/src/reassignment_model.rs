@@ -290,17 +290,15 @@ impl Model for ReassignModel {
                 }
                 let pr = pr_of(&state);
                 let alive: HashSet<NodeId> = state.alive.iter().copied().collect();
-                match reassign_one(&pr, &alive) {
-                    Some(next) => {
-                        assert_step(last, &next);
-                        state.leader = next.leader;
-                        state.isr = next.isr;
-                        state.adding = next.adding_replicas;
-                        state.removing = next.removing_replicas;
-                        state.replicas = next.replicas;
-                        state.leader_epoch = next.leader_epoch.0;
-                    }
-                    None => return None,
+                {
+                    let next = reassign_one(&pr, &alive)?;
+                    assert_step(last, &next);
+                    state.leader = next.leader;
+                    state.isr = next.isr;
+                    state.adding = next.adding_replicas;
+                    state.removing = next.removing_replicas;
+                    state.replicas = next.replicas;
+                    state.leader_epoch = next.leader_epoch.0;
                 }
             }
         }
