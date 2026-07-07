@@ -6,24 +6,65 @@ broker-jvm-acceptance = { max-threads = 1 }
 broker-share-state = { max-threads = 1 }
 broker-transactions = { max-threads = 1 }
 broker-tiered-storage-rlmm = { max-threads = 1 }
+consumer-cooperative-rebalance = { max-threads = 1 }
 schema-registry-fixed-port-captures = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'package(crabka-broker) & (binary(jvm_acceptance) | binary(jvm_consumer_group_next_gen))'
+test-group = 'broker-jvm-acceptance'
+threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
+filter = 'package(crabka-broker) & (binary(share_consume) | binary(share_admin_offsets))'
+test-group = 'broker-share-state'
+threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
+filter = 'package(crabka-broker) & binary(transactions)'
+test-group = 'broker-transactions'
+threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
+filter = 'package(crabka-broker) & binary(tiered_storage_topic_rlmm)'
+test-group = 'broker-tiered-storage-rlmm'
+threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
+filter = 'package(crabka-integration-tests) & binary(consumer_cooperative_rebalance)'
+test-group = 'consumer-cooperative-rebalance'
+threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
+filter = 'package(crabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
+test-group = 'schema-registry-fixed-port-captures'
+threads-required = 'num-test-threads'
 
 [[profile.ci.overrides]]
 filter = 'package(crabka-broker) & (binary(jvm_acceptance) | binary(jvm_consumer_group_next_gen))'
 test-group = 'broker-jvm-acceptance'
+threads-required = 'num-test-threads'
 
 [[profile.ci.overrides]]
 filter = 'package(crabka-broker) & (binary(share_consume) | binary(share_admin_offsets))'
 test-group = 'broker-share-state'
+threads-required = 'num-test-threads'
 
 [[profile.ci.overrides]]
 filter = 'package(crabka-broker) & binary(transactions)'
 test-group = 'broker-transactions'
+threads-required = 'num-test-threads'
 
 [[profile.ci.overrides]]
 filter = 'package(crabka-broker) & binary(tiered_storage_topic_rlmm)'
 test-group = 'broker-tiered-storage-rlmm'
+threads-required = 'num-test-threads'
+
+[[profile.ci.overrides]]
+filter = 'package(crabka-integration-tests) & binary(consumer_cooperative_rebalance)'
+test-group = 'consumer-cooperative-rebalance'
+threads-required = 'num-test-threads'
 
 [[profile.ci.overrides]]
 filter = 'package(crabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
 test-group = 'schema-registry-fixed-port-captures'
+threads-required = 'num-test-threads'

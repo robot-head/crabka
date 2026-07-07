@@ -1517,9 +1517,9 @@ fn spawn_rlmm_bootstrap(
     swap_target: Option<&Arc<crabka_remote_storage_topic::SwappableRlmm>>,
     kickoff: Option<&KafkaSwapKickoff>,
     shutdown: &CancellationToken,
-) {
+) -> Option<JoinHandle<()>> {
     let (Some(swap), Some(kickoff)) = (swap_target, kickoff) else {
-        return;
+        return None;
     };
     let future = bootstrap_topic_rlmm(
         Arc::clone(swap),
@@ -1531,12 +1531,12 @@ fn spawn_rlmm_bootstrap(
         shutdown.clone(),
     );
     let shutdown = shutdown.clone();
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         tokio::select! {
             () = shutdown.cancelled() => tracing::debug!("RLMM bootstrap cancelled"),
             () = future => {}
         }
-    });
+    }))
 }
 
 async fn start_metadata_phase(
@@ -1634,7 +1634,7 @@ async fn finish_broker_startup(
     });
     let (shutdown, listener_tasks) = spawn_listener_tasks(&broker, bound);
     emit_broker_started(&broker, runtime.audit_led_partition).await;
-    spawn_rlmm_bootstrap(
+    let topic_rlmm_task = spawn_rlmm_bootstrap(
         &broker,
         runtime.kafka_swap_target.as_ref(),
         runtime.kafka_swap_kickoff.as_ref(),
@@ -1644,6 +1644,7 @@ async fn finish_broker_startup(
         listen_addr,
         shutdown,
         listener_tasks,
+        topic_rlmm_task,
         broker,
     })
 }
@@ -1912,6 +1913,9 @@ pub struct BrokerHandle {
     /// One task per `ListenerSpec` bound during `Broker::start`. `shutdown()`
     /// awaits every task to drain in-flight connections.
     listener_tasks: Vec<JoinHandle<()>>,
+    /// Topic-backed RLMM bootstrap and assignment task. Retained so shutdown
+    /// can join it before the Tokio runtime drops.
+    topic_rlmm_task: Option<JoinHandle<()>>,
     /// Held so partition writer tasks live as long as the handle.
     broker: Arc<Broker>,
 }
@@ -3221,6 +3225,9 @@ impl BrokerHandle {
             let _ = h.await;
         }
         self.shutdown.cancel();
+        if let Some(task) = self.topic_rlmm_task.take() {
+            let _ = task.await;
+        }
         for t in self.listener_tasks.drain(..) {
             let _ = t.await;
         }
@@ -3742,46 +3749,48 @@ async fn bootstrap_topic_rlmm(
         needed_metadata_partitions(&image_rx.borrow_and_update(), node_id, partition_count);
     let (set_tx, set_rx) = tokio::sync::watch::channel(initial);
 
-    // Image-watcher: recompute on every image change.
-    {
-        let set_tx = set_tx;
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    () = shutdown.cancelled() => return,
-                    changed = image_rx.changed() => {
-                        if changed.is_err() {
-                            return; // image sender dropped
-                        }
-                        let set = needed_metadata_partitions(
-                            &image_rx.borrow_and_update(),
-                            node_id,
-                            partition_count,
-                        );
-                        // send_if_modified avoids a reconcile when the set is
-                        // unchanged across an image bump that didn't touch us.
-                        set_tx.send_if_modified(|cur| {
-                            if *cur == set {
-                                false
-                            } else {
-                                *cur = set;
-                                true
-                            }
-                        });
-                    }
-                }
-            }
-        });
-    }
-
-    // Reconciler: apply the latest set to the manager's AssignmentHandle.
-    spawn_rlmm_reconciler(manager, set_rx, shutdown);
+    // Keep both loops owned by this bootstrap task so broker shutdown can join
+    // them before the Tokio runtime drops.
+    let image_watcher =
+        watch_rlmm_needed_partitions(image_rx, set_tx, node_id, partition_count, shutdown.clone());
+    let reconciler = run_rlmm_reconciler(manager, set_rx, shutdown);
+    tokio::join!(image_watcher, reconciler);
 }
 
-/// Spawn the metadata-partition reconciler: apply the leadership-derived
-/// set to the RLMM's `AssignmentHandle` on the initial value, on every
-/// change, and on a fixed [`RLMM_RECONCILE_TICK`] cadence.
+async fn watch_rlmm_needed_partitions(
+    mut image_rx: tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>>,
+    set_tx: tokio::sync::watch::Sender<Vec<i32>>,
+    node_id: crabka_metadata::NodeId,
+    partition_count: i32,
+    shutdown: CancellationToken,
+) {
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            changed = image_rx.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                let set = needed_metadata_partitions(
+                    &image_rx.borrow_and_update(),
+                    node_id,
+                    partition_count,
+                );
+                set_tx.send_if_modified(|current| {
+                    if *current == set {
+                        false
+                    } else {
+                        *current = set;
+                        true
+                    }
+                });
+            }
+        }
+    }
+}
+
+/// Run the metadata-partition reconciler on the initial value, every change,
+/// and a fixed [`RLMM_RECONCILE_TICK`] cadence.
 ///
 /// The periodic tick is what makes a partition parked at the
 /// `HWM_UNKNOWN` sentinel (after a transient assignment-time
@@ -3789,36 +3798,31 @@ async fn bootstrap_topic_rlmm(
 /// `NotReady` state, even when the metadata image stays static.
 /// `reconcile_assignment` is idempotent for partitions already
 /// assigned-and-ready, so the periodic re-apply is cheap.
-fn spawn_rlmm_reconciler(
+async fn run_rlmm_reconciler(
     manager: Arc<crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager>,
     mut set_rx: tokio::sync::watch::Receiver<Vec<i32>>,
     shutdown: CancellationToken,
 ) {
-    tokio::spawn(async move {
-        // Apply the initial set immediately.
-        {
-            let set = set_rx.borrow_and_update().clone();
-            manager.reconcile_assignment(&set).await;
-        }
-        let mut tick = tokio::time::interval(RLMM_RECONCILE_TICK);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                () = shutdown.cancelled() => return,
-                changed = set_rx.changed() => {
-                    if changed.is_err() {
-                        return;
-                    }
-                    let set = set_rx.borrow_and_update().clone();
-                    manager.reconcile_assignment(&set).await;
+    let set = set_rx.borrow_and_update().clone();
+    manager.reconcile_assignment(&set).await;
+    let mut tick = tokio::time::interval(RLMM_RECONCILE_TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => return,
+            changed = set_rx.changed() => {
+                if changed.is_err() {
+                    return;
                 }
-                _ = tick.tick() => {
-                    let set = set_rx.borrow().clone();
-                    manager.reconcile_assignment(&set).await;
-                }
+                let set = set_rx.borrow_and_update().clone();
+                manager.reconcile_assignment(&set).await;
+            }
+            _ = tick.tick() => {
+                let set = set_rx.borrow().clone();
+                manager.reconcile_assignment(&set).await;
             }
         }
-    });
+    }
 }
 
 /// Create the partition runtime (mpsc channel + writer task + notify).
@@ -5002,7 +5006,11 @@ mod tests {
         let (set_tx, set_rx) = tokio::sync::watch::channel(vec![0, 2]);
         let shutdown = CancellationToken::new();
 
-        spawn_rlmm_reconciler(manager.clone(), set_rx, shutdown.clone());
+        let reconciler = tokio::spawn(run_rlmm_reconciler(
+            manager.clone(),
+            set_rx,
+            shutdown.clone(),
+        ));
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while manager.assigned_metadata_partitions() != vec![0, 2] {
             assert!(
@@ -5023,6 +5031,7 @@ mod tests {
         }
 
         shutdown.cancel();
+        reconciler.await.expect("reconciler exits");
     }
 
     #[tokio::test]
