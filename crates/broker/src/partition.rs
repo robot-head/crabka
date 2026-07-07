@@ -199,6 +199,9 @@ pub struct Partition {
     /// Current `leader_epoch` from the metadata image. Stamped on every
     /// appended batch; validated on every follower Fetch.
     pub current_leader_epoch: Arc<AtomicI32>,
+    /// True for Slice 1 diskless partitions whose client-visible HW may only
+    /// advance via the WAL durable-sync path.
+    pub(crate) diskless: bool,
     /// Held so the writer task is reaped when every `Partition` handle is
     /// dropped. Not accessed after construction.
     pub writer_handle: Arc<JoinHandle<()>>,
@@ -465,12 +468,9 @@ impl Partition {
     /// replica catching up toward ISR re-admission keeps its progress
     /// across reconciles — see [`crate::replica_state::ReplicaState::install_isr`].
     ///
-    /// Recomputes HW under the new ISR and fires `hw_advance_notify`
-    /// if HW advanced — necessary because an `AlterPartition` shrink
-    /// may have just dropped a lagging follower, and the surviving
-    /// followers' LEOs (which were already being updated via fetch)
-    /// can now satisfy a previously-blocked acks=-1 produce without
-    /// waiting for the next fetch round.
+    /// Recomputes HW under the new ISR and fires `hw_advance_notify` if HW
+    /// advanced. Diskless partitions deliberately skip this LEO-based HW
+    /// recompute: their client-visible HW advances only after WAL fsync.
     pub async fn install_isr(
         &self,
         isr: &[crabka_raft::NodeId],
@@ -481,7 +481,11 @@ impl Partition {
         let mut st = self.replica_state.lock().await;
         let prev_hw = st.hw;
         st.install_isr(isr, replicas, leader, std::time::Instant::now());
-        let new_hw = st.recompute_hw_for_leader_append(leader_leo);
+        let new_hw = if self.diskless {
+            st.hw
+        } else {
+            st.recompute_hw_for_leader_append(leader_leo)
+        };
         drop(st);
         if new_hw > prev_hw {
             self.hw_advance_notify.notify_waiters();
@@ -647,6 +651,7 @@ mod tests {
             hw_advance_notify,
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            diskless: false,
             writer_handle: Arc::new(writer),
         };
         (p, dir)
@@ -690,6 +695,7 @@ mod tests {
             hw_advance_notify,
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            diskless: false,
             writer_handle: Arc::new(writer),
         };
         (p, dir)
@@ -754,6 +760,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            diskless: false,
             writer_handle: Arc::new(writer),
         };
         let s = format!("{p:?}");
@@ -794,6 +801,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            diskless: false,
             writer_handle: Arc::new(writer),
         };
         assert!(p.high_watermark().await == 42);
@@ -818,6 +826,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            diskless: false,
             writer_handle: Arc::new(writer),
         };
         p.install_isr(
@@ -873,6 +882,35 @@ mod tests {
         assert!(
             futures_util::poll!(&mut waiter).is_ready(),
             "notify should fire when ISR install advances HW"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_isr_does_not_advance_diskless_hw_from_unsynced_leo() {
+        let hw_advance_notify = Arc::new(Notify::new());
+        let (mut p, _td) = test_partition(hw_advance_notify.clone());
+        p.diskless = true;
+        append_records(&p, 3);
+        assert!(p.high_watermark().await == 0);
+
+        let waiter = hw_advance_notify.notified();
+        tokio::pin!(waiter);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "waiter registers on first poll"
+        );
+
+        p.install_isr(
+            &[crabka_audit::NodeId(1)],
+            &[crabka_audit::NodeId(1)],
+            crabka_audit::NodeId(1),
+        )
+        .await;
+
+        assert!(p.high_watermark().await == 0);
+        assert!(
+            futures_util::poll!(&mut waiter).is_pending(),
+            "diskless ISR install must not release HW before WAL sync"
         );
     }
 
@@ -995,6 +1033,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            diskless: false,
             writer_handle: Arc::new(writer),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1022,6 +1061,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            diskless: false,
             writer_handle: Arc::new(writer),
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
@@ -1051,6 +1091,7 @@ mod tests {
             hw_advance_notify: hw_advance_notify.clone(),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            diskless: false,
             writer_handle: Arc::new(writer),
         };
 
@@ -1152,6 +1193,7 @@ mod tests {
             hw_advance_notify: hw_advance_notify.clone(),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            diskless: false,
             writer_handle: Arc::new(writer),
         };
         tokio::spawn(async move {
