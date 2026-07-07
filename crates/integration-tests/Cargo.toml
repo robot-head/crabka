@@ -15,14 +15,14 @@ bytes = { workspace = true }
 crabka-broker = { path = "../broker", version = "0.3.8", features = ["test-helpers"] }
 crabka-raft = { path = "../raft", version = "0.3.8" }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
-crabka-client-admin = { path = "../client-admin", version = "0.3.8" }
-crabka-client-consumer = { path = "../client-consumer", version = "0.3.8" }
-crabka-client-producer = { path = "../client-producer", version = "0.3.8" }
-crabka-client-core = { path = "../client-core", version = "0.3.8" }
+crabka-client-admin = { path = "../client-admin", version = "0.3.9" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.3.9" }
+crabka-client-producer = { path = "../client-producer", version = "0.3.9" }
+crabka-client-core = { path = "../client-core", version = "0.3.9" }
 crabka-observability = { path = "../observability", version = "0.3.7" }
-crabka-protocol = { path = "../protocol", version = "0.3.8", default-features = false }
-crabka-security = { path = "../security", version = "0.3.8" }
-crabka-log = { path = "../log", version = "0.3.8" }
+crabka-protocol = { path = "../protocol", version = "0.3.9", default-features = false }
+crabka-security = { path = "../security", version = "0.3.9" }
+crabka-log = { path = "../log", version = "0.3.9" }
 serde_json = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls"] }
 tempfile = { workspace = true }

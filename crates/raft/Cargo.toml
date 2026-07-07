@@ -28,9 +28,9 @@ scenarios = ["crabka-kraft-core/sim"]
 crabka-kraft-core = { version = "0.3.8", path = "../kraft-core" }
 crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
-crabka-log = { version = "0.3.8", path = "../log" }
-crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3.8", path = "../client-core" }
+crabka-log = { version = "0.3.9", path = "../log" }
+crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
 async-trait = { workspace = true }
 wincode = { workspace = true }
 serde-wincode = { workspace = true }

@@ -30,12 +30,12 @@ anyhow = { workspace = true }
 bytes = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
-crabka-client-admin = { version = "0.3.8", path = "../client-admin" }
-crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
-crabka-client-core = { version = "0.3.8", path = "../client-core" }
-crabka-client-producer = { version = "0.3.8", path = "../client-producer" }
-crabka-protocol = { version = "0.3.8", path = "../protocol" }
-crabka-security = { version = "0.3.8", path = "../security" }
+crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
+crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
+crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
+crabka-protocol = { version = "0.3.9", path = "../protocol" }
+crabka-security = { version = "0.3.9", path = "../security" }
 derive_more = { workspace = true }
 exponential-backoff = "2.1.0"
 futures = { workspace = true }

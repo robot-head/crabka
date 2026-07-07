@@ -21,8 +21,8 @@ default = []
 
 [dependencies]
 bon = { workspace = true }
-crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3.8", path = "../client-core", features = ["mock"] }
+crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3.9", path = "../client-core", features = ["mock"] }
 crabka-ids = { version = "0.3.8", path = "../ids" }
 bytes = { workspace = true }
 thiserror = { workspace = true }

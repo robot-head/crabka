@@ -20,10 +20,10 @@ workspace = true
 default = []
 
 [dependencies]
-crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3.8", path = "../client-core" }
-crabka-client-consumer = { version = "0.3.8", path = "../client-consumer" }
-crabka-compression = { version = "0.3.8", path = "../compression" }
+crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
+crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
+crabka-compression = { version = "0.3.9", path = "../compression" }
 async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }

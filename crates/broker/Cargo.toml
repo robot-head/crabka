@@ -36,18 +36,18 @@ path = "src/bin/broker.rs"
 
 [dependencies]
 crabka-audit = { workspace = true }
-crabka-protocol = { version = "0.3.8", path = "../protocol", default-features = false }
+crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
 crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
 crabka-records-legacy = { version = "0.3.8", path = "../records-legacy" }
-crabka-log = { version = "0.3.8", path = "../log" }
+crabka-log = { version = "0.3.9", path = "../log" }
 crabka-ids = { version = "0.3.8", path = "../ids" }
-crabka-compression = { version = "0.3.8", path = "../compression", default-features = false }
+crabka-compression = { version = "0.3.9", path = "../compression", default-features = false }
 crabka-raft = { version = "0.3.8", path = "../raft" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
 crabka-authz = { version = "0.3.8", path = "../authz" }
 crabka-remote-storage = { version = "0.3.8", path = "../remote-storage" }
 crabka-remote-storage-topic = { version = "0.3.8", path = "../remote-storage-topic" }
-crabka-client-core = { version = "0.3.8", path = "../client-core" }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-throttle = { version = "0.3.8", path = "../throttle" }
 crabka-security.workspace = true
 qubit-clock = { workspace = true, features = ["tokio"] }
