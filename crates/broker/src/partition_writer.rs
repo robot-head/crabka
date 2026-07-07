@@ -807,6 +807,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn diskless_acked_record_survives_reopen() {
+        let dir = tempdir().expect("tempdir");
+        {
+            let log = Arc::new(Mutex::new(
+                Log::open(dir.path(), LogConfig::default()).expect("open log"),
+            ));
+            let wal: Option<crate::wal::SharedWal> =
+                Some(Arc::new(crate::wal::LocalFsyncWal::new(log.clone())));
+            let (tx, rx) = mpsc::channel(1);
+            let append_notify = Arc::new(Notify::new());
+            let replica_state = Arc::new(tokio::sync::Mutex::new(ReplicaState::new()));
+            {
+                let mut st = replica_state.lock().await;
+                st.install_isr(
+                    &[crabka_audit::NodeId(1)],
+                    &[crabka_audit::NodeId(1)],
+                    crabka_audit::NodeId(1),
+                    std::time::Instant::now(),
+                );
+            }
+            let hw_advance_notify = Arc::new(Notify::new());
+            let writer = tokio::spawn(run(
+                "t".to_string(),
+                PartitionIndex(0),
+                log.clone(),
+                Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+                rx,
+                append_notify,
+                replica_state.clone(),
+                hw_advance_notify.clone(),
+                crate::log_dir_status::LogDirRegistry::default(),
+                Arc::new(ProducerState::new()),
+                wal,
+            ));
+
+            let hw_waiter = hw_advance_notify.notified();
+            tokio::pin!(hw_waiter);
+
+            let (ack, ack_rx) = oneshot::channel();
+            tx.send(WriterMessage::Produce(ProduceJob {
+                data: ProduceData::Owned(sample_batch(1)),
+                ack,
+            }))
+            .await
+            .expect("send job");
+
+            let assigned = ack_rx.await.expect("ack recv").expect("append ok");
+            assert!(assigned == 0);
+            tokio::time::timeout(std::time::Duration::from_secs(1), &mut hw_waiter)
+                .await
+                .expect("hw_advance_notify did not fire");
+            assert!(replica_state.lock().await.hw == 1);
+
+            drop(tx);
+            writer.await.expect("writer join");
+        }
+
+        let log = Log::open(dir.path(), LogConfig::default()).expect("reopen log");
+        assert!(log.log_end_offset() >= Offset(1));
+    }
+
+    #[tokio::test]
     async fn writer_groups_queued_produces_up_to_configured_cap() {
         let dir = tempdir().expect("tempdir");
         let log = Arc::new(Mutex::new(
