@@ -54,7 +54,7 @@ pub(crate) mod test_support {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
-            None,
+            false,
         );
         registry.insert(
             bootstrap::TOPIC.to_string(),

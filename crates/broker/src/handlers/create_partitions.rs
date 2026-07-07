@@ -227,6 +227,7 @@ pub(crate) async fn handle(
         };
 
         let existing = topic_rec.partitions;
+        let diskless = crate::broker::diskless_topic_config(image.topic_config(&t.name));
         if t.count <= existing {
             out.error_code = codes::INVALID_PARTITIONS;
             out.error_message = Some(format!(
@@ -306,6 +307,7 @@ pub(crate) async fn handle(
                             &log_config,
                             &log_dir_status,
                             &producer_state,
+                            diskless,
                         ) {
                             tracing::error!(
                                 topic = %t.name, partition = *p, error = %e,

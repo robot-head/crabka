@@ -181,6 +181,7 @@ pub(crate) async fn handle(
                     &log_config,
                     &log_dir_status,
                     &broker.producer_state,
+                    false,
                 )
                 .map_err(BrokerError::Txn)?;
                 handle_transactional(&coord, tid, &req, txnv, req.enable2_pc).await?
@@ -351,7 +352,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
-            None,
+            false,
         );
         assert!(part.log_end_offset() == 0);
         partitions.insert("orders".to_string(), PartitionIndex(0), Arc::clone(&part));

@@ -2364,10 +2364,12 @@ impl Broker {
         // Controller-only nodes host no data partitions, so they skip the
         // disk scan/recovery entirely.
         if config.is_broker() {
+            let startup_image = controller.current_image();
             let scan_dirs = log_dir_status.online_subset(&config.all_log_dirs());
             for (topic, partition_id, owning_dir) in log_dir::scan_all(&scan_dirs)? {
                 let dir = log_dir::partition_dir(&owning_dir, &topic, partition_id);
                 let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
+                let diskless = diskless_topic_config(startup_image.topic_config(&topic));
                 let part = spawn_partition(
                     topic.clone(),
                     PartitionIndex(partition_id),
@@ -2375,7 +2377,7 @@ impl Broker {
                     log,
                     log_dir_status.clone(),
                     producer_state.clone(),
-                    None,
+                    diskless,
                 );
                 partitions.insert(topic.clone(), PartitionIndex(partition_id), part);
             }
@@ -3896,6 +3898,21 @@ async fn run_rlmm_reconciler(
     }
 }
 
+pub(crate) fn diskless_topic_config(
+    config: Option<&std::collections::BTreeMap<String, String>>,
+) -> bool {
+    config
+        .and_then(|config| config.get("crabka.diskless"))
+        .is_some_and(|value| value == "true")
+}
+
+fn partition_wal(
+    log: Arc<Mutex<crabka_log::Log>>,
+    diskless: bool,
+) -> Option<crate::wal::SharedWal> {
+    diskless.then(|| Arc::new(crate::wal::LocalFsyncWal::new(log)) as crate::wal::SharedWal)
+}
+
 /// Create the partition runtime (mpsc channel + writer task + notify).
 ///
 /// `log_dir` is the parent `log.dir` that owns the partition (i.e. the
@@ -3912,13 +3929,14 @@ pub(crate) fn spawn_partition(
     log: crabka_log::Log,
     log_dir_status: crate::log_dir_status::LogDirRegistry,
     producer_state: Arc<crate::producer_state::ProducerState>,
-    wal: Option<crate::wal::SharedWal>,
+    diskless: bool,
 ) -> Arc<Partition> {
     /// Depth of the per-partition writer mpsc queue: bounds how many
     /// produce/replication appends may be in flight to one partition before
     /// senders back-pressure.
     const PARTITION_WRITER_QUEUE_DEPTH: usize = 64;
     let log = Arc::new(Mutex::new(log));
+    let wal = partition_wal(log.clone(), diskless);
     let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(PARTITION_WRITER_QUEUE_DEPTH);
     let notify = Arc::new(tokio::sync::Notify::new());
     let replica_state = Arc::new(tokio::sync::Mutex::new(
@@ -4438,7 +4456,7 @@ mod tests {
             log,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
-            None,
+            false,
         );
         if !values.is_empty() {
             let mut batch = crabka_protocol::records::RecordBatch {
@@ -4461,6 +4479,32 @@ mod tests {
                 .expect("append records");
         }
         part
+    }
+
+    #[test]
+    fn diskless_topic_config_requires_exact_true() {
+        assert!(!diskless_topic_config(None));
+
+        let mut config = std::collections::BTreeMap::new();
+        config.insert("crabka.diskless".to_string(), "false".to_string());
+        assert!(!diskless_topic_config(Some(&config)));
+
+        config.insert("crabka.diskless".to_string(), "TRUE".to_string());
+        assert!(!diskless_topic_config(Some(&config)));
+
+        config.insert("crabka.diskless".to_string(), "true".to_string());
+        assert!(diskless_topic_config(Some(&config)));
+    }
+
+    #[test]
+    fn partition_wal_is_created_only_for_diskless_partitions() {
+        let dir = tempdir().expect("tempdir");
+        let log = Arc::new(Mutex::new(
+            crabka_log::Log::open(dir.path(), crabka_log::LogConfig::default()).expect("open log"),
+        ));
+
+        assert!(partition_wal(log.clone(), false).is_none());
+        assert!(partition_wal(log, true).is_some());
     }
 
     fn consumer_group_seed(member_id: &str) -> crate::coordinator::unified::GroupSeed {
