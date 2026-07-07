@@ -272,26 +272,28 @@ pub(crate) async fn handle(
                 }));
             }
 
+            let topic_config_overrides: std::collections::BTreeMap<String, String> = topic_req
+                .configs
+                .iter()
+                .filter_map(|cfg| {
+                    cfg.value
+                        .as_ref()
+                        .map(|value| (cfg.name.clone(), value.clone()))
+                })
+                .collect();
+            let diskless = crate::broker::diskless_topic_config(Some(&topic_config_overrides));
+
             // Persist any topic-level configs the client sent. Without
             // this, cleanup.policy / segment.bytes / retention.ms etc.
             // set at CreateTopics time would be silently dropped — clients
             // would need a follow-up AlterConfigs round-trip. Match Kafka's
             // CreateTopics semantics by emitting one V1TopicConfig record
             // covering the full override map.
-            if !topic_req.configs.is_empty() {
-                let mut overrides: std::collections::BTreeMap<String, String> =
-                    std::collections::BTreeMap::new();
-                for cfg in &topic_req.configs {
-                    if let Some(value) = &cfg.value {
-                        overrides.insert(cfg.name.clone(), value.clone());
-                    }
-                }
-                if !overrides.is_empty() {
-                    records.push(MetadataRecord::V1TopicConfig(TopicConfigRecord {
-                        topic: name.clone(),
-                        overrides,
-                    }));
-                }
+            if !topic_config_overrides.is_empty() {
+                records.push(MetadataRecord::V1TopicConfig(TopicConfigRecord {
+                    topic: name.clone(),
+                    overrides: topic_config_overrides,
+                }));
             }
 
             let result = controller.submit_change(records).await;
@@ -321,6 +323,7 @@ pub(crate) async fn handle(
                                 &log_config,
                                 &log_dir_status,
                                 &producer_state,
+                                diskless,
                             ) {
                                 tracing::error!(
                                     topic = %name, partition = p_i32, error = %e,

@@ -1724,7 +1724,7 @@ mod tests {
             log,
             log_dir_status.clone(),
             Arc::clone(&producer_state),
-            None,
+            false,
         );
         // Push LEO to 3 so the HW can be clamped to 2 (one below the target).
         {
