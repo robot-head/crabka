@@ -153,6 +153,16 @@ fn real_hwm(s: &DpState, base: Instant) -> i64 {
     rs.recompute_hw_for_leader_append(Offset(leader_leo)).0
 }
 
+/// Drive the REAL diskless WAL durable-HW core. Slice 1 is local fsync only, so
+/// the model constrains the ISR to the leader broker and releases exactly the
+/// durable WAL prefix.
+fn real_wal_hwm(leader: u8, durable_leo: i64, base: Instant) -> i64 {
+    let leader = crabka_audit::NodeId(node(leader));
+    let mut rs = ReplicaState::new();
+    rs.install_isr(&[leader], &[leader], leader, base);
+    rs.recompute_hw_for_wal_durable(Offset(durable_leo)).0
+}
+
 /// The leader-epoch entries for a log: one entry per epoch change.
 fn epoch_entries(log: &[u8]) -> Vec<EpochEntry> {
     let mut out = Vec::new();
@@ -438,12 +448,17 @@ impl Model for DpModel {
                 }
             }
             Act::WalSync => {
-                // fsync makes the leader's appended prefix durable. Record it in
-                // the wal_acked ghost (mirrors AdvanceHwm recording `committed`).
+                // fsync makes the leader's appended prefix durable and releases
+                // it through the same HW seam the broker's diskless path uses.
                 let leader_log = &s.log[s.leader as usize];
                 while s.wal_acked.len() < leader_log.len() {
                     let off = s.wal_acked.len();
                     s.wal_acked.push(leader_log[off]);
+                }
+                s.hwm = real_wal_hwm(s.leader, s.wal_acked.len() as i64, self.base);
+                while (s.committed.len() as i64) < s.hwm {
+                    let off = s.committed.len();
+                    s.committed.push(leader_log[off]);
                 }
             }
             Act::ConsumerFetch {
@@ -504,6 +519,9 @@ impl Model for DpModel {
         ];
         if self.diskless {
             props.extend([
+                Property::always("diskless_hw_released_by_wal_sync", |_, s: &DpState| {
+                    s.hwm == s.wal_acked.len() as i64
+                }),
                 Property::sometimes("wal_acked_progress", |_, s: &DpState| {
                     !s.wal_acked.is_empty()
                 }),

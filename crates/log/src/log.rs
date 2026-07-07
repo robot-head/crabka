@@ -36,6 +36,7 @@ pub struct Log {
     config: std::sync::Arc<std::sync::RwLock<LogConfig>>,
     segments: Vec<Segment>,
     active: Option<Segment>,
+    dir_sync_needed: bool,
     /// Override for `log_start_offset()`. When `Some(n)`, the effective
     /// `log_start` is `max(derived_from_segments, n)`. Used by
     /// `trim_to_offset` (and in tests) to advance the log start pointer
@@ -100,6 +101,23 @@ impl RawRead {
             bytes: Bytes::new(),
             total: 0,
         }
+    }
+}
+
+#[cfg(test)]
+mod sync_observer {
+    use std::{cell::RefCell, path::PathBuf};
+
+    thread_local! {
+        static DIR_SYNCS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn take_dir_syncs() -> Vec<PathBuf> {
+        DIR_SYNCS.take()
+    }
+
+    pub(super) fn record_dir_sync(dir: PathBuf) {
+        DIR_SYNCS.with_borrow_mut(|synced| synced.push(dir));
     }
 }
 
@@ -256,9 +274,9 @@ impl Log {
             }
         }
 
-        let active = match active {
-            Some(s) => s,
-            None => Segment::create(&dir, Offset(0))?,
+        let (active, dir_sync_needed) = match active {
+            Some(s) => (s, false),
+            None => (Segment::create(&dir, Offset(0))?, true),
         };
 
         let active_txn_index = TxnIndex::open(active.txn_index_path())?;
@@ -277,6 +295,7 @@ impl Log {
             config,
             segments,
             active: Some(active),
+            dir_sync_needed,
             log_start_override: None,
             lso,
             pending: HashMap::new(),
@@ -379,6 +398,7 @@ impl Log {
         self.pending.clear(); // reset_to is a hard reset (after divergence)
         self.lso = new_active.last_offset() + 1; // = new_base (empty segment)
         self.active = Some(new_active);
+        self.dir_sync_needed = true;
         // The log now holds no records, so the leader-epoch cache must hold no
         // entries (Kafka's truncateFullyAndStartAt → leaderEpochCache.clearAndFlush).
         // Leaving stale entries makes a follower advertise a `last_fetched_epoch`
@@ -536,13 +556,27 @@ impl Log {
     }
 
     /// Flush and `fsync` the active segment to stable storage, independent of
-    /// [`LogConfig::flush_on_append`]. Used by the diskless WAL path to make
-    /// appended records durable before acknowledging a produce.
+    /// [`LogConfig::flush_on_append`]. Also fsyncs the log directory after a new
+    /// segment file has been created, so the segment remains reachable after a
+    /// crash on filesystems that require parent-directory fsync.
     ///
     /// # Errors
-    /// Returns a [`LogError`] if the underlying segment flush fails.
+    /// Returns a [`LogError`] if the underlying segment or directory flush fails.
     pub fn sync(&mut self) -> Result<(), LogError> {
-        self.active_segment_flush()
+        self.active_segment_flush()?;
+        if self.dir_sync_needed {
+            Self::sync_log_dir(&self.dir)?;
+            self.dir_sync_needed = false;
+        }
+        Ok(())
+    }
+
+    fn sync_log_dir(dir: &Path) -> Result<(), LogError> {
+        let log_dir = fs::File::open(dir)?;
+        log_dir.sync_all()?;
+        #[cfg(test)]
+        sync_observer::record_dir_sync(dir.to_path_buf());
+        Ok(())
     }
 
     fn active_segment_flush(&mut self) -> Result<(), LogError> {
@@ -753,6 +787,7 @@ impl Log {
         let new_seg = Segment::create(&self.dir, new_base)?;
         self.active_txn_index = TxnIndex::open(new_seg.txn_index_path())?;
         self.active = Some(new_seg);
+        self.dir_sync_needed = true;
         Ok(())
     }
 
@@ -1053,6 +1088,7 @@ impl Log {
                 let new_seg = Segment::create(&self.dir, offset)?;
                 self.active_txn_index = TxnIndex::open(new_seg.txn_index_path())?;
                 self.active = Some(new_seg);
+                self.dir_sync_needed = true;
             }
         } else if let Some(active) = self.active.as_mut()
             && active.last_offset() >= offset
@@ -1834,6 +1870,38 @@ mod tests {
         // Reopen from disk: the synced records are present.
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();
         assert2::assert!(log.log_end_offset() == Offset(3));
+    }
+
+    #[test]
+    fn sync_fsyncs_parent_dir_for_initial_segment_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        sync_observer::take_dir_syncs();
+
+        log.sync().unwrap();
+
+        assert2::assert!(sync_observer::take_dir_syncs() == vec![dir.path().to_path_buf()]);
+    }
+
+    #[test]
+    fn sync_fsyncs_parent_dir_after_segment_rollover() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                segment_bytes: 1,
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        log.append(&mut sample_batch(1)).unwrap();
+        log.sync().unwrap();
+        sync_observer::take_dir_syncs();
+
+        log.append(&mut sample_batch(1)).unwrap();
+        log.sync().unwrap();
+
+        assert2::assert!(sync_observer::take_dir_syncs() == vec![dir.path().to_path_buf()]);
     }
 
     #[test]
