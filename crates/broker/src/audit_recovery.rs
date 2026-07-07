@@ -102,6 +102,7 @@ mod tests {
             hw_advance_notify: Arc::new(Notify::new()),
             current_leader: Arc::new(AtomicU64::new(0)),
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
+            diskless: false,
             _writer_handle: Arc::new(writer),
         };
         (p, dir)
