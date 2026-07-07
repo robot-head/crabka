@@ -3,8 +3,6 @@
 //! moves them to KRaft); durability is a local `fsync` (Slice 6 upgrades to a
 //! cross-AZ quorum). Survives crash-restart, NOT node/disk loss.
 
-#![allow(dead_code)]
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -17,11 +15,13 @@ use crate::{error::BrokerError, partition::ProduceData};
 
 /// A [`WalStore`] backed by the partition's local `Log` plus an explicit
 /// `fsync` (`Log::sync`).
+#[allow(dead_code)] // Staged diskless WAL seam; later slices wire this into topics.
 pub struct LocalFsyncWal {
     log: Arc<Mutex<Log>>,
 }
 
 impl LocalFsyncWal {
+    #[allow(dead_code)]
     #[must_use]
     pub fn new(log: Arc<Mutex<Log>>) -> Self {
         Self { log }
@@ -88,6 +88,11 @@ mod tests {
             .append(vec![sample_owned(2), sample_owned(3)])
             .await
             .unwrap();
+        let actual_offsets = results
+            .iter()
+            .map(|result| result.as_ref().map(|offset| *offset).map_err(|_| ()))
+            .collect::<Vec<_>>();
+        assert!(actual_offsets == vec![Ok(Offset(0)), Ok(Offset(2))]);
         assert!(results.iter().all(Result::is_ok));
         assert!(leo == crabka_ids::Offset(5));
         // Durable watermark only advances after sync_durable.
