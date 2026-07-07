@@ -391,12 +391,17 @@ pub async fn run(
         Arc<tokio::sync::Mutex<ReplicaState>>,
         Arc<Notify>,
     ),
-    services: (LogDirRegistry, Arc<ProducerState>),
+    services: (
+        LogDirRegistry,
+        Arc<ProducerState>,
+        Option<crate::wal::SharedWal>,
+    ),
 ) {
     let (topic, partition) = identity;
     let (log, log_dir) = storage;
     let (append_notify, replica_state, hw_advance_notify) = signals;
-    let (log_dir_status, producer_state) = services;
+    let (log_dir_status, producer_state, wal) = services;
+    let _ = &wal;
     // `pending` holds a non-Produce message that was pulled off the channel
     // while group-draining Produce jobs (see the Produce arm). It is handled on
     // the next iteration so control messages are never reordered ahead of the
@@ -669,6 +674,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let (ack, ack_rx) = oneshot::channel();
@@ -730,6 +736,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let mut acks = acks.into_iter();
@@ -772,6 +779,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let (ack, ack_rx) = oneshot::channel();
@@ -813,6 +821,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         // "Producer" batch with a bogus base_offset + epoch the log overwrites.
@@ -913,6 +922,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         // Subscribe BEFORE sending so we don't miss the notification.
@@ -957,6 +967,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         // First replicate batch must start at offset 0 to match the
@@ -995,6 +1006,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         // Wrong offset — log_end_offset is 0 but we claim 7.
@@ -1037,6 +1049,7 @@ mod tests {
             Arc::new(Notify::new()),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         // Produce two batches so the log has some data.
@@ -1098,6 +1111,7 @@ mod tests {
             hw_advance_notify.clone(),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let waiter = hw_advance_notify.notified();
@@ -1153,6 +1167,7 @@ mod tests {
             hw_advance_notify.clone(),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let waiter = hw_advance_notify.notified();
@@ -1202,6 +1217,7 @@ mod tests {
             hw_advance_notify,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let new_cfg = LogConfig {
@@ -1256,6 +1272,7 @@ mod tests {
             hw_advance_notify,
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
@@ -1313,6 +1330,7 @@ mod tests {
             hw_advance_notify.clone(),
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
+            None,
         ));
 
         let (ack, ack_rx) = oneshot::channel();
