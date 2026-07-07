@@ -535,6 +535,24 @@ impl Log {
         Ok(assigned_base)
     }
 
+    /// Flush and `fsync` the active segment to stable storage, independent of
+    /// [`LogConfig::flush_on_append`]. Used by the diskless WAL path to make
+    /// appended records durable before acknowledging a produce.
+    ///
+    /// # Errors
+    /// Returns a [`LogError`] if the underlying segment flush fails.
+    pub fn sync(&mut self) -> Result<(), LogError> {
+        self.active_segment_flush()
+    }
+
+    fn active_segment_flush(&mut self) -> Result<(), LogError> {
+        let active = self
+            .active
+            .as_mut()
+            .expect("active segment must exist after Log::open");
+        active.flush()
+    }
+
     /// Verbatim counterpart of [`Log::append_preserving_offset`]: roll if
     /// needed, append the verbatim bytes to the active segment, honor
     /// `flush_on_append`, and update LSO from the batch's
@@ -577,7 +595,7 @@ impl Log {
         )?;
 
         if flush_on_append {
-            active.flush()?;
+            self.active_segment_flush()?;
         }
 
         // --- LSO tracking (no control batches on this path) ---
@@ -674,7 +692,7 @@ impl Log {
         active.append(batch, index_interval_bytes)?;
 
         if flush_on_append {
-            active.flush()?;
+            self.active_segment_flush()?;
         }
 
         // --- LSO tracking + .txnindex writes ---
@@ -1803,6 +1821,19 @@ mod tests {
         drop(log);
         let log_path = dir.path().join("00000000000000000000.log");
         assert!(log_path.exists());
+    }
+
+    #[test]
+    fn sync_persists_appended_records() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+            log.append(&mut sample_batch(3)).unwrap();
+            log.sync().unwrap(); // fsync without relying on flush_on_append
+        }
+        // Reopen from disk: the synced records are present.
+        let log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        assert2::assert!(log.log_end_offset() == Offset(3));
     }
 
     #[test]
