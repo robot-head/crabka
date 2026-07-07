@@ -326,8 +326,12 @@ impl Model for DpModel {
             hwm: 0,
             leader: 0,
             leader_epoch: 1,
-            isr: 0b111,
-            live: 0b111,
+            // Slice 1 diskless is a single-node local-fsync WAL. Keep the RF=3
+            // model for classic clean/unclean checks, but constrain diskless to
+            // the leader broker so WAL durability is not incorrectly invalidated
+            // by electing a different replica that never fsynced the record.
+            isr: if self.diskless { 0b001 } else { 0b111 },
+            live: if self.diskless { 0b001 } else { 0b111 },
             committed: vec![],
             wal_acked: vec![],
             lost: false,
@@ -341,9 +345,10 @@ impl Model for DpModel {
             if s.log[s.leader as usize].len() < MAX_LEN && s.leader_epoch <= MAX_EPOCH {
                 acts.push(Act::Produce);
             }
-            if self.diskless {
+            if self.diskless && s.wal_acked.len() < s.log[s.leader as usize].len() {
                 acts.push(Act::WalSync);
-            } else {
+            }
+            if !self.diskless {
                 for b in 0..NB as u8 {
                     if b != s.leader
                         && has(s.live, b)
@@ -368,7 +373,10 @@ impl Model for DpModel {
         // Liveness + failover.
         let live_count = u32::from(s.live).count_ones();
         for b in 0..NB as u8 {
-            if has(s.live, b) && live_count > 1 {
+            if self.diskless && b != s.leader {
+                continue;
+            }
+            if has(s.live, b) && (live_count > 1 || self.diskless) {
                 acts.push(Act::Die(b));
             }
             if !has(s.live, b) {
@@ -495,10 +503,14 @@ impl Model for DpModel {
             }),
         ];
         if self.diskless {
-            props.push(Property::sometimes(
-                "wal_acked_progress",
-                |_, s: &DpState| !s.wal_acked.is_empty(),
-            ));
+            props.extend([
+                Property::sometimes("wal_acked_progress", |_, s: &DpState| {
+                    !s.wal_acked.is_empty()
+                }),
+                Property::sometimes("wal_acked_survives_broker_down", |_, s: &DpState| {
+                    !has(s.live, s.leader) && !s.wal_acked.is_empty()
+                }),
+            ]);
         } else {
             props.extend([
                 Property::sometimes("committed_progress", |_, s: &DpState| {
@@ -532,7 +544,7 @@ impl Model for DpModel {
                 }),
             ]);
         }
-        if self.unclean && !self.diskless {
+        if self.unclean {
             // Loss characterization: an unclean-election data loss is reachable
             // (and `committed_durable` above still holds — `committed` is the LIVE
             // durability obligation, truncated when an unclean election drops it).
