@@ -3898,6 +3898,7 @@ pub(crate) fn spawn_partition(
         hw_advance_notify,
         current_leader,
         current_leader_epoch,
+        diskless,
         writer_handle: Arc::new(writer),
     })
 }
