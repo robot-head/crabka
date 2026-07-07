@@ -84,7 +84,7 @@ fn lock_log(log: &Mutex<Log>) -> std::sync::MutexGuard<'_, Log> {
 /// `fsync` is a credible "the disk just went sideways" signal, so we
 /// model it as a `LogError::Io` — which `flag_storage_failure` then
 /// recognizes and uses to mark the owning log dir offline.
-fn storage_failure_error(
+pub(crate) fn storage_failure_error(
     context: &str,
     detail: impl std::fmt::Display,
 ) -> crate::error::BrokerError {
@@ -135,7 +135,7 @@ fn append_produce_batch(
 /// replacement thread; current-thread test runtimes keep the `spawn_blocking`
 /// fallback because `block_in_place` is illegal there. The writer loop is still
 /// the single serializer for this partition, so append ordering is unchanged.
-async fn run_produce_append_batch(
+pub(crate) async fn run_produce_append_batch(
     log: Arc<Mutex<Log>>,
     datas: Vec<ProduceData>,
 ) -> Result<(Vec<Result<Offset, crate::error::BrokerError>>, Offset), crate::error::BrokerError> {
