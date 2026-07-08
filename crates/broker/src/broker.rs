@@ -4670,11 +4670,6 @@ mod tests {
         assert!(image.partition(topic, partition) == Some(&partition_record));
     }
 
-    fn unused_loopback_addr() -> SocketAddr {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
-        listener.local_addr().expect("reserved loopback addr")
-    }
-
     fn static_voter_test_config(
         log_dir: &std::path::Path,
         node_id: u64,
@@ -5645,17 +5640,34 @@ mod tests {
     async fn broker_handle_reports_non_default_node_and_voter_state() {
         let dir7 = tempfile::tempdir().unwrap();
         let dir8 = tempfile::tempdir().unwrap();
-        let listen7 = unused_loopback_addr();
-        let listen8 = unused_loopback_addr();
-        let controller7 = unused_loopback_addr();
-        let controller8 = unused_loopback_addr();
+        let data_listener7 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let data_listener8 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let controller_listener7 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let controller_listener8 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen7 = data_listener7.local_addr().unwrap();
+        let listen8 = data_listener8.local_addr().unwrap();
+        let controller7 = controller_listener7.local_addr().unwrap();
+        let controller8 = controller_listener8.local_addr().unwrap();
         let voters = [(7, controller7), (8, controller8)];
 
         let config7 = static_voter_test_config(dir7.path(), 7, listen7, controller7, &voters);
         let config8 = static_voter_test_config(dir8.path(), 8, listen8, controller8, &voters);
         let start = Box::pin(tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            async { tokio::try_join!(Broker::start(config7), Broker::start(config8)) },
+            async {
+                tokio::try_join!(
+                    Broker::start_with_listeners(
+                        config7,
+                        Some(controller_listener7),
+                        Some(data_listener7),
+                    ),
+                    Broker::start_with_listeners(
+                        config8,
+                        Some(controller_listener8),
+                        Some(data_listener8),
+                    ),
+                )
+            },
         ));
         let (handle7, handle8) = start
             .await
