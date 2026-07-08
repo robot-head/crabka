@@ -117,7 +117,7 @@
 //! `acks=all` produces survive arbitrary single-broker failures with
 //! no data loss and no zombie writes.
 
-#![doc(html_root_url = "https://docs.rs/crabka-broker/0.3.8")]
+#![doc(html_root_url = "https://docs.rs/crabka-broker/0.3.9")]
 
 /// Emit the wrapped item(s) only on platforms with a usable file→socket
 /// `sendfile(2)` for the zero-copy fetch path — Linux, the Apple targets, and

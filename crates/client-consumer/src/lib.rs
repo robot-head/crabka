@@ -72,7 +72,7 @@
 //!
 //! None for now.
 
-#![doc(html_root_url = "https://docs.rs/crabka-client-consumer/0.3.8")]
+#![doc(html_root_url = "https://docs.rs/crabka-client-consumer/0.3.9")]
 
 mod assignor;
 mod builder;

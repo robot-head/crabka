@@ -887,7 +887,7 @@
 //! materializes a table into a versioned key-value store, so out-of-order
 //! records are recorded as historical versions without clobbering the latest,
 //! and point-in-time reads are available via `get_as_of`.
-#![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.8")]
+#![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.9")]
 
 pub mod columnar;
 pub mod dsl;

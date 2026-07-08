@@ -49,7 +49,7 @@
 //! return [`RaftError::Unsupported`]. Mixed JVM+Crabka controller quorums are
 //! outside this crate's compatibility target.
 
-#![doc(html_root_url = "https://docs.rs/crabka-raft/0.3.8")]
+#![doc(html_root_url = "https://docs.rs/crabka-raft/0.3.9")]
 
 mod config;
 mod controller;
