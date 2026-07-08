@@ -69,7 +69,7 @@ mod snapshot;
 mod types;
 mod wire;
 
-pub use config::{BootstrapMode, ControllerConfig};
+pub use config::{BootstrapMode, ControllerConfig, RaftShardRouter, ShardRouteFuture};
 pub use controller::{
     Controller, ControllerHandle, QuorumState, SnapshotRange, SnapshotSlice, metadata_log_nonempty,
 };
@@ -78,7 +78,7 @@ pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
 pub use kraft::MetadataFetchSlice;
 pub use network::{OutboundDialer, PlaintextDialer};
 pub use reconfig::{AddVoter, ReconfigOutcome, RemoveVoter, UpdateVoter};
-pub use types::{AppData, AppDataResponse, Node, NodeId};
+pub use types::{AppData, AppDataResponse, Node, NodeId, OffsetReservation, SubmitChangeResult};
 pub use wire::{
     API_KEY_METADATA_FETCH, API_KEY_SUBMIT_CHANGE, CrabkaMetadataFetchRequest,
     CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse,

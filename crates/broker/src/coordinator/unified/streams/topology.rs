@@ -480,7 +480,7 @@ pub async fn ensure_internal_topics(
         }
 
         match controller.submit_change(records).await {
-            Ok(()) | Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => {}
+            Ok(_) | Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => {}
             Err(e) => {
                 return Err(BrokerError::Txn(format!(
                     "submit_change failed creating internal topic '{}': {e}",

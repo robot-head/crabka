@@ -170,6 +170,9 @@ pub enum ModelAction {
     Timeout(NodeId, TimerKind),
     /// A client appends `value` (as `client`) to the single current leader.
     ClientAppend(ClientId, u64),
+    /// A diskless WAL appender connected to `via` reserves through the same
+    /// ordered controller path, so the append still lands at the current leader.
+    AppendVia(NodeId, ClientId, u64),
     /// Drop an in-flight message without delivering it (network loss).
     DropMsg(Envelope),
     /// Deliver a copy of an in-flight message but leave the original queued
@@ -194,6 +197,8 @@ pub struct ConsensusModel {
     pub enable_loss_dup: bool,
     /// Max concurrently-crashed nodes (`0` = no crashes).
     pub max_crashes: usize,
+    /// Offer appends through every live node, not just direct leader appends.
+    pub enable_append_via: bool,
 }
 
 impl ConsensusModel {
@@ -208,6 +213,7 @@ impl ConsensusModel {
             max_epoch: 2,
             enable_loss_dup: false,
             max_crashes: 0,
+            enable_append_via: false,
         }
     }
 
@@ -222,6 +228,7 @@ impl ConsensusModel {
             max_epoch: 2,
             enable_loss_dup: false,
             max_crashes: 0,
+            enable_append_via: false,
         }
     }
 
@@ -237,6 +244,22 @@ impl ConsensusModel {
             max_epoch: 2,
             enable_loss_dup: true,
             max_crashes: 1,
+            enable_append_via: false,
+        }
+    }
+
+    /// Diskless append focus: client appends are offered through every live node
+    /// to model stateless appenders, but the ordered controller log remains the
+    /// linearization point.
+    pub fn append_via(voter_ids: &[NodeId], max_appends: u32) -> Self {
+        Self {
+            voter_ids: voter_ids.to_vec(),
+            max_appends,
+            max_inflight: 3,
+            max_epoch: 2,
+            enable_loss_dup: false,
+            max_crashes: 0,
+            enable_append_via: true,
         }
     }
 
@@ -572,7 +595,15 @@ impl Model for ConsensusModel {
         if leaders.len() == 1 && state.appends_issued < self.max_appends {
             let client = ClientId::from(state.appends_issued) + 1;
             let value = u64::from(state.appends_issued) + 1;
-            actions.push(ModelAction::ClientAppend(client, value));
+            if self.enable_append_via {
+                for &id in &self.voter_ids {
+                    if !state.crashed.contains(&id) {
+                        actions.push(ModelAction::AppendVia(id, client, value));
+                    }
+                }
+            } else {
+                actions.push(ModelAction::ClientAppend(client, value));
+            }
         }
     }
 
@@ -632,6 +663,30 @@ impl Model for ConsensusModel {
                 let epoch = state.nodes[&leader].machine.quorum_state().leader_epoch;
                 let offset = state.nodes[&leader].log.end_offset();
                 // Record the invocation, append at the leader, track until committed.
+                let _ = state
+                    .linz
+                    .on_invoke(client, LogOp::Append(value))
+                    .expect("fresh client id has no in-flight op");
+                state
+                    .nodes
+                    .get_mut(&leader)
+                    .expect("leader exists")
+                    .log
+                    .append_in_epoch(epoch, 1);
+                state.pending.insert(offset, (client, value));
+                state.appends_issued += 1;
+            }
+            ModelAction::AppendVia(via, client, value) => {
+                if state.crashed.contains(&via) {
+                    return None;
+                }
+                let leader = state
+                    .nodes
+                    .iter()
+                    .find(|(id, n)| is_leader(n) && !state.crashed.contains(*id))
+                    .map(|(&id, _)| id)?;
+                let epoch = state.nodes[&leader].machine.quorum_state().leader_epoch;
+                let offset = state.nodes[&leader].log.end_offset();
                 let _ = state
                     .linz
                     .on_invoke(client, LogOp::Append(value))

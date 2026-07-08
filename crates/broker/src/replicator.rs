@@ -823,7 +823,10 @@ mod tests {
             }
         }
 
-        async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+        async fn submit_change(
+            &self,
+            _records: Vec<MetadataRecord>,
+        ) -> Result<crabka_raft::SubmitChangeResult, RaftError> {
             panic!("unused in replicator tests")
         }
 

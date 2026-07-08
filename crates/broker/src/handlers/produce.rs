@@ -425,8 +425,8 @@ async fn process_partition(
         }
     };
 
-    // ── leadership gate (Kafka: only the LEADER accepts Produce) ──────
-    // Only the partition leader may accept a Produce. A Produce misrouted
+    // ── leadership gate (Kafka: only the LEADER accepts classic Produce) ──────
+    // Only the partition leader may accept a classic Produce. A Produce misrouted
     // to a non-leader must be rejected so the client refreshes its
     // metadata and re-targets — it must NOT be appended to a local
     // follower replica (the real leader would never see those records and
@@ -445,7 +445,9 @@ async fn process_partition(
     // already names it the leader; the only residual window is a follower
     // whose image hasn't yet caught up to a leadership change, which
     // correctly returns NOT_LEADER (the client retries against the new
-    // leader) rather than appending to the wrong replica.
+    // leader) rather than appending to the wrong replica. Diskless topics are
+    // the exception: any local WAL member can append after obtaining a
+    // controller-reserved base offset.
     //
     // Partition-level absence in the image (topic exists but this index
     // doesn't, or the topic is unknown) maps to UNKNOWN_TOPIC_OR_PARTITION
@@ -465,21 +467,6 @@ async fn process_partition(
         }
         Some(pr) => (pr.leader, pr.leader_epoch),
     };
-    if leader != this_node_id {
-        out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
-        out.current_leader = LeaderIdAndEpoch {
-            leader_id: i32::try_from(leader.0).unwrap_or(NO_LEADER_ID),
-            leader_epoch: leader_epoch.0,
-            ..Default::default()
-        };
-        return Ok(out);
-    }
-
-    // We are the image-designated leader. The local replica must exist;
-    // if the local writer-actor hasn't been spun up yet (supervisor
-    // reconcile lagging the image on a just-elected leader), treat it as a
-    // transient not-leader — the client retries and the append lands once
-    // the writer is ready, rather than failing the produce outright.
     let Some(part) = partitions.get(topic_name, crabka_ids::PartitionIndex(idx)) else {
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
@@ -489,6 +476,15 @@ async fn process_partition(
         };
         return Ok(out);
     };
+    if leader != this_node_id && !part.diskless {
+        out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
+        out.current_leader = LeaderIdAndEpoch {
+            leader_id: i32::try_from(leader.0).unwrap_or(NO_LEADER_ID),
+            leader_epoch: leader_epoch.0,
+            ..Default::default()
+        };
+        return Ok(out);
+    }
 
     // KIP-113 offline-dir handling: if the partition's owning log dir
     // has been flipped offline (either by the startup probe or by a
@@ -535,6 +531,10 @@ async fn process_partition(
     // batch HEADER on the verbatim path (no record decode), or from the
     // decoded owned `RecordBatch` header on the fallback path.
     let is_transactional = prepared.attributes.is_transactional();
+    if is_transactional && part.diskless {
+        out.error_code = codes::INVALID_TXN_STATE;
+        return Ok(out);
+    }
     {
         let pid_txn = prepared.producer_id;
         let epoch_txn = prepared.producer_epoch;
@@ -1800,6 +1800,69 @@ mod tests {
             resp.error_code == crate::codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND,
             "HW 2 < target 3 must time out; a `-1` mutant would target offset 1 and return NONE"
         );
+    }
+
+    #[tokio::test]
+    async fn transactional_produce_to_diskless_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = Arc::new(image_with_topic("orders", &[1]));
+        let partitions = Arc::new(crate::partition_registry::PartitionRegistry::new());
+        let txn_coordinator = Arc::new(crate::txn::coordinator::TxnCoordinator::new(
+            crabka_audit::NodeId(1),
+            Arc::clone(&partitions),
+            Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+        ));
+        let producer_state = Arc::new(crate::producer_state::ProducerState::new());
+        let log_dir_status = crate::log_dir_status::LogDirRegistry::default();
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let part_dir = crate::log_dir::partition_dir(dir.path(), "orders", 0);
+        std::fs::create_dir_all(&part_dir).unwrap();
+        let log = crabka_log::Log::open(&part_dir, crabka_log::LogConfig::default()).unwrap();
+        let part = crate::broker::spawn_partition(
+            "orders".to_string(),
+            crabka_ids::PartitionIndex(0),
+            dir.path().to_path_buf(),
+            log,
+            log_dir_status.clone(),
+            Arc::clone(&producer_state),
+            true,
+        );
+        partitions.insert("orders".to_string(), crabka_ids::PartitionIndex(0), part);
+        let payload = encode_batch(&RecordBatch {
+            attributes: crabka_protocol::records::Attributes::default().with_transactional(true),
+            producer_id: 42,
+            producer_epoch: 0,
+            base_sequence: 0,
+            records: vec![Record {
+                value: Some(Bytes::from_static(b"txn")),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let resp = process_partition(
+            FramedPartition {
+                index: 0,
+                payload: PartitionPayload::Slice(payload),
+            },
+            None,
+            "orders",
+            false,
+            false,
+            1,
+            Duration::from_millis(50),
+            &partitions,
+            &txn_coordinator,
+            &producer_state,
+            &log_dir_status,
+            &image,
+            crabka_audit::NodeId(1),
+            &metrics,
+        )
+        .await
+        .expect("process partition");
+
+        assert!(resp.error_code == crate::codes::INVALID_TXN_STATE);
     }
 
     #[test]

@@ -44,6 +44,23 @@ const UNKNOWN_TIMESTAMP: i64 = -1;
 /// Kafka's `ListOffsetsResponse.UNKNOWN_OFFSET`.
 const UNKNOWN_OFFSET: i64 = -1;
 
+async fn diskless_earliest_offset(
+    local_start: i64,
+    diskless_read: Option<&crate::diskless::read::DisklessReadHandle>,
+    topic_id: Option<uuid::Uuid>,
+    partition: i32,
+) -> i64 {
+    let Some((handle, topic_id)) = diskless_read.zip(topic_id) else {
+        return local_start;
+    };
+    handle
+        .index
+        .lock()
+        .await
+        .earliest_covered(topic_id, partition)
+        .map_or(local_start, |object_start| local_start.min(object_start))
+}
+
 #[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_list_offsets",
@@ -62,6 +79,7 @@ pub(crate) async fn handle(
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
     let remote_reader = broker.remote_reader.clone();
+    let diskless_read = broker.diskless_read.clone();
     {
         let mut cur: &[u8] = req_bytes;
         let req = ListOffsetsRequest::decode(&mut cur, version)?;
@@ -128,7 +146,8 @@ pub(crate) async fn handle(
                 };
 
                 let tiered = remote_storage_enable && remote_reader.is_some();
-                let topic_id = if tiered {
+                let diskless = p.diskless && diskless_read.is_some();
+                let topic_id = if tiered || diskless {
                     controller
                         .current_image()
                         .topic(&topic.name)
@@ -158,6 +177,13 @@ pub(crate) async fn handle(
                                 ),
                             }
                         }
+                        earliest = diskless_earliest_offset(
+                            earliest,
+                            diskless_read.as_deref(),
+                            topic_id,
+                            idx,
+                        )
+                        .await;
                         (earliest, UNKNOWN_TIMESTAMP)
                     }
                     LATEST_TIMESTAMP => (local_end, UNKNOWN_TIMESTAMP),
@@ -254,6 +280,36 @@ mod tests {
     );
 
     use crate::test_support::start_broker_with_authorizer_no_audit as start_broker;
+
+    #[tokio::test]
+    async fn diskless_earliest_uses_object_floor_but_leaves_local_floor_visible() {
+        let topic_id = uuid::Uuid::from_u128(42);
+        let mut cache = crate::diskless::wal_index::WalIndexCache::default();
+        cache.apply(&crate::diskless::wal_index::WalFlushRecord {
+            object_key: "o".into(),
+            format_version: 1,
+            entries: vec![crate::diskless::wal_index::WalIndexEntry {
+                topic_id,
+                partition: 0,
+                first_offset: 0,
+                last_offset: 8,
+                byte_start: 0,
+                byte_len: 1,
+            }],
+        });
+        let handle = crate::diskless::read::DisklessReadHandle::new(
+            Arc::new(tokio::sync::Mutex::new(cache)),
+            Arc::new(object_store::memory::InMemory::new()),
+        );
+
+        let earliest = diskless_earliest_offset(9, Some(&handle), Some(topic_id), 0).await;
+        let earliest_local = 9;
+        let latest = 12;
+
+        assert!(earliest == 0);
+        assert!(earliest_local == 9);
+        assert!(latest == 12);
+    }
 
     #[test]
     fn sentinel_constants_match_kafka_wire_values() {

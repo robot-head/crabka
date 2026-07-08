@@ -42,25 +42,25 @@ type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 /// Resolved read for a single requested (topic, partition) tuple, kept
 /// around so we can re-read after a long-poll wake.
-struct PendingRead {
-    topic_name: String,
-    topic_id: WireUuid,
-    partition_index: i32,
-    fetch_offset: i64,
-    max_bytes: i32,
+pub(crate) struct PendingRead {
+    pub(crate) topic_name: String,
+    pub(crate) topic_id: WireUuid,
+    pub(crate) partition_index: i32,
+    pub(crate) fetch_offset: i64,
+    pub(crate) max_bytes: i32,
     /// `true` when `isolation_level == 1` on a consumer fetch (not a
     /// follower fetch). Causes batch-level LSO filtering and populates
     /// `aborted_transactions` in the response.
-    read_committed: bool,
+    pub(crate) read_committed: bool,
     /// `true` when `replica_id >= 0` — i.e., the request is from a follower
     /// replicator rather than a consumer. Follower fetches see all records up
     /// to LEO and report LEO as HW/LSO; consumer fetches are clamped at HW.
-    is_follower_fetch: bool,
+    pub(crate) is_follower_fetch: bool,
     /// `None` for unknown topic/partition or out-of-range — final response is
     /// already filled out and won't be re-read on wake.
-    partition: Option<Arc<Partition>>,
+    pub(crate) partition: Option<Arc<Partition>>,
     /// Per-partition output, mutated in place by `do_read`.
-    out: PartitionData,
+    pub(crate) out: PartitionData,
     /// Accumulator for microseconds spent in this partition's `do_read`
     /// calls (first pass plus any long-poll re-reads). Measured as an
     /// `Instant` elapsed delta around each `do_read`. The heavy byte read
@@ -68,7 +68,7 @@ struct PendingRead {
     /// allocating a `tokio_metrics::TaskMonitor` per partition per fetch.
     /// Drained into the response-emit loop's `record_partition_cpu_micros`
     /// call.
-    cpu_micros: u64,
+    pub(crate) cpu_micros: u64,
 }
 
 /// Handle a `Fetch` request, returning the response **struct** (not yet
@@ -495,6 +495,8 @@ pub(crate) async fn handle(
         let read_start = std::time::Instant::now();
         total_bytes += do_read(
             &part,
+            topic_id_from_wire(p.topic_id),
+            Some(broker.hot_tail.clone()),
             // Wrap the decoded-request wire offset into `Offset` for the read.
             Offset(p.fetch_offset),
             p.max_bytes,
@@ -511,10 +513,14 @@ pub(crate) async fn handle(
         // OFFSET_OUT_OF_RANGE because the requested offset is below
         // `local_log_start_offset()` on a tiered topic, attempt to
         // serve the batch from the remote tier.
-        if p.out.error_code == codes::OFFSET_OUT_OF_RANGE
-            && let Some(serviced_bytes) = try_remote_read(broker, p, &part).await
-        {
-            total_bytes += serviced_bytes;
+        if p.out.error_code == codes::OFFSET_OUT_OF_RANGE {
+            if let Some(serviced_bytes) = try_remote_read(broker, p, &part).await {
+                total_bytes += serviced_bytes;
+            } else if let Some(serviced_bytes) =
+                crate::diskless::read::try_diskless_read(broker, p, &part).await
+            {
+                total_bytes += serviced_bytes;
+            }
         }
     }
 
@@ -1062,9 +1068,11 @@ pub(crate) fn compute_visibility_window(
 /// - raw bytes are clamped at HW (`base_offset < hw`)
 /// - `out.high_watermark` and `out.last_stable_offset` are set to `hw`
 /// - `out.aborted_transactions` is `None`
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn do_read(
     part: &Partition,
+    topic_id: Option<uuid::Uuid>,
+    hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     fetch_offset: Offset,
     max_bytes: i32,
     read_committed: bool,
@@ -1136,116 +1144,127 @@ async fn do_read(
             read_committed_aborts,
         } => {
             let read_max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
-            // Run the blocking seek+read (and, for read_committed, the
-            // aborted-txn index scan) off the reactor thread. The lock is
-            // re-acquired inside the closure for the brief duration of the
-            // syscalls.
-            let log = part.log.clone();
-            let join = tokio::task::spawn_blocking(move || {
-                let log = log.lock().expect("log mutex poisoned");
+            if part.diskless
+                && !read_committed_aborts
+                && let (Some(topic_id), Some(hot_tail)) = (topic_id, hot_tail.as_ref())
+                && let Some(bytes) =
+                    hot_tail.get(topic_id, part.partition_id, fetch_offset.0, read_max)
+            {
+                (Some(RecordsPayload::Raw(bytes)), Vec::new())
+            } else {
+                // Run the blocking seek+read (and, for read_committed, the
+                // aborted-txn index scan) off the reactor thread. The lock is
+                // re-acquired inside the closure for the brief duration of the
+                // syscalls.
+                let log = part.log.clone();
+                let join = tokio::task::spawn_blocking(move || {
+                    let log = log.lock().expect("log mutex poisoned");
 
-                // Zero-copy (Increments D + E): on a plaintext connection
-                // (SENDFILE alias: Linux + Apple + FreeBSD/DragonFly), describe
-                // the records run with a cheap header-only walk (`read_raw_desc`)
-                // instead of `pread`ing the payload. If the run is large enough
-                // to amortize the sendfile syscall, return file-backed regions
-                // for the `sendfile` drain; otherwise fall back to the byte-copy
-                // `read_raw` path (small/fragmented fetches stay on the vectored
-                // path). The descriptor is captured here under the log lock so
-                // retention can't truncate the region out from under the later
-                // async send (the `Arc<File>` pins the inode).
-                #[cfg(any(
-                    target_os = "linux",
-                    target_os = "macos",
-                    target_os = "ios",
-                    target_os = "tvos",
-                    target_os = "watchos",
-                    target_os = "freebsd",
-                    target_os = "dragonfly",
-                ))]
-                let records: RecordsPayload = {
-                    let mut chosen: Option<RecordsPayload> = None;
-                    if sendfile_capable {
-                        let desc = log.read_raw_desc(fetch_offset, limit_offset, read_max)?;
-                        if desc.total >= crate::network::fetch_writer::SENDFILE_MIN_BYTES
-                            && !desc.regions.is_empty()
-                        {
-                            chosen = Some(RecordsPayload::FileRegions(desc.regions));
+                    // Zero-copy (Increments D + E): on a plaintext connection
+                    // (SENDFILE alias: Linux + Apple + FreeBSD/DragonFly), describe
+                    // the records run with a cheap header-only walk (`read_raw_desc`)
+                    // instead of `pread`ing the payload. If the run is large enough
+                    // to amortize the sendfile syscall, return file-backed regions
+                    // for the `sendfile` drain; otherwise fall back to the byte-copy
+                    // `read_raw` path (small/fragmented fetches stay on the vectored
+                    // path). The descriptor is captured here under the log lock so
+                    // retention can't truncate the region out from under the later
+                    // async send (the `Arc<File>` pins the inode).
+                    #[cfg(any(
+                        target_os = "linux",
+                        target_os = "macos",
+                        target_os = "ios",
+                        target_os = "tvos",
+                        target_os = "watchos",
+                        target_os = "freebsd",
+                        target_os = "dragonfly",
+                    ))]
+                    let records: RecordsPayload = {
+                        let mut chosen: Option<RecordsPayload> = None;
+                        if sendfile_capable {
+                            let desc = log.read_raw_desc(fetch_offset, limit_offset, read_max)?;
+                            if desc.total >= crate::network::fetch_writer::SENDFILE_MIN_BYTES
+                                && !desc.regions.is_empty()
+                            {
+                                chosen = Some(RecordsPayload::FileRegions(desc.regions));
+                            }
                         }
-                    }
-                    match chosen {
-                        Some(p) => p,
-                        None => RecordsPayload::Raw(
+                        match chosen {
+                            Some(p) => p,
+                            None => RecordsPayload::Raw(
+                                log.read_raw(fetch_offset, limit_offset, read_max)?.bytes,
+                            ),
+                        }
+                    };
+                    // Windows fallback: no safe `sendfile`/`TransmitFile`, so always
+                    // `read_raw` + copy (the Increment C vectored path drains it).
+                    #[cfg(not(any(
+                        target_os = "linux",
+                        target_os = "macos",
+                        target_os = "ios",
+                        target_os = "tvos",
+                        target_os = "watchos",
+                        target_os = "freebsd",
+                        target_os = "dragonfly",
+                    )))]
+                    let records: RecordsPayload = {
+                        let _ = sendfile_capable;
+                        RecordsPayload::Raw(
                             log.read_raw(fetch_offset, limit_offset, read_max)?.bytes,
-                        ),
-                    }
-                };
-                // Windows fallback: no safe `sendfile`/`TransmitFile`, so always
-                // `read_raw` + copy (the Increment C vectored path drains it).
-                #[cfg(not(any(
-                    target_os = "linux",
-                    target_os = "macos",
-                    target_os = "ios",
-                    target_os = "tvos",
-                    target_os = "watchos",
-                    target_os = "freebsd",
-                    target_os = "dragonfly",
-                )))]
-                let records: RecordsPayload = {
-                    let _ = sendfile_capable;
-                    RecordsPayload::Raw(log.read_raw(fetch_offset, limit_offset, read_max)?.bytes)
-                };
+                        )
+                    };
 
-                // read_committed does NO server-side batch filtering: verbatim
-                // bytes (including aborted/control batches) are returned and the
-                // consumer drops them client-side via `aborted_transactions`,
-                // matching Apache Kafka's behavior. Skip the Vec allocation
-                // entirely when there are no aborted txns in range.
-                let aborted = if read_committed_aborts {
-                    let mut it = log
-                        .aborted_in_range(fetch_offset, effective_lso)
-                        .into_iter();
-                    if let Some(first) = it.next() {
-                        let mut v = vec![AbortedTransaction {
-                            // Unwrap the log-layer `ProducerId` into the wire `i64` field.
-                            producer_id: first.producer_id.get(),
-                            // Unwrap the log-layer `Offset` into the wire `i64` field.
-                            first_offset: first.start_offset.0,
-                            ..Default::default()
-                        }];
-                        v.extend(it.map(|e| AbortedTransaction {
-                            producer_id: e.producer_id.get(),
-                            first_offset: e.start_offset.0,
-                            ..Default::default()
-                        }));
-                        v
+                    // read_committed does NO server-side batch filtering: verbatim
+                    // bytes (including aborted/control batches) are returned and the
+                    // consumer drops them client-side via `aborted_transactions`,
+                    // matching Apache Kafka's behavior. Skip the Vec allocation
+                    // entirely when there are no aborted txns in range.
+                    let aborted = if read_committed_aborts {
+                        let mut it = log
+                            .aborted_in_range(fetch_offset, effective_lso)
+                            .into_iter();
+                        if let Some(first) = it.next() {
+                            let mut v = vec![AbortedTransaction {
+                                // Unwrap the log-layer `ProducerId` into the wire `i64` field.
+                                producer_id: first.producer_id.get(),
+                                // Unwrap the log-layer `Offset` into the wire `i64` field.
+                                first_offset: first.start_offset.0,
+                                ..Default::default()
+                            }];
+                            v.extend(it.map(|e| AbortedTransaction {
+                                producer_id: e.producer_id.get(),
+                                first_offset: e.start_offset.0,
+                                ..Default::default()
+                            }));
+                            v
+                        } else {
+                            Vec::new()
+                        }
                     } else {
                         Vec::new()
+                    };
+
+                    Ok::<_, BrokerError>((records, aborted))
+                });
+                let (records, aborted) = match join.await {
+                    Ok(res) => res?,
+                    Err(join_err) => {
+                        // A panic inside the blocking read poisoned/aborted the
+                        // closure. Surface it as an I/O failure rather than
+                        // propagating the panic across the await point.
+                        return Err(BrokerError::Io(std::io::Error::other(format!(
+                            "fetch read task panicked: {join_err}"
+                        ))));
                     }
-                } else {
-                    Vec::new()
                 };
 
-                Ok::<_, BrokerError>((records, aborted))
-            });
-            let (records, aborted) = match join.await {
-                Ok(res) => res?,
-                Err(join_err) => {
-                    // A panic inside the blocking read poisoned/aborted the
-                    // closure. Surface it as an I/O failure rather than
-                    // propagating the panic across the await point.
-                    return Err(BrokerError::Io(std::io::Error::other(format!(
-                        "fetch read task panicked: {join_err}"
-                    ))));
-                }
-            };
-
-            let records = if records.payload_len() > 0 {
-                Some(records)
-            } else {
-                None
-            };
-            (records, aborted)
+                let records = if records.payload_len() > 0 {
+                    Some(records)
+                } else {
+                    None
+                };
+                (records, aborted)
+            }
         }
     };
 
@@ -1265,6 +1284,10 @@ async fn do_read(
     let bytes_est = records.as_ref().map_or(0, RecordsPayload::payload_len);
     out.records = records;
     Ok(bytes_est)
+}
+
+fn topic_id_from_wire(topic_id: WireUuid) -> Option<uuid::Uuid> {
+    (topic_id != WireUuid::ZERO).then(|| uuid::Uuid::from_bytes(topic_id.0))
 }
 
 /// KIP-405: try to serve `p`'s requested offset from the remote
@@ -1453,6 +1476,8 @@ async fn long_poll_then_reread(
         let read_start = std::time::Instant::now();
         do_read(
             &part,
+            topic_id_from_wire(p.topic_id),
+            Some(broker.hot_tail.clone()),
             // Wrap the decoded-request wire offset into `Offset` for the read.
             Offset(p.fetch_offset),
             p.max_bytes,
@@ -1468,8 +1493,10 @@ async fn long_poll_then_reread(
         // Re-attempt the remote-tier read on the re-read pass
         // so a long-poll that fires on a non-tiered partition doesn't
         // clobber the remote batch we'd already served on this one.
-        if p.out.error_code == codes::OFFSET_OUT_OF_RANGE {
-            let _ = try_remote_read(broker, p, &part).await;
+        if p.out.error_code == codes::OFFSET_OUT_OF_RANGE
+            && try_remote_read(broker, p, &part).await.is_none()
+        {
+            let _ = crate::diskless::read::try_diskless_read(broker, p, &part).await;
         }
     }
     Ok(())

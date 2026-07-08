@@ -182,6 +182,8 @@ pub(crate) async fn handle(
     let log_dir_status = broker.log_dir_status.clone();
     let partitions_map = broker.partitions.clone();
     let producer_state = broker.producer_state.clone();
+    let hot_tail = broker.hot_tail.clone();
+    let wal_shards = broker.wal_shards.clone();
 
     {
         let mut cur: &[u8] = &req_bytes;
@@ -299,7 +301,7 @@ pub(crate) async fn handle(
             let result = controller.submit_change(records).await;
 
             let error_code = match result {
-                Ok(()) => {
+                Ok(_) => {
                     // Committed to quorum — materialize on-disk partitions for
                     // every assignment where THIS broker is in `replicas`,
                     // whether as leader or follower. The replicator supervisor
@@ -318,12 +320,15 @@ pub(crate) async fn handle(
                             if let Err(e) = materialize_partition(
                                 &partitions_map,
                                 &name,
+                                Some(topic_id),
                                 p_i32,
                                 &log_dirs,
                                 &log_config,
                                 &log_dir_status,
                                 &producer_state,
                                 diskless,
+                                Some(hot_tail.clone()),
+                                Some(wal_shards.clone()),
                             ) {
                                 tracing::error!(
                                     topic = %name, partition = p_i32, error = %e,

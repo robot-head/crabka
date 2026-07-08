@@ -429,7 +429,7 @@ pub(crate) fn relative_offset_for_timestamp(
 /// `>= floor`. Used to skip past batches at the start of the returned byte
 /// range that the offset-index pointed at but that don't actually cover the
 /// requested offset (because Kafka offset indexes are sparse).
-fn first_batch_at_or_after(data: &[u8], floor: LogOffset) -> Option<RecordBatch> {
+pub(crate) fn first_batch_at_or_after(data: &[u8], floor: LogOffset) -> Option<RecordBatch> {
     let mut cur: &[u8] = data;
     while !cur.is_empty() {
         let Ok(batch) = RecordBatch::decode(&mut cur) else {

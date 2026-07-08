@@ -129,6 +129,42 @@ fn append_produce_batch(
     (results, leo)
 }
 
+fn append_produce_batch_at(
+    log: &Mutex<Log>,
+    base: Offset,
+    datas: Vec<ProduceData>,
+) -> (Vec<Result<Offset, crate::error::BrokerError>>, Offset) {
+    let mut guard = lock_log(log);
+    let target = guard.config_snapshot().compression_type;
+    let mut next = base;
+    let mut results = Vec::with_capacity(datas.len());
+    for data in datas {
+        let count = i64::from(data.record_count());
+        let result = match data {
+            ProduceData::Verbatim(batch) => guard
+                .append_verbatim_at(&batch, next)
+                .map_err(crate::error::BrokerError::from),
+            ProduceData::Owned(mut batch) => {
+                if let Some(target) = target
+                    && batch.attributes.compression() != target
+                {
+                    batch.attributes = batch.attributes.with_compression(target);
+                }
+                guard
+                    .append_at(&mut batch, next)
+                    .map(|()| next)
+                    .map_err(crate::error::BrokerError::from)
+            }
+        };
+        if result.is_ok() {
+            next = Offset(next.0 + count);
+        }
+        results.push(result);
+    }
+    let leo = guard.log_end_offset();
+    (results, leo)
+}
+
 /// Run [`append_produce_batch`] away from normal async polling. On the broker's
 /// multi-thread runtime, `block_in_place` avoids the per-batch `spawn_blocking`
 /// scheduling hop while letting Tokio hand the worker's other tasks to a
@@ -150,10 +186,57 @@ pub(crate) async fn run_produce_append_batch(
     }
 }
 
+pub(crate) async fn run_produce_append_batch_at(
+    log: Arc<Mutex<Log>>,
+    base: Offset,
+    datas: Vec<ProduceData>,
+) -> Result<(Vec<Result<Offset, crate::error::BrokerError>>, Offset), crate::error::BrokerError> {
+    match Handle::current().runtime_flavor() {
+        RuntimeFlavor::MultiThread => catch_unwind(AssertUnwindSafe(|| {
+            tokio::task::block_in_place(move || append_produce_batch_at(&log, base, datas))
+        }))
+        .map_err(|_| storage_failure_error("append task panicked", "block_in_place panic")),
+        _ => tokio::task::spawn_blocking(move || append_produce_batch_at(&log, base, datas))
+            .await
+            .map_err(|join_err| storage_failure_error("append task panicked", &join_err)),
+    }
+}
+
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 /// Exits when the channel closes (every sender dropped).
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub async fn run(
+    topic: String,
+    partition: PartitionIndex,
+    log: Arc<Mutex<Log>>,
+    log_dir: Arc<ArcSwap<PathBuf>>,
+    rx: mpsc::Receiver<WriterMessage>,
+    append_notify: Arc<Notify>,
+    replica_state: Arc<tokio::sync::Mutex<ReplicaState>>,
+    hw_advance_notify: Arc<Notify>,
+    log_dir_status: LogDirRegistry,
+    producer_state: Arc<ProducerState>,
+    wal: Option<crate::wal::SharedWal>,
+) {
+    run_with_sequencer(
+        topic,
+        partition,
+        log,
+        log_dir,
+        rx,
+        append_notify,
+        replica_state,
+        hw_advance_notify,
+        log_dir_status,
+        producer_state,
+        wal,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub async fn run_with_sequencer(
     topic: String,
     partition: PartitionIndex,
     log: Arc<Mutex<Log>>,
@@ -165,6 +248,7 @@ pub async fn run(
     log_dir_status: LogDirRegistry,
     producer_state: Arc<ProducerState>,
     wal: Option<crate::wal::SharedWal>,
+    sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
 ) {
     // `pending` holds a non-Produce message that was pulled off the channel
     // while group-draining Produce jobs (see the Produce arm). It is handled on
@@ -219,8 +303,34 @@ pub async fn run(
                 // Append the whole group under one lock, off the async poller
                 // (`block_in_place` on the multi-thread runtime, `spawn_blocking`
                 // on current-thread test runtimes — see `run_produce_append_batch`).
-                let append_result = if let Some(wal) = &wal {
-                    wal.append(datas).await
+                let append_result = if wal.is_some() {
+                    let Some(sequencer) = &sequencer else {
+                        let err = storage_failure_error(
+                            "diskless append missing offset sequencer",
+                            "no sequencer configured",
+                        );
+                        flag_storage_failure(&err, &log_dir, &log_dir_status);
+                        for ack in acks {
+                            let _ = ack.send(Err(storage_failure_error(
+                                "diskless append missing offset sequencer",
+                                "no sequencer configured",
+                            )));
+                        }
+                        continue;
+                    };
+                    let count: u32 = datas.iter().map(ProduceData::record_count).sum();
+                    match sequencer.assign(&topic, partition, count).await {
+                        Ok(base) => run_produce_append_batch_at(log.clone(), base, datas).await,
+                        Err(err) => {
+                            for ack in acks {
+                                let _ = ack.send(Err(storage_failure_error(
+                                    "offset assignment failed",
+                                    &err,
+                                )));
+                            }
+                            continue;
+                        }
+                    }
                 } else {
                     run_produce_append_batch(log.clone(), datas).await
                 };
@@ -572,6 +682,8 @@ fn swap_future_log(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
     use assert2::{assert, check};
     use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
@@ -580,6 +692,29 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+
+    struct TestSequencer {
+        next: AtomicI64,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::wal::OffsetSequencer for TestSequencer {
+        async fn assign(
+            &self,
+            _topic: &str,
+            _partition: PartitionIndex,
+            count: u32,
+        ) -> Result<Offset, crate::error::BrokerError> {
+            let base = self.next.fetch_add(i64::from(count), Ordering::SeqCst);
+            Ok(Offset(base))
+        }
+    }
+
+    fn test_sequencer() -> Arc<dyn crate::wal::OffsetSequencer> {
+        Arc::new(TestSequencer {
+            next: AtomicI64::new(0),
+        })
+    }
 
     fn sample_batch(n: i32) -> RecordBatch {
         let mut b = RecordBatch {
@@ -757,7 +892,7 @@ mod tests {
             );
         }
         let hw_advance_notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_with_sequencer(
             "t".to_string(),
             PartitionIndex(0),
             log.clone(),
@@ -769,6 +904,7 @@ mod tests {
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(ProducerState::new()),
             wal,
+            Some(test_sequencer()),
         ));
 
         let hw_waiter = hw_advance_notify.notified();
@@ -828,7 +964,7 @@ mod tests {
                 );
             }
             let hw_advance_notify = Arc::new(Notify::new());
-            let writer = tokio::spawn(run(
+            let writer = tokio::spawn(run_with_sequencer(
                 "t".to_string(),
                 PartitionIndex(0),
                 log.clone(),
@@ -840,6 +976,7 @@ mod tests {
                 crate::log_dir_status::LogDirRegistry::default(),
                 Arc::new(ProducerState::new()),
                 wal,
+                Some(test_sequencer()),
             ));
 
             let hw_waiter = hw_advance_notify.notified();

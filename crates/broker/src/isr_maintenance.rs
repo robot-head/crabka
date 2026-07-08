@@ -466,7 +466,7 @@ mod tests {
         async fn submit_change(
             &self,
             _records: Vec<MetadataRecord>,
-        ) -> Result<(), crabka_raft::RaftError> {
+        ) -> Result<crabka_raft::SubmitChangeResult, crabka_raft::RaftError> {
             unimplemented!("unused in isr_maintenance tests")
         }
 

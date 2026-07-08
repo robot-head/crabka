@@ -204,7 +204,7 @@ pub(crate) async fn handle(
 
     if !records.is_empty() {
         match broker.controller.submit_change(records).await {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
                 return apply_request_wide(
                     results,

@@ -85,3 +85,11 @@ fn three_voters_faults() {
         "three_voters_faults",
     );
 }
+
+#[test]
+fn three_voters_append_via_linearizable() {
+    run(
+        ConsensusModel::append_via(&[NodeId(1), NodeId(2), NodeId(3)], 2),
+        "three_voters_append_via_linearizable",
+    );
+}

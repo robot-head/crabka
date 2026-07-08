@@ -25,8 +25,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    broker::spawn_partition, partition_registry::PartitionRegistry, replicator,
-    throttle::ThrottleState, txn::coordinator::TxnCoordinator,
+    partition_registry::PartitionRegistry, replicator, throttle::ThrottleState,
+    txn::coordinator::TxnCoordinator,
 };
 
 /// A `(topic, partition)` pair — the key the supervisor tracks follower
@@ -82,12 +82,15 @@ pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashS
 pub(crate) fn materialize_partition(
     partitions: &PartitionRegistry,
     topic: &str,
+    topic_id: Option<uuid::Uuid>,
     partition: i32,
     log_dirs: &[PathBuf],
     log_config: &LogConfig,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
     producer_state: &Arc<crate::producer_state::ProducerState>,
     diskless: bool,
+    hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
+    wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
 ) -> Result<(), String> {
     // `materialize_if_vacant` runs `build` under the per-key write lock —
     // only one thread can be inside it for a given key at a time,
@@ -98,20 +101,26 @@ pub(crate) fn materialize_partition(
     partitions.materialize_if_vacant(topic, PartitionIndex(partition), || {
         let dir = crate::log_dir::place_partition_dir(log_dirs, topic, partition);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-        let log = Log::open(&dir, log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
+        let open_config = crate::diskless::recovery::open_config(log_config, diskless);
+        let log = Log::open(&dir, open_config).map_err(|e| format!("Log::open: {e}"))?;
         let owning_dir = dir
             .parent()
             .expect("placed partition dir always has a parent log.dir")
             .to_path_buf();
-        Ok(spawn_partition(
+        crate::broker::try_spawn_partition_with_sequencer(
             topic.to_string(),
+            topic_id,
             PartitionIndex(partition),
             owning_dir,
             log,
             log_dir_status.clone(),
             producer_state.clone(),
             diskless,
-        ))
+            hot_tail,
+            wal_shards,
+            None,
+        )
+        .map_err(|e| format!("spawn partition: {e}"))
     })
 }
 
@@ -269,6 +278,11 @@ pub(crate) struct ReplicatorSupervisor {
     /// KIP-858: stable UUID per configured log.dir. Used by the reconcile
     /// loop to build `AssignReplicasToDirs` reports.
     log_dir_ids: crate::log_dir_id::LogDirIds,
+    /// Shared advisory cache for quorum-committed diskless WAL tails.
+    hot_tail: Arc<crate::diskless::hot_tail::HotTailCache>,
+    /// Registry exposed through the KIP-595 shard router for diskless WAL
+    /// fetches to newly materialized partitions.
+    wal_shards: Arc<crate::wal::quorum::registry::WalShardRegistry>,
     /// KIP-858: tracks the last-reported dir UUID per (topic, partition) so
     /// we only send `AssignReplicasToDirs` on first materialization or after
     /// a KIP-113 log-dir swap.
@@ -297,6 +311,8 @@ impl ReplicatorSupervisor {
         producer_state: Arc<crate::producer_state::ProducerState>,
         metrics: crate::metrics::BrokerMetrics,
         log_dir_ids: crate::log_dir_id::LogDirIds,
+        hot_tail: Arc<crate::diskless::hot_tail::HotTailCache>,
+        wal_shards: Arc<crate::wal::quorum::registry::WalShardRegistry>,
     ) -> Self {
         Self {
             node_id,
@@ -319,6 +335,8 @@ impl ReplicatorSupervisor {
             producer_state,
             metrics,
             log_dir_ids,
+            hot_tail,
+            wal_shards,
             reported_dirs: dashmap::DashMap::new(),
             assign_dirs_reporter: Arc::new(NetworkAssignDirsReporter),
         }
@@ -363,6 +381,12 @@ impl ReplicatorSupervisor {
                 // up toward ISR re-admission.
                 part.install_isr(&part_record.isr, &part_record.replicas, part_record.leader)
                     .await;
+                if part.diskless
+                    && let Some(next_offset) = image.partition_next_offset(&key.0, key.1)
+                {
+                    part.install_diskless_durable_hw(crabka_ids::Offset(next_offset))
+                        .await;
+                }
             }
         }
 
@@ -534,12 +558,15 @@ impl ReplicatorSupervisor {
         materialize_partition(
             &self.partitions,
             topic,
+            image.topic(topic).map(|topic| topic.topic_id),
             partition,
             &self.log_dirs,
             &self.log_config,
             &self.log_dir_status,
             &self.producer_state,
             crate::broker::diskless_topic_config(image.topic_config(topic)),
+            Some(self.hot_tail.clone()),
+            Some(self.wal_shards.clone()),
         )
     }
 
@@ -700,7 +727,10 @@ mod tests {
             }
         }
 
-        async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+        async fn submit_change(
+            &self,
+            _records: Vec<MetadataRecord>,
+        ) -> Result<crabka_raft::SubmitChangeResult, RaftError> {
             panic!("unused in replicator supervisor tests")
         }
 
@@ -788,6 +818,8 @@ mod tests {
             Arc::new(crate::producer_state::ProducerState::new()),
             crate::metrics::BrokerMetrics::default(),
             crate::log_dir_id::LogDirIds::resolve(&[dir.path().to_path_buf()]),
+            Arc::new(crate::diskless::hot_tail::HotTailCache::default()),
+            Arc::new(crate::wal::quorum::registry::WalShardRegistry::new()),
         );
         supervisor.assign_dirs_reporter = reporter.clone();
         (supervisor, partitions, reporter, dir)
@@ -902,12 +934,15 @@ mod tests {
         materialize_partition(
             &partitions,
             "t",
+            None,
             0,
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
             &Arc::new(crate::producer_state::ProducerState::new()),
             false,
+            None,
+            None,
         )
         .expect("materialize");
         let part = partitions.get("t", PartitionIndex(0)).expect("part");
@@ -928,6 +963,42 @@ mod tests {
         .await;
         let st = part.replica_state.lock().await;
         assert!(st.isr.len() == 3);
+    }
+
+    #[tokio::test]
+    async fn materialize_diskless_partition_registers_wal_shard() {
+        use crabka_log::LogConfig;
+        use tempfile::tempdir;
+
+        let dir = tempdir().expect("tempdir");
+        let partitions = Arc::new(PartitionRegistry::new());
+        let topic_id = uuid::Uuid::from_u128(0xD15C);
+        let hot_tail = Arc::new(crate::diskless::hot_tail::HotTailCache::default());
+        let wal_shards = Arc::new(crate::wal::quorum::registry::WalShardRegistry::new());
+
+        materialize_partition(
+            &partitions,
+            "diskless",
+            Some(topic_id),
+            0,
+            &[dir.path().to_path_buf()],
+            &LogConfig::default(),
+            &crate::log_dir_status::LogDirRegistry::default(),
+            &Arc::new(crate::producer_state::ProducerState::new()),
+            true,
+            Some(hot_tail),
+            Some(wal_shards.clone()),
+        )
+        .expect("materialize");
+
+        assert!(
+            wal_shards
+                .get(crate::wal::quorum::registry::ShardId {
+                    topic_id,
+                    partition: PartitionIndex(0),
+                })
+                .is_some()
+        );
     }
 
     #[test]
@@ -1215,12 +1286,15 @@ mod tests {
         materialize_partition(
             &partitions,
             "t",
+            None,
             0,
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
             &Arc::new(crate::producer_state::ProducerState::new()),
             false,
+            None,
+            None,
         )
         .expect("materialize");
 
@@ -1279,12 +1353,15 @@ mod tests {
         materialize_partition(
             &partitions,
             "t",
+            None,
             0,
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
             &Arc::new(crate::producer_state::ProducerState::new()),
             false,
+            None,
+            None,
         )
         .expect("materialize");
 
@@ -1344,12 +1421,15 @@ mod tests {
         materialize_partition(
             &partitions,
             "t",
+            None,
             0,
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
             &crate::log_dir_status::LogDirRegistry::default(),
             &Arc::new(crate::producer_state::ProducerState::new()),
             false,
+            None,
+            None,
         )
         .expect("materialize");
 

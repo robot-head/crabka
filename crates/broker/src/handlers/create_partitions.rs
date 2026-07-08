@@ -163,6 +163,8 @@ pub(crate) async fn handle(
     let log_dirs = broker.config.all_log_dirs();
     let log_config = broker.config.log_config.clone();
     let log_dir_status = broker.log_dir_status.clone();
+    let hot_tail = broker.hot_tail.clone();
+    let wal_shards = broker.wal_shards.clone();
 
     let image = controller.current_image();
 
@@ -294,7 +296,7 @@ pub(crate) async fn handle(
         }
 
         match controller.submit_change(records).await {
-            Ok(()) => {
+            Ok(_) => {
                 // Materialize new partitions on local disk where self in replicas.
                 for (i, p) in new_partition_indices.iter().enumerate() {
                     let replicas = &new_assignments[i];
@@ -302,12 +304,15 @@ pub(crate) async fn handle(
                         if let Err(e) = materialize_partition(
                             &partitions_map,
                             &t.name,
+                            Some(topic_rec.topic_id),
                             *p,
                             &log_dirs,
                             &log_config,
                             &log_dir_status,
                             &producer_state,
                             diskless,
+                            Some(hot_tail.clone()),
+                            Some(wal_shards.clone()),
                         ) {
                             tracing::error!(
                                 topic = %t.name, partition = *p, error = %e,

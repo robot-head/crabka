@@ -305,6 +305,21 @@ pub fn recompute_high_watermark(
     gated.max(current_hwm)
 }
 
+/// Monotonic handoff from a previous visible diskless high watermark to a newly
+/// observed WAL-quorum frontier. A broker that becomes read-capable must never
+/// lower visibility during leader/member handoff.
+#[ensures(result@ >= previous_hw@)]
+#[ensures(result@ >= quorum_frontier@)]
+#[ensures(result@ == previous_hw@ || result@ == quorum_frontier@)]
+#[must_use]
+pub const fn handoff_high_watermark(previous_hw: i64, quorum_frontier: i64) -> i64 {
+    if previous_hw >= quorum_frontier {
+        previous_hw
+    } else {
+        quorum_frontier
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
@@ -397,5 +412,11 @@ mod tests {
         check!(recompute_high_watermark(10, &[9, 8], 2, 0, 0) == 9);
         check!(recompute_high_watermark(10, &[10, 10], 3, 0, 0) == 10);
         check!(recompute_high_watermark(10, &[4, 4], 3, 0, 0) == 4);
+    }
+
+    #[test]
+    fn handoff_high_watermark_is_monotonic() {
+        check!(handoff_high_watermark(7, 5) == 7);
+        check!(handoff_high_watermark(7, 9) == 9);
     }
 }

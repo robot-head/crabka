@@ -64,6 +64,19 @@ pub struct AppDataResponse {
     pub rejected: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmitChangeResult {
+    pub offset_reservations: Vec<OffsetReservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OffsetReservation {
+    pub topic: String,
+    pub partition: i32,
+    pub base_offset: i64,
+    pub count: i64,
+}
+
 #[cfg(test)]
 mod node_tests {
     use assert2::assert;

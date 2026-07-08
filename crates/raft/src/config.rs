@@ -1,10 +1,20 @@
 //! Construction-time config for `Controller::start`.
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{future::Future, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc, time::Duration};
 
+use bytes::Bytes;
 use uuid::Uuid;
 
-use crate::{network::OutboundDialer, types::NodeId};
+use crate::{error::RaftError, network::OutboundDialer, types::NodeId};
+
+/// Optional router for KIP-595 traffic addressed to non-metadata quorum shards.
+pub type ShardRouteFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<Bytes>, RaftError>> + Send + 'a>>;
+
+/// Classifies and serves shard-addressed KIP-595 requests before metadata dispatch.
+pub trait RaftShardRouter: Send + Sync {
+    fn route(&self, api_key: i16, body: Bytes) -> ShardRouteFuture<'_>;
+}
 
 /// Bootstrap orchestration for a freshly-formatted controller node.
 ///
@@ -77,6 +87,9 @@ pub struct ControllerConfig {
     /// implementation here when the controller listener should
     /// terminate TLS and/or SASL before raft frames start flowing.
     pub handshake: Option<Arc<dyn crate::RaftListenerHandshake>>,
+    /// Optional KIP-595 shard router. Metadata traffic returns `None`; diskless
+    /// WAL shards return an encoded response body and bypass metadata dispatch.
+    pub shard_router: Option<Arc<dyn RaftShardRouter>>,
     /// `metadata.log.max.record.bytes.between.snapshots` (default 20 MiB).
     pub max_bytes_between_snapshots: u64,
     /// `metadata.log.max.snapshot.interval.ms` (default 1 h; 0 = disabled).
@@ -104,6 +117,7 @@ impl std::fmt::Debug for ControllerConfig {
             .field("cluster_id", &self.cluster_id)
             .field("dialer", &self.dialer.is_some())
             .field("handshake", &self.handshake.is_some())
+            .field("shard_router", &self.shard_router.is_some())
             .field(
                 "max_bytes_between_snapshots",
                 &self.max_bytes_between_snapshots,
@@ -144,6 +158,7 @@ impl ControllerConfig {
             cluster_id: None,
             dialer: None,
             handshake: None,
+            shard_router: None,
             max_bytes_between_snapshots: 20 * 1024 * 1024,
             max_snapshot_interval: Duration::from_hours(1),
             snapshot_interval_records: 0,
