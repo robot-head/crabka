@@ -3,7 +3,7 @@
 //! Every function here is a total, synchronous, allocation-light kernel whose
 //! functional contract is proven with Creusot (see `docs/verification.md`).
 //! Host crates call through - there are no duplicate bodies anywhere.
-#![doc(html_root_url = "https://docs.rs/crabka-verified/0.3.8")]
+#![doc(html_root_url = "https://docs.rs/crabka-verified/0.3.9")]
 
 pub mod compaction;
 pub mod consensus;

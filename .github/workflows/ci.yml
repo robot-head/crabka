@@ -361,6 +361,7 @@ jobs:
       - name: JVM differential coverage
         run: |
           mkdir -p coverage
+          cargo llvm-cov clean --workspace
           cargo llvm-cov nextest --workspace --profile ci \
             --exclude crabka-client-core \
             --exclude crabka-log \
