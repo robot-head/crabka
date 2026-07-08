@@ -167,6 +167,8 @@ pub(crate) async fn handle(
     let log_dir_status = broker.log_dir_status.clone();
     let partitions_map = broker.partitions.clone();
     let producer_state = broker.producer_state.clone();
+    let hot_tail = broker.hot_tail.clone();
+    let wal_shards = broker.wal_shards.clone();
 
     // KIP-599: count mutations before running handler logic so that even
     // invalid requests consume quota (bad-faith clients can't escape by
@@ -238,7 +240,7 @@ pub(crate) async fn handle(
         let result = controller.submit_change(records).await;
 
         let error_code = match result {
-            Ok(()) => {
+            Ok(_) => {
                 materialize_topic(
                     TopicMaterialization {
                         partitions: &partitions_map,
@@ -248,6 +250,9 @@ pub(crate) async fn handle(
                         producer_state: &producer_state,
                         node_id,
                         diskless,
+                        topic_id,
+                        hot_tail: &hot_tail,
+                        wal_shards: &wal_shards,
                     },
                     &name,
                     &assignments,
@@ -358,6 +363,9 @@ struct TopicMaterialization<'a> {
     producer_state: &'a std::sync::Arc<crate::producer_state::ProducerState>,
     node_id: crabka_raft::NodeId,
     diskless: bool,
+    topic_id: uuid::Uuid,
+    hot_tail: &'a std::sync::Arc<crate::diskless::hot_tail::HotTailCache>,
+    wal_shards: &'a std::sync::Arc<crate::wal::quorum::registry::WalShardRegistry>,
 }
 
 async fn materialize_topic(
@@ -373,12 +381,15 @@ async fn materialize_topic(
         if let Err(error) = materialize_partition(
             context.partitions,
             topic,
+            Some(context.topic_id),
             index,
             context.log_dirs,
             context.log_config,
             context.log_dir_status,
             context.producer_state,
             context.diskless,
+            Some(context.hot_tail.clone()),
+            Some(context.wal_shards.clone()),
         ) {
             tracing::error!(topic, partition = index, error = %error,
                 "CreateTopics: materialize after quorum commit failed");

@@ -123,7 +123,7 @@ pub async fn bootstrap_audit_topic(
 
     match controller.submit_change(records).await {
         // Idempotent: another broker / a restart already created it.
-        Ok(()) | Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => Ok(()),
+        Ok(_) | Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => Ok(()),
         Err(e) => Err(BrokerError::Startup(e.to_string())),
     }
 }
@@ -217,7 +217,7 @@ pub async fn bootstrap(
             match controller.submit_change(records).await {
                 // An earlier boot of ours already registered it (single
                 // writer, so no conflicting-id race) — treat as success.
-                Ok(())
+                Ok(_)
                 | Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => {}
                 Err(e) => return Err(BrokerError::Startup(e.to_string())),
             }

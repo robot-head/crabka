@@ -230,9 +230,12 @@ impl ControllerHandle {
         skip_all,
         fields(node = self.self_node_id.0, records = records.len())
     )]
-    pub async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+    pub async fn submit_change(
+        &self,
+        records: Vec<MetadataRecord>,
+    ) -> Result<crate::SubmitChangeResult, RaftError> {
         match self.engine.submit_change(records.clone()).await {
-            Ok(()) => Ok(()),
+            Ok(result) => Ok(result),
             Err(RaftError::NotLeader {
                 current_leader: Some(leader),
             }) => {
@@ -332,7 +335,7 @@ impl ControllerHandle {
         leader: NodeId,
         addr: &str,
         records: &[crabka_metadata::MetadataRecord],
-    ) -> Result<(), RaftError> {
+    ) -> Result<crate::SubmitChangeResult, RaftError> {
         let transport = DialerSubmitTransport {
             dialer: self.dialer.as_ref(),
             client_id: &self.client_id,
@@ -487,7 +490,7 @@ async fn forward_submit_via(
     leader: NodeId,
     addr: &str,
     records: &[crabka_metadata::MetadataRecord],
-) -> Result<(), RaftError> {
+) -> Result<crate::SubmitChangeResult, RaftError> {
     let body = encode_submit_change_body(records)?;
     let resp_body = transport
         .send_submit_change(leader, addr, body)
@@ -523,11 +526,17 @@ fn encode_submit_change_body(
 /// - anything else → collapse to `NotLeader` (`CreateTopics` maps that to the
 ///   retryable `NOT_CONTROLLER`), preferring the response's `leader_hint` when
 ///   non-negative and falling back to the dialed `leader`.
-fn translate_submit_change_response(resp_body: &[u8], leader: NodeId) -> Result<(), RaftError> {
+fn translate_submit_change_response(
+    resp_body: &[u8],
+    leader: NodeId,
+) -> Result<crate::SubmitChangeResult, RaftError> {
     let mut cur: &[u8] = resp_body;
     let resp = crate::wire::CrabkaSubmitChangeResponse::decode_v0(&mut cur)?;
     match resp.error_code {
-        0 => Ok(()),
+        0 => <serde_wincode::SerdeCompat<crate::SubmitChangeResult> as wincode::Deserialize>::deserialize(
+            &resp.result,
+        )
+        .map_err(RaftError::from),
         2 => Err(RaftError::Metadata(
             crabka_metadata::MetadataError::TopicExists(String::new()),
         )),
@@ -588,7 +597,9 @@ impl crate::reconfig::ReconfigOps for ControllerHandle {
         &self,
         records: Vec<crabka_metadata::MetadataRecord>,
     ) -> Result<(), RaftError> {
-        ControllerHandle::submit_change(self, records).await
+        ControllerHandle::submit_change(self, records)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -724,6 +735,7 @@ impl Controller {
             engine.clone(),
             shutdown.clone(),
             config.handshake.clone(),
+            config.shard_router.clone(),
         ));
         info!(
             node_id = config.node_id.0,
@@ -872,6 +884,7 @@ mod bootstrap_mode_tests {
         tokio::time::timeout(TEST_OP_TIMEOUT, ctrl.submit_change(records))
             .await
             .unwrap_or_else(|_| panic!("{context} submit_change timed out"))
+            .map(|_| ())
     }
 
     async fn bind_eventually(addr: SocketAddr) -> tokio::net::TcpListener {
@@ -921,11 +934,17 @@ mod bootstrap_mode_tests {
 
     fn submit_change_response_bytes(error_code: i16, leader_hint: i64) -> bytes::Bytes {
         let mut out = Vec::new();
+        let result = <serde_wincode::SerdeCompat<crate::SubmitChangeResult> as wincode::Serialize>::serialize(
+            &crate::SubmitChangeResult::default(),
+        )
+        .expect("serialize result");
         crate::wire::CrabkaSubmitChangeResponse {
             error_code,
             leader_hint,
+            result: bytes::Bytes::from(result),
         }
-        .encode_v0(&mut out);
+        .encode_v0(&mut out)
+        .unwrap();
         bytes::Bytes::from(out)
     }
 

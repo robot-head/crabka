@@ -69,6 +69,22 @@ pub struct PartitionDirAssignmentRecord {
     pub directory: Uuid,
 }
 
+/// Diskless offset-sequencer delta: advance a partition's committed
+/// next-offset by `count`.
+///
+/// Applied as a delta, never a full-record replace, so sequential advances on
+/// the committed metadata log yield a gap-free, strictly-monotonic, unique
+/// offset sequence. On the `KRaft` log it rides a Crabka-private carrier like
+/// [`PartitionDirAssignmentRecord`], so it decodes back to this same delta.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartitionOffsetAdvanceRecord {
+    pub topic: String,
+    pub partition: i32,
+    /// Offsets consumed by the produce group. The producer's base offset is the
+    /// committed next-offset before this increment applies.
+    pub count: i64,
+}
+
 /// A single named listener endpoint advertised by a broker. Stored as a
 /// list on [`BrokerRegistrationRecord::endpoints`] so KRaft-style metadata
 /// can advertise per-listener `host:port`/protocol triples to clients on
@@ -289,6 +305,9 @@ pub enum MetadataRecord {
     /// Applied as a merge into one replica's `directories` slot; on the `KRaft`
     /// log it rides a Crabka-private carrier so it stays a delta end-to-end.
     V1PartitionDirAssignment(PartitionDirAssignmentRecord),
+    /// Diskless offset-sequencer delta (see [`PartitionOffsetAdvanceRecord`]).
+    /// Applied as an increment to the partition's committed next-offset.
+    V1PartitionOffsetAdvance(PartitionOffsetAdvanceRecord),
 }
 
 #[cfg(test)]

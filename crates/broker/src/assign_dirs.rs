@@ -173,7 +173,7 @@ mod tests {
         async fn submit_change(
             &self,
             _records: Vec<crabka_metadata::MetadataRecord>,
-        ) -> Result<(), RaftError> {
+        ) -> Result<crabka_raft::SubmitChangeResult, RaftError> {
             panic!("not used by assign_dirs tests")
         }
 

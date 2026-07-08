@@ -8,9 +8,13 @@
 pub mod compaction;
 pub mod consensus;
 pub mod log_index;
+pub mod offset_allocator;
 
 pub use compaction::{
     BatchMeta, RecordMeta, RetainDecision, TxnDataState, compute_horizon, retain_decision,
 };
-pub use consensus::{election_jitter_ms, log_is_up_to_date, recompute_high_watermark};
+pub use consensus::{
+    election_jitter_ms, handoff_high_watermark, log_is_up_to_date, recompute_high_watermark,
+};
 pub use log_index::offset_index_lookup;
+pub use offset_allocator::reserve_offsets;

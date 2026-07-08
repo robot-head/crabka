@@ -74,6 +74,7 @@ pub(crate) async fn run(
     engine: KraftController,
     shutdown: CancellationToken,
     handshake: Option<Arc<dyn crate::RaftListenerHandshake>>,
+    shard_router: Option<Arc<dyn crate::RaftShardRouter>>,
 ) {
     match listener.local_addr() {
         Ok(addr) => info!(%addr, "controller listener started"),
@@ -88,6 +89,7 @@ pub(crate) async fn run(
                         let engine = engine.clone();
                         let shutdown = shutdown.clone();
                         let handshake = handshake.clone();
+                        let shard_router = shard_router.clone();
                         tokio::spawn(async move {
                             let boxed: Box<dyn crate::DuplexStream> = if let Some(hs) = handshake {
                                 match hs.upgrade(stream).await {
@@ -100,7 +102,7 @@ pub(crate) async fn run(
                             } else {
                                 Box::new(stream) as Box<dyn crate::DuplexStream>
                             };
-                            if let Err(e) = handle_conn(boxed, engine, shutdown).await {
+                            if let Err(e) = handle_conn(boxed, engine, shutdown, shard_router).await {
                                 error!(%peer, error = %e, "controller connection error");
                             }
                         });
@@ -118,6 +120,7 @@ async fn handle_conn<S>(
     mut stream: S,
     engine: KraftController,
     shutdown: CancellationToken,
+    shard_router: Option<Arc<dyn crate::RaftShardRouter>>,
 ) -> Result<(), RaftError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -162,7 +165,7 @@ where
                     write_response(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
-                let resp = dispatch(api_key_n, body, &engine).await?;
+                let resp = dispatch_with_router(api_key_n, body, &engine, shard_router.as_deref()).await?;
                 write_response(&mut stream, correlation_id, resp).await?;
             }
         }
@@ -343,12 +346,27 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
 /// which decodes the body, runs the core, and replies on a oneshot with the
 /// encoded response body. The Crabka-private 1003/1004 keep their bespoke
 /// request/response wire types.
+#[cfg(test)]
 #[tracing::instrument(level = "debug", skip_all, fields(node = engine.node_id().0, api_key = api_key_n.get()), err)]
 async fn dispatch(
     api_key_n: ApiKey,
     body: Bytes,
     engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
+    dispatch_with_router(api_key_n, body, engine, None).await
+}
+
+async fn dispatch_with_router(
+    api_key_n: ApiKey,
+    body: Bytes,
+    engine: &KraftController,
+    shard_router: Option<&dyn crate::RaftShardRouter>,
+) -> Result<Bytes, RaftError> {
+    if let Some(router) = shard_router
+        && let Some(resp) = router.route(api_key_n.get(), body.clone()).await?
+    {
+        return Ok(resp);
+    }
     match api_key_n {
         ApiKey(api_key::FETCH) => {
             deliver_inbound(engine, |reply| Inbound::Fetch { req: body, reply }).await
@@ -405,37 +423,44 @@ async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result
             let resp = CrabkaSubmitChangeResponse {
                 error_code: SUBMIT_CHANGE_REJECTED,
                 leader_hint: LEADER_HINT_UNKNOWN,
+                result: Bytes::new(),
             };
             let mut out = Vec::with_capacity(16);
-            resp.encode_v0(&mut out);
+            resp.encode_v0(&mut out)?;
             return Ok(Bytes::from(out));
         }
     };
     let resp = match engine.submit_change(records).await {
-        Ok(()) => CrabkaSubmitChangeResponse {
+        Ok(result) => CrabkaSubmitChangeResponse {
             error_code: SUBMIT_CHANGE_APPLIED,
             leader_hint: LEADER_HINT_UNKNOWN,
+            result: Bytes::from(
+                <serde_wincode::SerdeCompat<crate::SubmitChangeResult> as wincode::Serialize>::serialize(&result)?,
+            ),
         },
         Err(RaftError::Metadata(_)) => CrabkaSubmitChangeResponse {
             error_code: SUBMIT_CHANGE_REJECTED,
             leader_hint: LEADER_HINT_UNKNOWN,
+            result: Bytes::new(),
         },
         Err(RaftError::NotLeader { current_leader }) => CrabkaSubmitChangeResponse {
             error_code: SUBMIT_CHANGE_NOT_LEADER,
             leader_hint: current_leader
                 .and_then(|l| i64::try_from(l.0).ok())
                 .unwrap_or(LEADER_HINT_UNKNOWN),
+            result: Bytes::new(),
         },
         Err(e) => {
             tracing::warn!(error = ?e, "submit-change failed");
             CrabkaSubmitChangeResponse {
                 error_code: SUBMIT_CHANGE_FAILED,
                 leader_hint: LEADER_HINT_UNKNOWN,
+                result: Bytes::new(),
             }
         }
     };
     let mut out = Vec::with_capacity(16);
-    resp.encode_v0(&mut out);
+    resp.encode_v0(&mut out)?;
     Ok(Bytes::from(out))
 }
 

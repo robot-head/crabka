@@ -2324,8 +2324,10 @@ dependencies = [
  "crabka-client-producer",
  "crabka-compression",
  "crabka-ids",
+ "crabka-kraft-core",
  "crabka-log",
  "crabka-metadata",
+ "crabka-object-store",
  "crabka-protocol",
  "crabka-raft",
  "crabka-records-legacy",
@@ -2334,6 +2336,8 @@ dependencies = [
  "crabka-security",
  "crabka-telemetry",
  "crabka-throttle",
+ "crabka-verified",
+ "crabka-voters",
  "crc32c",
  "dashmap",
  "exponential-backoff",
@@ -2345,6 +2349,7 @@ dependencies = [
  "mutants",
  "nix 0.31.3",
  "num-traits",
+ "object_store",
  "opentelemetry-proto",
  "pbkdf2",
  "prometheus-client",
@@ -2948,7 +2953,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-object-store"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "assert2",
  "async-trait",
@@ -3229,6 +3234,7 @@ dependencies = [
  "crabka-log",
  "crabka-metadata",
  "crabka-protocol",
+ "crabka-verified",
  "dashmap",
  "futures-util",
  "mockall",

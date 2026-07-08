@@ -70,7 +70,7 @@ pub(crate) async fn ensure_topic(
     }
 
     match controller.submit_change(records).await {
-        Ok(()) | Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => Ok(()),
+        Ok(_) | Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => Ok(()),
         Err(e) => Err(crate::error::BrokerError::Txn(format!(
             "submit_change failed: {e}"
         ))),

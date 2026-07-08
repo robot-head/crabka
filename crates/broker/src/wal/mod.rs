@@ -5,6 +5,8 @@
 //! object-store-backed WAL without changing the writer or the ack gate.
 
 mod local_fsync;
+mod offset_sequencer;
+pub(crate) mod quorum;
 
 use std::sync::Arc;
 
@@ -12,6 +14,7 @@ use async_trait::async_trait;
 use crabka_ids::Offset;
 #[allow(unused_imports)]
 pub(crate) use local_fsync::LocalFsyncWal;
+pub(crate) use offset_sequencer::{ControllerSequencer, OffsetSequencer};
 
 use crate::{error::BrokerError, partition::ProduceData};
 

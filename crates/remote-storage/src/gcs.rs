@@ -29,98 +29,9 @@
 //! through [`S3RemoteStorage::from_s3_config`] (which could not use Workload
 //! Identity and required HMAC interoperability keys).
 
-use std::sync::Arc;
+use crabka_object_store::{GcsConfig, ObjectStoreConfig, build_object_store};
 
-use object_store::{ClientOptions, gcp::GoogleCloudStorageBuilder};
-
-use crate::{
-    error::RemoteStorageError,
-    s3::{DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, S3RemoteStorage},
-};
-
-/// Connection / bucket parameters for [`S3RemoteStorage::from_gcs_config`].
-///
-/// Leaving every credential field `None` selects Workload Identity / ADC
-/// (the metadata server) — the keyless GKE production path. Set exactly one
-/// of [`Self::service_account_path`], [`Self::service_account_key`], or
-/// [`Self::application_credentials_path`] to use an explicit credential;
-/// providing more than one is rejected by `object_store`'s builder.
-#[derive(Clone, PartialEq, Eq)]
-pub struct GcsConfig {
-    /// GCS bucket name.
-    pub bucket: String,
-    /// Optional key prefix inside the bucket (no leading or trailing slash).
-    /// Lets multiple Crabka clusters share a bucket safely.
-    pub prefix: Option<String>,
-    /// Optional path to a service-account JSON key file (e.g. a mounted
-    /// Kubernetes Secret). Falls back to ADC / Workload Identity when `None`.
-    pub service_account_path: Option<String>,
-    /// Optional inline service-account JSON key contents. Mutually exclusive
-    /// with [`Self::service_account_path`]. Falls back to ADC / Workload
-    /// Identity when `None`.
-    pub service_account_key: Option<String>,
-    /// Optional path to an application-default-credentials JSON file. When
-    /// `None`, `object_store` consults the gcloud well-known ADC file and
-    /// then the metadata server (Workload Identity).
-    pub application_credentials_path: Option<String>,
-    /// Optional custom GCS API base URL (e.g. `http://fake-gcs:4443` for the
-    /// `fake-gcs-server` emulator, or a private Google API endpoint). When
-    /// `None`, the public `https://storage.googleapis.com` endpoint is used.
-    pub endpoint: Option<String>,
-    /// Allow plaintext HTTP (off-by-default; required by emulators such as
-    /// `fake-gcs-server` running without TLS). Real GCS always uses HTTPS.
-    pub allow_http: bool,
-    /// Files at least this large are uploaded via resumable (multipart)
-    /// upload instead of a single PUT. Defaults to
-    /// [`DEFAULT_MULTIPART_THRESHOLD`] (100 MiB).
-    pub multipart_threshold: u64,
-    /// Per-part size used when multipart upload kicks in. Defaults to
-    /// [`DEFAULT_MULTIPART_CHUNK_SIZE`] (16 MiB).
-    pub multipart_chunk_size: usize,
-}
-
-impl std::fmt::Debug for GcsConfig {
-    /// Redacts the credential fields so a stray `{:?}` / tracing call never
-    /// leaks them. Mirrors the hand-written `Debug` on
-    /// [`crate::S3Config`].
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let redact = |opt: &Option<String>| opt.as_ref().map(|_| "***");
-        f.debug_struct("GcsConfig")
-            .field("bucket", &self.bucket)
-            .field("prefix", &self.prefix)
-            .field("service_account_path", &redact(&self.service_account_path))
-            .field("service_account_key", &redact(&self.service_account_key))
-            .field(
-                "application_credentials_path",
-                &redact(&self.application_credentials_path),
-            )
-            .field("endpoint", &self.endpoint)
-            .field("allow_http", &self.allow_http)
-            .field("multipart_threshold", &self.multipart_threshold)
-            .field("multipart_chunk_size", &self.multipart_chunk_size)
-            .finish()
-    }
-}
-
-impl Default for GcsConfig {
-    /// Produces a placeholder `GcsConfig` so callers can use
-    /// `..Default::default()` to fill in just the tuning knobs. The bucket /
-    /// credential / endpoint fields are stubs — every real caller overrides
-    /// the bucket.
-    fn default() -> Self {
-        Self {
-            bucket: String::new(),
-            prefix: None,
-            service_account_path: None,
-            service_account_key: None,
-            application_credentials_path: None,
-            endpoint: None,
-            allow_http: false,
-            multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
-            multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
-        }
-    }
-}
+use crate::{error::RemoteStorageError, s3::S3RemoteStorage};
 
 impl S3RemoteStorage {
     /// Build a `GoogleCloudStorage` client from `cfg` and wrap it in the
@@ -136,26 +47,9 @@ impl S3RemoteStorage {
     /// builder (e.g. both a service-account path and key are supplied, a
     /// credential file is unreadable, or the bucket name is empty).
     pub fn from_gcs_config(cfg: &GcsConfig) -> Result<Self, RemoteStorageError> {
-        let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(&cfg.bucket);
-        if let Some(path) = &cfg.service_account_path {
-            builder = builder.with_service_account_path(path);
-        }
-        if let Some(key) = &cfg.service_account_key {
-            builder = builder.with_service_account_key(key);
-        }
-        if let Some(adc) = &cfg.application_credentials_path {
-            builder = builder.with_application_credentials(adc);
-        }
-        if let Some(endpoint) = &cfg.endpoint {
-            builder = builder.with_base_url(endpoint);
-        }
-        if cfg.allow_http {
-            builder = builder.with_client_options(ClientOptions::new().with_allow_http(true));
-        }
-        let store = builder
-            .build()
-            .map_err(|e| RemoteStorageError::InvalidArgument(format!("GCS builder: {e}")))?;
-        Ok(Self::with_store(Arc::new(store), cfg.prefix.clone())
+        let store = build_object_store(&ObjectStoreConfig::Gcs(cfg.clone()))
+            .map_err(|e| RemoteStorageError::InvalidArgument(e.to_string()))?;
+        Ok(Self::with_store(store, cfg.prefix.clone())
             .with_multipart_tuning(cfg.multipart_threshold, cfg.multipart_chunk_size))
     }
 }
@@ -166,11 +60,13 @@ mod tests {
         collections::BTreeMap,
         io::Write,
         path::{Path, PathBuf},
+        sync::Arc,
     };
 
     use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_ids::LeaderEpoch;
+    use crabka_object_store::{DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD};
     use object_store::memory::InMemory;
     use tempfile::TempDir;
     use uuid::Uuid;

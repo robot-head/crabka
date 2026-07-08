@@ -556,8 +556,11 @@ mod run_recovery_tests {
         fn quorum_state(&self) -> QuorumState {
             unimplemented!()
         }
-        async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
-            Ok(())
+        async fn submit_change(
+            &self,
+            _records: Vec<MetadataRecord>,
+        ) -> Result<crabka_raft::SubmitChangeResult, RaftError> {
+            Ok(crabka_raft::SubmitChangeResult::default())
         }
         async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
             unimplemented!()

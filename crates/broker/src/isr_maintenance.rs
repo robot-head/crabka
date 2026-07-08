@@ -179,7 +179,7 @@ async fn send_alter_partition(
     let mut last_err = String::new();
     for (target_id, addr) in targets {
         match send_alter_partition_to(broker_id, &addr, req.clone()).await {
-            Ok(()) => {
+            Ok(_) => {
                 debug!(
                     topic = topic,
                     partition = partition,
@@ -466,7 +466,7 @@ mod tests {
         async fn submit_change(
             &self,
             _records: Vec<MetadataRecord>,
-        ) -> Result<(), crabka_raft::RaftError> {
+        ) -> Result<crabka_raft::SubmitChangeResult, crabka_raft::RaftError> {
             unimplemented!("unused in isr_maintenance tests")
         }
 

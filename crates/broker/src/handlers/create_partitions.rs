@@ -161,6 +161,8 @@ pub(crate) async fn handle(
     let log_dirs = broker.config.all_log_dirs();
     let log_config = broker.config.log_config.clone();
     let log_dir_status = broker.log_dir_status.clone();
+    let hot_tail = broker.hot_tail.clone();
+    let wal_shards = broker.wal_shards.clone();
 
     let image = broker.controller.current_image();
 
@@ -251,7 +253,7 @@ pub(crate) async fn handle(
         let records = partition_records(&t.name, &new_partition_indices, &new_assignments);
 
         match broker.controller.submit_change(records).await {
-            Ok(()) => {
+            Ok(_) => {
                 materialize_new_partitions(
                     MaterializeContext {
                         partitions: &partitions_map,
@@ -261,6 +263,9 @@ pub(crate) async fn handle(
                         producer_state: &producer_state,
                         node_id,
                         diskless,
+                        topic_id: topic_rec.topic_id,
+                        hot_tail: &hot_tail,
+                        wal_shards: &wal_shards,
                     },
                     &t.name,
                     &new_partition_indices,
@@ -329,6 +334,9 @@ struct MaterializeContext<'a> {
     producer_state: &'a std::sync::Arc<crate::producer_state::ProducerState>,
     node_id: NodeId,
     diskless: bool,
+    topic_id: uuid::Uuid,
+    hot_tail: &'a std::sync::Arc<crate::diskless::hot_tail::HotTailCache>,
+    wal_shards: &'a std::sync::Arc<crate::wal::quorum::registry::WalShardRegistry>,
 }
 
 async fn materialize_new_partitions(
@@ -344,12 +352,15 @@ async fn materialize_new_partitions(
         if let Err(error) = materialize_partition(
             context.partitions,
             topic,
+            Some(context.topic_id),
             *index,
             context.log_dirs,
             context.log_config,
             context.log_dir_status,
             context.producer_state,
             context.diskless,
+            Some(context.hot_tail.clone()),
+            Some(context.wal_shards.clone()),
         ) {
             tracing::error!(topic, partition = *index, error = %error,
                 "CreatePartitions: materialize after quorum commit failed");

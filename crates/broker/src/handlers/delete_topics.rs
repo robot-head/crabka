@@ -179,7 +179,7 @@ pub(crate) async fn handle(
             .await;
 
         let error_code = match res {
-            Ok(()) => {
+            Ok(_) => {
                 // Committed to quorum — tear down in-memory state and dirs.
                 for idx in partitions.partitions_of(&name) {
                     partitions.remove(&name, idx);

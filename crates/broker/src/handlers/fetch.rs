@@ -43,25 +43,25 @@ type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 /// Resolved read for a single requested (topic, partition) tuple, kept
 /// around so we can re-read after a long-poll wake.
-struct PendingRead {
-    topic_name: String,
-    topic_id: WireUuid,
-    partition_index: i32,
-    fetch_offset: i64,
-    max_bytes: i32,
+pub(crate) struct PendingRead {
+    pub(crate) topic_name: String,
+    pub(crate) topic_id: WireUuid,
+    pub(crate) partition_index: i32,
+    pub(crate) fetch_offset: i64,
+    pub(crate) max_bytes: i32,
     /// `true` when `isolation_level == 1` on a consumer fetch (not a
     /// follower fetch). Causes batch-level LSO filtering and populates
     /// `aborted_transactions` in the response.
-    read_committed: bool,
+    pub(crate) read_committed: bool,
     /// `true` when `replica_id >= 0` — i.e., the request is from a follower
     /// replicator rather than a consumer. Follower fetches see all records up
     /// to LEO and report LEO as HW/LSO; consumer fetches are clamped at HW.
-    is_follower_fetch: bool,
+    pub(crate) is_follower_fetch: bool,
     /// `None` for unknown topic/partition or out-of-range — final response is
     /// already filled out and won't be re-read on wake.
-    partition: Option<Arc<Partition>>,
+    pub(crate) partition: Option<Arc<Partition>>,
     /// Per-partition output, mutated in place by `do_read`.
-    out: PartitionData,
+    pub(crate) out: PartitionData,
     /// Accumulator for microseconds spent in this partition's `do_read`
     /// calls (first pass plus any long-poll re-reads). Measured as an
     /// `Instant` elapsed delta around each `do_read`. The heavy byte read
@@ -69,7 +69,7 @@ struct PendingRead {
     /// allocating a `tokio_metrics::TaskMonitor` per partition per fetch.
     /// Drained into the response-emit loop's `record_partition_cpu_micros`
     /// call.
-    cpu_micros: u64,
+    pub(crate) cpu_micros: u64,
 }
 
 impl PendingRead {
@@ -734,6 +734,8 @@ async fn execute_pending_reads(
         let started = std::time::Instant::now();
         total_bytes += do_read(
             &partition,
+            Some(uuid::Uuid::from_bytes(read.topic_id.0)),
+            Some(broker.hot_tail.clone()),
             Offset(read.fetch_offset),
             read.max_bytes,
             read.read_committed,
@@ -745,10 +747,14 @@ async fn execute_pending_reads(
         read.cpu_micros = read
             .cpu_micros
             .saturating_add(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
-        if read.out.error_code == codes::OFFSET_OUT_OF_RANGE
-            && let Some(remote_bytes) = try_remote_read(broker, read, &partition).await
-        {
-            total_bytes += remote_bytes;
+        if read.out.error_code == codes::OFFSET_OUT_OF_RANGE {
+            if let Some(remote_bytes) = try_remote_read(broker, read, &partition).await {
+                total_bytes += remote_bytes;
+            } else if let Some(diskless_bytes) =
+                crate::diskless::read::try_diskless_read(broker, read, &partition).await
+            {
+                total_bytes += diskless_bytes;
+            }
         }
     }
     let wants_more = total_bytes < usize::try_from(min_bytes.max(0)).unwrap_or(0);
@@ -1036,6 +1042,8 @@ enum ReadPlan {
 
 async fn do_read(
     part: &Partition,
+    topic_id: Option<uuid::Uuid>,
+    hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     fetch_offset: Offset,
     max_bytes: i32,
     read_committed: bool,
@@ -1053,6 +1061,28 @@ async fn do_read(
         out,
     );
     // Log mutex released here.
+
+    if part.diskless
+        && !read_committed
+        && matches!(plan, ReadPlan::Read { .. })
+        && let (Some(topic_id), Some(hot_tail)) = (topic_id, hot_tail.as_ref())
+        && let Some(bytes) = hot_tail.get(
+            topic_id,
+            part.index,
+            fetch_offset.0,
+            usize::try_from(max_bytes.max(0)).unwrap_or(0),
+        )
+    {
+        return Ok(finish_read(
+            out,
+            &w,
+            log_start,
+            read_committed,
+            is_follower_fetch,
+            Vec::new(),
+            Some(RecordsPayload::Raw(bytes)),
+        ));
+    }
 
     let (records, aborted_txns): (Option<RecordsPayload>, Vec<AbortedTransaction>) = match plan {
         ReadPlan::OffsetOutOfRange => return Ok(0),
@@ -1426,6 +1456,8 @@ async fn long_poll_then_reread(
         let read_start = std::time::Instant::now();
         do_read(
             &part,
+            Some(uuid::Uuid::from_bytes(p.topic_id.0)),
+            Some(broker.hot_tail.clone()),
             // Wrap the decoded-request wire offset into `Offset` for the read.
             Offset(p.fetch_offset),
             p.max_bytes,
@@ -1442,7 +1474,9 @@ async fn long_poll_then_reread(
         // so a long-poll that fires on a non-tiered partition doesn't
         // clobber the remote batch we'd already served on this one.
         if p.out.error_code == codes::OFFSET_OUT_OF_RANGE {
-            let _ = try_remote_read(broker, p, &part).await;
+            if try_remote_read(broker, p, &part).await.is_none() {
+                let _ = crate::diskless::read::try_diskless_read(broker, p, &part).await;
+            }
         }
     }
     Ok(())
