@@ -175,12 +175,15 @@ pub(crate) async fn handle(
                 materialize_partition(
                     &coord.partitions,
                     crate::txn::bootstrap::TOPIC,
+                    None,
                     txn_partition.get(),
                     &log_dirs,
                     &log_config,
                     &log_dir_status,
                     &broker.producer_state,
                     false,
+                    None,
+                    None,
                 )
                 .map_err(BrokerError::Txn)?;
                 handle_transactional(&coord, tid, &req, txnv, req.enable2_pc).await?

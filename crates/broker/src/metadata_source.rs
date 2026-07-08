@@ -9,7 +9,7 @@ use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 use crabka_metadata::{MetadataImage, MetadataRecord};
 use crabka_raft::{
     AddVoter, ControllerHandle, Node, NodeId, OutboundDialer, QuorumState, RaftError,
-    ReconfigOutcome, RemoveVoter, SnapshotRange, UpdateVoter,
+    ReconfigOutcome, RemoveVoter, SnapshotRange, SubmitChangeResult, UpdateVoter,
 };
 use tokio::sync::watch;
 
@@ -21,7 +21,10 @@ pub trait MetadataSource: Send + Sync {
     fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>>;
     fn watch_leader(&self) -> watch::Receiver<Option<NodeId>>;
     fn quorum_state(&self) -> QuorumState;
-    async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError>;
+    async fn submit_change(
+        &self,
+        records: Vec<MetadataRecord>,
+    ) -> Result<SubmitChangeResult, RaftError>;
     async fn change_membership(&self, new_voters: BTreeSet<NodeId>) -> Result<(), RaftError>;
     async fn add_learner(&self, node_id: NodeId, node: Node) -> Result<(), RaftError>;
     /// The controller listener's bound address. Meaningful only on
@@ -55,7 +58,10 @@ impl MetadataSource for ControllerHandle {
     fn quorum_state(&self) -> QuorumState {
         ControllerHandle::quorum_state(self)
     }
-    async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+    async fn submit_change(
+        &self,
+        records: Vec<MetadataRecord>,
+    ) -> Result<SubmitChangeResult, RaftError> {
         ControllerHandle::submit_change(self, records).await
     }
     async fn change_membership(&self, new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
@@ -98,7 +104,10 @@ pub struct ObserverSource {
 /// quorum leader.
 #[async_trait::async_trait]
 pub trait MetadataWriter: Send + Sync {
-    async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError>;
+    async fn submit_change(
+        &self,
+        records: Vec<MetadataRecord>,
+    ) -> Result<SubmitChangeResult, RaftError>;
 }
 
 impl ObserverSource {
@@ -133,7 +142,10 @@ impl MetadataSource for ObserverSource {
             per_voter_matched_index: std::collections::BTreeMap::new(),
         }
     }
-    async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+    async fn submit_change(
+        &self,
+        records: Vec<MetadataRecord>,
+    ) -> Result<SubmitChangeResult, RaftError> {
         self.writer.submit_change(records).await
     }
     async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
@@ -246,7 +258,10 @@ fn build_forward_order(voters: &[(NodeId, String)], hint: Option<NodeId>) -> Vec
 
 #[async_trait::async_trait]
 impl MetadataWriter for QuorumForwarder {
-    async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+    async fn submit_change(
+        &self,
+        records: Vec<MetadataRecord>,
+    ) -> Result<SubmitChangeResult, RaftError> {
         let payload =
             <serde_wincode::SerdeCompat<Vec<MetadataRecord>> as wincode::Serialize>::serialize(
                 &records,
@@ -267,7 +282,12 @@ impl MetadataWriter for QuorumForwarder {
         };
         for (target, addr) in order {
             match self.try_submit(target, &addr, &body).await {
-                Ok(resp) if resp.error_code == 0 => return Ok(()),
+                Ok(resp) if resp.error_code == 0 => {
+                    return <serde_wincode::SerdeCompat<SubmitChangeResult> as wincode::Deserialize>::deserialize(
+                        &resp.result,
+                    )
+                    .map_err(RaftError::from);
+                }
                 // error_code 2 => leader rejected at apply-time. Match the
                 // controller's own forward path (`forward_submit_to`), which
                 // collapses the typed `MetadataError` into `TopicExists` since
@@ -303,7 +323,7 @@ mod tests {
     };
 
     use assert2::assert;
-    use bytes::BytesMut;
+    use bytes::{Bytes, BytesMut};
     use crabka_metadata::{MetadataRecord, TopicRecord};
     use crabka_protocol::{
         Encode,
@@ -314,7 +334,7 @@ mod tests {
     };
     use crabka_raft::{
         BootstrapMode, Controller, ControllerConfig, Node, NodeId, OutboundDialer, RaftError,
-        SnapshotRange,
+        SnapshotRange, SubmitChangeResult,
     };
     use tempfile::TempDir;
     use tokio::sync::watch;
@@ -359,11 +379,18 @@ mod tests {
 
     fn submit_change_response_body(error_code: i16, leader_hint: i64) -> Vec<u8> {
         let mut out = vec![0u8]; // flexible ResponseHeader v1 tagged-fields
+        let result =
+            <serde_wincode::SerdeCompat<SubmitChangeResult> as wincode::Serialize>::serialize(
+                &SubmitChangeResult::default(),
+            )
+            .expect("serialize submit result");
         crabka_raft::CrabkaSubmitChangeResponse {
             error_code,
             leader_hint,
+            result: Bytes::from(result),
         }
-        .encode_v0(&mut out);
+        .encode_v0(&mut out)
+        .unwrap();
         out
     }
 
@@ -410,13 +437,16 @@ mod tests {
 
     #[async_trait::async_trait]
     impl MetadataWriter for RecordingWriter {
-        async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+        async fn submit_change(
+            &self,
+            records: Vec<MetadataRecord>,
+        ) -> Result<SubmitChangeResult, RaftError> {
             self.calls.lock().unwrap().push(records);
-            Ok(())
+            Ok(SubmitChangeResult::default())
         }
     }
 
-    fn not_leader_none(result: &Result<(), RaftError>) {
+    fn not_leader_none(result: &Result<SubmitChangeResult, RaftError>) {
         assert!(matches!(
             result,
             Err(RaftError::NotLeader {

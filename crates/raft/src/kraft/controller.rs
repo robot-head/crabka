@@ -44,6 +44,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
+    OffsetReservation, SubmitChangeResult,
     error::RaftError,
     kraft::{
         action::{Action, TimerKind},
@@ -151,7 +152,8 @@ struct CommitWaiter {
     need_offset: Offset,
     /// First per-record rejection observed at apply time, if any.
     rejection: Option<RaftError>,
-    reply: oneshot::Sender<Result<(), RaftError>>,
+    result: SubmitChangeResult,
+    reply: oneshot::Sender<Result<SubmitChangeResult, RaftError>>,
 }
 
 /// Cheap, cloneable handle to the running engine: holds the command sender and
@@ -622,7 +624,7 @@ impl KraftController {
     pub async fn submit_change(
         &self,
         records: Vec<crabka_metadata::MetadataRecord>,
-    ) -> Result<(), RaftError> {
+    ) -> Result<SubmitChangeResult, RaftError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::SubmitChange { records, reply })
@@ -787,7 +789,7 @@ impl Engine {
             }
             Command::Inbound(inbound) => self.on_inbound(inbound),
             Command::Timer(tick) => self.on_timer(tick),
-            Command::SubmitChange { records, reply } => self.on_submit_change(&records, reply),
+            Command::SubmitChange { records, reply } => self.on_submit_change(records, reply),
             Command::TriggerSnapshot { reply } => {
                 let _ = reply.send(self.do_trigger_snapshot());
             }
@@ -1241,6 +1243,7 @@ impl Engine {
     /// Handle a `submit_change`: leader appends + parks a waiter; non-leader
     /// rejects immediately with the leader hint. Takes `records` by value: it
     /// owns the batch moved out of the [`Command`].
+    #[allow(clippy::needless_pass_by_value)]
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -1253,8 +1256,8 @@ impl Engine {
     )]
     fn on_submit_change(
         &mut self,
-        records: &[crabka_metadata::MetadataRecord],
-        reply: oneshot::Sender<Result<(), RaftError>>,
+        records: Vec<crabka_metadata::MetadataRecord>,
+        reply: oneshot::Sender<Result<SubmitChangeResult, RaftError>>,
     ) {
         if !self.core.role().is_leader() {
             let _ = reply.send(Err(RaftError::NotLeader {
@@ -1276,8 +1279,9 @@ impl Engine {
         let assign_base = self.log.log_end_offset();
 
         let mut scratch = self.image.clone();
+        let mut result = SubmitChangeResult::default();
         let mut value_blobs: Vec<bytes::Bytes> = Vec::new();
-        for r in records {
+        for r in &records {
             // Stamp the registration epoch = its committed offset.
             let stamped;
             let r: &MetadataRecord = match r {
@@ -1294,6 +1298,20 @@ impl Engine {
                 let _ = reply.send(Err(RaftError::Metadata(e)));
                 return;
             }
+            if let MetadataRecord::V1PartitionOffsetAdvance(r) = r {
+                let (base_offset, _next_offset) = crabka_verified::reserve_offsets(
+                    scratch
+                        .partition_next_offset(&r.topic, r.partition)
+                        .unwrap_or(0),
+                    r.count,
+                );
+                result.offset_reservations.push(OffsetReservation {
+                    topic: r.topic.clone(),
+                    partition: r.partition,
+                    base_offset,
+                    count: r.count,
+                });
+            }
             match to_kraft_values(r, &scratch) {
                 Ok(mut blobs) => value_blobs.append(&mut blobs),
                 Err(e) => {
@@ -1307,7 +1325,7 @@ impl Engine {
         // Every record fanned out to nothing (e.g. an empty config clear): the
         // submit is a committed no-op. Reply success without appending a batch.
         if value_blobs.is_empty() {
-            let _ = reply.send(Ok(()));
+            let _ = reply.send(Ok(result));
             return;
         }
 
@@ -1337,6 +1355,7 @@ impl Engine {
             base_offset: base,
             need_offset,
             rejection: None,
+            result,
             reply,
         });
         // Drive a self-fetch so the core recomputes the HWM (single voter
@@ -1532,7 +1551,7 @@ impl Engine {
         let mut still = Vec::new();
         for w in self.commit_waiters.drain(..) {
             if hwm_reaches_waiter(hwm, w.need_offset) {
-                let result = w.rejection.map_or(Ok(()), Err);
+                let result = w.rejection.map_or(Ok(w.result), Err);
                 let _ = w.reply.send(result);
             } else {
                 still.push(w);
@@ -2995,16 +3014,46 @@ mod tests {
         assert2::assert!(engine.image.topic("direct").is_none());
 
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(&topic_record("direct"), reply);
+        engine.on_submit_change(topic_record("direct"), reply);
 
-        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(()))));
-        check!(
-            (
-                engine.image.topic("direct").is_some(),
-                engine.log.hwm() == engine.log.log_end_offset(),
-                engine.commit_waiters.is_empty(),
-            ) == (true, true, true)
-        );
+        assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        check!(engine.image.topic("direct").is_some());
+        check!(engine.log.hwm() == engine.log.log_end_offset());
+        check!(engine.commit_waiters.is_empty());
+    }
+
+    #[test]
+    fn offset_advance_submit_returns_actor_ordered_base() {
+        use crabka_metadata::{MetadataRecord, PartitionOffsetAdvanceRecord};
+
+        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
+        elect_single_voter_engine(&mut engine);
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(topic_record("topic"), reply);
+        assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+
+        let advance = |count| {
+            vec![MetadataRecord::V1PartitionOffsetAdvance(
+                PartitionOffsetAdvanceRecord {
+                    topic: "topic".to_string(),
+                    partition: 0,
+                    count,
+                },
+            )]
+        };
+
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(advance(3), reply);
+        let first = rx.try_recv().expect("first reply").expect("first ok");
+        let (reply, mut rx) = oneshot::channel();
+        engine.on_submit_change(advance(5), reply);
+        let second = rx.try_recv().expect("second reply").expect("second ok");
+
+        assert_eq!(first.offset_reservations[0].base_offset, 0);
+        assert_eq!(first.offset_reservations[0].count, 3);
+        assert_eq!(second.offset_reservations[0].base_offset, 3);
+        assert_eq!(second.offset_reservations[0].count, 5);
+        assert_eq!(engine.image.partition_next_offset("topic", 0), Some(8));
     }
 
     #[test]
@@ -3015,8 +3064,8 @@ mod tests {
         elect_single_voter_engine(&mut engine);
 
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(&topic_record("anchor"), reply);
-        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+        engine.on_submit_change(topic_record("anchor"), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
 
         let base = engine.log.log_end_offset();
         let reg = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
@@ -3029,10 +3078,10 @@ mod tests {
             endpoints: vec![],
         });
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(&[reg], reply);
+        engine.on_submit_change(vec![reg], reply);
 
-        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(()))));
-        assert2::assert!(engine.image.broker_epoch(NodeId(7)) == Some(base.0));
+        assert!(matches!(rx.try_recv(), Ok(Ok(_))));
+        assert!(engine.image.broker_epoch(NodeId(7)) == Some(base.0));
     }
 
     #[test]
@@ -3040,8 +3089,8 @@ mod tests {
         let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         elect_single_voter_engine(&mut engine);
         let (reply, mut rx) = oneshot::channel();
-        engine.on_submit_change(&topic_record("replayed"), reply);
-        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+        engine.on_submit_change(topic_record("replayed"), reply);
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
 
         let mut recovered = MetadataImage::new(uuid::Uuid::nil());
         replay_committed(&engine.log, &mut recovered, Offset(0));
@@ -3064,19 +3113,21 @@ mod tests {
             base_offset: Offset(4),
             need_offset: Offset(5),
             rejection: None,
+            result: SubmitChangeResult::default(),
             reply: ready_tx,
         });
         engine.commit_waiters.push(CommitWaiter {
             base_offset: Offset(5),
             need_offset: Offset(6),
             rejection: None,
+            result: SubmitChangeResult::default(),
             reply: future_tx,
         });
 
         engine.try_resolve_waiters();
 
-        assert2::assert!(matches!(ready_rx.try_recv(), Ok(Ok(()))));
-        assert2::assert!(matches!(
+        assert!(matches!(ready_rx.try_recv(), Ok(Ok(_))));
+        assert!(matches!(
             future_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
@@ -3099,12 +3150,14 @@ mod tests {
             base_offset: Offset(4),
             need_offset: Offset(5),
             rejection: None,
+            result: SubmitChangeResult::default(),
             reply: ready_tx,
         });
         engine.commit_waiters.push(CommitWaiter {
             base_offset: Offset(5),
             need_offset: Offset(6),
             rejection: None,
+            result: SubmitChangeResult::default(),
             reply: future_tx,
         });
 
@@ -3472,6 +3525,7 @@ mod tests {
         tokio::time::timeout(StdDuration::from_secs(2), ctrl.submit_change(records))
             .await
             .unwrap_or_else(|_| panic!("{context} submit_change timed out"))
+            .map(|_| ())
     }
 
     #[tokio::test]

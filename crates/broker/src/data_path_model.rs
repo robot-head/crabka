@@ -69,14 +69,28 @@ struct DpState {
     hwm: i64,           // leader-authoritative high watermark
     leader: u8,
     leader_epoch: u8,
-    isr: u8,            // bitmask over brokers
-    live: u8,           // bitmask over brokers
-    committed: Vec<u8>, // ghost: committed[off] = epoch, for offsets ever <= hwm
+    isr: u8,                   // bitmask over brokers
+    live: u8,                  // bitmask over brokers
+    committed: Vec<u8>,        // ghost: committed[off] = epoch, for offsets ever <= hwm
     wal_acked: Vec<u8>, // ghost: wal_acked[off] = epoch, for offsets made WAL-durable (diskless mode)
+    seq_next: i64,      // ghost: controller's next assignable diskless offset
+    assigned: Vec<(i64, i64)>, // ghost: half-open assigned ranges
     lost: bool,         // ghost: an unclean loss has occurred
 }
 
-type StateProjection = (Vec<Vec<u8>>, i64, u8, u8, u8, u8, Vec<u8>, Vec<u8>, bool);
+type StateProjection = (
+    Vec<Vec<u8>>,
+    i64,
+    u8,
+    u8,
+    u8,
+    u8,
+    Vec<u8>,
+    Vec<u8>,
+    i64,
+    Vec<(i64, i64)>,
+    bool,
+);
 
 impl DpState {
     fn leader_leo(&self) -> i64 {
@@ -92,6 +106,8 @@ impl DpState {
             self.live,
             self.committed.clone(),
             self.wal_acked.clone(),
+            self.seq_next,
+            self.assigned.clone(),
             self.lost,
         )
     }
@@ -325,6 +341,7 @@ fn do_failover(s: &mut DpState, dead: u8, unclean: bool) {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Act {
     Produce,
+    Assign(u8),
     Replicate(u8), // follower b fetches one step from the leader
     AdvanceHwm,
     WalSync, // diskless: make the leader's appended prefix fsync-durable
@@ -362,6 +379,8 @@ impl Model for DpModel {
             live: if self.diskless { 0b001 } else { 0b111 },
             committed: vec![],
             wal_acked: vec![],
+            seq_next: 0,
+            assigned: vec![],
             lost: false,
         }]
     }
@@ -372,6 +391,9 @@ impl Model for DpModel {
         if leader_live {
             if s.log[usize::from(s.leader)].len() < MAX_LEN && s.leader_epoch <= MAX_EPOCH {
                 acts.push(Act::Produce);
+                if self.diskless && s.assigned.len() < 3 {
+                    acts.push(Act::Assign(1));
+                }
             }
             if self.diskless && s.wal_acked.len() < s.log[s.leader as usize].len() {
                 acts.push(Act::WalSync);
@@ -441,6 +463,12 @@ impl Model for DpModel {
         match a {
             Act::Produce => {
                 s.log[usize::from(s.leader)].push(s.leader_epoch);
+            }
+            Act::Assign(count) => {
+                let start = s.seq_next;
+                let end = start + i64::from(count);
+                s.assigned.push((start, end));
+                s.seq_next = end;
             }
             Act::Replicate(b) => {
                 let leader_log = s.log[usize::from(s.leader)].clone();
@@ -546,6 +574,16 @@ impl Model for DpModel {
                 }),
                 Property::sometimes("wal_acked_survives_broker_down", |_, s: &DpState| {
                     !has(s.live, s.leader) && !s.wal_acked.is_empty()
+                }),
+                Property::always("offsets_contiguous_and_unique", |_, s: &DpState| {
+                    let mut next = 0;
+                    for &(start, end) in &s.assigned {
+                        if start != next || end <= start {
+                            return false;
+                        }
+                        next = end;
+                    }
+                    next == s.seq_next
                 }),
             ]);
         } else {
@@ -660,5 +698,17 @@ fn data_diskless_wal_acked_never_lost() {
             diskless: true,
         },
         "data_diskless_wal_acked_never_lost",
+    );
+}
+
+#[test]
+fn data_diskless_offsets_gap_free_and_unique() {
+    run(
+        DpModel {
+            base: Instant::now(),
+            unclean: false,
+            diskless: true,
+        },
+        "data_diskless_offsets_gap_free_and_unique",
     );
 }

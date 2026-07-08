@@ -13,7 +13,7 @@ use bytes::{Buf, BufMut, Bytes};
 use crabka_protocol::ProtocolError;
 
 const I32_LEN: usize = 4;
-const SUBMIT_CHANGE_RESPONSE_LEN: usize = 10;
+const SUBMIT_CHANGE_RESPONSE_FIXED_LEN: usize = 10;
 const METADATA_FETCH_REQUEST_LEN: usize = 12;
 const METADATA_FETCH_RESPONSE_FIXED_LEN: usize = 30;
 
@@ -89,21 +89,26 @@ pub struct CrabkaSubmitChangeResponse {
     /// Hint: the leader id the responder believes is current, when it cannot
     /// apply the change itself. -1 means "unknown".
     pub leader_hint: i64,
+    /// Wincode-encoded [`crate::SubmitChangeResult`] on success.
+    pub result: Bytes,
 }
 
 impl CrabkaSubmitChangeResponse {
-    pub fn encode_v0(&self, out: &mut Vec<u8>) {
+    pub fn encode_v0(&self, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
         out.put_i16(self.error_code);
         out.put_i64(self.leader_hint);
+        put_i32_len_prefixed_bytes(out, &self.result, "result length exceeds i32::MAX")?;
+        Ok(())
     }
 
     /// # Errors
     /// Returns an error if the response payload is truncated.
     pub fn decode_v0(buf: &mut &[u8]) -> Result<Self, ProtocolError> {
-        require_remaining(buf, SUBMIT_CHANGE_RESPONSE_LEN)?;
+        require_remaining(buf, SUBMIT_CHANGE_RESPONSE_FIXED_LEN)?;
         Ok(Self {
             error_code: buf.get_i16(),
             leader_hint: buf.get_i64(),
+            result: get_i32_len_prefixed_bytes(buf, "negative result length")?,
         })
     }
 }
@@ -209,9 +214,10 @@ mod tests {
         let resp = CrabkaSubmitChangeResponse {
             error_code: 1,
             leader_hint: 3,
+            result: Bytes::from_static(b"result"),
         };
         let mut out = Vec::new();
-        resp.encode_v0(&mut out);
+        resp.encode_v0(&mut out).unwrap();
         let mut cur: &[u8] = &out;
         assert2::assert!(CrabkaSubmitChangeResponse::decode_v0(&mut cur).unwrap() == resp);
     }

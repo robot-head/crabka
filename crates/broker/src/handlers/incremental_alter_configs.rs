@@ -202,7 +202,7 @@ async fn process_resource(
         return out;
     }
     match broker.controller.submit_change(to_submit).await {
-        Ok(()) => {}
+        Ok(_) => {}
         Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
             out.error_code = codes::NOT_CONTROLLER;
         }

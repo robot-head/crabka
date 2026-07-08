@@ -551,6 +551,10 @@ async fn process_partition(
     // All header fields below come from `prepared` — sourced from the v2
     // batch HEADER on the verbatim path (no record decode), or from the
     // decoded owned `RecordBatch` header on the fallback path.
+    if prepared.attributes.is_transactional() && part.diskless {
+        out.error_code = codes::INVALID_TXN_STATE;
+        return Ok(out);
+    }
     if let Some(code) =
         validate_transactional_produce(&prepared, txn_coordinator, image, topic_name, idx).await?
     {
@@ -724,12 +728,6 @@ fn validate_partition_gate(
         leader_epoch: record.leader_epoch.0,
         ..Default::default()
     };
-    if record.leader != this_node_id {
-        return Err(PartitionGateError {
-            code: codes::NOT_LEADER_OR_FOLLOWER,
-            current_leader: Some(leader),
-        });
-    }
     let Some(partition) = partitions.get(topic_name, crabka_ids::PartitionIndex(partition_index))
     else {
         return Err(PartitionGateError {
@@ -737,6 +735,12 @@ fn validate_partition_gate(
             current_leader: Some(leader),
         });
     };
+    if record.leader != this_node_id && !partition.diskless {
+        return Err(PartitionGateError {
+            code: codes::NOT_LEADER_OR_FOLLOWER,
+            current_leader: Some(leader),
+        });
+    }
     if log_dir_status.is_offline(&partition.log_dir.load()) {
         return Err(PartitionGateError {
             code: codes::KAFKA_STORAGE_ERROR,

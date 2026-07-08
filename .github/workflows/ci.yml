@@ -274,6 +274,12 @@ jobs:
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
       - run: cargo +nightly fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Diskless WAL shipping gates
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          cargo nextest run -p crabka-raft --profile ci --test kraft_model
+          cargo nextest run -p crabka-broker --profile ci --lib diskless
+          cargo nextest run -p crabka-verified --profile ci
       # nextest cannot run doctests, so run them explicitly (once, on Linux).
       - name: Doctests
         if: matrix.os == 'ubuntu-latest'
@@ -916,6 +922,7 @@ jobs:
           cargo llvm-cov clean --workspace
           cargo llvm-cov nextest --no-report --profile ci -p crabka-broker --tests
           cargo llvm-cov nextest --no-report --profile ci -p crabka-client-admin --tests
+          cargo nextest run --profile ci -p crabka-integration-tests --test diskless_jepsen --no-run
           cargo llvm-cov report --lcov --output-path coverage/broker-integration.lcov
       - uses: codecov/codecov-action@v7
         with:

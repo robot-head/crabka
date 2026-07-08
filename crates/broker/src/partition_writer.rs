@@ -129,6 +129,42 @@ fn append_produce_batch(
     (results, leo)
 }
 
+fn append_produce_batch_at(
+    log: &Mutex<Log>,
+    base: Offset,
+    datas: Vec<ProduceData>,
+) -> (Vec<Result<Offset, crate::error::BrokerError>>, Offset) {
+    let mut guard = lock_log(log);
+    let target = guard.config_snapshot().compression_type;
+    let mut next = base;
+    let mut results = Vec::with_capacity(datas.len());
+    for data in datas {
+        let count = i64::from(data.record_count());
+        let result = match data {
+            ProduceData::Verbatim(batch) => guard
+                .append_verbatim_at(&batch, next)
+                .map_err(crate::error::BrokerError::from),
+            ProduceData::Owned(mut batch) => {
+                if let Some(target) = target
+                    && batch.attributes.compression() != target
+                {
+                    batch.attributes = batch.attributes.with_compression(target);
+                }
+                guard
+                    .append_at(&mut batch, next)
+                    .map(|()| next)
+                    .map_err(crate::error::BrokerError::from)
+            }
+        };
+        if result.is_ok() {
+            next = Offset(next.0 + count);
+        }
+        results.push(result);
+    }
+    let leo = guard.log_end_offset();
+    (results, leo)
+}
+
 /// Run [`append_produce_batch`] away from normal async polling. On the broker's
 /// multi-thread runtime, `block_in_place` avoids the per-batch `spawn_blocking`
 /// scheduling hop while letting Tokio hand the worker's other tasks to a
@@ -150,7 +186,24 @@ pub(crate) async fn run_produce_append_batch(
     }
 }
 
+pub(crate) async fn run_produce_append_batch_at(
+    log: Arc<Mutex<Log>>,
+    base: Offset,
+    datas: Vec<ProduceData>,
+) -> Result<(Vec<Result<Offset, crate::error::BrokerError>>, Offset), crate::error::BrokerError> {
+    match Handle::current().runtime_flavor() {
+        RuntimeFlavor::MultiThread => catch_unwind(AssertUnwindSafe(|| {
+            tokio::task::block_in_place(move || append_produce_batch_at(&log, base, datas))
+        }))
+        .map_err(|_| storage_failure_error("append task panicked", "block_in_place panic")),
+        _ => tokio::task::spawn_blocking(move || append_produce_batch_at(&log, base, datas))
+            .await
+            .map_err(|join_err| storage_failure_error("append task panicked", &join_err)),
+    }
+}
+
 async fn handle_produce(
+    identity: (&str, PartitionIndex),
     first: ProduceJob,
     rx: &mut mpsc::Receiver<WriterMessage>,
     pending: &mut Option<WriterMessage>,
@@ -161,6 +214,7 @@ async fn handle_produce(
         &Arc<Notify>,
     ),
     wal: Option<&crate::wal::SharedWal>,
+    sequencer: Option<&Arc<dyn crate::wal::OffsetSequencer>>,
 ) {
     let (log, log_dir, log_dir_status) = storage;
     let (append_notify, replica_state, hw_advance_notify) = signals;
@@ -183,8 +237,29 @@ async fn handle_produce(
         datas.push(data);
     }
 
-    let append_result = if let Some(wal) = wal {
-        wal.append(datas).await
+    let append_result = if wal.is_some() {
+        let Some(sequencer) = sequencer else {
+            for ack in acks {
+                let _ = ack.send(Err(storage_failure_error(
+                    "diskless append missing offset sequencer",
+                    "no sequencer configured",
+                )));
+            }
+            return;
+        };
+        let count = datas.iter().map(ProduceData::record_count).sum();
+        match sequencer.assign(identity.0, identity.1, count).await {
+            Ok(base) => run_produce_append_batch_at(Arc::clone(log), base, datas).await,
+            Err(error) => {
+                for ack in acks {
+                    let _ = ack.send(Err(storage_failure_error(
+                        "offset assignment failed",
+                        &error,
+                    )));
+                }
+                return;
+            }
+        }
     } else {
         run_produce_append_batch(Arc::clone(log), datas).await
     };
@@ -403,6 +478,24 @@ async fn handle_trim(
 pub async fn run(
     identity: (String, PartitionIndex),
     storage: (Arc<Mutex<Log>>, Arc<ArcSwap<PathBuf>>),
+    rx: mpsc::Receiver<WriterMessage>,
+    signals: (
+        Arc<Notify>,
+        Arc<tokio::sync::Mutex<ReplicaState>>,
+        Arc<Notify>,
+    ),
+    services: (
+        LogDirRegistry,
+        Arc<ProducerState>,
+        Option<crate::wal::SharedWal>,
+    ),
+) {
+    run_with_sequencer(identity, storage, rx, signals, services, None).await;
+}
+
+pub async fn run_with_sequencer(
+    identity: (String, PartitionIndex),
+    storage: (Arc<Mutex<Log>>, Arc<ArcSwap<PathBuf>>),
     mut rx: mpsc::Receiver<WriterMessage>,
     signals: (
         Arc<Notify>,
@@ -414,6 +507,7 @@ pub async fn run(
         Arc<ProducerState>,
         Option<crate::wal::SharedWal>,
     ),
+    sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
 ) {
     let (topic, partition) = identity;
     let (log, log_dir) = storage;
@@ -435,12 +529,14 @@ pub async fn run(
         match msg {
             WriterMessage::Produce(first) => {
                 handle_produce(
+                    (&topic, partition),
                     first,
                     &mut rx,
                     &mut pending,
                     (&log, &log_dir, &log_dir_status),
                     (&append_notify, &replica_state, &hw_advance_notify),
                     wal.as_ref(),
+                    sequencer.as_ref(),
                 )
                 .await;
             }
@@ -595,6 +691,8 @@ fn swap_future_log(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
     use assert2::{assert, check};
     use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
@@ -615,6 +713,29 @@ mod tests {
                 ($status, $producer),
             )
         };
+    }
+
+    struct TestSequencer {
+        next: AtomicI64,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::wal::OffsetSequencer for TestSequencer {
+        async fn assign(
+            &self,
+            _topic: &str,
+            _partition: PartitionIndex,
+            count: u32,
+        ) -> Result<Offset, crate::error::BrokerError> {
+            let base = self.next.fetch_add(i64::from(count), Ordering::SeqCst);
+            Ok(Offset(base))
+        }
+    }
+
+    fn test_sequencer() -> Arc<dyn crate::wal::OffsetSequencer> {
+        Arc::new(TestSequencer {
+            next: AtomicI64::new(0),
+        })
     }
 
     fn sample_batch(n: i32) -> RecordBatch {
@@ -793,7 +914,7 @@ mod tests {
             );
         }
         let hw_advance_notify = Arc::new(Notify::new());
-        let writer = tokio::spawn(run(
+        let writer = tokio::spawn(run_with_sequencer(
             ("t".to_string(), PartitionIndex(0)),
             (
                 log.clone(),
@@ -810,6 +931,7 @@ mod tests {
                 Arc::new(ProducerState::new()),
                 wal,
             ),
+            Some(test_sequencer()),
         ));
 
         let hw_waiter = hw_advance_notify.notified();
@@ -869,18 +991,24 @@ mod tests {
                 );
             }
             let hw_advance_notify = Arc::new(Notify::new());
-            let writer = tokio::spawn(run(
-                "t".to_string(),
-                PartitionIndex(0),
-                log.clone(),
-                Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            let writer = tokio::spawn(run_with_sequencer(
+                ("t".to_string(), PartitionIndex(0)),
+                (
+                    log.clone(),
+                    Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+                ),
                 rx,
-                append_notify,
-                replica_state.clone(),
-                hw_advance_notify.clone(),
-                crate::log_dir_status::LogDirRegistry::default(),
-                Arc::new(ProducerState::new()),
-                wal,
+                (
+                    append_notify,
+                    replica_state.clone(),
+                    hw_advance_notify.clone(),
+                ),
+                (
+                    crate::log_dir_status::LogDirRegistry::default(),
+                    Arc::new(ProducerState::new()),
+                    wal,
+                ),
+                Some(test_sequencer()),
             ));
 
             let hw_waiter = hw_advance_notify.notified();

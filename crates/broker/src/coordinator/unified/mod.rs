@@ -1453,8 +1453,8 @@ mod tests {
         async fn submit_change(
             &self,
             _records: Vec<crabka_metadata::MetadataRecord>,
-        ) -> Result<(), crabka_raft::RaftError> {
-            Ok(())
+        ) -> Result<crabka_raft::SubmitChangeResult, crabka_raft::RaftError> {
+            Ok(crabka_raft::SubmitChangeResult::default())
         }
 
         async fn change_membership(
