@@ -73,7 +73,7 @@ A split of range r at rowid b: force a checkpoint of r (G-3, with its garbage ho
 
 ### G-8c — the honest research line
 
-Unbounded single-table *commit* rate requires decisions that do not serialize through one range's group commit: distributed decision logs with coherent snapshots (per-range decision homes + a snapshot protocol), or a timestamp-ordering redesign (HLC/Percolator-class) replacing xid snapshots outright. Both are engine-architecture changes, not slices; G-8c exists as a named research chapter with its trigger condition (tenants sustaining near the batched-decision ceiling), so the roadmap neither promises it nor forgets it.
+Unbounded single-table *commit* rate requires decisions that do not serialize through one range's group commit: distributed decision logs with coherent snapshots (per-range decision homes + a snapshot protocol), or a timestamp-ordering redesign (HLC/Percolator-class) replacing xid snapshots outright. Both are engine-architecture changes, not slices; G-8c exists as a named research chapter with its trigger condition (tenants sustaining near the batched-decision ceiling), so the roadmap neither promises it nor forgets it. *(Resolved: the research line closed as **[G-9a](2026-07-09-crabka-gres-g9-distributed-maturity-design.md)** — the Percolator-class direction, with range 0 as a batched monotone timestamp oracle and decisions as durable intents/commit records on primary ranges, superseding this spec's g-timeline for sharded tables once it lands.)*
 
 ## The envelope (stated, chapter-bound)
 
