@@ -90,7 +90,13 @@ pub struct MetadataImage {
     /// `apply()` alongside `topics`; rebuilt on snapshot replay because
     /// every record (including snapshot installs) flows through `apply()`.
     topic_ids: HashMap<Uuid, String>,
-    partitions: HashMap<(String, i32), PartitionRecord>,
+    /// Partition records grouped by owning topic. The by-topic grouping is
+    /// the scaling-critical index: [`Self::partitions_of`] resolves a topic
+    /// in O(1) and touches only that topic's partitions, keeping per-topic
+    /// hot paths (Metadata responses, reconcile loops) O(total partitions)
+    /// rather than O(topics × partitions). The inner `BTreeMap` keys by
+    /// partition index, so per-topic iteration is ascending-index order.
+    partitions: HashMap<String, BTreeMap<i32, PartitionRecord>>,
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
     topic_configs: HashMap<String, BTreeMap<String, String>>,
     broker_configs: HashMap<NodeId, BTreeMap<String, String>>,
@@ -173,14 +179,19 @@ impl MetadataImage {
     #[tracing::instrument(level = "debug", skip_all, fields(topic = %topic, partition = idx))]
     #[must_use]
     pub fn partition(&self, topic: &str, idx: i32) -> Option<&PartitionRecord> {
-        self.partitions.get(&(topic.to_string(), idx))
+        self.partitions.get(topic)?.get(&idx)
     }
 
+    /// All partitions of `topic`, in ascending partition-index order.
+    /// O(1) topic lookup + O(own partitions) iteration via the by-topic
+    /// index — never scans other topics' partitions, so per-topic callers
+    /// stay proportional to the topic they ask about even in images with
+    /// tens of thousands of topics.
     pub fn partitions_of(&self, topic: &str) -> impl Iterator<Item = &PartitionRecord> {
         self.partitions
-            .iter()
-            .filter(move |((t, _), _)| t == topic)
-            .map(|(_, v)| v)
+            .get(topic)
+            .into_iter()
+            .flat_map(BTreeMap::values)
     }
 
     /// The live partition count for `topic`, derived from the partitions
@@ -188,26 +199,33 @@ impl MetadataImage {
     /// the authoritative count for the KIP-631 round-trip (the KIP-631
     /// `TopicRecord` carries no partition count) and for the `validate`
     /// partition-count-grew check. Returns 0 for an unknown topic or one
-    /// with no partition records yet applied.
+    /// with no partition records yet applied. O(1).
     #[must_use]
     pub fn topic_partition_count(&self, topic: &str) -> i32 {
-        i32::try_from(self.partitions_of(topic).count()).unwrap_or(i32::MAX)
+        self.partitions
+            .get(topic)
+            .map_or(0, |parts| i32::try_from(parts.len()).unwrap_or(i32::MAX))
     }
 
-    /// Single-pass iterator over every partition in the image, yielding
-    /// the flat `(topic_name, partition_index)` key alongside the record.
+    /// Total partition count across every topic. O(topics).
+    fn total_partitions(&self) -> usize {
+        self.partitions.values().map(BTreeMap::len).sum()
+    }
+
+    /// Single-pass iterator over every partition in the image (each record
+    /// carries its own `topic` / `partition` fields). Topic order is
+    /// unspecified; within a topic, ascending partition-index order.
     /// O(P) in total partition count — the cluster-wide maintenance loops
     /// (failover, rebalance, reassignment, metrics) use this instead of
-    /// `topics().flat_map(partitions_of)`, which is O(topics × P).
-    pub fn all_partitions(&self) -> impl Iterator<Item = (&(String, i32), &PartitionRecord)> {
-        self.partitions.iter()
+    /// a per-topic loop.
+    pub fn all_partitions(&self) -> impl Iterator<Item = &PartitionRecord> {
+        self.partitions.values().flat_map(BTreeMap::values)
     }
 
     /// All partitions where a reassignment is currently in flight
     /// (`adding_replicas` or `removing_replicas` non-empty).
     pub fn reassignments_in_flight(&self) -> impl Iterator<Item = &PartitionRecord> + '_ {
         self.all_partitions()
-            .map(|(_, p)| p)
             .filter(|p| !p.adding_replicas.is_empty() || !p.removing_replicas.is_empty())
     }
 
@@ -499,7 +517,9 @@ impl MetadataImage {
                 // derived view of the partitions map.
                 let is_new = self
                     .partitions
-                    .insert((p.topic.clone(), p.partition), p.clone())
+                    .entry(p.topic.clone())
+                    .or_default()
+                    .insert(p.partition, p.clone())
                     .is_none();
                 if let Some(t) = self.topics.get_mut(&p.topic) {
                     if is_new {
@@ -517,7 +537,7 @@ impl MetadataImage {
                     self.topic_ids.remove(&prev.topic_id);
                 }
                 self.topics.remove(&d.name);
-                self.partitions.retain(|(t, _), _| t != &d.name);
+                self.partitions.remove(&d.name);
                 self.topic_configs.remove(&d.name);
             }
             MetadataRecord::V1TopicConfig(c) => {
@@ -646,7 +666,10 @@ impl MetadataImage {
             // adding/removing, so a concurrent reassignment or ISR change is
             // preserved regardless of commit order.
             MetadataRecord::V1PartitionDirAssignment(r) => {
-                if let Some(pr) = self.partitions.get_mut(&(r.topic.clone(), r.partition))
+                if let Some(pr) = self
+                    .partitions
+                    .get_mut(&r.topic)
+                    .and_then(|parts| parts.get_mut(&r.partition))
                     && let Some(slot) = pr.replicas.iter().position(|n| *n == r.replica)
                 {
                     if pr.directories.len() < pr.replicas.len() {
@@ -677,7 +700,7 @@ impl MetadataImage {
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(topics = self.topics.len(), partitions = self.partitions.len())
+        fields(topics = self.topics.len(), partitions = self.total_partitions())
     )]
     #[must_use]
     pub fn to_records(&self) -> Vec<MetadataRecord> {
@@ -703,7 +726,7 @@ impl MetadataImage {
         for t in self.topics.values() {
             out.push(MetadataRecord::V1Topic(t.clone()));
         }
-        for p in self.partitions.values() {
+        for p in self.all_partitions() {
             out.push(MetadataRecord::V1Partition(p.clone()));
         }
         for (topic, overrides) in &self.topic_configs {
@@ -1925,6 +1948,95 @@ mod tests {
             m.all_partitions().count()
                 == m.partitions_of("t").count() + m.partitions_of("u").count()
         );
+    }
+
+    /// `total_partitions` sums the by-topic index across every topic. It backs
+    /// the `to_records` snapshot tracing field (whose span is inert under the
+    /// test subscriber), so pin its value directly here — otherwise a
+    /// constant-return mutant survives with no behavioral test to catch it.
+    #[test]
+    fn total_partitions_sums_across_topics() {
+        let mut m = img();
+        // Empty image: no topics, no partitions.
+        check!(m.total_partitions() == 0);
+
+        // "a" gets 2 partitions, "b" gets 1 → 3 total across the index.
+        m.apply(&topic("a", 2));
+        m.apply(&topic("b", 1));
+        for (name, idx) in [("a", 0), ("a", 1), ("b", 0)] {
+            m.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: name.into(),
+                partition: idx,
+                leader: NodeId(1),
+                replicas: vec![NodeId(1)],
+                isr: vec![NodeId(1)],
+                leader_epoch: LeaderEpoch(0),
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+                directories: vec![],
+                partition_epoch: 0,
+            }));
+        }
+        check!(m.total_partitions() == 3);
+        // Matches an independent full walk, and is not the mutant constant 1.
+        check!(m.total_partitions() == m.all_partitions().count());
+    }
+
+    /// Pins the `partitions_of` ordering contract: ascending partition-index
+    /// order regardless of apply order. `Metadata` / `DescribeTopicPartitions`
+    /// rows and the cursor-based pagination rely on it.
+    #[test]
+    fn partitions_of_yields_ascending_partition_index_order() {
+        let mut m = img();
+        m.apply(&topic("t", 3));
+        for p in [2, 0, 1] {
+            m.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: "t".into(),
+                partition: p,
+                leader: NodeId(1),
+                replicas: vec![NodeId(1)],
+                isr: vec![NodeId(1)],
+                leader_epoch: LeaderEpoch(0),
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+                directories: vec![],
+                partition_epoch: 0,
+            }));
+        }
+        let idxs: Vec<i32> = m.partitions_of("t").map(|p| p.partition).collect();
+        assert!(idxs == vec![0, 1, 2]);
+    }
+
+    /// Deleting one topic must not disturb another topic's partitions in
+    /// the by-topic index, and `partitions_of` for the deleted topic goes
+    /// empty while its sibling stays intact.
+    #[test]
+    fn delete_topic_leaves_other_topics_partitions_intact() {
+        let mut m = img();
+        m.apply(&topic("doomed", 1));
+        m.apply(&topic("survivor", 1));
+        for name in ["doomed", "survivor"] {
+            m.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: name.into(),
+                partition: 0,
+                leader: NodeId(1),
+                replicas: vec![NodeId(1)],
+                isr: vec![NodeId(1)],
+                leader_epoch: LeaderEpoch(0),
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+                directories: vec![],
+                partition_epoch: 0,
+            }));
+        }
+        m.apply(&MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
+            name: "doomed".into(),
+        }));
+        check!(m.partitions_of("doomed").count() == 0);
+        check!(m.topic_partition_count("doomed") == 0);
+        check!(m.partitions_of("survivor").count() == 1);
+        check!(m.partition("survivor", 0).is_some());
+        check!(m.all_partitions().count() == 1);
     }
 
     #[test]

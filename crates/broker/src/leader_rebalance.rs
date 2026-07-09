@@ -65,15 +65,14 @@ pub(crate) async fn rebalance_tick(
     let image = controller.current_image();
     let mut to_submit: Vec<MetadataRecord> = Vec::new();
     let mut total: u64 = 0;
-    // Single O(P) walk over every partition instead of the quadratic
-    // topics() × partitions_of() scan.
-    for ((topic_name, partition), _pr) in image.all_partitions() {
+    // Single O(P) walk over every partition.
+    for pr in image.all_partitions() {
         total += 1;
         if let Ok(new_pr) = select_new_leader_for_partition(
             &image,
             liveness,
-            topic_name,
-            *partition,
+            &pr.topic,
+            pr.partition,
             ElectionType::Preferred,
         )
         .await
