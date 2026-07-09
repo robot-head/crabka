@@ -17,7 +17,8 @@ G-2's recovery read its replay target from `ListOffsets(latest, read_committed)`
 
 ## Design Goals
 
-- **Bounded spin-up:** recovery cost is checkpoint-download + tail-replay, independent of tenant history.
+- **Bounded spin-up:** recovery cost is checkpoint-download + tail-replay — proportional to **live** store size, not tenant history. *(Reworded after the scaling review: the engine never vacuums — no dead-version deletion, no clog truncation exist in the donor — so without the garbage horizon below, "checkpoint size" silently means "everything ever written" and this goal is false. The horizon is therefore in-scope for this slice, not optional polish.)*
+- **A garbage horizon:** each checkpoint is also the vacuum — dead versions and unreferenced clog below the horizon do not survive into the checkpoint, so checkpoint size tracks live data and a restored store is compacted for free.
 - **Bounded log:** the WAL topic holds only the tail since the last durable checkpoint.
 - **Crash-anywhere safety:** a failure at any step boundary (scan, upload, manifest, truncate, prune) leaves only redundant data, never a hole; recovery detects the one impossible state (log start beyond the newest manifest) and refuses to serve.
 - **Backend-agnostic seams, fjall-fast paths:** the checkpoint/restore machinery works over any `Kv` backend; fjall gets the MVCC-snapshot and ingestion fast paths.
@@ -63,7 +64,7 @@ recovery (G-3 shape):
 
 ### Immutable per-checkpoint prefixes, manifest-last, no CAS
 
-Each checkpoint lives under `gres/<tenant>/ckpt/<offset>-<epoch>/` (zero-padded offset so lexical order is offset order; the producer epoch disambiguates the theoretical same-offset collision between a zombie and its successor). Part objects hold length-prefixed sorted key/value pairs, chunked at a size threshold and uploaded with the existing `ObjectOps` streaming; `MANIFEST` — part names, pair counts, per-part checksums, covered offset, `journal_seq`, format version — is written **last**, so a torn upload is invisible to recovery. No conditional puts are needed (the repo has no CAS idiom to lean on anyway): manifests are immutable, recovery picks the highest-offset manifest, and a fenced zombie can only ever write a checkpoint of a valid prefix at an offset at or below its fence point — harmless by construction, pinned by the model.
+Each checkpoint lives under `gres/<tenant>/ckpt/<offset>-<epoch>/` (zero-padded offset so lexical order is offset order; the producer epoch disambiguates the theoretical same-offset collision between a zombie and its successor). Part objects hold length-prefixed sorted key/value pairs, chunked at a size threshold and uploaded with the existing `ObjectOps` streaming; `MANIFEST` — part names, pair counts, per-part checksums, covered offset, `journal_seq`, a `wal_generation` counter (0 in this slice; G-5's topic parking bumps it so recovery can tell a fresh WAL topic from a truncated one — schema lands now to avoid format churn), format version — is written **last**, so a torn upload is invisible to recovery. No conditional puts are needed (the repo has no CAS idiom to lean on anyway): manifests are immutable, recovery picks the highest-offset manifest, and a fenced zombie can only ever write a checkpoint of a valid prefix at an offset at or below its fence point — harmless by construction, pinned by the model.
 
 ### Truncate after manifest; prune after truncate; every gap survivable
 
@@ -72,6 +73,10 @@ Ordering: manifest durable → `DeleteRecords(covered_offset)` → prune all but
 ### Restore through the seam, with the fjall fast path
 
 Recovery downloads parts in order and rebuilds the store from the sorted stream: `FjallKv` via fjall's ingestion API (strictly-ascending guarantee holds — parts are written in key order from a snapshot iterator), any other backend via chunked `write_batch`. Counts and checksums are verified against the manifest before the store is trusted; then the WAL tail replays from `covered_offset` exactly as in G-2 (merge rules, `journal_seq` continuity from the manifest's recorded seq, ending at the successor's own barrier).
+
+### Vacuum-into-checkpoint: the checkpoint scan is the garbage collector
+
+*(Added after the scaling review.)* The engine retains every dead row version and every clog entry forever — tolerable for the donor's long-lived single node, fatal for a design whose spin-up, suspend, and upload costs all ride checkpoint size: a write-hot tenant of constant logical size grows its checkpoint with calendar time. The fix rides the machinery this slice already builds. At snapshot acquisition the writer also stamps the **horizon** — the oldest xid visible to any active snapshot (from the engine's ProcArray; with no active sessions it is simply the next xid). While streaming the snapshot into parts, the checkpointer applies three rewrite rules: (1) **drop** row versions whose `xmax` is a committed xid below the horizon — dead to every present and future snapshot; (2) **freeze** surviving versions whose `xmin` is committed below the horizon by rewriting `xmin` to the frozen sentinel (added to `crabka-pgmvcc` with visibility treating it always-committed — PostgreSQL's own freeze concept); (3) **emit clog entries only for xids at or above the horizon** — frozen/pruned tuples no longer consult them. The result restores to a visibility-equivalent, compacted store. The live store still accretes between checkpoints (bounded by restart/resume frequency, since every restore compacts); a `compact` maintenance operation — checkpoint followed by self-restore — is named as a future operational knob, not built here. Correctness gate: a differential property test that the pre-prune and post-prune stores answer every visibility question identically at the checkpoint instant, plus conformance-on-substrate staying at baseline across a checkpoint/restore cycle.
 
 ### The Stateright model is the gate's centerpiece
 
@@ -105,13 +110,15 @@ DeleteRecords is standard Kafka wire; the new client method encodes the stock re
 ## Risks
 
 - **Long-lived fjall snapshots retain old versions** — bounded by upload duration; mitigated by chunked streaming (upload speed), a snapshot-age metric, and the retain-2 policy keeping uploads small for small tenants. Large-tenant checkpoint cost is the known approach-A trade, owned by the disaggregated-store follow-on.
+- **Checkpoint uploads can lose the race against a hot writer** *(added after the scaling review)*: if sustained WAL ingress exceeds upload bandwidth, truncation never advances and tail + snapshot-retention costs compound. The design's admission: this is a **detected condition, not a handled one** — a `checkpoint_lag` metric (WAL bytes/frames since the last durable manifest) plus a loud warning threshold ship with the checkpointer; tenants that sustain it have outgrown approach A and the operator's lever is graduation, not tuning.
 - **`AdminClient::delete_records` is a published-API addition** — reviewed as a first-class client feature (docs, tests, JVM-parity semantics documented), not smuggled in.
 - **Manifest format evolution** — versioned from day one (`format_version` field; unknown versions refuse restore).
 - **Zombie checkpoint uploads waste bucket writes** — harmless for correctness (model-pinned); the fenced flag stops the zombie's checkpointer quickly in practice.
 
 ## Resolved decisions
 
-- Snapshot seam: `SnapshotKv` in `crabka-pgkv`; acquisition between commit-groups stamped with `(covered_offset, journal_seq, epoch)`; streaming iteration concurrent with writes.
+- Snapshot seam: `SnapshotKv` in `crabka-pgkv`; acquisition between commit-groups stamped with `(covered_offset, journal_seq, epoch, horizon_xid)`; streaming iteration concurrent with writes.
+- Garbage horizon: the checkpoint scan prunes dead versions below the horizon, freezes old committed `xmin`s, and drops sub-horizon clog — checkpoints track live size; visibility-equivalence is the gate.
 - Layout: `gres/<tenant>/ckpt/<offset>-<epoch>/part-NNNNN` + `MANIFEST` last; immutable; retain 2; no CAS.
 - Ordering: manifest → DeleteRecords → prune; recovery refuses on log-start-beyond-manifest, bad checksums, or seq gaps.
 - Restore: fjall ingestion fast path, `write_batch` fallback; verify before trust.
