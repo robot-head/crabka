@@ -1944,11 +1944,11 @@ dependencies = [
 
 [[package]]
 name = "connectrpc-axum-build"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7ea9686d543111c0fd06c3d1276f3e5918714be2af8deb72d61c52fa35098274"
+checksum = "9e53df7c4119f8a65b84e646e2d0271e2e8029fddd438bacf82bd06d7976a3cb"
 dependencies = [
- "convert_case 0.11.0",
+ "heck",
  "pbjson-build",
  "proc-macro2",
  "prost 0.14.4",
@@ -2064,15 +2064,6 @@ name = "convert_case"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "633458d4ef8c78b72454de2d54fd6ab2e60f9e02be22f3c6104cdc8a4e0fceb9"
-dependencies = [
- "unicode-segmentation",
-]
-
-[[package]]
-name = "convert_case"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "affbf0190ed2caf063e3def54ff444b449371d55c58e513a95ab98eca50adb49"
 dependencies = [
  "unicode-segmentation",
 ]
