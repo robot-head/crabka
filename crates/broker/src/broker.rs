@@ -2549,6 +2549,25 @@ impl Broker {
         // still reuse the same `metrics` value.
         let metrics = crate::metrics::BrokerMetrics::new();
 
+        if config.share_group_backlog_poll_interval_secs > 0 {
+            crate::share_partition::backlog_poller::spawn_backlog_poller(
+                crate::share_partition::backlog_poller::BacklogPollerConfig {
+                    node_id: config.node_id,
+                    coordinator: group_coordinator.clone(),
+                    controller: controller.clone(),
+                    partitions: partitions.clone(),
+                    inter_broker_client: inter_broker_client.clone(),
+                    inter_broker_listener_protocol: inter_listener_proto,
+                    inter_broker_listener_name: config.inter_broker_listener_name.clone(),
+                    persister: share_persister.clone(),
+                    metrics: metrics.clone(),
+                    period: std::time::Duration::from_secs(
+                        config.share_group_backlog_poll_interval_secs,
+                    ),
+                },
+            );
+        }
+
         // ── Audit pipeline (FedRAMP MLA, Slice 1) ──────────────────────────
         // Wired after `bootstrap_audit_topic` (which submits the audit topic
         // metadata record into raft) and after `partitions` + `metrics` are

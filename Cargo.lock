@@ -2184,6 +2184,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-app-sdk"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "base64",
+ "bytes",
+ "crabka-sdk-conformance",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "protox",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "crabka-audit"
 version = "0.3.9"
 dependencies = [
@@ -2553,6 +2574,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-compute-client"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "axum",
+ "bytes",
+ "crabka-page-store",
+ "crabka-pageserver",
+ "crabka-postgres-redo",
+ "crabka-postgres-wal",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "protoc-bin-vendored",
+ "reqwest 0.13.4",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "crabka-connect"
 version = "0.3.9"
 dependencies = [
@@ -2632,6 +2672,7 @@ dependencies = [
  "anyhow",
  "apache-avro",
  "arc-swap",
+ "arrow",
  "assert2",
  "async-stream",
  "async-trait",
@@ -2647,12 +2688,14 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-client-streams",
  "crabka-ids",
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
  "crabka-telemetry",
  "dashmap",
+ "datafusion",
  "derive_more",
  "futures-util",
  "hex",
@@ -2920,7 +2963,7 @@ dependencies = [
 
 [[package]]
 name = "crabka-object-store"
-version = "0.3.8"
+version = "0.3.9"
 dependencies = [
  "assert2",
  "async-trait",
@@ -3039,6 +3082,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-page-store"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "bytes",
+ "crabka-object-store",
+ "crabka-postgres-wal",
+ "crc32c",
+ "object_store",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "crabka-pageserver"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "axum",
+ "bytes",
+ "connectrpc-axum",
+ "connectrpc-axum-build",
+ "crabka-object-store",
+ "crabka-page-store",
+ "crabka-postgres-redo",
+ "crabka-postgres-wal",
+ "object_store",
+ "pbjson",
+ "prost 0.14.4",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "crabka-playground"
 version = "0.3.9"
 dependencies = [
@@ -3048,6 +3133,29 @@ dependencies = [
  "serde_json",
  "uuid",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "crabka-postgres-redo"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "bytes",
+ "crabka-page-store",
+ "crabka-postgres-wal",
+ "thiserror 2.0.18",
+ "toml",
+]
+
+[[package]]
+name = "crabka-postgres-wal"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "bytes",
+ "crc32c",
+ "thiserror 2.0.18",
+ "toml",
 ]
 
 [[package]]
@@ -3356,6 +3464,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-safekeeper"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "bytes",
+ "crabka-client-admin",
+ "crabka-client-core",
+ "crabka-client-producer",
+ "crabka-postgres-wal",
+ "crabka-protocol",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "toml",
+]
+
+[[package]]
 name = "crabka-schema-registry"
 version = "0.3.9"
 dependencies = [
@@ -3425,6 +3550,27 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "wiremock",
+]
+
+[[package]]
+name = "crabka-sdk-conformance"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "async-trait",
+ "base64",
+ "bytes",
+ "clap",
+ "crabka-authz",
+ "crabka-broker",
+ "crabka-client-admin",
+ "crabka-grpc-gateway",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

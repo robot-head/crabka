@@ -153,7 +153,7 @@ pub(crate) fn to_gateway_record(r: crate::pb::Record) -> crate::types::GatewayRe
         headers: r
             .headers
             .into_iter()
-            .map(|(k, v)| (k, bytes::Bytes::from(v)))
+            .map(|header| (header.key, header.value.map(bytes::Bytes::from)))
             .collect(),
         partition: r.partition,
         timestamp_ms: r.timestamp_ms,
@@ -241,4 +241,49 @@ pub async fn send(
         results.push(result);
     }
     Ok(ConnectResponse::new(pb::SendResponse { results }))
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+
+    #[test]
+    fn to_gateway_record_preserves_header_order_duplicates_and_nulls() {
+        let record = pb::Record {
+            topic: "events".into(),
+            key: None,
+            body: Some(pb::record::Body::Raw(b"body".to_vec())),
+            headers: vec![
+                pb::Header {
+                    key: "x".into(),
+                    value: Some(b"first".to_vec()),
+                },
+                pb::Header {
+                    key: "x".into(),
+                    value: None,
+                },
+                pb::Header {
+                    key: "y".into(),
+                    value: Some(b"last".to_vec()),
+                },
+            ],
+            partition: None,
+            timestamp_ms: None,
+            idempotency_key: None,
+            schema: None,
+        };
+
+        let gateway_record = to_gateway_record(record);
+
+        assert!(
+            gateway_record.headers
+                == vec![
+                    ("x".into(), Some(Bytes::from_static(b"first"))),
+                    ("x".into(), None),
+                    ("y".into(), Some(Bytes::from_static(b"last"))),
+                ]
+        );
+    }
 }

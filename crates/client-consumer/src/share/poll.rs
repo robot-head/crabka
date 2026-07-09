@@ -24,7 +24,10 @@
 //! `ShareFetch` / `ShareAcknowledge` (sequence 0 → 1 → 2 → …). Getting this wrong
 //! makes the broker drop the session (`INVALID_SHARE_SESSION_EPOCH`).
 
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use crabka_protocol::{
     owned::{
@@ -37,13 +40,14 @@ use crabka_protocol::{
         },
     },
     primitives::uuid::Uuid as WireUuid,
+    records::RecordHeader,
 };
 
 use super::{
     consumer::ShareConsumer,
     types::{ShareAckMode, ShareAckType, ShareConsumerRecord},
 };
-use crate::error::ConsumerError;
+use crate::{Header, error::ConsumerError};
 
 /// `partition_max_bytes` / `max_bytes` budget for a `ShareFetch` (mirrors the
 /// classic consumer's 50 MiB fetch budget).
@@ -141,6 +145,54 @@ fn record_timestamp(base_timestamp: i64, timestamp_delta: i64) -> i64 {
     base_timestamp + timestamp_delta
 }
 
+fn record_headers(headers: &[RecordHeader]) -> Vec<Header> {
+    headers
+        .iter()
+        .map(|header| Header {
+            key: header.key.clone(),
+            value: header.value.clone(),
+        })
+        .collect()
+}
+
+fn failed_share_fetch_ack_partitions(
+    responses: &[crabka_protocol::owned::share_fetch_response::ShareFetchableTopicResponse],
+) -> HashSet<(WireUuid, i32)> {
+    responses
+        .iter()
+        .flat_map(|topic| {
+            topic.partitions.iter().filter_map(|partition| {
+                response_has_error(partition.acknowledge_error_code)
+                    .then_some((topic.topic_id, partition.partition_index))
+            })
+        })
+        .collect()
+}
+
+fn failed_share_ack_partitions(
+    responses: &[crabka_protocol::owned::share_acknowledge_response::ShareAcknowledgeTopicResponse],
+) -> HashSet<(WireUuid, i32)> {
+    responses
+        .iter()
+        .flat_map(|topic| {
+            topic.partitions.iter().filter_map(|partition| {
+                response_has_error(partition.error_code)
+                    .then_some((topic.topic_id, partition.partition_index))
+            })
+        })
+        .collect()
+}
+
+fn first_share_ack_partition_error(
+    responses: &[crabka_protocol::owned::share_acknowledge_response::ShareAcknowledgeTopicResponse],
+) -> Option<i16> {
+    responses
+        .iter()
+        .flat_map(|topic| &topic.partitions)
+        .map(|partition| partition.error_code)
+        .find(|error_code| response_has_error(*error_code))
+}
+
 impl ShareConsumer {
     /// Acquire and return the next batch of records.
     ///
@@ -180,8 +232,10 @@ impl ShareConsumer {
         }
 
         // Build the piggyback acknowledgement batches per (topic_id, partition)
-        // from the previous poll, draining the source so each ack is sent once.
-        let acks = self.take_piggyback_acks();
+        // from the previous poll without clearing the source yet. The staged
+        // state is consumed only after the broker accepts the ShareFetch, so a
+        // timeout or top-level fetch error can be retried with the same acks.
+        let acks = self.build_piggyback_acks();
 
         // Group assigned partitions by topic id, attaching the (topic_id,
         // partition) acks to the matching partition entry.
@@ -201,6 +255,8 @@ impl ShareConsumer {
         if response_has_error(resp.error_code) {
             return Err(ConsumerError::Server(resp.error_code));
         }
+        let failed_ack_partitions = failed_share_fetch_ack_partitions(&resp.responses);
+        self.clear_piggyback_acks_after_success(&acks, &failed_ack_partitions);
         // A successful ShareFetch consumes one session epoch; advance to the
         // value the broker now expects (it stored ours + 1).
         self.share_session_epoch = self.share_session_epoch.wrapping_add(1);
@@ -271,6 +327,7 @@ impl ShareConsumer {
                             timestamp: record_timestamp(batch.base_timestamp, r.timestamp_delta),
                             key: r.key.clone(),
                             value: r.value.clone(),
+                            headers: record_headers(&r.headers),
                             delivery_count,
                         });
                     }
@@ -280,7 +337,10 @@ impl ShareConsumer {
 
         // Implicit mode auto-Accepts these ranges on the next poll/close; explicit
         // mode acknowledges per record, so the ranges are not auto-accepted.
-        self.prev_delivered = delivered;
+        match self.ack_mode {
+            ShareAckMode::Implicit => self.prev_delivered.extend(delivered),
+            ShareAckMode::Explicit => self.prev_delivered = delivered,
+        }
         tracing::Span::current().record("records", out.len());
         Ok(out)
     }
@@ -312,13 +372,18 @@ impl ShareConsumer {
             ));
         }
         let topic_id = self.topic_id_for(&record.topic);
-        self.pending_acks.push((
+        let pending_ack = (
             topic_id,
             record.partition,
             record.offset,
             record.offset,
             ack.wire(),
-        ));
+        );
+        if self.pending_acks.contains(&pending_ack) {
+            return Ok(());
+        }
+
+        self.pending_acks.push(pending_ack);
         Ok(())
     }
 
@@ -377,6 +442,9 @@ impl ShareConsumer {
             return Err(ConsumerError::Server(resp.error_code));
         }
         self.share_session_epoch = self.share_session_epoch.wrapping_add(1);
+        if let Some(error_code) = first_share_ack_partition_error(&resp.responses) {
+            return Err(ConsumerError::Server(error_code));
+        }
         Ok(())
     }
 
@@ -393,9 +461,10 @@ impl ShareConsumer {
         self.flush_pending_acks().await
     }
 
-    /// Drain `pending_acks` into a `ShareAcknowledge`. Advances the session epoch
-    /// on success (an accepted `ShareAcknowledge` consumes one epoch, exactly
-    /// like a `ShareFetch`). No-op (and no epoch advance) when nothing is staged.
+    /// Send `pending_acks` in a `ShareAcknowledge`. Advances the session epoch
+    /// and clears staged acks only on success (an accepted `ShareAcknowledge`
+    /// consumes one epoch, exactly like a `ShareFetch`). No-op (and no epoch
+    /// advance) when nothing is staged.
     #[tracing::instrument(
         name = "share_consumer.flush_pending_acks",
         level = "debug",
@@ -411,8 +480,7 @@ impl ShareConsumer {
         if self.pending_acks.is_empty() {
             return Ok(());
         }
-        let drained = std::mem::take(&mut self.pending_acks);
-        let topics = build_ack_topics(drained);
+        let topics = build_ack_topics(self.pending_acks.iter().copied());
 
         let resp = self
             .client
@@ -427,20 +495,26 @@ impl ShareConsumer {
         if response_has_error(resp.error_code) {
             return Err(ConsumerError::Server(resp.error_code));
         }
+        let failed_ack_partitions = failed_share_ack_partitions(&resp.responses);
+        self.clear_pending_acks_after_ack_response(&failed_ack_partitions);
         self.share_session_epoch = self.share_session_epoch.wrapping_add(1);
+        if let Some(error_code) = first_share_ack_partition_error(&resp.responses) {
+            return Err(ConsumerError::Server(error_code));
+        }
         Ok(())
     }
 
     /// Build the piggyback acknowledgement batches for the next `ShareFetch`,
-    /// keyed by `(topic_id, partition)`, consuming the source state.
+    /// keyed by `(topic_id, partition)`, keeping the source state retryable until
+    /// the `ShareFetch` succeeds.
     ///
     /// - Implicit: one `Accept` batch per previously-delivered range.
     /// - Explicit: the drained `pending_acks`, grouped into per-offset batches.
-    fn take_piggyback_acks(&mut self) -> HashMap<(WireUuid, i32), Vec<FetchAckBatch>> {
+    fn build_piggyback_acks(&self) -> HashMap<(WireUuid, i32), Vec<FetchAckBatch>> {
         let mut out: HashMap<(WireUuid, i32), Vec<FetchAckBatch>> = HashMap::new();
         match self.ack_mode {
             ShareAckMode::Implicit => {
-                for (tid, partition, first, last) in std::mem::take(&mut self.prev_delivered) {
+                for &(tid, partition, first, last) in &self.prev_delivered {
                     let count = range_len(first, last);
                     out.entry((tid, partition))
                         .or_default()
@@ -453,7 +527,7 @@ impl ShareConsumer {
                 }
             }
             ShareAckMode::Explicit => {
-                for (tid, partition, first, last, ack) in std::mem::take(&mut self.pending_acks) {
+                for &(tid, partition, first, last, ack) in &self.pending_acks {
                     let count = range_len(first, last);
                     out.entry((tid, partition))
                         .or_default()
@@ -464,11 +538,41 @@ impl ShareConsumer {
                             ..Default::default()
                         });
                 }
+            }
+        }
+        out
+    }
+
+    /// Clear the state represented by a successful piggyback `ShareFetch`.
+    fn clear_piggyback_acks_after_success(
+        &mut self,
+        sent_acks: &HashMap<(WireUuid, i32), Vec<FetchAckBatch>>,
+        failed_ack_partitions: &HashSet<(WireUuid, i32)>,
+    ) {
+        let was_ack_accepted = |tid: &WireUuid, partition: &i32| {
+            sent_acks.contains_key(&(*tid, *partition))
+                && !failed_ack_partitions.contains(&(*tid, *partition))
+        };
+        match self.ack_mode {
+            ShareAckMode::Implicit => self
+                .prev_delivered
+                .retain(|(tid, partition, _, _)| !was_ack_accepted(tid, partition)),
+            ShareAckMode::Explicit => {
+                self.pending_acks
+                    .retain(|(tid, partition, _, _, _)| !was_ack_accepted(tid, partition));
                 // Explicit mode never auto-accepts; clear any stale ranges.
                 self.prev_delivered.clear();
             }
         }
-        out
+    }
+
+    fn clear_pending_acks_after_ack_response(
+        &mut self,
+        failed_ack_partitions: &HashSet<(WireUuid, i32)>,
+    ) {
+        self.pending_acks.retain(|(tid, partition, _, _, _)| {
+            failed_ack_partitions.contains(&(*tid, *partition))
+        });
     }
 
     /// Resolve a topic id from a topic name via the live assignment / cached
@@ -495,7 +599,9 @@ impl ShareConsumer {
 /// Group `(topic_id, partition, first, last, ack_wire)` acks into
 /// `ShareAcknowledge` topic/partition/batch shape, coalescing by topic and
 /// partition.
-fn build_ack_topics(acks: Vec<(WireUuid, i32, i64, i64, i8)>) -> Vec<AcknowledgeTopic> {
+fn build_ack_topics(
+    acks: impl IntoIterator<Item = (WireUuid, i32, i64, i64, i8)>,
+) -> Vec<AcknowledgeTopic> {
     let mut by_topic: HashMap<WireUuid, HashMap<i32, Vec<AckAckBatch>>> = HashMap::new();
     for (tid, partition, first, last, ack) in acks {
         let count = if ack == 0 { 0 } else { range_len(first, last) };
@@ -535,8 +641,20 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::{assert, check};
-    use crabka_client_core::Client;
-    use crabka_protocol::tagged_fields::UnknownTaggedFields;
+    use bytes::BytesMut;
+    use crabka_client_core::{Client, ClientError, MockBroker};
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            share_acknowledge_request, share_acknowledge_response,
+            share_acknowledge_response::ShareAcknowledgeResponse,
+            share_fetch_request, share_fetch_response,
+            share_fetch_response::ShareFetchResponse,
+        },
+        tagged_fields::UnknownTaggedFields,
+    };
     use tokio::sync::Mutex;
     use tokio_util::sync::CancellationToken;
 
@@ -549,13 +667,19 @@ mod tests {
     }
 
     async fn test_consumer(ack_mode: ShareAckMode) -> ShareConsumer {
+        let client = Client::builder()
+            .bootstrap("127.0.0.1:1")
+            .client_id("share-poll-test")
+            .build()
+            .await
+            .unwrap();
+
+        test_consumer_with_client(ack_mode, client)
+    }
+
+    fn test_consumer_with_client(ack_mode: ShareAckMode, client: Client) -> ShareConsumer {
         ShareConsumer {
-            client: Client::builder()
-                .bootstrap("127.0.0.1:1")
-                .client_id("share-poll-test")
-                .build()
-                .await
-                .unwrap(),
+            client,
             group_id: "group-a".into(),
             member_id: "member-a".into(),
             member_epoch: Arc::new(Mutex::new(3)),
@@ -570,9 +694,140 @@ mod tests {
         }
     }
 
+    fn api_versions_for_share_data_path() -> Vec<u8> {
+        let resp = ApiVersionsResponse {
+            error_code: 0,
+            api_keys: vec![
+                ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 3,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key: share_acknowledge_request::API_KEY,
+                    min_version: share_acknowledge_request::MIN_VERSION,
+                    max_version: share_acknowledge_request::MAX_VERSION,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key: share_fetch_request::API_KEY,
+                    min_version: share_fetch_request::MIN_VERSION,
+                    max_version: share_fetch_request::MAX_VERSION,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        resp.encode(&mut buf, 0).unwrap();
+        buf.to_vec()
+    }
+
+    async fn mock_client(addr: std::net::SocketAddr) -> Client {
+        Client::builder()
+            .bootstrap(addr.to_string())
+            .client_id("share-poll-test")
+            .request_timeout(Duration::from_millis(50))
+            .build()
+            .await
+            .unwrap()
+    }
+
+    fn share_ack_response_at(version: i16, error_code: i16) -> Vec<u8> {
+        let resp = ShareAcknowledgeResponse {
+            error_code,
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        if version >= share_acknowledge_response::FLEXIBLE_MIN {
+            buf.extend_from_slice(&[0x00]);
+        }
+        resp.encode(&mut buf, version).unwrap();
+        buf.to_vec()
+    }
+
+    fn share_ack_partition_response_at(
+        version: i16,
+        partition_errors: impl IntoIterator<Item = (i32, i16)>,
+    ) -> Vec<u8> {
+        let resp = ShareAcknowledgeResponse {
+            error_code: 0,
+            responses: vec![share_acknowledge_response::ShareAcknowledgeTopicResponse {
+                topic_id: id(7),
+                partitions: partition_errors
+                    .into_iter()
+                    .map(|(partition_index, error_code)| {
+                        share_acknowledge_response::PartitionData {
+                            partition_index,
+                            error_code,
+                            ..Default::default()
+                        }
+                    })
+                    .collect(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        if version >= share_acknowledge_response::FLEXIBLE_MIN {
+            buf.extend_from_slice(&[0x00]);
+        }
+        resp.encode(&mut buf, version).unwrap();
+        buf.to_vec()
+    }
+
+    fn share_fetch_response_at(version: i16, error_code: i16) -> Vec<u8> {
+        let resp = ShareFetchResponse {
+            error_code,
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        if version >= share_fetch_response::FLEXIBLE_MIN {
+            buf.extend_from_slice(&[0x00]);
+        }
+        resp.encode(&mut buf, version).unwrap();
+        buf.to_vec()
+    }
+
+    fn share_fetch_ack_partition_response_at(version: i16, acknowledge_error_code: i16) -> Vec<u8> {
+        let resp = ShareFetchResponse {
+            error_code: 0,
+            responses: vec![share_fetch_response::ShareFetchableTopicResponse {
+                topic_id: id(7),
+                partitions: vec![share_fetch_response::PartitionData {
+                    partition_index: 2,
+                    acknowledge_error_code,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::new();
+        if version >= share_fetch_response::FLEXIBLE_MIN {
+            buf.extend_from_slice(&[0x00]);
+        }
+        resp.encode(&mut buf, version).unwrap();
+        buf.to_vec()
+    }
+
     fn only<T>(items: &[T]) -> &T {
         assert!(items.len() == 1);
         &items[0]
+    }
+
+    fn test_record() -> ShareConsumerRecord {
+        ShareConsumerRecord {
+            topic: "topic-a".into(),
+            partition: 2,
+            offset: 10,
+            timestamp: 0,
+            key: None,
+            value: None,
+            headers: Vec::new(),
+            delivery_count: 1,
+        }
     }
 
     #[test]
@@ -694,6 +949,42 @@ mod tests {
         check!(record_timestamp(1000, 33) == 1033);
     }
 
+    #[test]
+    fn share_record_headers_preserve_order_and_null_values() {
+        let headers = record_headers(&[
+            RecordHeader {
+                key: "trace".into(),
+                value: Some(bytes::Bytes::from_static(b"abc")),
+            },
+            RecordHeader {
+                key: "empty".into(),
+                value: Some(bytes::Bytes::new()),
+            },
+            RecordHeader {
+                key: "null".into(),
+                value: None,
+            },
+        ]);
+
+        assert!(
+            headers
+                == vec![
+                    Header {
+                        key: "trace".into(),
+                        value: Some(bytes::Bytes::from_static(b"abc")),
+                    },
+                    Header {
+                        key: "empty".into(),
+                        value: Some(bytes::Bytes::new()),
+                    },
+                    Header {
+                        key: "null".into(),
+                        value: None,
+                    },
+                ]
+        );
+    }
+
     #[tokio::test]
     async fn acknowledge_rejects_implicit_mode_and_stages_explicit_record() {
         let record = ShareConsumerRecord {
@@ -703,6 +994,7 @@ mod tests {
             timestamp: 0,
             key: None,
             value: None,
+            headers: Vec::new(),
             delivery_count: 1,
         };
 
@@ -723,16 +1015,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acknowledge_is_idempotent_for_same_record_and_ack_type() {
+        let record = test_record();
+        let mut consumer = test_consumer(ShareAckMode::Explicit).await;
+
+        consumer.acknowledge(&record, ShareAckType::Accept).unwrap();
+        consumer.acknowledge(&record, ShareAckType::Accept).unwrap();
+
+        assert!(consumer.pending_acks == vec![(id(7), 2, 10, 10, ShareAckType::Accept.wire())]);
+    }
+
+    #[tokio::test]
+    async fn acknowledge_preserves_conflicting_ack_types_for_broker_validation() {
+        let record = test_record();
+        let mut consumer = test_consumer(ShareAckMode::Explicit).await;
+
+        consumer.acknowledge(&record, ShareAckType::Accept).unwrap();
+        consumer.acknowledge(&record, ShareAckType::Reject).unwrap();
+
+        assert!(
+            consumer.pending_acks
+                == vec![
+                    (id(7), 2, 10, 10, ShareAckType::Accept.wire()),
+                    (id(7), 2, 10, 10, ShareAckType::Reject.wire()),
+                ]
+        );
+    }
+
+    #[tokio::test]
     async fn renew_rejects_implicit_mode_before_sending() {
-        let record = ShareConsumerRecord {
-            topic: "topic-a".into(),
-            partition: 2,
-            offset: 10,
-            timestamp: 0,
-            key: None,
-            value: None,
-            delivery_count: 1,
-        };
+        let record = test_record();
         let mut consumer = test_consumer(ShareAckMode::Implicit).await;
 
         assert!(
@@ -746,13 +1058,78 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn take_piggyback_acks_drains_implicit_deliveries_as_accept_ranges() {
+    async fn renew_returns_top_level_error_without_advancing_epoch() {
+        let mock = MockBroker::start(|api_key, version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_for_share_data_path());
+            }
+            if api_key != share_acknowledge_request::API_KEY {
+                return None;
+            }
+            Some(share_ack_response_at(version, 91))
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Explicit, client);
+
+        let err = consumer.renew(&test_record()).await.unwrap_err();
+
+        mock.stop();
+        assert!(matches!(err, ConsumerError::Server(91)));
+        assert!(consumer.share_session_epoch == 4);
+    }
+
+    #[tokio::test]
+    async fn renew_returns_partition_error_after_advancing_epoch() {
+        let mock = MockBroker::start(|api_key, version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_for_share_data_path());
+            }
+            if api_key != share_acknowledge_request::API_KEY {
+                return None;
+            }
+            Some(share_ack_partition_response_at(version, [(2, 42)]))
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Explicit, client);
+
+        let err = consumer.renew(&test_record()).await.unwrap_err();
+
+        mock.stop();
+        assert!(matches!(err, ConsumerError::Server(42)));
+        assert!(consumer.share_session_epoch == 5);
+    }
+
+    #[tokio::test]
+    async fn renew_advances_epoch_on_success() {
+        let mock = MockBroker::start(|api_key, version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_for_share_data_path());
+            }
+            if api_key != share_acknowledge_request::API_KEY {
+                return None;
+            }
+            Some(share_ack_partition_response_at(version, [(2, 0)]))
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Explicit, client);
+
+        consumer.renew(&test_record()).await.unwrap();
+
+        mock.stop();
+        assert!(consumer.share_session_epoch == 5);
+    }
+
+    #[tokio::test]
+    async fn build_piggyback_acks_keeps_implicit_deliveries_retryable() {
         let mut consumer = test_consumer(ShareAckMode::Implicit).await;
         consumer.prev_delivered = vec![(id(7), 2, 10, 12)];
 
-        let acks = consumer.take_piggyback_acks();
+        let acks = consumer.build_piggyback_acks();
 
-        assert!(consumer.prev_delivered.is_empty());
+        assert!(consumer.prev_delivered == vec![(id(7), 2, 10, 12)]);
         let batch = only(acks.get(&(id(7), 2)).unwrap());
         assert!(
             *batch
@@ -766,15 +1143,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn take_piggyback_acks_drains_explicit_pending_and_clears_stale_deliveries() {
+    async fn build_piggyback_acks_keeps_explicit_pending_and_stale_deliveries_retryable() {
         let mut consumer = test_consumer(ShareAckMode::Explicit).await;
         consumer.prev_delivered = vec![(id(7), 2, 1, 1)];
         consumer.pending_acks = vec![(id(7), 2, 10, 11, ShareAckType::Reject.wire())];
 
-        let acks = consumer.take_piggyback_acks();
+        let acks = consumer.build_piggyback_acks();
 
-        assert!(consumer.prev_delivered.is_empty());
-        assert!(consumer.pending_acks.is_empty());
+        assert!(consumer.prev_delivered == vec![(id(7), 2, 1, 1)]);
+        assert!(consumer.pending_acks == vec![(id(7), 2, 10, 11, ShareAckType::Reject.wire())]);
         let batch = only(acks.get(&(id(7), 2)).unwrap());
         assert!(
             *batch
@@ -785,6 +1162,317 @@ mod tests {
                     unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
                 }
         );
+    }
+
+    #[tokio::test]
+    async fn clear_piggyback_acks_after_success_consumes_only_successful_state() {
+        let mut explicit = test_consumer(ShareAckMode::Explicit).await;
+        explicit.prev_delivered = vec![(id(7), 2, 1, 1)];
+        explicit.pending_acks = vec![(id(7), 2, 10, 10, ShareAckType::Accept.wire())];
+        let sent_acks = explicit.build_piggyback_acks();
+        let failed_ack_partitions = HashSet::new();
+
+        explicit.clear_piggyback_acks_after_success(&sent_acks, &failed_ack_partitions);
+
+        assert!(explicit.prev_delivered.is_empty());
+        assert!(explicit.pending_acks.is_empty());
+
+        let mut implicit = test_consumer(ShareAckMode::Implicit).await;
+        implicit.prev_delivered = vec![(id(7), 2, 20, 21)];
+        let sent_acks = implicit.build_piggyback_acks();
+        let failed_ack_partitions = HashSet::new();
+
+        implicit.clear_piggyback_acks_after_success(&sent_acks, &failed_ack_partitions);
+
+        assert!(implicit.prev_delivered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_piggyback_acks_after_success_preserves_failed_partitions() {
+        let mut consumer = test_consumer(ShareAckMode::Explicit).await;
+        consumer.pending_acks = vec![
+            (id(7), 2, 10, 10, ShareAckType::Accept.wire()),
+            (id(7), 3, 20, 20, ShareAckType::Accept.wire()),
+        ];
+        let sent_acks = consumer.build_piggyback_acks();
+        let failed_ack_partitions = HashSet::from([(id(7), 2)]);
+
+        consumer.clear_piggyback_acks_after_success(&sent_acks, &failed_ack_partitions);
+
+        assert!(consumer.pending_acks == vec![(id(7), 2, 10, 10, ShareAckType::Accept.wire())]);
+
+        let mut implicit = test_consumer(ShareAckMode::Implicit).await;
+        implicit.prev_delivered = vec![(id(7), 2, 30, 30), (id(7), 3, 40, 40)];
+        let sent_acks = implicit.build_piggyback_acks();
+        let failed_ack_partitions = HashSet::from([(id(7), 3)]);
+
+        implicit.clear_piggyback_acks_after_success(&sent_acks, &failed_ack_partitions);
+
+        assert!(implicit.prev_delivered == vec![(id(7), 3, 40, 40)]);
+    }
+
+    #[tokio::test]
+    async fn flush_pending_acks_preserves_pending_acks_on_transport_failure() {
+        let mock = MockBroker::start(|api_key, _version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                Some(api_versions_for_share_data_path())
+            } else {
+                None
+            }
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Explicit, client);
+        consumer.pending_acks = vec![(id(7), 2, 10, 10, ShareAckType::Accept.wire())];
+        let expected_pending = consumer.pending_acks.clone();
+
+        let err = consumer.flush_pending_acks().await.unwrap_err();
+
+        mock.stop();
+        assert!(matches!(
+            err,
+            ConsumerError::Client(ClientError::Timeout(_))
+        ));
+        assert!(consumer.pending_acks == expected_pending);
+        assert!(consumer.share_session_epoch == 4);
+    }
+
+    #[tokio::test]
+    async fn flush_pending_acks_preserves_broker_failed_acks_for_retry() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_in_mock = Arc::clone(&attempts);
+        let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_for_share_data_path());
+            }
+            if api_key != share_acknowledge_request::API_KEY {
+                return None;
+            }
+            let attempt = attempts_in_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let error_code = if attempt == 0 { 42 } else { 0 };
+            Some(share_ack_response_at(version, error_code))
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Explicit, client);
+        consumer.pending_acks = vec![(id(7), 2, 10, 10, ShareAckType::Reject.wire())];
+        let expected_pending = consumer.pending_acks.clone();
+
+        let first_err = consumer.flush_pending_acks().await.unwrap_err();
+        assert!(matches!(first_err, ConsumerError::Server(42)));
+        assert!(consumer.pending_acks == expected_pending);
+        assert!(consumer.share_session_epoch == 4);
+
+        consumer.flush_pending_acks().await.unwrap();
+
+        mock.stop();
+        assert!(consumer.pending_acks.is_empty());
+        assert!(consumer.share_session_epoch == 5);
+        assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test]
+    async fn flush_pending_acks_preserves_partition_failed_acks_for_retry() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_in_mock = Arc::clone(&attempts);
+        let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_for_share_data_path());
+            }
+            if api_key != share_acknowledge_request::API_KEY {
+                return None;
+            }
+            let attempt = attempts_in_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let error_code = if attempt == 0 { 42 } else { 0 };
+            Some(share_ack_partition_response_at(version, [(2, error_code)]))
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Explicit, client);
+        consumer.pending_acks = vec![(id(7), 2, 10, 10, ShareAckType::Reject.wire())];
+        let expected_pending = consumer.pending_acks.clone();
+
+        let first_err = consumer.flush_pending_acks().await.unwrap_err();
+        assert!(matches!(first_err, ConsumerError::Server(42)));
+        assert!(consumer.pending_acks == expected_pending);
+        assert!(consumer.share_session_epoch == 5);
+
+        consumer.flush_pending_acks().await.unwrap();
+
+        mock.stop();
+        assert!(consumer.pending_acks.is_empty());
+        assert!(consumer.share_session_epoch == 6);
+        assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test]
+    async fn flush_pending_acks_clears_successful_partitions_in_mixed_response() {
+        let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_for_share_data_path());
+            }
+            if api_key != share_acknowledge_request::API_KEY {
+                return None;
+            }
+            Some(share_ack_partition_response_at(version, [(2, 42), (3, 0)]))
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Explicit, client);
+        consumer.pending_acks = vec![
+            (id(7), 2, 10, 10, ShareAckType::Reject.wire()),
+            (id(7), 3, 20, 20, ShareAckType::Accept.wire()),
+        ];
+
+        let err = consumer.flush_pending_acks().await.unwrap_err();
+
+        mock.stop();
+        assert!(matches!(err, ConsumerError::Server(42)));
+        assert!(consumer.pending_acks == vec![(id(7), 2, 10, 10, ShareAckType::Reject.wire())]);
+        assert!(consumer.share_session_epoch == 5);
+    }
+
+    #[tokio::test]
+    async fn flush_pending_acks_does_not_resend_after_success() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_in_mock = Arc::clone(&attempts);
+        let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_for_share_data_path());
+            }
+            if api_key != share_acknowledge_request::API_KEY {
+                return None;
+            }
+            attempts_in_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(share_ack_response_at(version, 0))
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Explicit, client);
+        consumer.pending_acks = vec![(id(7), 2, 10, 10, ShareAckType::Accept.wire())];
+
+        consumer.flush_pending_acks().await.unwrap();
+        consumer.flush_pending_acks().await.unwrap();
+
+        mock.stop();
+        assert!(consumer.pending_acks.is_empty());
+        assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) == 1);
+    }
+
+    #[tokio::test]
+    async fn poll_preserves_explicit_piggyback_state_on_fetch_broker_error() {
+        let mock = MockBroker::start(|api_key, version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_for_share_data_path());
+            }
+            if api_key != share_fetch_request::API_KEY {
+                return None;
+            }
+            Some(share_fetch_response_at(version, 91))
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Explicit, client);
+        consumer.pending_acks = vec![(id(7), 2, 10, 10, ShareAckType::Release.wire())];
+        consumer.prev_delivered = vec![(id(7), 2, 1, 1)];
+        let expected_pending = consumer.pending_acks.clone();
+        let expected_delivered = consumer.prev_delivered.clone();
+
+        let err = consumer.poll(Duration::from_millis(1)).await.unwrap_err();
+
+        mock.stop();
+        assert!(matches!(err, ConsumerError::Server(91)));
+        assert!(consumer.pending_acks == expected_pending);
+        assert!(consumer.prev_delivered == expected_delivered);
+        assert!(consumer.share_session_epoch == 4);
+    }
+
+    #[tokio::test]
+    async fn poll_preserves_explicit_piggyback_state_on_partition_ack_error_for_retry() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_in_mock = Arc::clone(&attempts);
+        let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_for_share_data_path());
+            }
+            if api_key != share_fetch_request::API_KEY {
+                return None;
+            }
+            let attempt = attempts_in_mock.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let acknowledge_error_code = if attempt == 0 { 42 } else { 0 };
+            Some(share_fetch_ack_partition_response_at(
+                version,
+                acknowledge_error_code,
+            ))
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Explicit, client);
+        consumer.pending_acks = vec![(id(7), 2, 10, 10, ShareAckType::Release.wire())];
+        let expected_pending = consumer.pending_acks.clone();
+
+        let records = consumer.poll(Duration::from_millis(1)).await.unwrap();
+        assert!(records.is_empty());
+        assert!(consumer.pending_acks == expected_pending);
+        assert!(consumer.share_session_epoch == 5);
+
+        let records = consumer.poll(Duration::from_millis(1)).await.unwrap();
+
+        mock.stop();
+        assert!(records.is_empty());
+        assert!(consumer.pending_acks.is_empty());
+        assert!(consumer.share_session_epoch == 6);
+        assert!(attempts.load(std::sync::atomic::Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test]
+    async fn poll_preserves_implicit_piggyback_state_on_partition_ack_error() {
+        let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                return Some(api_versions_for_share_data_path());
+            }
+            if api_key != share_fetch_request::API_KEY {
+                return None;
+            }
+            Some(share_fetch_ack_partition_response_at(version, 42))
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Implicit, client);
+        consumer.prev_delivered = vec![(id(7), 2, 20, 21)];
+
+        let records = consumer.poll(Duration::from_millis(1)).await.unwrap();
+
+        mock.stop();
+        assert!(records.is_empty());
+        assert!(consumer.prev_delivered == vec![(id(7), 2, 20, 21)]);
+        assert!(consumer.share_session_epoch == 5);
+    }
+
+    #[tokio::test]
+    async fn poll_preserves_implicit_delivered_state_on_fetch_transport_failure() {
+        let mock = MockBroker::start(|api_key, _version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                Some(api_versions_for_share_data_path())
+            } else {
+                None
+            }
+        })
+        .await;
+        let client = mock_client(mock.addr).await;
+        let mut consumer = test_consumer_with_client(ShareAckMode::Implicit, client);
+        consumer.prev_delivered = vec![(id(7), 2, 20, 21)];
+        let expected_delivered = consumer.prev_delivered.clone();
+
+        let err = consumer.poll(Duration::from_millis(1)).await.unwrap_err();
+
+        mock.stop();
+        assert!(matches!(
+            err,
+            ConsumerError::Client(ClientError::Timeout(_))
+        ));
+        assert!(consumer.prev_delivered == expected_delivered);
+        assert!(consumer.share_session_epoch == 4);
     }
 
     #[tokio::test]

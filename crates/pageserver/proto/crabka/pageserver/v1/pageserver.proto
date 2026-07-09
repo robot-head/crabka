@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+package crabka.pageserver.v1;
+
+service PageService {
+  rpc GetPage(GetPageRequest) returns (GetPageResponse);
+  rpc GetRelSize(GetRelSizeRequest) returns (GetRelSizeResponse);
+  rpc Basebackup(BasebackupRequest) returns (BasebackupResponse);
+  rpc CreateBranch(CreateBranchRequest) returns (CreateBranchResponse);
+  rpc ListTimelines(ListTimelinesRequest) returns (ListTimelinesResponse);
+  rpc DeleteTimeline(DeleteTimelineRequest) returns (DeleteTimelineResponse);
+  rpc SeedImage(SeedImageRequest) returns (SeedImageResponse);
+  rpc IngestWal(IngestWalRequest) returns (IngestWalResponse);
+}
+
+message Timeline {
+  string branch_id = 1;
+  string tenant_id = 2;
+  string timeline_id = 3;
+}
+
+message RelTag {
+  uint32 spc_node = 1;
+  uint32 db_node = 2;
+  uint32 rel_node = 3;
+  uint32 fork_number = 4;
+}
+
+message PageKey {
+  RelTag rel = 1;
+  uint32 block_number = 2;
+}
+
+message RelMetaKey {
+  RelTag rel = 1;
+  RelMetaKind kind = 2;
+}
+
+message SlruPageKey {
+  SlruKind kind = 1;
+  uint32 segment_number = 2;
+  uint32 block_number = 3;
+}
+
+enum RelMetaKind {
+  REL_META_KIND_UNSPECIFIED = 0;
+  REL_META_KIND_SIZE = 1;
+  REL_META_KIND_REL_MAP = 2;
+  REL_META_KIND_STORAGE_MANAGER = 3;
+}
+
+enum SlruKind {
+  SLRU_KIND_UNSPECIFIED = 0;
+  SLRU_KIND_CLOG = 1;
+  SLRU_KIND_MULTI_XACT_OFFSET = 2;
+  SLRU_KIND_MULTI_XACT_MEMBER = 3;
+  SLRU_KIND_COMMIT_TS = 4;
+}
+
+message GetPageRequest {
+  Timeline timeline = 1;
+  PageKey key = 2;
+  uint64 lsn = 3;
+}
+
+message GetPageResponse {
+  bytes page = 1;
+}
+
+message GetRelSizeRequest {
+  Timeline timeline = 1;
+  RelTag rel = 2;
+  uint64 lsn = 3;
+}
+
+message GetRelSizeResponse {
+  uint32 blocks = 1;
+}
+
+message BasebackupRequest {
+  Timeline timeline = 1;
+  uint64 lsn = 2;
+}
+
+message BasebackupResponse {
+  Timeline timeline = 1;
+  uint64 lsn = 2;
+  repeated BasebackupRelMeta relmeta = 3;
+  repeated BasebackupSlruPage slru_pages = 4;
+  bytes tar = 5;
+}
+
+message BasebackupRelMeta {
+  RelMetaKey key = 1;
+  bytes metadata = 2;
+}
+
+message BasebackupSlruPage {
+  SlruPageKey key = 1;
+  bytes page = 2;
+}
+
+message CreateBranchRequest {
+  Timeline timeline = 1;
+  Timeline source_timeline = 2;
+  uint64 branch_lsn = 3;
+}
+
+message CreateBranchResponse {
+  Timeline timeline = 1;
+  bool created = 2;
+  Timeline source_timeline = 3;
+  uint64 branch_lsn = 4;
+}
+
+message ListTimelinesRequest {
+  string tenant_id = 1;
+}
+
+message ListTimelinesResponse {
+  repeated Timeline timelines = 1;
+}
+
+message DeleteTimelineRequest {
+  Timeline timeline = 1;
+}
+
+message DeleteTimelineResponse {
+  Timeline timeline = 1;
+  bool deleted = 2;
+}
+
+message SeedImageRequest {
+  Timeline timeline = 1;
+  PageKey key = 2;
+  uint64 lsn = 3;
+  bytes page = 4;
+}
+
+message SeedImageResponse {
+  Timeline timeline = 1;
+  PageKey key = 2;
+  uint64 lsn = 3;
+}
+
+message IngestWalRequest {
+  Timeline timeline = 1;
+  PageKey key = 2;
+  uint64 lsn = 3;
+  bool will_init = 4;
+  bytes record = 5;
+}
+
+message IngestWalResponse {
+  Timeline timeline = 1;
+  PageKey key = 2;
+  uint64 lsn = 3;
+  bool will_init = 4;
+}

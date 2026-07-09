@@ -24,9 +24,14 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    codec::RecordCodec, error::GatewayError, metrics::metrics,
-    outbound_config::CompiledSubscription,
+    ce_translate,
+    codec::RecordCodec,
+    error::GatewayError,
+    metrics::metrics,
+    outbound_config::{CompiledSubscription, OutboundContentMode},
 };
+
+const CLOUDEVENTS_JSON_CONTENT_TYPE: &str = "application/cloudevents+json";
 
 /// RAII guard that decrements the active-subscriptions gauge exactly once on
 /// drop, regardless of how `run_subscription` exits (normal shutdown, poll
@@ -178,21 +183,31 @@ async fn deliver_one(
         return;
     }
 
-    // 2. Build the delivery body. event_id = topic-partition-offset is the
-    //    receiver's dedup key (X-Crabka-Event-Id). When `decode_to_json` is set,
-    //    the (Confluent-framed) record value is decoded and its JSON view is
-    //    delivered verbatim; otherwise — and whenever decode yields no JSON or
-    //    errors — the standard signed JSON envelope is delivered (raw path,
-    //    inert under `RawCodec`).
+    // 2. Build the delivery body + content headers. event_id =
+    //    topic-partition-offset is the receiver's dedup key
+    //    (X-Crabka-Event-Id). Envelope mode preserves the existing JSON envelope
+    //    and decode_to_json behavior; CloudEvents modes require valid CE record
+    //    headers and are dropped/dead-lettered before any HTTP attempt when the
+    //    required attributes are missing.
     let event_id = format!("{}-{}-{}", rec.topic, rec.partition, rec.offset);
-    let body = decoded_body(codec, sub, rec)
-        .await
-        .unwrap_or_else(|| render_envelope(&event_id, rec));
+    let delivery = match render_delivery(codec, sub, &event_id, rec).await {
+        Ok(delivery) => delivery,
+        Err(e) => {
+            tracing::warn!(
+                subscription = %sub.name,
+                event = %event_id,
+                error = %e,
+                "outbound CloudEvents record is invalid; dropping or dead-lettering",
+            );
+            dead_letter(producer, sub, rec, &event_id).await;
+            return;
+        }
+    };
     let ts = now_unix_ms();
     let sig = sub
         .signing_secret
         .as_ref()
-        .map(|s| crate::webhook_config::sign_hmac_hex(s, &body));
+        .map(|s| crate::webhook_config::sign_hmac_hex(s, &delivery.body));
 
     // 3. POST with exponential backoff + jitter up to max_attempts.
     let mut attempt: u32 = 0;
@@ -202,8 +217,10 @@ async fn deliver_one(
             .post(&sub.target_url)
             .header("X-Crabka-Event-Id", &event_id)
             .header("X-Crabka-Timestamp", ts.to_string())
-            .header("content-type", "application/json")
-            .body(body.clone());
+            .body(delivery.body.clone());
+        for (name, value) in &delivery.headers {
+            req = req.header(name, value);
+        }
         if let Some(sig) = &sig {
             req = req.header("X-Crabka-Signature", sig);
         }
@@ -246,6 +263,82 @@ async fn deliver_one(
     }
 }
 
+struct RenderedDelivery {
+    body: Vec<u8>,
+    headers: Vec<(reqwest::header::HeaderName, reqwest::header::HeaderValue)>,
+}
+
+async fn render_delivery(
+    codec: &dyn RecordCodec,
+    sub: &CompiledSubscription,
+    event_id: &str,
+    rec: &ConsumerRecord,
+) -> Result<RenderedDelivery, ce_translate::CeError> {
+    match sub.content_mode {
+        OutboundContentMode::Envelope => Ok(RenderedDelivery {
+            body: decoded_body(codec, sub, rec)
+                .await
+                .unwrap_or_else(|| render_envelope(event_id, rec)),
+            headers: vec![content_type_header("application/json")],
+        }),
+        OutboundContentMode::CloudEventsBinary => render_cloudevents_binary_delivery(rec),
+        OutboundContentMode::CloudEventsStructured => render_cloudevents_structured_delivery(rec),
+    }
+}
+
+fn render_cloudevents_binary_delivery(
+    rec: &ConsumerRecord,
+) -> Result<RenderedDelivery, ce_translate::CeError> {
+    let kafka_headers = record_headers(rec);
+    validate_record_cloudevents_headers(&kafka_headers)?;
+
+    Ok(RenderedDelivery {
+        body: rec.value.clone().unwrap_or_default().to_vec(),
+        headers: ce_translate::kafka_headers_to_http(&kafka_headers),
+    })
+}
+
+fn render_cloudevents_structured_delivery(
+    rec: &ConsumerRecord,
+) -> Result<RenderedDelivery, ce_translate::CeError> {
+    let kafka_headers = record_headers(rec);
+    validate_record_cloudevents_headers(&kafka_headers)?;
+
+    Ok(RenderedDelivery {
+        body: ce_translate::structured_from_binary(
+            &kafka_headers,
+            rec.value.as_deref().unwrap_or_default(),
+        ),
+        headers: vec![content_type_header(CLOUDEVENTS_JSON_CONTENT_TYPE)],
+    })
+}
+
+fn validate_record_cloudevents_headers(
+    headers: &[(String, Option<Bytes>)],
+) -> Result<(), ce_translate::CeError> {
+    let present_headers = headers
+        .iter()
+        .filter_map(|(key, value)| Some((key.clone(), value.clone()?)))
+        .collect::<Vec<_>>();
+    ce_translate::validate_binary_required(&present_headers)
+}
+
+fn record_headers(rec: &ConsumerRecord) -> Vec<(String, Option<Bytes>)> {
+    rec.headers
+        .iter()
+        .map(|h| (h.key.clone(), h.value.clone()))
+        .collect()
+}
+
+fn content_type_header(
+    value: &'static str,
+) -> (reqwest::header::HeaderName, reqwest::header::HeaderValue) {
+    (
+        reqwest::header::CONTENT_TYPE,
+        reqwest::header::HeaderValue::from_static(value),
+    )
+}
+
 /// The decoded-to-JSON delivery body, or `None` to fall back to the envelope.
 ///
 /// Returns `None` (envelope path) when `decode_to_json` is off, the record
@@ -280,8 +373,8 @@ async fn decoded_body(
 
 /// Render the delivery envelope as serialized JSON bytes. The value is embedded
 /// as raw JSON when the record value parses as JSON, otherwise wrapped as
-/// `{"_base64": "..."}`; the key is base64. The envelope omits record headers
-/// (`ConsumerRecord` exposes none).
+/// `{"_base64": "..."}`; the key is base64. Record headers are carried as an
+/// ordered `headers` array of `{ "key", "value" }` (value base64, or `null`).
 fn render_envelope(event_id: &str, rec: &ConsumerRecord) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "event_id": event_id,
@@ -291,6 +384,10 @@ fn render_envelope(event_id: &str, rec: &ConsumerRecord) -> Vec<u8> {
         "timestamp_ms": rec.timestamp,
         "key": rec.key.as_ref().map(|k| b64(k)),
         "value": value_field(rec),
+        "headers": rec.headers.iter().map(|h| json!({
+            "key": &h.key,
+            "value": h.value.as_ref().map(|v| b64(v)),
+        })).collect::<Vec<_>>(),
     }))
     .unwrap_or_default()
 }
@@ -434,6 +531,7 @@ fn b64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crabka_client_consumer::Header as ConsumerHeader;
     use jsonpath_rust::parser::parse_json_path;
 
     use super::*;
@@ -481,6 +579,7 @@ mod tests {
             request_timeout_ms: 1,
             filter: None,
             headers: vec![],
+            content_mode: OutboundContentMode::Envelope,
             decode_to_json,
         }
     }
@@ -529,6 +628,149 @@ mod tests {
         let body = render_envelope("events-3-42", &rec);
         let v: Value = serde_json::from_slice(&body).expect("envelope is JSON");
         assert_eq!(v["value"], Value::Null);
+    }
+
+    #[test]
+    fn envelope_carries_headers_in_source_order() {
+        let mut rec = rec_with_value(Some(br#"{"n":1}"#));
+        rec.headers = vec![
+            ConsumerHeader {
+                key: "ce-type".into(),
+                value: Some(Bytes::from_static(b"order")),
+            },
+            ConsumerHeader {
+                key: "nullv".into(),
+                value: None,
+            },
+            ConsumerHeader {
+                key: "ce-type".into(),
+                value: Some(Bytes::from_static(b"order.updated")),
+            },
+        ];
+
+        let body = render_envelope("events-3-42", &rec);
+        let v: Value = serde_json::from_slice(&body).expect("envelope is JSON");
+
+        assert_eq!(
+            v["headers"],
+            json!([
+                { "key": "ce-type", "value": B64STD.encode(b"order") },
+                { "key": "nullv", "value": Value::Null },
+                { "key": "ce-type", "value": B64STD.encode(b"order.updated") },
+            ]),
+        );
+    }
+
+    #[tokio::test]
+    async fn default_envelope_mode_is_unchanged() {
+        let codec = RawCodec;
+        let sub = sub_with_decode(false);
+        let rec = rec_with_value(Some(br#"{"n":1}"#));
+
+        let delivery = render_delivery(&codec, &sub, "events-3-42", &rec)
+            .await
+            .expect("envelope renders");
+        let body: Value = serde_json::from_slice(&delivery.body).expect("envelope JSON");
+
+        assert_eq!(body["event_id"], "events-3-42");
+        assert_eq!(body["headers"], json!([]));
+        assert!(delivery.headers.iter().any(|(name, value)| {
+            name.as_str() == "content-type" && value.as_bytes() == b"application/json"
+        }));
+    }
+
+    #[test]
+    fn cloudevents_binary_maps_headers_and_raw_body() {
+        let mut rec = rec_with_value(Some(br#"{"n":1}"#));
+        rec.headers = vec![
+            ConsumerHeader {
+                key: "ce_id".into(),
+                value: Some(Bytes::from_static(b"1")),
+            },
+            ConsumerHeader {
+                key: "ce_source".into(),
+                value: Some(Bytes::from_static(b"/source")),
+            },
+            ConsumerHeader {
+                key: "ce_type".into(),
+                value: Some(Bytes::from_static(b"example.created")),
+            },
+            ConsumerHeader {
+                key: "ce_specversion".into(),
+                value: Some(Bytes::from_static(b"1.0")),
+            },
+            ConsumerHeader {
+                key: "content-type".into(),
+                value: Some(Bytes::from_static(b"application/json")),
+            },
+        ];
+
+        let delivery = render_cloudevents_binary_delivery(&rec).expect("binary renders");
+
+        assert_eq!(delivery.body, br#"{"n":1}"#);
+        assert!(
+            delivery
+                .headers
+                .iter()
+                .any(|(name, value)| { name.as_str() == "ce-id" && value.as_bytes() == b"1" })
+        );
+        assert!(delivery.headers.iter().any(|(name, value)| {
+            name.as_str() == "content-type" && value.as_bytes() == b"application/json"
+        }));
+    }
+
+    #[test]
+    fn cloudevents_structured_emits_json_event() {
+        let mut rec = rec_with_value(Some(br#"{"n":1}"#));
+        rec.headers = vec![
+            ConsumerHeader {
+                key: "ce_id".into(),
+                value: Some(Bytes::from_static(b"1")),
+            },
+            ConsumerHeader {
+                key: "ce_source".into(),
+                value: Some(Bytes::from_static(b"/source")),
+            },
+            ConsumerHeader {
+                key: "ce_type".into(),
+                value: Some(Bytes::from_static(b"example.created")),
+            },
+            ConsumerHeader {
+                key: "ce_specversion".into(),
+                value: Some(Bytes::from_static(b"1.0")),
+            },
+            ConsumerHeader {
+                key: "content-type".into(),
+                value: Some(Bytes::from_static(b"application/json")),
+            },
+        ];
+
+        let delivery = render_cloudevents_structured_delivery(&rec).expect("structured renders");
+        let body: Value = serde_json::from_slice(&delivery.body).expect("structured JSON");
+
+        assert_eq!(body["id"], "1");
+        assert_eq!(body["source"], "/source");
+        assert_eq!(body["type"], "example.created");
+        assert_eq!(body["specversion"], "1.0");
+        assert_eq!(body["datacontenttype"], "application/json");
+        assert_eq!(body["data"]["n"], 1);
+        assert!(delivery.headers.iter().any(|(name, value)| {
+            name.as_str() == "content-type" && value.as_bytes() == b"application/cloudevents+json"
+        }));
+    }
+
+    #[test]
+    fn cloudevents_structured_rejects_missing_required_attribute() {
+        let mut rec = rec_with_value(Some(br#"{"n":1}"#));
+        rec.headers = vec![ConsumerHeader {
+            key: "ce_id".into(),
+            value: Some(Bytes::from_static(b"1")),
+        }];
+
+        assert!(matches!(
+            render_cloudevents_structured_delivery(&rec),
+            Err(ce_translate::CeError::MissingAttribute("source"))
+        ));
     }
 
     #[test]

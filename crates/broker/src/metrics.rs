@@ -56,6 +56,16 @@ pub struct PartitionLabel {
     pub partition: i32,
 }
 
+/// Per-share-group partition backlog label set. Emitted by the
+/// coordinator broker so fleet-wide autoscalers can sum a single
+/// series per `(group, topic, partition)`.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct ShareGroupLabel {
+    pub group_id: String,
+    pub topic: String,
+    pub partition: i32,
+}
+
 /// KIP-511 client software fingerprint, attached to the
 /// `client_software_versions_total` counter on every accepted v3+
 /// `ApiVersions` handshake.
@@ -150,6 +160,10 @@ pub struct BrokerMetrics {
     /// counter) rather than seconds (float) because `prometheus-client`
     /// counters are `u64`.
     pub partition_cpu_micros: Family<PartitionLabel, Counter>,
+    /// Current share-group partition backlog in records, labelled by
+    /// `(group_id, topic, partition)`. The coordinator broker is the sole
+    /// emitter; operators sum by `group_id` for serverless autoscaling.
+    pub share_group_backlog: Family<ShareGroupLabel, Gauge>,
     pub partitions_led: Gauge,
     /// Total number of partitions (leader + follower
     /// replicas) this broker hosts. Mirrors Kafka's
@@ -357,6 +371,7 @@ impl BrokerMetrics {
         let replication_bytes_out: Family<PartitionLabel, Counter> = Family::default();
         let partition_disk_bytes: Family<PartitionLabel, Gauge> = Family::default();
         let partition_cpu_micros: Family<PartitionLabel, Counter> = Family::default();
+        let share_group_backlog: Family<ShareGroupLabel, Gauge> = Family::default();
         let partitions_led = Gauge::default();
         let partitions_total = Gauge::default();
         let under_replicated_partitions = Gauge::default();
@@ -563,6 +578,13 @@ impl BrokerMetrics {
              (topic, partition). Rebalancer-targeted; rate(...) divided by \
              1_000_000 yields core occupancy.",
             partition_cpu_micros.clone(),
+        );
+        registry.register(
+            "share_group_backlog",
+            "Share-group partition backlog (HWM - effective SPSO) in records, \
+             per (group, topic, partition), emitted by the coordinator broker. \
+             Fleet total = sum(crabka_broker_share_group_backlog{group_id=\"G\"}).",
+            share_group_backlog.clone(),
         );
         registry.register(
             "incremental_fetch_sessions",
@@ -774,6 +796,7 @@ impl BrokerMetrics {
             replication_bytes_out,
             partition_disk_bytes,
             partition_cpu_micros,
+            share_group_backlog,
             partitions_led,
             partitions_total,
             under_replicated_partitions,
@@ -1099,6 +1122,16 @@ mod tests {
     #[tokio::test]
     async fn registry_has_broker_prefix_and_all_metrics() {
         let m = BrokerMetrics::new();
+
+        record_sample_metric_values(&m);
+
+        let buf = encode_registry(&m).await;
+
+        assert_all_broker_metric_names_are_present(&buf);
+        assert_sample_values_are_present(&buf);
+    }
+
+    fn record_sample_metric_values(m: &BrokerMetrics) {
         m.record_produce("topic-a", 100);
         m.record_produce_messages("topic-a", 5);
         m.record_fetch("topic-a", 50);
@@ -1131,6 +1164,13 @@ mod tests {
                 partition: 0,
             })
             .set(42);
+        m.share_group_backlog
+            .get_or_create(&ShareGroupLabel {
+                group_id: "share-g".into(),
+                topic: "topic-a".into(),
+                partition: 0,
+            })
+            .set(10);
         m.partitions_led.set(7);
         m.partitions_total.set(42);
         m.under_replicated_partitions.set(3);
@@ -1140,11 +1180,17 @@ mod tests {
         m.controller_leader_changes_total.inc();
         m.isr_shrinks_total.inc();
         m.isr_expands_total.inc_by(2);
+    }
 
+    async fn encode_registry(m: &BrokerMetrics) -> String {
         let mut buf = String::new();
         let r = m.registry.lock().await;
         prometheus_client::encoding::text::encode(&mut buf, &r).unwrap();
-        // Spot-check every metric is present and prefixed.
+
+        buf
+    }
+
+    fn assert_all_broker_metric_names_are_present(buf: &str) {
         for needle in [
             "crabka_broker_topic_bytes_in_total",
             "crabka_broker_topic_bytes_out_total",
@@ -1163,6 +1209,7 @@ mod tests {
             "crabka_broker_partition_bytes_out_total",
             "crabka_broker_partition_disk_bytes",
             "crabka_broker_partition_cpu_micros_total",
+            "crabka_broker_share_group_backlog",
             "crabka_broker_incremental_fetch_sessions",
             "crabka_broker_incremental_fetch_session_evictions_total",
             "crabka_broker_incremental_fetch_partitions_cached",
@@ -1190,7 +1237,9 @@ mod tests {
         ] {
             assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
-        // Topic label and values made it through.
+    }
+
+    fn assert_sample_values_are_present(buf: &str) {
         for (needle, what) in [
             ("topic=\"topic-a\"", "topic label"),
             ("100", "bytes_in=100"),
@@ -1199,6 +1248,30 @@ mod tests {
         ] {
             assert!(buf.contains(needle), "expected {what} in:\n{buf}");
         }
+    }
+
+    #[tokio::test]
+    async fn share_group_backlog_encodes_as_gauge() {
+        let m = BrokerMetrics::new();
+        m.share_group_backlog
+            .get_or_create(&ShareGroupLabel {
+                group_id: "g".into(),
+                topic: "t".into(),
+                partition: 0,
+            })
+            .set(42);
+
+        let mut buf = String::new();
+        let registry = m.registry.lock().await;
+        prometheus_client::encoding::text::encode(&mut buf, &registry).unwrap();
+
+        assert!(
+            buf.contains(
+                "crabka_broker_share_group_backlog{group_id=\"g\",topic=\"t\",partition=\"0\"} 42"
+            ),
+            "missing share-group backlog gauge in:\n{buf}"
+        );
+        assert!(!buf.contains("share_group_backlog_total"));
     }
 
     #[test]

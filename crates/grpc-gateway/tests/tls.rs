@@ -216,11 +216,23 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
             schema_registry_url: None,
+            queue_max_messages: GatewayConfig::DEFAULT_QUEUE_MAX_MESSAGES,
+            queue_wait_ms_cap: GatewayConfig::DEFAULT_QUEUE_WAIT_MS_CAP,
+            queue_session_idle_secs: GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS,
+            queue_max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
         ))),
         codec: Arc::new(RawCodec),
+        queue_sessions: Arc::new(crabka_grpc_gateway::queue::QueueSessionTable::new(
+            crabka_grpc_gateway::queue::QueueSessionConfig {
+                idle_timeout: std::time::Duration::from_secs(
+                    GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS,
+                ),
+                max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
+            },
+        )),
     });
 
     // Serve Connect + health + forward routes over TLS.

@@ -1,0 +1,9 @@
+pg_major = 17
+status = "strict-audit-decoder-model-blockers"
+implemented_exact_in_repo = ["xlog_fpi", "rmgr_fpi", "heap_init_empty_zero_page", "heap2_visible_pd_all_visible", "seq_log_full_page_payload", "slru_zero_truncate_clog_status_metadata", "relmap_exact_payload_metadata"]
+unsupported_relation_delta_families = ["heap", "heap2", "btree", "sequence"]
+unsupported_long_tail_index_families = ["hash", "gin", "gist", "spgist", "brin"]
+unsupported_transaction_opcodes = ["xact_unknown"]
+unsupported_metadata_delta_families = ["multixact_create_id_opcode"]
+required_decoder_model_fields = ["heap_tuple_headers_and_offsets", "heap2_prune_visibility_map_payloads", "btree_item_split_delete_payloads", "hash_bucket_split_pageopaque_payloads", "gin_pending_posting_tree_payloads", "gist_split_page_payloads", "spgist_tuple_node_payloads", "brin_revmap_summary_payloads", "multixact_create_id_member_payloads"]
+oracle_prerequisites = ["real_postgresql_17_wal_corpus", "pg_waldump_for_corpus", "standby_relation_bytes_at_capture_lsn", "standby_pg_xact_segments_at_capture_lsn", "standby_pg_multixact_segments_at_capture_lsn"]

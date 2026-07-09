@@ -131,9 +131,21 @@ async fn app_state(bootstrap: &str, client: &str, authz: Arc<GatewayAuthz>) -> A
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
             schema_registry_url: None,
+            queue_max_messages: GatewayConfig::DEFAULT_QUEUE_MAX_MESSAGES,
+            queue_wait_ms_cap: GatewayConfig::DEFAULT_QUEUE_WAIT_MS_CAP,
+            queue_session_idle_secs: GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS,
+            queue_max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
         }),
         authz,
         codec: Arc::new(RawCodec),
+        queue_sessions: Arc::new(crabka_grpc_gateway::queue::QueueSessionTable::new(
+            crabka_grpc_gateway::queue::QueueSessionConfig {
+                idle_timeout: std::time::Duration::from_secs(
+                    GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS,
+                ),
+                max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
+            },
+        )),
     })
 }
 
@@ -164,7 +176,7 @@ fn send_one(topic: &str, value: &[u8]) -> pb::SendRequest {
             topic: topic.into(),
             key: None,
             body: Some(pb::record::Body::Raw(value.to_vec())),
-            headers: BTreeMap::new().into_iter().collect(),
+            headers: vec![],
             partition: None,
             timestamp_ms: None,
             idempotency_key: None,
@@ -773,9 +785,21 @@ async fn spawn_acl_gateway(bootstrap: &str, client: &str) -> AclGw {
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
             schema_registry_url: None,
+            queue_max_messages: GatewayConfig::DEFAULT_QUEUE_MAX_MESSAGES,
+            queue_wait_ms_cap: GatewayConfig::DEFAULT_QUEUE_WAIT_MS_CAP,
+            queue_session_idle_secs: GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS,
+            queue_max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
         }),
         authz,
         codec: Arc::new(RawCodec),
+        queue_sessions: Arc::new(crabka_grpc_gateway::queue::QueueSessionTable::new(
+            crabka_grpc_gateway::queue::QueueSessionConfig {
+                idle_timeout: std::time::Duration::from_secs(
+                    GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS,
+                ),
+                max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
+            },
+        )),
     });
 
     {

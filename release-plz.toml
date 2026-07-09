@@ -80,6 +80,11 @@ publish = false
 release = false
 
 [[package]]
+name = "crabka-app-sdk"
+publish = false
+release = false
+
+[[package]]
 name = "crabka-audit"
 publish = false
 release = false
@@ -111,6 +116,11 @@ release = false
 
 [[package]]
 name = "crabka-cli"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-compute-client"
 publish = false
 release = false
 
@@ -200,6 +210,16 @@ publish = false
 release = false
 
 [[package]]
+name = "crabka-page-store"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-pageserver"
+publish = false
+release = false
+
+[[package]]
 name = "crabka-operator"
 publish = false
 release = false
@@ -211,6 +231,16 @@ release = false
 
 [[package]]
 name = "crabka-pprof"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-postgres-wal"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-postgres-redo"
 publish = false
 release = false
 
@@ -256,6 +286,16 @@ release = false
 
 [[package]]
 name = "crabka-schema-registry"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-safekeeper"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-sdk-conformance"
 publish = false
 release = false
 

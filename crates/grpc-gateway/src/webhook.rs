@@ -34,6 +34,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
+    ce_translate::{self, CeError, IngressMode},
     codec::{CodecError, SchemaSelector},
     error::GatewayError,
     handlers::anonymous_principal,
@@ -91,72 +92,27 @@ pub async fn webhook_handler(
     body: Bytes,
 ) -> Response {
     let _req = metrics().begin_request("webhook_in");
-    // 1. Look up the compiled endpoint config.
     let Some(cfg) = state.config.webhooks.get(&name) else {
         metrics().record_webhook_in("not_found");
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    // 2. Body size guard.
     if body.len() > cfg.max_body_bytes {
         metrics().record_webhook_in("too_large");
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
 
-    // 3. HMAC signature verification (when configured).
-    if let Some(sig_header) = &cfg.signature_header {
-        // Read the signature header value.
-        let provided = if let Some(v) = headers.get(sig_header).and_then(|v| v.to_str().ok()) {
-            v.to_owned()
-        } else {
-            metrics().record_webhook_in("unauthenticated");
-            return StatusCode::UNAUTHORIZED.into_response();
-        };
-
-        // Replay guard: validate the timestamp before the HMAC check so a
-        // stale-timestamp request is rejected without doing crypto work.
-        if let Some(ts_header) = &cfg.timestamp_header {
-            let ts_str = if let Some(v) = headers.get(ts_header).and_then(|v| v.to_str().ok()) {
-                v.to_owned()
-            } else {
-                metrics().record_webhook_in("unauthenticated");
-                return StatusCode::UNAUTHORIZED.into_response();
-            };
-            let ts: i64 = if let Ok(v) = ts_str.parse() {
-                v
-            } else {
-                metrics().record_webhook_in("unauthenticated");
-                return StatusCode::UNAUTHORIZED.into_response();
-            };
-            let now = now_unix_secs();
-            let skew = (i128::from(now) - i128::from(ts)).abs();
-            if skew > i128::from(cfg.timestamp_tolerance_secs) {
-                metrics().record_webhook_in("unauthenticated");
-                return StatusCode::UNAUTHORIZED.into_response();
-            }
-        }
-
-        // Verify the HMAC-SHA256 digest.
-        if !verify_signature(
-            cfg.secret.as_deref().unwrap_or(b""),
-            &body,
-            &provided,
-            &cfg.signature_encoding,
-            cfg.signature_prefix.as_deref(),
-        ) {
-            metrics().record_webhook_in("unauthenticated");
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
+    if !verify_configured_signature(cfg, &headers, &body) {
+        metrics().record_webhook_in("unauthenticated");
+        return StatusCode::UNAUTHORIZED.into_response();
     }
 
-    // 4. Parse JSON body once — only when at least one source requires it.
     let body_json: Option<Value> = if needs_json(cfg) {
         serde_json::from_slice(&body).ok()
     } else {
         None
     };
 
-    // 5. Idempotency key extraction.
     let idempotency_key: Option<String> = match &cfg.idempotency_source {
         Some(src) => {
             if let Some(k) = extract_source(src, &headers, body_json.as_ref()) {
@@ -169,20 +125,25 @@ pub async fn webhook_handler(
         None => None,
     };
 
-    // 6. Record key extraction (optional; None ⇒ producer partitioner chooses).
     let key: Option<String> = match &cfg.key_source {
         Some(src) => extract_source(src, &headers, body_json.as_ref()),
         None => None,
     };
 
-    // 7. Build the transport-agnostic record. When the endpoint is bound to a
-    //    schema subject, produce the body as a STRUCTURED record: the produce
-    //    path's codec validates+serializes the JSON against the subject's schema
-    //    and Confluent-frames it. Without a registry (`RawCodec`), the structured
-    //    body's JSON passes through unchanged, so this is inert.
+    let (record_headers, record_value) = match translate_cloudevent_ingress(&headers, &body) {
+        IngressTranslation::Record(record) => record,
+        IngressTranslation::BadRequest => {
+            metrics().record_webhook_in("bad_request");
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        IngressTranslation::UnsupportedMediaType => {
+            metrics().record_webhook_in("bad_request");
+            return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+        }
+    };
     let body_structured = cfg.schema_subject.as_ref().map(|subject| {
         (
-            body.clone(),
+            record_value.clone(),
             SchemaSelector {
                 subject: Some(subject.clone()),
                 id: None,
@@ -190,25 +151,27 @@ pub async fn webhook_handler(
             },
         )
     });
+
     let rec = GatewayRecord {
         topic: cfg.target_topic.clone(),
         key: key.map(|k| Bytes::from(k.into_bytes())),
-        value: body,
+        value: record_value,
         body_structured,
-        headers: vec![],
+        headers: record_headers
+            .into_iter()
+            .map(|(key, value)| (key, Some(value)))
+            .collect(),
         partition: None,
         timestamp_ms: None,
         idempotency_key,
     };
 
-    // 8. Build the principal from the endpoint's configured service identity.
     let principal = Principal {
         name: cfg.principal.clone(),
         auth_method: AuthMethod::MTls,
         groups: vec![],
     };
 
-    // 9. Produce and map the result to HTTP status.
     let host = peer.map_or_else(crate::handlers::unknown_host, |p| p.0);
     produce_and_respond(state, rec, &principal, host).await
 }
@@ -241,12 +204,27 @@ pub async fn produce_handler(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
 
+    let (record_headers, record_value) = match translate_cloudevent_ingress(&headers, &body) {
+        IngressTranslation::Record(record) => record,
+        IngressTranslation::BadRequest => {
+            metrics().record_webhook_in("bad_request");
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+        IngressTranslation::UnsupportedMediaType => {
+            metrics().record_webhook_in("bad_request");
+            return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+        }
+    };
+
     let rec = GatewayRecord {
         topic,
         key: None,
-        value: body,
+        value: record_value,
         body_structured: None,
-        headers: vec![],
+        headers: record_headers
+            .into_iter()
+            .map(|(key, value)| (key, Some(value)))
+            .collect(),
         partition: None,
         timestamp_ms: None,
         idempotency_key,
@@ -268,6 +246,97 @@ fn needs_json(cfg: &crate::webhook_config::CompiledWebhook) -> bool {
     let json_src = |src: &Source| matches!(src, Source::JsonPath(_));
     cfg.idempotency_source.as_ref().is_some_and(json_src)
         || cfg.key_source.as_ref().is_some_and(json_src)
+}
+
+fn verify_configured_signature(
+    cfg: &crate::webhook_config::CompiledWebhook,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> bool {
+    let Some(sig_header) = &cfg.signature_header else {
+        return true;
+    };
+
+    let Some(provided) = headers.get(sig_header).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+
+    if !has_valid_timestamp(cfg, headers) {
+        return false;
+    }
+
+    verify_signature(
+        cfg.secret.as_deref().unwrap_or(b""),
+        body,
+        provided,
+        &cfg.signature_encoding,
+        cfg.signature_prefix.as_deref(),
+    )
+}
+
+fn has_valid_timestamp(cfg: &crate::webhook_config::CompiledWebhook, headers: &HeaderMap) -> bool {
+    let Some(ts_header) = &cfg.timestamp_header else {
+        return true;
+    };
+    let Some(ts_str) = headers.get(ts_header).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let Ok(timestamp) = ts_str.parse::<i64>() else {
+        return false;
+    };
+
+    let skew = (i128::from(now_unix_secs()) - i128::from(timestamp)).abs();
+    skew <= i128::from(cfg.timestamp_tolerance_secs)
+}
+
+type IngressRecordParts = (Vec<(String, Bytes)>, Bytes);
+
+enum IngressTranslation {
+    Record(IngressRecordParts),
+    BadRequest,
+    UnsupportedMediaType,
+}
+
+/// Translate `CloudEvents` HTTP binding details into the Kafka record shape used
+/// internally.
+fn translate_cloudevent_ingress(headers: &HeaderMap, body: &Bytes) -> IngressTranslation {
+    let content_type = headers
+        .get("content-type")
+        .and_then(|value| value.to_str().ok());
+    let has_cloudevent_header = headers
+        .iter()
+        .any(|(name, _)| name.as_str().starts_with("ce-"));
+
+    match ce_translate::detect_content_mode(content_type, has_cloudevent_header) {
+        IngressMode::Batch => IngressTranslation::UnsupportedMediaType,
+        IngressMode::NotCloudEvent => IngressTranslation::Record((Vec::new(), body.clone())),
+        IngressMode::Binary => record_translation(translate_binary_cloudevent(headers, body)),
+        IngressMode::Structured => record_translation(translate_structured_cloudevent(body)),
+    }
+}
+
+fn record_translation(result: Result<IngressRecordParts, CeError>) -> IngressTranslation {
+    match result {
+        Ok(record) => IngressTranslation::Record(record),
+        Err(_) => IngressTranslation::BadRequest,
+    }
+}
+
+fn translate_binary_cloudevent(
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<IngressRecordParts, CeError> {
+    let record_headers = ce_translate::http_headers_to_kafka(headers)?;
+    ce_translate::validate_binary_required(&record_headers)?;
+
+    Ok((record_headers, body.clone()))
+}
+
+fn translate_structured_cloudevent(body: &Bytes) -> Result<IngressRecordParts, CeError> {
+    let event = serde_json::from_slice::<Value>(body).map_err(|_| CeError::MalformedJson)?;
+    ce_translate::validate_structured_json(&event)?;
+
+    ce_translate::structured_json_to_binary_record_parts(&event)
 }
 
 /// Produce the record and map [`GatewayError`] variants to HTTP status codes.
@@ -456,25 +525,31 @@ mod tests {
         let produce = ProduceCore::new_for_test("127.0.0.1:1", "webhook-test", codec)
             .await
             .expect("non-idempotent producer builds without connecting");
+        let config = GatewayConfig {
+            bootstrap: "127.0.0.1:0".to_string(),
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            client_id: "webhook-test".into(),
+            dedup_topic: "__wh_dedup".into(),
+            dedup_partitions: 4,
+            dedup_window_ms: 3_600_000,
+            dedup_txn_id_prefix: "wh-dedup".into(),
+            advertised_addr: "127.0.0.1:0".into(),
+            membership_topic: "__wh_membership".into(),
+            tls: None,
+            broker_security: None,
+            authz: None,
+            webhooks,
+            outbound: Vec::new(),
+            schema_registry_url: None,
+            queue_max_messages: GatewayConfig::DEFAULT_QUEUE_MAX_MESSAGES,
+            queue_wait_ms_cap: GatewayConfig::DEFAULT_QUEUE_WAIT_MS_CAP,
+            queue_session_idle_secs: GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS,
+            queue_max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
+        };
         Arc::new(AppState {
             produce: Arc::new(produce),
-            config: Arc::new(GatewayConfig {
-                bootstrap: "127.0.0.1:0".to_string(),
-                listen_addr: "127.0.0.1:0".parse().unwrap(),
-                client_id: "webhook-test".into(),
-                dedup_topic: "__wh_dedup".into(),
-                dedup_partitions: 4,
-                dedup_window_ms: 3_600_000,
-                dedup_txn_id_prefix: "wh-dedup".into(),
-                advertised_addr: "127.0.0.1:0".into(),
-                membership_topic: "__wh_membership".into(),
-                tls: None,
-                broker_security: None,
-                authz: None,
-                webhooks,
-                outbound: Vec::new(),
-                schema_registry_url: None,
-            }),
+            queue_sessions: AppState::queue_sessions_from_config(&config),
+            config: Arc::new(config),
             authz: Arc::new(GatewayAuthz::new(Arc::new(
                 crabka_authz::AllowAllAuthorizer,
             ))),

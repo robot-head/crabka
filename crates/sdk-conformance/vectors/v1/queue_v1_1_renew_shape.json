@@ -1,0 +1,69 @@
+{
+  "id": "queue_v1_1_renew_shape",
+  "since": { "major": 1, "minor": 1 },
+  "steps": [
+    {
+      "name": "publish renewable queue record",
+      "command": {
+        "cmd": "publish",
+        "topic": "queue-renew",
+        "value_b64": "cmVuZXc=",
+        "headers": []
+      },
+      "expect": {
+        "ok": { "deduplicated": false, "offset": 0, "partition": 0 }
+      }
+    },
+    {
+      "name": "acquire renewable queue record",
+      "command": {
+        "cmd": "queue_acquire",
+        "topic": "queue-renew",
+        "group": "queue-workers",
+        "max": 1,
+        "lock_duration_ms": 30000
+      },
+      "expect": {
+        "ok": {
+          "session_id": "queue-session-1",
+          "messages": [
+            {
+              "message_id": "queue-renew:0:0",
+              "topic": "queue-renew",
+              "partition": 0,
+              "offset": 0,
+              "value_b64": "cmVuZXc=",
+              "headers": [],
+              "delivery_count": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "renew returns mixed per-entry result shape",
+      "command": {
+        "cmd": "queue_renew",
+        "session_id": "queue-session-1",
+        "entries": [
+          { "message_id": "queue-renew:0:0" },
+          { "message_id": "missing:0:0" }
+        ]
+      },
+      "expect": {
+        "ok": {
+          "results": [
+            { "message_id": "queue-renew:0:0", "error": null },
+            {
+              "message_id": "missing:0:0",
+              "error": {
+                "kind": "invalid_argument",
+                "message": "queue message is not acquired"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

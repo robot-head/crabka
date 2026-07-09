@@ -1,10 +1,15 @@
 syntax = "proto3";
 package crabka.gateway.v1;
 
+option go_package = "github.com/robot-head/crabka/sdks/go/gen/crabka/gateway/v1;gatewayv1";
+
 service Gateway {
   rpc Send(SendRequest) returns (SendResponse);
   rpc SendStream(stream SendRequest) returns (stream SendAck);
   rpc Subscribe(stream SubscribeFrame) returns (stream Inbound);
+  rpc QueueAcquire(QueueAcquireRequest) returns (QueueAcquireResponse);
+  rpc QueueAcknowledge(QueueAcknowledgeRequest) returns (QueueAcknowledgeResponse);
+  rpc QueueRenew(QueueRenewRequest) returns (QueueRenewResponse);
 }
 
 enum Acks {
@@ -19,27 +24,6 @@ enum SchemaFormat {
   AVRO = 1;
   JSON = 2;
   PROTOBUF = 3;
-}
-
-enum PredicateOp {
-  PREDICATE_OP_UNSPECIFIED = 0;
-  EQUALS = 1;
-}
-
-// A server-side predicate over the decoded structured JSON view of a record.
-// `path` is a JSONPath expression evaluated after Confluent-framed Avro,
-// JSON Schema, or Protobuf payloads are decoded through the registry. The
-// current implementation supports scalar equality; raw/unframed records do not
-// match structured predicates.
-message FieldPredicate {
-  string path = 1;
-  PredicateOp op = 2;
-  oneof value {
-    string string_value = 3;
-    int64 int64_value = 4;
-    double double_value = 5;
-    bool bool_value = 6;
-  }
 }
 
 // Selects the schema to serialize a structured value against. An empty
@@ -65,7 +49,7 @@ message Record {
     bytes raw = 3;
     StructuredValue structured = 8;
   }
-  map<string, bytes> headers = 4;
+  repeated Header headers = 4;
   optional int32 partition = 5;
   optional int64 timestamp_ms = 6;
   optional string idempotency_key = 7;
@@ -81,6 +65,11 @@ message ErrorInfo {
   int32 code = 1;
   string message = 2;
   bool retriable = 3;
+}
+
+message Header {
+  string key = 1;
+  optional bytes value = 2;
 }
 
 message RecordResult {
@@ -102,12 +91,21 @@ message SubscribeStart {
   string group_id = 1;
   repeated string topics = 2;
   bool auto_commit = 3;
-  repeated FieldPredicate predicates = 4;
+  // A SQL WHERE-fragment (boolean expression) filtering records server-side by
+  // their registry-decoded fields. Empty = deliver all (subject to Read ACL).
+  string filter = 4;
 }
 
-// An Ack triggers a commit of the consumer's current consumed positions. The
-// topic/partition/offset fields are advisory in the current implementation
-// (per-offset commit is a follow-up).
+// An Ack confirms delivery of the identified record.
+//
+// With SubscribeStart.auto_commit=false, topic/partition/offset are required
+// and drive explicit per-partition commits: the server commits the acknowledged
+// contiguous offset frontier for that topic partition, using Kafka's next offset
+// value (`offset + 1`).
+//
+// With SubscribeStart.auto_commit=true, records are committed from the current
+// consumer position after each non-empty poll. Ack frames are optional; when
+// sent, their topic/partition/offset fields do not select a per-offset commit.
 message SubscribeAck {
   string topic = 1;
   int32 partition = 2;
@@ -127,11 +125,73 @@ message Inbound {
   int64 offset = 3;
   optional bytes key = 4;
   bytes value = 5;
-  map<string, bytes> headers = 6;
+  repeated Header headers = 6;
   int64 timestamp_ms = 7;
   // Decoded structured (JSON) view + resolved schema metadata, populated when
   // the value was Confluent-framed (wired by a later task; absent under
   // RawCodec).
   optional StructuredValue structured = 8;
   optional SchemaSelector schema = 9;
+}
+
+message QueueAcquireRequest {
+  string group_id = 1;
+  repeated string topics = 2;
+  uint32 max_messages = 3;
+  uint32 wait_ms = 4;
+  string session_id = 5;
+  uint64 lock_duration_ms = 6;
+}
+
+message QueuedMessage {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  optional bytes key = 4;
+  bytes value = 5;
+  repeated Header headers = 6;
+  int64 timestamp_ms = 7;
+  int32 delivery_count = 8;
+}
+
+message QueueAcquireResponse {
+  string session_id = 1;
+  repeated QueuedMessage messages = 2;
+}
+
+enum QueueAckType {
+  QUEUE_ACK_TYPE_UNSPECIFIED = 0;
+  ACCEPT = 1;
+  RELEASE = 2;
+  REJECT = 3;
+}
+
+message QueueAckEntry {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  QueueAckType type = 4;
+}
+
+message QueueAcknowledgeRequest {
+  string session_id = 1;
+  repeated QueueAckEntry entries = 2;
+}
+
+message QueueAckResult {
+  QueueAckEntry entry = 1;
+  optional ErrorInfo error = 2;
+}
+
+message QueueAcknowledgeResponse {
+  repeated QueueAckResult results = 1;
+}
+
+message QueueRenewRequest {
+  string session_id = 1;
+  repeated QueueAckEntry entries = 2;
+}
+
+message QueueRenewResponse {
+  repeated QueueAckResult results = 1;
 }

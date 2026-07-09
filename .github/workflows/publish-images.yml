@@ -146,6 +146,7 @@ jobs:
       matrix:
         image:
           - crabka-broker
+          - crabka-gateway
           - crabka-operator
           - crabka-schema-registry
           - bench-driver

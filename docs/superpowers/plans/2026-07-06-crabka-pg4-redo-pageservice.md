@@ -29,6 +29,11 @@
 - **In scope:** the v1 rmgr arms; `get_page`; the standby capture + gate; materializing compaction + horizon GC; the Connect service (`GetPage`, `GetRelSize`-as-hint); fuzz/property coverage.
 - **Deferred:** GIN/GiST/SP-GiST/BRIN/hash + SLRU/CLOG + SMGR-record interpretation (PG-4b); basebackup/streaming RPCs/page cache (PG-5); branching (PG-6); live ingest (PG-1).
 
+## Strict-audit status
+
+- **Implemented in-repo exact arms:** XLOG/any supported-rmgr full-page images, empty HEAP init-to-zero-page, HEAP2 visible (`PD_ALL_VISIBLE`), and SEQ records only when the decoded block payload is exactly one full page.
+- **Decoder-model blocked arms:** HEAP tuple deltas, HEAP2 non-visible deltas, BTREE tuple/split/delete deltas, unsupported SEQ opcodes, long-tail index deltas, and unsupported XACT opcodes remain explicit `UnsupportedRedoFamily` errors unless the decoder exposes family-specific tuple/item/page-opaque/status fields and a real PG17 standby oracle corpus proves byte identity. `XLOG_SEQ_LOG` records whose decoded payload is not exactly one page are malformed and fail as `BadRecord`, not as blockers. Supported metadata arms (SLRU zero/truncate, CLOG status folding, and exact relmap payload materialization) are tracked as implemented, not as broad blocker families, in `crates/postgres-redo/tests/fixtures/decoder_model_blockers.toml`.
+
 ---
 
 ## File Structure

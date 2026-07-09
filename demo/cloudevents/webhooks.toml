@@ -1,0 +1,5 @@
+[[endpoints]]
+name = "events"
+target_topic = "cloudevents-demo"
+principal = "webhook:cloudevents-demo"
+max_body_bytes = 1048576

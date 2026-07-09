@@ -141,9 +141,25 @@ pub struct GatewayConfig {
     /// produce and consume paths. When absent, `RawCodec` (the identity
     /// pass-through) is used — existing behaviour is unchanged.
     pub schema_registry_url: Option<String>,
+    /// Maximum records returned by one queue acquire call.
+    pub queue_max_messages: u32,
+    /// Maximum queue acquire long-poll wait, in milliseconds.
+    pub queue_wait_ms_cap: u32,
+    /// Queue session idle timeout, in seconds, before gateway-side eviction.
+    pub queue_session_idle_secs: u64,
+    /// Maximum live queue sessions retained by one gateway process.
+    pub queue_max_sessions: usize,
 }
 
 impl GatewayConfig {
+    /// Default maximum records returned by one queue acquire call.
+    pub const DEFAULT_QUEUE_MAX_MESSAGES: u32 = 256;
+    /// Default queue acquire long-poll cap, in milliseconds.
+    pub const DEFAULT_QUEUE_WAIT_MS_CAP: u32 = 30_000;
+    /// Default idle timeout for queue sessions, in seconds.
+    pub const DEFAULT_QUEUE_SESSION_IDLE_SECS: u64 = 60;
+    /// Default maximum live queue sessions per gateway process.
+    pub const DEFAULT_QUEUE_MAX_SESSIONS: usize = 10_000;
     /// Replication factor requested for the dedup topic at create time.
     /// Kept here so `bin` and tests agree; broker may downgrade.
     pub const DEDUP_TOPIC_REPLICATION: i16 = 3;

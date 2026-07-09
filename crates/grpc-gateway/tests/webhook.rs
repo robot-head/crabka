@@ -17,13 +17,13 @@ use std::{
 
 use axum::{
     body::Body,
-    http::{Request, StatusCode},
+    http::{HeaderValue, Request, StatusCode},
 };
 use bytes::Bytes;
 use crabka_authz::{AuthorizationRequest, AuthorizationResult, SimpleAclAuthorizer};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
+use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord, IsolationLevel};
 use crabka_grpc_gateway::{
     authz::GatewayAuthz,
     codec::RawCodec,
@@ -172,11 +172,21 @@ async fn webhook_state(
             webhooks,
             outbound: Vec::new(),
             schema_registry_url: None,
+            queue_max_messages: GatewayConfig::DEFAULT_QUEUE_MAX_MESSAGES,
+            queue_wait_ms_cap: GatewayConfig::DEFAULT_QUEUE_WAIT_MS_CAP,
+            queue_session_idle_secs: GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS,
+            queue_max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
         }),
         authz: Arc::new(GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
         ))),
         codec: Arc::new(RawCodec),
+        queue_sessions: Arc::new(crabka_grpc_gateway::queue::QueueSessionTable::new(
+            crabka_grpc_gateway::queue::QueueSessionConfig {
+                idle_timeout: Duration::from_secs(GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS),
+                max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
+            },
+        )),
     });
 
     (state, token, store)
@@ -213,6 +223,51 @@ async fn count_topic(bootstrap: &str, topic: &str, group: &str) -> usize {
     }
     let _ = consumer.close().await;
     n
+}
+
+async fn create_topic(bootstrap: &str, topic: &str) {
+    let mut admin = AdminClient::connect(&[bootstrap.to_string()])
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: topic.into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            10_000,
+        )
+        .await
+        .unwrap();
+}
+
+async fn read_topic_records(bootstrap: &str, topic: &str, group: &str) -> Vec<ConsumerRecord> {
+    let mut consumer = Consumer::builder()
+        .bootstrap(bootstrap.to_string())
+        .client_id(format!("{group}-client"))
+        .group_id(group.to_string())
+        .subscribe(vec![topic.to_string()])
+        .isolation_level(IsolationLevel::ReadCommitted)
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .build()
+        .await
+        .unwrap();
+    let mut records = Vec::new();
+    for _ in 0..10 {
+        records.extend(consumer.poll(Duration::from_millis(500)).await.unwrap());
+    }
+    let _ = consumer.close().await;
+    records
+}
+
+fn header_value<'a>(record: &'a ConsumerRecord, key: &str) -> Option<&'a [u8]> {
+    record
+        .headers
+        .iter()
+        .find(|header| header.key == key)
+        .and_then(|header| header.value.as_deref())
 }
 
 /// A trimmed view of the `WebhookResponse` JSON returned by webhook routes.
@@ -648,6 +703,226 @@ async fn generic_produce_route() {
     broker.shutdown().await;
 }
 
+/// Binary `CloudEvents` on the generic produce route keep the request body as the
+/// record value and translate HTTP `ce-*` attributes to Kafka `ce_*` headers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_cloudevent_produce_translates_headers() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let topic = "wh-ce-binary";
+    create_topic(&bootstrap, topic).await;
+
+    let (state, token, _store) = webhook_state(&bootstrap, "ceb", "", false).await;
+    let app = webhook_router(state);
+    let body = Bytes::from_static(b"avro-bytes");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/produce/{topic}"))
+                .header("ce-id", "evt-1")
+                .header("ce-source", "/tests")
+                .header("ce-type", "com.example.created")
+                .header("ce-specversion", "1.0")
+                .header("content-type", "application/avro")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let records = read_topic_records(&bootstrap, topic, "ceb-verify").await;
+    let record = records.first().expect("record should be produced");
+    assert_eq!(record.value.as_ref(), Some(&body));
+    assert_eq!(header_value(record, "ce_id"), Some(&b"evt-1"[..]));
+    assert_eq!(header_value(record, "ce_source"), Some(&b"/tests"[..]));
+    assert_eq!(
+        header_value(record, "ce_type"),
+        Some(&b"com.example.created"[..])
+    );
+    assert_eq!(header_value(record, "ce_specversion"), Some(&b"1.0"[..]));
+    assert_eq!(
+        header_value(record, "content-type"),
+        Some(&b"application/avro"[..])
+    );
+
+    token.cancel();
+    broker.shutdown().await;
+}
+
+/// Structured `CloudEvents` are validated and normalized to the same internal
+/// record shape used by binary `CloudEvents`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn structured_cloudevent_webhook_normalizes_to_binary_record_shape() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let topic = "wh-ce-structured";
+    create_topic(&bootstrap, topic).await;
+    let toml = format!(
+        r#"
+[[endpoints]]
+name = "structured"
+target_topic = "{topic}"
+"#
+    );
+
+    let (state, token, _store) = webhook_state(&bootstrap, "ces", &toml, false).await;
+    let app = webhook_router(state);
+    let body = Bytes::from_static(
+        br#"{"specversion":"1.0","id":"evt-2","source":"/tests","type":"com.example.structured","datacontenttype":"application/json","traceid":"abc123","data":{"n":7}}"#,
+    );
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/webhooks/structured")
+                .header(
+                    "content-type",
+                    "application/cloudevents+json; charset=UTF-8",
+                )
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let records = read_topic_records(&bootstrap, topic, "ces-verify").await;
+    let record = records.first().expect("record should be produced");
+    assert_eq!(record.value.as_deref(), Some(&br#"{"n":7}"#[..]));
+    assert_eq!(header_value(record, "ce_id"), Some(&b"evt-2"[..]));
+    assert_eq!(header_value(record, "ce_source"), Some(&b"/tests"[..]));
+    assert_eq!(
+        header_value(record, "ce_type"),
+        Some(&b"com.example.structured"[..])
+    );
+    assert_eq!(header_value(record, "ce_specversion"), Some(&b"1.0"[..]));
+    assert_eq!(header_value(record, "ce_traceid"), Some(&b"abc123"[..]));
+    assert_eq!(
+        header_value(record, "content-type"),
+        Some(&b"application/json"[..])
+    );
+
+    token.cancel();
+    broker.shutdown().await;
+}
+
+/// `CloudEvents` requests with missing required attributes are rejected before any
+/// record is produced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_binary_cloudevent_attribute_returns_400() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let (state, token, _store) = webhook_state(&bootstrap, "cem", "", false).await;
+    let app = webhook_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/produce/irrelevant")
+                .header("ce-source", "/tests")
+                .header("ce-type", "com.example.missing")
+                .header("ce-specversion", "1.0")
+                .body(Body::from(Bytes::from_static(b"data")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    token.cancel();
+    broker.shutdown().await;
+}
+
+/// A non-UTF-8 `CloudEvents` attribute cannot be represented as a `CloudEvents`
+/// string attribute, so ingress fails loudly with `400 Bad Request`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_utf8_binary_cloudevent_attribute_returns_400() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let (state, token, _store) = webhook_state(&bootstrap, "ceu", "", false).await;
+    let app = webhook_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/produce/irrelevant")
+                .header("ce-id", HeaderValue::from_bytes(&[0xff]).unwrap())
+                .header("ce-source", "/tests")
+                .header("ce-type", "com.example.invalid")
+                .header("ce-specversion", "1.0")
+                .body(Body::from(Bytes::from_static(b"data")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    token.cancel();
+    broker.shutdown().await;
+}
+
+/// `CloudEvents` batch mode is explicitly out of scope and rejected with 415.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cloudevents_batch_content_type_returns_415() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let (state, token, _store) = webhook_state(&bootstrap, "cebatch", "", false).await;
+    let app = webhook_router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/produce/irrelevant")
+                .header("content-type", "application/cloudevents-batch+json")
+                .body(Body::from(Bytes::from_static(b"[]")))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+
+    token.cancel();
+    broker.shutdown().await;
+}
+
+/// Non-CloudEvents ingress remains byte-for-byte unchanged with no record headers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_cloudevent_produce_remains_raw_without_headers() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let topic = "wh-non-ce";
+    create_topic(&bootstrap, topic).await;
+
+    let (state, token, _store) = webhook_state(&bootstrap, "nce", "", false).await;
+    let app = webhook_router(state);
+    let body = Bytes::from_static(b"plain webhook data");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/produce/{topic}"))
+                .header("content-type", "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let records = read_topic_records(&bootstrap, topic, "nce-verify").await;
+    let record = records.first().expect("record should be produced");
+    assert_eq!(record.value.as_ref(), Some(&body));
+    assert!(record.headers.is_empty());
+
+    token.cancel();
+    broker.shutdown().await;
+}
+
 /// Body larger than `max_body_bytes` → 413 Payload Too Large.
 #[tokio::test]
 async fn body_too_large_413() {
@@ -751,9 +1026,19 @@ async fn webhook_state_with_authz(
             webhooks,
             outbound: Vec::new(),
             schema_registry_url: None,
+            queue_max_messages: GatewayConfig::DEFAULT_QUEUE_MAX_MESSAGES,
+            queue_wait_ms_cap: GatewayConfig::DEFAULT_QUEUE_WAIT_MS_CAP,
+            queue_session_idle_secs: GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS,
+            queue_max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
         }),
         authz,
         codec: Arc::new(RawCodec),
+        queue_sessions: Arc::new(crabka_grpc_gateway::queue::QueueSessionTable::new(
+            crabka_grpc_gateway::queue::QueueSessionConfig {
+                idle_timeout: Duration::from_secs(GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS),
+                max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
+            },
+        )),
     })
 }
 

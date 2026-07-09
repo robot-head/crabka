@@ -151,7 +151,7 @@ struct Args {
     #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_KEY")]
     broker_tls_key: Option<std::path::PathBuf>,
     /// SNI / server-name used for the TLS handshake with the broker.
-    /// Required when `--broker-tls-cert` + `--broker-tls-key` are set.
+    /// Required when broker TLS is enabled.
     #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_SERVER_NAME")]
     broker_tls_server_name: Option<String>,
 
@@ -168,6 +168,38 @@ struct Args {
     /// via `SchemaRegistryCodec`; when absent, `RawCodec` (identity) is used.
     #[arg(long, env = "CRABKA_GATEWAY_SCHEMA_REGISTRY_URL")]
     schema_registry_url: Option<String>,
+
+    /// Maximum records returned by one `QueueAcquire` call.
+    #[arg(
+        long,
+        env = "CRABKA_GATEWAY_QUEUE_MAX_MESSAGES",
+        default_value_t = GatewayConfig::DEFAULT_QUEUE_MAX_MESSAGES
+    )]
+    queue_max_messages: u32,
+
+    /// Maximum `QueueAcquire` long-poll wait, in milliseconds.
+    #[arg(
+        long,
+        env = "CRABKA_GATEWAY_QUEUE_WAIT_MS_CAP",
+        default_value_t = GatewayConfig::DEFAULT_QUEUE_WAIT_MS_CAP
+    )]
+    queue_wait_ms_cap: u32,
+
+    /// Queue session idle timeout, in seconds.
+    #[arg(
+        long,
+        env = "CRABKA_GATEWAY_QUEUE_SESSION_IDLE_SECS",
+        default_value_t = GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS
+    )]
+    queue_session_idle_secs: u64,
+
+    /// Maximum live queue sessions retained by this gateway.
+    #[arg(
+        long,
+        env = "CRABKA_GATEWAY_QUEUE_MAX_SESSIONS",
+        default_value_t = GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS
+    )]
+    queue_max_sessions: usize,
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
@@ -251,6 +283,10 @@ async fn main() -> anyhow::Result<()> {
         webhooks,
         outbound,
         schema_registry_url: args.schema_registry_url.clone(),
+        queue_max_messages: args.queue_max_messages,
+        queue_wait_ms_cap: args.queue_wait_ms_cap,
+        queue_session_idle_secs: args.queue_session_idle_secs,
+        queue_max_sessions: args.queue_max_sessions,
     };
 
     let bearer = build_bearer(&args)?;
@@ -284,7 +320,7 @@ fn build_authz_settings(args: &Args) -> anyhow::Result<Option<AuthzSettings>> {
 /// Build [`ClientSecurity`] for outbound broker connections from the four
 /// `--broker-tls-*` flags.
 ///
-/// - Both cert+key present ⇒ mTLS; SNI is required in that case.
+/// - Both cert+key present ⇒ mTLS; SNI is required.
 /// - Both absent ⇒ plaintext (`None`).
 /// - Exactly one present ⇒ configuration error.
 /// - CA only (no cert/key) ⇒ one-way TLS with the given CA.
@@ -294,27 +330,51 @@ fn build_broker_security(
     ca: Option<&PathBuf>,
     sni: Option<&String>,
 ) -> anyhow::Result<Option<crabka_client_core::security::ClientSecurity>> {
+    match (cert, key, ca) {
+        (Some(cert_path), Some(key_path), ca) => {
+            let server_name = require_broker_tls_server_name(sni)?;
+            let client_identity = Some((cert_path.clone(), key_path.clone()));
+            Ok(Some(broker_tls_security(
+                ca.cloned(),
+                server_name,
+                client_identity,
+            )))
+        }
+        (None, None, Some(ca_path)) => {
+            let server_name = require_broker_tls_server_name(sni)?;
+            Ok(Some(broker_tls_security(
+                Some(ca_path.clone()),
+                server_name,
+                None,
+            )))
+        }
+        (None, None, None) => Ok(None),
+        _ => anyhow::bail!("--broker-tls-cert and --broker-tls-key must be set together"),
+    }
+}
+
+fn require_broker_tls_server_name(sni: Option<&String>) -> anyhow::Result<String> {
+    sni.cloned()
+        .context("--broker-tls-server-name required with broker TLS")
+}
+
+fn broker_tls_security(
+    trust_roots_pem: Option<PathBuf>,
+    server_name: String,
+    client_identity: Option<(PathBuf, PathBuf)>,
+) -> crabka_client_core::security::ClientSecurity {
     use crabka_client_core::security::{ClientSecurity, TlsConnectorConfig};
     use crabka_security::ListenerProtocol;
 
-    match (cert, key) {
-        (Some(cert_path), Some(key_path)) => {
-            let server_name = sni
-                .cloned()
-                .context("--broker-tls-server-name required with broker TLS")?;
-            Ok(Some(ClientSecurity {
-                protocol: ListenerProtocol::Ssl,
-                tls: Some(TlsConnectorConfig {
-                    trust_roots_pem: ca.cloned(),
-                    server_name,
-                    client_identity: Some((cert_path.clone(), key_path.clone())),
-                }),
-                sasl: None,
-                sasl_host: None,
-            }))
-        }
-        (None, None) => Ok(None),
-        _ => anyhow::bail!("--broker-tls-cert and --broker-tls-key must be set together"),
+    ClientSecurity {
+        protocol: ListenerProtocol::Ssl,
+        tls: Some(TlsConnectorConfig {
+            trust_roots_pem,
+            server_name,
+            client_identity,
+        }),
+        sasl: None,
+        sasl_host: None,
     }
 }
 
@@ -480,11 +540,13 @@ async fn run(
 
     let gateway_authz = build_gateway_authz(&config, &shutdown, config.broker_security.clone());
 
+    let queue_sessions = AppState::queue_sessions_from_config(&config);
     let state = Arc::new(AppState {
         produce: Arc::new(produce),
         config: Arc::new(config.clone()),
         authz: gateway_authz,
         codec,
+        queue_sessions,
     });
 
     let app = crabka_grpc_gateway::router(state.clone())
@@ -697,6 +759,21 @@ mod tests {
     }
 
     #[test]
+    fn build_broker_security_some_with_ca_and_sni() {
+        let ca = PathBuf::from("/tmp/ca.pem");
+        let sni = "broker.example.com".to_string();
+        let sec = build_broker_security(None, None, Some(&ca), Some(&sni))
+            .expect("should succeed")
+            .expect("should be Some");
+
+        assert_eq!(sec.protocol, ListenerProtocol::Ssl);
+        let tls = sec.tls.expect("tls should be set");
+        assert_eq!(tls.server_name, "broker.example.com");
+        assert_eq!(tls.trust_roots_pem, Some(ca));
+        assert_eq!(tls.client_identity, None);
+    }
+
+    #[test]
     fn build_broker_security_none_when_all_absent() {
         let sec = build_broker_security(None, None, None, None).expect("should succeed");
         assert!(sec.is_none(), "all absent should return None");
@@ -722,5 +799,15 @@ mod tests {
         let key = PathBuf::from("/tmp/key.pem");
         let result = build_broker_security(Some(&cert), Some(&key), None, None);
         assert!(result.is_err(), "cert+key without sni should error");
+    }
+
+    #[test]
+    fn build_broker_security_err_when_ca_but_no_sni() {
+        let ca = PathBuf::from("/tmp/ca.pem");
+        let result = build_broker_security(None, None, Some(&ca), None);
+        assert!(
+            result.is_err(),
+            "ca-only broker TLS without sni should error"
+        );
     }
 }

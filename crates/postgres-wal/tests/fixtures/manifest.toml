@@ -1,0 +1,193 @@
+pg_major = 17
+wal_segsize = "1MB"
+wal_compression = "off"
+platform = "little-endian"
+corpus = "real-pg17-standby-oracle"
+provenance = "real-postgresql-17"
+generator = "tools/gen-pg-wal-fixtures.sh"
+initdb_version = "initdb (PostgreSQL) 17.10 (Debian 17.10-1.pgdg13+1)"
+pg_waldump_version = "pg_waldump (PostgreSQL) 17.10 (Debian 17.10-1.pgdg13+1)"
+capture_lsn = "0/13A9E60"
+wal_segment_count = 15
+records = 34516
+required_workloads = ["heap_dml_fpi", "btree_primary_key", "brin_index", "hash_index", "gist_index", "spgist_index", "gin_index", "multixact_row_locks", "truncate_drop_lifecycle", "database_wal_log"]
+required_oracles = ["oracle.waldump", "standby/relations.tsv", "standby/relations", "standby/slru/pg_xact", "standby/slru/pg_multixact"]
+required_fork_oracles = ["fork/manifest.toml", "fork/parent/wal", "fork/child/wal", "fork/parent/standby-oracle", "fork/child/standby-oracle"]
+pg6_fork_capture = "required-external-promote-and-diverge-workflow"
+notes = "Generated from stock PostgreSQL 17 with WAL bytes, pg_waldump text, relation-file standby oracle, and SLRU standby oracle captured at capture_lsn. PG6 promote-and-diverge fork WAL remains a separate required oracle workflow under required_fork_oracles."
+
+[[files]]
+path = "000000010000000000000005.wal"
+sha256 = "02998578714fc7aa486599c933ebb7fdf995dd1aa54b3e971f7f4d6a09f7098b"
+crc32c = "091b82f3"
+
+[[files]]
+path = "000000010000000000000006.wal"
+sha256 = "e0c09eb02e950c33efa65e5a1c27db737970caa5513260b82827229294229c31"
+crc32c = "b2a909d8"
+
+[[files]]
+path = "000000010000000000000007.wal"
+sha256 = "82b65831b36ccd7ee97cac0bc831f40ca7207c080818a410831c9d4760f16937"
+crc32c = "fafa0e88"
+
+[[files]]
+path = "000000010000000000000008.wal"
+sha256 = "98d80ccee2ae71a3c5792796e377cb697fa8c2e603196b15fd38a99340aaf45a"
+crc32c = "5d46fb7b"
+
+[[files]]
+path = "000000010000000000000009.wal"
+sha256 = "b0943d186e79885bd78a37ebec6722624dd10a38955a3da78cbbc84d69bc6360"
+crc32c = "be22aad1"
+
+[[files]]
+path = "00000001000000000000000A.wal"
+sha256 = "2a17e4d7bb80cd29ca05dfa696c2979b1c4a6350b962e1131b41a0e8613126c1"
+crc32c = "d6dfc37b"
+
+[[files]]
+path = "00000001000000000000000B.wal"
+sha256 = "ee860885fc1bda7b6da7b6801067188b86924e804b400bb1551af1db4f161b83"
+crc32c = "62d9ba57"
+
+[[files]]
+path = "00000001000000000000000C.wal"
+sha256 = "a5022371acb5866a00681a6a3c7f15414e87b78bb9dae379d00d553ef684e431"
+crc32c = "61454061"
+
+[[files]]
+path = "00000001000000000000000D.wal"
+sha256 = "672ecd04d32ae83f30b65789449249061066125d641a7682aa90c751e6de3e6f"
+crc32c = "f13e1133"
+
+[[files]]
+path = "00000001000000000000000E.wal"
+sha256 = "313cca3f81efddb8212a33dd2c98385158b11eb52709368b47fd710f902ce61b"
+crc32c = "f39ec40f"
+
+[[files]]
+path = "00000001000000000000000F.wal"
+sha256 = "35385d189c40df1bd34190bc9ccd0f768f4fddfcfe73040d548878da5c59e878"
+crc32c = "eb637a9e"
+
+[[files]]
+path = "000000010000000000000010.wal"
+sha256 = "4de0bce2ab243450962ee74501a8fdb1b909a6e8d1e1bdee56ab1adf08aed3b4"
+crc32c = "105a87b3"
+
+[[files]]
+path = "000000010000000000000011.wal"
+sha256 = "a1c88bbbde1857cd32f3855a6a7dc57f0761d3152fc3d831252d7f4be2df8c16"
+crc32c = "1ec2a936"
+
+[[files]]
+path = "000000010000000000000012.wal"
+sha256 = "4cf84ba42149db81152da9442fa8e88ace78f2044884c64ab5aee9ff947df1b9"
+crc32c = "bf175955"
+
+[[files]]
+path = "000000010000000000000013.wal"
+sha256 = "62c779d4a775f161e285e57739e3ec08f0176757733c38f93437c5586769af7d"
+crc32c = "479feb34"
+
+[[files]]
+path = "oracle.waldump"
+sha256 = "83c29e0d665fe08bd894a26a82f053cd53b665df8c60ca02b8bc1b9011a67953"
+crc32c = "d3f894a3"
+
+[[files]]
+path = "standby/relations.tsv"
+sha256 = "62bcae6e0bb751cef16b10c07ebe59efe3cb566c6441f349c32aa5716fa89cfd"
+crc32c = "2427c5cb"
+
+[[files]]
+path = "standby/relations/wal_fixture_indexes/16395"
+sha256 = "88f081e57097f51c8a6842d31f090c3dadb0dbe2dd80e251ac52174a6763d65c"
+crc32c = "0a66f907"
+
+[[files]]
+path = "standby/relations/wal_fixture_indexes/16395_vm"
+sha256 = "d59d1d6e1d961c10ee7a58965dcb70bf59a09a69e457ca4dd9c39420de987fa6"
+crc32c = "f2f52248"
+
+[[files]]
+path = "standby/relations/wal_fixture_indexes_brin/16403"
+sha256 = "c292b1dbc23179dae95c491b6dfed5b5af3460e59265c5fe65ff1a0406626814"
+crc32c = "6d2d2eef"
+
+[[files]]
+path = "standby/relations/wal_fixture_indexes_gin/16407"
+sha256 = "30cbffc916dbaad20c8598449bdd99e2af3f31c07c618eafba3c1b25dd93d3d0"
+crc32c = "4ce2edb0"
+
+[[files]]
+path = "standby/relations/wal_fixture_indexes_gist/16405"
+sha256 = "761cd6d58e7974c4ca5a5178d5b2ba379132c7550dc50605e8a8a10a543d8553"
+crc32c = "88b93ad7"
+
+[[files]]
+path = "standby/relations/wal_fixture_indexes_hash/16404"
+sha256 = "2831ce8249da418327829a058ed8969225f72cdb546f7d3840f489620045a548"
+crc32c = "b2726461"
+
+[[files]]
+path = "standby/relations/wal_fixture_indexes_id_seq/16394"
+sha256 = "d46dfbb0206a9564d63baed5699608978495f72e0395f31db538fe64fbec1630"
+crc32c = "a92f5f72"
+
+[[files]]
+path = "standby/relations/wal_fixture_indexes_pkey/16401"
+sha256 = "013d555cd492490e55dce6f17ba5faa6a580e0e4531de2903130e506c2e9bb20"
+crc32c = "6d20dc2e"
+
+[[files]]
+path = "standby/relations/wal_fixture_indexes_spgist/16406"
+sha256 = "9936edcf69327ce44bcffbd99374cd7535ae9be6c86fb997aeb3f89c099de46a"
+crc32c = "2997d250"
+
+[[files]]
+path = "standby/relations/wal_fixture_multixact/16408"
+sha256 = "96906f9996493e77adc49f19f8460aa77f233601577ed2ea0ed84acc26fdaec5"
+crc32c = "106859ce"
+
+[[files]]
+path = "standby/relations/wal_fixture_multixact_pkey/16413"
+sha256 = "b21ac278906ad923e443420a709db1d1f1b30374140ad9d0cf60cb519fd5305c"
+crc32c = "18618407"
+
+[[files]]
+path = "standby/relations/wal_fixture_t/16385"
+sha256 = "34e12344e4fcd5537b788ae851ffc36969c95d2a1bf0eaf8d5f2c073229e6b84"
+crc32c = "b692fb90"
+
+[[files]]
+path = "standby/relations/wal_fixture_t/16385_vm"
+sha256 = "11cd57d2b9831579b0f3d69a9df47fd1cbae505d2794cbb49246fbac0decf82f"
+crc32c = "6a9029c1"
+
+[[files]]
+path = "standby/relations/wal_fixture_t_id_seq/16384"
+sha256 = "00cf488121aa9d87683b70448e9d0f4c0e00c5d2d37b0107996edbee22e4211e"
+crc32c = "ea3be03f"
+
+[[files]]
+path = "standby/relations/wal_fixture_t_pkey/16391"
+sha256 = "edce2ea63bf2b6ec554433dbc3a245161f92416e2af86d5007bf35c0fa07a51b"
+crc32c = "751c42ee"
+
+[[files]]
+path = "standby/slru/pg_multixact/members/0000"
+sha256 = "3a9cf55057ad8b4fd304590d617b9511c83b0f3e199c14bdd5b4658829c0f6dc"
+crc32c = "1c32d7c7"
+
+[[files]]
+path = "standby/slru/pg_multixact/offsets/0000"
+sha256 = "c09f762a57b8eba512cf418cabe9b7bed0ba34931d0882bd41b8ee94d5ab28f9"
+crc32c = "3d30c981"
+
+[[files]]
+path = "standby/slru/pg_xact/0000"
+sha256 = "cf8f8b3a9cef92998d32dedcdce4b1e081f02f8a3e296c7f25758a0165aaaf21"
+crc32c = "db5ee6af"
+

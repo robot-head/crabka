@@ -1,0 +1,42 @@
+[package]
+name = "crabka-safekeeper"
+publish = false # Internal PG safekeeper crate; keep out of the publish allowlist.
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Sans-IO PostgreSQL safekeeper protocol internals for Crabka"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-safekeeper"
+keywords = ["postgres", "wal", "safekeeper", "crabka"]
+categories = ["database"]
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio-postgres = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"], optional = true }
+crabka-client-admin = { version = "0.3.9", path = "../client-admin", optional = true }
+crabka-client-core = { version = "0.3.9", path = "../client-core", optional = true }
+crabka-client-producer = { version = "0.3.9", path = "../client-producer", optional = true }
+crabka-protocol = { version = "0.3.9", path = "../protocol", optional = true }
+
+[features]
+default = []
+kafka = [
+    "dep:tokio",
+    "dep:crabka-client-admin",
+    "dep:crabka-client-core",
+    "dep:crabka-client-producer",
+    "dep:crabka-protocol",
+]
+
+[dev-dependencies]
+assert2 = { workspace = true }
+crabka-postgres-wal = { path = "../postgres-wal", version = "0.3.9" }
+toml = { workspace = true }

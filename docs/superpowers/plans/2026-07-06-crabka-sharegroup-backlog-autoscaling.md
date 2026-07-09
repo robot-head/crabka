@@ -290,6 +290,14 @@ git commit -m "feat(broker): coordinator-hosted share-group backlog poll loop (l
 
 ## Task 4: Remote-HWM read for non-co-led data partitions
 
+**Audit status:** the production remote path is pinned in-repo by the offset-reader
+seam tests in `backlog_poller.rs` (request shape, endpoint selection, response
+parsing, and emission through the shared backlog kernel) plus RF=1
+`ListOffsets(LATEST/EARLIEST)` integration coverage in
+`sharegroup_backlog.rs`. Replicated HWM parity for a true non-co-led data
+partition remains an external fleet smoke gate because it requires a
+multi-broker fixture with controlled leadership and replication state.
+
 **Files:**
 - Modify: `crates/broker/src/share_partition/backlog_poller.rs` (peer-HWM helper + wire the remote branch)
 - Test: `crates/broker/tests/sharegroup_backlog.rs` (multi-broker case)
@@ -332,6 +340,12 @@ git commit -m "feat(broker): remote-HWM read (peer ListOffsets) for fleet-comple
 ---
 
 ## Task 5: Coordinator self-gate + stale-series hygiene
+
+**Audit status:** the coordinator self-gate, stale-series removal, and label-diff
+hygiene are covered by network-free in-process tests in `backlog_poller.rs`.
+The only remaining external gate is an end-to-end replicated fleet smoke test
+that combines non-coordinator data leaders, coordinator handoff, all-broker
+metrics scraping, and share-group delete/tombstone cleanup.
 
 **Files:**
 - Modify: `crates/broker/src/share_partition/backlog_poller.rs`

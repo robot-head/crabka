@@ -56,6 +56,7 @@ jobs:
               - 'release-plz.toml'
               - 'rust-toolchain.toml'
               - 'tools/check-publish-allowlist.sh'
+              - 'tools/check-grpc-gateway-arrow-filter.sh'
               - '.config/nextest.toml'
               - '.cargo/mutants.toml'
               - '.github/workflows/ci.yml'
@@ -149,6 +150,7 @@ jobs:
               - 'crates/broker/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'tools/check-grpc-gateway-arrow-filter.sh'
               - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             schema_registry:
@@ -696,6 +698,8 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov nextest -p crabka-grpc-gateway --profile ci --tests --test schema_codec --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
+      - name: gRPC gateway Arrow/DataFusion subscription filter gate
+        run: ./tools/check-grpc-gateway-arrow-filter.sh
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

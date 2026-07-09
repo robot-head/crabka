@@ -2,7 +2,12 @@
 
 use std::sync::Arc;
 
-use crate::{codec::RecordCodec, config::GatewayConfig, produce::ProduceCore};
+use crate::{
+    codec::RecordCodec,
+    config::GatewayConfig,
+    produce::ProduceCore,
+    queue::{QueueSessionConfig, QueueSessionTable},
+};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -17,4 +22,16 @@ pub struct AppState {
     /// `GatewayConfig::schema_registry_url`: `SchemaRegistryCodec` when a URL
     /// is configured, `RawCodec` (identity pass-through) otherwise.
     pub codec: Arc<dyn RecordCodec>,
+    /// Principal-bound explicit share-consumer sessions backing Queue RPCs.
+    pub queue_sessions: Arc<QueueSessionTable>,
+}
+
+impl AppState {
+    /// Build the queue-session table matching this state's gateway config.
+    #[must_use]
+    pub fn queue_sessions_from_config(config: &GatewayConfig) -> Arc<QueueSessionTable> {
+        Arc::new(QueueSessionTable::new(
+            QueueSessionConfig::from_gateway_config(config),
+        ))
+    }
 }

@@ -840,6 +840,11 @@ impl Consumer {
         self.assigned.lock().await.clone()
     }
 
+    /// Snapshot of currently assigned `(topic, partition)` pairs.
+    pub async fn assigned_partitions(&self) -> Vec<(String, i32)> {
+        self.assignment().await
+    }
+
     /// Stop the coordinator task so the broker evicts this member promptly.
     ///
     /// The coordinator itself sends a best-effort `LeaveGroup` as the last
@@ -1232,6 +1237,7 @@ mod security_arg_tests {
         check!(consumer.generation_id() == 7);
         check!(consumer.subscribed_topics() == ["orders".to_string(), "payments".to_string()]);
         check!(consumer.assignment().await == vec![("orders".into(), 0)]);
+        check!(consumer.assigned_partitions().await == vec![("orders".into(), 0)]);
 
         let metadata = consumer.group_metadata();
         assert!(

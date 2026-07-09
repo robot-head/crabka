@@ -1,0 +1,64 @@
+{
+  "id": "error_mapping",
+  "since": { "major": 1, "minor": 0 },
+  "steps": [
+    {
+      "name": "empty topic maps to invalid argument",
+      "command": {
+        "cmd": "publish",
+        "topic": "",
+        "value_b64": "eA==",
+        "headers": []
+      },
+      "expect": {
+        "error": {
+          "kind": "invalid_argument",
+          "message": "topic is required"
+        }
+      }
+    },
+    {
+      "name": "unknown topic maps to not found",
+      "command": {
+        "cmd": "publish",
+        "topic": "__missing_topic",
+        "value_b64": "eA==",
+        "headers": []
+      },
+      "expect": {
+        "error": {
+          "kind": "not_found",
+          "message": "topic not found"
+        }
+      }
+    },
+    {
+      "name": "configure unreachable endpoint",
+      "command": {
+        "cmd": "configure",
+        "endpoint": "unreachable://gateway",
+        "bearer": null
+      },
+      "expect": {
+        "ok": {
+          "bearer_configured": false
+        }
+      }
+    },
+    {
+      "name": "unreachable endpoint maps to transport",
+      "command": {
+        "cmd": "publish",
+        "topic": "t",
+        "value_b64": "eA==",
+        "headers": []
+      },
+      "expect": {
+        "error": {
+          "kind": "transport",
+          "message": "endpoint unreachable"
+        }
+      }
+    }
+  ]
+}

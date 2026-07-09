@@ -28,6 +28,11 @@
 - **In scope:** the `Key` enum; `shard_meta` (XACT/CLOG/MULTIXACT/SMGR/DBASE); clog + multixact + RelMeta redo arms; exact `GetRelSize`; basebackup SLRU segments; BRIN/hash/GiST/SP-GiST/GIN arms; the extended gate.
 - **Deferred:** commit_ts/subtrans/serial/notify; DBASE FILE_COPY (refused); GENERIC/LOGICALMSG; reclamation beyond existing GC; PG-6.
 
+## Strict-audit status
+
+- **Implemented in-repo exact metadata arms:** SLRU zero/truncate decoding, CLOG commit/abort status folding, and relmap exact-payload materialization where the current decoded model has enough structured bytes. These are not listed as broad CLOG/multixact/commit_ts/relmap blocker families.
+- **Blocked native deltas:** the multixact CREATE_ID opcode, unsupported XACT opcodes, and all BRIN/hash/GiST/SP-GiST/GIN native deltas are kept as precise blocker failures until decoder-model fields and a PG17 standby byte oracle are available. The CREATE_ID member payload model remains a separate decoder-field prerequisite. The current manifest/gate is `crates/postgres-redo/tests/fixtures/decoder_model_blockers.toml`.
+
 ---
 
 ## File Structure

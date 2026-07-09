@@ -1,0 +1,56 @@
+# KEDA ScaledObject for Crabka share-group consumers.
+#
+# This uses KEDA's stock `prometheus` scaler against Crabka's broker metrics.
+# Use the stock KEDA `kafka` scaler instead for classic consumer-group lag;
+# this manifest is only for KIP-932 share-group backlog.
+#
+# Replace the namespace, deployment name, group_id, and Prometheus server address
+# with values from your cluster.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: crabka-sharegroup-consumer
+  namespace: default # TODO: consumer deployment namespace
+spec:
+  scaleTargetRef:
+    name: sharegroup-consumer # TODO: consumer Deployment name
+  pollingInterval: 30
+  cooldownPeriod: 300
+  # Required for scale-to-zero. KEDA will hold zero replicas while the trigger is
+  # inactive, then wake the Deployment when backlog crosses activationThreshold.
+  minReplicaCount: 0
+  maxReplicaCount: 20
+  triggers:
+    - type: prometheus
+      metadata:
+        # Prometheus base URL reachable from the KEDA operator. Prometheus must
+        # scrape every Crabka broker's /metrics endpoint; only the current share
+        # group coordinator emits these series, and scraping the fleet keeps
+        # coordinator handoff transparent.
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local:9090
+
+        # Deprecated KEDA Prometheus metadata such as `metricName` is omitted on
+        # purpose. If your pinned KEDA version still requires it, add a stable
+        # name such as `crabka_share_group_backlog` after checking that version's
+        # prometheus scaler schema.
+
+        # Match the Kafka share-group id exactly. The metric is emitted once per
+        # initialized topic partition with labels {group_id, topic, partition};
+        # sum() is the fleet-complete group backlog because Crabka emits from a
+        # single coordinator and never emits Kafka's wire-level -1 "unknown" lag.
+        # `or on() vector(0)` turns an absent/deleted/drained group into a single
+        # zero sample so KEDA can scale to zero instead of treating the query as
+        # missing. Keep separate alerts on Prometheus scrape health, because this
+        # fallback should not hide a metrics pipeline outage.
+        query: 'sum(crabka_broker_share_group_backlog{group_id="my-share-group"}) or on() vector(0)'
+
+        # Target backlog per replica. With threshold 100 and backlog 450, KEDA's
+        # HPA target is roughly five replicas, capped by maxReplicaCount.
+        threshold: "100"
+
+        # Wake from zero on any real backlog. KEDA's Prometheus scaler activates
+        # only when the query result is greater than activationThreshold, so 0
+        # wakes on backlog 1 while the query's vector(0) fallback stays inactive
+        # for an empty queue. Raise this only if intentionally ignoring tiny
+        # backlogs.
+        activationThreshold: "0"

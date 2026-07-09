@@ -5,6 +5,9 @@
 use jsonpath_rust::parser::model::JpQuery;
 use serde::Deserialize;
 
+const CONTENT_TYPE_HEADER: &str = "content-type";
+const CE_HTTP_PREFIX: &str = "ce-";
+
 /// Top-level structure of the outbound webhook TOML config file.
 #[derive(Debug, Clone, Deserialize)]
 pub struct OutboundFile {
@@ -64,6 +67,11 @@ pub struct OutboundSubscription {
     /// Extra static HTTP headers added to every POST (e.g. `Authorization`).
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
+    /// HTTP body/header representation for outbound deliveries. Default keeps
+    /// the Crabka JSON envelope. `CloudEvents` modes forward records that carry
+    /// `ce_*` Kafka headers using the HTTP binding.
+    #[serde(default)]
+    pub content_mode: OutboundContentMode,
     /// When `true`, each record value is run through the injected codec's
     /// `decode` before delivery: a Confluent-framed value is de-framed to its
     /// JSON view and delivered as `application/json`. With `RawCodec` (no
@@ -71,6 +79,20 @@ pub struct OutboundSubscription {
     /// `false`.
     #[serde(default)]
     pub decode_to_json: bool,
+}
+
+/// Outbound HTTP content mode.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutboundContentMode {
+    /// Existing Crabka JSON envelope.
+    #[default]
+    Envelope,
+    /// `CloudEvents` HTTP binary binding: CE attributes in HTTP headers, record
+    /// value as the raw HTTP body.
+    CloudEventsBinary,
+    /// `CloudEvents` HTTP structured binding: complete `CloudEvent` JSON in body.
+    CloudEventsStructured,
 }
 
 fn default_max_attempts() -> u32 {
@@ -111,6 +133,7 @@ pub struct CompiledSubscription {
     pub filter: Option<JpQuery>,
     /// Static extra headers as `(name, value)` pairs.
     pub headers: Vec<(String, String)>,
+    pub content_mode: OutboundContentMode,
     /// Decode each record value to JSON via the injected codec before delivery
     /// (inert under `RawCodec`). See [`OutboundSubscription::decode_to_json`].
     pub decode_to_json: bool,
@@ -167,6 +190,10 @@ impl OutboundFile {
                 }
             };
 
+            if s.content_mode.is_cloudevents() {
+                reject_cloudevents_header_overrides(&ctx, &s.headers)?;
+            }
+
             out.push(CompiledSubscription {
                 name: s.name.clone(),
                 source_topics: s.source_topics.clone(),
@@ -183,11 +210,36 @@ impl OutboundFile {
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
+                content_mode: s.content_mode,
                 decode_to_json: s.decode_to_json,
             });
         }
         Ok(out)
     }
+}
+
+impl OutboundContentMode {
+    fn is_cloudevents(self) -> bool {
+        matches!(self, Self::CloudEventsBinary | Self::CloudEventsStructured)
+    }
+}
+
+fn reject_cloudevents_header_overrides(
+    ctx: &str,
+    headers: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    for header_name in headers.keys() {
+        let normalized_header_name = header_name.to_ascii_lowercase();
+        if normalized_header_name == CONTENT_TYPE_HEADER
+            || normalized_header_name.starts_with(CE_HTTP_PREFIX)
+        {
+            return Err(format!(
+                "{ctx}: CloudEvents content_mode reserves static header {header_name:?}"
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +279,55 @@ filter         = "json:$.type"
         assert_eq!(sub.base_backoff_ms, 500);
         assert_eq!(sub.max_backoff_ms, 30_000);
         assert_eq!(sub.request_timeout_ms, 10_000);
+        assert_eq!(sub.content_mode, OutboundContentMode::Envelope);
+    }
+
+    #[test]
+    fn cloudevents_content_mode_compiles() {
+        let toml = r#"
+[[allowed_targets]]
+scheme = "https"
+host   = "hooks.example.com"
+
+[[subscriptions]]
+name          = "ce-sub"
+source_topics = ["events"]
+target_url    = "https://hooks.example.com/deliver"
+content_mode  = "cloud_events_binary"
+"#;
+        let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
+        let compiled = file.compile().expect("compile");
+
+        assert_eq!(
+            compiled[0].content_mode,
+            OutboundContentMode::CloudEventsBinary
+        );
+    }
+
+    #[test]
+    fn cloudevents_content_mode_rejects_reserved_static_headers() {
+        let toml = r#"
+[[allowed_targets]]
+scheme = "https"
+host   = "hooks.example.com"
+
+[[subscriptions]]
+name          = "ce-sub"
+source_topics = ["events"]
+target_url    = "https://hooks.example.com/deliver"
+content_mode  = "cloud_events_structured"
+
+[subscriptions.headers]
+Authorization = "Bearer ok"
+"Ce-Id" = "bad"
+"#;
+        let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
+        let err = file.compile().expect_err("reserved header must fail");
+
+        assert!(
+            err.contains("reserves static header"),
+            "error must mention reserved header, got: {err}"
+        );
     }
 
     #[test]

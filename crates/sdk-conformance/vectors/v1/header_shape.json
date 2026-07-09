@@ -1,0 +1,58 @@
+{
+  "id": "header_shape",
+  "since": { "major": 1, "minor": 0 },
+  "steps": [
+    {
+      "name": "publish duplicate and null headers",
+      "command": {
+        "cmd": "publish",
+        "topic": "headers",
+        "value_b64": "aGk=",
+        "headers": [
+          { "name": "x", "value_b64": "Zmlyc3Q=" },
+          { "name": "x", "value_b64": null },
+          { "name": "y", "value_b64": "bGFzdA==" }
+        ]
+      },
+      "expect": {
+        "ok": {
+          "deduplicated": false,
+          "offset": 0,
+          "partition": 0
+        }
+      }
+    },
+    {
+      "name": "subscribe header topic",
+      "command": {
+        "cmd": "subscribe",
+        "topics": ["headers"],
+        "group": "header-reader",
+        "filter": null
+      },
+      "expect": {
+        "ok": {}
+      }
+    },
+    {
+      "name": "read duplicate and null headers",
+      "command": {
+        "cmd": "next_message",
+        "timeout_ms": 10000
+      },
+      "expect": {
+        "message": {
+          "topic": "headers",
+          "partition": 0,
+          "offset": 0,
+          "value_b64": "aGk=",
+          "headers": [
+            { "name": "x", "value_b64": "Zmlyc3Q=" },
+            { "name": "x", "value_b64": null },
+            { "name": "y", "value_b64": "bGFzdA==" }
+          ]
+        }
+      }
+    }
+  ]
+}

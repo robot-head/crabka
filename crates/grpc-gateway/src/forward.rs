@@ -35,7 +35,7 @@ pub struct ForwardRecord {
     pub topic: String,
     pub key: Option<Vec<u8>>,
     pub value: Vec<u8>,
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: Vec<(String, Option<Vec<u8>>)>,
     pub partition: Option<i32>,
     pub timestamp_ms: Option<i64>,
     pub idempotency_key: Option<String>,
@@ -117,7 +117,7 @@ impl ForwardRecord {
             headers: r
                 .headers
                 .iter()
-                .map(|(k, v)| (k.clone(), v.to_vec()))
+                .map(|(k, v)| (k.clone(), v.as_ref().map(|value| value.to_vec())))
                 .collect(),
             partition: r.partition,
             timestamp_ms: r.timestamp_ms,
@@ -137,7 +137,7 @@ impl ForwardRecord {
             headers: self
                 .headers
                 .into_iter()
-                .map(|(k, v)| (k, bytes::Bytes::from(v)))
+                .map(|(k, v)| (k, v.map(bytes::Bytes::from)))
                 .collect(),
             partition: self.partition,
             timestamp_ms: self.timestamp_ms,
@@ -432,6 +432,10 @@ mod tests {
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
             schema_registry_url: None,
+            queue_max_messages: GatewayConfig::DEFAULT_QUEUE_MAX_MESSAGES,
+            queue_wait_ms_cap: GatewayConfig::DEFAULT_QUEUE_WAIT_MS_CAP,
+            queue_session_idle_secs: GatewayConfig::DEFAULT_QUEUE_SESSION_IDLE_SECS,
+            queue_max_sessions: GatewayConfig::DEFAULT_QUEUE_MAX_SESSIONS,
         }
     }
 
@@ -455,9 +459,11 @@ mod tests {
             .await
             .unwrap()
             .with_dedup(engine);
+        let config = config(bootstrap, dedup, tls);
         Arc::new(AppState {
             produce: Arc::new(produce),
-            config: Arc::new(config(bootstrap, dedup, tls)),
+            queue_sessions: AppState::queue_sessions_from_config(&config),
+            config: Arc::new(config),
             authz: Arc::new(crate::authz::GatewayAuthz::new(authorizer)),
             codec: Arc::new(RawCodec),
         })

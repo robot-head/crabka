@@ -1,0 +1,69 @@
+name: sdk-cpp
+
+on:
+  push:
+    paths:
+      - "sdks/cpp/**"
+      - "crates/sdk-conformance/**"
+      - "buf.gen.yaml"
+      - ".github/workflows/sdk-cpp.yml"
+  pull_request:
+    paths:
+      - "sdks/cpp/**"
+      - "crates/sdk-conformance/**"
+      - "buf.gen.yaml"
+      - ".github/workflows/sdk-cpp.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-cpp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - sanitizer: asan-ubsan
+            build-dir: sdks/cpp/build-asan
+            cmake-args: -DCRABKA_CPP_SANITIZERS=ON
+            ctest-args: --output-on-failure
+          - sanitizer: tsan
+            build-dir: sdks/cpp/build-tsan
+            cmake-args: -DCRABKA_CPP_SANITIZERS=OFF -DCRABKA_CPP_TSAN=ON
+            ctest-args: --output-on-failure -R crabka_cpp_transport_test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install C++ SDK dependencies
+        run: sudo apt-get update && sudo apt-get install -y cmake g++ libnghttp2-dev libprotobuf-dev protobuf-compiler pkg-config
+      - name: Probe C++ SDK dependencies
+        run: |
+          cmake --version
+          g++ --version
+          protoc --version
+          pkg-config --modversion libnghttp2
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.96.0'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+      - name: Generate SDK stubs
+        run: |
+          go run github.com/bufbuild/buf/cmd/buf@latest generate
+          git diff --exit-code -- buf.gen.yaml sdks/cpp/gen
+      - name: Build with CMake (${{ matrix.sanitizer }})
+        run: cmake -S sdks/cpp -B ${{ matrix.build-dir }} ${{ matrix.cmake-args }} && cmake --build ${{ matrix.build-dir }} --parallel
+      - name: Run CTest (${{ matrix.sanitizer }})
+        run: ctest --test-dir ${{ matrix.build-dir }} ${{ matrix.ctest-args }}
+      - name: Run conformance
+        if: ${{ matrix.sanitizer == 'asan-ubsan' }}
+        run: cargo run -p crabka-sdk-conformance --bin conformance -- --adapter ${{ matrix.build-dir }}/crabka_cpp_adapter --vectors crates/sdk-conformance/vectors/v1
+      - name: Run live-compatible conformance
+        if: ${{ matrix.sanitizer == 'asan-ubsan' }}
+        run: cargo run -p crabka-sdk-conformance --bin conformance -- --adapter ${{ matrix.build-dir }}/crabka_cpp_adapter --vectors crates/sdk-conformance/vectors/v1 --live-substrate --live-compatible-only

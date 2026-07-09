@@ -71,6 +71,24 @@ async fn snapshot_commit_topics(
     Some((partitions, build_commit_topics(offsets, &topic_ids)))
 }
 
+async fn explicit_commit_topics(
+    offsets: HashMap<(String, i32), i64>,
+    positions: &Arc<Mutex<HashMap<(String, i32), PartitionPosition>>>,
+    topic_ids: &Arc<Mutex<HashMap<String, WireUuid>>>,
+) -> Option<(usize, Vec<OffsetCommitRequestTopic>)> {
+    if offsets.is_empty() {
+        return None;
+    }
+
+    let partitions = offsets.len();
+    let positions = positions.lock().await;
+    let offsets = commit_offsets(offsets, &positions);
+    drop(positions);
+
+    let topic_ids = topic_ids.lock().await.clone();
+    Some((partitions, build_commit_topics(offsets, &topic_ids)))
+}
+
 fn build_commit_request(
     group_id: String,
     generation_id_or_member_epoch: i32,
@@ -111,27 +129,11 @@ fn commit_response_result(
 }
 
 impl Consumer {
-    /// Commit the current next-offsets for every assigned partition.
-    /// Blocks until the broker acks.
-    #[cfg_attr(test, mutants::skip)] // cargo-mutants: I/O-bound coordinator RPC, exercised by integration tests
-    #[tracing::instrument(
-        name = "consumer.commit_sync",
-        level = "debug",
-        skip_all,
-        fields(
-            group_id = %self.group_id,
-            member_id = %self.member_id,
-            generation = self.current_generation.load(Ordering::Relaxed),
-            partitions = tracing::field::Empty,
-        ),
-        err
-    )]
-    pub async fn commit_sync(&self) -> Result<(), ConsumerError> {
-        let Some((partitions, topics)) =
-            snapshot_commit_topics(&self.next_offsets, &self.positions, &self.topic_ids).await
-        else {
-            return Ok(());
-        };
+    async fn commit_topics(
+        &self,
+        partitions: usize,
+        topics: Vec<OffsetCommitRequestTopic>,
+    ) -> Result<(), ConsumerError> {
         tracing::Span::current().record("partitions", partitions);
 
         // OffsetCommit is a coordinator RPC: route it to the coordinator broker
@@ -188,6 +190,49 @@ impl Consumer {
             );
         }
         commit_response_result(&resp, coordinator_alive)
+    }
+
+    /// Commit the current next-offsets for every assigned partition.
+    /// Blocks until the broker acks.
+    #[cfg_attr(test, mutants::skip)] // cargo-mutants: I/O-bound coordinator RPC, exercised by integration tests
+    #[tracing::instrument(
+        name = "consumer.commit_sync",
+        level = "debug",
+        skip_all,
+        fields(
+            group_id = %self.group_id,
+            member_id = %self.member_id,
+            generation = self.current_generation.load(Ordering::Relaxed),
+            partitions = tracing::field::Empty,
+        ),
+        err
+    )]
+    pub async fn commit_sync(&self) -> Result<(), ConsumerError> {
+        let Some((partitions, topics)) =
+            snapshot_commit_topics(&self.next_offsets, &self.positions, &self.topic_ids).await
+        else {
+            return Ok(());
+        };
+        self.commit_topics(partitions, topics).await
+    }
+
+    /// Commit explicit per-partition next offsets instead of the current fetch
+    /// position. Blocks until the broker acks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsumerError`] when the coordinator RPC fails or the broker
+    /// returns a non-deferrable `OffsetCommit` error code.
+    pub async fn commit_offsets_sync(
+        &self,
+        offsets: HashMap<(String, i32), i64>,
+    ) -> Result<(), ConsumerError> {
+        let Some((partitions, topics)) =
+            explicit_commit_topics(offsets, &self.positions, &self.topic_ids).await
+        else {
+            return Ok(());
+        };
+        self.commit_topics(partitions, topics).await
     }
 
     /// Fire-and-forget commit. Returns once the request is enqueued on the
@@ -383,6 +428,51 @@ mod tests {
                             unknown_tagged_fields: UnknownTaggedFields::default(),
                         },
                     ],
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }]
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_commit_topics_returns_none_for_empty_offsets() {
+        let positions = Arc::new(Mutex::new(HashMap::new()));
+        let topic_ids = Arc::new(Mutex::new(HashMap::new()));
+
+        let snapshot = explicit_commit_topics(HashMap::new(), &positions, &topic_ids).await;
+
+        assert!(snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_commit_topics_preserves_given_offsets_and_position_epochs() {
+        let offsets = HashMap::from([(("alpha".to_string(), 0), 42)]);
+        let positions = Arc::new(Mutex::new(HashMap::from([(
+            ("alpha".to_string(), 0),
+            PartitionPosition {
+                offset_epoch: crabka_ids::LeaderEpoch(9),
+                ..Default::default()
+            },
+        )])));
+        let topic_id = Uuid([2; 16]);
+        let topic_ids = Arc::new(Mutex::new(HashMap::from([("alpha".to_string(), topic_id)])));
+
+        let (partition_count, topics) = explicit_commit_topics(offsets, &positions, &topic_ids)
+            .await
+            .expect("non-empty offsets are snapshotted");
+
+        assert!(partition_count == 1);
+        assert!(
+            topics
+                == vec![OffsetCommitRequestTopic {
+                    name: "alpha".into(),
+                    topic_id,
+                    partitions: vec![OffsetCommitRequestPartition {
+                        partition_index: 0,
+                        committed_offset: 42,
+                        committed_leader_epoch: 9,
+                        committed_metadata: Some(String::new()),
+                        unknown_tagged_fields: UnknownTaggedFields::default(),
+                    }],
                     unknown_tagged_fields: UnknownTaggedFields::default(),
                 }]
         );

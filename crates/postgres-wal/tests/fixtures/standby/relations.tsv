@@ -1,0 +1,13 @@
+wal_fixture_indexes	r	base/5/16395
+wal_fixture_indexes_brin	i	base/5/16403
+wal_fixture_indexes_gin	i	base/5/16407
+wal_fixture_indexes_gist	i	base/5/16405
+wal_fixture_indexes_hash	i	base/5/16404
+wal_fixture_indexes_id_seq	S	base/5/16394
+wal_fixture_indexes_pkey	i	base/5/16401
+wal_fixture_indexes_spgist	i	base/5/16406
+wal_fixture_multixact	r	base/5/16408
+wal_fixture_multixact_pkey	i	base/5/16413
+wal_fixture_t	r	base/5/16385
+wal_fixture_t_id_seq	S	base/5/16384
+wal_fixture_t_pkey	i	base/5/16391

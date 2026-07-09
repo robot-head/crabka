@@ -1,0 +1,50 @@
+{
+  "id": "messaging_roundtrip",
+  "since": { "major": 1, "minor": 0 },
+  "steps": [
+    {
+      "name": "publish raw record",
+      "command": {
+        "cmd": "publish",
+        "topic": "roundtrip",
+        "value_b64": "aGVsbG8=",
+        "headers": []
+      },
+      "expect": {
+        "ok": {
+          "deduplicated": false,
+          "offset": 0,
+          "partition": 0
+        }
+      }
+    },
+    {
+      "name": "subscribe raw topic",
+      "command": {
+        "cmd": "subscribe",
+        "topics": ["roundtrip"],
+        "group": "roundtrip-reader",
+        "filter": null
+      },
+      "expect": {
+        "ok": {}
+      }
+    },
+    {
+      "name": "read raw record",
+      "command": {
+        "cmd": "next_message",
+        "timeout_ms": 10000
+      },
+      "expect": {
+        "message": {
+          "topic": "roundtrip",
+          "partition": 0,
+          "offset": 0,
+          "value_b64": "aGVsbG8=",
+          "headers": []
+        }
+      }
+    }
+  ]
+}

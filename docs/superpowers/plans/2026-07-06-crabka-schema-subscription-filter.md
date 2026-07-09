@@ -278,3 +278,10 @@ git commit -m "feat(gateway): server-enforced complex subscription filtering ove
 **4. Invariant check:** server-side gating (Task 4 delivers only masked-true); byte-exact original bytes (Task 4 keeps raw record); one engine (DataFusion, Task 2); enums by name + `UNKNOWN_<n>` (Task 3); greenfield proto (Task 1 removes `FieldPredicate`); not-RLS (Task 4 preserves the Read-ACL gate, RLS deferred). Each task green.
 
 **5. Prerequisites:** none unlanded — this reuses landed code (registry, schema-serde, RowBridge, DataFusion, the Subscribe stream); it is the first *buildable-today* sub-service of the vision.
+
+## Audit gate evidence
+
+- `tools/check-grpc-gateway-arrow-filter.sh` is the in-repo strict gate for the plan-complete path. It runs `cargo test -p crabka-grpc-gateway --features arrow filter` and `cargo test -p crabka-grpc-gateway --test streaming --features arrow`, so SQL/DataFusion/Arrow physical-expression evaluation and Subscribe delivery behavior cannot pass by using the default JSON compatibility fallback.
+- `.github/workflows/ci.yml` runs that script in the `grpc-gateway-integration` job and includes the script in both the broad Rust and gRPC-gateway path filters.
+- The default/non-arrow path remains a compatibility path for simple scalar JSON filters only. Complex SQL (`IN`, `LIKE`, nested/repeated paths) is explicitly rejected without Arrow/DataFusion, and with Arrow enabled a complex SQL filter over a non-Arrow/non-schema JSON record drops rather than claiming plan-complete behavior.
+- Required Arrow evidence lives in `crates/grpc-gateway/src/filter.rs` (`datafusion_arrow_filter_*`, `gateway_subscription_filter_*`, and `complex_sql_does_not_fall_back_to_legacy_json_filtering`) and `crates/grpc-gateway/src/streaming.rs` (`filtered_arrow_ipc_delivery_preserves_original_record_bytes`, `filtered_schema_registry_row_bridge_supports_nested_repeated_enum_and_raw_delivery`, and schema-id recompile tests). The integration test `crates/grpc-gateway/tests/streaming.rs::subscribe_filter_uses_batched_arrow_masks_and_preserves_raw_ipc_bytes` verifies Subscribe delivers the original bytes after Arrow mask evaluation.

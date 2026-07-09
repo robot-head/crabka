@@ -2,6 +2,8 @@
 
 use bytes::Bytes;
 
+use crate::Header;
+
 /// One record delivered by [`ShareConsumer::poll`](super::ShareConsumer).
 ///
 /// Unlike a classic `ConsumerRecord`, a share record carries a
@@ -16,6 +18,7 @@ pub struct ShareConsumerRecord {
     pub timestamp: i64,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
+    pub headers: Vec<Header>,
     pub delivery_count: i16,
 }
 

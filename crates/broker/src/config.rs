@@ -436,6 +436,12 @@ pub struct BrokerConfig {
     /// the rebalancer's usage scraper.
     pub partition_disk_scan_interval_secs: u64,
 
+    /// Share-group backlog poll cadence, in seconds. `0` disables the poller.
+    /// The coordinator broker emits one `share_group_backlog` gauge series per
+    /// initialized `(group, topic, partition)` it can observe locally or through
+    /// the inter-broker offset-read seam.
+    pub share_group_backlog_poll_interval_secs: u64,
+
     /// KIP-48: HMAC-SHA-256 master key used to mint + verify
     /// delegation tokens. When `None`, the broker rejects all four
     /// delegation-token RPCs with `DELEGATION_TOKEN_AUTH_DISABLED` and
@@ -659,6 +665,9 @@ pub const DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS: u64 = 300;
 /// `leader.imbalance.per.broker.percentage`.
 pub const DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE: u32 = 10;
 
+/// Default coordinator-side share-group backlog poll interval, in seconds.
+pub const DEFAULT_SHARE_GROUP_BACKLOG_POLL_INTERVAL_SECS: u64 = 15;
+
 /// KIP-227: default incremental-fetch session cache capacity. Matches Kafka's
 /// `max.incremental.fetch.session.cache.slots`.
 pub const DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS: usize = 1000;
@@ -808,6 +817,7 @@ impl BrokerConfig {
             // background task doesn't tick during short-lived fixtures.
             // Integration tests enable this explicitly when needed.
             partition_disk_scan_interval_secs: 0,
+            share_group_backlog_poll_interval_secs: 1,
             max_incremental_fetch_session_cache_slots:
                 DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS,
             // Connection caps unlimited by default (Kafka's
@@ -1098,6 +1108,7 @@ impl Default for BrokerConfig {
             metrics_listen_addr: None,
             client_metrics_otlp_endpoint: None,
             partition_disk_scan_interval_secs: 60,
+            share_group_backlog_poll_interval_secs: DEFAULT_SHARE_GROUP_BACKLOG_POLL_INTERVAL_SECS,
             max_incremental_fetch_session_cache_slots:
                 DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS,
             // Connection caps unlimited by default, matching Kafka's

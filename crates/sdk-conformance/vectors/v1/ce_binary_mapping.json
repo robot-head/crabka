@@ -1,0 +1,62 @@
+{
+  "id": "ce_binary_mapping",
+  "since": { "major": 1, "minor": 0 },
+  "steps": [
+    {
+      "name": "publish cloudevent",
+      "command": {
+        "cmd": "publish_event",
+        "topic": "events",
+        "event": {
+          "id": "evt-1",
+          "source": "/orders",
+          "type": "order.created",
+          "specversion": "1.0",
+          "datacontenttype": "application/json",
+          "data_b64": "eyJuIjo3fQ=="
+        }
+      },
+      "expect": {
+        "ok": {
+          "deduplicated": false,
+          "offset": 0,
+          "partition": 0
+        }
+      }
+    },
+    {
+      "name": "subscribe events",
+      "command": {
+        "cmd": "subscribe",
+        "topics": ["events"],
+        "group": "ce-reader",
+        "filter": null
+      },
+      "expect": {
+        "ok": {}
+      }
+    },
+    {
+      "name": "cloudevent headers are binary mode",
+      "command": {
+        "cmd": "next_message",
+        "timeout_ms": 10000
+      },
+      "expect": {
+        "message": {
+          "topic": "events",
+          "partition": 0,
+          "offset": 0,
+          "value_b64": "eyJuIjo3fQ==",
+          "headers": [
+            { "name": "ce_id", "value_b64": "ZXZ0LTE=" },
+            { "name": "ce_source", "value_b64": "L29yZGVycw==" },
+            { "name": "ce_type", "value_b64": "b3JkZXIuY3JlYXRlZA==" },
+            { "name": "ce_specversion", "value_b64": "MS4w" },
+            { "name": "content-type", "value_b64": "YXBwbGljYXRpb24vanNvbg==" }
+          ]
+        }
+      }
+    }
+  ]
+}

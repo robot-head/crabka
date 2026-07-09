@@ -1,0 +1,5 @@
+# PostgreSQL extension control stub for the future Crabka compute hook.
+comment = 'Crabka compute/pageserver storage manager hook scaffold'
+default_version = '0.1.0'
+module_pathname = '$libdir/crabka_compute'
+relocatable = false

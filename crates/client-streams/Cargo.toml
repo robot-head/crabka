@@ -45,7 +45,7 @@ columnar = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [features]
-arrow = ["dep:arrow"]
+arrow = ["dep:arrow", "dep:serde_json"]
 columnar = ["dep:columnar"]
 polars = ["dep:polars", "dep:polars-arrow", "dep:serde_json"]
 

@@ -43,7 +43,10 @@ use tokio::sync::oneshot;
 
 use crate::{
     codes,
-    coordinator::{DeleteGroupError, GroupSnapshot},
+    coordinator::{
+        DeleteGroupError, GroupSnapshot,
+        bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC},
+    },
 };
 
 pub(crate) fn first_join_member_id(request_member_id: &str) -> String {
@@ -511,6 +514,40 @@ impl GroupCoordinator {
     #[must_use]
     pub fn share_group_ids(&self) -> Vec<String> {
         self.share_groups.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Resolve the data-topic name for a KIP-932 `topic_id` from the current
+    /// metadata image. The share-group state records carry topic ids, while the
+    /// local partition registry and Prometheus label use topic names.
+    #[must_use]
+    pub(crate) fn topic_name_for(&self, topic_id: uuid::Uuid) -> Option<String> {
+        if let Some(metadata_source) = self.metadata_source() {
+            return metadata_source
+                .current_image()
+                .topics()
+                .find(|topic| topic.topic_id == topic_id)
+                .map(|topic| topic.name.clone());
+        }
+
+        self.metadata
+            .snapshot()
+            .topic_id_by_name
+            .into_iter()
+            .find_map(|(name, id)| (id.0 == *topic_id.as_bytes()).then_some(name))
+    }
+
+    /// Returns true when `node_id` is the current leader of
+    /// `__consumer_offsets-0`, the single source of truth for this coordinator's
+    /// share-group initialized-partition set.
+    #[must_use]
+    pub(crate) fn leads_offsets_partition(&self, node_id: crabka_metadata::NodeId) -> bool {
+        let Some(metadata_source) = self.metadata_source() else {
+            return false;
+        };
+        metadata_source
+            .current_image()
+            .partition(OFFSETS_TOPIC, OFFSETS_PARTITION)
+            .is_some_and(|partition| partition.leader == node_id)
     }
 
     // ── KIP-1071 streams-group registry ──────────────────────────────────

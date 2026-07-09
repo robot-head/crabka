@@ -39,11 +39,11 @@ use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::Client;
-use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_grpc_gateway::{
     codec::RawCodec,
     outbound,
-    outbound_config::{CompiledSubscription, OutboundFile},
+    outbound_config::{CompiledSubscription, OutboundContentMode, OutboundFile},
 };
 use crabka_protocol::owned::{
     fetch_request::{FetchPartition, FetchRequest, FetchTopic},
@@ -104,6 +104,8 @@ struct Received {
     event_id: Option<String>,
     signature: Option<String>,
     timestamp: Option<String>,
+    content_type: Option<String>,
+    ce_headers: BTreeMap<String, String>,
 }
 
 /// Shared mock-receiver state: the captured request log plus the status to
@@ -127,11 +129,26 @@ async fn mock_handler(
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
     };
+    let ce_headers = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            let header_name = name.as_str();
+            if !header_name.starts_with("ce-") {
+                return None;
+            }
+            Some((
+                header_name.to_string(),
+                value.to_str().ok().unwrap_or_default().to_string(),
+            ))
+        })
+        .collect();
     state.received.lock().unwrap().push(Received {
         body: body.to_vec(),
         event_id: get("X-Crabka-Event-Id"),
         signature: get("X-Crabka-Signature"),
         timestamp: get("X-Crabka-Timestamp"),
+        content_type: get("content-type"),
+        ce_headers,
     });
     // A queued status wins (per-request); else the shared default (200 if unset).
     if let Some(code) = state.queue.lock().unwrap().pop_front() {
@@ -185,6 +202,7 @@ fn sub(
         request_timeout_ms: 2_000,
         filter,
         headers: vec![],
+        content_mode: OutboundContentMode::Envelope,
         decode_to_json: false,
     }
 }
@@ -217,15 +235,49 @@ fn verify_sig_hex(secret: &[u8], body: &[u8], provided: &str) -> bool {
 }
 
 async fn produce_value(producer: &Producer, topic: &str, value: &[u8]) {
+    produce_value_with_headers(producer, topic, value, vec![]).await;
+}
+
+async fn produce_value_with_headers(
+    producer: &Producer,
+    topic: &str,
+    value: &[u8],
+    headers: Vec<Header>,
+) {
     let rec = ProducerRecord {
         topic: topic.into(),
         partition: None,
         key: None,
         value: Some(Bytes::from(value.to_vec())),
-        headers: vec![],
+        headers,
         timestamp_ms: None,
     };
     producer.send(rec).await.await.unwrap().unwrap();
+}
+
+fn ce_headers() -> Vec<Header> {
+    vec![
+        Header {
+            key: "ce_id".into(),
+            value: Some(Bytes::from_static(b"event-1")),
+        },
+        Header {
+            key: "ce_source".into(),
+            value: Some(Bytes::from_static(b"/tests")),
+        },
+        Header {
+            key: "ce_type".into(),
+            value: Some(Bytes::from_static(b"com.example.test")),
+        },
+        Header {
+            key: "ce_specversion".into(),
+            value: Some(Bytes::from_static(b"1.0")),
+        },
+        Header {
+            key: "content-type".into(),
+            value: Some(Bytes::from_static(b"application/json")),
+        },
+    ]
 }
 
 /// Decoded DLQ record: value plus the `x-crabka-dlq-source` header (the group
@@ -396,6 +448,91 @@ async fn delivers_2xx() {
         vec![0, 1, 2],
         "the three offsets 0,1,2 delivered"
     );
+
+    token.cancel();
+    let _ = handle.await;
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delivers_cloudevents_binary() {
+    let topic = "outbound-ce-binary";
+    let (broker, bootstrap, _dir) = boot().await;
+    create_topic(&bootstrap, topic, 1).await;
+
+    let producer = make_producer(&bootstrap).await;
+    produce_value_with_headers(&producer, topic, br#"{"n":1}"#, ce_headers()).await;
+
+    let state = Arc::new(MockState::default());
+    let addr = spawn_mock(state.clone()).await;
+    let mut s = sub("ce-binary", topic, &addr, None, None, 5, None);
+    s.content_mode = OutboundContentMode::CloudEventsBinary;
+    let token = CancellationToken::new();
+    let handle = tokio::spawn(outbound::run_subscription(
+        s,
+        bootstrap.clone(),
+        "test-out".into(),
+        Arc::new(make_producer(&bootstrap).await),
+        token.clone(),
+        None,
+        Arc::new(RawCodec),
+    ));
+
+    assert!(wait_until(|| received_len(&state) >= 1).await);
+    let recv = state.received.lock().unwrap().clone();
+    let request = &recv[0];
+    assert_eq!(request.body, br#"{"n":1}"#);
+    assert_eq!(request.content_type.as_deref(), Some("application/json"));
+    assert_eq!(
+        request.ce_headers.get("ce-id").map(String::as_str),
+        Some("event-1")
+    );
+    assert_eq!(
+        request.ce_headers.get("ce-source").map(String::as_str),
+        Some("/tests")
+    );
+
+    token.cancel();
+    let _ = handle.await;
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn delivers_cloudevents_structured() {
+    let topic = "outbound-ce-structured";
+    let (broker, bootstrap, _dir) = boot().await;
+    create_topic(&bootstrap, topic, 1).await;
+
+    let producer = make_producer(&bootstrap).await;
+    produce_value_with_headers(&producer, topic, br#"{"n":1}"#, ce_headers()).await;
+
+    let state = Arc::new(MockState::default());
+    let addr = spawn_mock(state.clone()).await;
+    let mut s = sub("ce-structured", topic, &addr, None, None, 5, None);
+    s.content_mode = OutboundContentMode::CloudEventsStructured;
+    let token = CancellationToken::new();
+    let handle = tokio::spawn(outbound::run_subscription(
+        s,
+        bootstrap.clone(),
+        "test-out".into(),
+        Arc::new(make_producer(&bootstrap).await),
+        token.clone(),
+        None,
+        Arc::new(RawCodec),
+    ));
+
+    assert!(wait_until(|| received_len(&state) >= 1).await);
+    let recv = state.received.lock().unwrap().clone();
+    let request = &recv[0];
+    let body: Value = serde_json::from_slice(&request.body).expect("structured CloudEvent JSON");
+    assert_eq!(
+        request.content_type.as_deref(),
+        Some("application/cloudevents+json")
+    );
+    assert_eq!(body["id"], "event-1");
+    assert_eq!(body["source"], "/tests");
+    assert_eq!(body["type"], "com.example.test");
+    assert_eq!(body["data"]["n"], 1);
 
     token.cancel();
     let _ = handle.await;
@@ -693,5 +830,32 @@ target_url    = "http://attacker.example.com/exfil"
     assert!(
         err.contains("SSRF guard"),
         "compile error must cite the SSRF guard, got: {err}"
+    );
+}
+
+#[test]
+fn cloudevents_static_header_override_rejected_at_compile() {
+    let toml = r#"
+[[allowed_targets]]
+scheme = "http"
+host   = "trusted.internal"
+
+[[subscriptions]]
+name          = "ce"
+source_topics = ["t"]
+target_url    = "http://trusted.internal/hook"
+content_mode  = "cloud_events_binary"
+
+[subscriptions.headers]
+"content-type" = "application/json"
+"#;
+    let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
+    let err = file
+        .compile()
+        .expect_err("CloudEvents modes reserve content-type overrides");
+
+    assert!(
+        err.contains("reserves static header"),
+        "compile error must cite the reserved header, got: {err}"
     );
 }

@@ -4,6 +4,7 @@
 //! *persisted* type). [`state::AcquisitionState`] is the live, per-partition
 //! offset-range state machine the share-partition leader drives during
 //! `ShareFetch`/`ShareAcknowledge`.
+pub mod backlog_poller;
 pub mod manager;
 pub mod session;
 pub mod state;

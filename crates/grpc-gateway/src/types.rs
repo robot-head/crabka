@@ -20,7 +20,7 @@ pub struct GatewayRecord {
     /// Present ⇒ a structured (JSON) value the codec serializes against the
     /// carried [`SchemaSelector`]. `None` ⇒ the record is raw `value`.
     pub body_structured: Option<(Bytes, SchemaSelector)>,
-    pub headers: Vec<(String, Bytes)>,
+    pub headers: Vec<(String, Option<Bytes>)>,
     /// Explicit partition override; `None` ⇒ producer's partitioner.
     pub partition: Option<i32>,
     pub timestamp_ms: Option<i64>,

@@ -1,0 +1,46 @@
+[package]
+name = "crabka-app-sdk"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Crabka application SDK for Rust"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-app-sdk"
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+conformance-adapter = ["dep:crabka-sdk-conformance"]
+
+[[bin]]
+name = "conformance_adapter"
+path = "src/bin/conformance_adapter.rs"
+required-features = ["conformance-adapter"]
+
+[dependencies]
+base64 = { workspace = true }
+bytes = { workspace = true }
+crabka-sdk-conformance = { path = "../sdk-conformance", optional = true }
+futures-util = { workspace = true }
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+prost = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+
+[build-dependencies]
+prost-build = { workspace = true }
+protox = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }

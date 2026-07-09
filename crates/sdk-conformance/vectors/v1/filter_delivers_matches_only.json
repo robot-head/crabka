@@ -1,0 +1,70 @@
+{
+  "id": "filter_delivers_matches_only",
+  "since": { "major": 1, "minor": 0 },
+  "steps": [
+    {
+      "name": "publish non matching structured value",
+      "command": {
+        "cmd": "publish",
+        "topic": "filtered",
+        "value_b64": "eyJraW5kIjoic2tpcCJ9",
+        "headers": []
+      },
+      "expect": {
+        "ok": {
+          "deduplicated": false,
+          "offset": 0,
+          "partition": 0
+        }
+      }
+    },
+    {
+      "name": "publish matching structured value",
+      "command": {
+        "cmd": "publish",
+        "topic": "filtered",
+        "value_b64": "eyJraW5kIjoia2VlcCJ9",
+        "headers": []
+      },
+      "expect": {
+        "ok": {
+          "deduplicated": false,
+          "offset": 1,
+          "partition": 0
+        }
+      }
+    },
+    {
+      "name": "subscribe with equals filter",
+      "command": {
+        "cmd": "subscribe",
+        "topics": ["filtered"],
+        "group": "filtered-reader",
+        "filter": {
+          "path": "$.kind",
+          "op": "equals",
+          "value": "keep"
+        }
+      },
+      "expect": {
+        "ok": {}
+      }
+    },
+    {
+      "name": "filter delivers matching record only",
+      "command": {
+        "cmd": "next_message",
+        "timeout_ms": 10000
+      },
+      "expect": {
+        "message": {
+          "topic": "filtered",
+          "partition": 0,
+          "offset": 1,
+          "value_b64": "eyJraW5kIjoia2VlcCJ9",
+          "headers": []
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+[package]
+name = "crabka-compute-client"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Blocking PostgreSQL compute-to-pageserver client for Crabka"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-compute-client"
+keywords = ["postgres", "compute", "pageserver", "crabka"]
+categories = ["database"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# This crate owns the workspace's sanctioned PostgreSQL C ABI boundary.
+# `src/ffi.rs` contains the only unsafe blocks; keep `unsafe_op_in_unsafe_fn`
+# denied so pointer operations remain explicit and documented.
+[lints.rust]
+unsafe_code = "allow"
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+clone_on_copy = "warn"
+
+[dependencies]
+prost = { workspace = true }
+reqwest = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+axum = { workspace = true, features = ["http1", "tokio"] }
+bytes = { workspace = true }
+crabka-page-store = { path = "../page-store", version = "0.3.9" }
+crabka-pageserver = { path = "../pageserver", version = "0.3.9" }
+crabka-postgres-redo = { path = "../postgres-redo", version = "0.3.9" }
+crabka-postgres-wal = { path = "../postgres-wal", version = "0.3.9" }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
