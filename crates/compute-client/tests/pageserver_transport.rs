@@ -1,4 +1,4 @@
-use std::{ffi::CString, ptr, sync::Arc};
+use std::{ffi::CString, path::PathBuf, ptr, sync::Arc};
 
 use assert2::assert;
 use bytes::Bytes;
@@ -243,18 +243,74 @@ async fn blocking_transport_seeds_image_and_ingests_live_wal_through_connect_rou
 }
 
 #[test]
-#[ignore = "manual PG17 patched-compute boot plus pgbench gate; requires PG17_SOURCE_DIR, CRABKA_COMPUTE_IMAGE, and a live pageserver endpoint"]
-fn manual_pg17_compute_boot_pgbench_gate_requires_external_fixture() {
-    for variable in [
-        "PG17_SOURCE_DIR",
-        "CRABKA_COMPUTE_IMAGE",
-        "CRABKA_PAGESERVER_ENDPOINT",
-    ] {
-        assert!(
-            std::env::var_os(variable).is_some(),
-            "{variable} must be set for the manual external PG17 compute/pgbench gate"
+#[ignore = "manual PG17 compute external fixture-env sentinel; requires PG17_SOURCE_DIR, CRABKA_COMPUTE_IMAGE, and CRABKA_PAGESERVER_ENDPOINT"]
+fn manual_pg17_compute_external_fixture_env_sentinel_skips_without_fixture() {
+    let missing_variables = MANUAL_PG17_COMPUTE_FIXTURE_ENV
+        .into_iter()
+        .filter(|variable| std::env::var_os(variable).is_none())
+        .collect::<Vec<_>>();
+
+    if !missing_variables.is_empty() {
+        eprintln!(
+            "skipping manual PG17 compute external fixture-env sentinel; set {} to run it",
+            missing_variables.join(", ")
         );
+        return;
     }
+
+    let fixture = ManualPg17ComputeFixture::from_env();
+    assert!(fixture.pg17_source_dir.is_dir());
+    assert!(!fixture.compute_image.is_empty());
+    assert!(!fixture.pageserver_endpoint.is_empty());
+}
+
+const MANUAL_PG17_COMPUTE_FIXTURE_ENV: [&str; 3] = [
+    "PG17_SOURCE_DIR",
+    "CRABKA_COMPUTE_IMAGE",
+    "CRABKA_PAGESERVER_ENDPOINT",
+];
+
+struct ManualPg17ComputeFixture {
+    pg17_source_dir: PathBuf,
+    compute_image: String,
+    pageserver_endpoint: String,
+}
+
+impl ManualPg17ComputeFixture {
+    fn from_env() -> Self {
+        let pg17_source_dir = required_env_path("PG17_SOURCE_DIR");
+        let compute_image = required_env_string("CRABKA_COMPUTE_IMAGE");
+        let pageserver_endpoint = required_env_string("CRABKA_PAGESERVER_ENDPOINT");
+
+        assert!(
+            pg17_source_dir.is_dir(),
+            "PG17_SOURCE_DIR must point at an existing PostgreSQL 17 source directory: {}",
+            pg17_source_dir.display()
+        );
+
+        Self {
+            pg17_source_dir,
+            compute_image,
+            pageserver_endpoint,
+        }
+    }
+}
+
+fn required_env_path(variable: &str) -> PathBuf {
+    let value = required_env_string(variable);
+    PathBuf::from(value)
+}
+
+fn required_env_string(variable: &str) -> String {
+    let value = std::env::var(variable).unwrap_or_else(|_| {
+        panic!("set {variable} for the ignored manual PG17 compute fixture-env sentinel")
+    });
+    assert!(
+        !value.is_empty(),
+        "{variable} must not be empty for the ignored manual PG17 compute fixture-env sentinel"
+    );
+
+    value
 }
 
 fn service_with_timeline(timeline: &TimelineKey) -> PageService<PostgresRedo<SyntheticRedoCodec>> {
