@@ -43,7 +43,7 @@ Dispatch each batch's tasks concurrently (one message, multiple agents), review,
 ### Task 1: Mark observability backend crates `publish = false`
 
 **Files:**
-- Modify: `crates/metrics/Cargo.toml`, `crates/metrics-service/Cargo.toml`, `crates/promql/Cargo.toml`, `crates/logql/Cargo.toml`, `crates/observability-spike/Cargo.toml`
+- Modify: `crates/metrics/Cargo.toml`, `crates/metrics-service/Cargo.toml`, `crates/promql/Cargo.toml`, `crates/logql/Cargo.toml`
 
 **Interfaces:**
 - Consumes: nothing.
@@ -51,7 +51,7 @@ Dispatch each batch's tasks concurrently (one message, multiple agents), review,
 
 - [ ] **Step 1: Add `publish = false` to each `[package]` table**
 
-In each of the five `Cargo.toml` files, add `publish = false` directly under the `[package]` line (these crates currently inherit the default `publish = true`). Example for `crates/metrics/Cargo.toml`:
+In each of the four `Cargo.toml` files, add `publish = false` directly under the `[package]` line (these crates currently inherit the default `publish = true`). Example for `crates/metrics/Cargo.toml`:
 
 ```toml
 [package]
@@ -62,12 +62,12 @@ edition.workspace = true
 # ... rest unchanged
 ```
 
-Apply the identical one-line addition to `crates/metrics-service/Cargo.toml`, `crates/promql/Cargo.toml`, `crates/logql/Cargo.toml`, and `crates/observability-spike/Cargo.toml`.
+Apply the identical one-line addition to `crates/metrics-service/Cargo.toml`, `crates/promql/Cargo.toml`, and `crates/logql/Cargo.toml`.
 
 - [ ] **Step 2: Verify the flags and that the workspace still builds**
 
-Run: `cargo metadata --format-version 1 --no-deps | python -c "import json,sys; d=json.load(sys.stdin); print([p['name'] for p in d['packages'] if p['name'] in ('crabka-metrics','crabka-metrics-service','crabka-promql','crabka-logql','crabka-observability-spike') and p['publish']==[]])"`
-Expected: `['crabka-metrics', 'crabka-metrics-service', 'crabka-promql', 'crabka-logql', 'crabka-observability-spike']` (cargo represents `publish = false` as `publish: []`).
+Run: `cargo metadata --format-version 1 --no-deps | python -c "import json,sys; d=json.load(sys.stdin); print([p['name'] for p in d['packages'] if p['name'] in ('crabka-metrics','crabka-metrics-service','crabka-promql','crabka-logql') and p['publish']==[]])"`
+Expected: `['crabka-metrics', 'crabka-metrics-service', 'crabka-promql', 'crabka-logql']` (cargo represents `publish = false` as `publish: []`).
 
 Run: `cargo build -p crabka-metrics -p crabka-promql -p crabka-logql`
 Expected: builds succeed.
@@ -75,8 +75,8 @@ Expected: builds succeed.
 - [ ] **Step 3: Commit**
 
 ```bash
-cargo +nightly fmt -p crabka-metrics -p crabka-metrics-service -p crabka-promql -p crabka-logql -p crabka-observability-spike
-git add crates/metrics/Cargo.toml crates/metrics-service/Cargo.toml crates/promql/Cargo.toml crates/logql/Cargo.toml crates/observability-spike/Cargo.toml
+cargo +nightly fmt -p crabka-metrics -p crabka-metrics-service -p crabka-promql -p crabka-logql
+git add crates/metrics/Cargo.toml crates/metrics-service/Cargo.toml crates/promql/Cargo.toml crates/logql/Cargo.toml
 git commit -m "chore: mark observability backend crates publish=false"
 ```
 
@@ -1837,5 +1837,5 @@ git commit -m "feat(demo): MinIO bootstrap, README, and querier host ports; smok
 - [ ] `crabka-observability` (logs) serves the Loki API on `:3100`; `metrics-querier` serves the Prometheus API on `:9090`; `traces-querier` Tempo on `:3200`; `profiles-querier` Pyroscope on `:4040`.
 - [ ] The demo app produces proto orders (registry-framed), the stream app aggregates, the consumer reads — visible as traces with spans across `demo-produce`/`demo-stream`/`demo-consume`.
 - [ ] `cargo clippy --workspace --all-targets` is clean; `cargo build --release --features heap-profiling` succeeds for every binary in the image.
-- [ ] No crate that should be private is publishable: demo app + metrics/metrics-service/promql/logql/observability-spike are `publish = false`.
+- [ ] No crate that should be private is publishable: demo app + metrics/metrics-service/promql/logql are `publish = false`.
 - [ ] The three "Confirm during implementation" notes (metrics remote-write path; metrics CLI flag names; Alloy `pyroscope.scrape`/Loki-OTLP syntax) are resolved against the real code/version.

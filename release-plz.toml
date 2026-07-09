@@ -190,11 +190,6 @@ publish = false
 release = false
 
 [[package]]
-name = "crabka-observability-spike"
-publish = false
-release = false
-
-[[package]]
 name = "crabka-operator"
 publish = false
 release = false
