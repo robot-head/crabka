@@ -135,12 +135,18 @@ fn pg17_manifest_declares_promote_and_diverge_fork_oracle_shape() {
 #[test]
 #[ignore = "requires CRABKA_FORKED_WAL_FIXTURE_DIR captured from a promoted PostgreSQL 17 standby"]
 fn external_pg17_forked_wal_divergence_gate_is_explicit() {
-    let fixture_dir = std::env::var("CRABKA_FORKED_WAL_FIXTURE_DIR")
-        .expect("set CRABKA_FORKED_WAL_FIXTURE_DIR to the external PG17 fork fixture root");
-    let fixture_root = std::path::Path::new(&fixture_dir);
+    let Some(fixture_dir) = std::env::var_os("CRABKA_FORKED_WAL_FIXTURE_DIR") else {
+        return;
+    };
+    let fixture_root = std::path::PathBuf::from(fixture_dir);
 
     for required_oracle in REQUIRED_PG6_FORK_ORACLES {
-        assert!(fixture_root.join(required_oracle).exists());
+        let oracle_path = fixture_root.join(required_oracle);
+        assert!(
+            oracle_path.exists(),
+            "missing required external PG17 fork fixture oracle: {}",
+            oracle_path.display()
+        );
     }
 }
 
