@@ -12,7 +12,7 @@ G-7's inherited wall is visibility, not routing. The donor rejects cross-range s
 
 - **One table, N ranges:** storage, scan bandwidth, and ingest scale linearly with ranges for a sharded table; queries against it are correct (snapshot-isolated, first-committer-wins) without statement-shape restrictions.
 - **Splits are online and boring:** splitting or moving a range is a bounded-pause operation built from checkpoint machinery that already exists, safe against every 2PC/recovery interleaving (model-checked).
-- **Unsharded tables pay nothing:** the local-xid fast path, the conformance baseline, and every G-2…G-7 property are untouched for tables that never opt in.
+- **Unsharded tables pay nothing:** the local-xid fast path, the conformance baseline, and every G-2…G-7 property are untouched for tables that never opt in. *(Amended by [G-9](2026-07-09-crabka-gres-g9-distributed-maturity-design.md): "never opt in" becomes "until converted" — the balancer auto-converts unsharded tables past policy thresholds via an online conversion fork, `SHARDED` demoted to a hint, so plain `CREATE TABLE` scales without vendor DDL; the byte-identical pin holds for unconverted tables.)*
 - **The commit-rate ceiling is stated, not discovered:** G-8a's design has a named aggregate-commit ceiling (range-0 decision throughput, batched); the design to remove it is scoped as research, not promised.
 
 ## Non-goals

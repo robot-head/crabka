@@ -84,9 +84,15 @@ Steps: TDD maintenance atomicity through the ts-txn (bank-style invariant: index
 
 Commit `feat(gres): range merges`.
 
+### Task 8b: Online auto-shard conversion
+
+**Files:** Extend `crates/gres-ranges/src/split.rs` (the conversion fork: pause → checkpoint-with-freeze-rewrite → catalog flag + map version in one range-0 commit → ts-table successors → resume), `crates/gres-substrate` (the freeze pass gains an xid→ts rewrite mode: frozen tuples emitted as ts-versions with a synthetic `commit_ts` below the conversion's read floor), `crates/pgexec`/`pgcatalog` (the flag flip path shared with `SET SHARDED`, which becomes a manual trigger of the same operation), the conversion Stateright model (racing writes / 2PC / fence — no acked loss, no mixed-visibility statement), a conversion equivalence test (converted table answers every query exactly as its unconverted control did), and the `ALTER TABLE … SET SHARDED` docs re-worded as "request now what policy would do later".
+
+Commit `feat(gres): online auto-shard conversion`.
+
 ### Task 9: `crabka-gres-balancer`
 
-**Files:** Create `crates/gres-balancer/` (internal-crate manifest; **verify the goal-framework shape against `crates/rebalancer` at execution time and mirror its idioms** — goals, plan, dry-run reporting); metrics aggregation into the registry (store size + checkpoint stats + commit rate + scan bytes — all already emitted, wired to records); goals: size ceiling/floor, load skew, co-location integrity (9c), index placement (9d), compute anti-affinity; executor client calling the G-8b/Task-8 orchestrator under rate limits + cooldowns; CLI (`crabka gres balance [--dry-run]`) + operator knobs.
+**Files:** Create `crates/gres-balancer/` (internal-crate manifest; **verify the goal-framework shape against `crates/rebalancer` at execution time and mirror its idioms** — goals, plan, dry-run reporting); metrics aggregation into the registry (store size + checkpoint stats + commit rate + scan bytes — all already emitted, wired to records); goals: size ceiling/floor, load skew, **auto-shard conversion thresholds (Task 8b's operation; per-tenant/table disable knob)**, co-location integrity (9c), index placement (9d), compute anti-affinity; executor client calling the G-8b/Task-8/8b orchestrator under rate limits + cooldowns; CLI (`crabka gres balance [--dry-run]`) + operator knobs.
 
 Steps: per-goal unit tests (violation → expected plan, whole-struct compares); dry-run parity (predicted plan == executed plan on a static fleet); the no-flapping property (oscillating load within hysteresis produces no plan); end-to-end under synthetic skew (balancer converges to goal satisfaction; every operation audited in the registry). Commit `feat(gres): goal-based auto-rebalancer`.
 
