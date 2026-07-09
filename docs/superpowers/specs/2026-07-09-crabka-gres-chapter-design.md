@@ -15,7 +15,7 @@ The donor is crabgresql: ~68k lines of Rust 2024 built as independently shippabl
 ## Design Goals
 
 - **Serverless per-tenant Postgres as the product:** many small Postgres-compatible databases, each a topic + a bucket prefix + at most one live compute; computes are disposable and recover entirely from the substrate.
-- **Zero broker changes:** the engine journals over the ordinary Kafka wire, exactly the posture PG-1 resolved for the safekeeper — the durability tier inherits the diskless-WAL upgrades (classic today, fsync, then quorum) with no engine change.
+- **Zero broker changes:** the engine journals over the ordinary Kafka wire, exactly the posture PG-1 resolved for the safekeeper — the durability tier inherits the diskless-WAL upgrades (classic today, fsync, then quorum) with no engine change. *(Qualified during the G-2 design: the WAL uses transactional produce, which diskless partitions reject today — `__gres_wal.*` topics stay classic-tier until the diskless track supports transactional batches; a named cross-track dependency.)*
 - **Shared-substrate co-location as the moat:** tenant databases, topics, blobs, and (later) the PG tier's pages ride the same log and the same bucket; the FDW makes the cluster's own topics queryable from any tenant database.
 - **The donor's conformance culture, preserved whole:** vendoring must provably regress nothing, and every new gres feature keeps the differential-oracle + Stateright discipline.
 
@@ -85,7 +85,7 @@ PgDog (AGPL-3.0, Rust) provides pooling, database-name routing, and failover as 
 Crates imported and renamed, lints and deps merged, conformance corpus + oracle harness running in Crabka CI against a `postgres:18` service container (CI already runs postgres containers for `connect-postgres`), and `crabka-gres` serving a single tenant on local fjall. **Gate:** the donor repo's parity baseline reproduced in Crabka CI — vendoring regressed nothing.
 
 ### G-2 — Substrate WAL
-`SubstrateKv` + the `Committer` implementation, `GRW1` framing, transactional-producer fencing; recovery by full replay (no checkpoints yet). **Gate:** deterministic kill−9/respawn with zero acked-transaction loss; a fenced stale compute provably cannot commit.
+`SubstrateKv` + the `Committer` implementation, `GRW1` framing, transactional-producer fencing; recovery by full replay (no checkpoints yet). **Gate:** deterministic kill−9/respawn with zero acked-transaction loss; a fenced stale compute provably cannot commit. *(Refined during the [G-2 design](2026-07-09-crabka-gres-g2-substrate-wal-design.md): the seam is `SqlEngine::replicated` + a `SubstrateCommitter` — not a `Kv` wrapper — because Replicated mode is what forces the xid/rowid counters into the batch stream; the WAL rides one Kafka transaction per commit-group, since the coordinator-checked transactional path is the only authoritative fence; statement batches await durability in v1 (async pipelining is a named optimization); and replay applies the donor's max-merge/write-once rules rather than blind LWW.)*
 
 ### G-3 — Checkpoints
 Snapshot upload, manifest-last ordering, DeleteRecords truncation, fast spin-up. **Gate:** spin-up bounded by snapshot-download + tail-replay, and a Stateright model of the WAL/checkpoint/recovery/fencing protocol (the donor's SP21 torn-commit is the cautionary tale for skipping this).
