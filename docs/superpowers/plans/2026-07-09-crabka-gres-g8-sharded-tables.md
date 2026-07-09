@@ -17,7 +17,7 @@
 
 ---
 
-## Batch 1 — G-8a semantics (run Tasks 1 and 2 in parallel; disjoint crates)
+## Batch 1 — G-8a semantics (serial: Task 1 then Task 2 — both modify `crates/pgexec` and `crates/gres-ranges`, so they are NOT a disjoint parallel batch; panel amendment I8)
 
 ### Task 1: Global-visibility tables — catalog flag, write-path escalation, g-block leases
 

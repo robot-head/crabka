@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **Prerequisites:** G-1 landed (all waves); G-2+ only where a wave's sharded story needs it. Verify every quoted seam against the landed tree at execution time.
+- **Prerequisites:** G-1 landed (all waves); G-2+ only where a wave's sharded story needs it. **G-4 (the PgDog front door) is required for the M0 gate and every pooler-story leg** — the conformance-through-PgDog runs and the transaction-pooling smokes cannot execute without it *(corrected after the PR panel review — "G-1 only" was wrong for those gates)*. Verify every quoted seam against the landed tree at execution time.
 - **Spec:** the program design above. The four standing per-cycle rules (oracle/ratchet, sharded story, pooler story, matrix update) bind every wave without restatement.
 - **The matrix cannot rot:** CI diffs `PG_COMPAT_MATRIX.md` against the parser's accepted-statement surface (Task 1); a wave that changes acceptance without a matrix row fails CI.
 - **Explicit dispositions are code, not prose:** stock-PG-default errors (2PC-SQL 55000, CREATE DATABASE, non-goal commands) are implemented as recognizable parse-then-error paths with the documented SQLSTATE and hint — never generic syntax errors — so client software sees PostgreSQL-shaped refusals.
@@ -22,7 +22,7 @@
 
 ### Task 1: `PG_COMPAT_MATRIX.md` + the anti-rot check
 
-**Files:** Create `docs/PG_COMPAT_MATRIX.md` (one row per PG18 command — all 190 — plus major language-feature rows; columns: item, disposition {Implemented, Wave-assigned(<wave>), Mapped(<semantics>), Error-with-notice(<SQLSTATE>), Non-goal(<reason>)}, notes; seeded from the program design's wave map and decisions — zero `UNDECIDED` rows at seed time), `tools/check-pg-compat-matrix.sh` (extracts the parser's accepted statement kinds — a `cargo run` helper in gres-conformance that dumps the Statement enum's accepted-command list — and diffs against the matrix's Implemented/Mapped rows), a `ci.yml` step in the `gres` filter's job set, `CONTRIBUTING.md` pointer.
+**Files:** Create `docs/PG_COMPAT_MATRIX.md` (one row per PG18 command — all 190 — plus major language-feature rows; columns: item, disposition {Implemented, Wave-assigned(<wave>), Mapped(<semantics>), Error-with-notice(<SQLSTATE>), Non-goal(<reason>)}, notes; seeded from the program design's wave map and decisions — zero `UNDECIDED` rows at seed time; M5 is reached when zero `Wave-assigned` rows remain, per the design's M5 wording), `tools/check-pg-compat-matrix.sh` (extracts the parser's accepted statement kinds — a `cargo run` helper in gres-conformance that dumps the Statement enum's accepted-command list — and diffs against the matrix's Implemented/Mapped rows), a `ci.yml` step in the `gres` filter's job set, `CONTRIBUTING.md` pointer.
 
 Steps: seed the matrix from the spec (every command, exhaustively — the grounding report is the checklist); write the dump helper + differ TDD (a deliberately-missing row fails); wire CI; commit `docs(gres): the PostgreSQL compatibility matrix with CI anti-rot`.
 

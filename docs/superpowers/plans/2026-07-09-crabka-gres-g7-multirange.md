@@ -13,13 +13,13 @@
 - **Prerequisites:** G-1…G-3 landed (G-7a); plus G-4 (registry/operator) for G-7b. Verify every signature against the landed tree; donor claims were verified at `crabgresql@93f3d17` (donor clone convention: `/tmp/crabgresql-donor`).
 - **Spec:** [2026-07-09-crabka-gres-g7-multirange-design.md](../specs/2026-07-09-crabka-gres-g7-multirange-design.md). The KEEP/ADAPT/DROP map and the 2PC portability briefing live in the G-7 research (all claims re-verifiable at the donor pin); the plan references donor files by their in-tree paths.
 - **The load-bearing ordering, everywhere:** fence (epoch bump) → produce barrier → read/replay to the fenced end → reseed → settle → serve. Never read a log end before fencing that log's writers. The new model action (Task 2) is the executable statement of this rule.
-- **Naming:** topics `__gres_wal.<tenant>.r<id>` (range 0 = `…​.r0`; the existing single-range tenant topic `__gres_wal.<tenant>` is the degenerate spelling — pick ONE at execution time and migrate the constant in `gres-substrate` so both tiers share code; greenfield rule applies, no compat shim); transactional ids `__gres.<tenant>.r<id>`; checkpoints `gres/<tenant>/r<id>/ckpt/…`.
+- **Naming (decided — panel minor):** topics are `__gres_wal.<tenant>.r<id>` universally, with a single-range tenant being `…​.r0`; G-7's Task 1 migrates the constant in `gres-substrate` (and its uses in the G-2/G-4/G-5 code and CI scripts) in one greenfield rename commit — no compat shim, no dual spelling. Transactional ids `__gres.<tenant>.r<id>`; checkpoints `gres/<tenant>/r<id>/ckpt/…`; the G-4 ACL prefixes cover both spellings' prefix (`__gres_wal.<tenant>`), so authorization is unaffected.
 - **Error-contract preservation:** the donor's retryability mapping (40001 `SerializationFailure` for NotLeader-equivalents, 08006 for wire loss, one bounded re-resolve+retry in the wire layer only — never in the router) is a compatibility surface; tests pin it.
 - Lints/format/commit/test conventions as in the G-2 plan; every ported test keeps its donor name for traceability.
 
 ---
 
-## Batch 1 — G-7a foundations (run Tasks 1 and 2 in parallel; disjoint file sets)
+## Batch 1 — G-7a foundations (serial: Task 1 then Task 2 — the models compile against the crate Task 1 creates; panel amendment I8)
 
 ### Task 1: `crabka-gres-ranges` crate — vendor the KEEP subset + range-parameterize the substrate
 
@@ -52,7 +52,7 @@ Steps: vendor, adapt imports, run (`cargo nextest run -p crabka-gres-ranges --te
 
 **Interfaces:**
 - `range0_tail::spawn(bootstrap, tenant, store: Arc<dyn Kv>) -> Range0Tail` — a READ_COMMITTED consumer of `__gres_wal.<tenant>.r0` applying frames through the G-2 merge rules into a local store (this store is the `catalog_kv` for every engine on the compute), publishing `applied_offset: watch::Receiver<i64>`.
-- `barrier::Range0Barrier { tail: Range0Tail, watermark: Arc<AtomicI64>, refresher: JoinHandle }` implementing `crabka_pgexec::Linearizer`: `ensure_readable` = read the continuously-refreshed end-offset watermark (a background task polling ListOffsets(-1) on r0 with a bounded staleness budget, plus an on-demand fetch when the watermark is stale) and await `tail.applied_offset >= watermark` (bounded; timeout → `ExecError::Unavailable`). Conservative-LEO semantics per the spec. Unit-tested against an in-process broker with an open producer transaction proving the barrier waits for markers, never passes early.
+- `barrier::Range0Barrier { tail: Range0Tail, inflight: <batched-fetch state>, }` implementing `crabka_pgexec::Linearizer`: `ensure_readable` = obtain an end-offset sample **from a fetch that began after this call began** (the ReadIndex discipline — panel amendment I5; concurrent callers piggyback on the next in-flight ListOffsets(-1) rather than each issuing one, and a *free-running cached watermark is explicitly forbidden*), then await `tail.applied_offset >= sample` (bounded; timeout → `ExecError::Unavailable`). Conservative-LEO semantics per the spec. Unit-tested against an in-process broker with (a) an open producer transaction proving the barrier waits for markers, never passes early, and (b) a freshness test: a commit acked before `ensure_readable` is called is always visible after it returns.
 - `prologue::recover_range(...) -> Result<ServingRange, ...>` — the straight line: G-2 fence+barrier+replay (per range) → `reseed_counters`/`reseed_gtm` (range 0 only; fail-closed) → `reacquire_in_doubt_locks` (the executor API, verbatim donor step) → abort-race in-doubt g's via the coordinator seam → settle-complete re-scan loop (retry-interval + bounded attempts; gate stays closed on any in-doubt remainder) → `gate.mark_served(range, epoch)`.
 
 Steps: TDD each piece (tail applies + publishes; barrier conservative-wait; prologue happy path + in-doubt-marker path against an in-process broker with a hand-journaled `Prepared` marker), then an integration: kill a two-range in-process tenant mid-2PC, recover, assert the prologue settles and state matches the decision. Commit `feat(gres): range-0 tail, log-derived barrier, and the recovery prologue`.
@@ -71,7 +71,7 @@ Steps: TDD via ported donor suites — vendor `crossrange_2pc.rs`, `multirange.r
 
 ### Task 5: Transport, forwarding, NetCoordinator, discovery
 
-**Files:** Vendor+adapt donor `transport/server.rs` (raft arms deleted; `RangeRegistry` re-typed to range→engine/writer handles), `forward.rs` (`resolve_leader` → registry lookup via `crabka-gres-control`), `twopc.rs` (`TwoPcClient` discovery → registry; `Range0Barrier` deleted in favor of Task 3's; `TxnResp::Barrier` carries an offset); extend `crates/gres-control` records with the range layout (`ranges: [{range_id, tables_end, endpoint}]`).
+**Files:** Vendor+adapt donor `transport/server.rs` (raft arms deleted; `RangeRegistry` re-typed to range→engine/writer handles), `forward.rs` (`resolve_leader` → registry lookup via `crabka-gres-control`), `twopc.rs` (`TwoPcClient` discovery → registry; `Range0Barrier` deleted in favor of Task 3's; `TxnResp::Barrier` carries an offset); extend `crates/gres-control` records with the range layout (`ranges: [{range_id, tables_end, endpoint, wal_generation}]` — the endpoint doubles as the spec's `compute` field, and per-range `wal_generation` lands here as the registry home the G-8 parking mechanics need; panel amendments I4 + minor).
 
 Steps: TDD the discovery seam (registry-backed resolve with the donor's one-bounded-retry contract — port `remote_forward.rs`'s injected-NotLeader retry proof); port `crossrange_2pc_net.rs`; wire the silence sweeper; nextest/clippy/fmt. Commit `feat(gres): distributed range transport, forwarding, and coordination (G-7b core)`.
 
@@ -79,7 +79,7 @@ Steps: TDD the discovery seam (registry-backed resolve with the donor's one-boun
 
 **Files:** Modify `crates/gres/src/main.rs` (`--host-ranges r0,r2` mode: host listed ranges + gateway + range-0 tail), `crates/operator` (GresTenant CRD grows the range layout; one Deployment per range compute; the tenant Service selects all of them), `crates/cli` (`crabka gres create-tenant --ranges`), `crates/gres-control` (layout mutations).
 
-Steps: operator mock-harness tests for the multi-Deployment render; CLI integration (create a 3-range tenant, registry shows the layout); a compose-style two-pod smoke in the e2e script (two computes, forwarded DML, one cross-range txn). Commit `feat(gres): distributed range placement (G-7b)`.
+Steps: operator mock-harness tests for the multi-Deployment render; CLI integration (create a 3-range tenant, registry shows the layout); a compose-style two-pod smoke in the e2e script (two computes, forwarded DML, one cross-range txn); **east-west hardening** *(panel amendment I7 — owned here, in the slice that creates the shared path)*: either mTLS on the node-protocol + forwarding legs (rustls over the framed transport; certs from the fleet CA the operator already manages) or NetworkPolicy-enforced per-tenant segmentation with the trade recorded in the G-7 spec's Risks — decided and implemented in this task, with an e2e negative: a connection to a range compute's node port from outside its tenant's workloads is refused. Commit `feat(gres): distributed range placement (G-7b)`.
 
 ---
 
