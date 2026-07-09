@@ -15,9 +15,18 @@ use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle, config::ListenerSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
-use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+use crabka_client_core::{
+    Client,
+    security::{ClientSecurity, SaslCredentials},
+};
 use crabka_client_producer::{ConsumerGroupMetadata, Producer, ProducerRecord};
-use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::{
+    create_topics_request::{CreatableTopic, CreateTopicsRequest},
+    offset_fetch_request::{
+        OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopic,
+        OffsetFetchRequestTopics,
+    },
+};
 use crabka_security::{ListenerProtocol, SaslMechanism};
 use tempfile::TempDir;
 
@@ -56,6 +65,66 @@ async fn create_topic(bootstrap: &str, name: &str) {
         "create_topic {name}: error_code={}",
         cr.topics[0].error_code
     );
+}
+
+async fn fetch_committed_offset(bootstrap: &str, group_id: &str, topic: &str) -> Option<i64> {
+    let client = Client::builder()
+        .bootstrap(bootstrap)
+        .build()
+        .await
+        .unwrap();
+    let topic_id = client
+        .refresh_metadata()
+        .await
+        .unwrap()
+        .topics
+        .iter()
+        .find(|metadata_topic| metadata_topic.name.as_deref() == Some(topic))
+        .map_or_else(
+            || panic!("topic {topic} missing from metadata"),
+            |metadata_topic| metadata_topic.topic_id,
+        );
+
+    let resp = client
+        .send(OffsetFetchRequest {
+            group_id: group_id.to_string(),
+            topics: Some(vec![OffsetFetchRequestTopic {
+                name: topic.to_string(),
+                partition_indexes: vec![0],
+                ..Default::default()
+            }]),
+            groups: vec![OffsetFetchRequestGroup {
+                group_id: group_id.to_string(),
+                topics: Some(vec![OffsetFetchRequestTopics {
+                    name: topic.to_string(),
+                    topic_id,
+                    partition_indexes: vec![0],
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    for group in &resp.groups {
+        for topic in &group.topics {
+            for partition in &topic.partitions {
+                if partition.partition_index == 0 && partition.committed_offset >= 0 {
+                    return Some(partition.committed_offset);
+                }
+            }
+        }
+    }
+    for topic in &resp.topics {
+        for partition in &topic.partitions {
+            if partition.partition_index == 0 && partition.committed_offset >= 0 {
+                return Some(partition.committed_offset);
+            }
+        }
+    }
+    None
 }
 
 /// Boot a single-broker cluster whose only listener is `SASL_PLAINTEXT`
@@ -382,12 +451,9 @@ async fn fenced_producer_cannot_commit() {
 /// and the output records become visible under `read_committed` once the commit
 /// marker advances the LSO.
 ///
-/// Note: this test deliberately does not assert `OffsetFetch` visibility of the
-/// committed consumer offset. Materialising transactionally-committed offsets
-/// into the group coordinator on LSO advance is still tracked separately:
-///
-/// TODO(CRABKA-TXN-5): Wire group-manager offset materialization to LSO advance
-/// for transactional offset commits on `__consumer_offsets`.
+/// The source offset must not be visible through `OffsetFetch` while the
+/// transaction is open, then must become visible after the commit marker makes
+/// the transaction stable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn send_offsets_to_transaction_atomic_with_records() {
     let (broker, bootstrap, _dir) = boot_single().await;
@@ -456,7 +522,17 @@ async fn send_offsets_to_transaction_atomic_with_records() {
                 .await
                 .unwrap();
         }
+        assert!(
+            fetch_committed_offset(&bootstrap, "cpp-g", "input")
+                .await
+                .is_none(),
+            "transactional offset must stay invisible before commit"
+        );
         txn.commit().await.unwrap();
+        assert!(
+            fetch_committed_offset(&bootstrap, "cpp-g", "input").await == Some(5),
+            "transactional offset must become visible after commit"
+        );
         // Wait for the transactional data batches and commit marker to hit the
         // local log before a read_committed verifier polls. `commit()` returns
         // after the coordinator flow completes, but LSO advancement can lag on

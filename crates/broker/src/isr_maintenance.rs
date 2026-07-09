@@ -459,21 +459,30 @@ mod tests {
         }
 
         fn quorum_state(&self) -> crabka_raft::QuorumState {
-            unimplemented!("unused in isr_maintenance tests")
+            crabka_raft::QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: *self.leader_tx.borrow(),
+                voters: Vec::new(),
+                voter_nodes: std::collections::BTreeMap::new(),
+                per_voter_matched_index: std::collections::BTreeMap::new(),
+            }
         }
 
         async fn submit_change(
             &self,
             _records: Vec<MetadataRecord>,
         ) -> Result<(), crabka_raft::RaftError> {
-            unimplemented!("unused in isr_maintenance tests")
+            panic!("TestMetadataSource::submit_change must not be called by ISR maintenance tests")
         }
 
         async fn change_membership(
             &self,
             _new_voters: std::collections::BTreeSet<NodeId>,
         ) -> Result<(), crabka_raft::RaftError> {
-            unimplemented!("unused in isr_maintenance tests")
+            panic!(
+                "TestMetadataSource::change_membership must not be called by ISR maintenance tests"
+            )
         }
 
         async fn add_learner(
@@ -481,11 +490,11 @@ mod tests {
             _node_id: NodeId,
             _node: crabka_raft::Node,
         ) -> Result<(), crabka_raft::RaftError> {
-            unimplemented!("unused in isr_maintenance tests")
+            panic!("TestMetadataSource::add_learner must not be called by ISR maintenance tests")
         }
 
         fn controller_bound_addr(&self) -> std::net::SocketAddr {
-            unimplemented!("unused in isr_maintenance tests")
+            std::net::SocketAddr::from(([0, 0, 0, 0], 0))
         }
 
         fn read_snapshot_range(
@@ -493,32 +502,34 @@ mod tests {
             _position: i64,
             _max_bytes: i32,
         ) -> crabka_raft::SnapshotRange {
-            unimplemented!("unused in isr_maintenance tests")
+            crabka_raft::SnapshotRange::NoSnapshot
         }
 
         async fn trigger_snapshot(&self) -> Result<(), crabka_raft::RaftError> {
-            unimplemented!("unused in isr_maintenance tests")
+            panic!(
+                "TestMetadataSource::trigger_snapshot must not be called by ISR maintenance tests"
+            )
         }
 
         async fn add_voter(
             &self,
             _req: crabka_raft::AddVoter,
         ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
-            unimplemented!("unused in isr_maintenance tests")
+            panic!("TestMetadataSource::add_voter must not be called by ISR maintenance tests")
         }
 
         async fn remove_voter(
             &self,
             _req: crabka_raft::RemoveVoter,
         ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
-            unimplemented!("unused in isr_maintenance tests")
+            panic!("TestMetadataSource::remove_voter must not be called by ISR maintenance tests")
         }
 
         async fn update_voter(
             &self,
             _req: crabka_raft::UpdateVoter,
         ) -> Result<crabka_raft::ReconfigOutcome, crabka_raft::RaftError> {
-            unimplemented!("unused in isr_maintenance tests")
+            panic!("TestMetadataSource::update_voter must not be called by ISR maintenance tests")
         }
 
         async fn cancel(&self) {}
