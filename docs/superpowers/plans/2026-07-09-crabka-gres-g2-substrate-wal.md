@@ -817,13 +817,13 @@ impl Linearizer for SubstrateLinearizer {
 //! verifies journal_seq continuity, refusing to serve on any gap.
 ```
 
-Logic (complete; client-call shapes per Global Constraints and the `crates/gres-fdw/src/source.rs` precedents for metadata/ListOffsets/fetch):
+Logic (complete; client-call shapes per Global Constraints and the `crates/gres-fdw/src/source.rs` precedents for metadata/fetch). **Replay terminates at the compute's own barrier record — do NOT use ListOffsets as the target (Crabka's handler ignores `isolation_level` and returns LEO; amended per the G-3 design):**
 1. `ensure_wal_topic(...)`.
 2. Build the transactional producer (`transactional_id = format!("__gres.{tenant}")`, `acks(Acks::All)`), `producer.init_transactions().await` — the fence.
-3. Resolve topic id via `AdminClient::metadata`; open a `client_core::Connection` to the partition leader (the fdw's `source.rs` shows the exact connect + metadata idiom).
-4. Stable end: send `ListOffsetsRequest` with `timestamp = -1` and `isolation_level = 1` (the fdw builds this exact request; reuse its shape) → `stable_end`.
-5. Replay loop: from `offset = 0`, `fetch_partition_with_isolation(&conn, topic, topic_id, 0, offset, max_wait_ms, max_bytes, 1)`; for each record: `WalFrame::decode`, assert `journal_seq == expected` else return `SubstrateError::SequenceGap { .. }`; `apply_frame(store, &frame.ops)?`; `expected += 1`; `offset = last.offset + 1`; stop when `offset >= stable_end`. Empty fetch below `stable_end` retries (bounded attempts, then `Unavailable`).
-6. Return `Recovered { producer, next_journal_seq: expected }`.
+3. **Produce the barrier:** peek the last committed frame's `journal_seq` is unknown until replay, so the barrier carries `journal_seq = BARRIER_SEQ` (`u64::MAX`, reserved — `WalFrame` with `ops: vec![]`); produce it in its own Kafka transaction (`begin_transaction` → `send` → `commit`). Record nothing else in the txn. (Reserve `u64::MAX` in `frame.rs` with a doc comment and a unit test that ordinary writers never reach it.)
+4. Resolve topic id via `AdminClient::metadata`; open a `client_core::Connection` to the partition leader (the fdw's `source.rs` shows the exact connect + metadata idiom).
+5. Replay loop: from `offset = 0`, `fetch_partition_with_isolation(&conn, topic, topic_id, 0, offset, max_wait_ms, max_bytes, 1)`; for each record: `WalFrame::decode`; if `journal_seq == BARRIER_SEQ`: this is a barrier — if it is OURS (track: count barriers produced by this recovery = 1; ours is the first barrier encountered *after* the fence, i.e. simply the first barrier whose offset is ≥ the offset our own produce ack reported — capture `RecordMetadata.offset` from step 3) then replay is complete, break; a FOREIGN barrier (an older generation's) is skipped and replay continues. Otherwise: assert `journal_seq == expected` else return `SubstrateError::SequenceGap { .. }`; `apply_frame(store, &frame.ops)?`; `expected += 1`. Advance `offset = last.offset + 1`. Empty fetch before our barrier's known offset retries (bounded attempts, then `Unavailable`).
+6. Return `Recovered { producer, next_journal_seq: expected }`. (`expected` starts at 0 and counts only non-barrier frames; barriers never consume engine sequence numbers, so cross-generation continuity asserts stay exact.)
 
 - [ ] **Step 5: Wire the lib** — add `pub mod committer; pub mod recover; pub mod topic; pub mod writer;` + re-export `SubstrateCommitter`, `SubstrateLinearizer`, `spawn_wal_writer`, `recover::{recover, Recovered}`, `topic::{ensure_wal_topic, wal_topic}` from `lib.rs`; extend the crate rustdoc's Key Types list.
 
