@@ -647,11 +647,28 @@ impl Log {
     }
 
     fn sync_log_dir(dir: &Path) -> Result<(), LogError> {
-        let log_dir = fs::File::open(dir)?;
+        let log_dir = Self::open_log_dir_for_sync(dir)?;
         log_dir.sync_all()?;
         #[cfg(test)]
         sync_observer::record_dir_sync(dir.to_path_buf());
         Ok(())
+    }
+
+    #[cfg(not(windows))]
+    fn open_log_dir_for_sync(dir: &Path) -> Result<fs::File, std::io::Error> {
+        fs::File::open(dir)
+    }
+
+    #[cfg(windows)]
+    fn open_log_dir_for_sync(dir: &Path) -> Result<fs::File, std::io::Error> {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+        fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
     }
 
     fn active_segment_flush(&mut self) -> Result<(), LogError> {
