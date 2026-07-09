@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { pathToFileURL } from "node:url";
 import { createClient, CrabkaClient } from "./client.ts";
 import { CrabkaError, ErrorKind, InvalidArgumentError, NotFoundError, ServerError, UnimplementedError } from "./errors.ts";
 import type { Filter, Header, Message } from "./messaging.ts";
@@ -11,6 +12,8 @@ type HeaderWire = { name: string; value_b64: string | null };
 
 const CONTRACT_MAJOR = 1;
 const CONTRACT_MINOR = 1;
+const GATEWAY_QUEUE_MESSAGE_NOT_ACQUIRED = "record is not acquired by this session";
+const CONTRACT_QUEUE_MESSAGE_NOT_ACQUIRED = "queue message is not acquired";
 
 type Command = {
   cmd: string;
@@ -303,11 +306,18 @@ function encodeQueueBatchResult(results: { messageId: string; error: { kind: str
   };
 }
 
-function encodeQueueOperationError(error: { kind: string; message: string } | null): unknown {
+export function encodeQueueOperationError(error: { kind: string; message: string } | null): unknown {
   if (!error) {
     return null;
   }
-  return { kind: error.kind, message: error.message };
+  return { kind: error.kind, message: queueOperationErrorMessageForContract(error.message) };
+}
+
+function queueOperationErrorMessageForContract(message: string): string {
+  if (message === GATEWAY_QUEUE_MESSAGE_NOT_ACQUIRED) {
+    return CONTRACT_QUEUE_MESSAGE_NOT_ACQUIRED;
+  }
+  return message;
 }
 
 function encodeMessage(message: Message): unknown {
@@ -320,4 +330,16 @@ function encodeMessage(message: Message): unknown {
   };
 }
 
-await main();
+if (isAdapterEntrypoint()) {
+  await main();
+}
+
+function isAdapterEntrypoint(): boolean {
+  if (!process.argv[1]) {
+    return false;
+  }
+  if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+    return true;
+  }
+  return process.argv[1].endsWith("/bin/conformance-adapter");
+}
