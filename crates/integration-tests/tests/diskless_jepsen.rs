@@ -34,9 +34,9 @@ async fn diskless_restart_preserves_all_acked_records() {
 
     broker.shutdown().await;
 
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
-        .await
-        .expect("broker restart");
+    let mut restart_config = BrokerConfig::for_tests(dir.path().to_path_buf());
+    restart_config.bootstrap_mode = crabka_broker::BootstrapMode::Rejoin;
+    let broker = Broker::start(restart_config).await.expect("broker restart");
     let bootstrap = broker.listen_addr().to_string();
 
     let observed = consume_count(&bootstrap, 8).await;
