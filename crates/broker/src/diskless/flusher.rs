@@ -48,6 +48,12 @@ pub(crate) struct FlushPartition {
     pub(crate) high_watermark: Offset,
 }
 
+#[derive(Default)]
+struct PendingWalObject {
+    builder: WalObjectBuilder,
+    aborted_transactions_by_run: Vec<Vec<WalAbortedTxn>>,
+}
+
 pub(crate) async fn flush_once(
     object_store: Arc<dyn ObjectStore>,
     index_log: &DisklessIndexLog,
@@ -55,8 +61,25 @@ pub(crate) async fn flush_once(
     partitions: &[FlushPartition],
     config: &FlushConfig,
 ) -> Result<Option<WalFlushRecord>, crate::error::BrokerError> {
-    let mut builder = WalObjectBuilder::new();
-    let mut aborted_transactions_by_run: Vec<Vec<WalAbortedTxn>> = Vec::new();
+    let pending = collect_flushable_runs(cache.as_ref(), partitions, config).await?;
+    if pending.builder.is_empty() {
+        return Ok(None);
+    }
+
+    let record = put_wal_object(object_store.as_ref(), pending).await?;
+    index_log.publish_flush(&record).await?;
+    wait_for_committed_projection(cache.clone(), &record).await?;
+    trim_flushed_partitions(cache.as_ref(), partitions, config.trim_safety_lag).await?;
+
+    Ok(Some(record))
+}
+
+async fn collect_flushable_runs(
+    cache: &AsyncMutex<WalIndexCache>,
+    partitions: &[FlushPartition],
+    config: &FlushConfig,
+) -> Result<PendingWalObject, crate::error::BrokerError> {
+    let mut pending = PendingWalObject::default();
     for partition in partitions {
         let start = cache
             .lock()
@@ -89,21 +112,26 @@ pub(crate) async fn flush_once(
         let Some(last_offset) = raw.last_offset else {
             continue;
         };
-        builder.append_run(
+        pending.builder.append_run(
             partition.topic_id,
             partition.partition,
             raw.start_offset.0,
             last_offset.0,
             &raw.bytes,
         );
-        aborted_transactions_by_run.push(aborted_transactions);
+        pending
+            .aborted_transactions_by_run
+            .push(aborted_transactions);
     }
+    Ok(pending)
+}
 
-    if builder.is_empty() {
-        return Ok(None);
-    }
+async fn put_wal_object(
+    object_store: &dyn ObjectStore,
+    pending: PendingWalObject,
+) -> Result<WalFlushRecord, crate::error::BrokerError> {
     let object_key = format!("diskless-wal/{}.ckwl", Uuid::new_v4());
-    let object = builder.finish();
+    let object = pending.builder.finish();
     object_store
         .put(
             &Path::from(object_key.clone()),
@@ -112,16 +140,27 @@ pub(crate) async fn flush_once(
         .await
         .map_err(|error| crate::error::BrokerError::Txn(format!("diskless wal put: {error}")))?;
 
-    let object_entries = super::wal_object::parse_wal_object(&object)
-        .map_err(|error| crate::error::BrokerError::Txn(error.to_string()))?
-        .into_iter()
-        .collect::<Vec<_>>();
+    let entries = wal_index_entries_from_object(&object, pending.aborted_transactions_by_run)?;
+    Ok(WalFlushRecord {
+        object_key,
+        format_version: WAL_INDEX_FORMAT_VERSION,
+        entries,
+    })
+}
+
+fn wal_index_entries_from_object(
+    object: &bytes::Bytes,
+    aborted_transactions_by_run: Vec<Vec<WalAbortedTxn>>,
+) -> Result<Vec<WalIndexEntry>, crate::error::BrokerError> {
+    let object_entries = super::wal_object::parse_wal_object(object)
+        .map_err(|error| crate::error::BrokerError::Txn(error.to_string()))?;
     if object_entries.len() != aborted_transactions_by_run.len() {
         return Err(crate::error::BrokerError::Txn(
             "diskless wal object manifest/run metadata length mismatch".into(),
         ));
     }
-    let entries = object_entries
+
+    Ok(object_entries
         .into_iter()
         .zip(aborted_transactions_by_run)
         .map(|(entry, aborted_transactions)| WalIndexEntry {
@@ -133,37 +172,38 @@ pub(crate) async fn flush_once(
             byte_len: entry.byte_len,
             aborted_transactions,
         })
-        .collect();
-    let record = WalFlushRecord {
-        object_key,
-        format_version: WAL_INDEX_FORMAT_VERSION,
-        entries,
+        .collect())
+}
+
+async fn trim_flushed_partitions(
+    cache: &AsyncMutex<WalIndexCache>,
+    partitions: &[FlushPartition],
+    trim_safety_lag: Option<i64>,
+) -> Result<(), crate::error::BrokerError> {
+    let Some(lag) = trim_safety_lag else {
+        return Ok(());
     };
-    index_log.publish_flush(&record).await?;
-    wait_for_committed_projection(cache.clone(), &record).await?;
-
-    if let Some(lag) = config.trim_safety_lag {
-        for partition in partitions {
-            if let Some(frontier) = cache
-                .lock()
-                .await
-                .flushed_frontier(partition.topic_id, partition.partition)
-            {
-                let hw_trim_floor = partition.high_watermark.0.saturating_sub(lag);
-                let trim_to = frontier.min(hw_trim_floor);
-                if trim_to > 0 {
-                    partition
-                        .log
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .trim_to_offset(Offset(trim_to))
-                        .map_err(crate::error::BrokerError::from)?;
-                }
-            }
+    for partition in partitions {
+        let frontier = cache
+            .lock()
+            .await
+            .flushed_frontier(partition.topic_id, partition.partition);
+        let Some(frontier) = frontier else {
+            continue;
+        };
+        let hw_trim_floor = partition.high_watermark.0.saturating_sub(lag);
+        let trim_to = frontier.min(hw_trim_floor);
+        if trim_to <= 0 {
+            continue;
         }
+        partition
+            .log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .trim_to_offset(Offset(trim_to))
+            .map_err(crate::error::BrokerError::from)?;
     }
-
-    Ok(Some(record))
+    Ok(())
 }
 
 async fn wait_for_committed_projection(
