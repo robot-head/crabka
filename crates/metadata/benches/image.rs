@@ -3,6 +3,8 @@
 //! Covers the hot paths for the Raft state machine and for request handlers:
 //!
 //! - `MetadataImage::apply` for the common record kinds.
+//! - `MetadataImage::partitions_of` / `all_partitions` — per-topic lookups
+//!   and the reconcile-loop scan, at many-topic cluster scale.
 //! - `MetadataImage::matching_acls` — called per `authorize()`.
 //! - `MetadataRecord` serialize/deserialize via wincode.
 
@@ -155,6 +157,54 @@ fn bench_apply(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// partitions_of / all_partitions — the per-topic and reconcile hot paths.
+//
+// Pins the scaling contract for many-topic clusters (the Gres per-tenant-topic
+// model): per-topic lookups must stay flat as the topic count grows (the
+// 1k-topic and 10k-topic `partitions_of` numbers must match — a regression to
+// a full-map filter scan makes the 10k case ~10× slower), and one
+// reconcile-shaped pass over the whole image must stay O(P), not O(topics×P).
+// ---------------------------------------------------------------------------
+
+fn image_with_single_partition_topics(n: usize) -> MetadataImage {
+    let mut img = MetadataImage::new(Uuid::nil());
+    for i in 0..n {
+        let name = format!("tenant-topic-{i:05}");
+        img.apply(&topic_record(&name, 1));
+        img.apply(&partition_record(&name, 0));
+    }
+    img
+}
+
+fn bench_partitions_by_topic(c: &mut Criterion) {
+    let mut group = c.benchmark_group("metadata_image/partitions_by_topic");
+
+    for n in [1_000usize, 10_000] {
+        let img = image_with_single_partition_topics(n);
+        let probe = format!("tenant-topic-{:05}", n / 2);
+
+        group.bench_function(format!("partitions_of/{n}_topics"), |b| {
+            b.iter(|| img.partitions_of(black_box(&probe)).count());
+        });
+        group.bench_function(format!("topic_partition_count/{n}_topics"), |b| {
+            b.iter(|| black_box(&img).topic_partition_count(black_box(&probe)));
+        });
+        // The replication supervisor's desired-follower-set shape: one pass
+        // over every partition per metadata-image change.
+        group.bench_function(format!("reconcile_scan/{n}_topics"), |b| {
+            b.iter(|| {
+                black_box(&img)
+                    .all_partitions()
+                    .filter(|p| p.replicas.contains(&NodeId(2)) && p.leader != NodeId(2))
+                    .count()
+            });
+        });
+    }
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // matching_acls — the authorize() hot path.
 // ---------------------------------------------------------------------------
 
@@ -247,6 +297,7 @@ fn bench_record_serde(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_apply,
+    bench_partitions_by_topic,
     bench_matching_acls,
     bench_record_serde,
 );

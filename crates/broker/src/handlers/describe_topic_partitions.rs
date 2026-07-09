@@ -171,8 +171,9 @@ pub(crate) async fn handle(
             continue;
         };
 
+        // `partitions_of` yields ascending partition-index order — the
+        // order the cursor pagination below depends on.
         let mut sorted_parts: Vec<_> = image.partitions_of(name).collect();
-        sorted_parts.sort_by_key(|p| p.partition);
 
         // Skip partitions before the cursor's `partition_index` on the
         // resume-topic only. `cursor_partition = 0` is a no-op skip.

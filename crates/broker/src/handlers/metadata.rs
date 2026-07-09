@@ -133,12 +133,10 @@ pub(crate) async fn handle(
     };
     // Build a fully-populated success row for a known topic by name.
     let success_row = |name: &str, rec: &crabka_metadata::TopicRecord| {
-        // Partitions are stored in a `HashMap`; sort by index so clients
+        // `partitions_of` yields ascending partition-index order, so clients
         // (and tests) see a deterministic ordering.
-        let mut sorted: Vec<_> = image.partitions_of(name).collect();
-        sorted.sort_by_key(|p| p.partition);
-        let partitions: Vec<MetadataResponsePartition> = sorted
-            .into_iter()
+        let partitions: Vec<MetadataResponsePartition> = image
+            .partitions_of(name)
             .map(|p| MetadataResponsePartition {
                 error_code: codes::NONE,
                 partition_index: p.partition,

@@ -244,33 +244,33 @@ async fn drain_leaderships_for_shutdown(
 
     let mut leader_count: usize = 0;
     let mut changes: Vec<MetadataRecord> = Vec::new();
-    for topic in image.topics() {
-        for pr in image.partitions_of(&topic.name) {
-            if pr.leader != shutting_down {
-                continue;
-            }
-            if let Ok(new_pr) = select_replacement_leader_for_shutdown(
-                &image,
-                liveness,
-                &pr.topic,
-                pr.partition,
-                shutting_down,
-            )
-            .await
-            {
-                // A live replica can take over: transfer leadership and keep
-                // the broker waiting until the new leadership is visible.
-                leader_count += 1;
-                changes.push(MetadataRecord::V1Partition(new_pr));
-            }
-            // Else: no live alternative ISR member to transfer to — e.g. the
-            // single-replica internal topics (__consumer_offsets,
-            // __transaction_state, __crabka_audit), of which every broker
-            // leads its own copy. Leadership cannot move anywhere, so counting
-            // it would block controlled shutdown forever; and the broker is
-            // stopping regardless (the partition has no other replica to serve
-            // it either way). Do NOT count it toward the drain gate.
+    // Single O(P) walk over every partition — this runs on every heartbeat
+    // tick during a controlled shutdown.
+    for pr in image.all_partitions() {
+        if pr.leader != shutting_down {
+            continue;
         }
+        if let Ok(new_pr) = select_replacement_leader_for_shutdown(
+            &image,
+            liveness,
+            &pr.topic,
+            pr.partition,
+            shutting_down,
+        )
+        .await
+        {
+            // A live replica can take over: transfer leadership and keep
+            // the broker waiting until the new leadership is visible.
+            leader_count += 1;
+            changes.push(MetadataRecord::V1Partition(new_pr));
+        }
+        // Else: no live alternative ISR member to transfer to — e.g. the
+        // single-replica internal topics (__consumer_offsets,
+        // __transaction_state, __crabka_audit), of which every broker
+        // leads its own copy. Leadership cannot move anywhere, so counting
+        // it would block controlled shutdown forever; and the broker is
+        // stopping regardless (the partition has no other replica to serve
+        // it either way). Do NOT count it toward the drain gate.
     }
 
     if !changes.is_empty()

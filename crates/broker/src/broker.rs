@@ -2951,13 +2951,13 @@ impl Broker {
                         })
                         .collect();
                     // Single O(P) walk over every partition.
-                    for ((topic_name, _idx), pr) in image.all_partitions() {
+                    for pr in image.all_partitions() {
                         if pr.leader == node_id {
                             if pr.isr.len() < pr.replicas.len() {
                                 urp += 1;
                             }
                             let min_isr = min_isr_by_topic
-                                .get(topic_name.as_str())
+                                .get(pr.topic.as_str())
                                 .copied()
                                 .unwrap_or(1);
                             if pr.isr.len() < min_isr {

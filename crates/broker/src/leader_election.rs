@@ -145,7 +145,7 @@ pub(crate) async fn compute_failover_changes(
         .map(NodeId)
         .collect();
     // Single O(P) walk over every partition in the image.
-    for (_, pr) in image.all_partitions() {
+    for pr in image.all_partitions() {
         if !pr.replicas.contains(&dead) && !pr.isr.contains(&dead) {
             continue;
         }
@@ -259,7 +259,7 @@ pub(crate) async fn compute_offline_dir_failover_changes(
         .into_iter()
         .map(NodeId)
         .collect();
-    for (_, pr) in image.all_partitions() {
+    for pr in image.all_partitions() {
         let Some(slot) = pr.replicas.iter().position(|n| *n == broker) else {
             continue;
         };

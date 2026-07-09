@@ -35,36 +35,30 @@ pub(crate) type TopicPartition = (String, i32);
 
 /// `(topic, partition)` pairs where `node_id` is in `replicas` AND
 /// `leader != node_id` — i.e., the broker should run a follower
-/// replicator task.
+/// replicator task. Single O(P) walk — this runs on every metadata-image
+/// change, so it must stay proportional to total partitions.
 pub(crate) fn desired_follower_set(
     node_id: NodeId,
     image: &MetadataImage,
 ) -> HashSet<TopicPartition> {
-    let mut out = HashSet::new();
-    for t in image.topics() {
-        for p in image.partitions_of(&t.name) {
-            if p.replicas.contains(&node_id) && p.leader != node_id {
-                out.insert((p.topic.clone(), p.partition));
-            }
-        }
-    }
-    out
+    image
+        .all_partitions()
+        .filter(|p| p.replicas.contains(&node_id) && p.leader != node_id)
+        .map(|p| (p.topic.clone(), p.partition))
+        .collect()
 }
 
 /// `(topic, partition)` pairs where `node_id` is in `replicas`,
 /// regardless of leader/follower role — every entry here means this
 /// broker hosts partition data on disk and must materialize the
-/// on-disk `Partition` locally.
+/// on-disk `Partition` locally. Single O(P) walk, same as
+/// [`desired_follower_set`].
 pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashSet<TopicPartition> {
-    let mut out = HashSet::new();
-    for t in image.topics() {
-        for p in image.partitions_of(&t.name) {
-            if p.replicas.contains(&node_id) {
-                out.insert((p.topic.clone(), p.partition));
-            }
-        }
-    }
-    out
+    image
+        .all_partitions()
+        .filter(|p| p.replicas.contains(&node_id))
+        .map(|p| (p.topic.clone(), p.partition))
+        .collect()
 }
 
 /// Open (or recover) the on-disk `Partition` for `(topic, partition)` and
