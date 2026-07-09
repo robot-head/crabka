@@ -512,6 +512,39 @@ impl Log {
             .collect()
     }
 
+    /// Return aborted transactions from every local segment's `.txnindex`
+    /// whose offset range overlaps `[start, end)`.
+    ///
+    /// Unlike [`Self::aborted_in_range`], this is intended for background
+    /// archival paths that may copy sealed segments before they are evicted.
+    /// Fetch uses the cheaper active-index projection on its hot path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LogError`] when a segment transaction index cannot be opened.
+    pub fn aborted_in_range_all_segments(
+        &self,
+        start: Offset,
+        end: Offset,
+    ) -> Result<Vec<crate::txn_index::AbortedTxn>, LogError> {
+        if end <= start {
+            return Ok(Vec::new());
+        }
+
+        let mut aborted = Vec::new();
+        for segment in &self.segments {
+            let segment_start = segment.base_offset();
+            let segment_end = segment.last_offset() + 1;
+            if segment_start >= end || segment_end <= start {
+                continue;
+            }
+            let index = TxnIndex::open(segment.txn_index_path())?;
+            aborted.extend(index.aborted_in_range(start, end).copied());
+        }
+        aborted.extend(self.active_txn_index.aborted_in_range(start, end).copied());
+        Ok(aborted)
+    }
+
     /// Append a `RecordBatch`. The batch's `base_offset` is overwritten
     /// by the log to be the next assigned offset; `last_offset_delta`
     /// determines how many absolute offsets this batch consumes.

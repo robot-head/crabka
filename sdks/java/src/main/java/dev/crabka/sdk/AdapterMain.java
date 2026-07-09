@@ -258,7 +258,9 @@ public final class AdapterMain {
 
     private static Map<String, Object> errorResponse(Throwable error) {
         Throwable unwrapped = unwrap(error);
-        if (unwrapped instanceof UnimplementedException unimplemented) {
+        if (unwrapped instanceof UnimplementedException unimplemented
+                && !unimplemented.module().isBlank()
+                && !unimplemented.gatedOn().isBlank()) {
             return Map.of("error", Map.of(
                     "kind", unimplemented.kind(),
                     "module", unimplemented.module(),

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -120,6 +121,45 @@ final class MessagingTest {
         assertTrue(start.getAutoCommit());
     }
 
+    @Test
+    void liveSendMapsInvalidArgumentErrorInfo() {
+        InvalidArgumentException error = assertSendError(
+                InvalidArgumentException.class,
+                gatewayError(3, "topic is required", false));
+
+        assertEquals("topic is required", error.getMessage());
+    }
+
+    @Test
+    void liveSendMapsRetriableErrorInfoToTransport() {
+        TransportException error = assertSendError(
+                TransportException.class,
+                gatewayError(13, "owner unavailable", true));
+
+        assertEquals("owner unavailable", error.getMessage());
+    }
+
+    @Test
+    void liveSendMapsUnavailableErrorInfoToTransport() {
+        TransportException error = assertSendError(
+                TransportException.class,
+                gatewayError(14, "gateway unavailable", false));
+
+        assertEquals("gateway unavailable", error.getMessage());
+    }
+
+    private static <T extends CrabkaException> T assertSendError(
+            Class<T> expectedType,
+            GatewayOuterClass.ErrorInfo errorInfo) {
+        OkHttpClient httpClient = new OkHttpClient.Builder()
+                .addInterceptor(chain -> gatewayResponse(
+                        chain.request(), CONNECT_PROTO, gatewaySendErrorResponse(errorInfo)))
+                .build();
+        LiveGatewayTransport transport = new LiveGatewayTransport(URI.create("http://gateway.test"), "", httpClient);
+
+        return assertThrows(expectedType, () -> transport.send(Record.of("live", bytes("payload"))));
+    }
+
     private static byte[] gatewaySendResponse(long offset) {
         GatewayOuterClass.RecordResult result = GatewayOuterClass.RecordResult.newBuilder()
                 .setPartition(0)
@@ -130,6 +170,24 @@ final class MessagingTest {
                 .addResults(result)
                 .build();
         return response.toByteArray();
+    }
+
+    private static byte[] gatewaySendErrorResponse(GatewayOuterClass.ErrorInfo errorInfo) {
+        GatewayOuterClass.RecordResult result = GatewayOuterClass.RecordResult.newBuilder()
+                .setError(errorInfo)
+                .build();
+        return GatewayOuterClass.SendResponse.newBuilder()
+                .addResults(result)
+                .build()
+                .toByteArray();
+    }
+
+    private static GatewayOuterClass.ErrorInfo gatewayError(int code, String message, boolean retriable) {
+        return GatewayOuterClass.ErrorInfo.newBuilder()
+                .setCode(code)
+                .setMessage(message)
+                .setRetriable(retriable)
+                .build();
     }
 
     private static byte[] gatewaySubscribeResponse(String topic, byte[] value) {
@@ -177,5 +235,9 @@ final class MessagingTest {
         byte[] payload = body.readByteArray(length);
         assertEquals(0, flags);
         return payload;
+    }
+
+    private static byte[] bytes(String value) {
+        return value.getBytes(StandardCharsets.UTF_8);
     }
 }

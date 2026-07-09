@@ -86,7 +86,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::diskless::wal_index::WalIndexEntry;
+    use crate::diskless::wal_index::{WAL_INDEX_FORMAT_VERSION, WalIndexEntry};
 
     #[tokio::test]
     async fn index_log_projects_published_flush_records() {
@@ -95,7 +95,7 @@ mod tests {
         let topic_id = Uuid::from_u128(7);
         let record = WalFlushRecord {
             object_key: "object-a".into(),
-            format_version: 1,
+            format_version: WAL_INDEX_FORMAT_VERSION,
             entries: vec![WalIndexEntry {
                 topic_id,
                 partition: 0,
@@ -103,6 +103,7 @@ mod tests {
                 last_offset: 3,
                 byte_start: 6,
                 byte_len: 10,
+                aborted_transactions: Vec::new(),
             }],
         };
 

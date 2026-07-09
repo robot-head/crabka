@@ -34,8 +34,9 @@ type QueueRenewEntry struct {
 }
 
 type QueueOperationError struct {
-	Kind    ErrorKind
-	Message string
+	Kind      ErrorKind
+	Message   string
+	Retriable bool
 }
 
 type QueueResult struct {
@@ -328,10 +329,20 @@ func fromProtoQueueBatch(entries []QueueAckEntry, results []*gw.QueueAckResult) 
 }
 
 func fromProtoQueueResult(messageID string, result *gw.QueueAckResult) QueueResult {
-	if result == nil || result.Error == nil {
+	if result == nil {
 		return QueueResult{MessageID: messageID}
 	}
-	return queueEntryError(messageID)
+	if result.Error == nil {
+		return QueueResult{MessageID: messageID}
+	}
+	return QueueResult{MessageID: messageID, Error: fromProtoQueueOperationError(result.Error)}
+}
+
+func fromProtoQueueOperationError(errorInfo *gw.ErrorInfo) *QueueOperationError {
+	if errorInfo == nil {
+		return nil
+	}
+	return &QueueOperationError{Kind: mapGatewayErrorKind(errorInfo.Code, errorInfo.Retriable), Message: errorInfo.Message, Retriable: errorInfo.Retriable}
 }
 
 func renewEntriesAsAckEntries(entries []QueueRenewEntry) []QueueAckEntry {

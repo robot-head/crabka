@@ -5,6 +5,7 @@
 
 use std::{
     collections::{HashMap, VecDeque},
+    net::SocketAddr,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
 };
@@ -606,9 +607,11 @@ fn effective_principal(principal: Option<Extension<Principal>>) -> Principal {
 pub async fn queue_acquire(
     Extension(state): Extension<Arc<crate::state::AppState>>,
     principal: Option<Extension<Principal>>,
+    peer: Option<Extension<SocketAddr>>,
     req: ConnectRequest<pb::QueueAcquireRequest>,
 ) -> Result<ConnectResponse<pb::QueueAcquireResponse>, ConnectError> {
     let principal = effective_principal(principal);
+    let host = peer.map_or_else(unknown_host, |Extension(addr)| addr);
     let request = req.0;
     if request.group_id.is_empty() {
         return Err(ConnectError::new_invalid_argument("group_id is required"));
@@ -620,7 +623,6 @@ pub async fn queue_acquire(
         return Err(error);
     }
 
-    let host = unknown_host();
     if authorize_resource(
         &state,
         &principal,
@@ -721,13 +723,47 @@ pub async fn queue_renew(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Barrier;
+    use std::{collections::HashSet, sync::Barrier};
 
     use assert2::assert;
     use bytes::Bytes;
+    use crabka_authz::{
+        AclCache, AclSource, AuthorizationRequest, Authorizer, SimpleAclAuthorizer,
+    };
+    use crabka_metadata::{AclEntry, PatternType, PermissionType};
     use crabka_security::AuthMethod;
 
     use super::*;
+
+    const QUEUE_ACL_PRINCIPAL: &str = "queue-user";
+    const QUEUE_ACL_GROUP: &str = "queue-group";
+    const QUEUE_ACL_TOPIC: &str = "queue-topic";
+    const ALLOWED_HOST: &str = "127.0.0.7";
+
+    #[derive(Debug)]
+    struct EmbeddedAclAuthorizer {
+        inner: SimpleAclAuthorizer,
+        cache: AclCache,
+    }
+
+    impl EmbeddedAclAuthorizer {
+        fn new(entries: Vec<AclEntry>) -> Self {
+            Self {
+                inner: SimpleAclAuthorizer::new(HashSet::new()),
+                cache: AclCache::new(entries),
+            }
+        }
+    }
+
+    impl Authorizer for EmbeddedAclAuthorizer {
+        fn authorize(
+            &self,
+            _source: &dyn AclSource,
+            req: &AuthorizationRequest<'_>,
+        ) -> AuthorizationResult {
+            self.inner.authorize(&self.cache, req)
+        }
+    }
 
     fn test_config() -> QueueSessionConfig {
         QueueSessionConfig {
@@ -775,6 +811,156 @@ mod tests {
             delivered,
             staged_acks: HashMap::new(),
         }
+    }
+
+    fn gateway_config() -> GatewayConfig {
+        GatewayConfig {
+            bootstrap: "127.0.0.1:1".to_string(),
+            listen_addr: "127.0.0.1:0".parse().expect("listen addr parses"),
+            client_id: "queue-auth-test".to_string(),
+            dedup_topic: "__queue_auth_dedup".to_string(),
+            dedup_partitions: 1,
+            dedup_window_ms: 3_600_000,
+            dedup_txn_id_prefix: "queue-auth-dedup".to_string(),
+            advertised_addr: "127.0.0.1:0".to_string(),
+            membership_topic: "__queue_auth_membership".to_string(),
+            tls: None,
+            broker_security: None,
+            authz: None,
+            webhooks: HashMap::new(),
+            outbound: Vec::new(),
+            schema_registry_url: None,
+            queue_max_messages: 16,
+            queue_wait_ms_cap: 1_000,
+            queue_session_idle_secs: 60,
+            queue_max_sessions: 64,
+        }
+    }
+
+    async fn state_with_acls(entries: Vec<AclEntry>) -> Arc<crate::state::AppState> {
+        let config = gateway_config();
+        let produce = crate::produce::ProduceCore::new_for_test(
+            &config.bootstrap,
+            &config.client_id,
+            Arc::new(crate::codec::RawCodec),
+        )
+        .await
+        .expect("produce core builds for authorization-only queue test");
+        let queue_sessions = crate::state::AppState::queue_sessions_from_config(&config);
+
+        Arc::new(crate::state::AppState {
+            produce: Arc::new(produce),
+            config: Arc::new(config),
+            authz: Arc::new(crate::authz::GatewayAuthz::new(Arc::new(
+                EmbeddedAclAuthorizer::new(entries),
+            ))),
+            codec: Arc::new(crate::codec::RawCodec),
+            queue_sessions,
+        })
+    }
+
+    fn read_allow_acl(resource_type: ResourceType, resource_name: &str, host: &str) -> AclEntry {
+        AclEntry {
+            resource_type,
+            resource_name: resource_name.to_string(),
+            pattern_type: PatternType::Literal,
+            principal: format!("User:{QUEUE_ACL_PRINCIPAL}"),
+            host: host.to_string(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        }
+    }
+
+    fn peer(addr: &str) -> SocketAddr {
+        addr.parse().expect("test peer address parses")
+    }
+
+    fn queue_acquire_request() -> ConnectRequest<pb::QueueAcquireRequest> {
+        ConnectRequest(pb::QueueAcquireRequest {
+            group_id: QUEUE_ACL_GROUP.to_string(),
+            topics: vec![QUEUE_ACL_TOPIC.to_string()],
+            max_messages: 1,
+            wait_ms: 0,
+            session_id: "missing-session".to_string(),
+            lock_duration_ms: SUPPORTED_QUEUE_LOCK_DURATION_MS,
+        })
+    }
+
+    fn assert_reached_session_lookup(error: &ConnectError) {
+        assert!(error.code() == connectrpc_axum::message::Code::FailedPrecondition);
+        assert!(
+            error
+                .message()
+                .is_some_and(|message| message.contains("expired"))
+        );
+    }
+
+    #[tokio::test]
+    async fn acquire_uses_peer_host_for_host_scoped_group_and_topic_acls() {
+        let state = state_with_acls(vec![
+            read_allow_acl(ResourceType::Group, QUEUE_ACL_GROUP, ALLOWED_HOST),
+            read_allow_acl(ResourceType::Topic, QUEUE_ACL_TOPIC, ALLOWED_HOST),
+        ])
+        .await;
+
+        let allowed = queue_acquire(
+            Extension(state.clone()),
+            Some(Extension(principal(QUEUE_ACL_PRINCIPAL))),
+            Some(Extension(peer("127.0.0.7:9092"))),
+            queue_acquire_request(),
+        )
+        .await
+        .expect_err("allowed host reaches session lookup");
+        let denied = queue_acquire(
+            Extension(state),
+            Some(Extension(principal(QUEUE_ACL_PRINCIPAL))),
+            Some(Extension(peer("127.0.0.8:9092"))),
+            queue_acquire_request(),
+        )
+        .await
+        .expect_err("denied host fails group authorization");
+
+        assert_reached_session_lookup(&allowed);
+        assert!(denied.code() == connectrpc_axum::message::Code::PermissionDenied);
+        assert!(
+            denied
+                .message()
+                .is_some_and(|message| message.contains("Read Group:queue-group"))
+        );
+    }
+
+    #[tokio::test]
+    async fn acquire_uses_peer_host_for_topic_acl_after_group_is_allowed() {
+        let state = state_with_acls(vec![
+            read_allow_acl(ResourceType::Group, QUEUE_ACL_GROUP, "*"),
+            read_allow_acl(ResourceType::Topic, QUEUE_ACL_TOPIC, ALLOWED_HOST),
+        ])
+        .await;
+
+        let allowed = queue_acquire(
+            Extension(state.clone()),
+            Some(Extension(principal(QUEUE_ACL_PRINCIPAL))),
+            Some(Extension(peer("127.0.0.7:9092"))),
+            queue_acquire_request(),
+        )
+        .await
+        .expect_err("allowed topic host reaches session lookup");
+        let denied = queue_acquire(
+            Extension(state),
+            Some(Extension(principal(QUEUE_ACL_PRINCIPAL))),
+            Some(Extension(peer("127.0.0.8:9092"))),
+            queue_acquire_request(),
+        )
+        .await
+        .expect_err("denied host fails topic authorization");
+
+        assert_reached_session_lookup(&allowed);
+        assert!(denied.code() == connectrpc_axum::message::Code::PermissionDenied);
+        assert!(
+            denied
+                .message()
+                .is_some_and(|message| message.contains("Read Topic:queue-topic"))
+        );
     }
 
     #[test]

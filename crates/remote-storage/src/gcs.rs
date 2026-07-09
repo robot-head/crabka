@@ -2,8 +2,8 @@
 //!
 //! This is the GCS sibling of [`S3RemoteStorage`]: it builds an
 //! `object_store::gcp::GoogleCloudStorage` client from a [`GcsConfig`] and
-//! wraps it in the same generic [`S3RemoteStorage`] engine via
-//! [`S3RemoteStorage::with_store`]. Because that engine is backend-agnostic
+//! wraps it in the same generic [`S3RemoteStorage`] engine. Because that engine
+//! is backend-agnostic
 //! (object-key layout, byte-range fetch, streaming multipart upload, and
 //! `object_store` error mapping are all generic over `dyn ObjectStore`), GCS
 //! reuses the entire copy / fetch / delete + multipart implementation —
@@ -49,7 +49,7 @@ impl S3RemoteStorage {
     pub fn from_gcs_config(cfg: &GcsConfig) -> Result<Self, RemoteStorageError> {
         let store = build_object_store(&ObjectStoreConfig::Gcs(cfg.clone()))
             .map_err(|e| RemoteStorageError::InvalidArgument(e.to_string()))?;
-        Ok(Self::with_store(store, cfg.prefix.clone())
+        Ok(Self::with_prefix_applied_store(store, cfg.prefix.clone())
             .with_multipart_tuning(cfg.multipart_threshold, cfg.multipart_chunk_size))
     }
 }

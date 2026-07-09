@@ -87,10 +87,24 @@ where
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use futures::stream::TryStreamExt as _;
     use object_store::ObjectStoreExt;
 
     use super::*;
     use crate::config::{GcsConfig, ObjectStoreConfig, S3Config};
+
+    async fn list_paths(store: &Arc<dyn ObjectStore>, prefix: Option<&Path>) -> Vec<String> {
+        let mut paths: Vec<String> = store
+            .list(prefix)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|meta| meta.location.as_ref().to_owned())
+            .collect();
+        paths.sort();
+        paths
+    }
 
     #[test]
     fn inmemory_builds() {
@@ -107,6 +121,69 @@ mod tests {
             .unwrap();
         let got = store.get(&path).await.unwrap().bytes().await.unwrap();
         assert!(&got[..] == b"hi");
+    }
+
+    #[tokio::test]
+    async fn prefix_wrapper_applies_prefix_once_to_operations_and_lists() {
+        let raw = Arc::new(object_store::memory::InMemory::new()) as Arc<dyn ObjectStore>;
+        let store = apply_prefix(Arc::clone(&raw), Some("cluster-a"));
+        let relative_path = Path::from("segments/log");
+        let raw_path = Path::from("cluster-a/segments/log");
+        let double_prefixed_path = Path::from("cluster-a/cluster-a/segments/log");
+
+        store
+            .put(
+                &relative_path,
+                object_store::PutPayload::from(b"hi".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let got = raw.get(&raw_path).await.unwrap().bytes().await.unwrap();
+        assert!(&got[..] == b"hi");
+        assert!(matches!(
+            raw.get(&double_prefixed_path).await.unwrap_err(),
+            object_store::Error::NotFound { .. }
+        ));
+        assert!(list_paths(&raw, None).await == vec!["cluster-a/segments/log"]);
+        assert!(list_paths(&store, None).await == vec!["segments/log"]);
+
+        store.delete(&relative_path).await.unwrap();
+        assert!(list_paths(&raw, None).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn absent_prefix_leaves_operations_and_lists_relative() {
+        let raw = Arc::new(object_store::memory::InMemory::new()) as Arc<dyn ObjectStore>;
+        let store = apply_prefix(Arc::clone(&raw), None);
+        let relative_path = Path::from("segments/log");
+        let prefixed_path = Path::from("cluster-a/segments/log");
+
+        store
+            .put(
+                &relative_path,
+                object_store::PutPayload::from(b"hi".to_vec()),
+            )
+            .await
+            .unwrap();
+
+        let got = raw
+            .get(&relative_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert!(&got[..] == b"hi");
+        assert!(matches!(
+            raw.get(&prefixed_path).await.unwrap_err(),
+            object_store::Error::NotFound { .. }
+        ));
+        assert!(list_paths(&raw, None).await == vec!["segments/log"]);
+        assert!(list_paths(&store, None).await == vec!["segments/log"]);
+
+        store.delete(&relative_path).await.unwrap();
+        assert!(list_paths(&raw, None).await.is_empty());
     }
 
     #[test]

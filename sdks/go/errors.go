@@ -67,18 +67,26 @@ func mapConnectError(err error) *SDKError {
 }
 
 func mapRecordError(code int32, message string) *SDKError {
+	return errorWithMessage(mapGatewayErrorKind(code, false), message)
+}
+
+func mapGatewayErrorKind(code int32, retriable bool) ErrorKind {
+	if code == 13 && retriable {
+		return Transport
+	}
+
 	switch code {
 	case 3, 9, 11:
-		return errorWithMessage(InvalidArgument, message)
+		return InvalidArgument
 	case 5:
-		return errorWithMessage(NotFound, message)
+		return NotFound
 	case 16:
-		return errorWithMessage(Unauthenticated, message)
+		return Unauthenticated
 	case 12:
-		return errorWithMessage(Unimplemented, message)
+		return Unimplemented
 	case 14:
-		return errorWithMessage(Transport, message)
+		return Transport
 	default:
-		return errorWithMessage(ServerError, message)
+		return ServerError
 	}
 }

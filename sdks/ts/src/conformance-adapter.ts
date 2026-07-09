@@ -298,9 +298,16 @@ function encodeQueueBatchResult(results: { messageId: string; error: { kind: str
   return {
     results: results.map((result) => ({
       message_id: result.messageId,
-      error: result.error,
+      error: encodeQueueOperationError(result.error),
     })),
   };
+}
+
+function encodeQueueOperationError(error: { kind: string; message: string } | null): unknown {
+  if (!error) {
+    return null;
+  }
+  return { kind: error.kind, message: error.message };
 }
 
 function encodeMessage(message: Message): unknown {

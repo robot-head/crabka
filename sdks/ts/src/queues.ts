@@ -1,6 +1,7 @@
 import type { Client } from "@connectrpc/connect";
 import { create } from "@bufbuild/protobuf";
 import {
+  type ErrorInfo,
   Gateway,
   Header as ProtoHeader,
   QueueAckEntrySchema,
@@ -9,7 +10,7 @@ import {
   QueueAcknowledgeRequestSchema,
   QueueRenewRequestSchema,
 } from "../gen/crabka/gateway/v1/gateway_pb.ts";
-import { fromConnectError, InvalidArgumentError, TransportError } from "./errors.ts";
+import { fromConnectError, fromRecordError, type ErrorKind, InvalidArgumentError, TransportError } from "./errors.ts";
 import type { Header, MockStore, StoredMessage } from "./messaging.ts";
 
 const DEFAULT_QUEUE_LOCK_DURATION_MS = 30_000;
@@ -21,7 +22,7 @@ type LiveGateway = Client<typeof Gateway>;
 export type QueueAckTypeName = "accept" | "release" | "reject";
 export type QueueAckEntry = { messageId: string; ackType: QueueAckTypeName };
 export type QueueRenewEntry = { messageId: string };
-export type QueueOperationError = { kind: "invalid_argument"; message: string };
+export type QueueOperationError = { kind: ErrorKind; message: string; retriable: boolean };
 export type QueueResult = { messageId: string; error: QueueOperationError | null };
 export type QueueMessage = {
   messageId: string;
@@ -228,7 +229,7 @@ function mockQueueStateForAck(ackType: QueueAckTypeName): StoredMessage["queueSt
 }
 
 function queueEntryError(messageId: string): QueueResult {
-  return { messageId, error: { kind: "invalid_argument", message: QUEUE_MESSAGE_NOT_ACQUIRED } };
+  return { messageId, error: { kind: "invalid_argument", message: QUEUE_MESSAGE_NOT_ACQUIRED, retriable: false } };
 }
 
 function toProtoAckEntry(entry: QueueAckEntry) {
@@ -265,12 +266,17 @@ function toProtoAckType(ackType: QueueAckTypeName): QueueAckType {
   return QueueAckType.ACCEPT;
 }
 
-function fromProtoQueueResult(entry: { messageId: string } | undefined, error: { message: string } | undefined): QueueResult {
+function fromProtoQueueResult(entry: { messageId: string } | undefined, error: ErrorInfo | undefined): QueueResult {
   const messageId = entry?.messageId ?? "";
   if (!error) {
     return { messageId, error: null };
   }
-  return { messageId, error: { kind: "invalid_argument", message: QUEUE_MESSAGE_NOT_ACQUIRED } };
+  return { messageId, error: queueOperationErrorFromProto(error) };
+}
+
+function queueOperationErrorFromProto(error: ErrorInfo): QueueOperationError {
+  const mappedError = fromRecordError(error.code, error.message, error.retriable);
+  return { kind: mappedError.kind, message: mappedError.message, retriable: error.retriable };
 }
 
 function fromProtoHeaders(headers: ProtoHeader[]): Header[] {

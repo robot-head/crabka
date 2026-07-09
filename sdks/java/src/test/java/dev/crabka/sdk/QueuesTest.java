@@ -125,6 +125,24 @@ final class QueuesTest {
         assertEquals(GatewayOuterClass.QueueAckType.ACCEPT, renewRequest.getEntries(0).getType());
     }
 
+    @Test
+    void liveQueueEntryErrorsPreserveGatewayErrorInfo() {
+        OkHttpClient httpClient = new OkHttpClient.Builder()
+                .addInterceptor(chain -> gatewayResponse(queueBatchErrorResponse(
+                        gatewayError(13, "coordinator unavailable", true),
+                        gatewayError(13, "commit failed", false))))
+                .build();
+        LiveGatewayTransport transport = new LiveGatewayTransport(URI.create("http://gateway.test"), "", httpClient);
+
+        QueueBatchResult result = transport.queueAcknowledge("actual-session", List.of(
+                new QueueAckEntry("queue:0:7", QueueAckType.ACCEPT),
+                new QueueAckEntry("queue:0:8", QueueAckType.RELEASE)));
+
+        assertQueueResults(result.results(), List.of(
+                new QueueResult("queue:0:7", new QueueOperationError("transport", "coordinator unavailable")),
+                new QueueResult("queue:0:8", new QueueOperationError("server_error", "commit failed"))));
+    }
+
     private static void assertInvalidArgument(String message, Runnable action) {
         CompletionException error = assertThrows(CompletionException.class, action::run);
         InvalidArgumentException invalidArgument = assertInstanceOf(InvalidArgumentException.class, error.getCause());
@@ -161,12 +179,30 @@ final class QueuesTest {
     private static byte[] queueBatchResponse(boolean withError) {
         GatewayOuterClass.QueueAckResult.Builder result = GatewayOuterClass.QueueAckResult.newBuilder();
         if (withError) {
-            result.setError(GatewayOuterClass.ErrorInfo.newBuilder().setMessage("queue message is not acquired"));
+            result.setError(GatewayOuterClass.ErrorInfo.newBuilder()
+                    .setCode(9)
+                    .setMessage("record is not acquired by this session"));
         }
         return GatewayOuterClass.QueueAcknowledgeResponse.newBuilder()
                 .addResults(result)
                 .build()
                 .toByteArray();
+    }
+
+    private static byte[] queueBatchErrorResponse(GatewayOuterClass.ErrorInfo... errors) {
+        GatewayOuterClass.QueueAcknowledgeResponse.Builder response = GatewayOuterClass.QueueAcknowledgeResponse.newBuilder();
+        for (GatewayOuterClass.ErrorInfo error : errors) {
+            response.addResults(GatewayOuterClass.QueueAckResult.newBuilder().setError(error));
+        }
+        return response.build().toByteArray();
+    }
+
+    private static GatewayOuterClass.ErrorInfo gatewayError(int code, String message, boolean retriable) {
+        return GatewayOuterClass.ErrorInfo.newBuilder()
+                .setCode(code)
+                .setMessage(message)
+                .setRetriable(retriable)
+                .build();
     }
 
     private static Response gatewayResponse(byte[] body) {

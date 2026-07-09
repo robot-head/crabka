@@ -85,7 +85,7 @@ export function fromConnectError(error: unknown): CrabkaError {
   }
 }
 
-export function fromRecordError(code: number, message: string): CrabkaError {
+export function fromRecordError(code: number, message: string, retriable = false): CrabkaError {
   switch (code) {
     case 3:
     case 9:
@@ -97,6 +97,11 @@ export function fromRecordError(code: number, message: string): CrabkaError {
       return new UnauthenticatedError(message);
     case 12:
       return new UnimplementedError(undefined, undefined, message);
+    case 13:
+      if (retriable) {
+        return new TransportError(message);
+      }
+      return new ServerError(message);
     case 14:
       return new TransportError(message);
     default:

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import { createClient } from "./client.ts";
-import { cloudEventHeaders } from "./messaging.ts";
+import type { SubscribeFrame } from "../gen/crabka/gateway/v1/gateway_pb.ts";
+import { cloudEventHeaders, createMessagingModule, type Filter } from "./messaging.ts";
 
 const encoder = new TextEncoder();
 
@@ -54,4 +55,39 @@ describe("messaging", () => {
       done: false,
     });
   });
+
+  test.each([
+    { value: "C:\\tmp", expected: "path = 'C:\\\\tmp'" },
+    { value: "C:\\tmp\\", expected: "path = 'C:\\\\tmp\\\\'" },
+    { value: "C:\\tmp\\O'Brien", expected: "path = 'C:\\\\tmp\\\\O\\'Brien'" },
+  ])("live subscribe string filter escapes backslashes and quotes for $value", async ({ value, expected }) => {
+    await expect(renderedLiveFilterFor({ path: "$.path", op: "equals", value })).resolves.toBe(expected);
+  });
 });
+
+async function renderedLiveFilterFor(filter: Filter): Promise<string> {
+  let renderedFilter: string | undefined;
+  const gateway = {
+    subscribe(frames: AsyncIterable<SubscribeFrame>) {
+      return {
+        async *[Symbol.asyncIterator]() {
+          const startFrame = await frames[Symbol.asyncIterator]().next();
+          if (startFrame.done || startFrame.value.frame.case !== "start") {
+            throw new Error("subscribe start frame is required");
+          }
+          renderedFilter = startFrame.value.frame.value.filter;
+        },
+      };
+    },
+  } as unknown as NonNullable<Parameters<typeof createMessagingModule>[0]["gateway"]>;
+
+  const subscription = createMessagingModule({ endpoint: "http://gateway", gateway }).subscribe(["filtered"], {
+    group: "reader",
+    filter,
+  });
+  await subscription[Symbol.asyncIterator]().next();
+  if (renderedFilter === undefined) {
+    throw new Error("subscribe filter was not rendered");
+  }
+  return renderedFilter;
+}

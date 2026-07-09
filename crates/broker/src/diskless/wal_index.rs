@@ -8,6 +8,29 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Diskless WAL index schema version carried in committed flush records.
+pub const WAL_INDEX_FORMAT_VERSION: u16 = 2;
+
+/// One aborted transaction whose data overlaps a flushed diskless WAL run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WalAbortedTxn {
+    pub producer_id: i64,
+    pub first_offset: i64,
+    pub last_offset: i64,
+}
+
+impl WalAbortedTxn {
+    /// Whether this aborted transaction overlaps the half-open offset range
+    /// `[first_offset, last_offset_exclusive)`.
+    #[must_use]
+    pub fn overlaps(self, first_offset: i64, last_offset_exclusive: i64) -> bool {
+        if last_offset_exclusive <= first_offset {
+            return false;
+        }
+        self.first_offset < last_offset_exclusive && self.last_offset >= first_offset
+    }
+}
+
 /// One partition's byte range within a flushed WAL object.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WalIndexEntry {
@@ -17,6 +40,7 @@ pub struct WalIndexEntry {
     pub last_offset: i64,
     pub byte_start: u64,
     pub byte_len: u32,
+    pub aborted_transactions: Vec<WalAbortedTxn>,
 }
 
 /// Durable index event for one flushed diskless WAL object.
@@ -70,18 +94,17 @@ impl WalIndexCache {
         }
     }
 
-    /// Return the object and byte range covering `offset`, if one exists.
+    /// Return the object and index entry covering `offset`, if one exists.
     #[must_use]
     pub fn lookup(
         &self,
         topic_id: Uuid,
         partition: i32,
         offset: i64,
-    ) -> Option<(String, u64, u32)> {
+    ) -> Option<(String, WalIndexEntry)> {
         let entries = self.by_topic_partition.get(&(topic_id, partition))?;
         let (_, (object_key, entry)) = entries.range(..=offset).next_back()?;
-        (offset <= entry.last_offset)
-            .then(|| (object_key.clone(), entry.byte_start, entry.byte_len))
+        (offset <= entry.last_offset).then(|| (object_key.clone(), entry.clone()))
     }
 
     /// Return the highest flushed offset plus one for the partition.
@@ -129,6 +152,7 @@ mod tests {
             last_offset: l,
             byte_start: 0,
             byte_len: 1,
+            aborted_transactions: Vec::new(),
         }
     }
 
@@ -137,12 +161,12 @@ mod tests {
         let mut c = WalIndexCache::default();
         c.apply(&WalFlushRecord {
             object_key: "o1".into(),
-            format_version: 1,
+            format_version: WAL_INDEX_FORMAT_VERSION,
             entries: vec![entry(0, 0, 4)],
         });
         c.apply(&WalFlushRecord {
             object_key: "o2".into(),
-            format_version: 1,
+            format_version: WAL_INDEX_FORMAT_VERSION,
             entries: vec![entry(0, 5, 9)],
         });
         let t = Uuid::from_u128(1);
@@ -157,7 +181,7 @@ mod tests {
         let mut c = WalIndexCache::default();
         let rec = WalFlushRecord {
             object_key: "o1".into(),
-            format_version: 1,
+            format_version: WAL_INDEX_FORMAT_VERSION,
             entries: vec![entry(0, 0, 4)],
         };
         c.apply(&rec);
@@ -170,8 +194,15 @@ mod tests {
     fn wincode_round_trips() {
         let rec = WalFlushRecord {
             object_key: "o".into(),
-            format_version: 1,
-            entries: vec![entry(3, 1, 2)],
+            format_version: WAL_INDEX_FORMAT_VERSION,
+            entries: vec![WalIndexEntry {
+                aborted_transactions: vec![WalAbortedTxn {
+                    producer_id: 42,
+                    first_offset: 1,
+                    last_offset: 2,
+                }],
+                ..entry(3, 1, 2)
+            }],
         };
         let bytes = rec.to_bytes().unwrap();
         assert!(WalFlushRecord::from_bytes(&bytes).unwrap() == rec);
@@ -182,16 +213,31 @@ mod tests {
         let mut c = WalIndexCache::default();
         c.apply(&WalFlushRecord {
             object_key: "o2".into(),
-            format_version: 1,
+            format_version: WAL_INDEX_FORMAT_VERSION,
             entries: vec![entry(0, 5, 9)],
         });
         c.apply(&WalFlushRecord {
             object_key: "o1".into(),
-            format_version: 1,
+            format_version: WAL_INDEX_FORMAT_VERSION,
             entries: vec![entry(0, 0, 4)],
         });
 
         assert!(c.earliest_covered(Uuid::from_u128(1), 0) == Some(0));
         assert!(c.earliest_covered(Uuid::from_u128(1), 1).is_none());
+    }
+
+    #[test]
+    fn aborted_txn_overlap_uses_half_open_query_range() {
+        let txn = WalAbortedTxn {
+            producer_id: 7,
+            first_offset: 5,
+            last_offset: 8,
+        };
+
+        assert!(txn.overlaps(0, 6));
+        assert!(txn.overlaps(8, 9));
+        assert!(!txn.overlaps(0, 5));
+        assert!(!txn.overlaps(9, 10));
+        assert!(!txn.overlaps(5, 5));
     }
 }

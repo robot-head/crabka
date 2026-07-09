@@ -150,6 +150,7 @@ async fn acquire_until_message(
         let response = queue::queue_acquire(
             Extension(state.clone()),
             Some(Extension(principal())),
+            None,
             ConnectRequest(pb::QueueAcquireRequest {
                 group_id: group_id.into(),
                 topics: vec![topic.into()],
@@ -182,6 +183,7 @@ async fn acquire_until_messages(
         let response = queue::queue_acquire(
             Extension(state.clone()),
             Some(Extension(principal())),
+            None,
             ConnectRequest(pb::QueueAcquireRequest {
                 group_id: group_id.into(),
                 topics: vec![topic.into()],
@@ -334,6 +336,7 @@ async fn acquire_returns_records_and_headers_then_accept_prevents_redelivery() {
     let second = queue::queue_acquire(
         Extension(state),
         Some(Extension(principal())),
+        None,
         ConnectRequest(pb::QueueAcquireRequest {
             group_id: "queue-accept-group".into(),
             topics: vec!["queue-accept".into()],
@@ -415,6 +418,7 @@ async fn reject_archives_record_and_prevents_redelivery() {
     let second = queue::queue_acquire(
         Extension(state),
         Some(Extension(principal())),
+        None,
         ConnectRequest(pb::QueueAcquireRequest {
             group_id: "queue-reject-group".into(),
             topics: vec!["queue-reject".into()],
@@ -475,6 +479,7 @@ async fn non_default_lock_duration_is_invalid_argument() {
     let error = queue::queue_acquire(
         Extension(state),
         Some(Extension(principal())),
+        None,
         ConnectRequest(pb::QueueAcquireRequest {
             group_id: "queue-lock-duration-group".into(),
             topics: vec!["queue-lock-duration".into()],
@@ -517,6 +522,7 @@ async fn session_expiry_reacquire_redelivers_unacked_record() {
     let expired = queue::queue_acquire(
         Extension(state.clone()),
         Some(Extension(principal())),
+        None,
         ConnectRequest(pb::QueueAcquireRequest {
             group_id: "queue-session-expiry-group".into(),
             topics: vec!["queue-session-expiry".into()],
@@ -602,6 +608,7 @@ async fn successful_acknowledge_batch_finalizes_after_broker_success() {
     let second = queue::queue_acquire(
         Extension(state),
         Some(Extension(principal())),
+        None,
         ConnectRequest(pb::QueueAcquireRequest {
             group_id: "queue-batch-accept-group".into(),
             topics: vec!["queue-batch-accept".into()],
@@ -660,6 +667,7 @@ async fn acquire_overflow_is_returned_by_later_acquire() {
     let third = queue::queue_acquire(
         Extension(state),
         Some(Extension(principal())),
+        None,
         ConnectRequest(pb::QueueAcquireRequest {
             group_id: "queue-overflow-group".into(),
             topics: vec!["queue-overflow".into()],

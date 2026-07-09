@@ -287,7 +287,7 @@ mod tests {
         let mut cache = crate::diskless::wal_index::WalIndexCache::default();
         cache.apply(&crate::diskless::wal_index::WalFlushRecord {
             object_key: "o".into(),
-            format_version: 1,
+            format_version: crate::diskless::wal_index::WAL_INDEX_FORMAT_VERSION,
             entries: vec![crate::diskless::wal_index::WalIndexEntry {
                 topic_id,
                 partition: 0,
@@ -295,6 +295,7 @@ mod tests {
                 last_offset: 8,
                 byte_start: 0,
                 byte_len: 1,
+                aborted_transactions: Vec::new(),
             }],
         });
         let handle = crate::diskless::read::DisklessReadHandle::new(

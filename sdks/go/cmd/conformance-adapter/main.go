@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	contractMajor = 1
-	contractMinor = 1
+	contractMajor                   = 1
+	contractMinor                   = 1
+	gatewayQueueNotAcquiredMessage  = "record is not acquired by this session"
+	contractQueueNotAcquiredMessage = "queue message is not acquired"
 )
 
 type command struct {
@@ -232,7 +234,14 @@ func encodeQueueResult(result crabka.QueueResult) map[string]any {
 	if result.Error == nil {
 		return map[string]any{"message_id": result.MessageID, "error": nil}
 	}
-	return map[string]any{"message_id": result.MessageID, "error": map[string]any{"kind": string(result.Error.Kind), "message": result.Error.Message}}
+	return map[string]any{"message_id": result.MessageID, "error": map[string]any{"kind": string(result.Error.Kind), "message": contractQueueErrorMessage(result.Error.Message)}}
+}
+
+func contractQueueErrorMessage(message string) string {
+	if message == gatewayQueueNotAcquiredMessage {
+		return contractQueueNotAcquiredMessage
+	}
+	return message
 }
 
 func ok(value any) any { return map[string]any{"ok": value} }

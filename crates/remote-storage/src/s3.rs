@@ -24,7 +24,10 @@
 //! ```
 //!
 //! Keys mirror [`LocalTieredStorage`](crate::LocalTieredStorage)'s
-//! directory layout so the two backends are observationally equivalent.
+//! directory layout so the two backends are observationally equivalent. When a
+//! remote-storage prefix is configured, the object-store handle applies it via a
+//! `PrefixStore`; the segment-key helpers always produce keys relative to that
+//! scoped store.
 
 use std::sync::Arc;
 
@@ -32,7 +35,7 @@ use crabka_object_store::{
     DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, ObjectOps, ObjectStoreClient,
     ObjectStoreConfig, ObjectStoreError, S3Config, build_object_store,
 };
-use object_store::{GetRange, ObjectStore, path::Path as ObjectPath};
+use object_store::{GetRange, ObjectStore, path::Path as ObjectPath, prefix::PrefixStore};
 use tracing::instrument;
 
 use crate::{
@@ -49,8 +52,8 @@ use crate::{
 /// endpoint, and bucket.
 pub struct S3RemoteStorage {
     ops: ObjectStoreClient,
-    /// Optional key prefix (joined with `/` to every object key). Lets
-    /// multiple Crabka clusters share a bucket safely.
+    /// Optional key prefix already applied by the wrapped object-store handle.
+    /// Kept for diagnostics; segment-key construction stays prefix-relative.
     prefix: Option<String>,
     /// File-size threshold above which uploads switch to S3 multipart.
     multipart_threshold: u64,
@@ -67,20 +70,18 @@ impl std::fmt::Debug for S3RemoteStorage {
 }
 
 impl S3RemoteStorage {
-    /// Wrap an arbitrary `ObjectStore` (e.g.
-    /// `object_store::memory::InMemory` for tests). Use
-    /// [`Self::from_s3_config`] for the production S3 path. Multipart
-    /// tuning falls back to the [`DEFAULT_MULTIPART_THRESHOLD`] /
+    /// Wrap an arbitrary, unscoped `ObjectStore` (e.g.
+    /// `object_store::memory::InMemory` for tests). When `prefix` is non-empty,
+    /// this wraps `store` in a `PrefixStore`; pass `None` if the store is
+    /// already scoped. Use [`Self::from_s3_config`] for the production S3 path.
+    /// Multipart tuning falls back to the [`DEFAULT_MULTIPART_THRESHOLD`] /
     /// [`DEFAULT_MULTIPART_CHUNK_SIZE`] constants; call
     /// [`Self::with_multipart_tuning`] to override in tests.
     #[must_use]
     pub fn with_store(store: Arc<dyn ObjectStore>, prefix: Option<String>) -> Self {
-        Self {
-            ops: ObjectStoreClient::new(store),
-            prefix,
-            multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
-            multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
-        }
+        let prefix = normalize_prefix(prefix);
+        let store = prefix_object_store(store, prefix.as_deref());
+        Self::with_prefix_applied_store(store, prefix)
     }
 
     /// Override the multipart threshold + chunk size. Returns `self` for
@@ -103,30 +104,38 @@ impl S3RemoteStorage {
     pub fn from_s3_config(cfg: &S3Config) -> Result<Self, RemoteStorageError> {
         let store = build_object_store(&ObjectStoreConfig::S3(cfg.clone()))
             .map_err(|e| RemoteStorageError::InvalidArgument(e.to_string()))?;
-        Ok(Self::with_store(store, cfg.prefix.clone())
+        Ok(Self::with_prefix_applied_store(store, cfg.prefix.clone())
             .with_multipart_tuning(cfg.multipart_threshold, cfg.multipart_chunk_size))
     }
 
-    fn segment_key(&self, metadata: &RemoteLogSegmentMetadata, suffix: &str) -> ObjectPath {
+    pub(super) fn with_prefix_applied_store(
+        store: Arc<dyn ObjectStore>,
+        prefix: Option<String>,
+    ) -> Self {
+        Self {
+            ops: ObjectStoreClient::new(store),
+            prefix: normalize_prefix(prefix),
+            multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
+            multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
+        }
+    }
+
+    fn segment_key(metadata: &RemoteLogSegmentMetadata, suffix: &str) -> ObjectPath {
         use std::fmt::Write;
         let id = metadata.remote_log_segment_id();
         let tp = &id.topic_id_partition;
         let mut key = String::new();
-        if let Some(p) = &self.prefix {
-            key.push_str(p);
-            key.push('/');
-        }
         // Infallible — writing into a String.
         let _ = write!(key, "{}_{}/{}/{}", tp.topic_id, tp.partition, id.id, suffix);
         ObjectPath::from(key)
     }
 
-    fn log_key(&self, metadata: &RemoteLogSegmentMetadata) -> ObjectPath {
-        self.segment_key(metadata, "log")
+    fn log_key(metadata: &RemoteLogSegmentMetadata) -> ObjectPath {
+        Self::segment_key(metadata, "log")
     }
 
-    fn index_key(&self, metadata: &RemoteLogSegmentMetadata, index_type: IndexType) -> ObjectPath {
-        self.segment_key(metadata, index_filename(index_type))
+    fn index_key(metadata: &RemoteLogSegmentMetadata, index_type: IndexType) -> ObjectPath {
+        Self::segment_key(metadata, index_filename(index_type))
     }
 
     /// Run an async [`ObjectOps`] call to completion on the current Tokio
@@ -144,6 +153,17 @@ impl S3RemoteStorage {
         })?;
         tokio::task::block_in_place(|| handle.block_on(fut))
     }
+}
+
+fn normalize_prefix(prefix: Option<String>) -> Option<String> {
+    prefix.filter(|prefix| !prefix.is_empty())
+}
+
+fn prefix_object_store(store: Arc<dyn ObjectStore>, prefix: Option<&str>) -> Arc<dyn ObjectStore> {
+    let Some(prefix) = prefix.filter(|prefix| !prefix.is_empty()) else {
+        return store;
+    };
+    Arc::new(PrefixStore::new(store, ObjectPath::from(prefix)))
 }
 
 fn index_filename(index_type: IndexType) -> &'static str {
@@ -176,38 +196,38 @@ impl RemoteStorageManager for S3RemoteStorage {
         let threshold = self.multipart_threshold;
         let chunk_size = self.multipart_chunk_size;
         Self::block_os(self.ops.put_from_path(
-            &self.log_key(metadata),
+            &Self::log_key(metadata),
             &data.log_segment,
             threshold,
             chunk_size,
         ))?;
         Self::block_os(self.ops.put_from_path(
-            &self.index_key(metadata, IndexType::Offset),
+            &Self::index_key(metadata, IndexType::Offset),
             &data.offset_index,
             threshold,
             chunk_size,
         ))?;
         Self::block_os(self.ops.put_from_path(
-            &self.index_key(metadata, IndexType::Timestamp),
+            &Self::index_key(metadata, IndexType::Timestamp),
             &data.time_index,
             threshold,
             chunk_size,
         ))?;
         if let Some(snap) = &data.producer_snapshot_index {
             Self::block_os(self.ops.put_from_path(
-                &self.index_key(metadata, IndexType::ProducerSnapshot),
+                &Self::index_key(metadata, IndexType::ProducerSnapshot),
                 snap,
                 threshold,
                 chunk_size,
             ))?;
         }
         Self::block_os(self.ops.put(
-            &self.index_key(metadata, IndexType::LeaderEpoch),
+            &Self::index_key(metadata, IndexType::LeaderEpoch),
             data.leader_epoch_index.clone(),
         ))?;
         if let Some(txn) = &data.transaction_index {
             Self::block_os(self.ops.put_from_path(
-                &self.index_key(metadata, IndexType::Transaction),
+                &Self::index_key(metadata, IndexType::Transaction),
                 txn,
                 threshold,
                 chunk_size,
@@ -237,7 +257,7 @@ impl RemoteStorageManager for S3RemoteStorage {
         start_position: u32,
         end_position: Option<u32>,
     ) -> Result<Vec<u8>, RemoteStorageError> {
-        let key = self.log_key(metadata);
+        let key = Self::log_key(metadata);
         let range = match end_position {
             Some(end) => {
                 if end < start_position {
@@ -276,7 +296,7 @@ impl RemoteStorageManager for S3RemoteStorage {
         metadata: &RemoteLogSegmentMetadata,
         index_type: IndexType,
     ) -> Result<Vec<u8>, RemoteStorageError> {
-        let key = self.index_key(metadata, index_type);
+        let key = Self::index_key(metadata, index_type);
         match Self::block_os(self.ops.get(&key)) {
             Ok(bytes) => Ok(bytes.to_vec()),
             Err(ObjectStoreError::NotFound(_)) => Err(RemoteStorageError::SegmentNotFound(
@@ -300,12 +320,12 @@ impl RemoteStorageManager for S3RemoteStorage {
         metadata: &RemoteLogSegmentMetadata,
     ) -> Result<(), RemoteStorageError> {
         for key in [
-            self.log_key(metadata),
-            self.index_key(metadata, IndexType::Offset),
-            self.index_key(metadata, IndexType::Timestamp),
-            self.index_key(metadata, IndexType::ProducerSnapshot),
-            self.index_key(metadata, IndexType::LeaderEpoch),
-            self.index_key(metadata, IndexType::Transaction),
+            Self::log_key(metadata),
+            Self::index_key(metadata, IndexType::Offset),
+            Self::index_key(metadata, IndexType::Timestamp),
+            Self::index_key(metadata, IndexType::ProducerSnapshot),
+            Self::index_key(metadata, IndexType::LeaderEpoch),
+            Self::index_key(metadata, IndexType::Transaction),
         ] {
             match Self::block_os(self.ops.delete(&key)) {
                 // Idempotent: deleting an absent object succeeds.
@@ -333,8 +353,54 @@ mod tests {
         RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentState, TopicIdPartition,
     };
 
+    fn memory_store() -> Arc<dyn ObjectStore> {
+        Arc::new(InMemory::new()) as Arc<dyn ObjectStore>
+    }
+
     fn rsm(prefix: Option<&str>) -> S3RemoteStorage {
-        S3RemoteStorage::with_store(Arc::new(InMemory::new()), prefix.map(str::to_string))
+        S3RemoteStorage::with_store(memory_store(), prefix.map(str::to_string))
+    }
+
+    async fn list_raw_keys(store: Arc<dyn ObjectStore>) -> Vec<String> {
+        let client = crabka_object_store::ObjectStoreClient::new(store);
+        let mut keys: Vec<String> = crabka_object_store::ObjectOps::list(&client, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|meta| meta.location.as_ref().to_owned())
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    async fn put_raw_object(store: Arc<dyn ObjectStore>, key: &str, bytes: Bytes) {
+        let client = crabka_object_store::ObjectStoreClient::new(store);
+        crabka_object_store::ObjectOps::put(&client, &ObjectPath::from(key), bytes)
+            .await
+            .unwrap();
+    }
+
+    fn relative_segment_keys(metadata: &RemoteLogSegmentMetadata) -> Vec<String> {
+        let mut keys: Vec<String> = [
+            S3RemoteStorage::log_key(metadata),
+            S3RemoteStorage::index_key(metadata, IndexType::Offset),
+            S3RemoteStorage::index_key(metadata, IndexType::Timestamp),
+            S3RemoteStorage::index_key(metadata, IndexType::ProducerSnapshot),
+            S3RemoteStorage::index_key(metadata, IndexType::LeaderEpoch),
+            S3RemoteStorage::index_key(metadata, IndexType::Transaction),
+        ]
+        .into_iter()
+        .map(|key| key.as_ref().to_owned())
+        .collect();
+        keys.sort();
+        keys
+    }
+
+    fn prefixed_keys(prefix: &str, relative_keys: &[String]) -> Vec<String> {
+        relative_keys
+            .iter()
+            .map(|key| format!("{prefix}/{key}"))
+            .collect()
     }
 
     #[test]
@@ -527,21 +593,134 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn prefix_isolates_clusters() {
-        let store_a =
-            S3RemoteStorage::with_store(Arc::new(InMemory::new()), Some("cluster-a".to_string()));
-        let _ = store_a;
-        // Single cluster keys live under the prefix; we verify the key
-        // construction at the unit level (no cross-cluster fixture
-        // available without sharing the InMemory backend, which we don't
-        // because each cluster gets its own bucket in practice).
+    async fn prefix_is_applied_once_for_fetches() {
+        let raw = memory_store();
+        let prefixed = prefix_object_store(Arc::clone(&raw), Some("cluster-a"));
+        let store = Arc::new(S3RemoteStorage::with_prefix_applied_store(
+            prefixed,
+            Some("cluster-a".to_string()),
+        ));
         let md = sample_metadata(30);
-        let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), Some("c".to_string()));
-        let key = store.log_key(&md);
-        assert!(
-            key.as_ref().starts_with("c/"),
-            "expected prefix to be applied, got {key:?}",
+        let log_key = format!("cluster-a/{}", S3RemoteStorage::log_key(&md).as_ref());
+        let offset_key = format!(
+            "cluster-a/{}",
+            S3RemoteStorage::index_key(&md, IndexType::Offset).as_ref()
         );
+        put_raw_object(Arc::clone(&raw), &log_key, Bytes::from_static(b"abcdef")).await;
+        put_raw_object(
+            Arc::clone(&raw),
+            &offset_key,
+            Bytes::from_static(b"OFFSET-IDX"),
+        )
+        .await;
+
+        let store_for_fetch = Arc::clone(&store);
+        tokio::task::spawn_blocking(move || {
+            assert!(store_for_fetch.fetch_log_segment(&md, 1, Some(3)).unwrap() == b"bcd");
+            assert!(store_for_fetch.fetch_index(&md, IndexType::Offset).unwrap() == b"OFFSET-IDX");
+        })
+        .await
+        .unwrap();
+
+        let mut expected_keys = vec![log_key, offset_key];
+        expected_keys.sort();
+        assert!(list_raw_keys(raw).await == expected_keys);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn prefix_is_applied_once_for_copy_delete_and_list() {
+        let raw = memory_store();
+        let prefixed = prefix_object_store(Arc::clone(&raw), Some("cluster-a"));
+        let store = Arc::new(S3RemoteStorage::with_prefix_applied_store(
+            prefixed,
+            Some("cluster-a".to_string()),
+        ));
+        let src = TempDir::new().unwrap();
+        let md = sample_metadata(31);
+        let expected_keys = prefixed_keys("cluster-a", &relative_segment_keys(&md));
+        let store_for_copy = Arc::clone(&store);
+        let md_for_copy = md.clone();
+        tokio::task::spawn_blocking(move || {
+            store_for_copy
+                .copy_log_segment_data(&md_for_copy, &sample_data(src.path(), true))
+                .unwrap();
+            assert!(
+                store_for_copy
+                    .fetch_log_segment(&md_for_copy, 0, None)
+                    .unwrap()
+                    == b"0123456789"
+            );
+            assert!(
+                store_for_copy
+                    .fetch_index(&md_for_copy, IndexType::Offset)
+                    .unwrap()
+                    == b"OFFSET-IDX"
+            );
+        })
+        .await
+        .unwrap();
+
+        let keys_after_copy = list_raw_keys(Arc::clone(&raw)).await;
+        assert!(keys_after_copy == expected_keys);
+        assert!(
+            !keys_after_copy
+                .iter()
+                .any(|key| key.starts_with("cluster-a/cluster-a/"))
+        );
+
+        let store_for_delete = Arc::clone(&store);
+        let md_for_delete = md;
+        tokio::task::spawn_blocking(move || {
+            store_for_delete
+                .delete_log_segment_data(&md_for_delete)
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(list_raw_keys(raw).await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn no_prefix_keeps_relative_keys_for_copy_fetch_delete_and_list() {
+        let raw = memory_store();
+        let store = Arc::new(S3RemoteStorage::with_store(Arc::clone(&raw), None));
+        let src = TempDir::new().unwrap();
+        let md = sample_metadata(32);
+        let expected_keys = relative_segment_keys(&md);
+        let store_for_copy = Arc::clone(&store);
+        let md_for_copy = md.clone();
+        tokio::task::spawn_blocking(move || {
+            store_for_copy
+                .copy_log_segment_data(&md_for_copy, &sample_data(src.path(), true))
+                .unwrap();
+            assert!(
+                store_for_copy
+                    .fetch_log_segment(&md_for_copy, 0, None)
+                    .unwrap()
+                    == b"0123456789"
+            );
+            assert!(
+                store_for_copy
+                    .fetch_index(&md_for_copy, IndexType::Offset)
+                    .unwrap()
+                    == b"OFFSET-IDX"
+            );
+        })
+        .await
+        .unwrap();
+
+        assert!(list_raw_keys(Arc::clone(&raw)).await == expected_keys);
+
+        let store_for_delete = Arc::clone(&store);
+        let md_for_delete = md;
+        tokio::task::spawn_blocking(move || {
+            store_for_delete
+                .delete_log_segment_data(&md_for_delete)
+                .unwrap();
+        })
+        .await
+        .unwrap();
+        assert!(list_raw_keys(raw).await.is_empty());
     }
 
     fn write_log_segment(dir: &std::path::Path, len: usize) -> PathBuf {

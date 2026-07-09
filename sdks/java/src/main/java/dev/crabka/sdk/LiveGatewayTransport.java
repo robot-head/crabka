@@ -25,6 +25,24 @@ final class LiveGatewayTransport {
     private static final MediaType CONNECT_PROTO = MediaType.get("application/proto");
     private static final MediaType CONNECT_STREAM_PROTO = MediaType.get("application/connect+proto");
     private static final String GATEWAY_SERVICE_PATH = "/crabka.gateway.v1.Gateway/";
+    private static final String GATEWAY_RECORD_NOT_ACQUIRED = "record is not acquired by this session";
+    private static final String QUEUE_MESSAGE_NOT_ACQUIRED = "queue message is not acquired";
+    private static final int CONNECT_CODE_CANCELED = 1;
+    private static final int CONNECT_CODE_INVALID_ARGUMENT = 3;
+    private static final int CONNECT_CODE_DEADLINE_EXCEEDED = 4;
+    private static final int CONNECT_CODE_NOT_FOUND = 5;
+    private static final int CONNECT_CODE_PERMISSION_DENIED = 7;
+    private static final int CONNECT_CODE_FAILED_PRECONDITION = 9;
+    private static final int CONNECT_CODE_OUT_OF_RANGE = 11;
+    private static final int CONNECT_CODE_UNIMPLEMENTED = 12;
+    private static final int CONNECT_CODE_UNAVAILABLE = 14;
+    private static final int CONNECT_CODE_UNAUTHENTICATED = 16;
+    private static final String ERROR_KIND_INVALID_ARGUMENT = "invalid_argument";
+    private static final String ERROR_KIND_NOT_FOUND = "not_found";
+    private static final String ERROR_KIND_SERVER_ERROR = "server_error";
+    private static final String ERROR_KIND_TRANSPORT = "transport";
+    private static final String ERROR_KIND_UNAUTHENTICATED = "unauthenticated";
+    private static final String ERROR_KIND_UNIMPLEMENTED = "unimplemented";
 
     private final URI endpoint;
     private final String bearerToken;
@@ -197,8 +215,9 @@ final class LiveGatewayTransport {
         List<QueueResult> queueResults = new ArrayList<>();
         for (int index = 0; index < results.size(); index++) {
             String messageId = messageIdAt(entries, index);
-            if (results.get(index).hasError()) {
-                queueResults.add(QueueResult.notAcquired(messageId));
+            GatewayOuterClass.QueueAckResult result = results.get(index);
+            if (result.hasError()) {
+                queueResults.add(new QueueResult(messageId, fromGatewayQueueError(result.getError())));
                 continue;
             }
             queueResults.add(QueueResult.success(messageId));
@@ -243,9 +262,50 @@ final class LiveGatewayTransport {
 
     private static RecordResult fromGatewayRecordResult(GatewayOuterClass.RecordResult result) {
         if (result.hasError()) {
-            throw new ServerException(result.getError().getMessage());
+            throw exceptionForGatewayError(result.getError());
         }
         return new RecordResult(result.getPartition(), result.getOffset(), result.getDeduplicated());
+    }
+
+    private static QueueOperationError fromGatewayQueueError(GatewayOuterClass.ErrorInfo error) {
+        GatewayError gatewayError = fromGatewayError(error);
+        return new QueueOperationError(gatewayError.kind(), queueErrorMessage(gatewayError.message()));
+    }
+
+    private static String queueErrorMessage(String message) {
+        if (GATEWAY_RECORD_NOT_ACQUIRED.equals(message)) {
+            return QUEUE_MESSAGE_NOT_ACQUIRED;
+        }
+        return message;
+    }
+
+    private static CrabkaException exceptionForGatewayError(GatewayOuterClass.ErrorInfo error) {
+        GatewayError gatewayError = fromGatewayError(error);
+        return switch (gatewayError.kind()) {
+            case ERROR_KIND_INVALID_ARGUMENT -> new InvalidArgumentException(gatewayError.message());
+            case ERROR_KIND_NOT_FOUND -> new NotFoundException(gatewayError.message());
+            case ERROR_KIND_TRANSPORT -> new TransportException(gatewayError.message());
+            case ERROR_KIND_UNAUTHENTICATED -> new UnauthenticatedException(gatewayError.message());
+            case ERROR_KIND_UNIMPLEMENTED -> new UnimplementedException(gatewayError.message());
+            default -> new ServerException(gatewayError.message());
+        };
+    }
+
+    private static GatewayError fromGatewayError(GatewayOuterClass.ErrorInfo error) {
+        return new GatewayError(kindForGatewayError(error), error.getMessage());
+    }
+
+    private static String kindForGatewayError(GatewayOuterClass.ErrorInfo error) {
+        return switch (error.getCode()) {
+            case CONNECT_CODE_INVALID_ARGUMENT, CONNECT_CODE_FAILED_PRECONDITION, CONNECT_CODE_OUT_OF_RANGE ->
+                    ERROR_KIND_INVALID_ARGUMENT;
+            case CONNECT_CODE_NOT_FOUND -> ERROR_KIND_NOT_FOUND;
+            case CONNECT_CODE_PERMISSION_DENIED, CONNECT_CODE_UNAUTHENTICATED -> ERROR_KIND_UNAUTHENTICATED;
+            case CONNECT_CODE_UNIMPLEMENTED -> ERROR_KIND_UNIMPLEMENTED;
+            case CONNECT_CODE_CANCELED, CONNECT_CODE_DEADLINE_EXCEEDED, CONNECT_CODE_UNAVAILABLE ->
+                    ERROR_KIND_TRANSPORT;
+            default -> error.getRetriable() ? ERROR_KIND_TRANSPORT : ERROR_KIND_SERVER_ERROR;
+        };
     }
 
     static CrabkaException errorForResponse(Response response) {
@@ -333,4 +393,6 @@ final class LiveGatewayTransport {
     }
 
     private record ParsedMessageId(String topic, int partition, long offset) {}
+
+    private record GatewayError(String kind, String message) {}
 }

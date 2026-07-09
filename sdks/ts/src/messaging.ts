@@ -115,7 +115,7 @@ async function publishRecord(
       throw new Error("send returned no record results");
     }
     if (result.error) {
-      throw fromRecordError(result.error.code, result.error.message);
+      throw fromRecordError(result.error.code, result.error.message, result.error.retriable);
     }
     return { partition: result.partition, offset: Number(result.offset), deduplicated: result.deduplicated };
   } catch (error) {
@@ -306,7 +306,7 @@ function toProtoFilter(filter: Filter | undefined): string {
   }
   const field = filter.path.startsWith("$.") ? filter.path.slice(2) : filter.path;
   if (typeof filter.value === "string") {
-    return `${field} = '${filter.value.replaceAll("'", "\\'")}'`;
+    return `${field} = '${filter.value.replaceAll("\\", "\\\\").replaceAll("'", "\\'")}'`;
   }
   return `${field} = ${filter.value}`;
 }

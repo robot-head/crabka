@@ -263,7 +263,7 @@ func toProtoFilter(filter *Filter) (string, error) {
 	}
 	switch value := filter.Value.(type) {
 	case string:
-		return fmt.Sprintf("%s = '%s'", field, strings.ReplaceAll(value, "'", "\\'")), nil
+		return fmt.Sprintf("%s = '%s'", field, escapeFilterString(value)), nil
 	case bool:
 		return fmt.Sprintf("%s = %t", field, value), nil
 	case int:
@@ -275,6 +275,11 @@ func toProtoFilter(filter *Filter) (string, error) {
 	default:
 		return "", errorWithMessage(InvalidArgument, "filter value must be string, bool, int, int64, or float64")
 	}
+}
+
+func escapeFilterString(value string) string {
+	escapedBackslashes := strings.ReplaceAll(value, "\\", "\\\\")
+	return strings.ReplaceAll(escapedBackslashes, "'", "\\'")
 }
 
 func addAuthorization(header interface{ Set(string, string) }, bearerToken string) {

@@ -99,6 +99,32 @@ func TestQueueValidationErrors(t *testing.T) {
 	assertSDKError(t, err, InvalidArgument, "", "")
 }
 
+func TestFromProtoQueueResultPropagatesErrorInfo(t *testing.T) {
+	tests := []struct {
+		name     string
+		info     *gw.ErrorInfo
+		expected QueueResult
+	}{
+		{
+			name:     "invalid argument message",
+			info:     &gw.ErrorInfo{Code: 9, Message: "record is not acquired by this session"},
+			expected: QueueResult{MessageID: "queue:0:7", Error: &QueueOperationError{Kind: InvalidArgument, Message: "record is not acquired by this session"}},
+		},
+		{
+			name:     "retriable transport",
+			info:     &gw.ErrorInfo{Code: 13, Message: "commit timed out", Retriable: true},
+			expected: QueueResult{MessageID: "queue:0:7", Error: &QueueOperationError{Kind: Transport, Message: "commit timed out", Retriable: true}},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := fromProtoQueueResult("queue:0:7", &gw.QueueAckResult{Error: test.info})
+			assertQueueResults(t, []QueueResult{result}, []QueueResult{test.expected})
+		})
+	}
+}
+
 func TestMockPublishSubscribeFilter(t *testing.T) {
 	client := New("mock://gateway", nil)
 	if _, err := client.Messaging().Publish(context.Background(), Record{Topic: "filtered", Value: []byte(`{"kind":"skip"}`)}); err != nil {
@@ -121,6 +147,29 @@ func TestMockPublishSubscribeFilter(t *testing.T) {
 	}
 	if message.Offset != 1 || string(message.Value) != `{"kind":"keep"}` {
 		t.Fatalf("message = %#v", message)
+	}
+}
+
+func TestToProtoFilterEscapesStringBackslashes(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "backslash", value: `C:\events\kept`, want: `kind = 'C:\\events\\kept'`},
+		{name: "trailing backslash", value: `C:\events\`, want: `kind = 'C:\\events\\'`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := toProtoFilter(&Filter{Path: "$.kind", Op: Equals, Value: test.value})
+			if err != nil {
+				t.Fatalf("toProtoFilter: %v", err)
+			}
+			if got != test.want {
+				t.Fatalf("filter = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
@@ -242,5 +291,5 @@ func queueOperationErrorsEqual(left *QueueOperationError, right *QueueOperationE
 	if left == nil || right == nil {
 		return left == right
 	}
-	return left.Kind == right.Kind && left.Message == right.Message
+	return left.Kind == right.Kind && left.Message == right.Message && left.Retriable == right.Retriable
 }
