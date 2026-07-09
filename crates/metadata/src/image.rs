@@ -1950,6 +1950,38 @@ mod tests {
         );
     }
 
+    /// `total_partitions` sums the by-topic index across every topic. It backs
+    /// the `to_records` snapshot tracing field (whose span is inert under the
+    /// test subscriber), so pin its value directly here — otherwise a
+    /// constant-return mutant survives with no behavioral test to catch it.
+    #[test]
+    fn total_partitions_sums_across_topics() {
+        let mut m = img();
+        // Empty image: no topics, no partitions.
+        check!(m.total_partitions() == 0);
+
+        // "a" gets 2 partitions, "b" gets 1 → 3 total across the index.
+        m.apply(&topic("a", 2));
+        m.apply(&topic("b", 1));
+        for (name, idx) in [("a", 0), ("a", 1), ("b", 0)] {
+            m.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: name.into(),
+                partition: idx,
+                leader: NodeId(1),
+                replicas: vec![NodeId(1)],
+                isr: vec![NodeId(1)],
+                leader_epoch: LeaderEpoch(0),
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+                directories: vec![],
+                partition_epoch: 0,
+            }));
+        }
+        check!(m.total_partitions() == 3);
+        // Matches an independent full walk, and is not the mutant constant 1.
+        check!(m.total_partitions() == m.all_partitions().count());
+    }
+
     /// Pins the `partitions_of` ordering contract: ascending partition-index
     /// order regardless of apply order. `Metadata` / `DescribeTopicPartitions`
     /// rows and the cursor-based pagination rely on it.
