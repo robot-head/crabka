@@ -204,10 +204,6 @@ name = "crabka-observability"
 publish = false
 release = false
 
-[[package]]
-name = "crabka-observability-spike"
-publish = false
-release = false
 
 [[package]]
 name = "crabka-page-store"
