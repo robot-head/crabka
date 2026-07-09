@@ -958,7 +958,7 @@ Expected: all pass (in-src unit + proptest suites, including the fjall store rou
 - [ ] **Step 7: Write `crates/pgkv/README.md`** from the template with:
   - `{CRATE}` = `crabka-pgkv`
   - `{ONELINER}` = "Ordered key-value storage seam for the Crabka Gres engine with order-preserving key encoding and versioned row encoding."
-  - `{OVERVIEW}` = "Defines the `Kv` trait (`get`/`put`/`delete`/`scan_prefix`/`scan_range`/`write_batch`, with `write_batch` atomic and durable) that the whole Gres engine consumes, plus two local backends: `MemKv` (ephemeral) and `FjallKv` (pure-Rust LSM). This trait is the permanent storage seam — Chapter Gres G-2 puts the Crabka substrate behind it without touching the engine."
+  - `{OVERVIEW}` = "Defines the `Kv` trait (`get`/`put`/`delete`/`scan_prefix`/`scan_range`/`write_batch`, with `write_batch` atomic and durable) that the whole Gres engine consumes, plus two local backends: `MemKv` (ephemeral) and `FjallKv` (pure-Rust LSM). It is the disposable per-tenant working store; Chapter Gres G-2 makes the tenant's durable truth a Crabka WAL topic behind the executor's `Committer` seam, with this store as the replayed read model."
 
 - [ ] **Step 8: Commit the cleanup**
 

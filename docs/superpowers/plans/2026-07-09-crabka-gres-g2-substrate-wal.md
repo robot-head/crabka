@@ -606,7 +606,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - Consumes: Task 1's `WalFrame`/`apply_frame`; producer/client APIs per Global Constraints.
 - Produces (consumed by Task 4's binary wiring and Task 5's tests):
   - `topic::wal_topic(tenant: &str) -> String` (= `__gres_wal.<tenant>`) and `topic::ensure_wal_topic(admin: &mut AdminClient, tenant: &str, replicas: i32) -> Result<(), SubstrateError>` (1 partition, `cleanup.policy=delete`, `retention.ms=-1`, tolerate `TOPIC_ALREADY_EXISTS`).
-  - `recover::recover(bootstrap: &str, tenant: &str, store: Arc<dyn Kv>) -> Result<Recovered, SubstrateError>` where `Recovered { producer: Producer, next_journal_seq: u64 }` — fence → stable end → replay → return.
+  - `recover::recover(bootstrap: &str, tenant: &str, store: Arc<dyn Kv>) -> Result<Recovered, SubstrateError>` where `Recovered { producer: Producer, next_journal_seq: u64 }` — fence → produce barrier → replay to own barrier → return.
   - `writer::spawn_wal_writer(producer: Producer, topic: String, store: Arc<dyn Kv>, next_journal_seq: u64) -> WalHandle` where `WalHandle { tx: mpsc::Sender<WalRequest>, fenced: Arc<AtomicBool> }`.
   - `committer::SubstrateCommitter::new(handle: WalHandle) -> Self` (implements `Committer`); `committer::SubstrateLinearizer::new(fenced: Arc<AtomicBool>) -> Self` (implements `Linearizer`).
 
@@ -673,13 +673,20 @@ async fn run(
         while let Ok(req) = rx.try_recv() {
             group.push(req);
         }
+        // PR-panel amendment (C2): failure handling must leave the producer in a
+        // known transaction state, or the writer wedges (begin_transaction errors
+        // with InvalidTransactionState forever) — and an INDETERMINATE EndTxn must
+        // never be reported to waiters as failure (the group may be durable; a
+        // successor would replay it, contradicting the error we sent).
         match commit_group(&producer, &topic, &store, &mut next_seq, &group).await {
             Ok(()) => {
                 for req in group {
                     let _ = req.ack.send(Ok(()));
                 }
             }
-            Err(err) => {
+            // Deterministic failure with the transaction CLEANLY ABORTED: safe to
+            // error the waiters and keep serving.
+            Err(GroupFailure::Aborted(err)) => {
                 let is_fence = matches!(err, SubstrateError::Fenced);
                 for req in group {
                     let _ = req.ack.send(Err(clone_err(&err)));
@@ -690,8 +697,26 @@ async fn run(
                     return; // channel drops; all future commits fail fast
                 }
             }
+            // Indeterminate (EndTxn ambiguous, or abort itself failed): the group
+            // may or may not be durable. Drop the waiters WITHOUT answering (their
+            // connections see a drop, the standard lost-COMMIT-ack outcome) and
+            // terminate: recovery resolves the truth from the log.
+            Err(GroupFailure::Indeterminate(err)) => {
+                tracing::error!(%err, "gres WAL writer: indeterminate commit-group outcome; terminating for recovery");
+                std::process::abort();
+            }
         }
     }
+}
+
+/// `commit_group`'s error contract. `Aborted` REQUIRES that the Kafka
+/// transaction was successfully aborted via the guard `Transaction::abort`
+/// returns on commit failure (the producer has no abort-on-drop); anything
+/// else — abort failed, or `EndTxn` returned an error that does not prove
+/// the broker rejected the commit — is `Indeterminate`.
+enum GroupFailure {
+    Aborted(SubstrateError),
+    Indeterminate(SubstrateError),
 }
 
 async fn commit_group(
@@ -700,7 +725,7 @@ async fn commit_group(
     store: &Arc<dyn Kv>,
     next_seq: &mut u64,
     group: &[WalRequest],
-) -> Result<(), SubstrateError> {
+) -> Result<(), GroupFailure> {
     let txn = producer.begin_transaction().await.map_err(map_producer_err)?;
     let mut acks = Vec::new();
     let base_seq = *next_seq;
@@ -747,7 +772,7 @@ fn chunk_ops(ops: &[WriteOp], cap: usize) -> Vec<Vec<WriteOp>> { /* sizes via Wa
 
 **Two adaptations the implementer makes concretely (not placeholders — the decision is made, only names vary):**
 1. `store.apply_or_panic` is pseudocode for: `apply_frame(store.as_ref(), &req.ops).expect("local apply after durable commit")` — a local-store failure after durable EndTxn is unrecoverable state divergence; crash loudly (the successor replays cleanly).
-2. `clone_err`/`map_producer_err`/`map_end_txn_err`: `SubstrateError` needs `Clone` on the variants used here (or wrap in `Arc<SubstrateError>` for acks); map `ProducerError::FencedProducer` → `SubstrateError::Fenced`, everything else → `SubstrateError::Unavailable(err.to_string())`. `Transaction::commit()` returns `EndTransactionError` — extract the inner producer error for the same mapping (check `crates/client-producer/src/transactional.rs` for its shape).
+2. Error classification (the load-bearing part, per the panel review): `SubstrateError` needs `Clone` on the variants used here (or wrap in `Arc<SubstrateError>` for acks); `ProducerError::FencedProducer` → `SubstrateError::Fenced`. **A send/produce error before `EndTxn`** → abort the transaction via the guard (`Transaction::abort(self)` — note the producer has NO abort-on-drop, and a producer left `InTransaction` rejects every future `begin_transaction` with `InvalidTransactionState`, wedging the writer permanently); abort success → `GroupFailure::Aborted`. **An `EndTxn(commit)` error** → classify against `EndTransactionError`'s shape (check `crates/client-producer/src/transactional.rs`): only an error that *proves* the broker rejected the commit (e.g. fenced 47 before any commit could land) may abort-and-continue; anything ambiguous — timeout, connection loss, an error carrying the returned guard after the request may have reached the broker — is `GroupFailure::Indeterminate`. **An abort failure** is always `Indeterminate`. Never construct `Aborted` on a path that didn't complete a successful abort.
 
 - [ ] **Step 3: The seams** — `src/committer.rs`:
 
@@ -989,12 +1014,14 @@ async fn stale_compute_is_fenced_and_journal_has_no_interleaving() {
     //    (ExecError::NotLeader surfaces as a pgwire error), and A's fenced flag is set.
     // 4. Read the whole topic READ_UNCOMMITTED via fetch_partition and decode frames:
     //    assert every committed frame after B's first frame has B's producer epoch
+    //    (FetchedRecord does not surface batch epochs — read them via the raw
+    //     fetch/record-batch path in crabka-protocol, not the high-level helper)
     //    (no A-record post-fence), and journal_seq is continuous per generation.
     // 5. Engine C recovers: sees A's acked row + B's acked row, nothing else.
 }
 ```
 
-Write it fully using the harness. Additionally: (a) an **oversized-batch case** in the disposability suite — one statement writing a row large enough to force chunking (> `MAX_RECORD_BYTES`); kill; recover; the row survives intact (pins chunk-group atomicity through replay); (b) a **coordinator≠leader fencing variant** — the single-broker harness co-locates the transaction coordinator with the partition leader, which is exactly the configuration where the produce-path epoch check fires; the corrected G-2 spec notes fencing falls back to `EndTxn` when they differ, so add a multi-broker variant using the in-process multi-node fixture from `crates/integration-tests` (if standing that fixture up here is disproportionate, land the single-broker suite and file the multi-broker variant as an explicit TODO test referencing the spec's fencing-locality paragraph — do not silently skip it).
+Write it fully using the harness. Additionally: (a) an **oversized-batch case** in the disposability suite — one statement writing a row large enough to force chunking (> `MAX_RECORD_BYTES`); kill; recover; the row survives intact (pins chunk-group atomicity through replay); (b) a **coordinator≠leader fencing variant** — the single-broker harness co-locates the transaction coordinator with the partition leader, which is exactly the configuration where the produce-path epoch check fires; the corrected G-2 spec notes fencing falls back to `EndTxn` when they differ, so add a multi-broker variant using the in-process multi-node fixture from `crates/integration-tests` (if standing that fixture up here is disproportionate, land the single-broker suite and file the multi-broker variant as an explicit TODO test referencing the spec's fencing-locality paragraph — do not silently skip it); (c) *(panel amendment C2)* a **transient-failure recovery case** — inject one produce failure (drop the broker connection mid-group or use a fault seam on the writer) and assert: the affected group's waiters get errors, the transaction is aborted, and the **next** group commits successfully (the wedge regression — a writer left `InTransaction` would fail here forever); (d) an **indeterminate-outcome case** — force an ambiguous `EndTxn` (kill the broker between request and response) and assert the writer terminates *without answering waiters* (no error responses observed on the client side, only connection drop), and a successor's replay yields a store consistent with whatever the log actually holds — present-or-absent atomically, never a reported-failed-but-durable group.
 
 - [ ] **Step 4: nextest group.** In `.config/nextest.toml` `[test-groups]` add `gres-substrate = { max-threads = 2 }` (broker-heavy, same rationale as `gres-fdw`) plus the matching `[[profile.default.overrides]]` block with `filter = 'package(crabka-gres-substrate) & kind(test)'`.
 
@@ -1032,11 +1059,12 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Filter + integration job.** Add `- "crates/gres-substrate/**"` to the `gres` filter list; add `-p crabka-gres-substrate` to the `gres-integration` job's `cargo llvm-cov nextest` package list.
 
-- [ ] **Step 2: Substrate conformance leg.** Append to the `gres-conformance` job, after the existing baseline harness step (a second subject; same oracle service is NOT reusable across corpus runs — start a second oracle container or, simpler, a second database on the same service: the corpus creates tables, so use `dbname=postgres2` after `createdb`):
+- [ ] **Step 2: Substrate conformance leg.** Append to the `gres-conformance` job, after the existing baseline harness step (a second subject; same oracle service is NOT reusable across corpus runs — start a second oracle container or, simpler, a second database on the same service: the corpus creates tables, so use `dbname=oracle2` after creating it — matching the YAML below):
 
 ```yaml
       - name: Create a fresh oracle database for the substrate leg
         run: psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" -c "CREATE DATABASE oracle2"
+        # (the harness invocation below uses dbname=oracle2 — keep them in sync)
       - name: Start a standalone broker
         run: |
           cargo build --locked -p crabka-cli -p crabka-broker

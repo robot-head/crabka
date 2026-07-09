@@ -19,7 +19,7 @@
 
 ---
 
-## Batch 1 — signals (run Tasks 1 and 2 in parallel; disjoint crates)
+## Batch 1 — signals (run Tasks 1 and 2 in parallel — verified disjoint: Task 1 `crabka-gres-control` only, Task 2 `crabka-gres` + a narrow `pgexec`/`pgwire` session-counter accessor; no shared file; panel amendment I8)
 
 ### Task 1: Registry state semantics in `crabka-gres-control`
 

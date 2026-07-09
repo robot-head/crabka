@@ -72,7 +72,7 @@ The gate harness provisions a small tenant, drives it to suspension, then measur
 
 - **`crates/gres`:** idle tracking (sessions + last-statement clock), suspend sequence (checkpoint → registry write → exit), readiness signal on `active`.
 - **New crate `crates/gres-activator`** (`crabka-gres-activator`, `publish = false`): the accept/peek/request/hold/pipe loop over `crabka-pgwire` message decoding + `crabka-gres-control` registry access.
-- **`crates/gres-control`:** `suspended` state transitions, resume-request records, idle-window field (all landed as schema in G-4; semantics activate here).
+- **`crates/gres-control`:** the `suspended`/`ResumeRequested` state transitions, resume-request records, idle-window field, and `wal_generation` — the record schema G-4 seeded is *extended* here by this slice's own plan (Task 1), not merely activated *(corrected after the PR panel review: G-4 seeds the record; G-5's plan adds the lifecycle fields — execution is unblocked either way, but the provenance was wrong)*.
 - **`crates/operator`:** `GresTenant` controller gains scale-to-zero/one on registry state; `Gres` controller gains activator workload rendering + suspended-tenant routing in the config render.
 - **`crates/cli`:** `crabka gres suspend|resume` become immediate (they write the same records the automation writes).
 
