@@ -51,7 +51,7 @@ Six tracks; waves within a track are ordered, tracks parallelize. Every wave = o
 - **M2 — psql usable:** F-2. Gate: `psql` interactive session with working `\d`, `\dt`, `\di`, `\l`, `\du` against a tenant.
 - **M3 — ORMs/migrations:** Q1 + D4 + S1 (+ M2). Gate: a migration-tool smoke suite (a Rails-style and a Django-style migration corpus, plus sqlx macros) runs end-to-end.
 - **M4 — pg_regress adoption (standing):** progressively vendor applicable portions of PostgreSQL's own regression corpus (PostgreSQL License — compatible) as conformance corpus sources, file-by-file with per-file ratchets; the adoption percentage is a published per-PR number from here to the horizon.
-- **M5 — the 190 answered:** `docs/PG_COMPAT_MATRIX.md` shows no `UNDECIDED` row; CI diffs the matrix against the parser's accepted-statement surface so the matrix cannot rot.
+- **M5 — the 190 answered:** `docs/PG_COMPAT_MATRIX.md` has **no row still in a `Wave-assigned` (not-yet-built) disposition** — every command is Implemented, Mapped, Error-with-notice, or Non-goal (the seed already has zero `UNDECIDED`; M5 is when the last *pending* wave lands). CI diffs the matrix against the parser's accepted-statement surface so the matrix cannot rot.
 
 ## The standing per-cycle rules (every wave's design must answer)
 
