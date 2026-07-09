@@ -298,6 +298,11 @@ pub(crate) async fn handle(
         match controller.submit_change(records).await {
             Ok(_) => {
                 // Materialize new partitions on local disk where self in replicas.
+                let offset_sequencer = diskless.then(|| {
+                    std::sync::Arc::new(crate::wal::ControllerSequencer::new(
+                        broker.controller.clone(),
+                    )) as std::sync::Arc<dyn crate::wal::OffsetSequencer>
+                });
                 for (i, p) in new_partition_indices.iter().enumerate() {
                     let replicas = &new_assignments[i];
                     if should_materialize_locally(replicas, node_id) {
@@ -313,6 +318,8 @@ pub(crate) async fn handle(
                             diskless,
                             Some(hot_tail.clone()),
                             Some(wal_shards.clone()),
+                            offset_sequencer.clone(),
+                            None,
                         ) {
                             tracing::error!(
                                 topic = %t.name, partition = *p, error = %e,

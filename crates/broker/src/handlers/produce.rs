@@ -445,9 +445,11 @@ async fn process_partition(
     // already names it the leader; the only residual window is a follower
     // whose image hasn't yet caught up to a leadership change, which
     // correctly returns NOT_LEADER (the client retries against the new
-    // leader) rather than appending to the wrong replica. Diskless topics are
-    // the exception: any local WAL member can append after obtaining a
-    // controller-reserved base offset.
+    // leader) rather than appending to the wrong replica. Non-idempotent
+    // diskless produces are the exception: any local WAL member can append
+    // after obtaining a controller-reserved base offset. Idempotent diskless
+    // produces stay leader-affine because the producer-sequence dedup table is
+    // local to the broker that accepted the original append.
     //
     // Partition-level absence in the image (topic exists but this index
     // doesn't, or the topic is unknown) maps to UNKNOWN_TOPIC_OR_PARTITION
@@ -476,7 +478,8 @@ async fn process_partition(
         };
         return Ok(out);
     };
-    if leader != this_node_id && !part.diskless {
+    let is_idempotent_produce = prepared.producer_id >= 0;
+    if leader != this_node_id && (!part.diskless || is_idempotent_produce) {
         out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
         out.current_leader = LeaderIdAndEpoch {
             leader_id: i32::try_from(leader.0).unwrap_or(NO_LEADER_ID),

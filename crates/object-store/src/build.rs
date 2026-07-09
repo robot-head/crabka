@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use object_store::{ClientOptions, ObjectStore};
+use object_store::{ClientOptions, ObjectStore, path::Path, prefix::PrefixStore};
 
 use crate::{
     config::{GcsConfig, ObjectStoreConfig, S3Config},
@@ -47,7 +47,7 @@ fn build_s3(cfg: &S3Config) -> Result<Arc<dyn ObjectStore>, ObjectStoreError> {
     let store = builder
         .build()
         .map_err(|e| ObjectStoreError::InvalidConfig(format!("S3 builder: {e}")))?;
-    Ok(Arc::new(store))
+    Ok(apply_prefix(store, cfg.prefix.as_deref()))
 }
 
 fn build_gcs(cfg: &GcsConfig) -> Result<Arc<dyn ObjectStore>, ObjectStoreError> {
@@ -71,7 +71,17 @@ fn build_gcs(cfg: &GcsConfig) -> Result<Arc<dyn ObjectStore>, ObjectStoreError> 
     let store = builder
         .build()
         .map_err(|e| ObjectStoreError::InvalidConfig(format!("GCS builder: {e}")))?;
-    Ok(Arc::new(store))
+    Ok(apply_prefix(store, cfg.prefix.as_deref()))
+}
+
+fn apply_prefix<T>(store: T, prefix: Option<&str>) -> Arc<dyn ObjectStore>
+where
+    T: ObjectStore + 'static,
+{
+    let Some(prefix) = prefix.filter(|prefix| !prefix.is_empty()) else {
+        return Arc::new(store);
+    };
+    Arc::new(PrefixStore::new(store, Path::from(prefix)))
 }
 
 #[cfg(test)]

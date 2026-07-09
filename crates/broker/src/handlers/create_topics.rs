@@ -309,6 +309,12 @@ pub(crate) async fn handle(
                     // lazily via the metadata-watch; this handler-side path is
                     // an optimization so producers that immediately follow the
                     // CreateTopics ack don't race the supervisor.
+                    let offset_sequencer = diskless.then(|| {
+                        std::sync::Arc::new(crate::wal::ControllerSequencer::new(
+                            controller.clone(),
+                        ))
+                            as std::sync::Arc<dyn crate::wal::OffsetSequencer>
+                    });
                     for (p, replicas) in assignments.iter().enumerate() {
                         let p_i32 = i32::try_from(p).unwrap_or(0);
                         if should_materialize_locally(replicas, node_id) {
@@ -329,6 +335,8 @@ pub(crate) async fn handle(
                                 diskless,
                                 Some(hot_tail.clone()),
                                 Some(wal_shards.clone()),
+                                offset_sequencer.clone(),
+                                None,
                             ) {
                                 tracing::error!(
                                     topic = %name, partition = p_i32, error = %e,

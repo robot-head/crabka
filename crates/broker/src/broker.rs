@@ -9,7 +9,7 @@ use std::{
     },
 };
 
-use crabka_ids::PartitionIndex;
+use crabka_ids::{Offset, PartitionIndex};
 use dashmap::DashMap;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -2395,9 +2395,10 @@ impl Broker {
                 let open_config =
                     crate::diskless::recovery::open_config(&config.log_config, diskless);
                 let mut log = crabka_log::Log::open(&dir, open_config)?;
+                let committed_next_offset = diskless
+                    .then(|| startup_image.partition_next_offset(&topic, partition_id))
+                    .flatten();
                 if diskless {
-                    let committed_next_offset =
-                        startup_image.partition_next_offset(&topic, partition_id);
                     crate::diskless::recovery::recover_open_log(
                         &topic,
                         PartitionIndex(partition_id),
@@ -2422,6 +2423,7 @@ impl Broker {
                         Arc::new(crate::wal::ControllerSequencer::new(controller.clone()))
                             as Arc<dyn crate::wal::OffsetSequencer>
                     }),
+                    committed_next_offset.map(Offset),
                 )?;
                 partitions.insert(topic.clone(), PartitionIndex(partition_id), part);
             }
@@ -3704,6 +3706,9 @@ impl Broker {
             && let Some(kafka_cfg) = kafka_swap_kickoff.as_ref()
         {
             let cache = handle.index.clone();
+            let object_store = handle.object_store();
+            let partitions = broker.partitions.clone();
+            let controller = broker.controller.clone();
             let kafka_cfg = kafka_cfg.clone();
             let shutdown_token = shutdown.clone();
             Some(tokio::spawn(async move {
@@ -3711,7 +3716,14 @@ impl Broker {
                     () = shutdown_token.cancelled() => {
                         tracing::debug!("diskless WAL index bootstrap cancelled");
                     }
-                    () = bootstrap_diskless_index_log(cache, kafka_cfg, shutdown_token.clone()) => {}
+                    () = bootstrap_diskless_index_log(
+                        cache,
+                        object_store,
+                        partitions,
+                        controller,
+                        kafka_cfg,
+                        shutdown_token.clone(),
+                    ) => {}
                 }
             }))
         } else {
@@ -3949,6 +3961,9 @@ async fn bootstrap_topic_rlmm(
 
 async fn bootstrap_diskless_index_log(
     cache: Arc<tokio::sync::Mutex<crate::diskless::wal_index::WalIndexCache>>,
+    object_store: Arc<dyn object_store::ObjectStore>,
+    partitions: Arc<PartitionRegistry>,
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
     cfg: KafkaSwapKickoff,
     shutdown: CancellationToken,
 ) {
@@ -3974,13 +3989,14 @@ async fn bootstrap_diskless_index_log(
         match started {
             Ok(log) => {
                 let log: Arc<dyn crabka_remote_storage_topic::MetadataEventLog> = log;
-                let _index =
+                let index =
                     crate::diskless::index_log::DisklessIndexLog::start_with_cache(log, cache);
                 tracing::info!(
                     topic = crate::diskless::index_log::DISKLESS_WAL_INDEX_TOPIC,
                     "diskless WAL index projection started"
                 );
-                shutdown.cancelled().await;
+                run_diskless_wal_flusher(object_store, index, partitions, controller, shutdown)
+                    .await;
                 return;
             }
             Err(error) => {
@@ -3995,6 +4011,71 @@ async fn bootstrap_diskless_index_log(
             }
         }
     }
+}
+
+async fn run_diskless_wal_flusher(
+    object_store: Arc<dyn object_store::ObjectStore>,
+    index_log: crate::diskless::index_log::DisklessIndexLog,
+    partitions: Arc<PartitionRegistry>,
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
+    shutdown: CancellationToken,
+) {
+    let config = crate::diskless::flusher::FlushConfig::default();
+    let cache = index_log.cache();
+    let mut tick = tokio::time::interval(config.interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            () = shutdown.cancelled() => {
+                tracing::debug!("diskless WAL flusher cancelled");
+                return;
+            }
+            _ = tick.tick() => {
+                let image = controller.current_image();
+                let flush_partitions = diskless_flush_partitions(&partitions, &image).await;
+                match crate::diskless::flusher::flush_once(
+                    object_store.clone(),
+                    &index_log,
+                    cache.clone(),
+                    &flush_partitions,
+                    &config,
+                )
+                .await
+                {
+                    Ok(Some(record)) => {
+                        tracing::debug!(entries = record.entries.len(), "diskless WAL flushed object");
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::warn!(error = %error, "diskless WAL flush failed");
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn diskless_flush_partitions(
+    partitions: &PartitionRegistry,
+    image: &crabka_metadata::MetadataImage,
+) -> Vec<crate::diskless::flusher::FlushPartition> {
+    let mut out = Vec::new();
+    for part in partitions.arcs() {
+        if !part.diskless {
+            continue;
+        }
+        let Some(topic) = image.topic(&part.topic) else {
+            continue;
+        };
+        out.push(crate::diskless::flusher::FlushPartition {
+            topic_id: topic.topic_id,
+            partition: part.partition_id.get(),
+            log: part.log.clone(),
+            high_watermark: part.high_watermark().await,
+        });
+    }
+    out
 }
 
 async fn watch_rlmm_needed_partitions(
@@ -4089,6 +4170,7 @@ fn partition_wal(
     diskless: bool,
     hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
+    initial_durable_watermark: Option<Offset>,
 ) -> Result<Option<crate::wal::SharedWal>, BrokerError> {
     if !diskless {
         return Ok(None);
@@ -4100,6 +4182,7 @@ fn partition_wal(
         log_dir,
         log,
         hot_tail,
+        initial_durable_watermark.unwrap_or(Offset(0)),
     )?;
     if let (Some(topic_id), Some(registry)) = (topic_id, wal_shards) {
         registry.insert(
@@ -4143,6 +4226,7 @@ pub(crate) fn spawn_partition(
         None,
         None,
         None,
+        None,
     )
     .expect("spawn partition")
 }
@@ -4173,6 +4257,7 @@ pub(crate) fn spawn_partition_with_sequencer(
         hot_tail,
         wal_shards,
         sequencer,
+        None,
     )
     .expect("spawn partition")
 }
@@ -4190,6 +4275,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
     hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
     sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
+    initial_durable_watermark: Option<Offset>,
 ) -> Result<Arc<Partition>, BrokerError> {
     /// Depth of the per-partition writer mpsc queue: bounds how many
     /// produce/replication appends may be in flight to one partition before
@@ -4205,6 +4291,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         diskless,
         hot_tail,
         wal_shards,
+        initial_durable_watermark,
     )?;
     let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(PARTITION_WRITER_QUEUE_DEPTH);
     let notify = Arc::new(tokio::sync::Notify::new());
@@ -4783,6 +4870,7 @@ mod tests {
                 log.clone(),
                 false,
                 None,
+                None,
                 None
             )
             .expect("partition wal")
@@ -4796,6 +4884,7 @@ mod tests {
                 dir.path(),
                 log,
                 true,
+                None,
                 None,
                 None
             )

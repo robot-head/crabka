@@ -550,12 +550,12 @@ impl KraftController {
                 // Checkpoint filenames encode the raw offset (on-disk boundary).
                 last_snapshot_end_offset = Offset(off);
             }
-            // Checkpoints cover the in-memory image, not a log
-            // prefix offset, so replay the full log on top (idempotent:
-            // duplicate records fail validate and are skipped). A precise
-            // checkpoint-offset cursor.
+            // Checkpoints encode the committed image through the filename's
+            // end offset. The pre-snapshot log prefix may still be present after
+            // a manual snapshot or failed prune, so replay only records beyond
+            // that boundary.
         }
-        replay_committed(&log, &mut image, Offset(0));
+        replay_committed(&log, &mut image, last_snapshot_end_offset);
         log.advance_hwm(log.log_end_offset());
 
         // Seed the durable quorum state from the file, falling back to a fresh

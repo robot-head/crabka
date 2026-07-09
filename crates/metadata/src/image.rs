@@ -961,10 +961,19 @@ impl MetadataImage {
             // `directories` slot. The handler already resolved topic/partition/
             // replica against the image; apply is an idempotent slot upsert
             // (a no-op if the partition or replica is unknown).
-            | MetadataRecord::V1PartitionDirAssignment(_)
-            // Diskless offset-sequencer delta. The handler supplies a positive
-            // count; image-level apply is an unconditional increment.
-            | MetadataRecord::V1PartitionOffsetAdvance(_) => Ok(()),
+            | MetadataRecord::V1PartitionDirAssignment(_) => Ok(()),
+            MetadataRecord::V1PartitionOffsetAdvance(r) => {
+                if !self.topics.contains_key(&r.topic) {
+                    return Err(MetadataError::UnknownTopic(r.topic.clone()));
+                }
+                if !self.partitions.contains_key(&(r.topic.clone(), r.partition)) {
+                    return Err(MetadataError::InvalidPartition {
+                        topic: r.topic.clone(),
+                        partition: r.partition,
+                    });
+                }
+                Ok(())
+            }
         }
     }
 }

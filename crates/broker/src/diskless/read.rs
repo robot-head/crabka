@@ -25,6 +25,11 @@ impl DisklessReadHandle {
         Self { index, store }
     }
 
+    #[must_use]
+    pub(crate) fn object_store(&self) -> Arc<dyn ObjectStore> {
+        self.store.clone()
+    }
+
     async fn read_run(&self, topic_id: Uuid, partition: i32, offset: i64) -> Option<Bytes> {
         let (object_key, byte_start, byte_len) = self
             .index
@@ -47,9 +52,15 @@ impl DisklessReadHandle {
             .ok()
     }
 
-    async fn read_records(&self, topic_id: Uuid, partition: i32, offset: i64) -> Option<Bytes> {
+    async fn read_records(
+        &self,
+        topic_id: Uuid,
+        partition: i32,
+        offset: i64,
+        max_bytes: usize,
+    ) -> Option<Bytes> {
         let run = self.read_run(topic_id, partition, offset).await?;
-        first_batch_bytes_at_or_after(&run, offset)
+        bounded_batch_bytes_at_or_after(&run, offset, max_bytes)
     }
 }
 
@@ -73,7 +84,12 @@ pub(crate) async fn try_diskless_read(
     let handle = broker.diskless_read.clone()?;
     let topic_id = Uuid::from_bytes(p.topic_id.0);
     let records = handle
-        .read_records(topic_id, p.partition_index, p.fetch_offset)
+        .read_records(
+            topic_id,
+            p.partition_index,
+            p.fetch_offset,
+            usize::try_from(p.max_bytes.max(0)).unwrap_or(0),
+        )
         .await?;
     let bytes_est = records.len();
     p.out.error_code = codes::NONE;
@@ -84,7 +100,11 @@ pub(crate) async fn try_diskless_read(
     Some(bytes_est)
 }
 
-fn first_batch_bytes_at_or_after(run: &Bytes, floor: i64) -> Option<Bytes> {
+fn bounded_batch_bytes_at_or_after(run: &Bytes, floor: i64, max_bytes: usize) -> Option<Bytes> {
+    if max_bytes == 0 {
+        return None;
+    }
+
     let mut offset = 0;
     while offset < run.len() {
         let slice = run.slice(offset..);
@@ -95,11 +115,41 @@ fn first_batch_bytes_at_or_after(run: &Bytes, floor: i64) -> Option<Bytes> {
         let encoded_len = batch.encoded_len();
         let last_offset = batch.base_offset + i64::from(batch.last_offset_delta);
         if last_offset >= floor {
-            return Some(run.slice(offset..));
+            return batch_window_at(run, offset, encoded_len, max_bytes);
         }
         offset = offset.checked_add(encoded_len)?;
     }
     None
+}
+
+fn batch_window_at(
+    run: &Bytes,
+    start: usize,
+    first_batch_len: usize,
+    max_bytes: usize,
+) -> Option<Bytes> {
+    if first_batch_len == 0 {
+        return None;
+    }
+
+    let mut end = start.checked_add(first_batch_len)?;
+    while end < run.len() {
+        let slice = run.slice(end..);
+        let mut cur: &[u8] = &slice;
+        let Ok(batch) = RecordBatch::decode(&mut cur) else {
+            return None;
+        };
+        let encoded_len = batch.encoded_len();
+        if encoded_len == 0 {
+            return None;
+        }
+        let next_end = end.checked_add(encoded_len)?;
+        if next_end.checked_sub(start)? > max_bytes {
+            break;
+        }
+        end = next_end;
+    }
+    Some(run.slice(start..end))
 }
 
 #[cfg(test)]
@@ -149,7 +199,7 @@ mod tests {
         let mut expected = BytesMut::new();
         second.encode(&mut expected).unwrap();
 
-        let got = first_batch_bytes_at_or_after(&run, 1).unwrap();
+        let got = bounded_batch_bytes_at_or_after(&run, 1, usize::MAX).unwrap();
 
         assert!(got == expected.freeze());
     }
@@ -158,7 +208,7 @@ mod tests {
     fn cold_read_miss_leaves_out_of_range() {
         let run = encode_batches(&[batch(0, b"a")]);
 
-        assert!(first_batch_bytes_at_or_after(&run, 5).is_none());
+        assert!(bounded_batch_bytes_at_or_after(&run, 5, usize::MAX).is_none());
     }
 
     #[test]
@@ -176,7 +226,7 @@ mod tests {
             ..Default::default()
         }]);
 
-        let got = first_batch_bytes_at_or_after(&run, 11).unwrap();
+        let got = bounded_batch_bytes_at_or_after(&run, 11, usize::MAX).unwrap();
 
         assert!(got == run);
     }
@@ -215,7 +265,10 @@ mod tests {
         });
         let handle = DisklessReadHandle::new(Arc::new(AsyncMutex::new(cache)), store);
 
-        let got = handle.read_records(topic_id, 0, 1).await.unwrap();
+        let got = handle
+            .read_records(topic_id, 0, 1, usize::MAX)
+            .await
+            .unwrap();
 
         assert!(got == second);
     }

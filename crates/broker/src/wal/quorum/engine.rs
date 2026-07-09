@@ -52,10 +52,20 @@ impl WalShardEngine {
     #[allow(dead_code)]
     #[must_use]
     pub(crate) fn new(me: NodeId, state: QuorumState, replicas: Vec<WalReplica>) -> Self {
+        Self::new_with_durable_watermark(me, state, replicas, Offset(0))
+    }
+
+    #[must_use]
+    pub(crate) fn new_with_durable_watermark(
+        me: NodeId,
+        state: QuorumState,
+        replicas: Vec<WalReplica>,
+        durable_watermark: Offset,
+    ) -> Self {
         Self {
             core: Mutex::new(QuorumStateMachine::new(me, state, 1_000)),
             replicas,
-            durable_watermark: AtomicI64::new(0),
+            durable_watermark: AtomicI64::new(durable_watermark.0),
         }
     }
 

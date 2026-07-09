@@ -57,11 +57,14 @@ impl QuorumWalStore {
         log_dir: &std::path::Path,
         source: Arc<Mutex<Log>>,
         hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
+        initial_durable_watermark: Offset,
     ) -> Result<Self, BrokerError> {
-        let config = source
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .config_snapshot();
+        let (config, source_start_offset) = {
+            let source = source
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (source.config_snapshot(), source.log_start_offset())
+        };
         let mut replicas = Vec::with_capacity(3);
         replicas.push(engine::WalReplica::new(NodeId(0), source.clone()));
         let root = log_dir.join("__diskless_wal_quorum").join(format!(
@@ -77,7 +80,13 @@ impl QuorumWalStore {
         let voter_ids: Vec<_> = replicas.iter().map(engine::WalReplica::id).collect();
         let voters = engine::voter_set(voter_ids.iter().copied());
         let state = load_or_bootstrap_quorum_state(&root, voter_ids, voters)?;
-        let engine = Arc::new(WalShardEngine::new(NodeId(0), state, replicas));
+        let durable_watermark = initial_durable_watermark.max(source_start_offset);
+        let engine = Arc::new(WalShardEngine::new_with_durable_watermark(
+            NodeId(0),
+            state,
+            replicas,
+            durable_watermark,
+        ));
         let hot_tail = topic_id
             .zip(hot_tail)
             .map(|(topic_id, cache)| HotTailTarget {

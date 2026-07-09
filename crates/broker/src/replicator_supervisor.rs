@@ -91,6 +91,8 @@ pub(crate) fn materialize_partition(
     diskless: bool,
     hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
+    sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
+    initial_durable_watermark: Option<crabka_ids::Offset>,
 ) -> Result<(), String> {
     // `materialize_if_vacant` runs `build` under the per-key write lock —
     // only one thread can be inside it for a given key at a time,
@@ -102,7 +104,10 @@ pub(crate) fn materialize_partition(
         let dir = crate::log_dir::place_partition_dir(log_dirs, topic, partition);
         std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
         let open_config = crate::diskless::recovery::open_config(log_config, diskless);
-        let log = Log::open(&dir, open_config).map_err(|e| format!("Log::open: {e}"))?;
+        let mut log = Log::open(&dir, open_config).map_err(|e| format!("Log::open: {e}"))?;
+        if diskless && let Some(frontier) = initial_durable_watermark {
+            log.reconcile_next_offset(frontier);
+        }
         let owning_dir = dir
             .parent()
             .expect("placed partition dir always has a parent log.dir")
@@ -118,7 +123,8 @@ pub(crate) fn materialize_partition(
             diskless,
             hot_tail,
             wal_shards,
-            None,
+            sequencer,
+            initial_durable_watermark,
         )
         .map_err(|e| format!("spawn partition: {e}"))
     })
@@ -555,6 +561,19 @@ impl ReplicatorSupervisor {
         topic: &str,
         partition: i32,
     ) -> Result<(), String> {
+        let diskless = crate::broker::diskless_topic_config(image.topic_config(topic));
+        let sequencer = diskless.then(|| {
+            Arc::new(crate::wal::ControllerSequencer::new(
+                self.controller.clone(),
+            )) as Arc<dyn crate::wal::OffsetSequencer>
+        });
+        let initial_durable_watermark = diskless
+            .then(|| {
+                image
+                    .partition_next_offset(topic, partition)
+                    .map(crabka_ids::Offset)
+            })
+            .flatten();
         materialize_partition(
             &self.partitions,
             topic,
@@ -564,9 +583,11 @@ impl ReplicatorSupervisor {
             &self.log_config,
             &self.log_dir_status,
             &self.producer_state,
-            crate::broker::diskless_topic_config(image.topic_config(topic)),
+            diskless,
             Some(self.hot_tail.clone()),
             Some(self.wal_shards.clone()),
+            sequencer,
+            initial_durable_watermark,
         )
     }
 
@@ -943,6 +964,8 @@ mod tests {
             false,
             None,
             None,
+            None,
+            None,
         )
         .expect("materialize");
         let part = partitions.get("t", PartitionIndex(0)).expect("part");
@@ -988,6 +1011,8 @@ mod tests {
             true,
             Some(hot_tail),
             Some(wal_shards.clone()),
+            None,
+            None,
         )
         .expect("materialize");
 
@@ -1295,6 +1320,8 @@ mod tests {
             false,
             None,
             None,
+            None,
+            None,
         )
         .expect("materialize");
 
@@ -1360,6 +1387,8 @@ mod tests {
             &crate::log_dir_status::LogDirRegistry::default(),
             &Arc::new(crate::producer_state::ProducerState::new()),
             false,
+            None,
+            None,
             None,
             None,
         )
@@ -1428,6 +1457,8 @@ mod tests {
             &crate::log_dir_status::LogDirRegistry::default(),
             &Arc::new(crate::producer_state::ProducerState::new()),
             false,
+            None,
+            None,
             None,
             None,
         )
