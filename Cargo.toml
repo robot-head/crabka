@@ -25,6 +25,10 @@ clone_on_copy = "warn"
 inherits = "test"
 debug = "none"
 
+[profile.dev]
+# Split debug info into a separate file (reduces linker work)
+split-debuginfo = "packed"
+
 [workspace.dependencies]
 # Columnar / dataframe support for the streams client (opt-in via crate
 # features). `polars` and `polars-arrow` MUST share the same version.
