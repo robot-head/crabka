@@ -321,8 +321,8 @@ explicit. Dependency direction was checked so no publishable product crate
   `publish = false`.
 - **Flip to `publish = false`** (currently publishable; every dependent is itself
   an observability crate — verified no product crate depends on them):
-  `crabka-metrics`, `crabka-metrics-service`, `crabka-promql`, `crabka-logql`,
-  and `crabka-observability-spike`.
+  `crabka-metrics`, `crabka-metrics-service`, `crabka-promql`, and
+  `crabka-logql`.
 - **Already `publish = false`** (no change): `crabka-observability`,
   `crabka-traces`, `crabka-traceql`, `crabka-profiles`, `crabka-pprof`,
   `crabka-blockstore`.
