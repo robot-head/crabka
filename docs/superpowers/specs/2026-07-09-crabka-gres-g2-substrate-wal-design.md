@@ -49,8 +49,9 @@ crabka-gres --substrate --tenant t1 --bootstrap broker:9092
    │
    └─ recovery (before serving):
         init_transactions()             ← fences predecessors, aborts their open txn
-        stable_end = ListOffsets(-1, read_committed)
-        replay [0, stable_end) via fetch(READ_COMMITTED), merge-rule apply
+        produce barrier                 ← empty GRW1 frame in its own committed txn
+        replay from offset 0 via fetch(READ_COMMITTED), merge-rule apply,
+          until the compute consumes its own barrier
         reseed_counters() → serve
 
 topic: __gres_wal.<tenant>  (1 partition, cleanup.policy=delete, retention.ms=-1)
@@ -68,9 +69,9 @@ Wrapping `Kv::write_batch` was the chapter's sketch, but Replicated mode exists 
 
 A transactional producer admits one open transaction at a time, and concurrent sessions call `commit()` concurrently — so a single writer task owns the producer (the workspace's single-writer-task idiom) and group-commits: drain everything queued, produce each `Vec<WriteOp>` as one framed record inside one Kafka transaction, `EndTxn(commit)`, apply the group to the local store in order, then ack every waiter. Queue order is journal order is apply order. A produce or EndTxn failure fails every waiter in the group (`ExecError::Unavailable`; sessions abort), and nothing from a failed group is applied locally — the store never runs ahead of the durable log, which keeps a later G-3 checkpoint trivially consistent. Kafka-transaction *visibility* is not load-bearing for data batches (each batch is one record, atomic by itself); the transaction buys the per-produce authoritative epoch check, and READ_COMMITTED replay additionally skips any group whose EndTxn never landed — a group that was never acked to anyone.
 
-### Fence first, then replay to the stable end, then serve
+### Fence first, then replay to the compute's own barrier, then serve
 
-Recovery order matters: `init_transactions()` first (the epoch bump fences every predecessor and aborts any open transaction it left), then read the partition's stable end, then replay `[0, stable_end)` at READ_COMMITTED. After the fence no new committed record can appear, so the replay endpoint is final; aborted zombie tails are invisible at READ_COMMITTED. Replay applies each frame's ops with the reimplemented merge rules — max-merge for `/0/meta/next_xid` and `/0/seq/*`, first-terminal-wins for `/0/clog/*`, LWW for the rest — then `reseed_counters()` lifts the in-memory allocators, exactly the donor's leadership-rise path. A fenced running compute learns it is fenced from the writer's first 47: the writer sets a shared fenced flag and the process exits; `SubstrateLinearizer::ensure_readable` checks the same flag so even the read path refuses once fenced (a zombie serving stale reads forever is not a v1 behavior we accept silently).
+Recovery order matters: `init_transactions()` first (the epoch bump fences every predecessor and aborts any open transaction it left), then the new compute **produces a barrier record** — an empty `GRW1` frame carrying the next `journal_seq`, in its own committed Kafka transaction — and replays from the start at READ_COMMITTED until it consumes its own barrier. *(Amended during the [G-3 design](2026-07-09-crabka-gres-g3-checkpoints-design.md): the original ListOffsets-based stable end was unsound — Crabka's ListOffsets handler ignores `isolation_level` and returns LEO — and the barrier is strictly better: self-delimiting, guaranteed to terminate because the barrier itself is committed and fetchable, well-defined when the tail holds only aborted zombie data or transaction markers, and it stamps generation boundaries into the journal for free.)* After the fence no new committed record can appear ahead of the barrier, so the replay endpoint is final; aborted zombie tails are invisible at READ_COMMITTED. Replay applies each frame's ops with the reimplemented merge rules — max-merge for `/0/meta/next_xid` and `/0/seq/*`, first-terminal-wins for `/0/clog/*`, LWW for the rest — then `reseed_counters()` lifts the in-memory allocators, exactly the donor's leadership-rise path. A fenced running compute learns it is fenced from the writer's first 47: the writer sets a shared fenced flag and the process exits; `SubstrateLinearizer::ensure_readable` checks the same flag so even the read path refuses once fenced (a zombie serving stale reads forever is not a v1 behavior we accept silently).
 
 ### `journal_seq` is a replay tripwire, not a protocol
 
@@ -114,6 +115,6 @@ All traffic is standard Kafka wire: transactional produce with KIP-890 epoch sem
 - Seam: `SqlEngine::replicated` + `SubstrateCommitter`/`SubstrateLinearizer`; local store is a disposable read model (MemKv or ephemeral fjall); no Kv wrapper.
 - Journal: one GRW1 record per `Committer` batch; single WAL-writer task; one Kafka transaction per commit-group; ack after `EndTxn(commit)`; apply-after-durable.
 - Fencing: `transactional.id = __gres.<tenant>`; fence-then-replay-then-serve; fenced flag fails reads and exits the process.
-- Replay: READ_COMMITTED to the fence-time stable end; max-merge counters; write-once clog; `journal_seq` continuity or refuse to serve.
+- Replay: READ_COMMITTED to the compute's own post-fence barrier record (amended in the G-3 cycle); max-merge counters; write-once clog; `journal_seq` continuity or refuse to serve.
 - Engine change: FDW-DDL routed through the seam (ops-returning catalog functions).
 - Chapter refinements: transactional produce as the fence; await-per-batch v1; diskless-tier qualifier.
