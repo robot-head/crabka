@@ -21,6 +21,8 @@
   - Producer: `Producer::builder().bootstrap(..).transactional_id(..).acks(Acks::All).build().await`; `init_transactions()`, `begin_transaction() -> Transaction<'_>`, `Transaction::commit()/abort()`, `send(ProducerRecord) -> oneshot::Receiver<Result<RecordMetadata, ProducerError>>`, `ProducerError::FencedProducer`.
   - Fetch: `crabka_client_core::fetch_partition_with_isolation(&conn, topic, topic_uuid, partition, offset, max_wait_ms, max_bytes, isolation: i8)`; isolation `1` = READ_COMMITTED.
 - **Merge rules (must match the donor's cluster semantics):** counter keys (`next_xid`, `/0/seq/*`) max-merge on 8-byte BE u64; clog keys write-once with first terminal decision winning (`crabka_pgmvcc::clog::is_terminal`); all else LWW. Replay must also fold within a batch (pending-map), exactly like the donor's `durable.rs`.
+- **Record sizing (scaling-review amendment):** the writer chunks a batch across multiple `GRW1` records when its encoded size exceeds `max_record_bytes` (default 1 MiB); the enclosing Kafka transaction makes the chunk group atomic to READ_COMMITTED replay. Never reject a statement for write-set size.
+- **Local-store persistence (scaling-review amendment):** the substrate read model and replay use a no-fsync cache mode (`FjallKv` with `PersistMode::Buffer`/periodic); the store is disposable, so `SyncAll`-per-batch would be pure waste inside commit latency and recovery. The durable local mode's fsync contract is unchanged.
 - **No behavior changes** to local mode; the conformance baseline gates the substrate mode at identical parity.
 - **New tests:** `assert2`, condition-driven bounded waits (never settle-sleeps), nextest.
 - **Lints/format/commits:** workspace pedantic `-D warnings`; `cargo +nightly fmt`; conventional commits ending with `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`.
@@ -336,7 +338,9 @@ impl<'a> Reader<'a> {
 
 - [ ] **Step 6: Run frame tests** — `cargo nextest run -p crabka-gres-substrate` → PASS (unit + proptest).
 
-- [ ] **Step 7: pgkv prefix helpers.** Check `crates/pgkv/src/key.rs` for public `clog_prefix()` and a seq prefix helper (`seq_prefix()` or equivalent). The donor's cluster crate matched clog keys by `clog_prefix()` and seq keys via an `is_seq_key` built on the seq key shape. If either helper is missing or `pub(crate)`, add/publicize (with rustdoc + a unit test asserting `seq_key(t)` starts with `seq_prefix()` and `clog_key(x)` starts with `clog_prefix()`), e.g.:
+- [ ] **Step 7: pgkv cache-mode constructor.** Add `FjallKv::open_cache(path) -> Result<Self, KvError>` beside `open`: identical except mutations skip the per-op `sync()` (`PersistMode::SyncAll`) tail — construct with a mode flag consulted by `put`/`delete`/`write_batch`, plus a periodic/explicit `persist_async` escape hatch if fjall's API makes it one line. Preserve the donor's DO-NOT-REFACTOR fsync comment on the durable path and extend it: the cache mode exists for the Gres substrate read model, where the topic is the truth. TDD: a test asserting `open_cache` round-trips data within a process (durability across reopen is explicitly NOT contracted — document that in the constructor's rustdoc).
+
+- [ ] **Step 7b: pgkv prefix helpers.** Check `crates/pgkv/src/key.rs` for public `clog_prefix()` and a seq prefix helper (`seq_prefix()` or equivalent). The donor's cluster crate matched clog keys by `clog_prefix()` and seq keys via an `is_seq_key` built on the seq key shape. If either helper is missing or `pub(crate)`, add/publicize (with rustdoc + a unit test asserting `seq_key(t)` starts with `seq_prefix()` and `clog_key(x)` starts with `clog_prefix()`), e.g.:
 
 ```rust
 /// Prefix of every per-table sequence-allocator key (`/0/seq/<table>`).
@@ -698,17 +702,26 @@ async fn commit_group(
     group: &[WalRequest],
 ) -> Result<(), SubstrateError> {
     let txn = producer.begin_transaction().await.map_err(map_producer_err)?;
-    let mut acks = Vec::with_capacity(group.len());
+    let mut acks = Vec::new();
     let base_seq = *next_seq;
-    for (i, req) in group.iter().enumerate() {
-        let frame = WalFrame { journal_seq: base_seq + i as u64, ops: req.ops.clone() };
-        let record = ProducerRecord {
-            topic: topic.to_string(),
-            partition: Some(0),
-            value: Some(frame.encode().into()),
-            ..Default::default()
-        };
-        acks.push(producer.send(record).await);
+    let mut seq = base_seq;
+    for req in group {
+        // Scaling-review amendment: chunk oversized batches across records at
+        // max_record_bytes; the enclosing Kafka txn keeps the chunk group atomic
+        // to READ_COMMITTED replay. chunk_ops splits req.ops greedily so each
+        // frame's encoded size stays under the cap (a single op larger than the
+        // cap gets its own frame — the broker cap is the real limit there).
+        for chunk in chunk_ops(&req.ops, MAX_RECORD_BYTES) {
+            let frame = WalFrame { journal_seq: seq, ops: chunk };
+            seq += 1;
+            let record = ProducerRecord {
+                topic: topic.to_string(),
+                partition: Some(0),
+                value: Some(frame.encode().into()),
+                ..Default::default()
+            };
+            acks.push(producer.send(record).await);
+        }
     }
     for ack in acks {
         ack.await
@@ -717,14 +730,20 @@ async fn commit_group(
     }
     txn.commit().await.map_err(|e| map_end_txn_err(e))?;
     // Durable: now apply to the local read model, in order, then advance.
-    for (i, req) in group.iter().enumerate() {
+    for req in group {
         store.apply_or_panic(&req.ops); // see note below
-        let _ = i;
     }
-    *next_seq = base_seq + group.len() as u64;
+    *next_seq = seq;
     Ok(())
 }
+
+/// Greedy split of a batch into chunks whose encoded frames stay under `cap`
+/// (a single op larger than `cap` gets its own frame). Pure; proptest that the
+/// concatenation of chunks equals the input and every multi-op chunk is under cap.
+fn chunk_ops(ops: &[WriteOp], cap: usize) -> Vec<Vec<WriteOp>> { /* sizes via WalFrame::encoded_len parts */ todo_impl!() }
 ```
+
+(`todo_impl!()` is plan shorthand — implement the greedy accumulator inline; ~15 lines. `MAX_RECORD_BYTES: usize = 1 << 20` as a module constant, overridable via writer config.)
 
 **Two adaptations the implementer makes concretely (not placeholders — the decision is made, only names vary):**
 1. `store.apply_or_panic` is pseudocode for: `apply_frame(store.as_ref(), &req.ops).expect("local apply after durable commit")` — a local-store failure after durable EndTxn is unrecoverable state divergence; crash loudly (the successor replays cleanly).
@@ -872,7 +891,8 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 
 ```rust
 let store: Arc<dyn Kv> = match &args.cache_dir {
-    Some(dir) => Arc::new(FjallKv::open(dir).map_err(|e| std::io::Error::other(format!("cache dir: {e:?}")))?),
+    // Cache mode (Task 1 Step 7): the topic is the truth; never fsync the read model.
+    Some(dir) => Arc::new(FjallKv::open_cache(dir).map_err(|e| std::io::Error::other(format!("cache dir: {e:?}")))?),
     None => Arc::new(MemKv::default()),
 };
 let tenant = args.tenant.as_deref().expect("clap requires tenant");
@@ -974,7 +994,7 @@ async fn stale_compute_is_fenced_and_journal_has_no_interleaving() {
 }
 ```
 
-Write it fully using the harness.
+Write it fully using the harness. Additionally: (a) an **oversized-batch case** in the disposability suite — one statement writing a row large enough to force chunking (> `MAX_RECORD_BYTES`); kill; recover; the row survives intact (pins chunk-group atomicity through replay); (b) a **coordinator≠leader fencing variant** — the single-broker harness co-locates the transaction coordinator with the partition leader, which is exactly the configuration where the produce-path epoch check fires; the corrected G-2 spec notes fencing falls back to `EndTxn` when they differ, so add a multi-broker variant using the in-process multi-node fixture from `crates/integration-tests` (if standing that fixture up here is disproportionate, land the single-broker suite and file the multi-broker variant as an explicit TODO test referencing the spec's fencing-locality paragraph — do not silently skip it).
 
 - [ ] **Step 4: nextest group.** In `.config/nextest.toml` `[test-groups]` add `gres-substrate = { max-threads = 2 }` (broker-heavy, same rationale as `gres-fdw`) plus the matching `[[profile.default.overrides]]` block with `filter = 'package(crabka-gres-substrate) & kind(test)'`.
 

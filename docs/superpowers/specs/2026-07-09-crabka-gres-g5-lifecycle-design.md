@@ -10,7 +10,7 @@ PgDog does not queue new connections while a backend is down: a lone primary tha
 
 ## Design Goals
 
-- **Scale to zero:** an idle tenant consumes no compute — only its topic tail, its checkpoints, and one registry record.
+- **Scale to zero:** an idle tenant consumes no compute, and — *corrected after the scaling review* — as little of everything else as the design can arrange: a suspended tenant's WAL topic is **parked** (deleted after the final checkpoint; see below), leaving its checkpoints and one registry record. Without parking, every idle topic costs the brokers continuous follower fetch loops with dedicated connections, ×RF, forever — "idle is free" was false broker-side.
 - **Transparent wake:** the first connection to a suspended tenant succeeds (slowly), not errors; no client-side retry choreography required.
 - **Inherited safety:** no new correctness machinery — suspend/resume must be safe purely because fencing and checkpointed recovery already are.
 - **A measured gate:** cold-start latency is continuously measured and asserted, not asserted once and forgotten.
@@ -26,35 +26,39 @@ PgDog does not queue new connections while a backend is down: a lone primary tha
 ```
 suspend (idle window elapsed, zero open sessions):
   compute: final checkpoint (G-3) → registry state = suspended → clean exit
-  GresTenant controller (registry watch): scale Deployment → 0
+  GresTenant controller (registry watch): scale Deployment → 0;
+    park the WAL topic (delete — it is empty behind the final checkpoint;
+    registry wal_generation += 1)
   Gres controller: re-render pgdog.toml → tenant db targets the ACTIVATOR → RELOAD
+    (this render is OFF the wake path — it only has to land before the NEXT wake)
 
 resume (first connection arrives):
   PgDog → activator (always accepting)
     activator: peek pg StartupMessage (crabka-pgwire decode) → tenant name
                write idempotent resume-request to registry
                hold the connection; bounded condition-driven wait for readiness
-  GresTenant controller: scale Deployment → 1
-  compute: restore checkpoint + replay tail + fence + barrier (G-2/G-3) →
-           registry state = active
-  Gres controller: re-render pgdog.toml → tenant db targets the compute → RELOAD
-  activator: replay held startup bytes to the compute; pipe transparently;
-             in-flight pipes drain naturally after re-route
+  GresTenant controller: recreate the WAL topic (current generation); scale → 1
+  compute: restore checkpoint (manifest generation < registry generation ⇒
+           fresh topic, tail replay from 0) + fence + barrier → state = active
+  activator: replay held startup bytes to the compute; PIPE TRANSPARENTLY —
+             the wake path ends here; no render, no RELOAD in it
+  Gres controller (lazily, batched): re-render pgdog.toml → tenant db targets
+             the compute directly → verified RELOAD; activator pipes drain
 ```
 
 ## Key Design Decisions
 
 ### Suspend is compute-initiated, controller-executed
 
-The compute is the only component that knows session truth, so it owns the decision: after the configured idle window with zero open sessions (window per tenant in the registry; `0` disables), it takes a final checkpoint, writes `suspended`, and exits cleanly. The `GresTenant` controller — which already tails the registry through `crabka-gres-control`'s reader (surfaced into the controller as a watch-channel requeue trigger) — executes the Kubernetes half: Deployment to zero replicas. Computes never hold kube credentials; every signal is a registry record. The final checkpoint is what makes this slice cheap: the next resume replays a near-empty tail, so cold start is dominated by checkpoint download for small tenants. A crash *during* suspend is just a crash — the successor path is identical whether the compute exited cleanly or not, because correctness never depended on clean shutdown (G-2's disposability gate).
+The compute is the only component that knows session truth, so it owns the decision: after the configured idle window with zero open sessions (window per tenant in the registry; `0` disables), it takes a final checkpoint, writes `suspended`, and exits cleanly. The `GresTenant` controller — which already tails the registry through `crabka-gres-control`'s reader (surfaced into the controller as a watch-channel requeue trigger) — executes the Kubernetes half: Deployment to zero replicas, and *(added after the scaling review)* **parks the WAL topic**: behind the final checkpoint the topic is empty, so the controller deletes it and bumps the registry's `wal_generation`, eliminating the suspended tenant's standing broker cost (follower fetch loops, connections, metadata weight — the review measured idle topics as decidedly not free). Resume recreates the topic; recovery already distinguishes a fresh topic from a truncated one via the manifest's `wal_generation` (schema landed in G-3), replaying the tail from offset 0 — which is exactly the empty tail. Fencing survives parking untouched: the producer epoch lives in `__transaction_state` under the tenant's transactional id, not in the topic. Suspend is also **size-gated as policy**: a tenant whose checkpoint exceeds a configured threshold stays warm rather than suspending (its cold start would blow the SLO); the threshold is a fleet default with a per-tenant override, and the idle metric plus checkpoint size make the tradeoff visible. Computes never hold kube credentials; every signal is a registry record. A crash *during* suspend is just a crash — the successor path is identical whether the compute exited cleanly or not, because correctness never depended on clean shutdown (G-2's disposability gate).
 
 ### The activator converts down into slow
 
-`crabka-gres-activator` is a small, stateless, always-on fleet service (replicable; part of the `Gres` controller's rendered workloads). Per connection: accept immediately; read exactly the SSLRequest/StartupMessage prelude using `crabka-pgwire`'s frontend decoding to learn the target database → tenant; write an idempotent resume-request record; hold the socket while waiting — a bounded, condition-driven wait on the registry flipping to `active` plus a TCP readiness probe of the compute, never a blind sleep — then open the backend connection, replay the held prelude bytes, and pipe bytes both ways until either side closes. It terminates nothing else of the protocol: auth, TLS-with-the-compute, and everything after the prelude pass through untouched (on the PgDog→backend leg the prelude is plaintext startup unless backend-TLS is configured; if backend TLS is enabled the activator answers the SSLRequest itself and pipes the TLS stream opaquely after wake — it holds bytes, not sessions). Wait bounds surface as ordinary Postgres error responses so a stuck wake fails loudly within the client's own timeout budget.
+`crabka-gres-activator` is a small, stateless, always-on fleet service (replicable; part of the `Gres` controller's rendered workloads). Per connection: accept immediately; answer an `SSLRequest` with `'N'` — the PgDog→activator leg is in-cluster plaintext, the chapter's stated v1 posture for internal legs, while client-side TLS terminates at PgDog — then read the `StartupMessage` using `crabka-pgwire`'s frontend decoding to learn the target database → tenant; write an idempotent resume-request record; hold the socket while waiting — a bounded, condition-driven wait on the registry flipping to `active` plus a TCP readiness probe of the compute, never a blind sleep — then open the backend connection, replay the held startup bytes, and pipe bytes both ways until either side closes. It terminates nothing else of the protocol: auth and everything after the startup pass through untouched. Wait bounds surface as ordinary Postgres error responses so a stuck wake fails loudly within the client's own timeout budget — a budget G-4's renderer guarantees exceeds the cold-start ceiling.
 
-### Routing flips at the config layer, not a permanent hop
+### The wake path contains no render and no RELOAD
 
-Suspended tenants' `[[databases]]` entries target the activator; active tenants' entries target their compute directly — the `Gres` controller already owns render + `RELOAD` (G-4), so suspend/resume are just two more render triggers from the same registry watch. The alternative — always routing through the activator — was rejected: a permanent extra hop and a second proxy tier to operate, purchased only to avoid config churn that the aggregation controller handles anyway. Races at the flip are benign by construction: a connection that reaches the activator for an already-active tenant just gets piped through immediately; one that reaches a just-suspended compute fails and retries into the activator on the next attempt; and any impossible interleaving that double-starts computes is exactly what fencing already kills.
+*(Promoted from fallback to the design after the scaling review: the original resume path waited on an O(N-tenants) fleet render, a Secret propagation, and a RELOAD — a serialized pipeline sitting inside every cold start and capping fleet-wide wake throughput at the reconciler's churn rate.)* Routing still flips at the config layer, but **asymmetrically**. Suspend-side (never latency-critical): the tenant's `[[databases]]` entry re-targets the activator; this render only has to land before the *next* wake, and the suspend flow tolerates it lazily. Resume-side (the critical path): the activator pipes the held connection **directly to the recovered compute** — the wake completes with zero config churn — and the flip back to direct PgDog→compute routing happens lazily afterward, batched across recent resumes by the fleet controller's ordinary reconcile. Until that lazy flip lands, new connections keep arriving via the activator, which pipes them straight through to the active compute (a per-connection hop, not a stall). The alternative — always routing through the activator — remains rejected as a permanent second proxy tier; the lazy flip buys the same wake latency without institutionalizing the hop. Races stay benign by construction: an activator connection for an already-active tenant pipes immediately; a connection reaching a just-suspended compute fails and retries into the activator; anything that double-starts computes is what fencing kills.
 
 ### Resume requests are records, so wake is at-least-once and idempotent
 
@@ -86,14 +90,15 @@ Nothing new on the Kafka wire (registry records as in G-4). On the Postgres wire
 
 ## Risks
 
-- **PgDog pooled idle connections block suspend** — transaction-mode pooling plus PgDog-side idle server-connection reaping are the mitigation knobs; documented as an operator tuning concern, with the idle metric exposing it.
-- **Render+RELOAD latency sits inside the cold-start budget** — measured by the pipeline; if it dominates, the named optimization is routing suspended tenants through the activator *speculatively* (flip on suspend only, skip the resume-time flip until after wake) — a config-policy change, not an architecture change.
-- **Activator as a byte pipe with backend TLS** — the SSLRequest-handling subtlety is pinned by golden-trace tests; if a PgDog behavior makes pass-through infeasible in some mode, the fallback is plaintext-to-activator inside the cluster boundary (PgDog↔activator only), explicitly documented.
+- **PgDog pooled idle connections block suspend** — transaction-mode pooling is now the G-4 rendered default with backend idle disconnects pinned (the scaling review's finding: session pooling makes suspend unreachable); the idle metric exposes any residual blocker.
+- **The lazy flip leaves a window of activator-hop traffic after wake** — bounded by the fleet controller's reconcile cadence; the activator pipes at line rate, so the cost is one intra-cluster hop per connection during the window, measured by the SLO pipeline.
+- **Fleet churn still bounds suspend-side re-renders** — suspends batch through the same lazy reconcile; the chapter's cell posture (~10³ tenants per fleet) is the stated envelope, and the cold-start pipeline publishes wake rates alongside latency so churn saturation is visible before it hurts.
 - **Thundering herds on a popular suspended tenant** — absorbed by idempotent records and one Deployment; the held connections all pipe when the single compute wakes.
+- **Broker cross-track dependency** *(named after the scaling review)*: topic parking removes the per-idle-tenant broker cost, but fleets of many *active* tenants still lean on broker behaviors that degrade with topic count (per-topic follower fetch connections; metadata scans that are O(partitions) per topic lookup). Replica-fetch multiplexing and indexing partitions-by-topic are broker-track work items this chapter depends on beyond ~10⁴ topics, tracked there — not silently assumed here.
 
 ## Resolved decisions
 
-- Suspend: compute-initiated (idle window, zero sessions) with a final checkpoint; controller executes scale-to-zero; all signaling via registry records.
-- Wake: always-accepting activator; startup-prelude peek via `crabka-pgwire`; idempotent resume-request records; bounded condition-driven hold; transparent byte piping.
-- Routing: config-layer flip between compute and activator per tenant state; no permanent hop.
-- Gate: measured cold-start pipeline with an environment-qualified CI ceiling and published distributions.
+- Suspend: compute-initiated (idle window, zero sessions, checkpoint-size gate) with a final checkpoint; controller executes scale-to-zero and **parks the WAL topic** (delete + `wal_generation` bump; fencing survives in `__transaction_state`); all signaling via registry records.
+- Wake: always-accepting activator; `SSLRequest → 'N'` then startup peek via `crabka-pgwire`; idempotent resume-request records; bounded condition-driven hold; transparent byte piping **directly to the recovered compute — no render or RELOAD on the wake path**.
+- Routing: asymmetric config-layer flips — suspend-side re-render lands lazily before the next wake; resume-side flip back to direct routing is lazy and batched; no permanent hop.
+- Gate: measured cold-start pipeline with an environment-qualified CI ceiling and published distributions (including wake rates, so churn saturation is visible).

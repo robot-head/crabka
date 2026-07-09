@@ -76,6 +76,7 @@ pub struct Manifest {
     pub covered_offset: i64,          // WAL offset this checkpoint covers through (exclusive replay start)
     pub journal_seq: u64,             // next engine seq at the snapshot instant
     pub producer_epoch: i16,
+    pub wal_generation: u64,          // 0 in G-3; G-5 topic parking bumps it (fresh topic ⇒ tail replays from 0)
     pub parts: Vec<PartEntry>,        // in key order
     pub total_pairs: u64,
 }
@@ -95,11 +96,23 @@ Steps: failing tests (part codec proptest round-trip incl. multi-part splitting 
 **Files:** Modify `crates/gres-substrate/src/writer.rs` (control message), create `src/checkpoint/checkpointer.rs`; modify `crates/gres/src/main.rs` + `Cargo.toml` (bucket + threshold flags; `crabka-object-store` dep into gres-substrate).
 
 **Interfaces:**
-- Writer: the request channel becomes `enum WalMsg { Batch(WalRequest), Checkpoint(oneshot::Sender<SnapshotHandle>) }`; between groups the writer answers `Checkpoint` with `SnapshotHandle { snapshot: Box<dyn KvSnapshot>, covered_offset: i64, journal_seq: u64, producer_epoch: i16 }` — `covered_offset` is the last WAL offset whose group has been applied (the writer records the max acked `RecordMetadata.offset` per group; add that bookkeeping), taken synchronously in the loop so no group is in flight at the instant.
+- Writer: the request channel becomes `enum WalMsg { Batch(WalRequest), Checkpoint(oneshot::Sender<SnapshotHandle>) }`; between groups the writer answers `Checkpoint` with `SnapshotHandle { snapshot: Box<dyn KvSnapshot>, covered_offset: i64, journal_seq: u64, producer_epoch: i16, horizon_xid: u64 }` — `covered_offset` is the last WAL offset whose group has been applied (the writer records the max acked `RecordMetadata.offset` per group; add that bookkeeping), `horizon_xid` is the oldest xid visible to any active snapshot at the instant (exposed from the engine's ProcArray via a narrow public accessor — with no active sessions it is the next xid; Task 4b consumes it), taken synchronously in the loop so no group is in flight at the instant.
+- Checkpoint-lag metric *(scaling-review amendment)*: the shared `CheckpointStats` also exposes `lag_bytes`/`lag_frames` since the last durable manifest, logged with a loud warning above a configured threshold — sustained lag means WAL ingress is outrunning upload bandwidth, a detected-not-handled condition per the spec (the operator's lever is graduation).
 - Checkpointer (`spawn_checkpointer(handle, store, ops: Arc<dyn ObjectOps>, admin, cfg) -> JoinHandle`): trigger on `frames_since_last >= cfg.frames_threshold || bytes_since_last >= cfg.bytes_threshold` (counters fed by the writer through a shared `Arc<CheckpointStats>`); on trigger — request snapshot → stream parts (`ObjectOps::put` per part; sha256 while streaming) → put `MANIFEST` last → `admin.delete_records(&[DeleteRecordsOp { topic, partition: 0, offset: covered_offset + 1 }], …)` → list `ckpt_prefix` and delete all but the newest 2 dirs (NotFound-tolerant, the blockstore prune idiom) → reset counters. Every step logs; failures abort the attempt (retry at next trigger) without touching earlier checkpoints.
 - Gres bin: `--bucket-*` flags (or a TOML section mirroring the broker's `[remote_storage]` shape) → `ObjectStoreConfig`; `--checkpoint-frames`/`--checkpoint-bytes` thresholds; checkpointer spawned only in substrate mode with a bucket configured (substrate-without-bucket remains valid = G-2 behavior, full-replay).
 
 Steps: failing unit test for the writer control message (checkpoint between groups: enqueue batches, request snapshot, assert stamped offsets equal the applied prefix and the snapshot excludes post-request batches); implement writer change; failing checkpointer integration test against `ObjectStoreConfig::InMemory` + in-process broker (drive frames past threshold → assert parts+manifest exist, DeleteRecords advanced log start (`fetch` at 0 now errors code 1), old prefixes pruned to 2); implement; nextest/clippy/fmt; commit `feat(gres): checkpointer with manifest-last upload and WAL truncation`.
+
+### Task 4b: The garbage horizon — vacuum-into-checkpoint
+
+**Files:** Modify `crates/pgmvcc/src/{xid,visibility,version}.rs` (frozen sentinel), `crates/gres-substrate/src/checkpoint/checkpointer.rs` (rewrite rules in the part-streaming path), new `crates/gres-substrate/src/checkpoint/horizon.rs`; tests in both crates.
+
+**Interfaces:**
+- `crabka-pgmvcc` gains `pub const FROZEN_XID: Xid` (mirror PostgreSQL's FrozenTransactionId concept; pick a reserved value below the engine's first allocatable xid — inspect the vendored `Xid` domain and the donor's first-xid convention before choosing) with `satisfies_mvcc` treating `xmin == FROZEN_XID` as committed-for-everyone without a clog lookup. Unit tests pin the visibility table for frozen tuples.
+- `horizon.rs`: `pub fn rewrite_for_checkpoint(key: &[u8], value: &[u8], horizon: u64, clog: &impl ClogLookup) -> RewriteDecision` where `RewriteDecision::{Keep, Drop, Replace(Vec<u8>)}` implements the three spec rules — drop row versions with committed `xmax < horizon`; freeze committed `xmin < horizon` (rewrite the tuple header's xmin to `FROZEN_XID`); pass non-row keys through except clog entries with `xid < horizon`, which drop. (Key classification via the existing `crabka-pgkv` helpers + the mvcc version-key/tuple-header codecs — reuse the donor's `version.rs`/`rowenc` accessors; never hand-parse layouts.)
+- The checkpointer pipes every snapshot pair through `rewrite_for_checkpoint` before part framing; `total_pairs`/checksums reflect the rewritten stream.
+
+Steps: TDD the rewrite rules (dead-below-horizon dropped; dead-at-or-above kept; freeze rewrites byte-exactly; aborted-xmin versions below horizon dropped — they are invisible to everyone; clog pruning) → the **visibility-equivalence property test** (random committed/aborted/in-flight histories: for every key and every snapshot at-or-above the horizon, pre-rewrite and post-rewrite stores answer `satisfies_mvcc` identically) → wire into the checkpointer → the Task 5/6 suites re-run green including a checkpoint-restore cycle under conformance parity. Commit `feat(gres): vacuum-into-checkpoint garbage horizon`.
 
 ### Task 5: Restore-aware recovery
 
