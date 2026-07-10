@@ -1,0 +1,39 @@
+[package]
+name = "crabka-gres-conformance"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Differential conformance harness diffing Crabka Gres against a real PostgreSQL oracle over the wire"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-gres-conformance"
+readme = "README.md"
+keywords = ["postgres", "conformance", "testing", "crabka", "gres"]
+categories = ["development-tools::testing"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "crabka-gres-record"
+path = "src/bin/record.rs"
+
+[[bin]]
+name = "crabka-gres-parser-commands"
+path = "src/bin/parser_commands.rs"
+
+[dependencies]
+tokio = { workspace = true, features = ["full"] }
+tokio-postgres = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+tempfile = { workspace = true }

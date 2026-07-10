@@ -1,0 +1,26 @@
+[package]
+name = "crabka-gres-balancer"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Goal-based dry-run planner for Chapter Gres range balancing"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-gres-balancer"
+readme = "README.md"
+keywords = ["postgres", "gres", "balancer", "ranges", "crabka"]
+categories = ["algorithms", "database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+crabka-gres-control = { version = "0.3.8", path = "../gres-control" }
+crabka-gres-substrate = { version = "0.3.9", path = "../gres-substrate" }
+serde = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+assert2 = { workspace = true }

@@ -1,0 +1,30 @@
+[package]
+name = "crabka-pgparser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Hand-written PostgreSQL SQL lexer and parser producing the Crabka Gres AST"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-pgparser"
+readme = "README.md"
+keywords = ["postgres", "sql", "parser", "crabka", "gres"]
+categories = ["database-implementations", "parser-implementations"]
+
+[lints]
+workspace = true
+
+[features]
+# Differential accept/reject oracle vs libpg_query (C build dep) — dev/CI only,
+# never a default: the shipped tree stays pure Rust.
+oracle = ["dep:pg_query"]
+
+[dependencies]
+thiserror = { workspace = true }
+crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
+pg_query = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

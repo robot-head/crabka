@@ -1,0 +1,37 @@
+[package]
+name = "crabka-pgexec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "SQL execution engine for Crabka Gres: turns parsed SQL into catalog and KV operations under MVCC and implements the pgwire Engine trait"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-pgexec"
+readme = "README.md"
+keywords = ["postgres", "sql", "executor", "crabka", "gres"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
+crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
+crabka-pgmvcc = { version = "0.3.9", path = "../pgmvcc" }
+crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
+crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
+crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
+bytes = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+async-trait = { workspace = true }
+zerocopy = { workspace = true }
+bigdecimal = { workspace = true }
+jiff = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full"] }
+tokio-postgres = { workspace = true }
+tempfile = { workspace = true }

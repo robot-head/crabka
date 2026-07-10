@@ -1,0 +1,26 @@
+[package]
+name = "crabka-pgtypes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "PostgreSQL value layer for the Crabka Gres engine: Datum, column types, text and binary wire encodings, casts, and operator semantics"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-pgtypes"
+readme = "README.md"
+keywords = ["postgres", "types", "datum", "crabka", "gres"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+bigdecimal = { workspace = true }
+dashu-float = { workspace = true }
+jiff = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
