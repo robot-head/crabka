@@ -315,7 +315,23 @@ where
     F: FnOnce() -> Barrier,
     Barrier: Future<Output = Result<i64, SubstrateError>>,
 {
+    pause_and_commit_barrier_after_reservation(pause_state, commit_gate, || {}, commit_barrier)
+        .await
+}
+
+async fn pause_and_commit_barrier_after_reservation<F, Barrier, OnReserved>(
+    pause_state: Arc<Mutex<WriterPauseState>>,
+    commit_gate: Arc<Semaphore>,
+    on_reserved: OnReserved,
+    commit_barrier: F,
+) -> Result<PausedWalWriter, SubstrateError>
+where
+    F: FnOnce() -> Barrier,
+    Barrier: Future<Output = Result<i64, SubstrateError>>,
+    OnReserved: FnOnce(),
+{
     let pause = PauseReservation::reserve(pause_state)?;
+    on_reserved();
     let permit = commit_gate
         .acquire_owned()
         .await
@@ -728,6 +744,7 @@ mod tests {
     use std::{
         num::NonZeroU64,
         sync::atomic::{AtomicU64, Ordering},
+        time::Duration,
     };
 
     use assert2::assert;
@@ -809,15 +826,24 @@ mod tests {
             .acquire_owned()
             .await
             .expect("hold commit permit");
+        let reservation_ready = Arc::new(Notify::new());
+        let wait_for_reservation = reservation_ready.notified();
         let task_pause_state = Arc::clone(&pause_state);
         let task_commit_gate = Arc::clone(&commit_gate);
+        let task_reservation_ready = Arc::clone(&reservation_ready);
         let task = tokio::spawn(async move {
-            pause_and_commit_barrier(task_pause_state, task_commit_gate, || async { Ok(7) }).await
+            pause_and_commit_barrier_after_reservation(
+                task_pause_state,
+                task_commit_gate,
+                move || task_reservation_ready.notify_one(),
+                || async { Ok(7) },
+            )
+            .await
         });
 
-        while *pause_state.lock().expect("pause state") != WriterPauseState::Pausing {
-            tokio::task::yield_now().await;
-        }
+        tokio::time::timeout(Duration::from_secs(1), wait_for_reservation)
+            .await
+            .expect("pause reservation should be acquired before cancellation");
         task.abort();
         let Err(cancellation) = task.await else {
             panic!("task must be cancelled");
