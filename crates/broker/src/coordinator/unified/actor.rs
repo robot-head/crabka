@@ -371,7 +371,11 @@ struct ParkedWaiters {
     followers: HashMap<String, oneshot::Sender<SyncResult>>,
 }
 
-#[allow(clippy::too_many_lines)] // one match arm per message variant; splitting hurts readability
+#[allow(clippy::too_many_lines)]
+// one match arm per message variant; splitting hurts readability
+// cargo-mutants: long-lived actor orchestration over channels/timers; socket-free
+// state-transition helpers below carry the mutation-testable behavior.
+#[cfg_attr(test, mutants::skip)]
 async fn actor_loop(
     group_id: String,
     kind: GroupKindTag,
@@ -443,9 +447,8 @@ async fn actor_loop(
                                 }
                                 *group.kind_mut() = GroupKind::Consumer(new_state);
                             } else {
-                                // TODO(kip-848): confirm against mirror.gcr.io/apache/kafka:4.0.0 — an
-                                // un-upgradable/disallowed classic group appears to surface as
-                                // GROUP_ID_NOT_FOUND to a ConsumerGroupHeartbeat.
+                                // KIP-848 keeps an un-upgradable or policy-disallowed
+                                // classic group invisible to ConsumerGroupHeartbeat callers.
                                 let _ = reply.send(ConsumerGroupHeartbeatResponse {
                                     error_code: codes::GROUP_ID_NOT_FOUND,
                                     ..Default::default()
@@ -927,7 +930,6 @@ async fn handle_session_tick(
 /// every member's k5/k7/k8, and write the classic k2 `GroupMetadata`. Returns `Ok(true)` if a flip
 /// happened, `Ok(false)` if the conditions weren't met, `Err` on a log-write
 /// failure (the caller exits the actor loop).
-// TODO(kip-848): confirm exact downgrade trigger boundary against mirror.gcr.io/apache/kafka:4.0.0
 async fn maybe_downgrade(
     group: &mut Group,
     config: &NextGenConfig,

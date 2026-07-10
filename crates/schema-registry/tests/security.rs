@@ -41,8 +41,8 @@ use crabka_schema_registry::{
     rest::{self, AppState, SecurityLayers, forward::ForwardState},
 };
 use crabka_security::{
-    Jwks, TlsConfig,
-    ca::{SubjectAltName, generate_clients_ca, issue_broker_cert},
+    ClientAuthMode, Jwks, TlsConfig,
+    ca::{SubjectAltName, generate_clients_ca, issue_broker_cert, issue_user_cert},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -59,13 +59,18 @@ fn alice_users() -> HashMap<String, String> {
 
 /// A secure-node config: require Basic auth + enabled authz with a fast ACL
 /// refresh, plain HTTP (TLS is layered separately via [`tls_config`]).
-fn secure_cfg(bootstrap: &str, port: i32, tls: Option<TlsConfig>) -> RegistryConfig {
+fn secure_cfg_with_scheme(
+    bootstrap: &str,
+    port: i32,
+    scheme: &str,
+    tls: Option<TlsConfig>,
+) -> RegistryConfig {
     RegistryConfig {
         bootstrap: bootstrap.into(),
         schemas_topic: "_schemas".into(),
         schemas_topic_rf: 1,
         client_id: format!("sr-sec-{port}"),
-        advertised_url: format!("http://127.0.0.1:{port}"),
+        advertised_url: format!("{scheme}://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
         security: SecurityConfig {
@@ -87,13 +92,17 @@ fn secure_cfg(bootstrap: &str, port: i32, tls: Option<TlsConfig>) -> RegistryCon
     }
 }
 
-/// An ACL entry for `User:alice` `Allow` `op` on `Topic:s` (literal, any host).
-fn alice_acl(op: AclOperation) -> AclEntry {
+fn secure_cfg(bootstrap: &str, port: i32, tls: Option<TlsConfig>) -> RegistryConfig {
+    secure_cfg_with_scheme(bootstrap, port, "http", tls)
+}
+
+/// An ACL entry granting `principal` `Allow` `op` on `Topic:s` (literal, any host).
+fn principal_acl(principal: &str, op: AclOperation) -> AclEntry {
     AclEntry {
         resource_type: ResourceType::Topic,
         resource_name: "s".into(),
         pattern_type: PatternType::Literal,
-        principal: "User:alice".into(),
+        principal: principal.into(),
         host: "*".into(),
         operation: op,
         permission_type: PermissionType::Allow,
@@ -104,13 +113,17 @@ fn alice_acl(op: AclOperation) -> AclEntry {
 /// `Write`, `GET /subjects/s/versions` to `Read` (see `authz::authz_target`);
 /// `SimpleAclAuthorizer` does not imply Read←Write, so both are required.
 async fn seed_acls(bootstrap: &str) {
+    seed_acls_for(bootstrap, "User:alice").await;
+}
+
+async fn seed_acls_for(bootstrap: &str, principal: &str) {
     let mut admin = AdminClient::connect(&[bootstrap.to_string()])
         .await
         .expect("admin connect");
     let outcomes = admin
         .create_acls(&[
-            alice_acl(AclOperation::Write),
-            alice_acl(AclOperation::Read),
+            principal_acl(principal, AclOperation::Write),
+            principal_acl(principal, AclOperation::Read),
         ])
         .await
         .expect("create_acls");
@@ -262,6 +275,136 @@ async fn await_get_body_as_alice(http: &reqwest::Client, url: &str, expected: &s
             "GET {url} never returned {expected:?}"
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+fn https_client(ca_pem: &str, identity: Option<(&str, &str)>) -> reqwest::Client {
+    let ca = reqwest::Certificate::from_pem(ca_pem.as_bytes()).unwrap();
+    let mut builder = reqwest::Client::builder().add_root_certificate(ca);
+    if let Some((cert_pem, key_pem)) = identity {
+        let mut pem = String::with_capacity(cert_pem.len() + key_pem.len() + 1);
+        pem.push_str(cert_pem);
+        if !cert_pem.ends_with('\n') {
+            pem.push('\n');
+        }
+        pem.push_str(key_pem);
+        builder = builder.identity(reqwest::Identity::from_pem(pem.as_bytes()).unwrap());
+    }
+    builder.build().unwrap()
+}
+
+async fn register_over_mtls(
+    http: &reqwest::Client,
+    port: i32,
+    subject: &str,
+) -> reqwest::StatusCode {
+    http.post(format!(
+        "https://127.0.0.1:{port}/subjects/{subject}/versions"
+    ))
+    .header("content-type", SR_CONTENT_TYPE)
+    .body(SCHEMA_BODY)
+    .send()
+    .await
+    .unwrap()
+    .status()
+}
+
+async fn await_register_mtls_200(http: &reqwest::Client, port: i32, subject: &str, secs: u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let status = register_over_mtls(http, port, subject).await;
+        if status == 200 {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "mTLS register on {subject} never returned 200 (last status {status})"
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+}
+
+async fn await_get_body_over_mtls(
+    http: &reqwest::Client,
+    port: i32,
+    subject: &str,
+    expected: &str,
+    secs: u64,
+) {
+    let url = format!("https://127.0.0.1:{port}/subjects/{subject}/versions");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Ok(response) = http.get(&url).send().await
+            && response.status() == 200
+            && let Ok(body) = response.text().await
+            && body == expected
+        {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "mTLS GET {url} never returned {expected:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+async fn start_mtls_node(bootstrap: &str, tls: TlsConfig, forward_http: reqwest::Client) -> Node {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let port = i32::from(listener.local_addr().unwrap().port());
+    let cfg = secure_cfg_with_scheme(bootstrap, port, "https", Some(tls.clone()));
+    let cancel = CancellationToken::new();
+    let store = KafkaStore::start(&cfg, cancel.clone()).await.unwrap();
+    let primary = Election::start(&cfg, cancel.clone()).await.unwrap();
+
+    let auth = AuthState {
+        basic: None,
+        bearer: None,
+        require_auth: true,
+        realm: "test".into(),
+    };
+    let authz = Arc::new(SchemaRegistryAuthz::new(HashSet::new(), true));
+    {
+        let admin = AdminClient::connect(&[bootstrap.to_string()])
+            .await
+            .expect("authz admin connect");
+        let authz = authz.clone();
+        let refresh_cancel = cancel.clone();
+        tokio::spawn(async move {
+            authz
+                .run_acl_refresh(admin, Duration::from_millis(300), refresh_cancel)
+                .await;
+        });
+    }
+
+    let fwd = ForwardState {
+        primary: primary.clone(),
+        http: forward_http,
+        node_id: cfg.advertised_url.clone(),
+    };
+    let app: Router = rest::router_with_security(
+        AppState {
+            store: store.clone(),
+        },
+        SecurityLayers {
+            auth,
+            authz: Some(authz),
+            forward: fwd,
+        },
+    );
+    let serve_cancel = cancel.clone();
+    tokio::spawn(async move {
+        rest::serve::serve_https(listener, app, &tls, serve_cancel)
+            .await
+            .ok();
+    });
+    Node {
+        port,
+        _store: store,
+        primary,
+        cancel,
     }
 }
 
@@ -430,16 +573,74 @@ async fn https_round_trip_enforces_auth_over_tls() {
     broker.shutdown().await;
 }
 
-// TODO(slice-6): mTLS multi-node forward integration test. This Basic two-node
-// case plus the `auth::tests::forwarded_request_bypasses_require_auth` unit test
-// already cover model A end-to-end (ingress authn+authz → proxy with no creds,
-// only FORWARD_HEADER → primary auth_layer + authz_layer trust the forward). An
-// mTLS variant (two `serve_https` nodes with `ClientAuthMode::Required`, an mTLS
-// alice client writing to the secondary, the write landing on the primary) would
-// additionally prove model A works where model B could not — but it needs a
-// bespoke HTTPS harness (the secondary's forward `reqwest::Client` must carry its
-// own client identity + CA trust to complete the mTLS handshake to the primary)
-// plus a full-subject-DN ACL (`User:CN=alice,…`), so it is deferred as too heavy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn mtls_two_nodes_authorize_then_forward_to_primary() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    seed_acls_for(&bootstrap, "User:CN=alice").await;
+
+    let certdir = tempfile::tempdir().unwrap();
+    let ca = generate_clients_ca("sr-mtls-ca", 365).unwrap();
+    let server_sans = vec![SubjectAltName::Ip(std::net::IpAddr::V4(
+        std::net::Ipv4Addr::LOCALHOST,
+    ))];
+    let server =
+        issue_broker_cert(&ca.cert_pem, &ca.key_pem, "sr-node", &server_sans, &[], 365).unwrap();
+    let alice = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 365).unwrap();
+
+    let ca_path = certdir.path().join("ca.pem");
+    let server_cert_path = certdir.path().join("server-cert.pem");
+    let server_key_path = certdir.path().join("server-key.pem");
+    std::fs::write(&ca_path, &ca.cert_pem).unwrap();
+    std::fs::write(&server_cert_path, &server.cert_pem).unwrap();
+    std::fs::write(&server_key_path, &server.key_pem).unwrap();
+
+    let tls = TlsConfig {
+        cert_chain_path: server_cert_path,
+        private_key_path: server_key_path,
+        trust_roots_path: Some(ca_path.clone()),
+        client_ca_path: Some(ca_path),
+        client_auth: ClientAuthMode::Required,
+    };
+    let forward_http = https_client(&ca.cert_pem, Some((&server.cert_pem, &server.key_pem)));
+    let mtls_alice = https_client(&ca.cert_pem, Some((&alice.cert_pem, &alice.key_pem)));
+
+    let mut a = start_mtls_node(&bootstrap, tls.clone(), forward_http.clone()).await;
+    let mut b = start_mtls_node(&bootstrap, tls, forward_http).await;
+    await_state(&mut a.primary, 25, |s| s.primary_url.is_some()).await;
+    await_state(&mut b.primary, 25, |s| s.primary_url.is_some()).await;
+    let a_is_primary = a.primary.borrow().is_primary;
+    assert_ne!(
+        a_is_primary,
+        b.primary.borrow().is_primary,
+        "exactly one mTLS node is primary"
+    );
+    let (primary_port, secondary_port) = if a_is_primary {
+        (a.port, b.port)
+    } else {
+        (b.port, a.port)
+    };
+
+    await_register_mtls_200(&mtls_alice, secondary_port, "s", 20).await;
+    await_get_body_over_mtls(&mtls_alice, primary_port, "s", "[1]", 20).await;
+    await_get_body_over_mtls(&mtls_alice, secondary_port, "s", "[1]", 20).await;
+
+    let status = register_over_mtls(&mtls_alice, secondary_port, "other").await;
+    assert_eq!(
+        status, 403,
+        "mTLS secondary denies an unauthorized write before forwarding"
+    );
+
+    a.cancel.cancel();
+    b.cancel.cancel();
+    broker.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn two_nodes_authorize_then_forward_to_primary() {
     let dir = tempfile::tempdir().unwrap();

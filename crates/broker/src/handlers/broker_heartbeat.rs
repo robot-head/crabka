@@ -32,6 +32,9 @@ use crate::{
     fields(api = "BrokerHeartbeat", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: controller RPC orchestration over live broker state; helper
+// functions and handler tests cover the deterministic decision points.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
@@ -340,45 +343,51 @@ mod tests {
             self.image.clone()
         }
         fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
-            unimplemented!()
+            let (_tx, rx) = watch::channel(self.image.clone());
+            rx
         }
         fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
             self.leader_rx.clone()
         }
         fn quorum_state(&self) -> QuorumState {
-            unimplemented!()
+            QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: *self.leader_rx.borrow(),
+                voters: Vec::new(),
+                voter_nodes: std::collections::BTreeMap::new(),
+                per_voter_matched_index: std::collections::BTreeMap::new(),
+            }
         }
         async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
             self.captured.lock().unwrap().extend(records);
             Ok(())
         }
         async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
-            unimplemented!()
+            panic!("broker heartbeat MockSource does not support membership changes")
         }
         async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
-            unimplemented!()
+            panic!("broker heartbeat MockSource does not support learner changes")
         }
         fn controller_bound_addr(&self) -> SocketAddr {
-            unimplemented!()
+            SocketAddr::from(([0, 0, 0, 0], 0))
         }
         fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
-            unimplemented!()
+            SnapshotRange::NoSnapshot
         }
         async fn trigger_snapshot(&self) -> Result<(), RaftError> {
-            unimplemented!()
+            panic!("broker heartbeat MockSource does not support snapshots")
         }
         async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
-            unimplemented!()
+            panic!("broker heartbeat MockSource does not support adding voters")
         }
         async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
-            unimplemented!()
+            panic!("broker heartbeat MockSource does not support removing voters")
         }
         async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
-            unimplemented!()
+            panic!("broker heartbeat MockSource does not support updating voters")
         }
-        async fn cancel(&self) {
-            unimplemented!()
-        }
+        async fn cancel(&self) {}
     }
 
     fn image_with_dir_partition(

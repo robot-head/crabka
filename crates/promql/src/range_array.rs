@@ -11,28 +11,269 @@
 //! (count/sum/schema scalars plus bucket-bound and bucket-count lists) instead of
 //! a `Float64Array`; `get(i)` returns the sliced `StructArray` for that window.
 //!
-//! Only the *typed* fast-path accessors below are scalar-specific
+//! The typed fast-path accessors below cover scalar cells
 //! ([`value_slice`](RangeArray::value_slice) for `f64`,
-//! [`timestamp_slice`](RangeArray::timestamp_slice) for `i64`). The rate-family
-//! UDFs that consume histograms will want an equivalent zero-copy view per cell.
-//!
-//! TODO(histogram-rangearray): add a `histogram_cell(index) -> Option<HistogramView<'_>>`
-//! typed accessor that downcasts the backing `StructArray` once and exposes each
-//! window's count/sum/buckets without re-slicing. Deferred because it requires
-//! pinning the native-histogram `StructArray` field layout (a cross-crate schema
-//! decision owned by `crabka-metrics`), which is more than modest effort and not
-//! on the slice-2 critical path. The generic `get()` path unblocks histogram
-//! columns in the meantime.
+//! [`timestamp_slice`](RangeArray::timestamp_slice) for `i64`) and native
+//! histogram cells ([`histogram_cell`](RangeArray::histogram_cell)).
 
 use std::sync::Arc;
 
 use arrow::{
-    array::{Array, ArrayRef, DictionaryArray, Float64Array, Int64Array, ListArray},
+    array::{
+        Array, ArrayRef, BooleanArray, DictionaryArray, Float64Array, Int8Array, Int32Array,
+        Int64Array, ListArray, StructArray, UInt32Array,
+    },
     buffer::{OffsetBuffer, ScalarBuffer},
     compute::concat,
     datatypes::{Field, Int64Type},
     error::ArrowError,
 };
+use crabka_metrics::{
+    COL_NH_COUNT, COL_NH_CUSTOM_VALUES, COL_NH_IS_FLOAT, COL_NH_NEG_COUNTS, COL_NH_NEG_SPANS,
+    COL_NH_POS_COUNTS, COL_NH_POS_SPANS, COL_NH_RESET_HINT, COL_NH_SCHEMA, COL_NH_START_TS,
+    COL_NH_SUM, COL_NH_ZERO_COUNT, COL_NH_ZERO_THRESHOLD,
+};
+
+/// Zero-copy view of one native-histogram range cell.
+#[derive(Clone, Copy, Debug)]
+pub struct HistogramView<'a> {
+    row_start: usize,
+    row_len: usize,
+    schemas: &'a [i8],
+    is_floats: &'a BooleanArray,
+    reset_hints: &'a [i8],
+    zero_thresholds: &'a [f64],
+    zero_counts: &'a [f64],
+    counts: &'a [f64],
+    sums: &'a [f64],
+    positive_spans: &'a ListArray,
+    positive_counts: &'a ListArray,
+    negative_spans: &'a ListArray,
+    negative_counts: &'a ListArray,
+    custom_values: &'a ListArray,
+    start_timestamps: &'a Int64Array,
+}
+
+impl<'a> HistogramView<'a> {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.row_len
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.row_len == 0
+    }
+
+    #[must_use]
+    pub fn schema_slice(&self) -> &'a [i8] {
+        self.schemas
+    }
+
+    #[must_use]
+    pub fn reset_hint_slice(&self) -> &'a [i8] {
+        self.reset_hints
+    }
+
+    #[must_use]
+    pub fn zero_threshold_slice(&self) -> &'a [f64] {
+        self.zero_thresholds
+    }
+
+    #[must_use]
+    pub fn zero_count_slice(&self) -> &'a [f64] {
+        self.zero_counts
+    }
+
+    #[must_use]
+    pub fn count_slice(&self) -> &'a [f64] {
+        self.counts
+    }
+
+    #[must_use]
+    pub fn sum_slice(&self) -> &'a [f64] {
+        self.sums
+    }
+
+    #[must_use]
+    pub fn is_float(&self, sample_index: usize) -> Option<bool> {
+        let row = self.absolute_row(sample_index)?;
+        (!self.is_floats.is_null(row)).then(|| self.is_floats.value(row))
+    }
+
+    #[must_use]
+    pub fn positive_spans(&self, sample_index: usize) -> Option<HistogramSpanView<'a>> {
+        let row = self.absolute_row(sample_index)?;
+        span_list_value(self.positive_spans, row)
+    }
+
+    #[must_use]
+    pub fn positive_counts(&self, sample_index: usize) -> Option<&'a [f64]> {
+        let row = self.absolute_row(sample_index)?;
+        f64_list_value(self.positive_counts, row)
+    }
+
+    #[must_use]
+    pub fn negative_spans(&self, sample_index: usize) -> Option<HistogramSpanView<'a>> {
+        let row = self.absolute_row(sample_index)?;
+        span_list_value(self.negative_spans, row)
+    }
+
+    #[must_use]
+    pub fn negative_counts(&self, sample_index: usize) -> Option<&'a [f64]> {
+        let row = self.absolute_row(sample_index)?;
+        f64_list_value(self.negative_counts, row)
+    }
+
+    #[must_use]
+    pub fn custom_values(&self, sample_index: usize) -> Option<&'a [f64]> {
+        let row = self.absolute_row(sample_index)?;
+        f64_list_value(self.custom_values, row)
+    }
+
+    #[must_use]
+    pub fn start_timestamp_ms(&self, sample_index: usize) -> Option<i64> {
+        let row = self.absolute_row(sample_index)?;
+        (!self.start_timestamps.is_null(row)).then(|| self.start_timestamps.value(row))
+    }
+
+    fn absolute_row(&self, sample_index: usize) -> Option<usize> {
+        if sample_index >= self.row_len {
+            return None;
+        }
+        Some(self.row_start + sample_index)
+    }
+}
+
+/// Zero-copy view of a native-histogram span list.
+#[derive(Clone, Copy, Debug)]
+pub struct HistogramSpanView<'a> {
+    offsets: &'a [i32],
+    lengths: &'a [u32],
+}
+
+impl<'a> HistogramSpanView<'a> {
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.offsets.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.offsets.is_empty()
+    }
+
+    #[must_use]
+    pub fn offsets(&self) -> &'a [i32] {
+        self.offsets
+    }
+
+    #[must_use]
+    pub fn lengths(&self) -> &'a [u32] {
+        self.lengths
+    }
+}
+
+struct HistogramColumns<'a> {
+    schemas: &'a Int8Array,
+    is_floats: &'a BooleanArray,
+    reset_hints: &'a Int8Array,
+    zero_thresholds: &'a Float64Array,
+    zero_counts: &'a Float64Array,
+    counts: &'a Float64Array,
+    sums: &'a Float64Array,
+    positive_spans: &'a ListArray,
+    positive_counts: &'a ListArray,
+    negative_spans: &'a ListArray,
+    negative_counts: &'a ListArray,
+    custom_values: &'a ListArray,
+    start_timestamps: &'a Int64Array,
+}
+
+impl<'a> HistogramColumns<'a> {
+    fn parse(values: &'a dyn Array) -> Option<Self> {
+        let histograms = values.as_any().downcast_ref::<StructArray>()?;
+        Some(Self {
+            schemas: struct_column(histograms, COL_NH_SCHEMA)?,
+            is_floats: struct_column(histograms, COL_NH_IS_FLOAT)?,
+            reset_hints: struct_column(histograms, COL_NH_RESET_HINT)?,
+            zero_thresholds: struct_column(histograms, COL_NH_ZERO_THRESHOLD)?,
+            zero_counts: struct_column(histograms, COL_NH_ZERO_COUNT)?,
+            counts: struct_column(histograms, COL_NH_COUNT)?,
+            sums: struct_column(histograms, COL_NH_SUM)?,
+            positive_spans: struct_column(histograms, COL_NH_POS_SPANS)?,
+            positive_counts: struct_column(histograms, COL_NH_POS_COUNTS)?,
+            negative_spans: struct_column(histograms, COL_NH_NEG_SPANS)?,
+            negative_counts: struct_column(histograms, COL_NH_NEG_COUNTS)?,
+            custom_values: struct_column(histograms, COL_NH_CUSTOM_VALUES)?,
+            start_timestamps: struct_column(histograms, COL_NH_START_TS)?,
+        })
+    }
+
+    fn cell(self, offset: u32, len: u32) -> HistogramView<'a> {
+        let start = offset as usize;
+        let end = start + len as usize;
+        HistogramView {
+            row_start: start,
+            row_len: len as usize,
+            schemas: &self.schemas.values()[start..end],
+            is_floats: self.is_floats,
+            reset_hints: &self.reset_hints.values()[start..end],
+            zero_thresholds: &self.zero_thresholds.values()[start..end],
+            zero_counts: &self.zero_counts.values()[start..end],
+            counts: &self.counts.values()[start..end],
+            sums: &self.sums.values()[start..end],
+            positive_spans: self.positive_spans,
+            positive_counts: self.positive_counts,
+            negative_spans: self.negative_spans,
+            negative_counts: self.negative_counts,
+            custom_values: self.custom_values,
+            start_timestamps: self.start_timestamps,
+        }
+    }
+}
+
+fn struct_column<'a, T: Array + 'static>(histograms: &'a StructArray, name: &str) -> Option<&'a T> {
+    histograms
+        .column_by_name(name)?
+        .as_any()
+        .downcast_ref::<T>()
+}
+
+fn list_offsets(list: &ListArray, row: usize) -> Option<(usize, usize)> {
+    if list.is_null(row) {
+        return None;
+    }
+    let offsets = list.value_offsets();
+    let start = usize::try_from(*offsets.get(row)?).ok()?;
+    let end = usize::try_from(*offsets.get(row + 1)?).ok()?;
+    Some((start, end))
+}
+
+fn f64_list_value(list: &ListArray, row: usize) -> Option<&[f64]> {
+    let (start, end) = list_offsets(list, row)?;
+    let values = list.values().as_any().downcast_ref::<Float64Array>()?;
+    Some(&values.values()[start..end])
+}
+
+fn span_list_value(list: &ListArray, row: usize) -> Option<HistogramSpanView<'_>> {
+    let (start, end) = list_offsets(list, row)?;
+    let values = list.values().as_any().downcast_ref::<StructArray>()?;
+    let offsets = values
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()?
+        .values();
+    let lengths = values
+        .column(1)
+        .as_any()
+        .downcast_ref::<UInt32Array>()?
+        .values();
+    Some(HistogramSpanView {
+        offsets: &offsets[start..end],
+        lengths: &lengths[start..end],
+    })
+}
 
 /// A view over `values` partitioned into `(offset, len)` windows.
 #[derive(Clone, Debug)]
@@ -138,6 +379,16 @@ impl RangeArray {
         let ints = self.values.as_any().downcast_ref::<Int64Array>()?;
         let start = offset as usize;
         Some(&ints.values()[start..start + len as usize])
+    }
+
+    /// The native-histogram cell `index`, or `None` if `index` is out of bounds
+    /// or the backing array does not match `crabka-metrics`' native histogram
+    /// `StructArray` layout.
+    #[must_use]
+    pub fn histogram_cell(&self, index: usize) -> Option<HistogramView<'_>> {
+        let &(offset, len) = self.ranges.get(index)?;
+        let columns = HistogramColumns::parse(self.values.as_ref())?;
+        Some(columns.cell(offset, len))
     }
 
     /// Iterate every cell as a `&[f64]`, or `None` if the backing array is not

@@ -656,35 +656,45 @@ mod tests {
         }
 
         async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
-            unimplemented!("unused in leader_election tests")
+            Err(RaftError::NotLeader {
+                current_leader: *self.leader_tx.borrow(),
+            })
         }
 
         async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
-            unimplemented!("unused in leader_election tests")
+            Err(RaftError::NotLeader {
+                current_leader: *self.leader_tx.borrow(),
+            })
         }
 
         fn controller_bound_addr(&self) -> SocketAddr {
-            unimplemented!("unused in leader_election tests")
+            SocketAddr::from(([0, 0, 0, 0], 0))
         }
 
         fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
-            unimplemented!("unused in leader_election tests")
+            SnapshotRange::NoSnapshot
         }
 
         async fn trigger_snapshot(&self) -> Result<(), RaftError> {
-            unimplemented!("unused in leader_election tests")
+            Ok(())
         }
 
         async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
-            unimplemented!("unused in leader_election tests")
+            Err(RaftError::NotLeader {
+                current_leader: *self.leader_tx.borrow(),
+            })
         }
 
         async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
-            unimplemented!("unused in leader_election tests")
+            Err(RaftError::NotLeader {
+                current_leader: *self.leader_tx.borrow(),
+            })
         }
 
         async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
-            unimplemented!("unused in leader_election tests")
+            Err(RaftError::NotLeader {
+                current_leader: *self.leader_tx.borrow(),
+            })
         }
 
         async fn cancel(&self) {}

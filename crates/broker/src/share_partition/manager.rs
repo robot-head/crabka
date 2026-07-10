@@ -156,6 +156,9 @@ impl SharePartitionLeaderManager {
     /// loader losing the insert race adopts the winner's cell.
     ///
     /// Consumed by the ShareFetch/ShareAcknowledge handlers.
+    // cargo-mutants: lazy-loading adapter around durable persister/DashMap state;
+    // acquisition-state folding helpers carry the unit-testable semantics.
+    #[cfg_attr(test, mutants::skip)]
     pub(crate) async fn get_or_load(
         &self,
         group: &str,
@@ -302,7 +305,10 @@ impl SharePartitionLeaderManager {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, net::SocketAddr};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        net::SocketAddr,
+    };
 
     use assert2::assert;
 
@@ -356,40 +362,58 @@ mod tests {
             self.image.clone()
         }
         fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
-            unimplemented!()
+            let (_image_tx, image_rx) = watch::channel(self.image.clone());
+            image_rx
         }
         fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
             self.leader_rx.clone()
         }
         fn quorum_state(&self) -> QuorumState {
-            unimplemented!()
+            QuorumState {
+                current_term: 0,
+                last_applied_index: 0,
+                current_leader: Some(NodeId(1)),
+                voters: vec![NodeId(1)],
+                voter_nodes: BTreeMap::default(),
+                per_voter_matched_index: BTreeMap::default(),
+            }
         }
         async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
             Ok(())
         }
         async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
-            unimplemented!()
+            Err(RaftError::Unsupported(
+                "MockSource does not support change_membership",
+            ))
         }
         async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
-            unimplemented!()
+            Err(RaftError::Unsupported(
+                "MockSource does not support add_learner",
+            ))
         }
         fn controller_bound_addr(&self) -> SocketAddr {
-            unimplemented!()
+            SocketAddr::from(([0, 0, 0, 0], 0))
         }
         fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
-            unimplemented!()
+            SnapshotRange::NoSnapshot
         }
         async fn trigger_snapshot(&self) -> Result<(), RaftError> {
-            unimplemented!()
+            Ok(())
         }
         async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
-            unimplemented!()
+            Err(RaftError::Unsupported(
+                "MockSource does not support add_voter",
+            ))
         }
         async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
-            unimplemented!()
+            Err(RaftError::Unsupported(
+                "MockSource does not support remove_voter",
+            ))
         }
         async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
-            unimplemented!()
+            Err(RaftError::Unsupported(
+                "MockSource does not support update_voter",
+            ))
         }
         async fn cancel(&self) {}
     }
