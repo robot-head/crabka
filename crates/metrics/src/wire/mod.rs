@@ -23,13 +23,13 @@ pub use v2::{WrittenCounts, decode_v2};
 pub mod pb {
     /// `remote_write` v1 (`prometheus.WriteRequest`).
     pub mod v1 {
-        #![allow(clippy::pedantic)]
+        #![allow(clippy::pedantic, clippy::useless_borrows_in_formatting)]
         include!(concat!(env!("OUT_DIR"), "/prometheus.rs"));
     }
 
     /// `remote_write` v2 (`io.prometheus.write.v2.Request`).
     pub mod v2 {
-        #![allow(clippy::pedantic)]
+        #![allow(clippy::pedantic, clippy::useless_borrows_in_formatting)]
         include!(concat!(env!("OUT_DIR"), "/io.prometheus.write.v2.rs"));
     }
 }

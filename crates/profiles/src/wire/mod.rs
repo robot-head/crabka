@@ -1,7 +1,7 @@
 //! Generated message + Connect-server types from vendored protos.
 
 /// Generated protobuf + Connect server stubs.
-#[allow(clippy::pedantic, clippy::style)]
+#[allow(clippy::pedantic, clippy::style, clippy::useless_borrows_in_formatting)]
 pub mod pb {
     /// Pyroscope `push.v1.PusherService`.
     pub mod push {
