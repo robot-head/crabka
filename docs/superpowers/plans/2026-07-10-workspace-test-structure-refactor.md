@@ -17,7 +17,7 @@
 - Derive equality/debug traits only for private types where the traits are semantically correct; do not expand public APIs solely for test convenience.
 - Parameterize only scenarios with the same setup, action, and assertion shape. Every case must have a descriptive name used in assertion diagnostics.
 - Do not edit fixtures, snapshots, generated schemas, or production behavior unless required by a semantically correct private-type derive.
-- Use `cargo +nightly fmt --all` after edits and test every affected package.
+- In a parallel batch, implementers edit only their assigned source roots, do not commit, and do not run workspace-wide formatting. They run focused affected-package tests; at the batch barrier the controller runs `cargo +nightly fmt --all`, merges audit fragments, verifies the combined batch, and commits it.
 - Parallel implementers must not edit the shared canonical ledger directly. Task N writes reviewed dispositions to `.superpowers/sdd/task-N-audit.md`; after the task review passes, the controller merges that fragment into `.superpowers/sdd/test-refactor-audit.md` serially.
 
 ### Required transformation shapes
