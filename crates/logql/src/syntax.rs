@@ -1233,10 +1233,9 @@ impl<'a> Parser<'a> {
         let mut pipeline = Vec::new();
         loop {
             self.skip_ws();
-            if stop_before_range
-                && matches!(self.peek(), Some('[')) {
-                    break;
-                }
+            if stop_before_range && matches!(self.peek(), Some('[')) {
+                break;
+            }
             if self.pos == self.input.len() {
                 break;
             }

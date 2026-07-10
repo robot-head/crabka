@@ -974,7 +974,7 @@ async fn three_node_replication_byte_compare() {
     //    broker's on-disk partition directory visible to the tool
     //    container.
     let mut dumps = Vec::with_capacity(3);
-    for (_, dir) in cluster.iter() {
+    for (_, dir) in &cluster {
         let partition_dir = dir.path().join(format!("{TOPIC}-0"));
         let log_file = partition_dir.join("00000000000000000000.log");
         assert2::assert!(log_file.exists());

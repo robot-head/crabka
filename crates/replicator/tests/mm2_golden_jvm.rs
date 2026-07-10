@@ -24,7 +24,7 @@
 //!   downstream = 742
 //!   metadata   = "" (empty string)
 
-use std::{collections::HashMap, fmt::Write as _};
+use std::collections::HashMap;
 
 use crabka_replicator::{
     ids::{DownstreamOffset, PartitionIndex, UpstreamOffset},
@@ -47,14 +47,6 @@ fn golden(name: &str) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).expect("valid hex"))
         .collect()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 /// Assert one encoded buffer matches its JVM golden vector byte-for-byte.

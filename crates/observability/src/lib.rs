@@ -3843,17 +3843,20 @@ fn validate_loki_json_push_stream_objects(
             ));
         }
         if let Some(labels) = stream.get("stream")
-            && !labels.is_object() {
-                return Err(DistributorError::InvalidJsonPushValueSyntax(
-                    loki_json_push_labels_field_parse_error(body),
-                ));
-            }
+            && !labels.is_object()
+        {
+            return Err(DistributorError::InvalidJsonPushValueSyntax(
+                loki_json_push_labels_field_parse_error(body),
+            ));
+        }
         if let Some(values) = stream.get("values")
-            && !values.is_array() && !values.is_null() {
-                return Err(DistributorError::InvalidJsonPushValueSyntax(
-                    loki_json_push_values_field_parse_error(body, values),
-                ));
-            }
+            && !values.is_array()
+            && !values.is_null()
+        {
+            return Err(DistributorError::InvalidJsonPushValueSyntax(
+                loki_json_push_values_field_parse_error(body, values),
+            ));
+        }
         let stream = serde_json::from_value(stream.clone())
             .map_err(|_| DistributorError::InvalidPushPayload)?;
         streams.push(stream);
@@ -12011,9 +12014,10 @@ fn apply_metric_binary_comparison_to_sample_operands(
         true
     } else {
         if matches
-            && let (Some(output), Some(left)) = (output_values.get_mut(1), left_values.get(1)) {
-                *output = left.clone();
-            }
+            && let (Some(output), Some(left)) = (output_values.get_mut(1), left_values.get(1))
+        {
+            *output = left.clone();
+        }
         matches
     }
 }
@@ -19109,9 +19113,10 @@ fn loki_parquet_metric_timestamp_ns(
     kind: LokiMetricParquetKind,
 ) -> Result<i64, HttpQueryError> {
     if matches!(kind, LokiMetricParquetKind::Vector)
-        && let Some(timestamp_ns) = value.as_i64() {
-            return Ok(timestamp_ns);
-        }
+        && let Some(timestamp_ns) = value.as_i64()
+    {
+        return Ok(timestamp_ns);
+    }
 
     if let Some(seconds) = value.as_i64() {
         return seconds

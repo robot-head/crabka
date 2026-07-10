@@ -174,7 +174,6 @@ mod tests {
     use super::*;
 
     struct AttributeCase {
-        name: &'static str,
         bits: i16,
         compression: CompressionType,
         timestamp_type: TimestampType,
@@ -196,7 +195,6 @@ mod tests {
     fn attribute_compression_cases() {
         for case in [
             AttributeCase {
-                name: "zero",
                 bits: 0,
                 compression: CompressionType::None,
                 timestamp_type: TimestampType::CreateTime,
@@ -205,7 +203,6 @@ mod tests {
                 delete_horizon: false,
             },
             AttributeCase {
-                name: "gzip",
                 bits: 0x01,
                 compression: CompressionType::Gzip,
                 timestamp_type: TimestampType::CreateTime,
@@ -214,7 +211,6 @@ mod tests {
                 delete_horizon: false,
             },
             AttributeCase {
-                name: "snappy",
                 bits: 0x02,
                 compression: CompressionType::Snappy,
                 timestamp_type: TimestampType::CreateTime,
@@ -223,7 +219,6 @@ mod tests {
                 delete_horizon: false,
             },
             AttributeCase {
-                name: "lz4",
                 bits: 0x03,
                 compression: CompressionType::Lz4,
                 timestamp_type: TimestampType::CreateTime,
@@ -232,7 +227,6 @@ mod tests {
                 delete_horizon: false,
             },
             AttributeCase {
-                name: "zstd",
                 bits: 0x04,
                 compression: CompressionType::Zstd,
                 timestamp_type: TimestampType::CreateTime,
@@ -249,7 +243,6 @@ mod tests {
     fn attribute_flag_cases() {
         for case in [
             AttributeCase {
-                name: "log append",
                 bits: 0x08,
                 compression: CompressionType::None,
                 timestamp_type: TimestampType::LogAppendTime,
@@ -258,7 +251,6 @@ mod tests {
                 delete_horizon: false,
             },
             AttributeCase {
-                name: "transactional",
                 bits: 0x10,
                 compression: CompressionType::None,
                 timestamp_type: TimestampType::CreateTime,
@@ -267,7 +259,6 @@ mod tests {
                 delete_horizon: false,
             },
             AttributeCase {
-                name: "control",
                 bits: 0x20,
                 compression: CompressionType::None,
                 timestamp_type: TimestampType::CreateTime,
@@ -276,7 +267,6 @@ mod tests {
                 delete_horizon: false,
             },
             AttributeCase {
-                name: "delete horizon",
                 bits: 0x40,
                 compression: CompressionType::None,
                 timestamp_type: TimestampType::CreateTime,
@@ -285,7 +275,6 @@ mod tests {
                 delete_horizon: true,
             },
             AttributeCase {
-                name: "all",
                 bits: 0x7c,
                 compression: CompressionType::Zstd,
                 timestamp_type: TimestampType::LogAppendTime,

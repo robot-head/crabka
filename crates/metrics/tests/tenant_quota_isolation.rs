@@ -117,7 +117,6 @@ async fn per_tenant_quota_is_isolated() {
     // Drive org-a until its tight bucket rejects with 429. Bounded loop so a
     // regression (global / never-tripping quota) fails fast instead of hanging.
     let mut org_a_throttled = false;
-    let mut org_a_successes = 0usize;
     for _ in 0..50 {
         let status = push(&client, addr, ORG_A).await;
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -125,7 +124,6 @@ async fn per_tenant_quota_is_isolated() {
             break;
         }
         assert2::assert!(status.is_success());
-        org_a_successes += 1;
     }
     assert2::assert!(org_a_throttled);
 

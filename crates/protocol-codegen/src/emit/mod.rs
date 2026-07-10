@@ -26,7 +26,7 @@ pub struct EmittedMessage {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use assert2::check;
 
@@ -47,7 +47,7 @@ mod tests {
     /// `ApiKey` enum, and the differential dispatch table) the same way
     /// `main::run` does — but in the library's own test target so the work
     /// counts toward `--lib` coverage.
-    fn emit_all(dir: &PathBuf, namespace: Option<&str>) {
+    fn emit_all(dir: &Path, namespace: Option<&str>) {
         let specs = ir::load_dir(dir).unwrap();
         validate::validate(&specs).unwrap();
         let sha = "0000000000000000000000000000000000000000";

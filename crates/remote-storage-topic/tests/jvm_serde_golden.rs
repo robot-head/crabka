@@ -21,10 +21,7 @@
 //!   segmentLeaderEpochs = {0->0, 1->50}
 //!   customMetadata (with-custom case) = [1,2,3,4]
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    fmt::Write as _,
-};
+use std::collections::{BTreeMap, HashMap};
 
 use crabka_ids::LeaderEpoch;
 use crabka_remote_storage::{
@@ -89,14 +86,6 @@ fn assert_byte_exact(case: &str, event: &MetadataEvent) {
     let decoded = MetadataEvent::decode(&want)
         .unwrap_or_else(|e| panic!("case `{case}`: Crabka failed to decode JVM bytes: {e}"));
     assert2::assert!(&decoded == event);
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(s, "{b:02x}");
-    }
-    s
 }
 
 #[test]

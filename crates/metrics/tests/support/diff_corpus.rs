@@ -222,10 +222,6 @@ fn series_sort_key(value: &Value) -> String {
     format!("{labels}|{sample}")
 }
 
-fn pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-}
-
 #[allow(dead_code)]
 fn _native_histogram_shape_marker() -> Value {
     json!({
