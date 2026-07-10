@@ -3300,6 +3300,80 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn single_range_checkpoint_runtime_writes_to_the_range_zero_namespace() {
+        let config = SubstrateRuntimeConfig {
+            bootstrap: "broker-a:9092".to_string(),
+            tenant: "tenant-a".to_string(),
+            cache_dir: None,
+            checkpoints: Some(CheckpointRuntimeConfig {
+                object_store: CheckpointObjectStoreConfig::InMemory,
+                frames_threshold: 1,
+                bytes_threshold: 1,
+                part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
+                retain_newest: 2,
+            }),
+            kafka_security: None,
+            ranges: None,
+            host_ranges: None,
+            range_rpc: None,
+        };
+        let wal_selection = single_range_live_wal_selection(&config).expect("wal selection");
+        let kv = Arc::new(MemKv::default());
+        kv.put(b"checkpointed".to_vec(), b"value".to_vec())
+            .expect("seed checkpoint data");
+        let store: Arc<dyn SubstrateKv> = kv;
+        let checkpoint_store: Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore> =
+            crabka_gres_substrate::checkpoint::InMemoryCheckpointStore::shared();
+        let snapshot_source = Arc::new(crabka_gres_substrate::CheckpointSnapshotSource::new(
+            7,
+            8,
+            crabka_gres_substrate::WriterGeneration(0),
+        ));
+
+        let checkpoint_runtime = build_checkpoint_runtime(
+            &config,
+            store,
+            snapshot_source,
+            wal_selection.checkpoint_topic,
+            wal_selection.checkpoint_namespace,
+            Some(Arc::clone(&checkpoint_store)),
+            || Ok(GresCheckpointWalPruner::in_memory()),
+        )
+        .expect("checkpoint runtime")
+        .expect("checkpoint runtime enabled");
+        let checkpoint = checkpoint_runtime
+            .force_final_checkpoint()
+            .await
+            .expect("checkpoint");
+
+        assert!(
+            checkpoint
+                .manifest_key
+                .starts_with("gres/tenant-a/r0/ckpt/")
+        );
+        assert!(
+            checkpoint_store
+                .list("gres/tenant-a/r0/ckpt/")
+                .await
+                .expect("range-zero checkpoint objects")
+                .iter()
+                .any(|object| object.key == checkpoint.manifest_key)
+        );
+        assert_eq!(
+            checkpoint_runtime
+                .latest_checkpoint_bytes()
+                .await
+                .expect("range-zero checkpoint metadata"),
+            checkpoint.total_bytes
+        );
+        checkpoint_runtime
+            .handle
+            .shutdown()
+            .await
+            .expect("checkpoint shutdown");
+    }
+
     #[test]
     fn live_multirange_recovery_configs_are_range_specific() {
         let mut args = substrate_args();
