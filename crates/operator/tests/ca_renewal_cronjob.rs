@@ -292,13 +292,10 @@ async fn cronjob_reissues_aging_broker_leafs() {
     );
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
-    check!(
-        event_body["reason"].as_str().unwrap_or("") == "BrokerCertRenewed",
-        "event reason must be BrokerCertRenewed; body = {event_body}"
-    );
-    check!(
-        event_body["type"].as_str().unwrap_or("") == "Normal",
-        "event type must be Normal; body = {event_body}"
+    assert_eq!(
+        (event_body["reason"].as_str(), event_body["type"].as_str()),
+        (Some("BrokerCertRenewed"), Some("Normal")),
+        "body = {event_body}"
     );
 
     check!(state.remaining_rules() == 0, "all rules consumed");
@@ -453,13 +450,10 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
     );
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
-    assert!(
-        event_body["reason"].as_str().unwrap_or("") == "CaRenewalScheduled",
-        "event reason must be CaRenewalScheduled; body = {event_body}"
-    );
-    assert!(
-        event_body["type"].as_str().unwrap_or("") == "Normal",
-        "event type must be Normal; body = {event_body}"
+    assert_eq!(
+        (event_body["reason"].as_str(), event_body["type"].as_str()),
+        (Some("CaRenewalScheduled"), Some("Normal")),
+        "body = {event_body}"
     );
 
     // Must have PATCHed the Kafka CR metadata with the ca-renew-after annotation
@@ -643,13 +637,10 @@ async fn cronjob_byo_ca_expiring_emits_byo_event() {
     );
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
-    assert!(
-        event_body["reason"].as_str().unwrap_or("") == "ByoCaExpiringSoon",
-        "event reason must be ByoCaExpiringSoon; body = {event_body}"
-    );
-    assert!(
-        event_body["type"].as_str().unwrap_or("") == "Warning",
-        "event type must be Warning; body = {event_body}"
+    assert_eq!(
+        (event_body["reason"].as_str(), event_body["type"].as_str()),
+        (Some("ByoCaExpiringSoon"), Some("Warning")),
+        "body = {event_body}"
     );
 
     // Must NOT have PATCHed Kafka status (no CaRotationRequired condition for BYO).

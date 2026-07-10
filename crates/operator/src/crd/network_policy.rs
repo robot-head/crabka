@@ -49,28 +49,25 @@ mod tests {
             "namespaceSelector":{"matchLabels":{"team":"platform"}}
         }"#;
         let p: NetworkPolicyPeer = serde_json::from_str(json).unwrap();
-        let pod = p.pod_selector.as_ref().expect("podSelector present");
-        let ns = p
-            .namespace_selector
-            .as_ref()
-            .expect("namespaceSelector present");
         assert!(
-            pod.match_labels
-                .as_ref()
-                .and_then(|m| m.get("role"))
-                .map(String::as_str)
-                == Some("frontend")
-        );
-        assert!(
-            ns.match_labels
-                .as_ref()
-                .and_then(|m| m.get("team"))
-                .map(String::as_str)
-                == Some("platform")
+            p == NetworkPolicyPeer {
+                pod_selector: Some(LabelSelector {
+                    match_labels: Some([("role".into(), "frontend".into())].into()),
+                    match_expressions: None,
+                }),
+                namespace_selector: Some(LabelSelector {
+                    match_labels: Some([("team".into(), "platform".into())].into()),
+                    match_expressions: None,
+                }),
+            }
         );
         let back = serde_json::to_string(&p).unwrap();
-        assert!(back.contains("\"podSelector\""), "got: {back}");
-        assert!(back.contains("\"namespaceSelector\""), "got: {back}");
+        for (name, expected) in [
+            ("pod selector", "\"podSelector\""),
+            ("namespace selector", "\"namespaceSelector\""),
+        ] {
+            assert!(back.contains(expected), "case {name}; got: {back}");
+        }
     }
 
     #[test]

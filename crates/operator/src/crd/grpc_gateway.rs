@@ -333,7 +333,7 @@ pub struct KafkaGrpcGatewayStatus {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -341,19 +341,26 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaGrpcGateway::crd();
-        check!(crd.spec.group == "crabka.io");
-        check!(crd.spec.names.kind == "KafkaGrpcGateway");
-        check!(crd.spec.names.plural == "kafkagrpcgateways");
-        check!(
-            crd.spec
-                .names
-                .short_names
-                .as_ref()
-                .is_some_and(|v| v.contains(&"kgg".to_string())),
-            "expected shortname `kgg`",
+        assert_eq!(
+            (
+                crd.spec.group.as_str(),
+                crd.spec.names.kind.as_str(),
+                crd.spec.names.plural.as_str(),
+                crd.spec.names.short_names,
+                crd.spec
+                    .versions
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "crabka.io",
+                "KafkaGrpcGateway",
+                "kafkagrpcgateways",
+                Some(vec!["kgg".to_string()]),
+                vec!["v1alpha1"]
+            )
         );
-        check!(crd.spec.versions.len() == 1);
-        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -489,9 +496,8 @@ mod tests {
     #[test]
     fn status_omits_optional_fields_when_unset() {
         let status = KafkaGrpcGatewayStatus::default();
-        let j = serde_json::to_string(&status).unwrap();
-        assert!(!j.contains("observedGeneration"), "got: {j}");
-        assert!(!j.contains("readyReplicas"), "got: {j}");
+        let actual = serde_json::to_value(&status).unwrap();
+        assert_eq!(actual, serde_json::json!({"conditions": []}));
     }
 
     #[test]

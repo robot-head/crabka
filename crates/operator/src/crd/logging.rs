@@ -79,8 +79,12 @@ mod tests {
             value_from: None,
         };
         let j = serde_json::to_string(&lg).unwrap();
-        assert!(j.contains("\"loggers\""), "got: {j}");
-        assert!(j.contains("\"crabka_broker\":\"debug\""), "got: {j}");
+        for (name, expected) in [
+            ("loggers object", "\"loggers\""),
+            ("broker level", "\"crabka_broker\":\"debug\""),
+        ] {
+            assert!(j.contains(expected), "case {name}; got: {j}");
+        }
         let back: Logging = serde_json::from_str(&j).unwrap();
         assert!(back == lg);
     }
@@ -89,10 +93,18 @@ mod tests {
     fn logging_external_round_trips() {
         let json = r#"{"type":"external","valueFrom":{"configMapKeyRef":{"name":"my-log-cm","key":"rust.log"}}}"#;
         let lg: Logging = serde_json::from_str(json).unwrap();
-        assert!(lg.r#type == LoggingType::External);
-        let src = lg.value_from.expect("value_from present");
-        assert!(src.config_map_key_ref.name == "my-log-cm");
-        assert!(src.config_map_key_ref.key == "rust.log");
+        assert!(
+            lg == Logging {
+                r#type: LoggingType::External,
+                loggers: BTreeMap::new(),
+                value_from: Some(ExternalLoggingSource {
+                    config_map_key_ref: ConfigMapKeyRef {
+                        name: "my-log-cm".into(),
+                        key: "rust.log".into(),
+                    },
+                }),
+            }
+        );
     }
 
     #[test]

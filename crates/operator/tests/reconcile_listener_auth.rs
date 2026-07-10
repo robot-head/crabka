@@ -66,75 +66,52 @@ fn internal_listener(
     }
 }
 
-// ── test 1 ────────────────────────────────────────────────────────────────────
-
-/// SCRAM-SHA-512 internal listener with TLS renders `protocol = "SaslSsl"`
-/// and the correct `sasl_config` inline table.
 #[tokio::test]
-async fn scram_sha_512_internal_listener_renders_sasl_ssl() {
-    let items = vec![fake_pool_list_item("brokers", "ns1", "c1", 1, 1)];
-    let (ctx, state) = build_ctx("ns1", happy_path_rules("c1", "ns1", &items));
-
-    let kafka = kafka_cr_with_listeners(
-        "c1",
-        "ns1",
-        vec![internal_listener(
-            "data",
-            9094,
-            true,
-            Some(ListenerAuthentication::ScramSha512),
-        )],
-    );
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    let toml = extract_broker0_toml(&observed, "c1");
-
-    for needle in [
-        "protocol = \"SaslSsl\"",
-        "tls_config = {",
-        "sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }",
+async fn internal_listener_auth_render_cases() {
+    for (case, namespace, cluster, listener, expected_fragments) in [
+        (
+            "SCRAM-SHA-512 with TLS",
+            "ns1",
+            "c1",
+            internal_listener(
+                "data",
+                9094,
+                true,
+                Some(ListenerAuthentication::ScramSha512),
+            ),
+            vec![
+                "protocol = \"SaslSsl\"",
+                "tls_config = {",
+                "sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }",
+            ],
+        ),
+        (
+            "mTLS client authentication",
+            "ns2",
+            "c2",
+            internal_listener("mtls", 9095, true, Some(ListenerAuthentication::Tls)),
+            vec![
+                "protocol = \"Ssl\"",
+                "client_ca_path = \"/etc/crabka/clients-ca/ca.crt\"",
+                "client_auth = \"Required\"",
+            ],
+        ),
     ] {
-        assert!(
-            toml.contains(needle),
-            "expected {needle:?} for SCRAM-SHA-512 with TLS;\n{toml}"
-        );
-    }
-}
+        let items = vec![fake_pool_list_item("brokers", namespace, cluster, 1, 1)];
+        let (ctx, state) = build_ctx(namespace, happy_path_rules(cluster, namespace, &items));
+        let kafka = kafka_cr_with_listeners(cluster, namespace, vec![listener]);
+        reconcile(Arc::new(kafka), ctx)
+            .await
+            .unwrap_or_else(|error| panic!("{case}: reconcile failed: {error}"));
 
-// ── test 2 ────────────────────────────────────────────────────────────────────
-
-/// mTLS internal listener renders `protocol = "Ssl"`, `client_ca_path`, and
-/// `client_auth = "Required"`.
-#[tokio::test]
-async fn mtls_internal_listener_renders_client_auth_required() {
-    let items = vec![fake_pool_list_item("brokers", "ns2", "c2", 1, 1)];
-    let (ctx, state) = build_ctx("ns2", happy_path_rules("c2", "ns2", &items));
-
-    let kafka = kafka_cr_with_listeners(
-        "c2",
-        "ns2",
-        vec![internal_listener(
-            "mtls",
-            9095,
-            true,
-            Some(ListenerAuthentication::Tls),
-        )],
-    );
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    let toml = extract_broker0_toml(&observed, "c2");
-
-    for needle in [
-        "protocol = \"Ssl\"",
-        "client_ca_path = \"/etc/crabka/clients-ca/ca.crt\"",
-        "client_auth = \"Required\"",
-    ] {
-        assert!(
-            toml.contains(needle),
-            "mTLS listener must render {needle:?};\n{toml}"
-        );
+        let observed = state.take_observed();
+        let toml = extract_broker0_toml(&observed, cluster);
+        for fragment in expected_fragments {
+            assert!(
+                toml.contains(fragment),
+                "{case}: expected {fragment:?};\n{toml}"
+            );
+        }
     }
 }
 
@@ -253,9 +230,9 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    check!(valid["status"] == "False", "body = {body}");
-    check!(
-        valid["reason"] == "ListenerMtlsRequiresTransportTls",
+    assert_eq!(
+        (valid["status"].as_str(), valid["reason"].as_str()),
+        (Some("False"), Some("ListenerMtlsRequiresTransportTls")),
         "body = {body}"
     );
 

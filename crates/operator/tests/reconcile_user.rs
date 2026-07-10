@@ -334,11 +334,22 @@ async fn first_reconcile_provisions_scram_and_acls() {
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    check!(body["status"]["conditions"][0]["status"] == "True");
-    check!(body["status"]["conditions"][0]["reason"] == "Ready");
-    check!(body["status"]["username"] == USER);
-    check!(body["status"]["secret"] == USER);
-    check!(body["status"]["scramSha512"] == true);
+    assert_eq!(
+        (
+            body["status"]["conditions"][0]["status"].as_str(),
+            body["status"]["conditions"][0]["reason"].as_str(),
+            body["status"]["username"].as_str(),
+            body["status"]["secret"].as_str(),
+            body["status"]["scramSha512"].as_bool(),
+        ),
+        (
+            Some("True"),
+            Some("Ready"),
+            Some(USER),
+            Some(USER),
+            Some(true)
+        )
+    );
 }
 
 /// Reconcile with existing matching ACLs → no `CreateAcls` /
@@ -564,10 +575,9 @@ async fn first_reconcile_sets_declared_quotas() {
     reconcile(Arc::new(ku), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    let describe = calls
+    let described = calls
         .iter()
-        .find(|c| matches!(c, RecordedCall::DescribeUserQuotas(u) if u == USER));
-    assert!(describe.is_some(), "expected DescribeUserQuotas: {calls:?}");
+        .any(|call| matches!(call, RecordedCall::DescribeUserQuotas(user) if user == USER));
 
     let alter = calls
         .iter()
@@ -581,23 +591,31 @@ async fn first_reconcile_sets_declared_quotas() {
         })
         .expect("AlterUserQuotas must have been issued");
     let (ops, validate_only) = alter;
-    assert!(!validate_only, "production reconcile must commit");
-    assert!(
-        ops.len() == 4,
-        "every set field becomes one Set op: {ops:?}"
+    assert_eq!(
+        (described, validate_only, ops),
+        (
+            true,
+            false,
+            vec![
+                QuotaOp::Set {
+                    key: "consumer_byte_rate".into(),
+                    value: 2_097_152.0,
+                },
+                QuotaOp::Set {
+                    key: "controller_mutation_rate".into(),
+                    value: 10.0,
+                },
+                QuotaOp::Set {
+                    key: "producer_byte_rate".into(),
+                    value: 1_048_576.0,
+                },
+                QuotaOp::Set {
+                    key: "request_percentage".into(),
+                    value: 55.0,
+                },
+            ],
+        )
     );
-    for key in [
-        "producer_byte_rate",
-        "consumer_byte_rate",
-        "request_percentage",
-        "controller_mutation_rate",
-    ] {
-        assert!(
-            ops.iter()
-                .any(|op| matches!(op, QuotaOp::Set { key: k, .. } if k == key)),
-            "missing Set for {key}: {ops:?}",
-        );
-    }
 
     // Final status: quotasInSync=true.
     let observed = state.take_observed();
@@ -684,11 +702,10 @@ async fn drift_remove_path_emits_remove_op() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert!(ops.len() == 1, "only one drift op expected: {ops:?}");
-    assert!(matches!(
-        &ops[0],
-        QuotaOp::Remove { key } if key == "consumer_byte_rate"
-    ));
+    assert!(
+        matches!(ops.as_slice(), [QuotaOp::Remove { key }] if key == "consumer_byte_rate"),
+        "ops: {ops:?}"
+    );
 }
 
 /// `spec.quotas: {}` (empty object) wipes the broker's quota
@@ -722,10 +739,14 @@ async fn empty_quotas_object_tombstones_everything() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert!(ops.len() == 2, "two existing keys tombstoned: {ops:?}");
-    assert!(
-        ops.iter().all(|op| matches!(op, QuotaOp::Remove { .. })),
-        "every op must be a Remove: {ops:?}",
+    assert_eq!(
+        ops.iter()
+            .map(|op| match op {
+                QuotaOp::Remove { key } => key.as_str(),
+                _ => panic!("expected remove op, got {op:?}"),
+            })
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["consumer_byte_rate", "producer_byte_rate"])
     );
 }
 
@@ -1074,10 +1095,12 @@ async fn tls_finalizer_filters_acls_by_dn() {
             _ => None,
         })
         .expect("DeleteAcls must have been issued");
-    assert!(!filters.is_empty(), "at least one filter expected");
-    assert!(
-        filters[0].principal.as_deref() == Some("User:CN=alice"),
-        "TLS finalizer must filter by CN= principal: {filters:?}"
+    assert_eq!(
+        filters
+            .first()
+            .and_then(|filter| filter.principal.as_deref()),
+        Some("User:CN=alice"),
+        "filters: {filters:?}"
     );
 }
 
@@ -1172,16 +1195,14 @@ async fn tls_user_with_quotas_alters_quotas_by_dn() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert!(
-        username == "CN=alice",
-        "must be keyed by DN, got {username}"
-    );
-    assert!(
-        ops.iter().any(|op| matches!(
-            op,
-            QuotaOp::Set { key, value }
-                if key == "producer_byte_rate" && (*value - 1_048_576.0).abs() < f64::EPSILON
-        )),
-        "expected Set producer_byte_rate=1048576, got {ops:?}",
+    assert_eq!(
+        (username, ops),
+        (
+            "CN=alice".to_string(),
+            vec![QuotaOp::Set {
+                key: "producer_byte_rate".to_string(),
+                value: 1_048_576.0,
+            }],
+        )
     );
 }

@@ -431,13 +431,9 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
         ),
     ] {
         let (method, uri) = &methods_and_uris[idx];
-        assert!(
-            *method == want_method,
-            "step {} should {what}: {uri}",
-            idx + 1
-        );
-        assert!(
-            uri.contains(want_substr),
+        assert_eq!(
+            (method, uri.contains(want_substr)),
+            (&want_method, true),
             "step {} should {what}: {uri}",
             idx + 1
         );
@@ -485,11 +481,12 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     );
 
     // Status patch is last.
-    check!(methods_and_uris[16].0 == Method::PATCH);
-    check!(
-        methods_and_uris[16].1.contains("/kafkas/demo/status"),
-        "step 17 should patch Kafka status: {}",
-        methods_and_uris[16].1
+    assert_eq!(
+        (
+            &methods_and_uris[16].0,
+            methods_and_uris[16].1.contains("/kafkas/demo/status"),
+        ),
+        (&Method::PATCH, true)
     );
 
     check!(
@@ -516,11 +513,23 @@ async fn kafka_status_no_node_pools_when_list_empty() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    check!(cond["type"] == "Ready", "body = {body}");
-    check!(cond["status"] == "False", "body = {body}");
-    check!(cond["reason"] == "NoNodePools", "body = {body}");
-    check!(body["status"]["replicas"] == json!(0), "body = {body}");
-    check!(body["status"]["readyReplicas"] == json!(0), "body = {body}");
+    assert_eq!(
+        (
+            cond["type"].as_str(),
+            cond["status"].as_str(),
+            cond["reason"].as_str(),
+            body["status"]["replicas"].as_i64(),
+            body["status"]["readyReplicas"].as_i64()
+        ),
+        (
+            Some("Ready"),
+            Some("False"),
+            Some("NoNodePools"),
+            Some(0),
+            Some(0)
+        ),
+        "body = {body}"
+    );
 
     check!(state.remaining_rules() == 0);
 }
@@ -550,10 +559,16 @@ async fn kafka_status_aggregates_pool_readyreplicas() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .expect("Ready condition present");
-    check!(ready["status"] == "True", "body = {body}");
-    check!(ready["reason"] == "Available", "body = {body}");
-    check!(body["status"]["replicas"] == json!(1), "body = {body}");
-    check!(body["status"]["readyReplicas"] == json!(1), "body = {body}");
+    assert_eq!(
+        (
+            ready["status"].as_str(),
+            ready["reason"].as_str(),
+            body["status"]["replicas"].as_i64(),
+            body["status"]["readyReplicas"].as_i64()
+        ),
+        (Some("True"), Some("Available"), Some(1), Some(1)),
+        "body = {body}"
+    );
 
     check!(state.remaining_rules() == 0);
 }
@@ -709,8 +724,10 @@ async fn kafka_inline_logging_renders_rust_log_key() {
     );
 
     let cond = logging_condition(&observed);
-    check!(cond["status"] == "True");
-    check!(cond["reason"] == "Available");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("True"), Some("Available"))
+    );
     check!(state.remaining_rules() == 0);
 }
 
@@ -731,8 +748,10 @@ async fn kafka_no_logging_omits_rust_log_key() {
         "rust.log must be absent when logging unset, data = {data}"
     );
     let cond = logging_condition(&observed);
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "Disabled");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("Disabled"))
+    );
 }
 
 /// External logging reads the referenced `ConfigMap` key and uses it
@@ -818,8 +837,10 @@ async fn kafka_external_logging_missing_configmap_surfaces_condition() {
         "rust.log must be absent when external CM missing, data = {data}"
     );
     let cond = logging_condition(&observed);
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "LoggingConfigMapNotFound");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("LoggingConfigMapNotFound"))
+    );
 }
 
 /// Find the broker-config `ConfigMap` PATCH and return its serialized data
@@ -862,12 +883,12 @@ async fn kafka_status_finalizes_metadata_version() {
         .expect("status PATCH must have been captured");
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
-    assert!(
-        body["status"]["kafkaVersion"] == json!("3.7.0"),
-        "body = {body}"
-    );
-    assert!(
-        body["status"]["metadataVersion"] == json!("3.7"),
+    assert_eq!(
+        (
+            &body["status"]["kafkaVersion"],
+            &body["status"]["metadataVersion"],
+        ),
+        (&json!("3.7.0"), &json!("3.7")),
         "body = {body}"
     );
     let conds = body["status"]["conditions"]
@@ -909,8 +930,11 @@ async fn kafka_metadata_version_too_high_blocks() {
         .iter()
         .find(|c| c["type"] == "KafkaVersionValid")
         .unwrap_or_else(|| panic!("KafkaVersionValid present, body = {body}"));
-    check!(vcond["status"] == "False", "body = {body}");
-    check!(vcond["reason"] == "MetadataVersionTooHigh", "body = {body}");
+    assert_eq!(
+        (vcond["status"].as_str(), vcond["reason"].as_str()),
+        (Some("False"), Some("MetadataVersionTooHigh")),
+        "body = {body}"
+    );
     // Finalized metadata version is not advanced (was never set).
     check!(
         body["status"]["metadataVersion"].is_null(),
@@ -945,8 +969,11 @@ async fn kafka_status_includes_rolling_condition_stable() {
         .iter()
         .find(|c| c["type"] == "Rolling")
         .unwrap_or_else(|| panic!("Rolling condition present, body = {body}"));
-    check!(rolling["status"] == "False", "body = {body}");
-    check!(rolling["reason"] == "Stable", "body = {body}");
+    assert_eq!(
+        (rolling["status"].as_str(), rolling["reason"].as_str()),
+        (Some("False"), Some("Stable")),
+        "body = {body}"
+    );
 
     check!(state.remaining_rules() == 0);
 }
@@ -981,24 +1008,36 @@ async fn kafka_status_synthesized_default_listener_is_valid_and_ready() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid condition present, body = {body}"));
-    assert!(valid["status"] == "True", "body = {body}");
-    assert!(valid["reason"] == "Valid", "body = {body}");
 
     let ready = conds
         .iter()
         .find(|c| c["type"] == "ListenersReady")
         .unwrap_or_else(|| panic!("ListenersReady condition present, body = {body}"));
-    assert!(ready["status"] == "True", "body = {body}");
-    assert!(ready["reason"] == "Ready", "body = {body}");
+    assert_eq!(
+        (
+            valid["status"].as_str(),
+            valid["reason"].as_str(),
+            ready["status"].as_str(),
+            ready["reason"].as_str(),
+        ),
+        (Some("True"), Some("Valid"), Some("True"), Some("Ready")),
+        "body = {body}"
+    );
 
     let listeners = body["status"]["listeners"]
         .as_array()
         .unwrap_or_else(|| panic!("status.listeners array, body = {body}"));
-    assert!(listeners.len() == 1, "body = {body}");
-    check!(listeners[0]["name"] == "PLAIN", "body = {body}");
-    check!(listeners[0]["type"] == "internal", "body = {body}");
-    check!(
-        listeners[0]["bootstrapServers"] == "demo-broker-headless.y.svc.cluster.local:9092",
+    assert_eq!(
+        listeners.as_slice(),
+        [json!({
+            "name": "PLAIN",
+            "type": "internal",
+            "bootstrapServers": "demo-broker-headless.y.svc.cluster.local:9092",
+            "addresses": [{
+                "host": "demo-brokers-0.demo-broker-headless.y.svc.cluster.local",
+                "port": 9092
+            }]
+        })],
         "body = {body}"
     );
 
@@ -1077,9 +1116,9 @@ async fn kafka_mtls_without_tls_blocks_broker_configmap_and_sets_conditions() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present, body = {body}"));
-    assert!(valid["status"] == "False", "body = {body}");
-    assert!(
-        valid["reason"] == "ListenerMtlsRequiresTransportTls",
+    assert_eq!(
+        (valid["status"].as_str(), valid["reason"].as_str()),
+        (Some("False"), Some("ListenerMtlsRequiresTransportTls")),
         "body = {body}"
     );
 
@@ -1087,8 +1126,11 @@ async fn kafka_mtls_without_tls_blocks_broker_configmap_and_sets_conditions() {
         .iter()
         .find(|c| c["type"] == "ListenersReady")
         .unwrap_or_else(|| panic!("ListenersReady present, body = {body}"));
-    check!(ready["status"] == "False", "body = {body}");
-    check!(ready["reason"] == "ListenersInvalid", "body = {body}");
+    assert_eq!(
+        (ready["status"].as_str(), ready["reason"].as_str()),
+        (Some("False"), Some("ListenersInvalid")),
+        "body = {body}"
+    );
 
     // status.listeners is empty on the validation-failure path.
     check!(
@@ -1143,8 +1185,11 @@ async fn metrics_disabled_no_dynamic_apply() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    check!(cond["status"] == "False", "body = {body}");
-    check!(cond["reason"] == "Disabled", "body = {body}");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("Disabled")),
+        "body = {body}"
+    );
 
     check!(state.remaining_rules() == 0);
 }
@@ -1255,8 +1300,11 @@ async fn pod_monitor_path_applies_one_resource() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    check!(cond["status"] == "True", "body = {body}");
-    check!(cond["reason"] == "Available", "body = {body}");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("True"), Some("Available")),
+        "body = {body}"
+    );
 
     check!(state.remaining_rules() == 0);
 }
@@ -1344,8 +1392,11 @@ async fn service_monitor_path_applies_service_and_servicemonitor() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    check!(cond["status"] == "True", "body = {body}");
-    check!(cond["reason"] == "Available", "body = {body}");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("True"), Some("Available")),
+        "body = {body}"
+    );
 
     check!(state.remaining_rules() == 0);
 }
@@ -1390,8 +1441,11 @@ async fn mutually_exclusive_sets_condition_and_skips_apply() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    check!(cond["status"] == "False", "body = {body}");
-    check!(cond["reason"] == "MutuallyExclusive", "body = {body}");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("MutuallyExclusive")),
+        "body = {body}"
+    );
 
     check!(state.remaining_rules() == 0);
 }
@@ -1437,9 +1491,9 @@ async fn prom_operator_missing_sets_condition() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status body is JSON");
     let cond = metrics_ready_cond(&body);
-    check!(cond["status"] == "False", "body = {body}");
-    check!(
-        cond["reason"] == "PrometheusOperatorCrdsMissing",
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("PrometheusOperatorCrdsMissing")),
         "body = {body}"
     );
 
@@ -1479,8 +1533,11 @@ async fn network_policy_disabled_no_apply() {
         .iter()
         .find(|c| c["type"] == "NetworkPolicyReady")
         .expect("NetworkPolicyReady condition present");
-    assert!(cond["status"] == "False", "body = {body}");
-    assert!(cond["reason"] == "Disabled", "body = {body}");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("Disabled")),
+        "body = {body}"
+    );
 }
 
 /// `spec.networkPolicy=Some(NetworkPolicySpec::default())`
@@ -1541,8 +1598,11 @@ async fn network_policy_enabled_applies_one_resource() {
         .iter()
         .find(|c| c["type"] == "NetworkPolicyReady")
         .expect("NetworkPolicyReady present");
-    check!(cond["status"] == "True", "body = {body}");
-    check!(cond["reason"] == "Available", "body = {body}");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("True"), Some("Available")),
+        "body = {body}"
+    );
     check!(state.remaining_rules() == 0);
 }
 

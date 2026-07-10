@@ -199,7 +199,7 @@ fi\n\
 printf '%s' \"$NODE_ID\" > /var/lib/crabka/data/.node-id\n";
 
 // Main script (zero-metrics variant). Retained as a const so the
-// `build_main_script_disabled_matches_constant` test gives a
+// `build_main_script_cases` test gives a
 // loud failure if the upgrade-stability contract breaks.
 //
 // Copies the per-broker TOML from the ConfigMap volume into a writable
@@ -228,8 +228,8 @@ fn build_main_script(metrics_enabled: bool) -> String {
         return MAIN_SCRIPT.to_string();
     }
     // NB: the enabled-variant body intentionally duplicates the disabled
-    // one. See the `build_main_script_disabled_matches_constant`
-    // test — keeping the literals separate is the upgrade-stability
+    // one. See the `build_main_script_cases` test — keeping the literals
+    // separate is the upgrade-stability
     // contract. Don't refactor to a `format!`.
     "set -eu\n\
      NODE_ID=\"$(cat /var/lib/crabka/data/.node-id)\"\n\
@@ -1697,13 +1697,15 @@ mod tests {
             .as_ref()
             .and_then(|m| m.labels.as_ref())
             .expect("pod template labels");
-        assert!(
-            pod_labels
-                .get("app.kubernetes.io/instance")
-                .map(String::as_str)
-                == Some("demo")
+        assert_eq!(
+            (
+                pod_labels
+                    .get("app.kubernetes.io/instance")
+                    .map(String::as_str),
+                pod_labels.get("crabka.io/pool").map(String::as_str),
+            ),
+            (Some("demo"), Some("brokers"))
         );
-        assert!(pod_labels.get("crabka.io/pool").map(String::as_str) == Some("brokers"));
     }
 
     #[test]
@@ -1864,25 +1866,19 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_controller_only_roles() {
-        let mut pool = pool_fixture("brokers", "demo", 1);
-        pool.spec.roles = vec![NodeRole::Controller];
-        let err = validate(&pool).unwrap_err();
-        assert!(
-            matches!(err, PoolValidationError::RolesNotMixed(_)),
-            "expected RolesNotMixed, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_broker_only_roles() {
-        let mut pool = pool_fixture("brokers", "demo", 1);
-        pool.spec.roles = vec![NodeRole::Broker];
-        let err = validate(&pool).unwrap_err();
-        assert!(
-            matches!(err, PoolValidationError::RolesNotMixed(_)),
-            "expected RolesNotMixed, got {err:?}"
-        );
+    fn validate_rejects_single_role_cases() {
+        for (name, role) in [
+            ("controller only", NodeRole::Controller),
+            ("broker only", NodeRole::Broker),
+        ] {
+            let mut pool = pool_fixture("brokers", "demo", 1);
+            pool.spec.roles = vec![role];
+            let err = validate(&pool).unwrap_err();
+            assert!(
+                matches!(err, PoolValidationError::RolesNotMixed(_)),
+                "case {name}: expected RolesNotMixed, got {err:?}"
+            );
+        }
     }
 
     #[test]
@@ -1917,9 +1913,13 @@ mod tests {
         });
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let pod_labels = sts.spec.unwrap().template.metadata.unwrap().labels.unwrap();
-        assert!(pod_labels.get("team").map(String::as_str) == Some("platform"));
-        // operator-managed name MUST win
-        assert!(pod_labels.get("app.kubernetes.io/name").map(String::as_str) == Some(APP_LABEL));
+        assert_eq!(
+            (
+                pod_labels.get("team").map(String::as_str),
+                pod_labels.get("app.kubernetes.io/name").map(String::as_str),
+            ),
+            (Some("platform"), Some(APP_LABEL))
+        );
     }
 
     #[test]
@@ -2016,9 +2016,14 @@ mod tests {
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let spec = sts.spec.unwrap().template.spec.unwrap();
-        check!(spec.affinity.is_none());
-        check!(spec.tolerations.is_none() || spec.tolerations.as_ref().unwrap().is_empty());
-        check!(spec.node_selector.is_none() || spec.node_selector.as_ref().unwrap().is_empty());
+        assert_eq!(
+            (
+                spec.affinity,
+                spec.tolerations.unwrap_or_default(),
+                spec.node_selector.unwrap_or_default(),
+            ),
+            (None, vec![], BTreeMap::new())
+        );
     }
 
     #[test]
@@ -2051,38 +2056,27 @@ mod tests {
     }
 
     #[test]
-    fn render_statefulset_emptydir_when_storage_none() {
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
-        let spec = sts.spec.unwrap();
-        assert!(
-            spec.volume_claim_templates.is_none()
-                || spec.volume_claim_templates.as_ref().unwrap().is_empty()
-        );
-        let volumes = spec.template.spec.unwrap().volumes.unwrap();
-        let data_vol = volumes
-            .iter()
-            .find(|v| v.name == "data")
-            .expect("data volume present");
-        assert!(
-            data_vol.empty_dir.is_some(),
-            "data volume must be emptyDir; got {data_vol:?}"
-        );
-    }
-
-    #[test]
-    fn render_statefulset_emptydir_when_storage_ephemeral() {
-        let mut pool = pool_fixture("brokers", "demo", 1);
-        pool.spec.storage = Some(Storage::Ephemeral);
-        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
-        let spec = sts.spec.unwrap();
-        assert!(
-            spec.volume_claim_templates.is_none()
-                || spec.volume_claim_templates.as_ref().unwrap().is_empty()
-        );
-        let volumes = spec.template.spec.unwrap().volumes.unwrap();
-        let data_vol = volumes.iter().find(|v| v.name == "data").unwrap();
-        assert!(data_vol.empty_dir.is_some());
+    fn render_statefulset_emptydir_storage_cases() {
+        for (name, storage) in [
+            ("storage omitted", None),
+            ("explicit ephemeral storage", Some(Storage::Ephemeral)),
+        ] {
+            let mut pool = pool_fixture("brokers", "demo", 1);
+            pool.spec.storage = storage;
+            let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+            let spec = sts.spec.unwrap();
+            let claims = spec.volume_claim_templates.unwrap_or_default();
+            let volumes = spec.template.spec.unwrap().volumes.unwrap();
+            let data_vol = volumes
+                .iter()
+                .find(|v| v.name == "data")
+                .expect("data volume present");
+            assert_eq!(
+                (claims, data_vol.empty_dir.is_some()),
+                (vec![], true),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -2104,11 +2098,8 @@ mod tests {
             );
         }
         let vct = spec.volume_claim_templates.unwrap();
-        assert!(vct.len() == 1);
         let data_pvc = &vct[0];
-        assert!(data_pvc.metadata.name.as_deref() == Some("data"));
         let pvc_spec = data_pvc.spec.as_ref().unwrap();
-        assert!(pvc_spec.access_modes.as_deref() == Some(["ReadWriteOnce".to_string()].as_slice()));
         let req = pvc_spec
             .resources
             .as_ref()
@@ -2116,8 +2107,22 @@ mod tests {
             .requests
             .as_ref()
             .unwrap();
-        assert!(req.get("storage").map(|q| q.0.as_str()) == Some("10Gi"));
-        assert!(pvc_spec.storage_class_name.as_deref() == Some("fast-ssd"));
+        assert_eq!(
+            (
+                vct.len(),
+                data_pvc.metadata.name.as_deref(),
+                pvc_spec.access_modes.as_deref(),
+                req.get("storage").map(|q| q.0.as_str()),
+                pvc_spec.storage_class_name.as_deref(),
+            ),
+            (
+                1,
+                Some("data"),
+                Some(["ReadWriteOnce".to_string()].as_slice()),
+                Some("10Gi"),
+                Some("fast-ssd"),
+            )
+        );
     }
 
     #[test]
@@ -2153,44 +2158,42 @@ mod tests {
             .labels
             .clone()
             .expect("PVC has labels");
-        assert!(labels.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo"));
-        assert!(labels.get("crabka.io/pool").map(String::as_str) == Some("brokers"));
+        assert_eq!(
+            (
+                labels.get("app.kubernetes.io/instance").map(String::as_str),
+                labels.get("crabka.io/pool").map(String::as_str),
+            ),
+            (Some("demo"), Some("brokers"))
+        );
     }
 
     #[test]
-    fn render_statefulset_retention_policy_delete_when_delete_claim_true() {
-        let mut pool = pool_fixture("brokers", "demo", 1);
-        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
-            size: "1Gi".into(),
-            class: None,
-            delete_claim: true,
-        }));
-        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
-        let policy = sts
-            .spec
-            .unwrap()
-            .persistent_volume_claim_retention_policy
-            .unwrap();
-        assert!(policy.when_deleted.as_deref() == Some("Delete"));
-        assert!(policy.when_scaled.as_deref() == Some("Retain"));
-    }
-
-    #[test]
-    fn render_statefulset_retention_policy_retain_when_delete_claim_false() {
-        let mut pool = pool_fixture("brokers", "demo", 1);
-        pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
-            size: "1Gi".into(),
-            class: None,
-            delete_claim: false,
-        }));
-        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
-        let policy = sts
-            .spec
-            .unwrap()
-            .persistent_volume_claim_retention_policy
-            .unwrap();
-        assert!(policy.when_deleted.as_deref() == Some("Retain"));
-        assert!(policy.when_scaled.as_deref() == Some("Retain"));
+    fn render_statefulset_retention_policy_cases() {
+        for (name, delete_claim, when_deleted) in [
+            ("delete claim", true, "Delete"),
+            ("retain claim", false, "Retain"),
+        ] {
+            let mut pool = pool_fixture("brokers", "demo", 1);
+            pool.spec.storage = Some(Storage::PersistentClaim(PersistentClaimSpec {
+                size: "1Gi".into(),
+                class: None,
+                delete_claim,
+            }));
+            let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+            let policy = sts
+                .spec
+                .unwrap()
+                .persistent_volume_claim_retention_policy
+                .unwrap();
+            assert_eq!(
+                policy,
+                k8s_openapi::api::apps::v1::StatefulSetPersistentVolumeClaimRetentionPolicy {
+                    when_deleted: Some(when_deleted.to_string()),
+                    when_scaled: Some("Retain".to_string()),
+                },
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -2385,24 +2388,23 @@ mod tests {
     #[test]
     fn render_statefulset_jbod_renders_one_pvc_per_volume() {
         let pool = jbod_pool(&[(0, "10Gi", None), (1, "20Gi", Some("fast-ssd"))], false);
-        let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
+        let parent = parent_fixture("demo");
+        let expected_labels = common_labels("demo", &parent.spec.kafka_version, Some("brokers"));
+        let sts = render_statefulset(&parent, &pool, "img:1").unwrap();
         let vct = sts.spec.unwrap().volume_claim_templates.unwrap();
-        assert!(vct.len() == 2);
-        // Primary (lowest id) keeps the `data` name.
-        for (i, name, size, class) in [
-            (0, "data", "10Gi", None),
-            (1, "data-1", "20Gi", Some("fast-ssd")),
-        ] {
-            let tmpl = &vct[i];
-            check!(tmpl.metadata.name.as_deref() == Some(name), "case {i}");
-            let spec = tmpl.spec.as_ref().unwrap();
-            let req = spec.resources.as_ref().unwrap().requests.as_ref().unwrap();
-            check!(
-                req.get("storage").map(|q| q.0.as_str()) == Some(size),
-                "case {i}"
-            );
-            check!(spec.storage_class_name.as_deref() == class, "case {i}");
-        }
+        let expected_pvc = |name, size, class| {
+            let mut pvc = super::pvc_template(name, size, class, &expected_labels);
+            pvc["apiVersion"] = serde_json::json!("v1");
+            pvc["kind"] = serde_json::json!("PersistentVolumeClaim");
+            pvc
+        };
+        assert_eq!(
+            serde_json::to_value(vct).unwrap(),
+            serde_json::Value::Array(vec![
+                expected_pvc("data", "10Gi", None),
+                expected_pvc("data-1", "20Gi", Some("fast-ssd")),
+            ])
+        );
     }
 
     #[test]
@@ -2450,15 +2452,15 @@ mod tests {
             .unwrap();
         let by_name: Vec<(&str, &str)> = mounts
             .iter()
+            .filter(|mount| mount.name == "data" || mount.name.starts_with("data-"))
             .map(|m| (m.name.as_str(), m.mount_path.as_str()))
             .collect();
-        assert!(
-            by_name.contains(&("data", "/var/lib/crabka/data")),
-            "primary data mount; got {by_name:?}"
-        );
-        assert!(
-            by_name.contains(&("data-1", "/var/lib/crabka/data-1")),
-            "extra disk mount; got {by_name:?}"
+        assert_eq!(
+            by_name,
+            vec![
+                ("data", "/var/lib/crabka/data"),
+                ("data-1", "/var/lib/crabka/data-1"),
+            ]
         );
     }
 
@@ -2485,8 +2487,13 @@ mod tests {
             .unwrap()
             .persistent_volume_claim_retention_policy
             .unwrap();
-        assert!(policy.when_deleted.as_deref() == Some("Delete"));
-        assert!(policy.when_scaled.as_deref() == Some("Retain"));
+        assert_eq!(
+            (
+                policy.when_deleted.as_deref(),
+                policy.when_scaled.as_deref()
+            ),
+            (Some("Delete"), Some("Retain"))
+        );
     }
 
     #[test]
@@ -2536,10 +2543,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_storage_change_jbod_allows_grow() {
-        let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", None)]);
-        let desired = jbod(&[(0, "20Gi", None), (1, "30Gi", None)], false);
-        assert!(validate_storage_change(Some(&desired), Some(&observed)).is_ok());
+    fn validate_storage_change_jbod_success_cases() {
+        for (name, observed, desired) in [
+            (
+                "grow volumes",
+                jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", None)]),
+                jbod(&[(0, "20Gi", None), (1, "30Gi", None)], false),
+            ),
+            (
+                "unchanged volumes",
+                jbod_observed(&[("data", "10Gi", None), ("data-1", "20Gi", Some("fast"))]),
+                jbod(&[(0, "10Gi", None), (1, "20Gi", Some("fast"))], false),
+            ),
+        ] {
+            let result = validate_storage_change(Some(&desired), Some(&observed));
+            assert!(result.is_ok(), "case {name}: {result:?}");
+        }
     }
 
     #[test]
@@ -2588,28 +2607,22 @@ mod tests {
     }
 
     #[test]
-    fn validate_storage_change_jbod_unchanged_is_ok() {
-        let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "20Gi", Some("fast"))]);
-        let desired = jbod(&[(0, "10Gi", None), (1, "20Gi", Some("fast"))], false);
-        assert!(validate_storage_change(Some(&desired), Some(&observed)).is_ok());
-    }
-
-    #[test]
-    fn build_main_script_disabled_matches_constant() {
-        // Upgrade-stability contract: clusters with metrics_config=None
-        // must get a byte-identical pod template.
-        assert!(build_main_script(false) == MAIN_SCRIPT);
-    }
-
-    #[test]
-    fn build_main_script_enabled_appends_metrics_flag() {
-        let s = build_main_script(true);
-        check!(
-            s.contains("--metrics-listen-addr=0.0.0.0:9404"),
-            "got: {s:?}"
+    fn build_main_script_cases() {
+        let metrics_script = concat!(
+            "set -eu\n",
+            "NODE_ID=\"$(cat /var/lib/crabka/data/.node-id)\"\n",
+            "cp /etc/crabka/config/broker-${NODE_ID}.toml /run/crabka/broker.toml\n",
+            "exec /usr/bin/crabka-broker \\\n",
+            "  --config-file=/run/crabka/broker.toml \\\n",
+            "  --broker-id=\"${NODE_ID}\" \\\n",
+            "  --metrics-listen-addr=0.0.0.0:9404\n",
         );
-        check!(s.contains("--config-file=/run/crabka/broker.toml"));
-        check!(s.ends_with('\n'));
+        for (name, enabled, expected) in [
+            ("metrics disabled", false, MAIN_SCRIPT),
+            ("metrics enabled", true, metrics_script),
+        ] {
+            assert_eq!(build_main_script(enabled), expected, "case {name}");
+        }
     }
 
     #[test]
@@ -2661,35 +2674,42 @@ mod tests {
         let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
         let pod_spec = ss.spec.unwrap().template.spec.unwrap();
 
-        // volumeMount at the fixed keytab directory.
-        let mounts: Vec<&str> = pod_spec.containers[0]
+        let mount = pod_spec.containers[0]
             .volume_mounts
             .as_ref()
             .unwrap()
             .iter()
-            .map(|m| m.mount_path.as_str())
-            .collect();
-        assert!(
-            mounts.contains(&"/etc/crabka/gssapi-keytab"),
-            "missing /etc/crabka/gssapi-keytab; got {mounts:?}"
-        );
-
-        // Projected-items volume: source Secret name + key pinned to `keytab`.
+            .find(|mount| mount.name == "gssapi-keytab")
+            .expect("gssapi-keytab mount present");
         let volumes = pod_spec.volumes.unwrap_or_default();
-        let kt = volumes
+        let volume = volumes
             .iter()
             .find(|v| v.name == "gssapi-keytab")
             .expect("gssapi-keytab volume present");
-        let secret = kt.secret.as_ref().expect("keytab volume is a Secret");
-        assert!(secret.secret_name.as_deref() == Some("broker-keytab"));
-        let items = secret.items.as_ref().expect("projected items");
-        assert!(
-            *items
-                == vec![k8s_openapi::api::core::v1::KeyToPath {
-                    key: "krb5.keytab".into(),
-                    mode: None,
-                    path: "keytab".into(),
-                }]
+        assert_eq!(
+            (mount, volume),
+            (
+                &k8s_openapi::api::core::v1::VolumeMount {
+                    mount_path: "/etc/crabka/gssapi-keytab".into(),
+                    name: "gssapi-keytab".into(),
+                    read_only: Some(true),
+                    ..Default::default()
+                },
+                &k8s_openapi::api::core::v1::Volume {
+                    name: "gssapi-keytab".into(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        default_mode: Some(0o400),
+                        items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
+                            key: "krb5.keytab".into(),
+                            mode: None,
+                            path: "keytab".into(),
+                        }]),
+                        secret_name: Some("broker-keytab".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
         );
     }
 
@@ -2704,17 +2724,13 @@ mod tests {
         let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
         let pod_spec = ss.spec.unwrap().template.spec.unwrap();
 
-        let mounts: Vec<&str> = pod_spec.containers[0]
+        let mount = pod_spec.containers[0]
             .volume_mounts
             .as_ref()
             .unwrap()
             .iter()
-            .map(|m| m.mount_path.as_str())
-            .collect();
-        assert!(
-            mounts.contains(&"/etc/crabka/krb5"),
-            "missing /etc/crabka/krb5; got {mounts:?}"
-        );
+            .find(|mount| mount.name == "krb5-conf")
+            .expect("krb5-conf mount present");
 
         // KRB5_CONFIG env points at the projected krb5.conf file.
         let env = pod_spec.containers[0].env.as_ref().expect("env present");
@@ -2722,18 +2738,41 @@ mod tests {
             .iter()
             .find(|e| e.name == "KRB5_CONFIG")
             .expect("KRB5_CONFIG env present");
-        assert!(krb5_config.value.as_deref() == Some("/etc/crabka/krb5/krb5.conf"));
-
         let volumes = pod_spec.volumes.unwrap_or_default();
-        let kc = volumes
+        let volume = volumes
             .iter()
             .find(|v| v.name == "krb5-conf")
             .expect("krb5-conf volume present");
-        let secret = kc.secret.as_ref().expect("krb5-conf volume is a Secret");
-        assert!(secret.secret_name.as_deref() == Some("krb5-conf"));
-        let items = secret.items.as_ref().expect("projected items");
-        assert!(items[0].key == "config");
-        assert!(items[0].path == "krb5.conf");
+        assert_eq!(
+            (mount, krb5_config, volume),
+            (
+                &k8s_openapi::api::core::v1::VolumeMount {
+                    mount_path: "/etc/crabka/krb5".into(),
+                    name: "krb5-conf".into(),
+                    read_only: Some(true),
+                    ..Default::default()
+                },
+                &k8s_openapi::api::core::v1::EnvVar {
+                    name: "KRB5_CONFIG".into(),
+                    value: Some("/etc/crabka/krb5/krb5.conf".into()),
+                    value_from: None,
+                },
+                &k8s_openapi::api::core::v1::Volume {
+                    name: "krb5-conf".into(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        default_mode: Some(0o400),
+                        items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
+                            key: "config".into(),
+                            mode: None,
+                            path: "krb5.conf".into(),
+                        }]),
+                        secret_name: Some("krb5-conf".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+        );
     }
 
     #[test]
@@ -2761,173 +2800,124 @@ mod tests {
     }
 
     #[test]
-    fn render_statefulset_metrics_off_no_port() {
-        let parent = parent_fixture("demo");
-        assert!(parent.spec.metrics_config.is_none());
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
-        let ports = sts.spec.unwrap().template.spec.unwrap().containers[0]
-            .ports
-            .clone()
-            .unwrap();
-        assert!(ports.len() == 1);
-        assert!(ports[0].name.as_deref() == Some("kafka-internal"));
+    fn render_statefulset_metrics_port_cases() {
+        use crate::crd::{MetricsConfig, PodMonitorSpec};
+
+        let broker_port = k8s_openapi::api::core::v1::ContainerPort {
+            container_port: BROKER_PORT,
+            name: Some("kafka-internal".into()),
+            protocol: Some("TCP".into()),
+            ..Default::default()
+        };
+        let metrics_port = k8s_openapi::api::core::v1::ContainerPort {
+            container_port: METRICS_PORT,
+            name: Some("metrics".into()),
+            protocol: Some("TCP".into()),
+            ..Default::default()
+        };
+
+        for (name, config, expected) in [
+            ("metrics disabled", None, vec![broker_port.clone()]),
+            (
+                "metrics enabled",
+                Some(MetricsConfig {
+                    pod_monitor: Some(PodMonitorSpec::default()),
+                    ..Default::default()
+                }),
+                vec![broker_port.clone(), metrics_port],
+            ),
+        ] {
+            let mut parent = parent_fixture("demo");
+            parent.spec.metrics_config = config;
+            let pool = pool_fixture("brokers", "demo", 1);
+            let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
+            let actual = sts.spec.unwrap().template.spec.unwrap().containers[0]
+                .ports
+                .clone()
+                .unwrap();
+            assert_eq!(actual, expected, "case {name}");
+        }
     }
 
     #[test]
-    fn render_statefulset_logging_off_no_rust_log_env() {
-        let parent = parent_fixture("demo");
-        assert!(parent.spec.logging.is_none());
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
-        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
-            .env
-            .clone()
-            .unwrap();
-        assert!(
-            env.iter().all(|e| e.name != "RUST_LOG"),
-            "logging-off cluster must not set RUST_LOG; got {env:?}"
-        );
-    }
-
-    #[test]
-    fn render_statefulset_logging_on_adds_rust_log_env_from_configmap() {
+    fn render_statefulset_logging_cases() {
         use crate::crd::Logging;
-        let mut parent = parent_fixture("demo");
-        parent.spec.logging = Some(Logging::default());
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
-        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
-            .env
-            .clone()
-            .unwrap();
-        let rust_log = env
-            .iter()
-            .find(|e| e.name == "RUST_LOG")
-            .expect("RUST_LOG env present when logging set");
-        let cm_ref = rust_log
-            .value_from
-            .as_ref()
-            .and_then(|vf| vf.config_map_key_ref.as_ref())
-            .expect("RUST_LOG sourced from configMapKeyRef");
-        assert!(
-            *cm_ref
-                == k8s_openapi::api::core::v1::ConfigMapKeySelector {
+
+        let expected_rust_log = k8s_openapi::api::core::v1::EnvVar {
+            name: "RUST_LOG".into(),
+            value: None,
+            value_from: Some(k8s_openapi::api::core::v1::EnvVarSource {
+                config_map_key_ref: Some(k8s_openapi::api::core::v1::ConfigMapKeySelector {
                     key: "rust.log".into(),
                     name: "demo-broker-config".into(),
                     optional: Some(true),
-                }
-        );
-        // Value must be sourced (not literal) so a ConfigMap update + config
-        // hash roll re-reads it.
-        assert!(rust_log.value.is_none());
+                }),
+                ..Default::default()
+            }),
+        };
+
+        for (name, logging, expected) in [
+            ("logging disabled", None, None),
+            (
+                "logging enabled",
+                Some(Logging::default()),
+                Some(expected_rust_log),
+            ),
+        ] {
+            let mut parent = parent_fixture("demo");
+            parent.spec.logging = logging;
+            let pool = pool_fixture("brokers", "demo", 1);
+            let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
+            let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
+                .env
+                .clone()
+                .unwrap();
+            let actual = env.into_iter().find(|entry| entry.name == "RUST_LOG");
+            assert_eq!(actual, expected, "case {name}");
+        }
     }
 
-    /// Without `spec.delegationToken`, the broker container's
-    /// env list must NOT carry `CRABKA_DELEGATION_TOKEN_SECRET_KEY` —
-    /// keeps the pod template byte-identical for clusters without it
-    /// (no spurious roll).
     #[test]
-    fn render_statefulset_omits_dt_master_key_env_when_unset() {
-        let parent = parent_fixture("demo");
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
-        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
-            .env
-            .clone()
-            .unwrap();
-        assert!(
-            env.iter()
-                .all(|e| e.name != "CRABKA_DELEGATION_TOKEN_SECRET_KEY"),
-            "env: {env:#?}"
-        );
-    }
-
-    /// With `spec.delegationToken.secretKeyRef`, the operator
-    /// must wire `CRABKA_DELEGATION_TOKEN_SECRET_KEY` via
-    /// `valueFrom.secretKeyRef` (NOT a literal value — otherwise the
-    /// Secret value leaks into the `StatefulSet` manifest). With the key
-    /// unset, it defaults to `secret-key`.
-    #[test]
-    fn render_statefulset_dt_master_key_env_from_secret_default_key() {
+    fn render_statefulset_dt_master_key_env_cases() {
         use crate::crd::kafka::{DelegationTokenConfig, SecretKeyRef};
-        let mut parent = parent_fixture("demo");
-        parent.spec.delegation_token = Some(DelegationTokenConfig {
-            secret_key_ref: SecretKeyRef {
-                name: "dt-master".into(),
-                key: None,
-            },
-        });
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
-        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
-            .env
-            .clone()
-            .unwrap();
-        let dt_env = env
-            .iter()
-            .find(|e| e.name == "CRABKA_DELEGATION_TOKEN_SECRET_KEY")
-            .expect("dt env present when spec.delegationToken set");
-        assert!(
-            dt_env.value.is_none(),
-            "literal value must not be set; valueFrom only"
-        );
-        let secret_ref = dt_env
-            .value_from
-            .as_ref()
-            .and_then(|vf| vf.secret_key_ref.as_ref())
-            .expect("secretKeyRef present");
-        assert!(secret_ref.name == "dt-master");
-        assert!(secret_ref.key == "secret-key");
-    }
 
-    /// Explicit `key` override surfaces in the `SecretKeySelector`.
-    #[test]
-    fn render_statefulset_dt_master_key_env_honors_explicit_key() {
-        use crate::crd::kafka::{DelegationTokenConfig, SecretKeyRef};
-        let mut parent = parent_fixture("demo");
-        parent.spec.delegation_token = Some(DelegationTokenConfig {
-            secret_key_ref: SecretKeyRef {
-                name: "dt-master".into(),
-                key: Some("hmac".into()),
-            },
-        });
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
-        let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
-            .env
-            .clone()
-            .unwrap();
-        let secret_ref = env
-            .iter()
-            .find(|e| e.name == "CRABKA_DELEGATION_TOKEN_SECRET_KEY")
-            .and_then(|e| e.value_from.as_ref())
-            .and_then(|vf| vf.secret_key_ref.as_ref())
-            .expect("secretKeyRef present");
-        assert!(secret_ref.name == "dt-master");
-        assert!(secret_ref.key == "hmac");
-    }
-
-    #[test]
-    fn render_statefulset_metrics_on_adds_port() {
-        use crate::crd::{MetricsConfig, PodMonitorSpec};
-        let mut parent = parent_fixture("demo");
-        parent.spec.metrics_config = Some(MetricsConfig {
-            pod_monitor: Some(PodMonitorSpec::default()),
-            ..Default::default()
-        });
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
-        let ports = sts.spec.unwrap().template.spec.unwrap().containers[0]
-            .ports
-            .clone()
-            .unwrap();
-        assert!(ports.len() == 2);
-        assert!(
-            ports
-                .iter()
-                .any(|p| p.name.as_deref() == Some("metrics") && p.container_port == 9404)
-        );
+        let expected_env = |key: &str| {
+            Some(k8s_openapi::api::core::v1::EnvVar {
+                name: "CRABKA_DELEGATION_TOKEN_SECRET_KEY".into(),
+                value: None,
+                value_from: Some(k8s_openapi::api::core::v1::EnvVarSource {
+                    secret_key_ref: Some(k8s_openapi::api::core::v1::SecretKeySelector {
+                        key: key.into(),
+                        name: "dt-master".into(),
+                        optional: None,
+                    }),
+                    ..Default::default()
+                }),
+            })
+        };
+        for (name, configured_key, expected) in [
+            ("delegation token unset", None, None),
+            ("default key", Some(None), expected_env("secret-key")),
+            ("explicit key", Some(Some("hmac")), expected_env("hmac")),
+        ] {
+            let mut parent = parent_fixture("demo");
+            parent.spec.delegation_token = configured_key.map(|key| DelegationTokenConfig {
+                secret_key_ref: SecretKeyRef {
+                    name: "dt-master".into(),
+                    key: key.map(str::to_string),
+                },
+            });
+            let pool = pool_fixture("brokers", "demo", 1);
+            let sts = render_statefulset(&parent, &pool, "img:latest").unwrap();
+            let env = sts.spec.unwrap().template.spec.unwrap().containers[0]
+                .env
+                .clone()
+                .unwrap();
+            let actual = env
+                .into_iter()
+                .find(|entry| entry.name == "CRABKA_DELEGATION_TOKEN_SECRET_KEY");
+            assert_eq!(actual, expected, "case {name}");
+        }
     }
 
     /// Build a Kafka CR with one OAuth listener whose
@@ -2996,8 +2986,6 @@ mod tests {
             .iter()
             .find(|m| m.name == "oauth-jwks-trust")
             .expect("oauth-jwks-trust mount present");
-        assert!(mount.mount_path == "/etc/crabka/oauth-jwks-trust");
-        assert!(mount.read_only == Some(true));
 
         // Pod volume sources the managed `{kafka}-oauth-jwks-trust`
         // Secret with the same 0o400 mode as the other CA volumes.
@@ -3008,49 +2996,36 @@ mod tests {
             .iter()
             .find(|v| v.name == "oauth-jwks-trust")
             .expect("oauth-jwks-trust volume present");
-        let secret = volume.secret.as_ref().expect("secret volume source");
-        assert!(secret.secret_name.as_deref() == Some("demo-oauth-jwks-trust"));
-        assert!(secret.default_mode == Some(0o400));
-    }
-
-    #[test]
-    fn render_statefulset_omits_oauth_jwks_trust_volume_when_none() {
-        // parent_fixture has no listeners at all — the helper returns
-        // None and the volume/mount must not appear.
-        let parent = parent_fixture("demo");
-        let pool = pool_fixture("brokers", "demo", 1);
-        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
-        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
-
-        assert!(
-            pod_spec.containers[0]
-                .volume_mounts
-                .as_ref()
-                .unwrap()
-                .iter()
-                .all(|m| m.name != "oauth-jwks-trust"),
-            "no OAuth listener → no oauth-jwks-trust mount",
-        );
-        assert!(
-            pod_spec
-                .volumes
-                .as_ref()
-                .unwrap()
-                .iter()
-                .all(|v| v.name != "oauth-jwks-trust"),
-            "no OAuth listener → no oauth-jwks-trust pod volume",
+        assert_eq!(
+            (mount, volume),
+            (
+                &k8s_openapi::api::core::v1::VolumeMount {
+                    mount_path: "/etc/crabka/oauth-jwks-trust".into(),
+                    name: "oauth-jwks-trust".into(),
+                    read_only: Some(true),
+                    ..Default::default()
+                },
+                &k8s_openapi::api::core::v1::Volume {
+                    name: "oauth-jwks-trust".into(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        default_mode: Some(0o400),
+                        secret_name: Some("demo-oauth-jwks-trust".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
         );
     }
 
     #[test]
-    fn render_statefulset_omits_oauth_jwks_trust_volume_when_certs_empty() {
+    fn render_statefulset_oauth_secret_absence_cases() {
         use crate::crd::{
             Listener, ListenerAuthentication, ListenerAuthenticationOAuth, ListenerType,
         };
-        // OAuth listener with empty `tls_trusted_certificates` — the
-        // helper short-circuits to None, broker uses system trust.
-        let mut parent = parent_fixture("demo");
-        parent.spec.listeners = vec![Listener {
+        let no_listener = parent_fixture("demo");
+        let mut empty_certificates = parent_fixture("demo");
+        empty_certificates.spec.listeners = vec![Listener {
             name: "oauth".into(),
             port: 9094,
             type_: ListenerType::Internal,
@@ -3084,26 +3059,41 @@ mod tests {
             configuration: None,
             network_policy_peers: None,
         }];
-        let pool = pool_fixture("brokers", "demo", 1);
-        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
-        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
 
-        assert!(
-            pod_spec.containers[0]
+        for (name, parent, resource_name) in [
+            ("no OAuth listener", no_listener, "oauth-jwks-trust"),
+            (
+                "OAuth listener with empty certificates",
+                empty_certificates,
+                "oauth-jwks-trust",
+            ),
+            (
+                "JWT-mode OAuth has no introspection secret",
+                parent_with_oauth_trust("demo"),
+                "oauth-introspection-secret",
+            ),
+        ] {
+            let pool = pool_fixture("brokers", "demo", 1);
+            let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+            let pod_spec = ss.spec.unwrap().template.spec.unwrap();
+            let mount_present = pod_spec.containers[0]
                 .volume_mounts
                 .as_ref()
                 .unwrap()
                 .iter()
-                .all(|m| m.name != "oauth-jwks-trust"),
-        );
-        assert!(
-            pod_spec
+                .any(|mount| mount.name == resource_name);
+            let volume_present = pod_spec
                 .volumes
                 .as_ref()
                 .unwrap()
                 .iter()
-                .all(|v| v.name != "oauth-jwks-trust"),
-        );
+                .any(|volume| volume.name == resource_name);
+            assert_eq!(
+                (mount_present, volume_present),
+                (false, false),
+                "case {name}"
+            );
+        }
     }
 
     /// When the parent Kafka CR has an OAuth listener
@@ -3172,8 +3162,6 @@ mod tests {
             .iter()
             .find(|m| m.name == "oauth-introspection-secret")
             .expect("oauth-introspection-secret mount present");
-        assert!(mount.mount_path == "/etc/crabka/oauth-introspection");
-        assert!(mount.read_only == Some(true));
 
         // Pod volume sources the user-owned Secret directly with a
         // projected items mapping (user's key -> fixed path
@@ -3186,52 +3174,30 @@ mod tests {
             .iter()
             .find(|v| v.name == "oauth-introspection-secret")
             .expect("oauth-introspection-secret volume present");
-        let secret = volume.secret.as_ref().expect("secret volume source");
-        assert!(secret.secret_name.as_deref() == Some("my-oauth-secret"));
-        assert!(secret.default_mode == Some(0o400));
-        let items = secret.items.as_ref().expect("projected items present");
-        assert!(
-            *items
-                == vec![k8s_openapi::api::core::v1::KeyToPath {
-                    key: "my-key".into(),
-                    mode: None,
-                    path: "client-secret".into(),
-                }]
-        );
-    }
-
-    /// JWT-mode OAuth listeners (the default —
-    /// `accessTokenIsJwt: true`, no `clientSecret`) must NOT cause the
-    /// introspection volume / mount to be rendered. Confirms the
-    /// short-circuit in `oauth_introspection_secret_mount` flows through
-    /// to a byte-identical pod template for the common JWT path.
-    #[test]
-    fn render_statefulset_omits_oauth_introspection_volume_when_jwt_mode() {
-        // parent_with_oauth_trust builds a JWT-mode OAuth listener with
-        // tls_trusted_certificates; the introspection helper returns
-        // None for it.
-        let parent = parent_with_oauth_trust("demo");
-        let pool = pool_fixture("brokers", "demo", 1);
-        let ss = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
-        let pod_spec = ss.spec.unwrap().template.spec.unwrap();
-
-        assert!(
-            pod_spec.containers[0]
-                .volume_mounts
-                .as_ref()
-                .unwrap()
-                .iter()
-                .all(|m| m.name != "oauth-introspection-secret"),
-            "JWT-mode OAuth must not produce an oauth-introspection-secret mount",
-        );
-        assert!(
-            pod_spec
-                .volumes
-                .as_ref()
-                .unwrap()
-                .iter()
-                .all(|v| v.name != "oauth-introspection-secret"),
-            "JWT-mode OAuth must not produce an oauth-introspection-secret volume",
+        assert_eq!(
+            (mount, volume),
+            (
+                &k8s_openapi::api::core::v1::VolumeMount {
+                    mount_path: "/etc/crabka/oauth-introspection".into(),
+                    name: "oauth-introspection-secret".into(),
+                    read_only: Some(true),
+                    ..Default::default()
+                },
+                &k8s_openapi::api::core::v1::Volume {
+                    name: "oauth-introspection-secret".into(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        default_mode: Some(0o400),
+                        items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
+                            key: "my-key".into(),
+                            mode: None,
+                            path: "client-secret".into(),
+                        }]),
+                        secret_name: Some("my-oauth-secret".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
         );
     }
 
@@ -3306,12 +3272,9 @@ mod tests {
             .iter()
             .find(|m| m.name == "tier-storage")
             .expect("tier-storage mount present");
-        assert!(mount.mount_path == crate::controller::listeners::TIER_STORAGE_PATH);
-        // The mount is writable (no read_only flag).
-        assert!(
-            mount.read_only.is_none() || mount.read_only == Some(false),
-            "tier-storage mount must be writable, got read_only={:?}",
-            mount.read_only
+        assert_eq!(
+            (mount.mount_path.as_str(), mount.read_only.unwrap_or(false)),
+            (crate::controller::listeners::TIER_STORAGE_PATH, false)
         );
     }
 
@@ -3338,30 +3301,38 @@ mod tests {
             .iter()
             .find(|e| e.name == "AWS_ACCESS_KEY_ID")
             .expect("AWS_ACCESS_KEY_ID env present");
-        assert!(
-            ak.value.is_none(),
-            "literal value must not be set; valueFrom only"
-        );
         let ak_ref = ak
             .value_from
             .as_ref()
             .and_then(|v| v.secret_key_ref.as_ref())
             .expect("secretKeyRef present");
-        assert!(ak_ref.name == "crabka-s3-creds");
-        assert!(ak_ref.key == "access-key-id");
 
         let sk = env
             .iter()
             .find(|e| e.name == "AWS_SECRET_ACCESS_KEY")
             .expect("AWS_SECRET_ACCESS_KEY env present");
-        assert!(sk.value.is_none());
         let sk_ref = sk
             .value_from
             .as_ref()
             .and_then(|v| v.secret_key_ref.as_ref())
             .expect("secretKeyRef present");
-        assert!(sk_ref.name == "crabka-s3-creds");
-        assert!(sk_ref.key == "secret-access-key");
+        assert_eq!(
+            (ak.value.as_deref(), sk.value.as_deref(), ak_ref, sk_ref),
+            (
+                None,
+                None,
+                &k8s_openapi::api::core::v1::SecretKeySelector {
+                    name: "crabka-s3-creds".to_string(),
+                    key: "access-key-id".to_string(),
+                    optional: None,
+                },
+                &k8s_openapi::api::core::v1::SecretKeySelector {
+                    name: "crabka-s3-creds".to_string(),
+                    key: "secret-access-key".to_string(),
+                    optional: None,
+                },
+            )
+        );
     }
 
     /// S3 backend without `credentials` must produce a byte-identical
@@ -3385,67 +3356,6 @@ mod tests {
             env.iter()
                 .all(|e| e.name != "AWS_ACCESS_KEY_ID" && e.name != "AWS_SECRET_ACCESS_KEY"),
             "credentialless S3 must not inject AWS env, got: {env:?}",
-        );
-    }
-
-    /// S3 backend must NOT mount the local-tier `tier-storage`
-    /// emptyDir — that volume is meaningful only to `LocalTieredStorage`,
-    /// and shipping it on every S3 cluster would waste pod-local disk.
-    #[test]
-    fn pod_template_omits_tier_storage_volume_when_s3() {
-        let parent = parent_with_s3_tiered_storage("demo", true);
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
-        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
-        assert!(
-            pod_spec
-                .volumes
-                .as_ref()
-                .unwrap()
-                .iter()
-                .all(|v| v.name != "tier-storage"),
-            "S3 must not allocate the Local tier-storage emptyDir",
-        );
-        let broker = pod_spec
-            .containers
-            .iter()
-            .find(|c| c.name == "broker")
-            .expect("broker container");
-        assert!(
-            broker
-                .volume_mounts
-                .as_ref()
-                .is_none_or(|m| m.iter().all(|x| x.name != "tier-storage")),
-            "S3 must not mount the Local tier-storage path",
-        );
-    }
-
-    #[test]
-    fn pod_template_omits_tier_storage_when_tiered_none() {
-        let parent = parent_fixture("demo");
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
-        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
-        assert!(
-            pod_spec
-                .volumes
-                .as_ref()
-                .unwrap()
-                .iter()
-                .all(|v| v.name != "tier-storage"),
-            "non-tiered cluster must not have a tier-storage volume",
-        );
-        let broker = pod_spec
-            .containers
-            .iter()
-            .find(|c| c.name == "broker")
-            .expect("broker container");
-        assert!(
-            broker
-                .volume_mounts
-                .as_ref()
-                .is_none_or(|m| m.iter().all(|x| x.name != "tier-storage")),
-            "non-tiered cluster must not mount tier-storage",
         );
     }
 
@@ -3495,15 +3405,18 @@ mod tests {
             .secret
             .as_ref()
             .expect("gcs-credentials is a Secret volume");
-        assert!(secret.secret_name.as_deref() == Some("crabka-gcs-creds"));
         let items = secret.items.as_ref().expect("projected items");
-        assert!(
-            *items
-                == vec![k8s_openapi::api::core::v1::KeyToPath {
+        assert_eq!(
+            (secret.secret_name.as_deref(), items.as_slice()),
+            (
+                Some("crabka-gcs-creds"),
+                [k8s_openapi::api::core::v1::KeyToPath {
                     key: "key.json".into(),
                     mode: None,
                     path: "key.json".into(),
                 }]
+                .as_slice(),
+            )
         );
 
         // Read-only mount at the canonical credentials dir.
@@ -3519,8 +3432,14 @@ mod tests {
             .iter()
             .find(|m| m.name == "gcs-credentials")
             .expect("gcs-credentials mount present");
-        assert!(mount.mount_path == crate::controller::listeners::GCS_CREDENTIALS_DIR);
-        assert!(mount.read_only == Some(true), "must be read-only");
+        assert_eq!(
+            (mount.mount_path.as_str(), mount.read_only),
+            (
+                crate::controller::listeners::GCS_CREDENTIALS_DIR,
+                Some(true)
+            ),
+            "must use the canonical read-only mount"
+        );
 
         // GCS must NOT inject AWS-style env vars, and must NOT mount the
         // Local tier-storage scratch volume.
@@ -3541,36 +3460,49 @@ mod tests {
         );
     }
 
-    /// Keyless GCS (Workload Identity / ADC): with `credentials` unset, no
-    /// gcs-credentials volume/mount and no env are added — the pod resolves
-    /// credentials from its bound KSA via the metadata server.
     #[test]
-    fn pod_template_omits_gcs_credentials_when_keyless() {
-        let parent = parent_with_gcs_tiered_storage("demo", false);
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
-        let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
-        assert!(
-            pod_spec
-                .volumes
-                .as_ref()
-                .unwrap()
+    fn pod_template_omits_inapplicable_storage_resources() {
+        for (name, parent, resource_name) in [
+            (
+                "S3 omits local tier storage",
+                parent_with_s3_tiered_storage("demo", true),
+                "tier-storage",
+            ),
+            (
+                "cluster without tiering omits local tier storage",
+                parent_fixture("demo"),
+                "tier-storage",
+            ),
+            (
+                "keyless GCS omits credentials",
+                parent_with_gcs_tiered_storage("demo", false),
+                "gcs-credentials",
+            ),
+        ] {
+            let pool = pool_fixture("brokers", "demo", 1);
+            let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+            let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+            let broker = pod_spec
+                .containers
                 .iter()
-                .all(|v| v.name != "gcs-credentials"),
-            "keyless GCS must not allocate a gcs-credentials volume",
-        );
-        let broker = pod_spec
-            .containers
-            .iter()
-            .find(|c| c.name == "broker")
-            .expect("broker container");
-        assert!(
-            broker
-                .volume_mounts
-                .as_ref()
-                .is_none_or(|m| m.iter().all(|x| x.name != "gcs-credentials")),
-            "keyless GCS must not mount gcs-credentials",
-        );
+                .find(|container| container.name == "broker")
+                .expect("broker container");
+            assert_eq!(
+                (
+                    pod_spec
+                        .volumes
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .any(|volume| volume.name == resource_name),
+                    broker.volume_mounts.as_ref().is_some_and(|mounts| mounts
+                        .iter()
+                        .any(|mount| mount.name == resource_name)),
+                ),
+                (false, false),
+                "case {name}"
+            );
+        }
     }
 
     // ── tier-storage PVC tests ───────────────────────────────────────
@@ -3626,8 +3558,13 @@ mod tests {
             .as_ref()
             .and_then(|r| r.requests.as_ref())
             .expect("resources.requests");
-        assert!(req.get("storage").map(|q| q.0.as_str()) == Some("50Gi"));
-        assert!(spec.storage_class_name.as_deref() == Some("fast-ssd"));
+        assert_eq!(
+            (
+                req.get("storage").map(|q| q.0.as_str()),
+                spec.storage_class_name.as_deref(),
+            ),
+            (Some("50Gi"), Some("fast-ssd"))
+        );
         // Mount inside the broker container still lands at the canonical path.
         let broker = pod_spec
             .containers
@@ -3778,11 +3715,14 @@ mod tests {
             .persistent_volume_claim_retention_policy
             .as_ref()
             .expect("policy must exist when tier PVC is present");
-        assert!(
-            policy.when_deleted.as_deref() == Some("Delete"),
-            "delete_claim=true should map to whenDeleted=Delete"
+        assert_eq!(
+            (
+                policy.when_deleted.as_deref(),
+                policy.when_scaled.as_deref()
+            ),
+            (Some("Delete"), Some("Retain")),
+            "delete_claim=true retention policy"
         );
-        assert!(policy.when_scaled.as_deref() == Some("Retain"));
     }
 
     #[test]
@@ -3812,136 +3752,74 @@ mod tests {
     }
 
     #[test]
-    fn pod_template_emits_otlp_env_when_tracing_set() {
-        let parent = parent_with_tracing(
-            "demo",
-            crate::crd::kafka::OtlpTracing {
-                endpoint: "http://otel:4317".into(),
-                protocol: Some(crate::crd::kafka::OtlpProtocol::HttpProtobuf),
-                sample_ratio: Some(0.25),
-                service_name: Some("svc".into()),
-                timeout_secs: Some(7),
-            },
-        );
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
-        let env = sts
-            .spec
-            .as_ref()
-            .unwrap()
-            .template
-            .spec
-            .as_ref()
-            .unwrap()
-            .containers
-            .iter()
-            .find(|c| c.name == "broker")
-            .expect("broker container")
-            .env
-            .as_ref()
-            .expect("env present")
-            .clone();
+    fn pod_template_otlp_env_cases() {
+        use k8s_openapi::api::core::v1::EnvVar;
 
-        let by_name = |needle: &str| {
-            env.iter()
-                .find(|e| e.name == needle)
-                .unwrap_or_else(|| panic!("{needle} env missing"))
-                .value
-                .clone()
-                .unwrap_or_default()
+        use crate::crd::kafka::{OtlpProtocol, OtlpTracing};
+
+        let env = |name: &str, value: &str| EnvVar {
+            name: name.into(),
+            value: Some(value.into()),
+            value_from: None,
         };
-        for (name, want) in [
-            ("CRABKA_OTLP_ENABLED", "true"),
-            ("CRABKA_OTLP_ENDPOINT", "http://otel:4317"),
-            ("CRABKA_OTLP_PROTOCOL", "http/protobuf"),
-            ("CRABKA_OTLP_SAMPLE_RATIO", "0.25"),
-            ("OTEL_SERVICE_NAME", "svc"),
-            ("CRABKA_OTLP_TIMEOUT_SECS", "7"),
+        for (name, tracing, expected) in [
+            ("tracing disabled", None, vec![]),
+            (
+                "required fields only",
+                Some(OtlpTracing {
+                    endpoint: "http://otel:4317".into(),
+                    protocol: None,
+                    sample_ratio: None,
+                    service_name: None,
+                    timeout_secs: None,
+                }),
+                vec![
+                    env("CRABKA_OTLP_ENABLED", "true"),
+                    env("CRABKA_OTLP_ENDPOINT", "http://otel:4317"),
+                ],
+            ),
+            (
+                "all fields",
+                Some(OtlpTracing {
+                    endpoint: "http://otel:4317".into(),
+                    protocol: Some(OtlpProtocol::HttpProtobuf),
+                    sample_ratio: Some(0.25),
+                    service_name: Some("svc".into()),
+                    timeout_secs: Some(7),
+                }),
+                vec![
+                    env("CRABKA_OTLP_ENABLED", "true"),
+                    env("CRABKA_OTLP_ENDPOINT", "http://otel:4317"),
+                    env("CRABKA_OTLP_PROTOCOL", "http/protobuf"),
+                    env("CRABKA_OTLP_SAMPLE_RATIO", "0.25"),
+                    env("OTEL_SERVICE_NAME", "svc"),
+                    env("CRABKA_OTLP_TIMEOUT_SECS", "7"),
+                ],
+            ),
         ] {
-            assert!(by_name(name) == want, "case {name}");
-        }
-    }
-
-    #[test]
-    fn pod_template_omits_optional_otlp_env_when_unset() {
-        let parent = parent_with_tracing(
-            "demo",
-            crate::crd::kafka::OtlpTracing {
-                endpoint: "http://otel:4317".into(),
-                protocol: None,
-                sample_ratio: None,
-                service_name: None,
-                timeout_secs: None,
-            },
-        );
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
-        let env = sts
-            .spec
-            .as_ref()
-            .unwrap()
-            .template
-            .spec
-            .as_ref()
-            .unwrap()
-            .containers
-            .iter()
-            .find(|c| c.name == "broker")
-            .expect("broker container")
-            .env
-            .as_ref()
-            .expect("env present")
-            .clone();
-        // Required pair is present.
-        assert!(env.iter().any(|e| e.name == "CRABKA_OTLP_ENABLED"));
-        assert!(env.iter().any(|e| e.name == "CRABKA_OTLP_ENDPOINT"));
-        // Optional knobs are absent.
-        for unset in [
-            "CRABKA_OTLP_PROTOCOL",
-            "CRABKA_OTLP_SAMPLE_RATIO",
-            "OTEL_SERVICE_NAME",
-            "CRABKA_OTLP_TIMEOUT_SECS",
-        ] {
-            assert!(
-                env.iter().all(|e| e.name != unset),
-                "{unset} should not be emitted when unset"
-            );
-        }
-    }
-
-    #[test]
-    fn pod_template_omits_all_otlp_env_when_tracing_none() {
-        let parent = parent_fixture("demo");
-        let pool = pool_fixture("brokers", "demo", 1);
-        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
-        let env = sts
-            .spec
-            .as_ref()
-            .unwrap()
-            .template
-            .spec
-            .as_ref()
-            .unwrap()
-            .containers
-            .iter()
-            .find(|c| c.name == "broker")
-            .expect("broker container")
-            .env
-            .as_ref()
-            .expect("env present")
-            .clone();
-        for never in [
-            "CRABKA_OTLP_ENABLED",
-            "CRABKA_OTLP_ENDPOINT",
-            "CRABKA_OTLP_PROTOCOL",
-            "CRABKA_OTLP_SAMPLE_RATIO",
-            "OTEL_SERVICE_NAME",
-            "CRABKA_OTLP_TIMEOUT_SECS",
-        ] {
-            assert!(
-                env.iter().all(|e| e.name != never),
-                "{never} must not leak when tracing is None"
-            );
+            let parent = tracing
+                .map(|otlp| parent_with_tracing("demo", otlp))
+                .unwrap_or_else(|| parent_fixture("demo"));
+            let pool = pool_fixture("brokers", "demo", 1);
+            let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+            let actual = sts
+                .spec
+                .unwrap()
+                .template
+                .spec
+                .unwrap()
+                .containers
+                .into_iter()
+                .find(|container| container.name == "broker")
+                .expect("broker container")
+                .env
+                .unwrap()
+                .into_iter()
+                .filter(|entry| {
+                    entry.name.starts_with("CRABKA_OTLP_") || entry.name == "OTEL_SERVICE_NAME"
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "case {name}");
         }
     }
 
@@ -3979,44 +3857,43 @@ mod tests {
     }
 
     #[test]
-    fn version_gate_blocks_fresh_cluster_with_invalid_version() {
-        // Fresh cluster: the Kafka controller has evaluated the spec and
-        // published KafkaVersionValid=False, with no finalized metadata
-        // version. The pool must refrain from rendering pods.
-        let parent = parent_with_version_status("demo", Some(false), None);
-        match version_gate(&parent) {
-            VersionGate::Blocked(cond) => {
-                check!(cond.type_ == "Ready");
-                check!(cond.status == "False");
-                check!(cond.reason == "KafkaVersionInvalid");
-                check!(
-                    cond.message.contains("KafkaVersionValid=False"),
-                    "pool condition should surface the parent's verdict, got: {}",
-                    cond.message
-                );
-            }
-            VersionGate::Cleared => {
-                panic!("invalid parent version must block pod creation")
-            }
-        }
-    }
-
-    #[test]
-    fn version_gate_blocks_when_parent_has_no_version_status_yet() {
-        // The pool reconciled before the Kafka controller's first pass —
-        // no status at all. Hold off rather than format at a guessed
-        // version; the requeue + adopt-pools re-trigger will re-run us once
-        // the parent publishes its verdict.
-        let parent = parent_fixture("demo");
-        assert!(parent.status.is_none(), "fixture precondition");
-        match version_gate(&parent) {
-            VersionGate::Blocked(cond) => {
-                check!(cond.type_ == "Ready");
-                check!(cond.status == "False");
-                check!(cond.reason == "WaitingForVersionValidation");
-            }
-            VersionGate::Cleared => {
-                panic!("missing parent version status must block pod creation")
+    fn version_gate_blocked_cases() {
+        let missing_status = parent_fixture("demo");
+        assert!(missing_status.status.is_none(), "fixture precondition");
+        for (name, parent, expected, message_fragment) in [
+            (
+                "invalid finalized version",
+                parent_with_version_status("demo", Some(false), None),
+                ("Ready", "False", "KafkaVersionInvalid"),
+                Some("KafkaVersionValid=False"),
+            ),
+            (
+                "version status not published",
+                missing_status,
+                ("Ready", "False", "WaitingForVersionValidation"),
+                None,
+            ),
+        ] {
+            match version_gate(&parent) {
+                VersionGate::Blocked(cond) => {
+                    assert_eq!(
+                        (
+                            cond.type_.as_str(),
+                            cond.status.as_str(),
+                            cond.reason.as_str()
+                        ),
+                        expected,
+                        "case {name}"
+                    );
+                    if let Some(fragment) = message_fragment {
+                        check!(
+                            cond.message.contains(fragment),
+                            "case {name}: {}",
+                            cond.message
+                        );
+                    }
+                }
+                VersionGate::Cleared => panic!("case {name}: version gate must block"),
             }
         }
     }

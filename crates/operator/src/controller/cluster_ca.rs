@@ -1416,27 +1416,22 @@ mod tests {
     }
 
     #[test]
-    fn renews_when_within_window() {
-        let ca = generate_clients_ca("c1", 365).expect("CA");
-        let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 5).expect("leaf");
-        let now = OffsetDateTime::now_utc();
-        assert!(renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
-    }
-
-    #[test]
-    fn does_not_renew_when_comfortably_in_future() {
-        let ca = generate_clients_ca("c1", 365).expect("CA");
-        let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 365).expect("leaf");
-        let now = OffsetDateTime::now_utc();
-        assert!(!renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
-    }
-
-    #[test]
-    fn renews_when_already_past() {
-        let ca = generate_clients_ca("c1", 365).expect("CA");
-        let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 1).expect("leaf");
-        let now = OffsetDateTime::now_utc() + time::Duration::days(10);
-        assert!(renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
+    fn renewal_window_cases() {
+        for (name, validity_days, now_offset_days, expected) in [
+            ("within renewal window", 5, 0, true),
+            ("comfortably in future", 365, 0, false),
+            ("already expired", 1, 10, true),
+        ] {
+            let ca = generate_clients_ca("c1", 365).expect("CA");
+            let user =
+                issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", validity_days).expect("leaf");
+            let now = OffsetDateTime::now_utc() + time::Duration::days(now_offset_days);
+            assert_eq!(
+                renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"),
+                expected,
+                "case {name}"
+            );
+        }
     }
 }
 
@@ -1569,8 +1564,7 @@ mod san_tests {
         )
         .unwrap();
         let parsed = parse_cert_sans(&leaf.cert_pem);
-        assert!(parsed.len() == 1);
-        assert!(parsed[0] == "DNS:internal.svc");
+        assert_eq!(parsed, ["DNS:internal.svc"]);
     }
 
     // Round-trip: issue a leaf with a known CN and mixed DNS/IP SANs, then pull
@@ -1653,11 +1647,10 @@ mod rotation_tests {
         let b = ca_cert("b", 365);
         let bundle = format!("{a}{b}");
         let blocks = split_pem_certs(&bundle);
-        assert!(blocks.len() == 2);
-        assert!(blocks[0].contains("BEGIN CERTIFICATE"));
+        assert_eq!(blocks, vec![normalize_block(&a), normalize_block(&b)]);
         // join is the concatenation of normalized blocks; re-splitting is stable.
         let rejoined = join_bundle(&blocks);
-        assert!(split_pem_certs(&rejoined).len() == 2);
+        assert_eq!(split_pem_certs(&rejoined), blocks);
     }
 
     #[test]
@@ -1692,133 +1685,132 @@ mod rotation_tests {
     // --- planner: BYO -------------------------------------------------------
 
     #[test]
-    fn byo_never_rotates() {
-        let s = state(
-            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
-            "k",
-            CaPhase::Idle,
-        );
-        assert!(plan_ca_rotation(&s, &inputs(false, WhichCa::Cluster)) == CaRotationPlan::NoOp);
-    }
+    fn idle_and_byo_plan_cases() {
+        let idle_cluster = |days| {
+            state(
+                vec![normalize_block(&ca_cert("c1-cluster-ca", days))],
+                "k",
+                CaPhase::Idle,
+            )
+        };
+        let mut byo_force_key = inputs(false, WhichCa::Cluster);
+        byo_force_key.force_replace_key = true;
+        let mut byo_force_renew = inputs(false, WhichCa::Cluster);
+        byo_force_renew.force_renew = true;
+        let mut force_renew = inputs(true, WhichCa::Cluster);
+        force_renew.force_renew = true;
+        let mut force_replace = inputs(true, WhichCa::Cluster);
+        force_replace.force_replace_key = true;
+        let mut clients_force_replace = inputs(true, WhichCa::Clients);
+        clients_force_replace.force_replace_key = true;
+        let mut prune = inputs(true, WhichCa::Cluster);
+        prune.now = OffsetDateTime::now_utc() + time::Duration::days(100);
 
-    #[test]
-    fn byo_force_is_refused() {
-        let s = state(
-            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
-            "k",
-            CaPhase::Idle,
-        );
-        let mut inp = inputs(false, WhichCa::Cluster);
-        inp.force_replace_key = true;
-        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::Refuse(RefuseReason::Byo));
-        let mut inp2 = inputs(false, WhichCa::Cluster);
-        inp2.force_renew = true;
-        assert!(plan_ca_rotation(&s, &inp2) == CaRotationPlan::Refuse(RefuseReason::Byo));
-    }
-
-    // --- planner: idle ------------------------------------------------------
-
-    #[test]
-    fn idle_not_due_is_noop() {
-        let s = state(
-            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
-            "k",
-            CaPhase::Idle,
-        );
-        assert!(plan_ca_rotation(&s, &inputs(true, WhichCa::Cluster)) == CaRotationPlan::NoOp);
-    }
-
-    #[test]
-    fn idle_within_renewal_window_renews_same_key() {
-        // Signing cert with 20 days left, renewalDays=30 → due.
-        let s = state(
-            vec![normalize_block(&ca_cert("c1-cluster-ca", 20))],
-            "k",
-            CaPhase::Idle,
-        );
-        assert!(
-            plan_ca_rotation(&s, &inputs(true, WhichCa::Cluster))
-                == CaRotationPlan::RenewCertSameKey
-        );
-    }
-
-    #[test]
-    fn idle_force_renew_renews_even_when_not_due() {
-        let s = state(
-            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
-            "k",
-            CaPhase::Idle,
-        );
-        let mut inp = inputs(true, WhichCa::Cluster);
-        inp.force_renew = true;
-        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::RenewCertSameKey);
-    }
-
-    #[test]
-    fn idle_force_replace_starts_key_replace_on_cluster_ca() {
-        let s = state(
-            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
-            "k",
-            CaPhase::Idle,
-        );
-        let mut inp = inputs(true, WhichCa::Cluster);
-        inp.force_replace_key = true;
-        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::StartKeyReplace);
-    }
-
-    #[test]
-    fn idle_force_replace_refused_on_clients_ca() {
-        let s = state(
-            vec![normalize_block(&ca_cert("c1-clients-ca", 365))],
-            "k",
-            CaPhase::Idle,
-        );
-        let mut inp = inputs(true, WhichCa::Clients);
-        inp.force_replace_key = true;
-        assert!(
-            plan_ca_rotation(&s, &inp) == CaRotationPlan::Refuse(RefuseReason::ClientsCaKeyReplace)
-        );
-    }
-
-    #[test]
-    fn idle_with_expired_trust_anchor_prunes() {
-        let signing = normalize_block(&ca_cert("c1-cluster-ca", 365));
-        let stale = normalize_block(&ca_cert("old", 50));
-        let s = state(vec![signing, stale], "k", CaPhase::Idle);
-        let mut inp = inputs(true, WhichCa::Cluster);
-        // 100 days out: signing still valid (not due), trust anchor expired.
-        inp.now = OffsetDateTime::now_utc() + time::Duration::days(100);
-        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PruneOldTrust);
+        for (name, state, input, expected) in [
+            (
+                "BYO without force",
+                idle_cluster(365),
+                inputs(false, WhichCa::Cluster),
+                CaRotationPlan::NoOp,
+            ),
+            (
+                "BYO force key replacement",
+                idle_cluster(365),
+                byo_force_key,
+                CaRotationPlan::Refuse(RefuseReason::Byo),
+            ),
+            (
+                "BYO force renewal",
+                idle_cluster(365),
+                byo_force_renew,
+                CaRotationPlan::Refuse(RefuseReason::Byo),
+            ),
+            (
+                "idle certificate not due",
+                idle_cluster(365),
+                inputs(true, WhichCa::Cluster),
+                CaRotationPlan::NoOp,
+            ),
+            (
+                "idle certificate within renewal window",
+                idle_cluster(20),
+                inputs(true, WhichCa::Cluster),
+                CaRotationPlan::RenewCertSameKey,
+            ),
+            (
+                "forced renewal",
+                idle_cluster(365),
+                force_renew,
+                CaRotationPlan::RenewCertSameKey,
+            ),
+            (
+                "forced cluster CA key replacement",
+                idle_cluster(365),
+                force_replace,
+                CaRotationPlan::StartKeyReplace,
+            ),
+            (
+                "forced clients CA key replacement",
+                state(
+                    vec![normalize_block(&ca_cert("c1-clients-ca", 365))],
+                    "k",
+                    CaPhase::Idle,
+                ),
+                clients_force_replace,
+                CaRotationPlan::Refuse(RefuseReason::ClientsCaKeyReplace),
+            ),
+            (
+                "expired trust anchor",
+                state(
+                    vec![
+                        normalize_block(&ca_cert("c1-cluster-ca", 365)),
+                        normalize_block(&ca_cert("old", 50)),
+                    ],
+                    "k",
+                    CaPhase::Idle,
+                ),
+                prune,
+                CaRotationPlan::PruneOldTrust,
+            ),
+        ] {
+            assert_eq!(plan_ca_rotation(&state, &input), expected, "case {name}");
+        }
     }
 
     // --- planner: staged phases --------------------------------------------
 
     #[test]
-    fn trust_phase_waits_until_converged() {
-        let s = state(
-            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
-            "k",
-            CaPhase::KeyReplaceTrust,
-        );
-        let mut inp = inputs(true, WhichCa::Cluster);
-        inp.rollout_converged = false;
-        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
-        inp.rollout_converged = true;
-        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PromoteNewKey);
-    }
-
-    #[test]
-    fn promote_phase_waits_then_prunes() {
-        let s = state(
-            vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
-            "k",
-            CaPhase::KeyReplacePromote,
-        );
-        let mut inp = inputs(true, WhichCa::Cluster);
-        inp.rollout_converged = false;
-        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
-        inp.rollout_converged = true;
-        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PruneOldTrust);
+    fn staged_phase_convergence_cases() {
+        for (name, phase, expected_converged) in [
+            (
+                "trust phase",
+                CaPhase::KeyReplaceTrust,
+                CaRotationPlan::PromoteNewKey,
+            ),
+            (
+                "promote phase",
+                CaPhase::KeyReplacePromote,
+                CaRotationPlan::PruneOldTrust,
+            ),
+        ] {
+            let state = state(
+                vec![normalize_block(&ca_cert("c1-cluster-ca", 365))],
+                "k",
+                phase,
+            );
+            let mut input = inputs(true, WhichCa::Cluster);
+            assert_eq!(
+                plan_ca_rotation(&state, &input),
+                CaRotationPlan::NoOp,
+                "case {name}: unconverged"
+            );
+            input.rollout_converged = true;
+            assert_eq!(
+                plan_ca_rotation(&state, &input),
+                expected_converged,
+                "case {name}: converged"
+            );
+        }
     }
 
     #[test]

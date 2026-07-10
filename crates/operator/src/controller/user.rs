@@ -1078,17 +1078,25 @@ mod tests {
     }
 
     #[test]
-    fn principal_uses_user_prefix_for_scram() {
-        let scram = Authentication::ScramSha512(crate::crd::ScramSha512Auth::default());
-        assert!(principal_for("alice", &scram) == "User:alice");
-    }
-
-    #[test]
-    fn principal_for_dispatches_on_auth_type() {
-        let scram = Authentication::ScramSha512(crate::crd::ScramSha512Auth::default());
-        let tls = Authentication::Tls(crate::crd::user::TlsAuth::default());
-        assert!(principal_for("alice", &scram) == "User:alice");
-        assert!(principal_for("alice", &tls) == "User:CN=alice");
+    fn principal_cases() {
+        for (name, authentication, expected) in [
+            (
+                "SCRAM user",
+                Authentication::ScramSha512(crate::crd::ScramSha512Auth::default()),
+                "User:alice",
+            ),
+            (
+                "TLS certificate user",
+                Authentication::Tls(crate::crd::user::TlsAuth::default()),
+                "User:CN=alice",
+            ),
+        ] {
+            assert_eq!(
+                principal_for("alice", &authentication),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -1126,15 +1134,15 @@ mod tests {
             )],
         });
         let entries = expand_spec_acls(Some(&auth), "User:alice");
-        assert!(entries.len() == 3);
         let ops: Vec<_> = entries.iter().map(|e| e.operation).collect();
-        for op in [
-            AclOperation::Read,
-            AclOperation::Describe,
-            AclOperation::Write,
-        ] {
-            assert!(ops.contains(&op), "missing {op:?} in {ops:?}");
-        }
+        assert_eq!(
+            ops,
+            [
+                AclOperation::Read,
+                AclOperation::Describe,
+                AclOperation::Write
+            ]
+        );
     }
 
     #[test]
@@ -1175,8 +1183,7 @@ mod tests {
         desired.insert(add.clone());
 
         let (adds, dels) = diff_acls(&current, &desired);
-        assert!(adds == vec![add]);
-        assert!(dels == vec![drop]);
+        assert_eq!((adds, dels), (vec![add], vec![drop]));
     }
 
     #[test]
@@ -1193,8 +1200,7 @@ mod tests {
         };
         s.insert(e);
         let (adds, dels) = diff_acls(&s, &s);
-        assert!(adds.is_empty());
-        assert!(dels.is_empty());
+        assert_eq!((adds, dels), (vec![], vec![]));
     }
 
     #[test]

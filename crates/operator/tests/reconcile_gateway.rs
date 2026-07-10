@@ -16,7 +16,10 @@
 //!  11. GET deployments/<gw>                   — read back ready-replica count
 //!  12. PATCH kafkagrpcgateways/<gw>/status    — write final status
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use assert2::{assert, check};
 use crabka_operator::{
@@ -228,28 +231,20 @@ async fn happy_path_all_objects_created_ready() {
         .pointer("/spec/template/spec/containers/0/volumeMounts")
         .and_then(|v| v.as_array())
         .unwrap_or_else(|| panic!("Deployment PATCH missing volumeMounts; body = {dep_body}"));
-    let mount_names: Vec<&str> = mounts
+    let mount_names: BTreeSet<&str> = mounts
         .iter()
         .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
         .collect();
-    assert!(
-        mounts.len() == 5,
-        "Deployment must have exactly 5 volumeMounts, got {}: {:?}",
-        mounts.len(),
-        mount_names
+    assert_eq!(
+        mount_names,
+        BTreeSet::from([
+            "broker-client",
+            "clients-ca",
+            "cluster-ca",
+            "config",
+            "serving"
+        ])
     );
-    for want in [
-        "serving",
-        "broker-client",
-        "cluster-ca",
-        "clients-ca",
-        "config",
-    ] {
-        assert!(
-            mount_names.contains(&want),
-            "Deployment volumeMounts must include '{want}'; got {mount_names:?}"
-        );
-    }
 
     // --- Assert Deployment PATCH body has broker-TLS CLI args ---
     let args = dep_body
@@ -316,13 +311,10 @@ async fn happy_path_all_objects_created_ready() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {status_body}"));
-    check!(
-        ready["status"] == "True",
-        "Ready condition must be True when 1/1 replicas ready; body = {status_body}"
-    );
-    check!(
-        ready["reason"] == "Available",
-        "Ready reason must be Available; body = {status_body}"
+    assert_eq!(
+        (ready["status"].as_str(), ready["reason"].as_str()),
+        (Some("True"), Some("Available")),
+        "body = {status_body}"
     );
 
     // All 12 rules must have been consumed.
@@ -486,13 +478,10 @@ async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {body}"));
-    assert!(
-        ready["status"] == "False",
-        "Ready must be False without a TLS listener; body = {body}"
-    );
-    assert!(
-        ready["reason"] == "NoTlsListener",
-        "reason must be NoTlsListener; body = {body}"
+    assert_eq!(
+        (ready["status"].as_str(), ready["reason"].as_str()),
+        (Some("False"), Some("NoTlsListener")),
+        "body = {body}"
     );
 
     // No Deployment or Service PATCH must have happened.
@@ -586,13 +575,10 @@ async fn version_gate_blocks_when_kafka_not_validated() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {body}"));
-    assert!(
-        ready["status"] == "False",
-        "Ready must be False when version-gated; body = {body}"
-    );
-    assert!(
-        ready["reason"] == "WaitingForVersionValidation",
-        "reason must be WaitingForVersionValidation; body = {body}"
+    assert_eq!(
+        (ready["status"].as_str(), ready["reason"].as_str()),
+        (Some("False"), Some("WaitingForVersionValidation")),
+        "body = {body}"
     );
 
     // NO Deployment, Service, or KafkaUser PATCHes must have happened.

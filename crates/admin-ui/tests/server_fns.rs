@@ -22,7 +22,7 @@ use crabka_admin_ui::{
     error::UiError,
     server::AppState,
     server_fns::{
-        AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow,
+        AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, CurrentSession, QuotaRow,
         ServerFunctionContext, UserRow,
     },
     session::{SessionCredentials, SessionRecord, SessionStore, SessionUser},
@@ -61,15 +61,18 @@ fn app_state_carries_config_and_sessions() {
 
     let state = AppState::new(cfg.clone());
 
-    assert_eq!(state.cfg.cluster_name, "task-six-cluster");
-    assert_eq!(state.cfg.bootstrap_addrs, ["127.0.0.1:9092"]);
-    assert_eq!(state.sessions_ttl_seconds(), 37);
+    assert_eq!(
+        (state.cfg.as_ref(), state.sessions_ttl_seconds()),
+        (&cfg, 37)
+    );
 
     let sessions = Arc::new(SessionStore::new(Duration::from_secs(5)));
-    let state = AppState::from_parts(Arc::new(cfg), sessions);
+    let state = AppState::from_parts(Arc::new(cfg.clone()), sessions);
 
-    assert_eq!(state.cfg.cluster_name, "task-six-cluster");
-    assert_eq!(state.sessions_ttl_seconds(), 5);
+    assert_eq!(
+        (state.cfg.as_ref(), state.sessions_ttl_seconds()),
+        (&cfg, 5)
+    );
 }
 
 #[tokio::test]
@@ -121,7 +124,13 @@ async fn app_state_login_stores_session_in_protected_route_store() {
     .expect("session is stored in app state's protected-route store");
 
     assert_eq!(broker.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(current_session.username, "alice");
+    assert_eq!(
+        current_session,
+        CurrentSession {
+            username: "alice".to_string(),
+            principal: "User:alice".to_string(),
+        }
+    );
 }
 
 #[tokio::test]
@@ -146,14 +155,22 @@ async fn login_with_context_calls_broker_and_stores_session() {
     .expect("login succeeds through injected broker");
 
     assert_eq!(broker.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(success.username, "alice");
-    assert_eq!(success.principal, "User:alice");
+    assert_eq!(
+        (success.username.as_str(), success.principal.as_str()),
+        ("alice", "User:alice")
+    );
     let current_session = crabka_admin_ui::server_fns::current_session_with_store(
         &sessions,
         Some(&success.session_id),
     )
     .expect("session exists after successful login");
-    assert_eq!(current_session.username, "alice");
+    assert_eq!(
+        current_session,
+        CurrentSession {
+            username: "alice".to_string(),
+            principal: "User:alice".to_string(),
+        }
+    );
     assert_debug_does_not_contain_secret(
         &format_result_debug(&Ok::<_, UiError>(success)),
         LOGIN_PASSWORD_SENTINEL,
@@ -197,22 +214,30 @@ fn current_session_with_store_rejects_missing_invalid_and_expired_sessions() {
     )
     .expect("valid session resolves");
 
-    assert_eq!(valid_session.username, "alice");
-    assert!(matches!(
-        crabka_admin_ui::server_fns::current_session_with_store(&valid_store, None),
-        Err(UiError::NotAuthenticated)
-    ));
-    assert!(matches!(
-        crabka_admin_ui::server_fns::current_session_with_store(&valid_store, Some("not-a-uuid")),
-        Err(UiError::NotAuthenticated)
-    ));
-    assert!(matches!(
-        crabka_admin_ui::server_fns::current_session_with_store(
+    assert_eq!(
+        valid_session,
+        CurrentSession {
+            username: "alice".to_string(),
+            principal: "User:alice".to_string(),
+        }
+    );
+    for (name, store, cookie) in [
+        ("missing cookie", &valid_store, None),
+        ("invalid cookie", &valid_store, Some("not-a-uuid")),
+        (
+            "expired cookie",
             &expired_store,
             Some(expired_id.expose_for_cookie()),
         ),
-        Err(UiError::NotAuthenticated)
-    ));
+    ] {
+        assert!(
+            matches!(
+                crabka_admin_ui::server_fns::current_session_with_store(store, cookie),
+                Err(UiError::NotAuthenticated)
+            ),
+            "case {name}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -264,18 +289,35 @@ async fn authenticated_read_seams_validate_session_and_call_admin_reader() {
     .await
     .expect("log dirs read succeeds");
 
-    assert_eq!(topics[0].name, "orders");
-    assert_eq!(groups[0].group_id, "consumer-a");
-    assert_eq!(acls[0].principal, "User:alice");
-    assert_eq!(users[0].username, "scram-alice");
-    assert_eq!(quotas[0].quota_type, "producer_byte_rate");
-    assert_eq!(log_dirs[0].log_dir, "/var/lib/crabka");
-    assert_eq!(reader.topics.load(Ordering::SeqCst), 1);
-    assert_eq!(reader.groups.load(Ordering::SeqCst), 1);
-    assert_eq!(reader.acls.load(Ordering::SeqCst), 1);
-    assert_eq!(reader.users.load(Ordering::SeqCst), 1);
-    assert_eq!(reader.quotas.load(Ordering::SeqCst), 1);
-    assert_eq!(reader.log_dirs.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        (
+            topics[0].name.as_str(),
+            groups[0].group_id.as_str(),
+            acls[0].principal.as_str(),
+            users[0].username.as_str(),
+            quotas[0].quota_type.as_str(),
+            log_dirs[0].log_dir.as_str(),
+        ),
+        (
+            "orders",
+            "consumer-a",
+            "User:alice",
+            "scram-alice",
+            "producer_byte_rate",
+            "/var/lib/crabka",
+        )
+    );
+    assert_eq!(
+        [
+            reader.topics.load(Ordering::SeqCst),
+            reader.groups.load(Ordering::SeqCst),
+            reader.acls.load(Ordering::SeqCst),
+            reader.users.load(Ordering::SeqCst),
+            reader.quotas.load(Ordering::SeqCst),
+            reader.log_dirs.load(Ordering::SeqCst),
+        ],
+        [1; 6]
+    );
     assert!(matches!(
         crabka_admin_ui::server_fns::list_topics_with_reader(&sessions, None, &reader).await,
         Err(UiError::NotAuthenticated)
@@ -314,19 +356,36 @@ async fn public_context_reads_validate_session_and_call_admin_reader() {
         .await
         .expect("log dirs public context read succeeds");
 
-    assert_eq!(topics[0].name, "orders");
-    assert_eq!(groups[0].group_id, "consumer-a");
-    assert_eq!(acls[0].principal, "User:alice");
-    assert_eq!(users[0].username, "scram-alice");
-    assert_eq!(quotas[0].quota_type, "producer_byte_rate");
-    assert_eq!(log_dirs[0].log_dir, "/var/lib/crabka");
-    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 6);
-    assert_eq!(factory.reader.topics.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.reader.groups.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.reader.acls.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.reader.users.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.reader.quotas.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.reader.log_dirs.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        (
+            topics[0].name.as_str(),
+            groups[0].group_id.as_str(),
+            acls[0].principal.as_str(),
+            users[0].username.as_str(),
+            quotas[0].quota_type.as_str(),
+            log_dirs[0].log_dir.as_str(),
+        ),
+        (
+            "orders",
+            "consumer-a",
+            "User:alice",
+            "scram-alice",
+            "producer_byte_rate",
+            "/var/lib/crabka",
+        )
+    );
+    assert_eq!(
+        [
+            factory.read_seam_calls.load(Ordering::SeqCst),
+            factory.reader.topics.load(Ordering::SeqCst),
+            factory.reader.groups.load(Ordering::SeqCst),
+            factory.reader.acls.load(Ordering::SeqCst),
+            factory.reader.users.load(Ordering::SeqCst),
+            factory.reader.quotas.load(Ordering::SeqCst),
+            factory.reader.log_dirs.load(Ordering::SeqCst),
+        ],
+        [6, 1, 1, 1, 1, 1, 1]
+    );
 }
 
 #[tokio::test]
@@ -345,8 +404,13 @@ async fn public_context_current_session_uses_exported_context_path() {
     let current_session = crabka_admin_ui::server_fns::current_session_with_context(&context)
         .expect("public context current session resolves");
 
-    assert_eq!(current_session.username, "alice");
-    assert_eq!(current_session.principal, "User:alice");
+    assert_eq!(
+        current_session,
+        CurrentSession {
+            username: "alice".to_string(),
+            principal: "User:alice".to_string(),
+        }
+    );
     assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
 }
 
@@ -553,47 +617,33 @@ async fn public_create_topic_validates_session_and_calls_admin_mutation() {
 }
 
 #[tokio::test]
-async fn public_create_topic_rejects_unauthenticated_before_mutation() {
-    let sessions = SessionStore::new(Duration::from_secs(60));
-    let cfg = AdminUiConfig::default();
-    let factory = RecordingAdminSeamFactory::default();
-    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
+async fn public_create_topic_authentication_precedes_validation_cases() {
+    for (name, partitions) in [("valid request", 3), ("invalid partition count", 0)] {
+        let sessions = SessionStore::new(Duration::from_secs(60));
+        let cfg = AdminUiConfig::default();
+        let factory = RecordingAdminSeamFactory::default();
+        let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
 
-    let result = crabka_admin_ui::server_fns::create_topic(
-        &context,
-        CreateTopicRequestDto {
-            name: "orders".to_string(),
-            partitions: 3,
-            replicas: 1,
-            configs: Vec::new(),
-        },
-    )
-    .await;
+        let result = crabka_admin_ui::server_fns::create_topic(
+            &context,
+            CreateTopicRequestDto {
+                name: "orders".to_string(),
+                partitions,
+                replicas: 1,
+                configs: Vec::new(),
+            },
+        )
+        .await;
 
-    assert!(matches!(result, Err(UiError::NotAuthenticated)));
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn public_create_topic_requires_authentication_before_validation() {
-    let sessions = SessionStore::new(Duration::from_secs(60));
-    let cfg = AdminUiConfig::default();
-    let factory = RecordingAdminSeamFactory::default();
-    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
-
-    let result = crabka_admin_ui::server_fns::create_topic(
-        &context,
-        CreateTopicRequestDto {
-            name: "orders".to_string(),
-            partitions: 0,
-            replicas: 1,
-            configs: Vec::new(),
-        },
-    )
-    .await;
-
-    assert!(matches!(result, Err(UiError::NotAuthenticated)));
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            (
+                matches!(result, Err(UiError::NotAuthenticated)),
+                factory.mutation_seam_calls.load(Ordering::SeqCst),
+            ),
+            (true, 0),
+            "case {name}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -738,20 +788,22 @@ async fn public_context_mutations_validate_session_and_call_admin_mutation() {
         .await
         .expect("log-dir move mutation succeeds");
 
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 10);
-    assert_eq!(factory.mutations.delete_topic.load(Ordering::SeqCst), 1);
     assert_eq!(
-        factory.mutations.create_partitions.load(Ordering::SeqCst),
-        1
+        [
+            factory.mutation_seam_calls.load(Ordering::SeqCst),
+            factory.mutations.delete_topic.load(Ordering::SeqCst),
+            factory.mutations.create_partitions.load(Ordering::SeqCst),
+            factory.mutations.alter_configs.load(Ordering::SeqCst),
+            factory.mutations.create_acl.load(Ordering::SeqCst),
+            factory.mutations.delete_acl.load(Ordering::SeqCst),
+            factory.mutations.upsert_scram.load(Ordering::SeqCst),
+            factory.mutations.delete_scram.load(Ordering::SeqCst),
+            factory.mutations.upsert_quota.load(Ordering::SeqCst),
+            factory.mutations.delete_quota.load(Ordering::SeqCst),
+            factory.mutations.move_log_dir.load(Ordering::SeqCst),
+        ],
+        [10, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
     );
-    assert_eq!(factory.mutations.alter_configs.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.create_acl.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.delete_acl.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.upsert_scram.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.delete_scram.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.upsert_quota.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.delete_quota.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.move_log_dir.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -820,8 +872,7 @@ impl LoginBroker for RecordingLoginBroker {
         password: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
         Box::pin(async move {
-            assert_eq!(username, "alice");
-            assert_eq!(password, LOGIN_PASSWORD_SENTINEL);
+            assert_eq!((username, password), ("alice", LOGIN_PASSWORD_SENTINEL));
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -984,7 +1035,13 @@ impl AdminSeamFactory for RecordingAdminSeamFactory {
         _cfg: &AdminUiConfig,
         record: &SessionRecord,
     ) -> Result<Self::Reader<'a>, UiError> {
-        assert_eq!(record.user.username, "alice");
+        assert_eq!(
+            record.user,
+            SessionUser {
+                username: "alice".to_string(),
+                principal: "User:alice".to_string(),
+            }
+        );
         self.read_seam_calls.fetch_add(1, Ordering::SeqCst);
         Ok(&self.reader)
     }
@@ -994,7 +1051,13 @@ impl AdminSeamFactory for RecordingAdminSeamFactory {
         _cfg: &AdminUiConfig,
         record: &SessionRecord,
     ) -> Result<Self::Mutations<'a>, UiError> {
-        assert_eq!(record.user.username, "alice");
+        assert_eq!(
+            record.user,
+            SessionUser {
+                username: "alice".to_string(),
+                principal: "User:alice".to_string(),
+            }
+        );
         self.mutation_seam_calls.fetch_add(1, Ordering::SeqCst);
         Ok(&self.mutations)
     }

@@ -63,7 +63,6 @@ impl OperatorConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
     use clap::Parser;
 
     use super::*;
@@ -75,16 +74,33 @@ mod tests {
     }
 
     #[test]
-    fn cli_defaults_compute_cluster_scope() {
-        let parsed = Wrap::parse_from(["bin"]);
-        assert!(parsed.cfg.watched().is_none());
-        assert!(parsed.cfg.operator_namespace == "crabka-operator");
-    }
-
-    #[test]
-    fn comma_separated_namespaces_parse() {
-        let parsed = Wrap::parse_from(["bin", "--watch-namespaces=a,b,c"]);
-        assert!(parsed.cfg.watch_namespaces == vec!["a", "b", "c"]);
-        assert!(parsed.cfg.watched().is_some());
+    fn cli_namespace_cases() {
+        for (name, args, expected) in [
+            (
+                "defaults compute cluster scope",
+                vec!["bin"],
+                (Vec::<String>::new(), None, "crabka-operator"),
+            ),
+            (
+                "comma-separated namespaces",
+                vec!["bin", "--watch-namespaces=a,b,c"],
+                (
+                    vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                    Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+                    "crabka-operator",
+                ),
+            ),
+        ] {
+            let parsed = Wrap::parse_from(args);
+            assert_eq!(
+                (
+                    parsed.cfg.watch_namespaces.clone(),
+                    parsed.cfg.watched().map(<[String]>::to_vec),
+                    parsed.cfg.operator_namespace.as_str(),
+                ),
+                expected,
+                "case {name}"
+            );
+        }
     }
 }

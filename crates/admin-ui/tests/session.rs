@@ -14,8 +14,13 @@ fn session_store_creates_and_retrieves_user() {
     });
 
     let record = store.get(&id).expect("session exists");
-    assert_eq!(record.user.username, "alice");
-    assert_eq!(record.user.principal, "User:alice");
+    assert_eq!(
+        record.user,
+        SessionUser {
+            username: "alice".to_string(),
+            principal: "User:alice".to_string(),
+        }
+    );
 }
 
 #[test]

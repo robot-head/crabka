@@ -73,7 +73,7 @@ pub struct KafkaTopicStatus {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -81,19 +81,26 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaTopic::crd();
-        check!(crd.spec.group == "crabka.io");
-        check!(crd.spec.names.kind == "KafkaTopic");
-        check!(crd.spec.names.plural == "kafkatopics");
-        check!(
-            crd.spec
-                .names
-                .short_names
-                .as_ref()
-                .is_some_and(|v| v.contains(&"kt".to_string())),
-            "expected shortname `kt`",
+        assert_eq!(
+            (
+                crd.spec.group.as_str(),
+                crd.spec.names.kind.as_str(),
+                crd.spec.names.plural.as_str(),
+                crd.spec.names.short_names,
+                crd.spec
+                    .versions
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "crabka.io",
+                "KafkaTopic",
+                "kafkatopics",
+                Some(vec!["kt".to_string()]),
+                vec!["v1alpha1"]
+            )
         );
-        check!(crd.spec.versions.len() == 1);
-        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -135,11 +142,11 @@ mod tests {
                 preserve_topic: false,
             },
         );
-        let j = serde_json::to_string(&kt.spec).unwrap();
-        check!(!j.contains("topicName"), "got: {j}");
-        check!(!j.contains("config"), "got: {j}");
-        // `preserveTopic` is a plain bool — serde emits it.
-        check!(j.contains("\"preserveTopic\":false"), "got: {j}");
+        let actual = serde_json::to_value(&kt.spec).unwrap();
+        assert_eq!(
+            actual,
+            serde_json::json!({"partitions": 1, "replicas": 1, "preserveTopic": false})
+        );
     }
 
     #[test]
@@ -150,9 +157,11 @@ mod tests {
             topic_name: Some("foo".into()),
             topic_id: None,
         };
-        let j = serde_json::to_string(&status).unwrap();
-        assert!(!j.contains("topicId"), "got: {j}");
-        assert!(j.contains("\"observedGeneration\":1"), "got: {j}");
+        let actual = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            actual,
+            serde_json::json!({"conditions": [], "observedGeneration": 1, "topicName": "foo"})
+        );
     }
 
     #[test]

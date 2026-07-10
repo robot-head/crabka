@@ -7,11 +7,15 @@ fn default_config_targets_local_server_and_requires_bootstrap() {
     let cfg = AdminUiConfig::default();
 
     assert_eq!(
-        cfg.listen_addr,
-        "127.0.0.1:8088".parse::<SocketAddr>().unwrap()
+        cfg,
+        AdminUiConfig {
+            listen_addr: "127.0.0.1:8088".parse::<SocketAddr>().unwrap(),
+            cluster_name: "local".to_string(),
+            bootstrap_addrs: Vec::new(),
+            security: BrokerSecurityConfig::SaslPlaintext,
+            session_ttl_seconds: 28_800,
+        }
     );
-    assert_eq!(cfg.cluster_name, "local");
-    assert!(cfg.bootstrap_addrs.is_empty());
 
     let error = cfg.validate().expect_err("empty bootstrap is invalid");
     assert!(matches!(error, ConfigError::MissingBootstrap));
@@ -26,9 +30,9 @@ fn validates_single_cluster_sasl_plaintext_config() {
         ..AdminUiConfig::default()
     };
 
+    let expected = cfg.clone();
     let validated = cfg.validate().expect("config is valid");
-    assert_eq!(validated.cluster_name, "dev");
-    assert_eq!(validated.bootstrap_addrs, ["127.0.0.1:9092"]);
+    assert_eq!(validated, expected);
 }
 
 #[test]
@@ -65,17 +69,17 @@ fn sasl_ssl_tls_config_from_env_child() {
 
     let cfg = AdminUiConfig::from_env().expect("env config is valid");
     assert_eq!(
-        cfg.listen_addr,
-        "127.0.0.1:18088".parse::<SocketAddr>().unwrap()
-    );
-    assert_eq!(cfg.cluster_name, "staging");
-    assert_eq!(cfg.bootstrap_addrs, ["broker-1:9092", "127.0.0.1:9093"]);
-    assert_eq!(
-        cfg.security,
-        BrokerSecurityConfig::SaslSsl {
-            trust_roots_pem: Some(PathBuf::from("ca.pem")),
-            server_name: "broker.example.test".to_string(),
-            client_identity: Some((PathBuf::from("client.crt"), PathBuf::from("client.key"))),
+        cfg,
+        AdminUiConfig {
+            listen_addr: "127.0.0.1:18088".parse::<SocketAddr>().unwrap(),
+            cluster_name: "staging".to_string(),
+            bootstrap_addrs: vec!["broker-1:9092".to_string(), "127.0.0.1:9093".to_string()],
+            security: BrokerSecurityConfig::SaslSsl {
+                trust_roots_pem: Some(PathBuf::from("ca.pem")),
+                server_name: "broker.example.test".to_string(),
+                client_identity: Some((PathBuf::from("client.crt"), PathBuf::from("client.key"))),
+            },
+            session_ttl_seconds: 28_800,
         }
     );
 }
@@ -151,62 +155,31 @@ fn validates_multi_bootstrap_hostnames_and_ip_literals() {
 }
 
 #[test]
-fn from_env_rejects_empty_tls_server_name_for_sasl_ssl() {
-    let output = Command::new(std::env::current_exe().expect("test binary path is available"))
-        .arg("--exact")
-        .arg("empty_tls_server_name_from_env_child")
-        .arg("--nocapture")
-        .env("CRABKA_ADMIN_UI_CONFIG_EMPTY_TLS_CHILD", "1")
-        .env("CRABKA_ADMIN_UI_BOOTSTRAP", "127.0.0.1:9092")
-        .env("CRABKA_ADMIN_UI_SECURITY_PROTOCOL", "SASL_SSL")
-        .env("CRABKA_ADMIN_UI_TLS_SERVER_NAME", "")
-        .env_remove("CRABKA_ADMIN_UI_LISTEN_ADDR")
-        .output()
-        .expect("child test process runs");
-
-    assert!(
-        output.status.success(),
-        "child test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn empty_tls_server_name_from_env_child() {
-    if std::env::var_os("CRABKA_ADMIN_UI_CONFIG_EMPTY_TLS_CHILD").is_none() {
-        return;
+fn from_env_rejects_blank_tls_server_name_cases() {
+    for (name, server_name) in [("empty", ""), ("whitespace", " \t ")] {
+        let output = Command::new(std::env::current_exe().expect("test binary path is available"))
+            .arg("--exact")
+            .arg("blank_tls_server_name_from_env_child")
+            .arg("--nocapture")
+            .env("CRABKA_ADMIN_UI_CONFIG_BLANK_TLS_CHILD", "1")
+            .env("CRABKA_ADMIN_UI_BOOTSTRAP", "127.0.0.1:9092")
+            .env("CRABKA_ADMIN_UI_SECURITY_PROTOCOL", "SASL_SSL")
+            .env("CRABKA_ADMIN_UI_TLS_SERVER_NAME", server_name)
+            .env_remove("CRABKA_ADMIN_UI_LISTEN_ADDR")
+            .output()
+            .expect("child test process runs");
+        assert!(
+            output.status.success(),
+            "case {name}: child test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
-
-    let error = AdminUiConfig::from_env().expect_err("empty TLS server name is invalid");
-    assert!(matches!(error, ConfigError::MissingTlsServerName));
 }
 
 #[test]
-fn from_env_rejects_whitespace_tls_server_name_for_sasl_ssl() {
-    let output = Command::new(std::env::current_exe().expect("test binary path is available"))
-        .arg("--exact")
-        .arg("whitespace_tls_server_name_from_env_child")
-        .arg("--nocapture")
-        .env("CRABKA_ADMIN_UI_CONFIG_WHITESPACE_TLS_CHILD", "1")
-        .env("CRABKA_ADMIN_UI_BOOTSTRAP", "127.0.0.1:9092")
-        .env("CRABKA_ADMIN_UI_SECURITY_PROTOCOL", "SASL_SSL")
-        .env("CRABKA_ADMIN_UI_TLS_SERVER_NAME", " \t ")
-        .env_remove("CRABKA_ADMIN_UI_LISTEN_ADDR")
-        .output()
-        .expect("child test process runs");
-
-    assert!(
-        output.status.success(),
-        "child test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn whitespace_tls_server_name_from_env_child() {
-    if std::env::var_os("CRABKA_ADMIN_UI_CONFIG_WHITESPACE_TLS_CHILD").is_none() {
+fn blank_tls_server_name_from_env_child() {
+    if std::env::var_os("CRABKA_ADMIN_UI_CONFIG_BLANK_TLS_CHILD").is_none() {
         return;
     }
 
@@ -215,51 +188,39 @@ fn whitespace_tls_server_name_from_env_child() {
 }
 
 #[test]
-fn from_env_rejects_tls_client_cert_without_key() {
-    let output = Command::new(std::env::current_exe().expect("test binary path is available"))
-        .arg("--exact")
-        .arg("incomplete_tls_client_identity_from_env_child")
-        .arg("--nocapture")
-        .env("CRABKA_ADMIN_UI_CONFIG_INCOMPLETE_TLS_IDENTITY_CHILD", "1")
-        .env("CRABKA_ADMIN_UI_BOOTSTRAP", "127.0.0.1:9092")
-        .env("CRABKA_ADMIN_UI_SECURITY_PROTOCOL", "SASL_SSL")
-        .env("CRABKA_ADMIN_UI_TLS_SERVER_NAME", "localhost")
-        .env("CRABKA_ADMIN_UI_TLS_CLIENT_CERT_PEM", "client.crt")
-        .env_remove("CRABKA_ADMIN_UI_TLS_CLIENT_KEY_PEM")
-        .env_remove("CRABKA_ADMIN_UI_LISTEN_ADDR")
-        .output()
-        .expect("child test process runs");
+fn from_env_rejects_incomplete_tls_client_identity() {
+    for (name, cert, key) in [
+        ("certificate without key", Some("client.crt"), None),
+        ("key without certificate", None, Some("client.key")),
+    ] {
+        let mut command =
+            Command::new(std::env::current_exe().expect("test binary path is available"));
+        command
+            .arg("--exact")
+            .arg("incomplete_tls_client_identity_from_env_child")
+            .arg("--nocapture")
+            .env("CRABKA_ADMIN_UI_CONFIG_INCOMPLETE_TLS_IDENTITY_CHILD", "1")
+            .env("CRABKA_ADMIN_UI_BOOTSTRAP", "127.0.0.1:9092")
+            .env("CRABKA_ADMIN_UI_SECURITY_PROTOCOL", "SASL_SSL")
+            .env("CRABKA_ADMIN_UI_TLS_SERVER_NAME", "localhost")
+            .env_remove("CRABKA_ADMIN_UI_LISTEN_ADDR");
+        match cert {
+            Some(cert) => command.env("CRABKA_ADMIN_UI_TLS_CLIENT_CERT_PEM", cert),
+            None => command.env_remove("CRABKA_ADMIN_UI_TLS_CLIENT_CERT_PEM"),
+        };
+        match key {
+            Some(key) => command.env("CRABKA_ADMIN_UI_TLS_CLIENT_KEY_PEM", key),
+            None => command.env_remove("CRABKA_ADMIN_UI_TLS_CLIENT_KEY_PEM"),
+        };
 
-    assert!(
-        output.status.success(),
-        "child test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
-fn from_env_rejects_tls_client_key_without_cert() {
-    let output = Command::new(std::env::current_exe().expect("test binary path is available"))
-        .arg("--exact")
-        .arg("incomplete_tls_client_identity_from_env_child")
-        .arg("--nocapture")
-        .env("CRABKA_ADMIN_UI_CONFIG_INCOMPLETE_TLS_IDENTITY_CHILD", "1")
-        .env("CRABKA_ADMIN_UI_BOOTSTRAP", "127.0.0.1:9092")
-        .env("CRABKA_ADMIN_UI_SECURITY_PROTOCOL", "SASL_SSL")
-        .env("CRABKA_ADMIN_UI_TLS_SERVER_NAME", "localhost")
-        .env_remove("CRABKA_ADMIN_UI_TLS_CLIENT_CERT_PEM")
-        .env("CRABKA_ADMIN_UI_TLS_CLIENT_KEY_PEM", "client.key")
-        .env_remove("CRABKA_ADMIN_UI_LISTEN_ADDR")
-        .output()
-        .expect("child test process runs");
-
-    assert!(
-        output.status.success(),
-        "child test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+        let output = command.output().expect("child test process runs");
+        assert!(
+            output.status.success(),
+            "case {name}: child test failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 #[test]
@@ -273,37 +234,21 @@ fn incomplete_tls_client_identity_from_env_child() {
 }
 
 #[test]
-fn validate_rejects_manual_sasl_ssl_empty_server_name() {
-    let cfg = AdminUiConfig {
-        bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
-        security: BrokerSecurityConfig::SaslSsl {
-            trust_roots_pem: None,
-            server_name: String::new(),
-            client_identity: None,
-        },
-        ..AdminUiConfig::default()
-    };
+fn validate_rejects_manual_sasl_ssl_blank_server_names() {
+    for (name, server_name) in [("empty", ""), ("whitespace", " \t ")] {
+        let cfg = AdminUiConfig {
+            bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
+            security: BrokerSecurityConfig::SaslSsl {
+                trust_roots_pem: None,
+                server_name: server_name.to_string(),
+                client_identity: None,
+            },
+            ..AdminUiConfig::default()
+        };
 
-    let error = cfg
-        .validate()
-        .expect_err("empty TLS server name is invalid");
-    assert!(matches!(error, ConfigError::MissingTlsServerName));
-}
-
-#[test]
-fn validate_rejects_manual_sasl_ssl_whitespace_server_name() {
-    let cfg = AdminUiConfig {
-        bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
-        security: BrokerSecurityConfig::SaslSsl {
-            trust_roots_pem: None,
-            server_name: " \t ".to_string(),
-            client_identity: None,
-        },
-        ..AdminUiConfig::default()
-    };
-
-    let error = cfg
-        .validate()
-        .expect_err("blank TLS server name is invalid");
-    assert!(matches!(error, ConfigError::MissingTlsServerName));
+        let error = cfg
+            .validate()
+            .expect_err("blank TLS server name is invalid");
+        assert_eq!(error, ConfigError::MissingTlsServerName, "case {name}");
+    }
 }

@@ -231,34 +231,27 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
         .expect("status PATCH must have been observed");
     let body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
     let status = &body["status"];
-    assert!(
-        status["delegationTokenId"].is_string(),
-        "delegationTokenId missing: {status}",
-    );
     let expiry = status["delegationTokenExpiryTimestampMs"]
         .as_i64()
         .expect("delegationTokenExpiryTimestampMs is i64");
-    assert!(
-        expiry > 0,
-        "delegationTokenExpiryTimestampMs must be positive, got {expiry}",
-    );
     let max_ts = status["delegationTokenMaxTimestampMs"]
         .as_i64()
         .expect("delegationTokenMaxTimestampMs is i64");
-    assert!(max_ts >= expiry, "max_ts ({max_ts}) >= expiry ({expiry})");
-
     let conds = status["conditions"].as_array().expect("conditions array");
-    assert!(
-        conds
-            .iter()
-            .any(|c| c["type"] == "Ready" && c["status"] == "True" && c["reason"] == "TokenReady"),
-        "missing Ready=True/TokenReady, got: {conds:?}",
-    );
-    assert!(
-        conds.iter().any(|c| c["type"] == "TokenIssued"
-            && c["status"] == "True"
-            && c["reason"] == "Issued"),
-        "missing TokenIssued=True/Issued, got: {conds:?}",
+    assert_eq!(
+        (
+            status["delegationTokenId"].is_string(),
+            expiry > 0,
+            max_ts >= expiry,
+            conds.iter().any(|c| c["type"] == "Ready"
+                && c["status"] == "True"
+                && c["reason"] == "TokenReady"),
+            conds.iter().any(|c| c["type"] == "TokenIssued"
+                && c["status"] == "True"
+                && c["reason"] == "Issued"),
+        ),
+        (true, true, true, true, true),
+        "status: {status}"
     );
 }
 

@@ -288,8 +288,11 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
-    check!(rot["status"] == "True", "body = {sbody}");
-    check!(rot["reason"] == "RenewingCert", "body = {sbody}");
+    assert_eq!(
+        (rot["status"].as_str(), rot["reason"].as_str()),
+        (Some("True"), Some("RenewingCert")),
+        "body = {sbody}"
+    );
 
     check!(state.remaining_rules() == 0, "all rules consumed");
 }
@@ -401,13 +404,13 @@ async fn force_replace_key_starts_staged_rotation() {
         })
         .expect("cluster-ca-cert PATCH");
     let cbody: Value = serde_json::from_slice(cert_patch.body()).expect("cert PATCH JSON");
-    assert!(
-        count_cert_blocks(cbody["data"]["ca.crt"].as_str().expect("ca.crt")) == 2,
-        "trust bundle must grow to old+new; body = {cbody}"
-    );
-    assert!(
-        cbody["metadata"]["annotations"]["crabka.io/ca-rotation-phase"] == "key-replace-trust",
-        "phase must be key-replace-trust; body = {cbody}"
+    assert_eq!(
+        (
+            count_cert_blocks(cbody["data"]["ca.crt"].as_str().expect("ca.crt")),
+            cbody["metadata"]["annotations"]["crabka.io/ca-rotation-phase"].as_str(),
+        ),
+        (2, Some("key-replace-trust")),
+        "body = {cbody}"
     );
 
     // The force annotation must be stripped (null) via a metadata PATCH.
@@ -436,8 +439,11 @@ async fn force_replace_key_starts_staged_rotation() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
-    check!(rot["status"] == "True", "body = {sbody}");
-    check!(rot["reason"] == "DistributingTrust", "body = {sbody}");
+    assert_eq!(
+        (rot["status"].as_str(), rot["reason"].as_str()),
+        (Some("True"), Some("DistributingTrust")),
+        "body = {sbody}"
+    );
 
     check!(state.remaining_rules() == 0, "all rules consumed");
 }

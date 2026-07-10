@@ -422,7 +422,7 @@ impl KafkaUserQuotas {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -430,19 +430,26 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaUser::crd();
-        check!(crd.spec.group == "crabka.io");
-        check!(crd.spec.names.kind == "KafkaUser");
-        check!(crd.spec.names.plural == "kafkausers");
-        check!(
-            crd.spec
-                .names
-                .short_names
-                .as_ref()
-                .is_some_and(|v| v.contains(&"ku".to_string())),
-            "expected shortname `ku`",
+        assert_eq!(
+            (
+                crd.spec.group.as_str(),
+                crd.spec.names.kind.as_str(),
+                crd.spec.names.plural.as_str(),
+                crd.spec.names.short_names,
+                crd.spec
+                    .versions
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "crabka.io",
+                "KafkaUser",
+                "kafkausers",
+                Some(vec!["ku".to_string()]),
+                vec!["v1alpha1"]
+            )
         );
-        check!(crd.spec.versions.len() == 1);
-        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -491,14 +498,17 @@ mod tests {
     fn minimum_spec_parses() {
         let json = r#"{"authentication":{"type":"scram-sha-512"}}"#;
         let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
-        assert!(matches!(
-            spec.authentication,
-            Authentication::ScramSha512(ScramSha512Auth {
-                iterations: None,
-                password_length: None,
-            })
-        ));
-        assert!(spec.authorization.is_none());
+        assert_eq!(
+            spec,
+            KafkaUserSpec {
+                authentication: Authentication::ScramSha512(ScramSha512Auth {
+                    iterations: None,
+                    password_length: None,
+                }),
+                authorization: None,
+                quotas: None,
+            }
+        );
     }
 
     #[test]
@@ -523,47 +533,28 @@ mod tests {
     }
 
     #[test]
-    fn acl_rule_omits_default_host_on_serialize() {
-        let rule = AclRule {
-            resource: AclResource {
-                kind: AclResourceKind::Topic,
-                name: "orders".into(),
-                pattern_type: AclPatternType::Literal,
-            },
-            operations: vec![AclOp::Read],
-            host: "*".into(),
-            permission: AclPermission::Allow,
-        };
-        let j = serde_json::to_string(&rule).unwrap();
-        assert!(!j.contains("host"), "default host should be omitted: {j}");
-    }
-
-    #[test]
-    fn acl_rule_emits_non_default_host() {
-        let rule = AclRule {
-            resource: AclResource {
-                kind: AclResourceKind::Topic,
-                name: "orders".into(),
-                pattern_type: AclPatternType::Literal,
-            },
-            operations: vec![AclOp::Read],
-            host: "10.0.0.0".into(),
-            permission: AclPermission::Allow,
-        };
-        let j = serde_json::to_string(&rule).unwrap();
-        assert!(j.contains("\"host\":\"10.0.0.0\""), "got: {j}");
-    }
-
-    #[test]
-    fn status_omits_optional_fields_when_unset() {
-        let status = KafkaUserStatus::default();
-        let j = serde_json::to_string(&status).unwrap();
-        for absent in ["observedGeneration", "username", "secret"] {
-            assert!(!j.contains(absent), "case {absent:?}; got: {j}");
+    fn acl_rule_host_serialization_cases() {
+        for (name, host, expected_host) in [
+            ("default host omitted", "*", None),
+            ("non-default host emitted", "10.0.0.0", Some("10.0.0.0")),
+        ] {
+            let rule = AclRule {
+                resource: AclResource {
+                    kind: AclResourceKind::Topic,
+                    name: "orders".into(),
+                    pattern_type: AclPatternType::Literal,
+                },
+                operations: vec![AclOp::Read],
+                host: host.into(),
+                permission: AclPermission::Allow,
+            };
+            let value = serde_json::to_value(&rule).unwrap();
+            assert_eq!(
+                value.get("host").and_then(serde_json::Value::as_str),
+                expected_host,
+                "case {name}: {value}"
+            );
         }
-        // `scramSha512` + `quotasInSync` are plain bools — serde emits them.
-        assert!(j.contains("\"scramSha512\":false"), "got: {j}");
-        assert!(j.contains("\"quotasInSync\":false"), "got: {j}");
     }
 
     #[test]
@@ -583,9 +574,13 @@ mod tests {
             controller_mutation_rate: None,
         };
         let m = q.to_quota_map();
-        check!(m.len() == 2);
-        check!((m["producer_byte_rate"] - 1_048_576.0).abs() < f64::EPSILON);
-        check!((m["request_percentage"] - 25.0).abs() < f64::EPSILON);
+        assert_eq!(
+            m,
+            std::collections::BTreeMap::from([
+                ("producer_byte_rate".to_string(), 1_048_576.0),
+                ("request_percentage".to_string(), 25.0),
+            ])
+        );
     }
 
     #[test]
@@ -595,8 +590,10 @@ mod tests {
             ..Default::default()
         };
         let m = q.to_quota_map();
-        assert!(m.len() == 1);
-        assert!((m["controller_mutation_rate"] - 2.5).abs() < f64::EPSILON);
+        assert_eq!(
+            m,
+            std::collections::BTreeMap::from([("controller_mutation_rate".to_string(), 2.5)])
+        );
     }
 
     #[test]
@@ -619,125 +616,112 @@ mod tests {
     }
 
     #[test]
-    fn empty_quotas_object_parses_and_is_a_clear_signal() {
-        // `spec.quotas: {}` is the "wipe broker quotas" signal — the
-        // reconciler diffs against an empty desired map and tombstones
-        // every key the broker has for this user.
-        let json = r#"{"authentication":{"type":"scram-sha-512"},"quotas":{}}"#;
-        let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
-        let q = spec.quotas.expect("quotas section present");
-        assert!(q.to_quota_map().is_empty());
+    fn quota_presence_cases() {
+        for (name, json, expected) in [
+            (
+                "present empty quotas clear broker state",
+                r#"{"authentication":{"type":"scram-sha-512"},"quotas":{}}"#,
+                Some(KafkaUserQuotas::default()),
+            ),
+            (
+                "omitted quotas are unmanaged",
+                r#"{"authentication":{"type":"scram-sha-512"}}"#,
+                None,
+            ),
+        ] {
+            let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
+            assert_eq!(spec.quotas, expected, "case {name}");
+        }
     }
 
     #[test]
-    fn omitted_quotas_means_operator_does_not_manage() {
-        // `spec.quotas` absent => `spec.quotas == None` => the
-        // reconciler skips quota reconciliation entirely.
-        let json = r#"{"authentication":{"type":"scram-sha-512"}}"#;
-        let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.quotas.is_none());
+    fn authentication_json_round_trip_cases() {
+        for (name, authentication, expected_json) in [
+            (
+                "TLS defaults",
+                Authentication::Tls(TlsAuth::default()),
+                serde_json::json!({"type": "tls"}),
+            ),
+            (
+                "TLS validity overrides",
+                Authentication::Tls(TlsAuth {
+                    validity_days: Some(180),
+                    renewal_days: Some(14),
+                }),
+                serde_json::json!({
+                    "type": "tls",
+                    "validityDays": 180,
+                    "renewalDays": 14,
+                }),
+            ),
+            (
+                "SCRAM-SHA-512 defaults",
+                Authentication::ScramSha512(ScramSha512Auth::default()),
+                serde_json::json!({"type": "scram-sha-512"}),
+            ),
+            (
+                "SCRAM-SHA-256 defaults",
+                Authentication::ScramSha256(ScramSha256Auth::default()),
+                serde_json::json!({"type": "scram-sha-256"}),
+            ),
+            (
+                "SCRAM-SHA-256 overrides",
+                Authentication::ScramSha256(ScramSha256Auth {
+                    iterations: Some(16_384),
+                    password_length: Some(64),
+                }),
+                serde_json::json!({
+                    "type": "scram-sha-256",
+                    "iterations": 16_384,
+                    "passwordLength": 64,
+                }),
+            ),
+            (
+                "TLS external",
+                Authentication::TlsExternal,
+                serde_json::json!({"type": "tls-external"}),
+            ),
+        ] {
+            let actual_json = serde_json::to_value(&authentication).unwrap();
+            assert_eq!(&actual_json, &expected_json, "case {name}");
+            let back: Authentication = serde_json::from_value(actual_json).unwrap();
+            assert_eq!(back, authentication, "case {name}");
+        }
     }
 
     #[test]
-    fn tls_auth_round_trips() {
-        let auth = Authentication::Tls(TlsAuth::default());
-        let v = serde_json::to_value(&auth).unwrap();
-        assert!(v == serde_json::json!({"type": "tls"}));
-        let back: Authentication = serde_json::from_value(v).unwrap();
-        assert!(back == auth);
-    }
-
-    #[test]
-    fn tls_auth_with_validity_days_round_trips() {
-        let auth = Authentication::Tls(TlsAuth {
-            validity_days: Some(180),
-            renewal_days: Some(14),
-        });
-        let v = serde_json::to_value(&auth).unwrap();
-        assert!(
-            v == serde_json::json!({
-                "type": "tls",
-                "validityDays": 180,
-                "renewalDays": 14,
-            })
-        );
-        let back: Authentication = serde_json::from_value(v).unwrap();
-        assert!(back == auth);
-    }
-
-    #[test]
-    fn authentication_scram_round_trips_unchanged() {
-        let auth = Authentication::ScramSha512(ScramSha512Auth::default());
-        let v = serde_json::to_value(&auth).unwrap();
-        assert!(v == serde_json::json!({"type": "scram-sha-512"}));
-        let back: Authentication = serde_json::from_value(v).unwrap();
-        assert!(back == auth);
-    }
-
-    #[test]
-    fn authentication_scram_sha256_round_trips_with_overrides() {
-        // `scram-sha-256` sibling of the existing SHA-512
-        // round-trip test. Cover both the empty-defaults shape AND the
-        // explicit-overrides shape to lock the schema (a `passwordLength`
-        // change between releases would silently roll every user's
-        // Secret).
-        let auth_default = Authentication::ScramSha256(ScramSha256Auth::default());
-        let v = serde_json::to_value(&auth_default).unwrap();
-        assert!(v == serde_json::json!({"type": "scram-sha-256"}));
-        let back: Authentication = serde_json::from_value(v).unwrap();
-        assert!(back == auth_default);
-
-        let auth_overrides = Authentication::ScramSha256(ScramSha256Auth {
-            iterations: Some(16_384),
-            password_length: Some(64),
-        });
-        let v = serde_json::to_value(&auth_overrides).unwrap();
-        assert!(
-            v == serde_json::json!({
-                "type": "scram-sha-256",
-                "iterations": 16_384,
-                "passwordLength": 64,
-            })
-        );
-        let back: Authentication = serde_json::from_value(v).unwrap();
-        assert!(back == auth_overrides);
-    }
-
-    #[test]
-    fn status_tls_fields_omit_when_unset() {
-        let status = KafkaUserStatus {
-            tls: false,
-            tls_cert_not_after: None,
-            tls_principal: None,
-            ..Default::default()
-        };
-        let j = serde_json::to_string(&status).unwrap();
-        check!(!j.contains("tlsCertNotAfter"), "got: {j}");
-        check!(!j.contains("tlsPrincipal"), "got: {j}");
-        check!(j.contains("\"tls\":false"), "got: {j}");
-    }
-
-    #[test]
-    fn status_tls_fields_emit_when_set() {
-        let status = KafkaUserStatus {
-            tls: true,
-            tls_cert_not_after: Some("2027-05-19T00:00:00Z".into()),
-            tls_principal: Some("User:CN=alice".into()),
-            ..Default::default()
-        };
-        let v = serde_json::to_value(&status).unwrap();
-        check!(v.get("tls") == Some(&serde_json::Value::Bool(true)));
-        check!(v.get("tlsCertNotAfter").and_then(|x| x.as_str()) == Some("2027-05-19T00:00:00Z"));
-        check!(v.get("tlsPrincipal").and_then(|x| x.as_str()) == Some("User:CN=alice"));
-    }
-
-    #[test]
-    fn tls_external_round_trips() {
-        let auth = Authentication::TlsExternal;
-        let j = serde_json::to_string(&auth).unwrap();
-        assert!(j == r#"{"type":"tls-external"}"#);
-        let back: Authentication = serde_json::from_str(&j).unwrap();
-        assert!(back == auth);
+    fn status_field_json_cases() {
+        for (name, status, expected) in [
+            (
+                "optional fields unset",
+                KafkaUserStatus::default(),
+                serde_json::json!({"conditions": [], "tls": false, "scramSha512": false, "scramSha256": false, "quotasInSync": false, "external": false}),
+            ),
+            (
+                "TLS fields populated",
+                KafkaUserStatus {
+                    tls: true,
+                    tls_cert_not_after: Some("2027-05-19T00:00:00Z".into()),
+                    tls_principal: Some("User:CN=alice".into()),
+                    ..Default::default()
+                },
+                serde_json::json!({"conditions": [], "tls": true, "tlsCertNotAfter": "2027-05-19T00:00:00Z", "tlsPrincipal": "User:CN=alice", "scramSha512": false, "scramSha256": false, "quotasInSync": false, "external": false}),
+            ),
+            (
+                "external user",
+                KafkaUserStatus {
+                    external: true,
+                    ..Default::default()
+                },
+                serde_json::json!({"conditions": [], "tls": false, "scramSha512": false, "scramSha256": false, "quotasInSync": false, "external": true}),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(status).unwrap(),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -787,25 +771,11 @@ mod tests {
     }
 
     #[test]
-    fn status_external_field_emits_when_true() {
-        let status = KafkaUserStatus {
-            external: true,
-            ..Default::default()
-        };
-        let v = serde_json::to_value(&status).unwrap();
-        assert!(v.get("external") == Some(&serde_json::Value::Bool(true)));
-    }
-
-    #[test]
-    fn status_external_field_emits_default_false() {
-        let status = KafkaUserStatus::default();
-        let j = serde_json::to_string(&status).unwrap();
-        assert!(j.contains("\"external\":false"), "got: {j}");
-    }
-
-    #[test]
-    fn delegation_token_authentication_round_trip() {
-        let yaml = r#"
+    fn delegation_token_authentication_yaml_cases() {
+        for (name, yaml, expected) in [
+            (
+                "populated delegation token",
+                r#"
 apiVersion: crabka.io/v1alpha1
 kind: KafkaUser
 metadata:
@@ -816,23 +786,16 @@ spec:
     renewers: ["User:bob", "User:carol"]
     maxLifetimeMs: 86400000
     renewBeforeExpiryMs: 7200000
-"#;
-        let user: KafkaUser = serde_yaml::from_str(yaml).unwrap();
-        let Authentication::DelegationToken(dt) = user.spec.authentication else {
-            panic!("expected DelegationToken variant");
-        };
-        assert!(
-            dt == DelegationTokenAuth {
-                renewers: vec!["User:bob".to_string(), "User:carol".to_string()],
-                max_lifetime_ms: Some(86_400_000),
-                renew_before_expiry_ms: Some(7_200_000),
-            }
-        );
-    }
-
-    #[test]
-    fn delegation_token_authentication_minimal_omits_optional_fields() {
-        let yaml = "
+"#,
+                DelegationTokenAuth {
+                    renewers: vec!["User:bob".to_string(), "User:carol".to_string()],
+                    max_lifetime_ms: Some(86_400_000),
+                    renew_before_expiry_ms: Some(7_200_000),
+                },
+            ),
+            (
+                "minimal delegation token",
+                "
 apiVersion: crabka.io/v1alpha1
 kind: KafkaUser
 metadata:
@@ -840,17 +803,19 @@ metadata:
 spec:
   authentication:
     type: delegation-token
-";
-        let user: KafkaUser = serde_yaml::from_str(yaml).unwrap();
-        let Authentication::DelegationToken(dt) = user.spec.authentication else {
-            panic!("expected DelegationToken variant");
-        };
-        assert!(
-            dt == DelegationTokenAuth {
-                renewers: vec![],
-                max_lifetime_ms: None,
-                renew_before_expiry_ms: None,
-            }
-        );
+",
+                DelegationTokenAuth {
+                    renewers: vec![],
+                    max_lifetime_ms: None,
+                    renew_before_expiry_ms: None,
+                },
+            ),
+        ] {
+            let user: KafkaUser = serde_yaml::from_str(yaml).unwrap();
+            let Authentication::DelegationToken(actual) = user.spec.authentication else {
+                panic!("case {name}: expected DelegationToken variant");
+            };
+            assert_eq!(actual, expected, "case {name}");
+        }
     }
 }

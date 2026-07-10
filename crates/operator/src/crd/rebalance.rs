@@ -106,7 +106,7 @@ pub struct KafkaRebalanceStatus {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -114,19 +114,26 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaRebalance::crd();
-        check!(crd.spec.group == "crabka.io");
-        check!(crd.spec.names.kind == "KafkaRebalance");
-        check!(crd.spec.names.plural == "kafkarebalances");
-        check!(
-            crd.spec
-                .names
-                .short_names
-                .as_ref()
-                .is_some_and(|v| v.contains(&"kr".to_string())),
-            "expected shortname `kr`",
+        assert_eq!(
+            (
+                crd.spec.group.as_str(),
+                crd.spec.names.kind.as_str(),
+                crd.spec.names.plural.as_str(),
+                crd.spec.names.short_names,
+                crd.spec
+                    .versions
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "crabka.io",
+                "KafkaRebalance",
+                "kafkarebalances",
+                Some(vec!["kr".to_string()]),
+                vec!["v1alpha1"]
+            )
         );
-        check!(crd.spec.versions.len() == 1);
-        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -173,10 +180,11 @@ mod tests {
             session_id: None,
             optimization_result: None,
         };
-        let j = serde_json::to_string(&status).unwrap();
-        check!(!j.contains("sessionId"), "got: {j}");
-        check!(!j.contains("optimizationResult"), "got: {j}");
-        check!(j.contains("\"observedGeneration\":3"), "got: {j}");
+        let actual = serde_json::to_value(&status).unwrap();
+        assert_eq!(
+            actual,
+            serde_json::json!({"conditions": [], "observedGeneration": 3})
+        );
     }
 
     #[test]

@@ -402,8 +402,10 @@ mod tests {
             }
         });
         let p = proposal_from_json(&body);
-        assert!(p.id == "xyz");
-        assert!(p.status == ProposalStatus::Executing);
+        assert_eq!(
+            (p.id.as_str(), p.status),
+            ("xyz", ProposalStatus::Executing)
+        );
     }
 
     #[test]
@@ -442,34 +444,34 @@ mod tests {
             "failureReason": "broker 3 unreachable"
         });
         let p = proposal_from_json(&body);
-        assert!(p.status == ProposalStatus::Failed);
-        assert!(p.failure_reason.as_deref() == Some("broker 3 unreachable"));
-    }
-
-    #[test]
-    fn connect_error_parses_code_and_message() {
-        let e = connect_error(
-            r#"{"code":"failed_precondition","message":"proposal not in Computed state"}"#,
-            400,
+        assert_eq!(
+            (p.status, p.failure_reason.as_deref()),
+            (ProposalStatus::Failed, Some("broker 3 unreachable"))
         );
-        match e {
-            RebalancerError::Rpc { code, message } => {
-                assert!(code == "failed_precondition");
-                assert!(message == "proposal not in Computed state");
-            }
-            other => panic!("expected Rpc, got {other:?}"),
-        }
     }
 
     #[test]
-    fn connect_error_falls_back_to_http_status() {
-        let e = connect_error("upstream exploded", 503);
-        match e {
-            RebalancerError::Rpc { code, message } => {
-                assert!(code == "http_503");
-                assert!(message == "upstream exploded");
+    fn connect_error_cases() {
+        for (name, body, status, expected) in [
+            (
+                "structured Connect error",
+                r#"{"code":"failed_precondition","message":"proposal not in Computed state"}"#,
+                400,
+                ("failed_precondition", "proposal not in Computed state"),
+            ),
+            (
+                "HTTP fallback",
+                "upstream exploded",
+                503,
+                ("http_503", "upstream exploded"),
+            ),
+        ] {
+            match connect_error(body, status) {
+                RebalancerError::Rpc { code, message } => {
+                    assert_eq!((code.as_str(), message.as_str()), expected, "case {name}");
+                }
+                other => panic!("case {name}: expected Rpc, got {other:?}"),
             }
-            other => panic!("expected Rpc, got {other:?}"),
         }
     }
 

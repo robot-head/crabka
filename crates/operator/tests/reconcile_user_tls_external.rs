@@ -301,17 +301,15 @@ async fn tls_external_user_reconciles_quotas_under_bare_name_principal() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert!(
-        username == USER,
-        "tls-external quotas must be keyed by bare name, got `{username}`"
-    );
-    assert!(
-        ops.iter().any(|op| matches!(
-            op,
-            QuotaOp::Set { key, value }
-                if key == "producer_byte_rate" && (*value - 1_048_576.0).abs() < f64::EPSILON
-        )),
-        "expected Set producer_byte_rate=1048576, got {ops:?}",
+    assert_eq!(
+        (username, ops),
+        (
+            USER.to_string(),
+            vec![QuotaOp::Set {
+                key: "producer_byte_rate".to_string(),
+                value: 1_048_576.0,
+            }],
+        )
     );
 }
 
@@ -343,16 +341,27 @@ async fn tls_external_user_status_reports_external_true_and_tls_principal_and_no
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
     let s = &body["status"];
-    check!(s["conditions"][0]["status"] == "True");
-    check!(s["conditions"][0]["reason"] == "Ready");
-    check!(s["external"] == true, "external must be true: {body}");
-    check!(
-        s["tlsPrincipal"] == "User:alice",
-        "tlsPrincipal must pin the bare-name principal: {body}"
+    assert_eq!(
+        (
+            s["conditions"][0]["status"].as_str(),
+            s["conditions"][0]["reason"].as_str(),
+            s["external"].as_bool(),
+            s["tlsPrincipal"].as_str(),
+            s["secret"].is_null(),
+            s["scramSha512"].as_bool(),
+            s["tls"].as_bool(),
+        ),
+        (
+            Some("True"),
+            Some("Ready"),
+            Some(true),
+            Some("User:alice"),
+            true,
+            Some(false),
+            Some(false)
+        ),
+        "body = {body}"
     );
-    check!(s["secret"] == serde_json::Value::Null, "no Secret: {body}");
-    check!(s["scramSha512"] == false, "no SCRAM: {body}");
-    check!(s["tls"] == false, "no operator-issued TLS cert: {body}");
 }
 
 /// 5. A minimal `tls-external` user (no authorization, no quotas)
@@ -410,9 +419,14 @@ async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_rea
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    check!(body["status"]["conditions"][0]["status"] == "True");
-    check!(body["status"]["conditions"][0]["reason"] == "Ready");
-    check!(body["status"]["external"] == true);
+    assert_eq!(
+        (
+            body["status"]["conditions"][0]["status"].as_str(),
+            body["status"]["conditions"][0]["reason"].as_str(),
+            body["status"]["external"].as_bool(),
+        ),
+        (Some("True"), Some("Ready"), Some(true))
+    );
 }
 
 /// 6. Finalizer cleanup for a `tls-external` user must not call
@@ -461,10 +475,12 @@ async fn tls_external_user_finalizer_does_not_call_alter_user_scram_credentials(
             _ => None,
         })
         .expect("DeleteAcls must have been issued during finalizer");
-    assert!(!filters.is_empty(), "at least one filter expected");
-    assert!(
-        filters[0].principal.as_deref() == Some("User:alice"),
-        "tls-external finalizer must filter ACLs by `User:<name>`: {filters:?}"
+    assert_eq!(
+        filters
+            .first()
+            .and_then(|filter| filter.principal.as_deref()),
+        Some("User:alice"),
+        "filters: {filters:?}"
     );
 
     // The kube observation log must show the finalizer-removal PATCH on

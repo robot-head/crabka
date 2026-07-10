@@ -485,65 +485,62 @@ mod auth_tests {
 
     use super::*;
 
-    #[test]
-    fn listener_deserializes_tls_authentication() {
-        let l: Listener = serde_yaml::from_str(
-            r"
-name: mtls
-port: 9095
-type: internal
-tls: true
-authentication:
-  type: tls
-",
-        )
-        .unwrap();
-        assert!(l.authentication == Some(ListenerAuthentication::Tls));
+    fn minimal_oauth() -> ListenerAuthenticationOAuth {
+        ListenerAuthenticationOAuth {
+            valid_issuer_uri: "https://issuer.example.com/".into(),
+            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
+            valid_audience: None,
+            user_name_claim: None,
+            custom_claim_check: None,
+            jwks_refresh_seconds: None,
+            max_clock_skew_seconds: None,
+            enable_oauth_bearer: true,
+            tls_trusted_certificates: vec![],
+            access_token_is_jwt: true,
+            introspection_endpoint_uri: None,
+            user_info_endpoint_uri: None,
+            client_id: None,
+            client_secret: None,
+            introspection_http_timeout_seconds: None,
+            max_seconds_without_reauthentication: None,
+            valid_token_type: None,
+            fallback_user_name_claim: None,
+            fallback_user_name_prefix: None,
+            groups_claim: None,
+            groups_claim_delimiter: None,
+            jwks_min_refresh_pause_seconds: None,
+            jwks_expiry_seconds: None,
+            jwks_ignore_key_use: None,
+        }
     }
 
     #[test]
-    fn listener_deserializes_scram_sha_512_authentication() {
-        let l: Listener = serde_yaml::from_str(
-            r"
-name: scram
-port: 9094
-type: internal
-tls: true
-authentication:
-  type: scram-sha-512
-",
-        )
-        .unwrap();
-        assert!(l.authentication == Some(ListenerAuthentication::ScramSha512));
-    }
-
-    #[test]
-    fn listener_deserializes_scram_sha_256_authentication() {
-        let l: Listener = serde_yaml::from_str(
-            r"
-name: scram256
-port: 9094
-type: internal
-tls: true
-authentication:
-  type: scram-sha-256
-",
-        )
-        .unwrap();
-        assert!(l.authentication == Some(ListenerAuthentication::ScramSha256));
-    }
-
-    #[test]
-    fn listener_deserializes_without_authentication() {
-        let l: Listener = serde_yaml::from_str(
-            r"
-name: plain
-port: 9092
-type: internal
-",
-        )
-        .unwrap();
-        assert!(l.authentication.is_none());
+    fn listener_authentication_yaml_cases() {
+        for (name, yaml, expected) in [
+            (
+                "TLS",
+                "name: mtls\nport: 9095\ntype: internal\ntls: true\nauthentication:\n  type: tls\n",
+                Some(ListenerAuthentication::Tls),
+            ),
+            (
+                "SCRAM-SHA-512",
+                "name: scram\nport: 9094\ntype: internal\ntls: true\nauthentication:\n  type: scram-sha-512\n",
+                Some(ListenerAuthentication::ScramSha512),
+            ),
+            (
+                "SCRAM-SHA-256",
+                "name: scram\nport: 9094\ntype: internal\ntls: true\nauthentication:\n  type: scram-sha-256\n",
+                Some(ListenerAuthentication::ScramSha256),
+            ),
+            (
+                "no authentication",
+                "name: plain\nport: 9092\ntype: internal\n",
+                None,
+            ),
+        ] {
+            let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(listener.authentication, expected, "case {name}");
+        }
     }
 
     #[test]
@@ -565,9 +562,11 @@ authentication:
     }
 
     #[test]
-    fn listener_deserializes_oauth_authentication_full_config() {
-        let l: Listener = serde_yaml::from_str(
-            r#"
+    fn listener_oauth_yaml_cases() {
+        for (name, yaml, expected) in [
+            (
+                "full OAuth config",
+                r#"
 name: oauth
 port: 9096
 type: internal
@@ -583,43 +582,38 @@ authentication:
   maxClockSkewSeconds: 30
   enableOauthBearer: false
 "#,
-        )
-        .unwrap();
-        let expected = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://kc.example.com/realms/kafka".into(),
-            jwks_endpoint_uri: Some(
-                "https://kc.example.com/realms/kafka/protocol/openid-connect/certs".into(),
+                ListenerAuthenticationOAuth {
+                    valid_issuer_uri: "https://kc.example.com/realms/kafka".into(),
+                    jwks_endpoint_uri: Some(
+                        "https://kc.example.com/realms/kafka/protocol/openid-connect/certs".into(),
+                    ),
+                    valid_audience: Some("kafka".into()),
+                    user_name_claim: Some("preferred_username".into()),
+                    custom_claim_check: Some("$.scope[?@ == 'kafka.write']".into()),
+                    jwks_refresh_seconds: Some(300),
+                    max_clock_skew_seconds: Some(30),
+                    enable_oauth_bearer: false,
+                    tls_trusted_certificates: vec![],
+                    access_token_is_jwt: true,
+                    introspection_endpoint_uri: None,
+                    user_info_endpoint_uri: None,
+                    client_id: None,
+                    client_secret: None,
+                    introspection_http_timeout_seconds: None,
+                    max_seconds_without_reauthentication: None,
+                    valid_token_type: None,
+                    fallback_user_name_claim: None,
+                    fallback_user_name_prefix: None,
+                    groups_claim: None,
+                    groups_claim_delimiter: None,
+                    jwks_min_refresh_pause_seconds: None,
+                    jwks_expiry_seconds: None,
+                    jwks_ignore_key_use: None,
+                },
             ),
-            valid_audience: Some("kafka".into()),
-            user_name_claim: Some("preferred_username".into()),
-            custom_claim_check: Some("$.scope[?@ == 'kafka.write']".into()),
-            jwks_refresh_seconds: Some(300),
-            max_clock_skew_seconds: Some(30),
-            enable_oauth_bearer: false,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        assert!(l.authentication == Some(ListenerAuthentication::OAuth(expected)));
-    }
-
-    #[test]
-    fn listener_deserializes_oauth_authentication_minimum_required() {
-        let l: Listener = serde_yaml::from_str(
-            r"
+            (
+                "minimum OAuth config",
+                r"
 name: oauth-min
 port: 9097
 type: internal
@@ -629,45 +623,36 @@ authentication:
   validIssuerUri: https://issuer.example.com/
   jwksEndpointUri: https://issuer.example.com/jwks
 ",
-        )
-        .unwrap();
-        let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
-            panic!("expected OAuth authentication, got {:?}", l.authentication);
-        };
-        // `enable_oauth_bearer` defaults to true when omitted.
-        let expected = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        assert!(oauth == expected);
-    }
-
-    #[test]
-    fn oauth_with_custom_claim_check_deserializes() {
-        let l: Listener = serde_yaml::from_str(
-            r#"
+                ListenerAuthenticationOAuth {
+                    valid_issuer_uri: "https://issuer.example.com/".into(),
+                    jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
+                    valid_audience: None,
+                    user_name_claim: None,
+                    custom_claim_check: None,
+                    jwks_refresh_seconds: None,
+                    max_clock_skew_seconds: None,
+                    enable_oauth_bearer: true,
+                    tls_trusted_certificates: vec![],
+                    access_token_is_jwt: true,
+                    introspection_endpoint_uri: None,
+                    user_info_endpoint_uri: None,
+                    client_id: None,
+                    client_secret: None,
+                    introspection_http_timeout_seconds: None,
+                    max_seconds_without_reauthentication: None,
+                    valid_token_type: None,
+                    fallback_user_name_claim: None,
+                    fallback_user_name_prefix: None,
+                    groups_claim: None,
+                    groups_claim_delimiter: None,
+                    jwks_min_refresh_pause_seconds: None,
+                    jwks_expiry_seconds: None,
+                    jwks_ignore_key_use: None,
+                },
+            ),
+            (
+                "custom claim check",
+                r#"
 name: oauth-scope
 port: 9098
 type: internal
@@ -678,17 +663,25 @@ authentication:
   jwksEndpointUri: https://issuer.example.com/jwks
   customClaimCheck: "$.scope[?@ == 'kafka.write']"
 "#,
-        )
-        .unwrap();
-        let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
-            panic!("expected OAuth authentication");
-        };
-        assert!(oauth.custom_claim_check.as_deref() == Some("$.scope[?@ == 'kafka.write']"));
+                ListenerAuthenticationOAuth {
+                    custom_claim_check: Some("$.scope[?@ == 'kafka.write']".into()),
+                    ..minimal_oauth()
+                },
+            ),
+        ] {
+            let listener: Listener = serde_yaml::from_str(yaml)
+                .unwrap_or_else(|error| panic!("case {name}: YAML must parse: {error}"));
+            assert_eq!(
+                listener.authentication,
+                Some(ListenerAuthentication::OAuth(expected)),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
-    fn oauth_default_enable_omitted_on_serialize() {
-        let auth = ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
+    fn oauth_default_fields_omitted_on_serialize() {
+        let auth = ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example.com/".into(),
             jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
             valid_audience: None,
@@ -713,46 +706,96 @@ authentication:
             jwks_min_refresh_pause_seconds: None,
             jwks_expiry_seconds: None,
             jwks_ignore_key_use: None,
-        });
+        };
         let json = serde_json::to_string(&auth).unwrap();
-        assert!(
-            !json.contains("enableOauthBearer"),
-            "default-true enable_oauth_bearer must be omitted; got: {json}"
-        );
+        for field in [
+            "enableOauthBearer",
+            "tlsTrustedCertificates",
+            "accessTokenIsJwt",
+        ] {
+            assert!(!json.contains(field), "case {field:?}; got: {json}");
+        }
     }
 
     #[test]
-    fn oauth_enable_false_round_trips() {
-        let auth = ListenerAuthentication::OAuth(ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: false,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        });
-        let json = serde_json::to_string(&auth).unwrap();
-        assert!(json.contains("\"enableOauthBearer\":false"), "got: {json}");
-        let back: ListenerAuthentication = serde_json::from_str(&json).unwrap();
-        assert!(back == auth);
+    fn oauth_json_round_trip_cases() {
+        let introspection = ListenerAuthenticationOAuth {
+            jwks_endpoint_uri: None,
+            access_token_is_jwt: false,
+            introspection_endpoint_uri: Some("https://issuer.example.com/introspect".into()),
+            client_id: Some("kafka-broker".into()),
+            client_secret: Some(OauthClientSecretRef {
+                secret_name: "kafka-broker-oauth".into(),
+                key: "client-secret".into(),
+            }),
+            ..minimal_oauth()
+        };
+        for (name, config, present, absent) in [
+            (
+                "OAuth bearer disabled",
+                ListenerAuthenticationOAuth {
+                    enable_oauth_bearer: false,
+                    ..minimal_oauth()
+                },
+                &["\"enableOauthBearer\":false"][..],
+                &[][..],
+            ),
+            (
+                "trusted certificates",
+                ListenerAuthenticationOAuth {
+                    tls_trusted_certificates: vec![
+                        TlsTrustedCertificate {
+                            secret_name: "kc-ca".into(),
+                            certificate: "ca.crt".into(),
+                        },
+                        TlsTrustedCertificate {
+                            secret_name: "intermediate-ca".into(),
+                            certificate: "tls.crt".into(),
+                        },
+                    ],
+                    ..minimal_oauth()
+                },
+                &["\"tlsTrustedCertificates\":["][..],
+                &[][..],
+            ),
+            (
+                "introspection mode",
+                introspection.clone(),
+                &[
+                    "\"accessTokenIsJwt\":false",
+                    "\"introspectionEndpointUri\":\"https://issuer.example.com/introspect\"",
+                    "\"clientId\":\"kafka-broker\"",
+                    "\"clientSecret\":{\"secretName\":\"kafka-broker-oauth\",\"key\":\"client-secret\"}",
+                ][..],
+                &["jwksEndpointUri"][..],
+            ),
+            (
+                "userinfo endpoint",
+                ListenerAuthenticationOAuth {
+                    user_info_endpoint_uri: Some("https://idp.example/userinfo".into()),
+                    ..introspection
+                },
+                &["\"userInfoEndpointUri\":\"https://idp.example/userinfo\""][..],
+                &["jwksEndpointUri"][..],
+            ),
+        ] {
+            let authentication = ListenerAuthentication::OAuth(config);
+            let json = serde_json::to_string(&authentication).unwrap();
+            for fragment in present {
+                assert!(
+                    json.contains(fragment),
+                    "case {name}: missing {fragment:?}; {json}"
+                );
+            }
+            for fragment in absent {
+                assert!(
+                    !json.contains(fragment),
+                    "case {name}: found {fragment:?}; {json}"
+                );
+            }
+            let decoded: ListenerAuthentication = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, authentication, "case {name}");
+        }
     }
 
     #[test]
@@ -779,8 +822,16 @@ authentication:
         let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
             panic!("expected OAuth authentication");
         };
-        assert!(oauth.valid_issuer_uri == "https://issuer.example.com/");
-        assert!(oauth.jwks_endpoint_uri.as_deref() == Some("https://issuer.example.com/jwks"));
+        assert_eq!(
+            (
+                oauth.valid_issuer_uri.as_str(),
+                oauth.jwks_endpoint_uri.as_deref(),
+            ),
+            (
+                "https://issuer.example.com/",
+                Some("https://issuer.example.com/jwks"),
+            )
+        );
     }
 
     #[test]
@@ -863,178 +914,16 @@ authentication:
     }
 
     #[test]
-    fn oauth_with_tls_trusted_certificates_round_trips() {
-        let original = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![
-                TlsTrustedCertificate {
-                    secret_name: "kc-ca".into(),
-                    certificate: "ca.crt".into(),
-                },
-                TlsTrustedCertificate {
-                    secret_name: "intermediate-ca".into(),
-                    certificate: "tls.crt".into(),
-                },
-            ],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        assert!(
-            json.contains("\"tlsTrustedCertificates\":["),
-            "expected tlsTrustedCertificates array in JSON; got: {json}"
-        );
-        let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
-        assert!(round_tripped == original);
-    }
-
-    #[test]
-    fn oauth_tls_trusted_certificates_default_omitted_on_serialize() {
-        let auth = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let json = serde_json::to_string(&auth).unwrap();
-        assert!(
-            !json.contains("tlsTrustedCertificates"),
-            "empty tls_trusted_certificates must be omitted; got: {json}"
-        );
-    }
-
-    #[test]
     fn tls_trusted_certificate_required_fields_missing_rejected() {
-        let missing_certificate = serde_yaml::from_str::<TlsTrustedCertificate>(r"secretName: foo");
-        assert!(
-            missing_certificate.is_err(),
-            "entry without certificate must fail to deserialize"
-        );
-        let missing_secret_name =
-            serde_yaml::from_str::<TlsTrustedCertificate>(r"certificate: bar");
-        assert!(
-            missing_secret_name.is_err(),
-            "entry without secretName must fail to deserialize"
-        );
-    }
-
-    #[test]
-    fn oauth_with_access_token_is_jwt_false_introspection_round_trips() {
-        let original = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: None,
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: false,
-            introspection_endpoint_uri: Some("https://issuer.example.com/introspect".into()),
-            user_info_endpoint_uri: None,
-            client_id: Some("kafka-broker".into()),
-            client_secret: Some(OauthClientSecretRef {
-                secret_name: "kafka-broker-oauth".into(),
-                key: "client-secret".into(),
-            }),
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        for want in [
-            "\"accessTokenIsJwt\":false",
-            "\"introspectionEndpointUri\":\"https://issuer.example.com/introspect\"",
-            "\"clientId\":\"kafka-broker\"",
-            "\"clientSecret\":{\"secretName\":\"kafka-broker-oauth\",\"key\":\"client-secret\"}",
+        for (name, yaml) in [
+            ("missing certificate", r"secretName: foo"),
+            ("missing secret name", r"certificate: bar"),
         ] {
-            assert!(json.contains(want), "case {want:?}; got: {json}");
+            assert!(
+                serde_yaml::from_str::<TlsTrustedCertificate>(yaml).is_err(),
+                "case {name}"
+            );
         }
-        let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
-        assert!(round_tripped == original);
-    }
-
-    #[test]
-    fn oauth_access_token_is_jwt_default_omitted_on_serialize() {
-        let auth = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: Some("https://issuer.example.com/jwks".into()),
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let json = serde_json::to_string(&auth).unwrap();
-        assert!(
-            !json.contains("accessTokenIsJwt"),
-            "default-true access_token_is_jwt must be omitted; got: {json}"
-        );
     }
 
     #[test]
@@ -1050,100 +939,7 @@ authentication:
     }
 
     #[test]
-    fn oauth_jwks_endpoint_uri_now_optional_omits_when_none() {
-        let auth = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: None,
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: false,
-            introspection_endpoint_uri: Some("https://issuer.example.com/introspect".into()),
-            user_info_endpoint_uri: None,
-            client_id: Some("kafka-broker".into()),
-            client_secret: Some(OauthClientSecretRef {
-                secret_name: "kafka-broker-oauth".into(),
-                key: "client-secret".into(),
-            }),
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let json = serde_json::to_string(&auth).unwrap();
-        assert!(
-            !json.contains("jwksEndpointUri"),
-            "None jwks_endpoint_uri must be omitted from JSON; got: {json}"
-        );
-    }
-
-    #[test]
-    fn oauth_with_userinfo_endpoint_round_trips() {
-        let original = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example.com/".into(),
-            jwks_endpoint_uri: None,
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: false,
-            introspection_endpoint_uri: Some("https://issuer.example.com/introspect".into()),
-            user_info_endpoint_uri: Some("https://idp.example/userinfo".into()),
-            client_id: Some("kafka-broker".into()),
-            client_secret: Some(OauthClientSecretRef {
-                secret_name: "kafka-broker-oauth".into(),
-                key: "client-secret".into(),
-            }),
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        assert!(
-            json.contains("\"userInfoEndpointUri\":\"https://idp.example/userinfo\""),
-            "expected userInfoEndpointUri in JSON; got: {json}"
-        );
-        let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
-        assert!(round_tripped == original);
-    }
-
-    #[test]
-    fn oauth_round_trip_with_max_seconds_without_reauthentication() {
-        let yaml = r"
-type: oauth
-validIssuerUri: https://issuer.example/
-jwksEndpointUri: https://issuer.example/jwks
-maxSecondsWithoutReauthentication: 300
-";
-        let parsed: ListenerAuthentication = serde_yaml::from_str(yaml).expect("yaml must parse");
-        let ListenerAuthentication::OAuth(oauth) = &parsed else {
-            panic!("expected oauth variant");
-        };
-        assert!(oauth.max_seconds_without_reauthentication == Some(300));
-    }
-
-    #[test]
-    fn oauth_round_trip_without_max_seconds_without_reauthentication_omits_field() {
+    fn oauth_optional_fields_are_omitted_when_unset() {
         let cfg = ListenerAuthenticationOAuth {
             valid_issuer_uri: "https://issuer.example/".into(),
             jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
@@ -1172,67 +968,20 @@ maxSecondsWithoutReauthentication: 300
         };
         let auth = ListenerAuthentication::OAuth(cfg);
         let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
-        assert!(
-            !yaml.contains("maxSecondsWithoutReauthentication"),
-            "None field must be omitted from YAML; got:\n{yaml}"
-        );
-    }
-
-    #[test]
-    fn oauth_round_trip_with_custom_claim_check_string() {
-        let yaml = r#"
-type: oauth
-validIssuerUri: https://issuer.example/
-jwksEndpointUri: https://issuer.example/jwks
-customClaimCheck: "$.scope[?@ == 'kafka.write']"
-validTokenType: JWT
-"#;
-        let parsed: ListenerAuthentication = serde_yaml::from_str(yaml).expect("yaml must parse");
-        let ListenerAuthentication::OAuth(oauth) = &parsed else {
-            panic!("expected oauth variant");
-        };
-        assert!(oauth.custom_claim_check.as_deref() == Some("$.scope[?@ == 'kafka.write']"));
-        assert!(oauth.valid_token_type.as_deref() == Some("JWT"));
-    }
-
-    #[test]
-    fn oauth_round_trip_without_custom_claim_check_and_valid_token_type_omits_both() {
-        let cfg = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example/".into(),
-            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let auth = ListenerAuthentication::OAuth(cfg);
-        let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
-        assert!(
-            !yaml.contains("customClaimCheck"),
-            "None field must be omitted; got:\n{yaml}"
-        );
-        assert!(
-            !yaml.contains("validTokenType"),
-            "None field must be omitted; got:\n{yaml}"
-        );
+        for field in [
+            "maxSecondsWithoutReauthentication",
+            "customClaimCheck",
+            "validTokenType",
+            "fallbackUserNameClaim",
+            "fallbackUserNamePrefix",
+            "groupsClaim",
+            "groupsClaimDelimiter",
+            "jwksMinRefreshPauseSeconds",
+            "jwksExpirySeconds",
+            "jwksIgnoreKeyUse",
+        ] {
+            assert!(!yaml.contains(field), "case {field:?}; got:\n{yaml}");
+        }
     }
 
     #[test]
@@ -1240,8 +989,8 @@ validTokenType: JWT
         // The legacy object shape `{ scope: ... }` is gone.
         let yaml = r"
 type: oauth
-validIssuerUri: https://issuer.example/
-jwksEndpointUri: https://issuer.example/jwks
+validIssuerUri: https://issuer.example.com/
+jwksEndpointUri: https://issuer.example.com/jwks
 customClaimCheck:
   scope: kafka.write
 ";
@@ -1250,8 +999,39 @@ customClaimCheck:
     }
 
     #[test]
-    fn oauth_round_trip_with_claims_mapping_fields() {
-        let yaml = r#"
+    fn oauth_populated_field_round_trip_cases() {
+        for (name, yaml, expected) in [
+            (
+                "maximum reauthentication interval",
+                r"
+type: oauth
+validIssuerUri: https://issuer.example.com/
+jwksEndpointUri: https://issuer.example.com/jwks
+maxSecondsWithoutReauthentication: 300
+",
+                ListenerAuthenticationOAuth {
+                    max_seconds_without_reauthentication: Some(300),
+                    ..minimal_oauth()
+                },
+            ),
+            (
+                "custom claim and token type",
+                r#"
+type: oauth
+validIssuerUri: https://issuer.example.com/
+jwksEndpointUri: https://issuer.example.com/jwks
+customClaimCheck: "$.scope[?@ == 'kafka.write']"
+validTokenType: JWT
+"#,
+                ListenerAuthenticationOAuth {
+                    custom_claim_check: Some("$.scope[?@ == 'kafka.write']".into()),
+                    valid_token_type: Some("JWT".into()),
+                    ..minimal_oauth()
+                },
+            ),
+            (
+                "claims mapping fields",
+                r#"
 type: oauth
 validIssuerUri: https://issuer.example/
 jwksEndpointUri: https://issuer.example/jwks
@@ -1259,159 +1039,78 @@ fallbackUserNameClaim: client_id
 fallbackUserNamePrefix: "service-account-"
 groupsClaim: "$.realm_access.roles[*]"
 groupsClaimDelimiter: ","
-"#;
-        let parsed: ListenerAuthentication = serde_yaml::from_str(yaml).expect("yaml must parse");
-        let ListenerAuthentication::OAuth(oauth) = &parsed else {
-            panic!("expected oauth variant");
-        };
-        let expected = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example/".into(),
-            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: Some("client_id".into()),
-            fallback_user_name_prefix: Some("service-account-".into()),
-            groups_claim: Some("$.realm_access.roles[*]".into()),
-            groups_claim_delimiter: Some(",".into()),
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        assert!(*oauth == expected);
-    }
-
-    #[test]
-    fn oauth_round_trip_without_claims_mapping_fields_omits_them() {
-        let cfg = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example/".into(),
-            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let auth = ListenerAuthentication::OAuth(cfg);
-        let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
-        for key in [
-            "fallbackUserNameClaim",
-            "fallbackUserNamePrefix",
-            "groupsClaim",
-            "groupsClaimDelimiter",
-        ] {
-            assert!(!yaml.contains(key), "{key} must be omitted; got:\n{yaml}");
-        }
-    }
-
-    #[test]
-    fn oauth_round_trip_with_jwks_policy_fields() {
-        let yaml = r"
+"#,
+                ListenerAuthenticationOAuth {
+                    valid_issuer_uri: "https://issuer.example/".into(),
+                    jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
+                    valid_audience: None,
+                    user_name_claim: None,
+                    custom_claim_check: None,
+                    jwks_refresh_seconds: None,
+                    max_clock_skew_seconds: None,
+                    enable_oauth_bearer: true,
+                    tls_trusted_certificates: vec![],
+                    access_token_is_jwt: true,
+                    introspection_endpoint_uri: None,
+                    user_info_endpoint_uri: None,
+                    client_id: None,
+                    client_secret: None,
+                    introspection_http_timeout_seconds: None,
+                    max_seconds_without_reauthentication: None,
+                    valid_token_type: None,
+                    fallback_user_name_claim: Some("client_id".into()),
+                    fallback_user_name_prefix: Some("service-account-".into()),
+                    groups_claim: Some("$.realm_access.roles[*]".into()),
+                    groups_claim_delimiter: Some(",".into()),
+                    jwks_min_refresh_pause_seconds: None,
+                    jwks_expiry_seconds: None,
+                    jwks_ignore_key_use: None,
+                },
+            ),
+            (
+                "JWKS policy fields",
+                r"
 type: oauth
 validIssuerUri: https://issuer.example/
 jwksEndpointUri: https://issuer.example/jwks
 jwksMinRefreshPauseSeconds: 1
 jwksExpirySeconds: 3600
 jwksIgnoreKeyUse: false
-";
-        let parsed: ListenerAuthentication = serde_yaml::from_str(yaml).expect("yaml must parse");
-        let ListenerAuthentication::OAuth(oauth) = &parsed else {
-            panic!("expected oauth variant");
-        };
-        let expected = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example/".into(),
-            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: Some(1),
-            jwks_expiry_seconds: Some(3600),
-            jwks_ignore_key_use: Some(false),
-        };
-        assert!(*oauth == expected);
-    }
-
-    #[test]
-    fn oauth_round_trip_without_jwks_policy_fields_omits_them() {
-        let cfg = ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://issuer.example/".into(),
-            jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: true,
-            introspection_endpoint_uri: None,
-            user_info_endpoint_uri: None,
-            client_id: None,
-            client_secret: None,
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let auth = ListenerAuthentication::OAuth(cfg);
-        let yaml = serde_yaml::to_string(&auth).expect("yaml must serialize");
-        for key in [
-            "jwksMinRefreshPauseSeconds",
-            "jwksExpirySeconds",
-            "jwksIgnoreKeyUse",
+",
+                ListenerAuthenticationOAuth {
+                    valid_issuer_uri: "https://issuer.example/".into(),
+                    jwks_endpoint_uri: Some("https://issuer.example/jwks".into()),
+                    valid_audience: None,
+                    user_name_claim: None,
+                    custom_claim_check: None,
+                    jwks_refresh_seconds: None,
+                    max_clock_skew_seconds: None,
+                    enable_oauth_bearer: true,
+                    tls_trusted_certificates: vec![],
+                    access_token_is_jwt: true,
+                    introspection_endpoint_uri: None,
+                    user_info_endpoint_uri: None,
+                    client_id: None,
+                    client_secret: None,
+                    introspection_http_timeout_seconds: None,
+                    max_seconds_without_reauthentication: None,
+                    valid_token_type: None,
+                    fallback_user_name_claim: None,
+                    fallback_user_name_prefix: None,
+                    groups_claim: None,
+                    groups_claim_delimiter: None,
+                    jwks_min_refresh_pause_seconds: Some(1),
+                    jwks_expiry_seconds: Some(3600),
+                    jwks_ignore_key_use: Some(false),
+                },
+            ),
         ] {
-            assert!(!yaml.contains(key), "{key} must be omitted; got:\n{yaml}");
+            let parsed: ListenerAuthentication = serde_yaml::from_str(yaml)
+                .unwrap_or_else(|error| panic!("{name}: YAML must parse: {error}"));
+            let ListenerAuthentication::OAuth(actual) = parsed else {
+                panic!("{name}: expected OAuth variant");
+            };
+            assert!(actual == expected, "{name}");
         }
     }
 }
@@ -1423,21 +1122,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn internal_listener_round_trips_through_json() {
-        let l = Listener {
-            name: "PLAIN".into(),
-            port: 9092,
-            type_: ListenerType::Internal,
-            tls: false,
-            authentication: None,
-            configuration: None,
-            network_policy_peers: None,
-        };
-        let json = serde_json::to_string(&l).unwrap();
-        assert!(json.contains("\"type\":\"internal\""), "got: {json}");
-        assert!(json.contains("\"port\":9092"), "got: {json}");
-        let back: Listener = serde_json::from_str(&json).unwrap();
-        assert!(back == l);
+    fn internal_listener_json_round_trip_cases() {
+        for (name, peers, expected_json) in [
+            (
+                "peers omitted",
+                None,
+                serde_json::json!({"name":"PLAIN","port":9092,"type":"internal","tls":false}),
+            ),
+            (
+                "empty peers retained",
+                Some(vec![]),
+                serde_json::json!({"name":"PLAIN","port":9092,"type":"internal","tls":false,"networkPolicyPeers":[]}),
+            ),
+        ] {
+            let listener = Listener {
+                name: "PLAIN".into(),
+                port: 9092,
+                type_: ListenerType::Internal,
+                tls: false,
+                authentication: None,
+                configuration: None,
+                network_policy_peers: peers,
+            };
+            let actual_json = serde_json::to_value(&listener).unwrap();
+            assert_eq!(&actual_json, &expected_json, "case {name}");
+            assert_eq!(
+                serde_json::from_value::<Listener>(actual_json).unwrap(),
+                listener,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -1503,23 +1217,6 @@ mod tests {
         };
         let json = serde_json::to_string(&l).unwrap();
         assert!(!json.contains("networkPolicyPeers"), "got: {json}");
-    }
-
-    #[test]
-    fn listener_with_empty_peers_round_trips() {
-        let l = Listener {
-            name: "PLAIN".into(),
-            port: 9092,
-            type_: ListenerType::Internal,
-            tls: false,
-            authentication: None,
-            configuration: None,
-            network_policy_peers: Some(vec![]),
-        };
-        let json = serde_json::to_string(&l).unwrap();
-        assert!(json.contains("\"networkPolicyPeers\":[]"), "got: {json}");
-        let back: Listener = serde_json::from_str(&json).unwrap();
-        assert!(back == l);
     }
 
     #[test]

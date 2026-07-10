@@ -263,38 +263,33 @@ async fn oauth_trust_missing_source_secret_rejects_with_missing_oauth_trust_secr
 
 /// Secret exists but lacks the named key. Reason: `MissingOauthTrustKey`.
 #[tokio::test]
-async fn oauth_trust_missing_key_in_source_secret_rejects_with_missing_oauth_trust_key() {
-    let mut rules = rules_for_failure_path("c3", "n3");
-    rules.push(rule_get_secret(
-        "idp-ca-keyless",
-        &source_secret_body_no_data("idp-ca-keyless", "n3"),
-    ));
-
-    let (ctx, state) = build_ctx("n3", rules);
-    let kafka = kafka_with_oauth_trust("c3", "n3", vec![("idp-ca-keyless", "ca.crt")]);
-    reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    assert_ready_false_with_reason(&observed, "c3", "MissingOauthTrustKey");
-}
-
-// ── test 4: Secret + key present but value zero bytes → EmptyOauthTrustValue ─
-
-/// Secret + key exist; value is zero bytes. Reason: `EmptyOauthTrustValue`.
-#[tokio::test]
-async fn oauth_trust_empty_key_value_rejects_with_empty_oauth_trust_value() {
-    let mut rules = rules_for_failure_path("c4", "n4");
-    rules.push(rule_get_secret(
-        "idp-ca-empty",
-        &source_secret_body("idp-ca-empty", "n4", "ca.crt", b""),
-    ));
-
-    let (ctx, state) = build_ctx("n4", rules);
-    let kafka = kafka_with_oauth_trust("c4", "n4", vec![("idp-ca-empty", "ca.crt")]);
-    reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    assert_ready_false_with_reason(&observed, "c4", "EmptyOauthTrustValue");
+async fn oauth_trust_invalid_secret_value_cases() {
+    for (name, cluster, namespace, secret_name, secret, reason) in [
+        (
+            "missing key",
+            "c3",
+            "n3",
+            "idp-ca-keyless",
+            source_secret_body_no_data("idp-ca-keyless", "n3"),
+            "MissingOauthTrustKey",
+        ),
+        (
+            "empty value",
+            "c4",
+            "n4",
+            "idp-ca-empty",
+            source_secret_body("idp-ca-empty", "n4", "ca.crt", b""),
+            "EmptyOauthTrustValue",
+        ),
+    ] {
+        let mut rules = rules_for_failure_path(cluster, namespace);
+        rules.push(rule_get_secret(secret_name, &secret));
+        let (ctx, state) = build_ctx(namespace, rules);
+        let kafka = kafka_with_oauth_trust(cluster, namespace, vec![(secret_name, "ca.crt")]);
+        reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
+        assert_ready_false_with_reason(&state.take_observed(), cluster, reason);
+        let _ = name;
+    }
 }
 
 // ── test 5: empty tls_trusted_certificates → no managed Secret ─────────────
@@ -495,13 +490,13 @@ async fn statefulset_mounts_oauth_jwks_trust_secret_when_trust_certs_present() {
         .iter()
         .find(|m| m["name"] == "oauth-jwks-trust")
         .unwrap_or_else(|| panic!("oauth-jwks-trust mount present; body = {body}"));
-    assert!(
-        trust_mount["mountPath"] == "/etc/crabka/oauth-jwks-trust",
-        "mount path contract; body = {body}"
-    );
-    assert!(
-        trust_mount["readOnly"] == true,
-        "trust mount must be readOnly; body = {body}"
+    assert_eq!(
+        (
+            trust_mount["mountPath"].as_str(),
+            trust_mount["readOnly"].as_bool(),
+        ),
+        (Some("/etc/crabka/oauth-jwks-trust"), Some(true)),
+        "body = {body}"
     );
 }
 

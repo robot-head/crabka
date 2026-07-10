@@ -212,15 +212,27 @@ mod tests {
         prometheus_client::encoding::text::encode(&mut s, &registry).unwrap();
 
         // Counter is registered without `_total`; the encoder appends it.
-        assert!(s.contains("crabka_operator_reconciliations_total"));
-        assert!(s.contains("crabka_operator_reconcile_duration_seconds"));
-        assert!(s.contains("crabka_operator_managed_resources"));
-        // Label sets render on the counter.
-        assert!(s.contains("kind=\"Kafka\""));
-        assert!(s.contains("result=\"ok\""));
-        assert!(s.contains("result=\"error\""));
-        assert!(s.contains("result=\"requeue\""));
-        assert!(s.contains("# EOF"), "OpenMetrics terminator missing");
+        for (name, expected) in [
+            (
+                "reconciliation counter",
+                "crabka_operator_reconciliations_total",
+            ),
+            (
+                "duration histogram",
+                "crabka_operator_reconcile_duration_seconds",
+            ),
+            (
+                "managed resource gauge",
+                "crabka_operator_managed_resources",
+            ),
+            ("kind label", "kind=\"Kafka\""),
+            ("ok label", "result=\"ok\""),
+            ("error label", "result=\"error\""),
+            ("requeue label", "result=\"requeue\""),
+            ("OpenMetrics terminator", "# EOF"),
+        ] {
+            assert!(s.contains(expected), "case {name}");
+        }
 
         // Re-encoding still works and the gauge reflects the last set value.
         metrics.set_managed_resources("Kafka", 5);

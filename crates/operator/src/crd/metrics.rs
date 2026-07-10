@@ -72,8 +72,12 @@ mod tests {
             service_monitor: None,
         };
         let j = serde_json::to_string(&cfg).unwrap();
-        assert!(j.contains("\"podMonitor\""));
-        assert!(j.contains("\"interval\":\"15s\""));
+        for (name, expected) in [
+            ("pod monitor object", "\"podMonitor\""),
+            ("scrape interval", "\"interval\":\"15s\""),
+        ] {
+            assert!(j.contains(expected), "case {name}");
+        }
         let back: MetricsConfig = serde_json::from_str(&j).unwrap();
         assert!(back == cfg);
     }

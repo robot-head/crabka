@@ -6,7 +6,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use assert2::{assert, check};
+use assert2::assert;
 use crabka_operator::{
     controller::rebalance::reconcile,
     crd::{KafkaCondition, KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus},
@@ -113,10 +113,15 @@ async fn new_rebalance_creates_proposal() {
     assert!(fake.calls() == vec![RebalCall::CreateProposal(vec!["RackAware".into()])]);
 
     let body = status_patch_body(&state.take_observed(), "demo");
-    check!(body["status"]["conditions"][0]["type"] == "ProposalReady");
-    check!(body["status"]["sessionId"] == "p-new");
-    check!(body["status"]["optimizationResult"]["replicaMovements"] == 2);
-    check!(body["status"]["observedGeneration"] == 1);
+    assert_eq!(
+        (
+            body["status"]["conditions"][0]["type"].as_str(),
+            body["status"]["sessionId"].as_str(),
+            body["status"]["optimizationResult"]["replicaMovements"].as_i64(),
+            body["status"]["observedGeneration"].as_i64(),
+        ),
+        (Some("ProposalReady"), Some("p-new"), Some(2), Some(1))
+    );
 }
 
 /// `approve` on a `ProposalReady` proposal → `ExecuteProposal` (with the
@@ -160,9 +165,13 @@ async fn approve_executes_and_enters_rebalancing() {
     );
 
     let body = status_patch_body(&observed, "demo");
-    assert!(body["status"]["conditions"][0]["type"] == "Rebalancing");
-    // Session carried forward through the execute pass.
-    assert!(body["status"]["sessionId"] == "p1");
+    assert_eq!(
+        (
+            body["status"]["conditions"][0]["type"].as_str(),
+            body["status"]["sessionId"].as_str(),
+        ),
+        (Some("Rebalancing"), Some("p1"))
+    );
 }
 
 /// Polling an in-flight execution that has completed → `Ready`.
@@ -181,8 +190,13 @@ async fn poll_completes_to_ready() {
 
     assert!(fake.calls() == vec![RebalCall::GetProposal("p1".into())]);
     let body = status_patch_body(&state.take_observed(), "demo");
-    assert!(body["status"]["conditions"][0]["type"] == "Ready");
-    assert!(body["status"]["sessionId"] == "p1");
+    assert_eq!(
+        (
+            body["status"]["conditions"][0]["type"].as_str(),
+            body["status"]["sessionId"].as_str(),
+        ),
+        (Some("Ready"), Some("p1"))
+    );
 }
 
 /// `stop` while `Rebalancing` → `CancelExecution` → `Stopped`.
@@ -221,8 +235,13 @@ async fn poll_failure_surfaces_not_ready() {
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
     let body = status_patch_body(&state.take_observed(), "demo");
-    assert!(body["status"]["conditions"][0]["type"] == "NotReady");
-    assert!(body["status"]["conditions"][0]["message"] == "broker 3 unreachable");
+    assert_eq!(
+        (
+            body["status"]["conditions"][0]["type"].as_str(),
+            body["status"]["conditions"][0]["message"].as_str(),
+        ),
+        (Some("NotReady"), Some("broker 3 unreachable"))
+    );
 }
 
 /// No `spec.endpoint` and no `crabka.io/cluster` label → `NotReady` with
@@ -238,8 +257,13 @@ async fn missing_endpoint_sets_not_ready() {
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
     let body = status_patch_body(&state.take_observed(), "demo");
-    assert!(body["status"]["conditions"][0]["type"] == "NotReady");
-    assert!(body["status"]["conditions"][0]["reason"] == "MissingEndpoint");
+    assert_eq!(
+        (
+            body["status"]["conditions"][0]["type"].as_str(),
+            body["status"]["conditions"][0]["reason"].as_str(),
+        ),
+        (Some("NotReady"), Some("MissingEndpoint"))
+    );
 }
 
 /// A transport error leaves the status untouched (no kube writes) so the

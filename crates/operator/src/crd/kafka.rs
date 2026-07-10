@@ -848,7 +848,7 @@ pub struct KafkaCondition {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -856,11 +856,19 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = Kafka::crd();
-        check!(crd.spec.group == "crabka.io");
-        check!(crd.spec.names.kind == "Kafka");
-        check!(crd.spec.names.plural == "kafkas");
-        check!(crd.spec.versions.len() == 1);
-        check!(crd.spec.versions[0].name == "v1alpha1");
+        assert_eq!(
+            (
+                crd.spec.group.as_str(),
+                crd.spec.names.kind.as_str(),
+                crd.spec.names.plural.as_str(),
+                crd.spec
+                    .versions
+                    .iter()
+                    .map(|v| v.name.as_str())
+                    .collect::<Vec<_>>(),
+            ),
+            ("crabka.io", "Kafka", "kafkas", vec!["v1alpha1"])
+        );
     }
 
     #[test]
@@ -896,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn spec_omits_metrics_config_when_none() {
+    fn spec_omits_optional_fields_when_none() {
         let k = Kafka::new(
             "demo",
             KafkaSpec {
@@ -918,8 +926,17 @@ mod tests {
                 tracing: None,
             },
         );
-        let j = serde_json::to_string(&k.spec).unwrap();
-        assert!(!j.contains("metricsConfig"), "got: {j}");
+        let json = serde_json::to_string(&k.spec).unwrap();
+        for field in [
+            "metricsConfig",
+            "metadataVersion",
+            "networkPolicy",
+            "logging",
+            "delegationToken",
+            "tieredStorage",
+        ] {
+            assert!(!json.contains(field), "case {field:?}; got: {json}");
+        }
     }
 
     #[test]
@@ -936,8 +953,7 @@ mod tests {
     fn spec_only_carries_kafka_version() {
         let json = r#"{"kafkaVersion":"0.1.1"}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.kafka_version == "0.1.1");
-        assert!(spec.config.is_none());
+        assert_eq!((spec.kafka_version.as_str(), spec.config), ("0.1.1", None));
     }
 
     #[test]
@@ -958,9 +974,10 @@ mod tests {
             "interBrokerListenerName":"PLAIN"
         }"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert!(
-            spec.listeners
-                == vec![Listener {
+        assert_eq!(
+            (spec.listeners, spec.inter_broker_listener_name),
+            (
+                vec![Listener {
                     name: "PLAIN".to_string(),
                     port: 9092,
                     type_: ListenerType::Internal,
@@ -968,17 +985,20 @@ mod tests {
                     authentication: None,
                     configuration: None,
                     network_policy_peers: None,
-                }]
+                }],
+                Some("PLAIN".to_string()),
+            )
         );
-        assert!(spec.inter_broker_listener_name.as_deref() == Some("PLAIN"));
     }
 
     #[test]
     fn spec_defaults_listeners_to_empty() {
         let json = r#"{"kafkaVersion":"0.1.1"}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.listeners.is_empty());
-        assert!(spec.inter_broker_listener_name.is_none());
+        assert_eq!(
+            (spec.listeners, spec.inter_broker_listener_name),
+            (vec![], None)
+        );
     }
 
     #[test]
@@ -1017,33 +1037,6 @@ mod tests {
     }
 
     #[test]
-    fn spec_omits_metadata_version_when_none() {
-        let k = Kafka::new(
-            "demo",
-            KafkaSpec {
-                kafka_version: "3.7.0".into(),
-                metadata_version: None,
-                config: None,
-                listeners: vec![],
-                inter_broker_listener_name: None,
-                metrics_config: None,
-                network_policy: None,
-                cluster_ca: None,
-                clients_ca: None,
-                logging: None,
-                delegation_token: None,
-                authorization: None,
-                tiered_storage: None,
-                inter_broker_kerberos: None,
-                krb5_conf_secret_ref: None,
-                tracing: None,
-            },
-        );
-        let j = serde_json::to_string(&k.spec).unwrap();
-        assert!(!j.contains("metadataVersion"), "got: {j}");
-    }
-
-    #[test]
     fn status_carries_version_fields() {
         let status = KafkaStatus {
             kafka_version: Some("3.7.0".into()),
@@ -1057,46 +1050,10 @@ mod tests {
     }
 
     #[test]
-    fn spec_omits_network_policy_when_none() {
-        let k = Kafka::new(
-            "demo",
-            KafkaSpec {
-                kafka_version: "0.1.1".into(),
-                metadata_version: None,
-                config: None,
-                listeners: vec![],
-                inter_broker_listener_name: None,
-                metrics_config: None,
-                network_policy: None,
-                cluster_ca: None,
-                clients_ca: None,
-                logging: None,
-                delegation_token: None,
-                authorization: None,
-                tiered_storage: None,
-                inter_broker_kerberos: None,
-                krb5_conf_secret_ref: None,
-                tracing: None,
-            },
-        );
-        let j = serde_json::to_string(&k.spec).unwrap();
-        assert!(!j.contains("networkPolicy"), "got: {j}");
-    }
-
-    #[test]
     fn spec_carries_network_policy_when_set() {
         let json = r#"{"kafkaVersion":"0.1.1","networkPolicy":{}}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         assert!(spec.network_policy.is_some(), "networkPolicy parsed");
-    }
-
-    #[test]
-    fn spec_omits_logging_when_none() {
-        let json = r#"{"kafkaVersion":"0.1.1"}"#;
-        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.logging.is_none());
-        let j = serde_json::to_string(&spec).unwrap();
-        assert!(!j.contains("logging"), "got: {j}");
     }
 
     #[test]
@@ -1105,8 +1062,13 @@ mod tests {
         let json = r#"{"kafkaVersion":"0.1.1","logging":{"loggers":{"root":"info","crabka_broker":"debug"}}}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         let lg = spec.logging.expect("logging present");
-        assert!(lg.r#type == LoggingType::Inline);
-        assert!(lg.loggers.get("crabka_broker").map(String::as_str) == Some("debug"));
+        assert_eq!(
+            (
+                lg.r#type,
+                lg.loggers.get("crabka_broker").map(String::as_str)
+            ),
+            (LoggingType::Inline, Some("debug"))
+        );
     }
 
     #[test]
@@ -1115,41 +1077,34 @@ mod tests {
             "kafkaVersion": "3.7.0",
         }))
         .expect("parse minimal spec");
-        assert!(v.cluster_ca.is_none());
-        assert!(v.clients_ca.is_none());
+        assert_eq!((v.cluster_ca, v.clients_ca), (None, None));
     }
 
     #[test]
-    fn spec_omits_delegation_token_when_none() {
-        let json = r#"{"kafkaVersion":"0.1.1"}"#;
-        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.delegation_token.is_none());
-        let j = serde_json::to_string(&spec).unwrap();
-        assert!(!j.contains("delegationToken"), "got: {j}");
-    }
-
-    #[test]
-    fn spec_carries_delegation_token_with_default_key() {
-        let json = r#"{
-            "kafkaVersion":"0.1.1",
-            "delegationToken":{"secretKeyRef":{"name":"dt-master"}}
-        }"#;
-        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        let dt = spec.delegation_token.expect("delegationToken present");
-        assert!(dt.secret_key_ref.name == "dt-master");
-        assert!(dt.secret_key_ref.key.is_none());
-    }
-
-    #[test]
-    fn spec_carries_delegation_token_with_explicit_key() {
-        let json = r#"{
-            "kafkaVersion":"0.1.1",
-            "delegationToken":{"secretKeyRef":{"name":"dt-master","key":"hmac"}}
-        }"#;
-        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        let dt = spec.delegation_token.expect("delegationToken present");
-        assert!(dt.secret_key_ref.name == "dt-master");
-        assert!(dt.secret_key_ref.key.as_deref() == Some("hmac"));
+    fn spec_carries_delegation_token_secret_key_reference() {
+        for (name, json, expected_key) in [
+            (
+                "default key",
+                r#"{"kafkaVersion":"0.1.1","delegationToken":{"secretKeyRef":{"name":"dt-master"}}}"#,
+                None,
+            ),
+            (
+                "explicit key",
+                r#"{"kafkaVersion":"0.1.1","delegationToken":{"secretKeyRef":{"name":"dt-master","key":"hmac"}}}"#,
+                Some("hmac".to_string()),
+            ),
+        ] {
+            let spec: KafkaSpec = serde_json::from_str(json).unwrap();
+            let dt = spec.delegation_token.expect("delegationToken present");
+            assert_eq!(
+                dt.secret_key_ref,
+                SecretKeyRef {
+                    name: "dt-master".to_string(),
+                    key: expected_key,
+                },
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -1160,12 +1115,15 @@ mod tests {
             "clientsCa": { "generateCertificateAuthority": false },
         }))
         .expect("parse with CAs");
-        assert!(v.cluster_ca.as_ref().unwrap().validity_days == 30);
-        assert!(
-            !v.clients_ca
-                .as_ref()
-                .unwrap()
-                .generate_certificate_authority
+        assert_eq!(
+            (
+                v.cluster_ca.as_ref().unwrap().validity_days,
+                v.clients_ca
+                    .as_ref()
+                    .unwrap()
+                    .generate_certificate_authority,
+            ),
+            (30, false)
         );
     }
 
@@ -1193,7 +1151,12 @@ authorization:
         let Some(Authorization::Simple(simple)) = spec.authorization.clone() else {
             panic!("expected Simple variant, got {:?}", spec.authorization);
         };
-        assert!(simple.super_users == vec!["User:admin".to_string(), "ANONYMOUS".to_string()]);
+        assert!(
+            simple
+                == SimpleAuthorization {
+                    super_users: vec!["User:admin".to_string(), "ANONYMOUS".to_string()],
+                }
+        );
 
         // JSON round-trip pins the camelCase wire shape (`superUsers`,
         // `type: "simple"`).
@@ -1303,22 +1266,21 @@ authorization:
         let json = r#"{"kafkaVersion":"0.1.1","tieredStorage":{"type":"Local"}}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         let ts = spec.tiered_storage.as_ref().expect("tieredStorage parsed");
-        assert!(ts.kind == TieredStorageType::Local);
+        assert!(
+            ts == &TieredStorage {
+                kind: TieredStorageType::Local,
+                s3: None,
+                gcs: None,
+                metadata_manager: None,
+                persistence: None,
+            }
+        );
 
         let serialized = serde_json::to_string(&spec).unwrap();
         assert!(
             serialized.contains("\"tieredStorage\":{\"type\":\"Local\"}"),
             "round-trip JSON: {serialized}"
         );
-    }
-
-    #[test]
-    fn tiered_storage_omitted_when_none() {
-        let json = r#"{"kafkaVersion":"0.1.1"}"#;
-        let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.tiered_storage.is_none());
-        let j = serde_json::to_string(&spec).unwrap();
-        assert!(!j.contains("tieredStorage"), "got: {j}");
     }
 
     #[test]
@@ -1330,11 +1292,9 @@ authorization:
 
     // ── S3 tiered storage CRD + validation ──────────
 
-    /// Full S3 wire shape (camelCase, nested `s3.credentials`) round-trips
-    /// through serde without losing fields.
     #[test]
-    fn tiered_storage_s3_round_trips_through_json() {
-        let ts = TieredStorage {
+    fn tiered_storage_remote_json_round_trip_cases() {
+        let s3 = TieredStorage {
             kind: TieredStorageType::S3,
             s3: Some(S3StorageSpec {
                 bucket: "b".into(),
@@ -1359,107 +1319,7 @@ authorization:
             metadata_manager: None,
             persistence: None,
         };
-        let j = serde_json::to_string(&ts).unwrap();
-        for want in [
-            "\"type\":\"S3\"",
-            "\"s3\"",
-            "\"accessKeyId\"",
-            "\"secretAccessKey\"",
-            "\"allowHttp\":true",
-            "\"multipartThreshold\":1024",
-        ] {
-            assert!(j.contains(want), "case {want:?}; got: {j}");
-        }
-        let back: TieredStorage = serde_json::from_str(&j).unwrap();
-        assert!(back == ts);
-    }
-
-    /// `validate` enforces the four wire-shape rules: kind/s3 pairing,
-    /// non-empty bucket, non-empty region. Local + no s3 is the only
-    /// happy Local case; S3 + populated s3 with non-empty bucket/region
-    /// is the only happy S3 case.
-    #[test]
-    fn tiered_storage_validate_local_ok_only_without_s3() {
-        let ok = TieredStorage {
-            kind: TieredStorageType::Local,
-            s3: None,
-            gcs: None,
-            metadata_manager: None,
-            persistence: None,
-        };
-        assert!(ok.validate().is_ok());
-
-        let bad = TieredStorage {
-            kind: TieredStorageType::Local,
-            s3: Some(S3StorageSpec::default()),
-            gcs: None,
-            metadata_manager: None,
-            persistence: None,
-        };
-        assert!(
-            bad.validate().is_err(),
-            "type=Local with s3 must be rejected",
-        );
-    }
-
-    #[test]
-    fn tiered_storage_validate_s3_requires_s3_and_non_empty_bucket_region() {
-        let missing_s3 = TieredStorage {
-            kind: TieredStorageType::S3,
-            s3: None,
-            gcs: None,
-            metadata_manager: None,
-            persistence: None,
-        };
-        assert!(missing_s3.validate().is_err());
-
-        let missing_bucket = TieredStorage {
-            kind: TieredStorageType::S3,
-            s3: Some(S3StorageSpec {
-                bucket: String::new(),
-                region: "r".into(),
-                ..Default::default()
-            }),
-            gcs: None,
-            metadata_manager: None,
-            persistence: None,
-        };
-        assert!(missing_bucket.validate().is_err());
-
-        let missing_region = TieredStorage {
-            kind: TieredStorageType::S3,
-            s3: Some(S3StorageSpec {
-                bucket: "b".into(),
-                region: "  ".into(),
-                ..Default::default()
-            }),
-            gcs: None,
-            metadata_manager: None,
-            persistence: None,
-        };
-        assert!(missing_region.validate().is_err());
-
-        let ok = TieredStorage {
-            kind: TieredStorageType::S3,
-            s3: Some(S3StorageSpec {
-                bucket: "b".into(),
-                region: "r".into(),
-                ..Default::default()
-            }),
-            gcs: None,
-            metadata_manager: None,
-            persistence: None,
-        };
-        assert!(ok.validate().is_ok());
-    }
-
-    // ── GCS tiered storage CRD + validation ─────────
-
-    /// Full GCS wire shape (camelCase, nested `gcs.credentials`)
-    /// round-trips through serde and serializes with `type=Gcs` + `gcs`.
-    #[test]
-    fn tiered_storage_gcs_round_trips_through_json() {
-        let ts = TieredStorage {
+        let gcs = TieredStorage {
             kind: TieredStorageType::Gcs,
             s3: None,
             gcs: Some(GcsStorageSpec {
@@ -1479,201 +1339,210 @@ authorization:
             metadata_manager: None,
             persistence: None,
         };
-        let j = serde_json::to_string(&ts).unwrap();
-        for want in [
-            "\"type\":\"Gcs\"",
-            "\"gcs\"",
-            "\"serviceAccountKey\"",
-            "\"allowHttp\":true",
-            "\"multipartThreshold\":1024",
+
+        for (name, storage, expected_fragments) in [
+            (
+                "S3",
+                s3,
+                vec![
+                    "\"type\":\"S3\"",
+                    "\"s3\"",
+                    "\"accessKeyId\"",
+                    "\"secretAccessKey\"",
+                    "\"allowHttp\":true",
+                    "\"multipartThreshold\":1024",
+                ],
+            ),
+            (
+                "GCS",
+                gcs,
+                vec![
+                    "\"type\":\"Gcs\"",
+                    "\"gcs\"",
+                    "\"serviceAccountKey\"",
+                    "\"allowHttp\":true",
+                    "\"multipartThreshold\":1024",
+                ],
+            ),
         ] {
-            assert!(j.contains(want), "case {want:?}; got: {j}");
+            let json = serde_json::to_string(&storage).unwrap();
+            for fragment in expected_fragments {
+                assert!(
+                    json.contains(fragment),
+                    "case {name}: missing {fragment:?}; got: {json}"
+                );
+            }
+            let back: TieredStorage = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, storage, "case {name}");
         }
-        let back: TieredStorage = serde_json::from_str(&j).unwrap();
-        assert!(back == ts);
     }
 
     #[test]
-    fn tiered_storage_validate_gcs_requires_gcs_and_non_empty_bucket() {
-        let missing_gcs = TieredStorage {
-            kind: TieredStorageType::Gcs,
-            s3: None,
-            gcs: None,
-            metadata_manager: None,
-            persistence: None,
-        };
-        let err = missing_gcs.validate().unwrap_err();
-        assert!(err.contains("type=Gcs requires `gcs`"), "got: {err}");
+    fn tiered_storage_validation_cases() {
+        fn storage(
+            kind: TieredStorageType,
+            s3: Option<S3StorageSpec>,
+            gcs: Option<GcsStorageSpec>,
+        ) -> TieredStorage {
+            TieredStorage {
+                kind,
+                s3,
+                gcs,
+                metadata_manager: None,
+                persistence: None,
+            }
+        }
 
-        let missing_bucket = TieredStorage {
-            kind: TieredStorageType::Gcs,
-            s3: None,
-            gcs: Some(GcsStorageSpec {
-                bucket: "  ".into(),
+        fn s3(bucket: &str, region: &str) -> S3StorageSpec {
+            S3StorageSpec {
+                bucket: bucket.into(),
+                region: region.into(),
                 ..Default::default()
-            }),
-            metadata_manager: None,
-            persistence: None,
-        };
-        let err = missing_bucket.validate().unwrap_err();
-        assert!(err.contains("gcs.bucket is required"), "got: {err}");
+            }
+        }
 
-        let ok = TieredStorage {
-            kind: TieredStorageType::Gcs,
-            s3: None,
-            gcs: Some(GcsStorageSpec {
-                bucket: "b".into(),
+        fn gcs(bucket: &str) -> GcsStorageSpec {
+            GcsStorageSpec {
+                bucket: bucket.into(),
                 ..Default::default()
-            }),
-            metadata_manager: None,
-            persistence: None,
-        };
-        assert!(ok.validate().is_ok());
+            }
+        }
+
+        for (name, value, expected) in [
+            (
+                "local without remote config",
+                storage(TieredStorageType::Local, None, None),
+                Ok(()),
+            ),
+            (
+                "local rejects S3 config",
+                storage(
+                    TieredStorageType::Local,
+                    Some(S3StorageSpec::default()),
+                    None,
+                ),
+                Err("type=Local must not set `s3`".to_string()),
+            ),
+            (
+                "local rejects GCS config",
+                storage(TieredStorageType::Local, None, Some(gcs("b"))),
+                Err("type=Local must not set `gcs`".to_string()),
+            ),
+            (
+                "S3 requires config",
+                storage(TieredStorageType::S3, None, None),
+                Err("type=S3 requires `s3` (bucket + region at minimum)".to_string()),
+            ),
+            (
+                "S3 requires bucket",
+                storage(TieredStorageType::S3, Some(s3("", "r")), None),
+                Err("s3.bucket is required and must be non-empty".to_string()),
+            ),
+            (
+                "S3 requires region",
+                storage(TieredStorageType::S3, Some(s3("b", "  ")), None),
+                Err("s3.region is required and must be non-empty".to_string()),
+            ),
+            (
+                "S3 valid",
+                storage(TieredStorageType::S3, Some(s3("b", "r")), None),
+                Ok(()),
+            ),
+            (
+                "S3 rejects GCS config",
+                storage(TieredStorageType::S3, Some(s3("b", "r")), Some(gcs("b"))),
+                Err("type=S3 must not set `gcs`".to_string()),
+            ),
+            (
+                "GCS requires config",
+                storage(TieredStorageType::Gcs, None, None),
+                Err("type=Gcs requires `gcs` (bucket at minimum)".to_string()),
+            ),
+            (
+                "GCS requires bucket",
+                storage(TieredStorageType::Gcs, None, Some(gcs("  "))),
+                Err("gcs.bucket is required and must be non-empty".to_string()),
+            ),
+            (
+                "GCS valid",
+                storage(TieredStorageType::Gcs, None, Some(gcs("b"))),
+                Ok(()),
+            ),
+            (
+                "GCS rejects S3 config",
+                storage(
+                    TieredStorageType::Gcs,
+                    Some(S3StorageSpec::default()),
+                    Some(gcs("b")),
+                ),
+                Err("type=Gcs must not set `s3`".to_string()),
+            ),
+        ] {
+            assert_eq!(value.validate(), expected, "case {name}");
+        }
     }
 
     #[test]
-    fn tiered_storage_validate_gcs_must_not_set_s3() {
-        let bad = TieredStorage {
-            kind: TieredStorageType::Gcs,
-            s3: Some(S3StorageSpec::default()),
-            gcs: Some(GcsStorageSpec {
-                bucket: "b".into(),
-                ..Default::default()
-            }),
-            metadata_manager: None,
-            persistence: None,
-        };
-        let err = bad.validate().unwrap_err();
-        assert!(err.contains("type=Gcs must not set `s3`"), "got: {err}");
-    }
-
-    #[test]
-    fn tiered_storage_validate_local_and_s3_must_not_set_gcs() {
-        let local_with_gcs = TieredStorage {
-            kind: TieredStorageType::Local,
-            s3: None,
-            gcs: Some(GcsStorageSpec {
-                bucket: "b".into(),
-                ..Default::default()
-            }),
-            metadata_manager: None,
-            persistence: None,
-        };
-        let err = local_with_gcs.validate().unwrap_err();
-        assert!(err.contains("type=Local must not set `gcs`"), "got: {err}");
-
-        let s3_with_gcs = TieredStorage {
-            kind: TieredStorageType::S3,
-            s3: Some(S3StorageSpec {
-                bucket: "b".into(),
-                region: "r".into(),
-                ..Default::default()
-            }),
-            gcs: Some(GcsStorageSpec {
-                bucket: "b".into(),
-                ..Default::default()
-            }),
-            metadata_manager: None,
-            persistence: None,
-        };
-        let err = s3_with_gcs.validate().unwrap_err();
-        assert!(err.contains("type=S3 must not set `gcs`"), "got: {err}");
-    }
-
-    #[test]
-    fn metadata_manager_inmemory_with_topic_is_rejected() {
-        let ts = TieredStorage {
-            kind: TieredStorageType::Local,
-            s3: None,
-            gcs: None,
-            metadata_manager: Some(MetadataManagerSpec {
-                kind: MetadataManagerType::InMemory,
-                topic: Some(TopicMetadataManagerSpec {
+    fn metadata_manager_validation_cases() {
+        for (name, kind, topic, expected_error) in [
+            (
+                "in-memory manager forbids topic config",
+                MetadataManagerType::InMemory,
+                Some(TopicMetadataManagerSpec {
                     bootstrap: "127.0.0.1:9092".into(),
                     num_partitions: None,
                     replication: None,
                 }),
-            }),
-            persistence: None,
-        };
-        let err = ts.validate().unwrap_err();
-        assert!(err.contains("must not set `topic`"), "got: {err}");
-    }
-
-    #[test]
-    fn metadata_manager_topic_without_topic_is_valid() {
-        // A bare type=Topic with no topic sub-block is valid; the broker
-        // fills default bootstrap/partitions from its own config.
-        let ts = TieredStorage {
-            kind: TieredStorageType::Local,
-            s3: None,
-            gcs: None,
-            metadata_manager: Some(MetadataManagerSpec {
-                kind: MetadataManagerType::Topic,
-                topic: None,
-            }),
-            persistence: None,
-        };
-        assert!(ts.validate().is_ok());
-    }
-
-    #[test]
-    fn metadata_manager_topic_requires_non_empty_bootstrap() {
-        let ts = TieredStorage {
-            kind: TieredStorageType::Local,
-            s3: None,
-            gcs: None,
-            metadata_manager: Some(MetadataManagerSpec {
-                kind: MetadataManagerType::Topic,
-                topic: Some(TopicMetadataManagerSpec {
+                Some("must not set `topic`"),
+            ),
+            ("bare topic manager", MetadataManagerType::Topic, None, None),
+            (
+                "blank bootstrap",
+                MetadataManagerType::Topic,
+                Some(TopicMetadataManagerSpec {
                     bootstrap: "  ".into(),
                     num_partitions: None,
                     replication: None,
                 }),
-            }),
-            persistence: None,
-        };
-        let err = ts.validate().unwrap_err();
-        assert!(err.contains("bootstrap is required"), "got: {err}");
-    }
-
-    #[test]
-    fn metadata_manager_topic_rejects_non_positive_partition_count() {
-        let ts = TieredStorage {
-            kind: TieredStorageType::Local,
-            s3: None,
-            gcs: None,
-            metadata_manager: Some(MetadataManagerSpec {
-                kind: MetadataManagerType::Topic,
-                topic: Some(TopicMetadataManagerSpec {
+                Some("bootstrap is required"),
+            ),
+            (
+                "non-positive partitions",
+                MetadataManagerType::Topic,
+                Some(TopicMetadataManagerSpec {
                     bootstrap: "127.0.0.1:9094".into(),
                     num_partitions: Some(0),
                     replication: None,
                 }),
-            }),
-            persistence: None,
-        };
-        let err = ts.validate().unwrap_err();
-        assert!(err.contains("numPartitions"), "got: {err}");
-    }
-
-    #[test]
-    fn metadata_manager_topic_with_defaults_validates() {
-        let ts = TieredStorage {
-            kind: TieredStorageType::Local,
-            s3: None,
-            gcs: None,
-            metadata_manager: Some(MetadataManagerSpec {
-                kind: MetadataManagerType::Topic,
-                topic: Some(TopicMetadataManagerSpec {
+                Some("numPartitions"),
+            ),
+            (
+                "topic manager defaults",
+                MetadataManagerType::Topic,
+                Some(TopicMetadataManagerSpec {
                     bootstrap: "127.0.0.1:9094".into(),
                     num_partitions: None,
                     replication: None,
                 }),
-            }),
-            persistence: None,
-        };
-        assert!(ts.validate().is_ok());
+                None,
+            ),
+        ] {
+            let result = TieredStorage {
+                kind: TieredStorageType::Local,
+                s3: None,
+                gcs: None,
+                metadata_manager: Some(MetadataManagerSpec { kind, topic }),
+                persistence: None,
+            }
+            .validate();
+            match expected_error {
+                Some(fragment) => assert!(
+                    result.is_err_and(|error| error.contains(fragment)),
+                    "case {name}"
+                ),
+                None => assert_eq!(result, Ok(()), "case {name}"),
+            }
+        }
     }
 
     #[test]
@@ -1753,83 +1622,82 @@ authorization:
     // ── tracing validation ────────────────────────────────
 
     #[test]
-    fn tracing_otlp_without_otlp_block_is_rejected() {
-        let t = Tracing {
-            kind: TracingType::Otlp,
-            otlp: None,
-        };
-        let err = t.validate().unwrap_err();
-        assert!(err.contains("type=Otlp requires `otlp`"), "got: {err}");
-    }
-
-    #[test]
-    fn tracing_otlp_requires_non_empty_endpoint() {
-        let t = Tracing {
-            kind: TracingType::Otlp,
-            otlp: Some(OtlpTracing {
-                endpoint: "   ".into(),
-                protocol: None,
-                sample_ratio: None,
-                service_name: None,
-                timeout_secs: None,
-            }),
-        };
-        let err = t.validate().unwrap_err();
-        assert!(err.contains("otlp.endpoint is required"), "got: {err}");
-    }
-
-    #[test]
-    fn tracing_otlp_rejects_out_of_range_sample_ratio() {
-        let t = Tracing {
-            kind: TracingType::Otlp,
-            otlp: Some(OtlpTracing {
-                endpoint: "http://otel:4317".into(),
-                protocol: None,
-                sample_ratio: Some(1.5),
-                service_name: None,
-                timeout_secs: None,
-            }),
-        };
-        let err = t.validate().unwrap_err();
-        assert!(err.contains("otlp.sampleRatio"), "got: {err}");
-    }
-
-    #[test]
-    fn tracing_otlp_rejects_zero_timeout() {
-        let t = Tracing {
-            kind: TracingType::Otlp,
-            otlp: Some(OtlpTracing {
-                endpoint: "http://otel:4317".into(),
-                protocol: None,
-                sample_ratio: None,
-                service_name: None,
-                timeout_secs: Some(0),
-            }),
-        };
-        let err = t.validate().unwrap_err();
-        assert!(err.contains("otlp.timeoutSecs"), "got: {err}");
-    }
-
-    #[test]
-    fn tracing_otlp_with_full_spec_validates() {
-        let t = Tracing {
-            kind: TracingType::Otlp,
-            otlp: Some(OtlpTracing {
-                endpoint: "http://otel-collector.observability:4317".into(),
-                protocol: Some(OtlpProtocol::Grpc),
-                sample_ratio: Some(0.1),
-                service_name: Some("prod-cluster".into()),
-                timeout_secs: Some(5),
-            }),
-        };
-        assert!(t.validate().is_ok());
+    fn tracing_otlp_validation_cases() {
+        for (name, otlp, expected_error) in [
+            (
+                "missing OTLP block",
+                None,
+                Some("type=Otlp requires `otlp`"),
+            ),
+            (
+                "blank endpoint",
+                Some(OtlpTracing {
+                    endpoint: "   ".into(),
+                    protocol: None,
+                    sample_ratio: None,
+                    service_name: None,
+                    timeout_secs: None,
+                }),
+                Some("otlp.endpoint is required"),
+            ),
+            (
+                "sample ratio out of range",
+                Some(OtlpTracing {
+                    endpoint: "http://otel:4317".into(),
+                    protocol: None,
+                    sample_ratio: Some(1.5),
+                    service_name: None,
+                    timeout_secs: None,
+                }),
+                Some("otlp.sampleRatio"),
+            ),
+            (
+                "zero timeout",
+                Some(OtlpTracing {
+                    endpoint: "http://otel:4317".into(),
+                    protocol: None,
+                    sample_ratio: None,
+                    service_name: None,
+                    timeout_secs: Some(0),
+                }),
+                Some("otlp.timeoutSecs"),
+            ),
+            (
+                "full valid specification",
+                Some(OtlpTracing {
+                    endpoint: "http://otel-collector.observability:4317".into(),
+                    protocol: Some(OtlpProtocol::Grpc),
+                    sample_ratio: Some(0.1),
+                    service_name: Some("prod-cluster".into()),
+                    timeout_secs: Some(5),
+                }),
+                None,
+            ),
+        ] {
+            let result = Tracing {
+                kind: TracingType::Otlp,
+                otlp,
+            }
+            .validate();
+            match expected_error {
+                Some(fragment) => assert!(
+                    result.is_err_and(|error| error.contains(fragment)),
+                    "case {name}"
+                ),
+                None => assert_eq!(result, Ok(()), "case {name}"),
+            }
+        }
     }
 
     #[test]
     fn otlp_protocol_env_value_matches_broker_parse() {
         // The broker's `OtlpProtocol::parse` accepts "grpc" and
         // "http/protobuf" (spec values). Lock both ends.
-        assert!(OtlpProtocol::Grpc.as_env_value() == "grpc");
-        assert!(OtlpProtocol::HttpProtobuf.as_env_value() == "http/protobuf");
+        for (name, protocol, expected) in [
+            ("gRPC", OtlpProtocol::Grpc, "grpc"),
+            ("HTTP protobuf", OtlpProtocol::HttpProtobuf, "http/protobuf"),
+        ] {
+            assert!(protocol.as_env_value() == expected, "case {name}");
+        }
     }
 }

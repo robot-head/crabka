@@ -1022,7 +1022,7 @@ pub fn render_bootstrap_route(
 
 #[cfg(test)]
 mod service_rendering_tests {
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
     use crate::crd::{BootstrapConfig, BrokerOverride, KafkaSpec, ListenerConfiguration};
@@ -1075,13 +1075,25 @@ mod service_rendering_tests {
             network_policy_peers: None,
         };
         let svc = render_broker_service(&k, &listener, 0, "demo-pool-0").unwrap();
-        assert!(svc.metadata.name.as_deref() == Some("demo-external-0"));
         let spec = svc.spec.as_ref().unwrap();
-        assert!(spec.type_.as_deref() == Some("NodePort"));
         let sel = spec.selector.as_ref().unwrap();
-        check!(sel.get("statefulset.kubernetes.io/pod-name") == Some(&"demo-pool-0".to_string()));
-        check!(spec.ports.as_ref().unwrap()[0].port == 9094);
-        check!(spec.ports.as_ref().unwrap()[0].node_port == Some(32100));
+        assert_eq!(
+            (
+                svc.metadata.name.as_deref(),
+                spec.type_.as_deref(),
+                sel.get("statefulset.kubernetes.io/pod-name")
+                    .map(String::as_str),
+                spec.ports.as_ref().unwrap()[0].port,
+                spec.ports.as_ref().unwrap()[0].node_port,
+            ),
+            (
+                Some("demo-external-0"),
+                Some("NodePort"),
+                Some("demo-pool-0"),
+                9094,
+                Some(32100)
+            )
+        );
     }
 
     #[test]
@@ -1106,8 +1118,10 @@ mod service_rendering_tests {
         };
         let svc = render_broker_service(&k, &listener, 0, "demo-pool-0").unwrap();
         let spec = svc.spec.as_ref().unwrap();
-        assert!(spec.type_.as_deref() == Some("LoadBalancer"));
-        assert!(spec.load_balancer_ip.as_deref() == Some("10.0.0.5"));
+        assert_eq!(
+            (spec.type_.as_deref(), spec.load_balancer_ip.as_deref()),
+            (Some("LoadBalancer"), Some("10.0.0.5"))
+        );
     }
 
     #[test]
@@ -1130,12 +1144,22 @@ mod service_rendering_tests {
             network_policy_peers: None,
         };
         let svc = render_bootstrap_service(&k, &listener).unwrap();
-        assert!(svc.metadata.name.as_deref() == Some("demo-external-bootstrap"));
         let spec = svc.spec.as_ref().unwrap();
         let sel = spec.selector.as_ref().unwrap();
-        check!(sel.get("app.kubernetes.io/instance") == Some(&"demo".to_string()));
-        check!(sel.get("statefulset.kubernetes.io/pod-name").is_none());
-        check!(spec.ports.as_ref().unwrap()[0].node_port == Some(32099));
+        assert_eq!(
+            (
+                svc.metadata.name.as_deref(),
+                sel.get("app.kubernetes.io/instance").map(String::as_str),
+                sel.get("statefulset.kubernetes.io/pod-name"),
+                spec.ports.as_ref().unwrap()[0].node_port,
+            ),
+            (
+                Some("demo-external-bootstrap"),
+                Some("demo"),
+                None,
+                Some(32099)
+            )
+        );
     }
 
     fn ingress_listener(type_: ListenerType) -> Listener {
@@ -1167,13 +1191,16 @@ mod service_rendering_tests {
         let l = ingress_listener(ListenerType::Ingress);
         let svc = render_broker_service(&k, &l, 0, "demo-pool-0").unwrap();
         let spec = svc.spec.as_ref().unwrap();
-        assert!(spec.type_.as_deref() == Some("ClusterIP"));
-        assert!(
-            spec.selector
-                .as_ref()
-                .unwrap()
-                .get("statefulset.kubernetes.io/pod-name")
-                == Some(&"demo-pool-0".to_string())
+        assert_eq!(
+            (
+                spec.type_.as_deref(),
+                spec.selector
+                    .as_ref()
+                    .unwrap()
+                    .get("statefulset.kubernetes.io/pod-name")
+                    .map(String::as_str),
+            ),
+            (Some("ClusterIP"), Some("demo-pool-0"))
         );
     }
 
@@ -1190,22 +1217,35 @@ mod service_rendering_tests {
         let k = kafka("demo");
         let l = ingress_listener(ListenerType::Ingress);
         let ing = render_broker_ingress(&k, &l, 0, "broker-0.kafka.example.com").unwrap();
-        assert!(ing.metadata.name.as_deref() == Some("demo-ext-0"));
         let ann = ing.metadata.annotations.as_ref().unwrap();
-        assert!(
-            ann.get("nginx.ingress.kubernetes.io/ssl-passthrough") == Some(&"true".to_string())
-        );
         let spec = ing.spec.as_ref().unwrap();
-        assert!(spec.ingress_class_name.as_deref() == Some("nginx"));
         let rule = &spec.rules.as_ref().unwrap()[0];
-        assert!(rule.host.as_deref() == Some("broker-0.kafka.example.com"));
         let path = &rule.http.as_ref().unwrap().paths[0];
         let backend = path.backend.service.as_ref().unwrap();
-        assert!(backend.name == "demo-ext-0");
-        assert!(backend.port.as_ref().unwrap().number == Some(9094));
         let tls = &spec.tls.as_ref().unwrap()[0];
-        assert!(tls.hosts.as_ref().unwrap()[0] == "broker-0.kafka.example.com".to_string());
-        assert!(tls.secret_name.is_none(), "passthrough has no secretName");
+        assert_eq!(
+            (
+                ing.metadata.name.as_deref(),
+                ann.get("nginx.ingress.kubernetes.io/ssl-passthrough")
+                    .map(String::as_str),
+                spec.ingress_class_name.as_deref(),
+                rule.host.as_deref(),
+                backend.name.as_str(),
+                backend.port.as_ref().unwrap().number,
+                tls.hosts.as_deref(),
+                tls.secret_name.as_deref(),
+            ),
+            (
+                Some("demo-ext-0"),
+                Some("true"),
+                Some("nginx"),
+                Some("broker-0.kafka.example.com"),
+                "demo-ext-0",
+                Some(9094),
+                Some(["broker-0.kafka.example.com".to_string()].as_slice()),
+                None,
+            )
+        );
     }
 
     #[test]
@@ -1213,9 +1253,14 @@ mod service_rendering_tests {
         let k = kafka("demo");
         let l = ingress_listener(ListenerType::Ingress);
         let ing = render_bootstrap_ingress(&k, &l, "bootstrap.kafka.example.com").unwrap();
-        assert!(ing.metadata.name.as_deref() == Some("demo-ext-bootstrap"));
         let rule = &ing.spec.as_ref().unwrap().rules.as_ref().unwrap()[0];
-        assert!(rule.host.as_deref() == Some("bootstrap.kafka.example.com"));
+        assert_eq!(
+            (ing.metadata.name.as_deref(), rule.host.as_deref()),
+            (
+                Some("demo-ext-bootstrap"),
+                Some("bootstrap.kafka.example.com")
+            )
+        );
     }
 
     #[test]
@@ -1290,11 +1335,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_listeners_is_valid() {
-        assert!(validate_listeners(&[], None).is_ok());
-    }
-
-    #[test]
     fn gssapi_keytab_path_is_dir_plus_keytab() {
         assert!(
             GSSAPI_KEYTAB_PATH == format!("{GSSAPI_KEYTAB_DIR}/keytab"),
@@ -1303,62 +1343,7 @@ mod tests {
     }
 
     #[test]
-    fn one_internal_is_valid() {
-        let ls = [internal("PLAIN", 9092)];
-        assert!(validate_listeners(&ls, None).is_ok());
-    }
-
-    #[test]
-    fn duplicate_name_is_rejected() {
-        let ls = [internal("PLAIN", 9092), nodeport("PLAIN", 9094)];
-        let err = validate_listeners(&ls, None).unwrap_err();
-        assert!(matches!(err, ValidationError::DuplicateListenerName(_)));
-        assert!(err.reason() == "DuplicateListenerName");
-    }
-
-    #[test]
-    fn duplicate_port_is_rejected() {
-        let ls = [internal("A", 9092), nodeport("B", 9092)];
-        let err = validate_listeners(&ls, None).unwrap_err();
-        assert!(matches!(err, ValidationError::DuplicateListenerPort(9092)));
-    }
-
-    #[test]
-    fn ingress_without_tls_is_rejected() {
-        // An ingress listener needs an internal listener too (NoInternalListener
-        // would otherwise fire first), so validate it in isolation by giving it tls.
-        let mut l = internal("ing", 9094);
-        l.type_ = ListenerType::Ingress;
-        l.tls = false;
-        assert!(
-            validate_listeners(&[l], None).unwrap_err().reason() == "ListenerIngressRequiresTls"
-        );
-    }
-
-    #[test]
-    fn route_without_tls_is_rejected() {
-        let mut l = internal("rt", 9094);
-        l.type_ = ListenerType::Route;
-        l.tls = false;
-        assert!(
-            validate_listeners(&[l], None).unwrap_err().reason() == "ListenerIngressRequiresTls"
-        );
-    }
-
-    #[test]
-    fn ingress_without_bootstrap_host_is_rejected() {
-        let mut l = internal("ing", 9094);
-        l.type_ = ListenerType::Ingress;
-        l.tls = true;
-        assert!(
-            validate_listeners(&[l], None).unwrap_err().reason()
-                == "ListenerIngressBootstrapHostMissing"
-        );
-    }
-
-    #[test]
-    fn ingress_with_tls_and_bootstrap_host_and_internal_is_valid() {
-        let internal_l = internal("PLAIN", 9092);
+    fn validate_listener_success_cases() {
         let mut ing = internal("ext", 9094);
         ing.type_ = ListenerType::Ingress;
         ing.tls = true;
@@ -1370,13 +1355,55 @@ mod tests {
             brokers: vec![],
             ingress_class: Some("nginx".into()),
         });
-        validate_listeners(&[internal_l, ing], None).unwrap();
+        for (name, listeners) in [
+            ("empty", vec![]),
+            ("one internal", vec![internal("PLAIN", 9092)]),
+            ("valid ingress", vec![internal("PLAIN", 9092), ing]),
+            (
+                "SCRAM without TLS",
+                vec![Listener {
+                    authentication: Some(crate::crd::ListenerAuthentication::ScramSha512),
+                    ..internal("scram", 9094)
+                }],
+            ),
+            (
+                "TLS without authentication",
+                vec![Listener {
+                    tls: true,
+                    ..internal("tls", 9093)
+                }],
+            ),
+            (
+                "mTLS with TLS",
+                vec![Listener {
+                    tls: true,
+                    authentication: Some(crate::crd::ListenerAuthentication::Tls),
+                    ..internal("mtls", 9095)
+                }],
+            ),
+            (
+                "SCRAM with TLS",
+                vec![Listener {
+                    tls: true,
+                    authentication: Some(crate::crd::ListenerAuthentication::ScramSha256),
+                    ..internal("scram", 9094)
+                }],
+            ),
+        ] {
+            assert_eq!(validate_listeners(&listeners, None), Ok(()), "case {name}");
+        }
     }
 
     #[test]
-    fn duplicate_broker_override_is_rejected() {
-        let mut l = nodeport("ext", 9094);
-        l.configuration = Some(ListenerConfiguration {
+    fn validate_listener_error_cases() {
+        let mut ingress_without_tls = internal("external", 9094);
+        ingress_without_tls.type_ = ListenerType::Ingress;
+        let mut route_without_tls = ingress_without_tls.clone();
+        route_without_tls.type_ = ListenerType::Route;
+        let mut ingress_without_bootstrap_host = ingress_without_tls.clone();
+        ingress_without_bootstrap_host.tls = true;
+        let mut duplicate_broker = nodeport("ext", 9094);
+        duplicate_broker.configuration = Some(ListenerConfiguration {
             bootstrap: None,
             brokers: vec![
                 BrokerOverride {
@@ -1390,53 +1417,7 @@ mod tests {
             ],
             ingress_class: None,
         });
-        let err = validate_listeners(&[l], None).unwrap_err();
-        assert!(err.reason() == "DuplicateBrokerOverride");
-    }
-
-    #[test]
-    fn missing_internal_when_non_empty_is_rejected() {
-        let ls = [nodeport("ext", 9094)];
-        assert!(validate_listeners(&ls, None).unwrap_err().reason() == "NoInternalListener");
-    }
-
-    #[test]
-    fn inter_broker_listener_must_match_a_listener() {
-        let ls = [internal("PLAIN", 9092)];
-        let err = validate_listeners(&ls, Some("MISSING")).unwrap_err();
-        assert!(err.reason() == "InterBrokerListenerMissing");
-    }
-
-    #[test]
-    fn inter_broker_listener_must_be_internal() {
-        let ls = [internal("PLAIN", 9092), nodeport("ext", 9094)];
-        let err = validate_listeners(&ls, Some("ext")).unwrap_err();
-        assert!(err.reason() == "InterBrokerListenerNotInternal");
-    }
-
-    #[test]
-    fn effective_name_explicit_wins() {
-        assert!(effective_inter_broker_listener_name(&[], Some("FOO")) == "FOO");
-    }
-
-    #[test]
-    fn effective_name_picks_first_internal() {
-        let ls = [
-            nodeport("ext", 9094),
-            internal("ib", 9092),
-            internal("other", 9095),
-        ];
-        assert!(effective_inter_broker_listener_name(&ls, None) == "ib");
-    }
-
-    #[test]
-    fn effective_name_empty_defaults_to_plain() {
-        assert!(effective_inter_broker_listener_name(&[], None) == "PLAIN");
-    }
-
-    #[test]
-    fn validate_listeners_rejects_mtls_without_transport_tls() {
-        let listeners = vec![Listener {
+        let mtls_without_tls = Listener {
             name: "bad".into(),
             port: 9094,
             type_: ListenerType::Internal,
@@ -1444,67 +1425,111 @@ mod tests {
             authentication: Some(crate::crd::ListenerAuthentication::Tls),
             configuration: None,
             network_policy_peers: None,
-        }];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(
-            matches!(err, ValidationError::ListenerMtlsRequiresTransportTls(ref n) if n == "bad")
-        );
+        };
+
+        for (name, listeners, selected, expected, expected_reason) in [
+            (
+                "duplicate name",
+                vec![internal("PLAIN", 9092), nodeport("PLAIN", 9094)],
+                None,
+                ValidationError::DuplicateListenerName("PLAIN".into()),
+                "DuplicateListenerName",
+            ),
+            (
+                "duplicate port",
+                vec![internal("A", 9092), nodeport("B", 9092)],
+                None,
+                ValidationError::DuplicateListenerPort(9092),
+                "DuplicateListenerPort",
+            ),
+            (
+                "ingress without TLS",
+                vec![ingress_without_tls],
+                None,
+                ValidationError::ListenerIngressRequiresTls("external".into()),
+                "ListenerIngressRequiresTls",
+            ),
+            (
+                "route without TLS",
+                vec![route_without_tls],
+                None,
+                ValidationError::ListenerIngressRequiresTls("external".into()),
+                "ListenerIngressRequiresTls",
+            ),
+            (
+                "ingress without bootstrap host",
+                vec![ingress_without_bootstrap_host],
+                None,
+                ValidationError::ListenerIngressBootstrapHostMissing("external".into()),
+                "ListenerIngressBootstrapHostMissing",
+            ),
+            (
+                "duplicate broker override",
+                vec![duplicate_broker],
+                None,
+                ValidationError::DuplicateBrokerOverride {
+                    listener: "ext".into(),
+                    broker: 0,
+                },
+                "DuplicateBrokerOverride",
+            ),
+            (
+                "no internal listener",
+                vec![nodeport("ext", 9094)],
+                None,
+                ValidationError::NoInternalListener,
+                "NoInternalListener",
+            ),
+            (
+                "missing listener",
+                vec![internal("PLAIN", 9092)],
+                Some("MISSING"),
+                ValidationError::InterBrokerListenerMissing("MISSING".into()),
+                "InterBrokerListenerMissing",
+            ),
+            (
+                "external listener",
+                vec![internal("PLAIN", 9092), nodeport("ext", 9094)],
+                Some("ext"),
+                ValidationError::InterBrokerListenerNotInternal("ext".into()),
+                "InterBrokerListenerNotInternal",
+            ),
+            (
+                "mTLS without transport TLS",
+                vec![mtls_without_tls],
+                None,
+                ValidationError::ListenerMtlsRequiresTransportTls("bad".into()),
+                "ListenerMtlsRequiresTransportTls",
+            ),
+        ] {
+            let actual = validate_listeners(&listeners, selected).unwrap_err();
+            let reason = actual.reason();
+            assert_eq!((actual, reason), (expected, expected_reason), "case {name}");
+        }
     }
 
     #[test]
-    fn validate_listeners_accepts_scram_without_tls() {
-        let listeners = vec![Listener {
-            name: "scram".into(),
-            port: 9094,
-            type_: ListenerType::Internal,
-            tls: false,
-            authentication: Some(crate::crd::ListenerAuthentication::ScramSha512),
-            configuration: None,
-            network_policy_peers: None,
-        }];
-        validate_listeners(&listeners, None).unwrap();
-    }
-
-    #[test]
-    fn validate_listeners_accepts_tls_without_auth() {
-        let listeners = vec![Listener {
-            name: "tls".into(),
-            port: 9093,
-            type_: ListenerType::Internal,
-            tls: true,
-            authentication: None,
-            configuration: None,
-            network_policy_peers: None,
-        }];
-        validate_listeners(&listeners, None).unwrap();
-    }
-
-    #[test]
-    fn validate_listeners_accepts_mtls_with_tls() {
-        let listeners = vec![Listener {
-            name: "mtls".into(),
-            port: 9095,
-            type_: ListenerType::Internal,
-            tls: true,
-            authentication: Some(crate::crd::ListenerAuthentication::Tls),
-            configuration: None,
-            network_policy_peers: None,
-        }];
-        validate_listeners(&listeners, None).unwrap();
-    }
-
-    #[test]
-    fn validate_listeners_accepts_scram_with_tls() {
-        let listeners = vec![Listener {
-            name: "scram".into(),
-            port: 9094,
-            type_: ListenerType::Internal,
-            tls: true,
-            authentication: Some(crate::crd::ListenerAuthentication::ScramSha256),
-            configuration: None,
-            network_policy_peers: None,
-        }];
-        validate_listeners(&listeners, None).unwrap();
+    fn effective_inter_broker_name_cases() {
+        for (name, listeners, explicit, expected) in [
+            ("explicit name", vec![], Some("FOO"), "FOO"),
+            (
+                "first internal listener",
+                vec![
+                    nodeport("ext", 9094),
+                    internal("ib", 9092),
+                    internal("other", 9095),
+                ],
+                None,
+                "ib",
+            ),
+            ("empty defaults", vec![], None, "PLAIN"),
+        ] {
+            assert_eq!(
+                effective_inter_broker_listener_name(&listeners, explicit),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -1558,95 +1583,95 @@ mod tests {
     }
 
     #[test]
-    fn validate_listeners_rejects_oauth_without_tls() {
-        let listeners = vec![oauth_listener("oauth", 9095, false, oauth_cfg_minimal())];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthRequiresTransportTls");
-        assert!(matches!(
-            err,
-            ValidationError::ListenerOauthRequiresTransportTls(ref n) if n == "oauth"
-        ));
+    fn validate_single_oauth_listener_success_cases() {
+        let mut http_jwks = oauth_cfg_minimal();
+        http_jwks.jwks_endpoint_uri = Some("http://issuer.example.com/jwks".into());
+        let mut literal_issuer = oauth_cfg_minimal();
+        literal_issuer.valid_issuer_uri = "kafka-cluster".into();
+
+        for (name, config) in [
+            ("HTTP JWKS URI", http_jwks),
+            ("literal non-URI issuer", literal_issuer),
+        ] {
+            let listeners = vec![oauth_listener("oauth", 9095, true, config)];
+            assert_eq!(validate_listeners(&listeners, None), Ok(()), "case {name}");
+        }
     }
 
     #[test]
-    fn validate_listeners_accepts_oauth_with_http_jwks_uri() {
-        let mut cfg = oauth_cfg_minimal();
-        cfg.jwks_endpoint_uri = Some("http://issuer.example.com/jwks".into());
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        validate_listeners(&listeners, None).unwrap();
+    fn validate_single_oauth_listener_error_cases() {
+        let mut ftp_jwks = oauth_cfg_minimal();
+        ftp_jwks.jwks_endpoint_uri = Some("ftp://issuer.example.com/jwks".into());
+        let mut empty_issuer = oauth_cfg_minimal();
+        empty_issuer.valid_issuer_uri = String::new();
+        let mut short_refresh = oauth_cfg_minimal();
+        short_refresh.jwks_refresh_seconds = Some(29);
+
+        for (name, tls, config, expected_error, expected_reason) in [
+            (
+                "transport TLS required",
+                false,
+                oauth_cfg_minimal(),
+                ValidationError::ListenerOauthRequiresTransportTls("oauth".to_string()),
+                "ListenerOauthRequiresTransportTls",
+            ),
+            (
+                "FTP JWKS URI",
+                true,
+                ftp_jwks,
+                ValidationError::ListenerOauthJwksUriBadScheme("oauth".to_string()),
+                "ListenerOauthInvalidUri",
+            ),
+            (
+                "empty issuer",
+                true,
+                empty_issuer,
+                ValidationError::ListenerOauthIssuerUriEmpty("oauth".to_string()),
+                "ListenerOauthInvalidUri",
+            ),
+            (
+                "short JWKS refresh",
+                true,
+                short_refresh,
+                ValidationError::ListenerOauthJwksRefreshTooSmall {
+                    listener: "oauth".to_string(),
+                    got: 29,
+                },
+                "ListenerOauthInvalidRefresh",
+            ),
+        ] {
+            let listeners = vec![oauth_listener("oauth", 9095, tls, config)];
+            let actual_error = validate_listeners(&listeners, None).unwrap_err();
+            let actual_reason = actual_error.reason();
+            assert_eq!(
+                (actual_error, actual_reason),
+                (expected_error, expected_reason),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
-    fn validate_listeners_rejects_oauth_with_ftp_jwks_uri() {
-        let mut cfg = oauth_cfg_minimal();
-        cfg.jwks_endpoint_uri = Some("ftp://issuer.example.com/jwks".into());
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthInvalidUri");
-        assert!(matches!(
-            err,
-            ValidationError::ListenerOauthJwksUriBadScheme(ref n) if n == "oauth"
-        ));
-    }
+    fn validate_two_oauth_listener_success_cases() {
+        let identical = oauth_cfg_minimal();
+        let bearer_enabled = oauth_cfg_minimal();
+        let mut bearer_disabled = oauth_cfg_minimal();
+        bearer_disabled.enable_oauth_bearer = false;
 
-    #[test]
-    fn validate_listeners_rejects_oauth_with_empty_issuer_uri() {
-        let mut cfg = oauth_cfg_minimal();
-        cfg.valid_issuer_uri = String::new();
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthInvalidUri");
-        assert!(matches!(
-            err,
-            ValidationError::ListenerOauthIssuerUriEmpty(ref n) if n == "oauth"
-        ));
-    }
-
-    #[test]
-    fn validate_listeners_accepts_oauth_with_non_uri_issuer_string() {
-        // The broker compares the `iss` claim as a literal string. The CRD does
-        // not require `validIssuerUri` to parse as a URL — Keycloak deployments
-        // commonly use e.g. `kafka-cluster` as the issuer.
-        let mut cfg = oauth_cfg_minimal();
-        cfg.valid_issuer_uri = "kafka-cluster".into();
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        validate_listeners(&listeners, None).unwrap();
-    }
-
-    #[test]
-    fn validate_listeners_rejects_oauth_with_short_jwks_refresh() {
-        let mut cfg = oauth_cfg_minimal();
-        cfg.jwks_refresh_seconds = Some(29);
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthInvalidRefresh");
-        assert!(matches!(
-            err,
-            ValidationError::ListenerOauthJwksRefreshTooSmall { ref listener, got: 29 } if listener == "oauth"
-        ));
-    }
-
-    #[test]
-    fn validate_listeners_accepts_two_oauth_listeners_with_identical_config() {
-        let cfg = oauth_cfg_minimal();
-        let listeners = vec![
-            oauth_listener("oauth-a", 9095, true, cfg.clone()),
-            oauth_listener("oauth-b", 9096, true, cfg),
-        ];
-        validate_listeners(&listeners, None).unwrap();
-    }
-
-    #[test]
-    fn validate_listeners_accepts_two_oauth_listeners_differing_only_in_enable_oauth_bearer() {
-        let mut a = oauth_cfg_minimal();
-        a.enable_oauth_bearer = true;
-        let mut b = oauth_cfg_minimal();
-        b.enable_oauth_bearer = false;
-        let listeners = vec![
-            oauth_listener("oauth-a", 9095, true, a),
-            oauth_listener("oauth-b", 9096, true, b),
-        ];
-        validate_listeners(&listeners, None).unwrap();
+        for (name, first, second) in [
+            ("identical configs", identical.clone(), identical),
+            (
+                "different bearer enablement",
+                bearer_enabled,
+                bearer_disabled,
+            ),
+        ] {
+            let listeners = vec![
+                oauth_listener("oauth-a", 9095, true, first),
+                oauth_listener("oauth-b", 9096, true, second),
+            ];
+            assert_eq!(validate_listeners(&listeners, None), Ok(()), "case {name}");
+        }
     }
 
     #[test]
@@ -1844,9 +1869,10 @@ mod tests {
             let err = validate_listeners(&listeners, None).expect_err(&format!(
                 "expected ConflictingOAuthListenerConfig when only `{field}` differs"
             ));
-            assert!(
-                matches!(err, ValidationError::ConflictingOAuthListenerConfig),
-                "field {field}: got {err:?}"
+            assert_eq!(
+                err,
+                ValidationError::ConflictingOAuthListenerConfig,
+                "field {field}"
             );
         }
     }
@@ -1935,9 +1961,10 @@ mod tests {
             let err = validate_listeners(&listeners, None).expect_err(&format!(
                 "expected ConflictingOAuthListenerConfig when only `{field}` differs"
             ));
-            assert!(
-                matches!(err, ValidationError::ConflictingOAuthListenerConfig),
-                "field {field}: got {err:?}"
+            assert_eq!(
+                err,
+                ValidationError::ConflictingOAuthListenerConfig,
+                "field {field}"
             );
         }
     }
@@ -1979,135 +2006,81 @@ mod tests {
     }
 
     #[test]
-    fn validate_listeners_rejects_oauth_jwt_mode_without_jwks_endpoint_uri() {
+    fn validate_listeners_rejects_invalid_oauth_mode_cases() {
         let mut cfg = oauth_cfg_minimal();
         cfg.jwks_endpoint_uri = None;
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthAccessTokenIsJwtInvalid");
-        match err {
-            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
-                assert!(
-                    msg.contains("accessTokenIsJwt=true requires jwksEndpointUri"),
-                    "msg: {msg}"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
+        let mut no_endpoint = oauth_introspection_cfg_minimal();
+        no_endpoint.introspection_endpoint_uri = None;
+        let mut no_client_id = oauth_introspection_cfg_minimal();
+        no_client_id.client_id = None;
+        let mut no_client_secret = oauth_introspection_cfg_minimal();
+        no_client_secret.client_secret = None;
+        let mut jwt_with_introspection = oauth_cfg_minimal();
+        jwt_with_introspection.introspection_endpoint_uri =
+            Some("https://idp.example/introspect".into());
+        let mut introspection_with_jwks = oauth_introspection_cfg_minimal();
+        introspection_with_jwks.jwks_endpoint_uri = Some("https://issuer.example.com/jwks".into());
+        let mut jwt_with_userinfo = oauth_cfg_minimal();
+        jwt_with_userinfo.user_info_endpoint_uri = Some("https://idp.example/userinfo".into());
 
-    #[test]
-    fn validate_listeners_rejects_oauth_introspection_mode_without_endpoint_uri() {
-        let mut cfg = oauth_introspection_cfg_minimal();
-        cfg.introspection_endpoint_uri = None;
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthAccessTokenIsJwtInvalid");
-        match err {
-            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
-                assert!(
-                    msg.contains("accessTokenIsJwt=false requires introspectionEndpointUri"),
-                    "msg: {msg}"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn validate_listeners_rejects_oauth_introspection_mode_without_client_id() {
-        let mut cfg = oauth_introspection_cfg_minimal();
-        cfg.client_id = None;
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthAccessTokenIsJwtInvalid");
-        match err {
-            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
-                assert!(
-                    msg.contains("accessTokenIsJwt=false requires clientId"),
-                    "msg: {msg}"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn validate_listeners_rejects_oauth_introspection_mode_without_client_secret() {
-        let mut cfg = oauth_introspection_cfg_minimal();
-        cfg.client_secret = None;
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthAccessTokenIsJwtInvalid");
-        match err {
-            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
-                assert!(
-                    msg.contains("accessTokenIsJwt=false requires clientSecret"),
-                    "msg: {msg}"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn validate_listeners_rejects_oauth_jwt_mode_with_introspection_fields() {
-        // JWT-mode base (jwksEndpointUri set, accessTokenIsJwt=true) that
-        // also accidentally sets an introspection-mode field — should be
-        // rejected, since the two configs imply contradictory broker
-        // behaviour.
-        let mut cfg = oauth_cfg_minimal();
-        cfg.introspection_endpoint_uri = Some("https://idp.example/introspect".into());
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthAccessTokenIsJwtInvalid");
-        match err {
-            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
-                assert!(
-                    msg.contains("accessTokenIsJwt=true forbids introspection-mode fields"),
-                    "msg: {msg}"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn validate_listeners_rejects_oauth_introspection_mode_with_jwks_endpoint_uri() {
-        let mut cfg = oauth_introspection_cfg_minimal();
-        cfg.jwks_endpoint_uri = Some("https://issuer.example.com/jwks".into());
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthAccessTokenIsJwtInvalid");
-        match err {
-            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
-                assert!(
-                    msg.contains("accessTokenIsJwt=false forbids jwksEndpointUri"),
-                    "msg: {msg}"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn validate_listeners_rejects_oauth_userinfo_endpoint_without_introspection_mode() {
-        // userInfoEndpointUri is an introspection-mode-only field; setting
-        // it on a JWT-mode listener must be rejected by the
-        // accessTokenIsJwt=true forbids-introspection-fields rule.
-        let mut cfg = oauth_cfg_minimal();
-        cfg.user_info_endpoint_uri = Some("https://idp.example/userinfo".into());
-        let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthAccessTokenIsJwtInvalid");
-        match err {
-            ValidationError::ListenerOauthAccessTokenIsJwtInvalid(msg) => {
-                assert!(
-                    msg.contains("accessTokenIsJwt=true forbids introspection-mode fields"),
-                    "msg: {msg}"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
+        for (name, cfg, expected) in [
+            (
+                "JWT without JWKS endpoint",
+                cfg,
+                ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                    "listener 'oauth': accessTokenIsJwt=true requires jwksEndpointUri".into(),
+                ),
+            ),
+            (
+                "introspection without endpoint",
+                no_endpoint,
+                ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                    "listener 'oauth': accessTokenIsJwt=false requires introspectionEndpointUri"
+                        .into(),
+                ),
+            ),
+            (
+                "introspection without client id",
+                no_client_id,
+                ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                    "listener 'oauth': accessTokenIsJwt=false requires clientId".into(),
+                ),
+            ),
+            (
+                "introspection without client secret",
+                no_client_secret,
+                ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                    "listener 'oauth': accessTokenIsJwt=false requires clientSecret".into(),
+                ),
+            ),
+            (
+                "JWT with introspection endpoint",
+                jwt_with_introspection,
+                ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                    "listener 'oauth': accessTokenIsJwt=true forbids introspection-mode fields (introspectionEndpointUri/userInfoEndpointUri/clientId/clientSecret/introspectionHttpTimeoutSeconds)".into(),
+                ),
+            ),
+            (
+                "introspection with JWKS endpoint",
+                introspection_with_jwks,
+                ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                    "listener 'oauth': accessTokenIsJwt=false forbids jwksEndpointUri".into(),
+                ),
+            ),
+            (
+                "JWT with user info endpoint",
+                jwt_with_userinfo,
+                ValidationError::ListenerOauthAccessTokenIsJwtInvalid(
+                    "listener 'oauth': accessTokenIsJwt=true forbids introspection-mode fields (introspectionEndpointUri/userInfoEndpointUri/clientId/clientSecret/introspectionHttpTimeoutSeconds)".into(),
+                ),
+            ),
+        ] {
+            let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
+            assert_eq!(
+                validate_listeners(&listeners, None),
+                Err(expected),
+                "case {name}"
+            );
         }
     }
 
@@ -2157,58 +2130,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // validTokenType cross-mode validation
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn validate_listeners_rejects_valid_token_type_in_introspection_mode() {
-        // Introspection-mode listener with validTokenType set must be
-        // rejected: introspection responses carry no JWT header, so a
-        // `typ` check has nothing to bind against. Mirrors the new
-        // `ListenerOauthValidTokenTypeRejectedInIntrospectionMode`
-        // variant.
-        let cfg = crate::crd::ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://iss.example/".into(),
-            jwks_endpoint_uri: None,
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: false,
-            introspection_endpoint_uri: Some("https://iss.example/introspect".into()),
-            user_info_endpoint_uri: None,
-            client_id: Some("kafka-broker".into()),
-            client_secret: Some(crate::crd::OauthClientSecretRef {
-                secret_name: "creds".into(),
-                key: "client-secret".into(),
-            }),
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: Some("JWT".into()),
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: None,
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let listeners = vec![oauth_listener("oauth", 9096, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthValidTokenTypeRejectedInIntrospectionMode");
-        assert!(
-            matches!(
-                err,
-                ValidationError::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(_)
-            ),
-            "unexpected error variant: {err:?}"
-        );
-    }
-
-    // -----------------------------------------------------------------
     // GSSAPI listener validation
     // -----------------------------------------------------------------
 
@@ -2249,7 +2170,7 @@ mod tests {
     }
 
     #[test]
-    fn gssapi_listener_without_keytab_is_invalid() {
+    fn gssapi_listener_error_cases() {
         let g = crate::crd::ListenerAuthenticationGssapi {
             keytab_secret_ref: crate::crd::KeytabSecretRef {
                 secret_name: String::new(),
@@ -2260,107 +2181,105 @@ mod tests {
             realm: None,
             kdc: None,
         };
-        let l = gssapi_listener("gss", 9092, false, g);
-        assert!(
-            validate_listeners(&[l], None).unwrap_err().reason()
-                == "ListenerGssapiKeytabSecretMissing"
+        let missing_keytab = gssapi_listener("gss", 9092, false, g);
+        let invalid_rule = gssapi_listener(
+            "gss",
+            9092,
+            false,
+            gssapi_cfg_with_rules(vec!["NOT_A_RULE:::".into()]),
         );
-    }
+        let divergent = vec![
+            gssapi_listener("g1", 9092, false, gssapi_cfg_with_service("kafka")),
+            gssapi_listener("g2", 9093, false, gssapi_cfg_with_service("other")),
+        ];
 
-    #[test]
-    fn gssapi_listener_with_bad_rule_is_invalid() {
-        let g = gssapi_cfg_with_rules(vec!["NOT_A_RULE:::".into()]);
-        let l = gssapi_listener("gss", 9092, false, g);
-        assert!(
-            validate_listeners(&[l], None).unwrap_err().reason() == "ListenerGssapiInvalidRule"
-        );
-    }
-
-    #[test]
-    fn divergent_gssapi_listeners_conflict() {
-        let a = gssapi_cfg_with_service("kafka");
-        let b = gssapi_cfg_with_service("other");
-        let la = gssapi_listener("g1", 9092, false, a);
-        let lb = gssapi_listener("g2", 9093, false, b);
-        assert!(
-            validate_listeners(&[la, lb], None).unwrap_err().reason()
-                == "ListenerGssapiConfigConflict"
-        );
+        for (name, listeners, expected, expected_reason) in [
+            (
+                "missing keytab",
+                vec![missing_keytab],
+                ValidationError::ListenerGssapiKeytabSecretMissing("gss".into()),
+                "ListenerGssapiKeytabSecretMissing",
+            ),
+            (
+                "invalid principal-to-local rule",
+                vec![invalid_rule],
+                ValidationError::ListenerGssapiInvalidRule(
+                    "listener 'gss': invalid principalToLocalRules entry \"NOT_A_RULE:::\"".into(),
+                ),
+                "ListenerGssapiInvalidRule",
+            ),
+            (
+                "divergent listener configuration",
+                divergent,
+                ValidationError::ConflictingGssapiListenerConfig,
+                "ListenerGssapiConfigConflict",
+            ),
+        ] {
+            let actual = validate_listeners(&listeners, None).unwrap_err();
+            let reason = actual.reason();
+            assert_eq!((actual, reason), (expected, expected_reason), "case {name}");
+        }
     }
 
     #[test]
     fn gssapi_listener_allows_plaintext_and_ssl() {
-        // GSSAPI brings its own RFC 4752 security layer — TLS is optional.
-        let plain = gssapi_listener("g", 9092, false, gssapi_cfg_with_service("kafka"));
-        validate_listeners(&[plain], None).expect("plaintext+gssapi is valid");
-        let ssl = gssapi_listener("g", 9092, true, gssapi_cfg_with_service("kafka"));
-        validate_listeners(&[ssl], None).expect("ssl+gssapi is valid");
+        for (name, tls) in [("plaintext", false), ("TLS", true)] {
+            let listener = gssapi_listener("g", 9092, tls, gssapi_cfg_with_service("kafka"));
+            assert_eq!(validate_listeners(&[listener], None), Ok(()), "case {name}");
+        }
     }
 
     #[test]
-    fn inter_broker_gssapi_without_kerberos_config_is_invalid() {
-        let g = gssapi_cfg_with_service("kafka");
-        let l = gssapi_listener("ib", 9092, false, g);
-        assert!(
-            validate_inter_broker_gssapi(std::slice::from_ref(&l), "ib", false)
-                .unwrap_err()
-                .reason()
-                == "InterBrokerGssapiRequiresKerberosConfig"
-        );
-        validate_inter_broker_gssapi(&[l], "ib", true)
-            .expect("ok when interBrokerKerberos present");
-    }
-
-    // -----------------------------------------------------------------
-    // JWKS-only fields cross-mode validation
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn validate_listeners_rejects_jwks_fields_in_introspection_mode() {
-        // Introspection-mode listener with one JWKS-only field set must
-        // be rejected: JWKS isn't consulted at all in introspection
-        // mode, so a JWKS refresher policy field has nothing to bind
-        // against. Mirrors the new
-        // `ListenerOauthJwksFieldsRejectedInIntrospectionMode` variant.
-        let cfg = crate::crd::ListenerAuthenticationOAuth {
-            valid_issuer_uri: "https://iss.example/".into(),
-            jwks_endpoint_uri: None,
-            valid_audience: None,
-            user_name_claim: None,
-            custom_claim_check: None,
-            jwks_refresh_seconds: None,
-            max_clock_skew_seconds: None,
-            enable_oauth_bearer: true,
-            tls_trusted_certificates: vec![],
-            access_token_is_jwt: false,
-            introspection_endpoint_uri: Some("https://iss.example/introspect".into()),
-            user_info_endpoint_uri: None,
-            client_id: Some("kafka-broker".into()),
-            client_secret: Some(crate::crd::OauthClientSecretRef {
-                secret_name: "creds".into(),
-                key: "client-secret".into(),
-            }),
-            introspection_http_timeout_seconds: None,
-            max_seconds_without_reauthentication: None,
-            valid_token_type: None,
-            fallback_user_name_claim: None,
-            fallback_user_name_prefix: None,
-            groups_claim: None,
-            groups_claim_delimiter: None,
-            jwks_min_refresh_pause_seconds: Some(1),
-            jwks_expiry_seconds: None,
-            jwks_ignore_key_use: None,
-        };
-        let listeners = vec![oauth_listener("oauth", 9096, true, cfg)];
-        let err = validate_listeners(&listeners, None).unwrap_err();
-        assert!(err.reason() == "ListenerOauthJwksFieldsRejectedInIntrospectionMode");
-        assert!(
-            matches!(
-                err,
-                ValidationError::ListenerOauthJwksFieldsRejectedInIntrospectionMode(_)
+    fn inter_broker_gssapi_cases() {
+        for (name, kerberos_enabled, expected) in [
+            (
+                "missing inter-broker Kerberos configuration",
+                false,
+                Err(ValidationError::InterBrokerGssapiRequiresKerberosConfig(
+                    "ib".into(),
+                )),
             ),
-            "unexpected error variant: {err:?}"
-        );
+            ("Kerberos configuration present", true, Ok(())),
+        ] {
+            let listener = gssapi_listener("ib", 9092, false, gssapi_cfg_with_service("kafka"));
+            assert_eq!(
+                validate_inter_broker_gssapi(&[listener], "ib", kerberos_enabled),
+                expected,
+                "case {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_listeners_rejects_introspection_only_oauth_fields_cases() {
+        let mut valid_token_type = oauth_introspection_cfg_minimal();
+        valid_token_type.valid_token_type = Some("JWT".into());
+        let mut jwks_policy = oauth_introspection_cfg_minimal();
+        jwks_policy.jwks_min_refresh_pause_seconds = Some(1);
+
+        for (name, cfg, expected) in [
+            (
+                "valid token type",
+                valid_token_type,
+                ValidationError::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(
+                    "listener 'oauth': accessTokenIsJwt=false forbids validTokenType (no JWT header in introspection responses)".into(),
+                ),
+            ),
+            (
+                "JWKS refresh policy",
+                jwks_policy,
+                ValidationError::ListenerOauthJwksFieldsRejectedInIntrospectionMode(
+                    "listener 'oauth': accessTokenIsJwt=false forbids JWKS-only fields (jwksMinRefreshPauseSeconds)".into(),
+                ),
+            ),
+        ] {
+            let listeners = vec![oauth_listener("oauth", 9096, true, cfg)];
+            assert_eq!(
+                validate_listeners(&listeners, None),
+                Err(expected),
+                "case {name}"
+            );
+        }
     }
 }
 
@@ -2594,16 +2513,60 @@ mod advertised_tests {
     }
 
     #[test]
-    fn internal_uses_pod_fqdn() {
-        let l = internal("PLAIN", 9092);
-        let nodes = HashMap::new();
-        let a = compute_advertised(&l, 0, "pod.svc.local", None, &nodes, None).unwrap();
-        assert!(
-            a == AdvertisedAddress {
-                host: "pod.svc.local".into(),
-                port: 9092
-            }
-        );
+    fn advertised_address_cases() {
+        let ingress = ingress("ext", 9094, Some("broker-0.example.com"));
+        let mut route = ingress.clone();
+        route.type_ = ListenerType::Route;
+        let mut ingress_with_port_override = ingress.clone();
+        ingress_with_port_override
+            .configuration
+            .as_mut()
+            .unwrap()
+            .brokers[0]
+            .advertised_port = Some(8443);
+
+        for (name, listener, pod_fqdn, expected) in [
+            (
+                "internal pod FQDN",
+                internal("PLAIN", 9092),
+                "pod.svc.local",
+                AdvertisedAddress {
+                    host: "pod.svc.local".into(),
+                    port: 9092,
+                },
+            ),
+            (
+                "ingress broker host and HTTPS port",
+                ingress,
+                "pod",
+                AdvertisedAddress {
+                    host: "broker-0.example.com".into(),
+                    port: 443,
+                },
+            ),
+            (
+                "route broker host and HTTPS port",
+                route,
+                "pod",
+                AdvertisedAddress {
+                    host: "broker-0.example.com".into(),
+                    port: 443,
+                },
+            ),
+            (
+                "ingress advertised port override",
+                ingress_with_port_override,
+                "pod",
+                AdvertisedAddress {
+                    host: "broker-0.example.com".into(),
+                    port: 8443,
+                },
+            ),
+        ] {
+            let actual = compute_advertised(&listener, 0, pod_fqdn, None, &HashMap::new(), None)
+                .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+            assert!(actual == expected, "{name}");
+        }
     }
 
     #[test]
@@ -2697,7 +2660,13 @@ mod advertised_tests {
             ..Default::default()
         };
         let a = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap();
-        assert!(a.host == "10.0.0.1");
+        assert_eq!(
+            a,
+            AdvertisedAddress {
+                host: "10.0.0.1".to_string(),
+                port: 32100,
+            }
+        );
     }
 
     #[test]
@@ -2812,8 +2781,13 @@ mod advertised_tests {
             ..Default::default()
         };
         let a = compute_advertised(&l, 0, "pod", None, &nodes, Some(&svc)).unwrap();
-        assert!(a.host == "public.host");
-        assert!(a.port == 32100);
+        assert_eq!(
+            a,
+            AdvertisedAddress {
+                host: "public.host".to_string(),
+                port: 32100,
+            }
+        );
     }
 
     fn ingress(name: &str, port: i32, broker_host: Option<&str>) -> Listener {
@@ -2837,40 +2811,6 @@ mod advertised_tests {
             }),
             network_policy_peers: None,
         }
-    }
-
-    #[test]
-    fn ingress_uses_config_host_and_port_443() {
-        let l = ingress("ext", 9094, Some("broker-0.example.com"));
-        let nodes = HashMap::new();
-        let a = compute_advertised(&l, 0, "pod", None, &nodes, None).unwrap();
-        assert!(
-            a == AdvertisedAddress {
-                host: "broker-0.example.com".into(),
-                port: 443,
-            }
-        );
-    }
-
-    #[test]
-    fn route_uses_config_host_and_port_443() {
-        let mut l = ingress("ext", 9094, Some("broker-0.example.com"));
-        l.type_ = ListenerType::Route;
-        let nodes = HashMap::new();
-        let a = compute_advertised(&l, 0, "pod", None, &nodes, None).unwrap();
-        assert!(a.host == "broker-0.example.com");
-        assert!(a.port == 443);
-    }
-
-    #[test]
-    fn ingress_advertised_port_override_wins_over_443() {
-        let mut l = ingress("ext", 9094, Some("broker-0.example.com"));
-        if let Some(cfg) = l.configuration.as_mut() {
-            cfg.brokers[0].advertised_port = Some(8443);
-        }
-        let nodes = HashMap::new();
-        let a = compute_advertised(&l, 0, "pod", None, &nodes, None).unwrap();
-        assert!(a.port == 8443);
     }
 
     #[test]
@@ -3489,7 +3429,7 @@ pub fn synthesized_default_listener() -> Listener {
 
 #[cfg(test)]
 mod toml_rendering_tests {
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
 
@@ -3524,15 +3464,30 @@ mod toml_rendering_tests {
         // Sanity: parses cleanly with the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        check!(parsed.broker_id == Some(0));
-        check!(parsed.inter_broker_listener_name.as_deref() == Some("PLAIN"));
-        check!(parsed.heartbeat_interval_ms == Some(500));
-        check!(parsed.heartbeat_timeout_ms == Some(3000));
-        check!(parsed.replica_lag_time_max_ms == Some(2000));
-        check!(parsed.controller_election_timeout_ms == Some(500));
-        check!(parsed.controller_heartbeat_interval_ms == Some(100));
-        check!(parsed.listeners.len() == 1);
-        check!(parsed.listeners[0].advertised == "demo-0.svc.local:9092");
+        assert_eq!(
+            (
+                parsed.broker_id,
+                parsed.inter_broker_listener_name.as_deref(),
+                parsed.heartbeat_interval_ms,
+                parsed.heartbeat_timeout_ms,
+                parsed.replica_lag_time_max_ms,
+                parsed.controller_election_timeout_ms,
+                parsed.controller_heartbeat_interval_ms,
+                parsed.listeners.len(),
+                parsed.listeners[0].advertised.as_str(),
+            ),
+            (
+                Some(0),
+                Some("PLAIN"),
+                Some(500),
+                Some(3000),
+                Some(2000),
+                Some(500),
+                Some(100),
+                1,
+                "demo-0.svc.local:9092"
+            )
+        );
     }
 
     #[test]
@@ -3578,7 +3533,7 @@ mod toml_rendering_tests {
     }
 
     #[test]
-    fn controller_quorum_voters_omitted_when_empty() {
+    fn empty_optional_broker_config_sections_are_omitted() {
         let mut addrs = std::collections::BTreeMap::new();
         addrs.insert(
             "PLAIN".into(),
@@ -3602,13 +3557,20 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            !toml_str.contains("controller_quorum_voters"),
-            "empty voter slice must emit no key, got:\n{toml_str}"
-        );
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        assert!(parsed.controller_quorum_voters.is_empty());
+        assert_eq!(
+            (
+                toml_str.contains("controller_quorum_voters"),
+                toml_str.contains("controller_server_name"),
+                toml_str.contains("[server_properties]"),
+                toml_str.contains("[authorization]"),
+                toml_str.contains("[remote_storage]"),
+                parsed.controller_quorum_voters,
+                parsed.controller_server_name,
+            ),
+            (false, false, false, false, false, vec![], None)
+        );
     }
 
     #[test]
@@ -3658,40 +3620,6 @@ mod toml_rendering_tests {
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
         assert!(parsed.controller_server_name.as_deref() == Some(server_name));
-    }
-
-    #[test]
-    fn controller_server_name_omitted_when_empty() {
-        let mut addrs = std::collections::BTreeMap::new();
-        addrs.insert(
-            "PLAIN".into(),
-            AdvertisedAddress {
-                host: "demo-0.svc.local".into(),
-                port: 9092,
-            },
-        );
-        let toml_str = render_broker_toml(
-            0,
-            &[synthesized_default_listener()],
-            &addrs,
-            "PLAIN",
-            &std::collections::BTreeMap::new(),
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            !toml_str.contains("controller_server_name"),
-            "empty server name must emit no key, got:\n{toml_str}"
-        );
-        let parsed: crabka_broker::file_config::FileConfig =
-            toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        assert!(parsed.controller_server_name.is_none());
     }
 
     #[test]
@@ -3747,34 +3675,6 @@ mod toml_rendering_tests {
     }
 
     #[test]
-    fn server_properties_section_omitted_when_empty() {
-        let mut addrs = std::collections::BTreeMap::new();
-        addrs.insert(
-            "PLAIN".into(),
-            AdvertisedAddress {
-                host: "h".into(),
-                port: 9092,
-            },
-        );
-        let t = render_broker_toml(
-            0,
-            &[synthesized_default_listener()],
-            &addrs,
-            "PLAIN",
-            &std::collections::BTreeMap::new(),
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(!t.contains("[server_properties]"), "got:\n{t}");
-    }
-
-    #[test]
     fn render_broker_toml_emits_super_users_anonymous_when_delegation_token_set() {
         // When `delegation_token_enabled` and no explicit
         // `Kafka.spec.authorization`, the renderer auto-injects an
@@ -3823,7 +3723,14 @@ mod toml_rendering_tests {
         let authz = parsed
             .authorization
             .expect("[authorization] block must round-trip into FileConfig");
-        assert!(authz.super_users == vec!["ANONYMOUS".to_string()]);
+        assert_eq!(
+            authz,
+            crabka_broker::file_config::FileAuthorizationConfig {
+                authz_type: crabka_broker::file_config::AuthzType::Simple,
+                super_users: vec!["ANONYMOUS".to_string()],
+                opa: None,
+            }
+        );
     }
 
     #[test]
@@ -3912,8 +3819,14 @@ mod toml_rendering_tests {
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let a = parsed.authorization.expect("[authorization] present");
-        assert!(a.super_users == vec!["admin".to_string()]);
-        assert!(a.opa.is_none());
+        assert_eq!(
+            a,
+            crabka_broker::file_config::FileAuthorizationConfig {
+                authz_type: crabka_broker::file_config::AuthzType::Simple,
+                super_users: vec!["admin".to_string()],
+                opa: None,
+            }
+        );
     }
 
     #[test]
@@ -3967,38 +3880,6 @@ mod toml_rendering_tests {
                 "needle {needle:?}: expected contains == {want}, got:\n{t}"
             );
         }
-    }
-
-    #[test]
-    fn render_broker_toml_omits_authorization_section_when_unset() {
-        let mut addrs = std::collections::BTreeMap::new();
-        addrs.insert(
-            "PLAIN".into(),
-            AdvertisedAddress {
-                host: "h".into(),
-                port: 9092,
-            },
-        );
-        let t = render_broker_toml(
-            0,
-            &[synthesized_default_listener()],
-            &addrs,
-            "PLAIN",
-            &std::collections::BTreeMap::new(),
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            !t.contains("[authorization]"),
-            "no [authorization] section must be emitted when both inputs are unset \
-             (broker falls back to AllowAllAuthorizer), got:\n{t}"
-        );
     }
 
     #[test]
@@ -4098,51 +3979,21 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            t.contains("[remote_storage]"),
-            "expected [remote_storage] block, got:\n{t}"
-        );
-        assert!(
-            t.contains("storage_dir = \"/var/lib/crabka/remote\""),
-            "expected canonical storage_dir line, got:\n{t}"
-        );
+        for (name, expected) in [
+            ("remote storage block", "[remote_storage]"),
+            (
+                "canonical storage directory",
+                "storage_dir = \"/var/lib/crabka/remote\"",
+            ),
+        ] {
+            assert!(t.contains(expected), "case {name}; got:\n{t}");
+        }
         // Round-trip: the broker's FileConfig must accept the rendered
         // block and surface the path as the broker's tier storage dir.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let rs = parsed.remote_storage.expect("[remote_storage] round-trips");
         assert!(rs.storage_dir.as_deref() == Some("/var/lib/crabka/remote"));
-    }
-
-    #[test]
-    fn render_broker_toml_omits_remote_storage_when_tiered_none() {
-        let mut addrs = std::collections::BTreeMap::new();
-        addrs.insert(
-            "PLAIN".into(),
-            AdvertisedAddress {
-                host: "h".into(),
-                port: 9092,
-            },
-        );
-        let t = render_broker_toml(
-            0,
-            &[synthesized_default_listener()],
-            &addrs,
-            "PLAIN",
-            &std::collections::BTreeMap::new(),
-            None,
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            !t.contains("[remote_storage]"),
-            "no tieredStorage → no [remote_storage] block; got:\n{t}"
-        );
     }
 
     // ── S3 tiered storage TOML render ────────────────────────────────
@@ -4206,9 +4057,10 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .kafka_metadata
             .expect("kafka_metadata round-trips");
-        check!(km.bootstrap == "127.0.0.1:9094");
-        check!(km.num_partitions == Some(8));
-        check!(km.replication == Some(1));
+        assert_eq!(
+            (km.bootstrap.as_str(), km.num_partitions, km.replication),
+            ("127.0.0.1:9094", Some(8), Some(1))
+        );
     }
 
     #[test]
@@ -4247,14 +4099,12 @@ mod toml_rendering_tests {
             "",
         );
         // The block must always be emitted so the broker knows to select InMemory.
-        assert!(
-            t.contains("[remote_storage.kafka_metadata]"),
-            "kafka_metadata block missing for InMemory, got:\n{t}"
-        );
-        assert!(
-            t.contains("in_memory = true"),
-            "in_memory = true missing for InMemory, got:\n{t}"
-        );
+        for (name, expected) in [
+            ("Kafka metadata block", "[remote_storage.kafka_metadata]"),
+            ("in-memory flag", "in_memory = true"),
+        ] {
+            assert!(t.contains(expected), "case {name}; got:\n{t}");
+        }
     }
 
     #[test]
@@ -4335,14 +4185,12 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            t.contains("[remote_storage.kafka_metadata]"),
-            "expected kafka_metadata block for default MetadataManagerSpec, got:\n{t}"
-        );
-        // No bootstrap line — the bare header is enough; broker fills defaults.
-        assert!(
-            !t.contains("bootstrap ="),
-            "unexpected bootstrap line for bare Topic manager, got:\n{t}"
+        assert_eq!(
+            (
+                t.contains("[remote_storage.kafka_metadata]"),
+                t.contains("bootstrap ="),
+            ),
+            (true, false)
         );
     }
 
@@ -4412,15 +4260,30 @@ mod toml_rendering_tests {
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let rs = parsed.remote_storage.expect("[remote_storage] round-trips");
         let s3 = rs.s3.expect("[remote_storage.s3] round-trips");
-        check!(s3.bucket == "crabka-tier");
-        check!(s3.region == "us-east-1");
-        check!(s3.prefix.as_deref() == Some("cluster-a"));
-        check!(s3.endpoint.as_deref() == Some("http://minio.svc:9000"));
-        check!(s3.allow_http);
-        check!(s3.multipart_threshold == Some(4096));
-        check!(s3.multipart_chunk_size == Some(1024));
-        check!(s3.access_key_id.is_none());
-        check!(s3.secret_access_key.is_none());
+        assert_eq!(
+            (
+                s3.bucket.as_str(),
+                s3.region.as_str(),
+                s3.prefix.as_deref(),
+                s3.endpoint.as_deref(),
+                s3.allow_http,
+                s3.multipart_threshold,
+                s3.multipart_chunk_size,
+                s3.access_key_id.as_deref(),
+                s3.secret_access_key.as_deref(),
+            ),
+            (
+                "crabka-tier",
+                "us-east-1",
+                Some("cluster-a"),
+                Some("http://minio.svc:9000"),
+                true,
+                Some(4096),
+                Some(1024),
+                None,
+                None
+            )
+        );
     }
 
     /// Minimal S3 spec — only `bucket` + `region` set. Optional fields
@@ -4489,8 +4352,7 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .s3
             .expect("[remote_storage.s3] round-trips");
-        assert!(s3.bucket == "b");
-        assert!(s3.region == "r");
+        assert_eq!((s3.bucket.as_str(), s3.region.as_str()), ("b", "r"));
     }
 
     /// Reserved TOML metacharacters (`"`, `\`) in a user-supplied
@@ -4623,13 +4485,26 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .gcs
             .expect("[remote_storage.gcs] round-trips");
-        check!(gcs.bucket == "crabka-tier");
-        check!(gcs.prefix.as_deref() == Some("cluster-a"));
-        check!(gcs.endpoint.as_deref() == Some("http://fake-gcs.svc:4443"));
-        check!(gcs.allow_http);
-        check!(gcs.service_account_path.as_deref() == Some("/etc/crabka/gcs-credentials/key.json"));
-        check!(gcs.multipart_threshold == Some(4096));
-        check!(gcs.multipart_chunk_size == Some(1024));
+        assert_eq!(
+            (
+                gcs.bucket.as_str(),
+                gcs.prefix.as_deref(),
+                gcs.endpoint.as_deref(),
+                gcs.allow_http,
+                gcs.service_account_path.as_deref(),
+                gcs.multipart_threshold,
+                gcs.multipart_chunk_size,
+            ),
+            (
+                "crabka-tier",
+                Some("cluster-a"),
+                Some("http://fake-gcs.svc:4443"),
+                true,
+                Some("/etc/crabka/gcs-credentials/key.json"),
+                Some(4096),
+                Some(1024)
+            )
+        );
     }
 
     /// Keyless GCS (Workload Identity / ADC): with `credentials` unset,
@@ -4692,8 +4567,7 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .gcs
             .expect("[remote_storage.gcs] round-trips");
-        assert!(gcs.bucket == "b");
-        assert!(gcs.service_account_path.is_none());
+        assert_eq!((gcs.bucket.as_str(), gcs.service_account_path), ("b", None));
     }
 
     #[test]
@@ -4734,17 +4608,19 @@ mod toml_rendering_tests {
 
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        assert!(
-            parsed.controller_listener_protocol == Some(crabka_security::ListenerProtocol::Ssl)
-        );
+        let controller_listener_protocol = parsed.controller_listener_protocol;
         let parsed_tls = parsed.tls_config.expect("tls_config emitted");
-        assert!(parsed_tls.cert_path == std::path::PathBuf::from("/etc/crabka/broker-tls/0.crt"));
-        // The cluster CA must be wired as the controller-quorum TLS trust
-        // roots inside [tls_config] so the outbound raft dialer trusts peer
-        // serving certs (KIP-595 controller mTLS).
-        assert!(
-            parsed_tls.trust_roots_path
-                == Some(std::path::PathBuf::from("/etc/crabka/cluster-ca/ca.crt"))
+        assert_eq!(
+            (
+                controller_listener_protocol,
+                parsed_tls.cert_path,
+                parsed_tls.trust_roots_path,
+            ),
+            (
+                Some(crabka_security::ListenerProtocol::Ssl),
+                std::path::PathBuf::from("/etc/crabka/broker-tls/0.crt"),
+                Some(std::path::PathBuf::from("/etc/crabka/cluster-ca/ca.crt")),
+            )
         );
     }
 
@@ -5352,16 +5228,26 @@ mod toml_rendering_tests {
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml).expect("rendered TOML must parse with broker FileConfig");
         let ob = parsed.oauthbearer.expect("oauthbearer block emitted");
-        check!(
-            ob.jwks_endpoint_uri.as_deref()
-                == Some("https://kc.example.com/realms/kafka/protocol/openid-connect/certs")
+        assert_eq!(
+            (
+                ob.jwks_endpoint_uri.as_deref(),
+                ob.valid_issuer_uri.as_deref(),
+                ob.expected_audience.as_deref(),
+                ob.principal_claim_name.as_deref(),
+                ob.custom_claim_check.as_deref(),
+                ob.jwks_refresh_interval_ms,
+                ob.allowable_clock_skew_ms,
+            ),
+            (
+                Some("https://kc.example.com/realms/kafka/protocol/openid-connect/certs"),
+                Some("https://kc.example.com/realms/kafka"),
+                Some("kafka"),
+                Some("preferred_username"),
+                Some("$.scope[?@ == 'kafka-broker']"),
+                Some(300_000),
+                Some(30_000)
+            )
         );
-        check!(ob.valid_issuer_uri.as_deref() == Some("https://kc.example.com/realms/kafka"));
-        check!(ob.expected_audience.as_deref() == Some("kafka"));
-        check!(ob.principal_claim_name.as_deref() == Some("preferred_username"));
-        check!(ob.custom_claim_check.as_deref() == Some("$.scope[?@ == 'kafka-broker']"));
-        check!(ob.jwks_refresh_interval_ms == Some(300_000));
-        check!(ob.allowable_clock_skew_ms == Some(30_000));
     }
 
     #[test]
@@ -5705,286 +5591,107 @@ mod toml_rendering_tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn render_broker_toml_emits_custom_claim_check_when_set() {
-        // The JsonPath expression must be emitted in a TOML multi-line
-        // literal (`'''...'''`) so embedded `'` and `"` characters in the
-        // expression don't trip escape processing or string termination.
-        use std::collections::BTreeMap;
+    fn render_broker_toml_optional_oauth_field_cases() {
         let mut oauth = oauth_full_cfg();
         oauth.custom_claim_check = Some("$.scope[?@ == 'kafka.write']".into());
-        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
-        let toml = render_broker_toml(
-            0,
-            &listeners,
-            &addrs_for("oauth", 9096),
-            "oauth",
-            &BTreeMap::new(),
-            Some(&render_tls()),
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"),
-            "expected custom_claim_check render; got:\n{toml}"
-        );
-    }
+        let mut valid_type = oauth_full_cfg();
+        valid_type.valid_token_type = Some("JWT".into());
+        let mut fallback_claim = oauth_full_cfg();
+        fallback_claim.fallback_user_name_claim = Some("client_id".into());
+        let mut fallback_prefix = oauth_full_cfg();
+        fallback_prefix.fallback_user_name_prefix = Some("service-account-".into());
+        let mut groups_claim = oauth_full_cfg();
+        groups_claim.groups_claim = Some("$.realm_access.roles[*]".into());
+        let mut groups_delimiter = oauth_full_cfg();
+        groups_delimiter.groups_claim_delimiter = Some(",".into());
+        let mut no_custom_claim = oauth_full_cfg();
+        no_custom_claim.custom_claim_check = None;
+        let mut min_refresh = oauth_full_cfg();
+        min_refresh.jwks_min_refresh_pause_seconds = Some(2);
+        let mut expiry = oauth_full_cfg();
+        expiry.jwks_expiry_seconds = Some(3600);
+        let mut ignore_key_use = oauth_full_cfg();
+        ignore_key_use.jwks_ignore_key_use = Some(true);
 
-    #[test]
-    fn render_broker_toml_emits_valid_token_type_when_set() {
-        use std::collections::BTreeMap;
-        let mut oauth = oauth_full_cfg();
-        oauth.valid_token_type = Some("JWT".into());
-        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
-        let toml = render_broker_toml(
-            0,
-            &listeners,
-            &addrs_for("oauth", 9096),
-            "oauth",
-            &BTreeMap::new(),
-            Some(&render_tls()),
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            toml.contains("valid_token_type = \"JWT\""),
-            "expected valid_token_type render; got:\n{toml}"
-        );
-    }
-
-    // -----------------------------------------------------------------
-    // Claims mapping render
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn render_broker_toml_emits_fallback_user_name_claim_when_set() {
-        use std::collections::BTreeMap;
-        let mut oauth = oauth_full_cfg();
-        oauth.fallback_user_name_claim = Some("client_id".into());
-        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
-        let toml = render_broker_toml(
-            0,
-            &listeners,
-            &addrs_for("oauth", 9096),
-            "oauth",
-            &BTreeMap::new(),
-            Some(&render_tls()),
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            toml.contains("fallback_user_name_claim = \"client_id\""),
-            "expected fallback_user_name_claim render; got:\n{toml}"
-        );
-    }
-
-    #[test]
-    fn render_broker_toml_emits_fallback_user_name_prefix_when_set() {
-        use std::collections::BTreeMap;
-        let mut oauth = oauth_full_cfg();
-        oauth.fallback_user_name_prefix = Some("service-account-".into());
-        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
-        let toml = render_broker_toml(
-            0,
-            &listeners,
-            &addrs_for("oauth", 9096),
-            "oauth",
-            &BTreeMap::new(),
-            Some(&render_tls()),
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            toml.contains("fallback_user_name_prefix = \"service-account-\""),
-            "expected fallback_user_name_prefix render; got:\n{toml}"
-        );
-    }
-
-    #[test]
-    fn render_broker_toml_emits_groups_claim_with_jsonpath_when_set() {
-        use std::collections::BTreeMap;
-        let mut oauth = oauth_full_cfg();
-        oauth.groups_claim = Some("$.realm_access.roles[*]".into());
-        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
-        let toml = render_broker_toml(
-            0,
-            &listeners,
-            &addrs_for("oauth", 9096),
-            "oauth",
-            &BTreeMap::new(),
-            Some(&render_tls()),
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            toml.contains("groups_claim = '''$.realm_access.roles[*]'''"),
-            "expected groups_claim render (TOML multi-line literal); got:\n{toml}"
-        );
-    }
-
-    #[test]
-    fn render_broker_toml_emits_groups_claim_delimiter_when_set() {
-        use std::collections::BTreeMap;
-        let mut oauth = oauth_full_cfg();
-        oauth.groups_claim_delimiter = Some(",".into());
-        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
-        let toml = render_broker_toml(
-            0,
-            &listeners,
-            &addrs_for("oauth", 9096),
-            "oauth",
-            &BTreeMap::new(),
-            Some(&render_tls()),
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            toml.contains("groups_claim_delimiter = \",\""),
-            "expected groups_claim_delimiter render; got:\n{toml}"
-        );
-    }
-
-    #[test]
-    fn render_broker_toml_omits_custom_claim_check_when_unset() {
-        // Default oauth_full_cfg() now has custom_claim_check set; clear
-        // it explicitly so the omit branch is exercised.
-        use std::collections::BTreeMap;
-        let mut oauth = oauth_full_cfg();
-        oauth.custom_claim_check = None;
-        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
-        let toml = render_broker_toml(
-            0,
-            &listeners,
-            &addrs_for("oauth", 9096),
-            "oauth",
-            &BTreeMap::new(),
-            Some(&render_tls()),
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            !toml.contains("custom_claim_check"),
-            "TOML must omit custom_claim_check when None; got:\n{toml}"
-        );
-    }
-
-    // -----------------------------------------------------------------
-    // JWKS refresher policy fields render
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn render_broker_toml_emits_jwks_min_refresh_pause_seconds_when_set() {
-        use std::collections::BTreeMap;
-        let mut oauth = oauth_full_cfg();
-        oauth.jwks_min_refresh_pause_seconds = Some(2);
-        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
-        let toml = render_broker_toml(
-            0,
-            &listeners,
-            &addrs_for("oauth", 9096),
-            "oauth",
-            &BTreeMap::new(),
-            Some(&render_tls()),
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            toml.contains("jwks_min_refresh_pause_seconds = 2"),
-            "expected jwks_min_refresh_pause_seconds render; got:\n{toml}"
-        );
-    }
-
-    #[test]
-    fn render_broker_toml_emits_jwks_expiry_seconds_when_set() {
-        use std::collections::BTreeMap;
-        let mut oauth = oauth_full_cfg();
-        oauth.jwks_expiry_seconds = Some(3600);
-        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
-        let toml = render_broker_toml(
-            0,
-            &listeners,
-            &addrs_for("oauth", 9096),
-            "oauth",
-            &BTreeMap::new(),
-            Some(&render_tls()),
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            toml.contains("jwks_expiry_seconds = 3600"),
-            "expected jwks_expiry_seconds render; got:\n{toml}"
-        );
-    }
-
-    #[test]
-    fn render_broker_toml_emits_jwks_ignore_key_use_when_set() {
-        use std::collections::BTreeMap;
-        let mut oauth = oauth_full_cfg();
-        oauth.jwks_ignore_key_use = Some(true);
-        let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
-        let toml = render_broker_toml(
-            0,
-            &listeners,
-            &addrs_for("oauth", 9096),
-            "oauth",
-            &BTreeMap::new(),
-            Some(&render_tls()),
-            None,
-            false,
-            None,
-            None,
-            None,
-            &[],
-            "",
-        );
-        assert!(
-            toml.contains("jwks_ignore_key_use = true"),
-            "expected jwks_ignore_key_use render; got:\n{toml}"
-        );
+        for (name, oauth, needle, expected_present) in [
+            (
+                "custom claim check",
+                oauth,
+                "custom_claim_check = '''$.scope[?@ == 'kafka.write']'''",
+                true,
+            ),
+            (
+                "valid token type",
+                valid_type,
+                "valid_token_type = \"JWT\"",
+                true,
+            ),
+            (
+                "fallback username claim",
+                fallback_claim,
+                "fallback_user_name_claim = \"client_id\"",
+                true,
+            ),
+            (
+                "fallback username prefix",
+                fallback_prefix,
+                "fallback_user_name_prefix = \"service-account-\"",
+                true,
+            ),
+            (
+                "groups claim",
+                groups_claim,
+                "groups_claim = '''$.realm_access.roles[*]'''",
+                true,
+            ),
+            (
+                "groups delimiter",
+                groups_delimiter,
+                "groups_claim_delimiter = \",\"",
+                true,
+            ),
+            (
+                "custom claim omitted",
+                no_custom_claim,
+                "custom_claim_check",
+                false,
+            ),
+            (
+                "JWKS minimum refresh pause",
+                min_refresh,
+                "jwks_min_refresh_pause_seconds = 2",
+                true,
+            ),
+            ("JWKS expiry", expiry, "jwks_expiry_seconds = 3600", true),
+            (
+                "JWKS ignore key use",
+                ignore_key_use,
+                "jwks_ignore_key_use = true",
+                true,
+            ),
+        ] {
+            let listeners = vec![oauth_listener_for_render("oauth", 9096, true, oauth)];
+            let toml = render_broker_toml(
+                0,
+                &listeners,
+                &addrs_for("oauth", 9096),
+                "oauth",
+                &std::collections::BTreeMap::new(),
+                Some(&render_tls()),
+                None,
+                false,
+                None,
+                None,
+                None,
+                &[],
+                "",
+            );
+            assert_eq!(
+                toml.contains(needle),
+                expected_present,
+                "case {name}: {toml}"
+            );
+        }
     }
 
     #[test]
@@ -6328,8 +6035,6 @@ pub(crate) async fn observe_listener_addresses(
 
 #[cfg(test)]
 mod san_tests {
-    use assert2::assert;
-
     use super::*;
 
     fn internal_tls(name: &str, port: i32) -> Listener {
@@ -6345,27 +6050,31 @@ mod san_tests {
     }
 
     #[test]
-    fn compute_extra_sans_internal_only_returns_empty() {
-        let listeners = vec![Listener {
-            name: "internal".into(),
-            port: 9092,
-            type_: ListenerType::Internal,
-            tls: false,
-            authentication: None,
-            configuration: None,
-            network_policy_peers: None,
-        }];
-        let observed = ListenerObservedAddresses::default();
-        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-        assert!(sans.is_empty());
-    }
-
-    #[test]
-    fn compute_extra_sans_internal_tls_returns_empty() {
-        let listeners = vec![internal_tls("internal", 9093)];
-        let observed = ListenerObservedAddresses::default();
-        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-        assert!(sans.is_empty());
+    fn compute_extra_sans_internal_cases_return_empty() {
+        for (name, listeners) in [
+            (
+                "plaintext internal listener",
+                vec![Listener {
+                    name: "internal".into(),
+                    port: 9092,
+                    type_: ListenerType::Internal,
+                    tls: false,
+                    authentication: None,
+                    configuration: None,
+                    network_policy_peers: None,
+                }],
+            ),
+            (
+                "TLS internal listener",
+                vec![internal_tls("internal", 9093)],
+            ),
+        ] {
+            assert_eq!(
+                compute_extra_sans(0, &listeners, &ListenerObservedAddresses::default()),
+                Ok(vec![]),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -6387,8 +6096,13 @@ mod san_tests {
             ..Default::default()
         };
         let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.10".parse().unwrap())));
-        assert!(sans.contains(&SubjectAltName::Dns("node1.example.com".into())));
+        assert_eq!(
+            (
+                sans.contains(&SubjectAltName::Ip("203.0.113.10".parse().unwrap())),
+                sans.contains(&SubjectAltName::Dns("node1.example.com".into())),
+            ),
+            (true, true)
+        );
     }
 
     #[test]
@@ -6408,8 +6122,13 @@ mod san_tests {
             .insert(0, vec![LbIngress::Ip("203.0.113.20".parse().unwrap())]);
         observed.lb_bootstrap = vec![LbIngress::Ip("203.0.113.30".parse().unwrap())];
         let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.20".parse().unwrap())));
-        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.30".parse().unwrap())));
+        assert_eq!(
+            (
+                sans.contains(&SubjectAltName::Ip("203.0.113.20".parse().unwrap())),
+                sans.contains(&SubjectAltName::Ip("203.0.113.30".parse().unwrap())),
+            ),
+            (true, true)
+        );
     }
 
     #[test]
@@ -6432,126 +6151,86 @@ mod san_tests {
     }
 
     #[test]
-    fn compute_extra_sans_ingress_includes_config_hostnames() {
-        let listeners = vec![Listener {
-            name: "ext".into(),
-            port: 9094,
-            type_: ListenerType::Ingress,
-            tls: true,
-            authentication: None,
-            configuration: Some(crate::crd::ListenerConfiguration {
-                bootstrap: Some(crate::crd::BootstrapConfig {
-                    host: Some("bootstrap.kafka.example.com".into()),
-                    ..Default::default()
+    fn compute_extra_sans_ingress_and_route_include_config_hostnames() {
+        for (name, listener_type) in [
+            ("ingress", ListenerType::Ingress),
+            ("route", ListenerType::Route),
+        ] {
+            let listeners = vec![Listener {
+                name: "ext".into(),
+                port: 9094,
+                type_: listener_type,
+                tls: true,
+                authentication: None,
+                configuration: Some(crate::crd::ListenerConfiguration {
+                    bootstrap: Some(crate::crd::BootstrapConfig {
+                        host: Some("bootstrap.kafka.example.com".into()),
+                        ..Default::default()
+                    }),
+                    brokers: vec![crate::crd::BrokerOverride {
+                        broker: 0,
+                        host: Some("broker-0.kafka.example.com".into()),
+                        ..Default::default()
+                    }],
+                    ingress_class: None,
                 }),
-                brokers: vec![crate::crd::BrokerOverride {
-                    broker: 0,
-                    host: Some("broker-0.kafka.example.com".into()),
-                    ..Default::default()
-                }],
-                ingress_class: None,
-            }),
-            network_policy_peers: None,
-        }];
-        let observed = ListenerObservedAddresses::default();
-        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-        assert!(sans.contains(&SubjectAltName::Dns("broker-0.kafka.example.com".into())));
-        assert!(sans.contains(&SubjectAltName::Dns("bootstrap.kafka.example.com".into())));
-    }
-
-    #[test]
-    fn compute_extra_sans_route_includes_config_hostnames() {
-        let listeners = vec![Listener {
-            name: "ext".into(),
-            port: 9094,
-            type_: ListenerType::Route,
-            tls: true,
-            authentication: None,
-            configuration: Some(crate::crd::ListenerConfiguration {
-                bootstrap: Some(crate::crd::BootstrapConfig {
-                    host: Some("bootstrap.kafka.example.com".into()),
-                    ..Default::default()
-                }),
-                brokers: vec![crate::crd::BrokerOverride {
-                    broker: 0,
-                    host: Some("broker-0.kafka.example.com".into()),
-                    ..Default::default()
-                }],
-                ingress_class: None,
-            }),
-            network_policy_peers: None,
-        }];
-        let observed = ListenerObservedAddresses::default();
-        let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-        assert!(sans.contains(&SubjectAltName::Dns("broker-0.kafka.example.com".into())));
-        assert!(sans.contains(&SubjectAltName::Dns("bootstrap.kafka.example.com".into())));
+                network_policy_peers: None,
+            }];
+            let observed = ListenerObservedAddresses::default();
+            let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
+            assert_eq!(
+                sans,
+                vec![
+                    SubjectAltName::Dns("bootstrap.kafka.example.com".into()),
+                    SubjectAltName::Dns("broker-0.kafka.example.com".into()),
+                ],
+                "case {name}"
+            );
+        }
     }
 }
 
 #[cfg(test)]
 mod weak_auth_tests {
-    use assert2::{assert, check};
-
     use super::*;
 
     #[test]
-    fn weak_auth_warnings_emitted_for_scram_without_tls() {
-        let listeners = vec![Listener {
-            name: "scram-plain".into(),
-            port: 9094,
-            type_: ListenerType::Internal,
-            tls: false,
-            authentication: Some(ListenerAuthentication::ScramSha512),
-            configuration: None,
-            network_policy_peers: None,
-        }];
-        let warnings = weak_auth_warnings(&listeners);
-        assert!(warnings.len() == 1);
-        check!(warnings[0].contains("scram-plain"));
-        check!(warnings[0].contains("cleartext") || warnings[0].contains("TLS"));
-    }
-
-    #[test]
-    fn weak_auth_warnings_empty_for_scram_with_tls() {
-        let listeners = vec![Listener {
-            name: "scram-tls".into(),
-            port: 9094,
-            type_: ListenerType::Internal,
-            tls: true,
-            authentication: Some(ListenerAuthentication::ScramSha512),
-            configuration: None,
-            network_policy_peers: None,
-        }];
-        let warnings = weak_auth_warnings(&listeners);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn weak_auth_warnings_empty_for_no_auth() {
-        let listeners = vec![Listener {
-            name: "plain".into(),
-            port: 9092,
-            type_: ListenerType::Internal,
-            tls: false,
-            authentication: None,
-            configuration: None,
-            network_policy_peers: None,
-        }];
-        assert!(weak_auth_warnings(&listeners).is_empty());
-    }
-
-    #[test]
-    fn weak_auth_warnings_emitted_for_scram_256_without_tls() {
-        let listeners = vec![Listener {
-            name: "scram256-plain".into(),
-            port: 9094,
-            type_: ListenerType::Internal,
-            tls: false,
-            authentication: Some(ListenerAuthentication::ScramSha256),
-            configuration: None,
-            network_policy_peers: None,
-        }];
-        assert!(weak_auth_warnings(&listeners).len() == 1);
+    fn weak_auth_warning_scram_cases() {
+        for (name, listener_name, tls, authentication, expected) in [
+            (
+                "SCRAM-SHA-512 without TLS",
+                "scram-plain",
+                false,
+                Some(ListenerAuthentication::ScramSha512),
+                vec!["listener 'scram-plain' has SCRAM auth without transport TLS; credentials traverse the network in cleartext during the SCRAM exchange. Consider tls: true.".to_string()],
+            ),
+            (
+                "SCRAM-SHA-512 with TLS",
+                "scram-tls",
+                true,
+                Some(ListenerAuthentication::ScramSha512),
+                vec![],
+            ),
+            ("no authentication", "plain", false, None, vec![]),
+            (
+                "SCRAM-SHA-256 without TLS",
+                "scram256-plain",
+                false,
+                Some(ListenerAuthentication::ScramSha256),
+                vec!["listener 'scram256-plain' has SCRAM auth without transport TLS; credentials traverse the network in cleartext during the SCRAM exchange. Consider tls: true.".to_string()],
+            ),
+        ] {
+            let listeners = vec![Listener {
+                name: listener_name.to_string(),
+                port: 9094,
+                type_: ListenerType::Internal,
+                tls,
+                authentication,
+                configuration: None,
+                network_policy_peers: None,
+            }];
+            assert_eq!(weak_auth_warnings(&listeners), expected, "case {name}");
+        }
     }
 
     fn oauth_listener(name: &str, jwks: &str) -> Listener {
@@ -6594,18 +6273,20 @@ mod weak_auth_tests {
     }
 
     #[test]
-    fn weak_auth_warnings_emitted_for_oauth_with_http_jwks_uri() {
-        let listeners = vec![oauth_listener("oauth", "http://idp/jwks")];
-        let warnings = weak_auth_warnings(&listeners);
-        assert!(warnings.len() == 1);
-        for needle in ["oauth", "http://", "https"] {
-            check!(warnings[0].contains(needle), "missing {needle:?}");
+    fn weak_auth_warning_oauth_uri_cases() {
+        for (name, uri, expected) in [
+            (
+                "HTTP JWKS URI",
+                "http://idp/jwks",
+                vec!["listener 'oauth' has http:// JWKS endpoint; key material traverses the network in cleartext. Consider https.".to_string()],
+            ),
+            ("HTTPS JWKS URI", "https://idp/jwks", vec![]),
+        ] {
+            assert_eq!(
+                weak_auth_warnings(&[oauth_listener("oauth", uri)]),
+                expected,
+                "case {name}"
+            );
         }
-    }
-
-    #[test]
-    fn weak_auth_warnings_empty_for_oauth_with_https_jwks_uri() {
-        let listeners = vec![oauth_listener("oauth", "https://idp/jwks")];
-        assert!(weak_auth_warnings(&listeners).is_empty());
     }
 }

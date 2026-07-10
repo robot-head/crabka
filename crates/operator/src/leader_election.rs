@@ -139,15 +139,25 @@ mod tests {
     #[test]
     fn held_by_us_matches_identity() {
         let l = lease_with("me", now());
-        assert!(held_by_us(&l, "me"));
-        assert!(!held_by_us(&l, "someone-else"));
+        for (name, identity, expected) in [
+            ("matching identity", "me", true),
+            ("different identity", "someone-else", false),
+        ] {
+            assert!(held_by_us(&l, identity) == expected, "case {name}");
+        }
     }
 
     #[test]
     fn expiry_uses_renew_time() {
         let stale = jiff::Timestamp::from_second(now().as_second() - 60).unwrap();
         let fresh = now();
-        assert!(is_expired(&lease_with("x", stale)));
-        assert!(!is_expired(&lease_with("x", fresh)));
+        for (name, renew_time, expected) in
+            [("stale lease", stale, true), ("fresh lease", fresh, false)]
+        {
+            assert!(
+                is_expired(&lease_with("x", renew_time)) == expected,
+                "case {name}"
+            );
+        }
     }
 }

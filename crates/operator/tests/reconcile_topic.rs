@@ -146,8 +146,10 @@ async fn cluster_not_found_sets_status_cluster_not_ready() {
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "ClusterNotReady");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("ClusterNotReady"))
+    );
 }
 
 /// `KafkaTopic` whose effective name is invalid
@@ -181,8 +183,10 @@ async fn invalid_topic_name_sets_status() {
         .expect("status PATCH");
     let body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "InvalidTopicName");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("InvalidTopicName"))
+    );
 }
 
 /// A `KafkaTopic` referencing a Ready Kafka but with no
@@ -356,25 +360,41 @@ async fn creates_topic_on_first_reconcile() {
     reconcile(Arc::new(kt), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    assert!(
-        calls.len() == 2,
-        "expected Metadata + CreateTopics, got {calls:?}"
-    );
-    assert!(matches!(&calls[0], RecordedCall::Metadata(t) if t == &vec![TOPIC_NAME.to_string()]));
-    match &calls[1] {
-        RecordedCall::CreateTopics(specs) => {
-            check!(specs.len() == 1);
-            check!(specs[0].name == TOPIC_NAME);
-            check!(specs[0].partitions == 3);
-            check!(specs[0].replicas == 1);
-        }
-        other => panic!("expected CreateTopics, got {other:?}"),
+    #[derive(Debug, PartialEq, Eq)]
+    enum CallShape<'a> {
+        Metadata(Vec<&'a str>),
+        CreateTopics(Vec<(&'a str, i32, i32)>),
+        Other,
     }
+    let actual = calls
+        .iter()
+        .map(|call| match call {
+            RecordedCall::Metadata(topics) => {
+                CallShape::Metadata(topics.iter().map(String::as_str).collect())
+            }
+            RecordedCall::CreateTopics(specs) => CallShape::CreateTopics(
+                specs
+                    .iter()
+                    .map(|spec| (spec.name.as_str(), spec.partitions, spec.replicas))
+                    .collect(),
+            ),
+            _ => CallShape::Other,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        actual,
+        vec![
+            CallShape::Metadata(vec![TOPIC_NAME]),
+            CallShape::CreateTopics(vec![(TOPIC_NAME, 3, 1)]),
+        ]
+    );
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    check!(cond["status"] == "True");
-    check!(cond["reason"] == "Ready");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("True"), Some("Ready"))
+    );
     check!(
         body["status"]["topicId"].is_string(),
         "topicId should be a uuid string, got {:?}",
@@ -428,8 +448,10 @@ async fn noop_when_spec_matches_cluster() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["status"] == "True");
-    assert!(cond["reason"] == "Ready");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("True"), Some("Ready"))
+    );
 }
 
 /// current=3 partitions, spec=5 → one CreatePartitions(5) call,
@@ -465,103 +487,73 @@ async fn partition_increase_triggers_create_partitions() {
             _ => None,
         })
         .expect("CreatePartitions call expected");
-    check!(cp.len() == 1);
-    check!(cp[0].name == TOPIC_NAME);
-    check!(cp[0].new_total_count == 5);
+    assert_eq!(
+        cp.iter()
+            .map(|op| (op.name.as_str(), op.new_total_count))
+            .collect::<Vec<_>>(),
+        [(TOPIC_NAME, 5)]
+    );
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
-    assert!(body["status"]["conditions"][0]["status"] == "True");
-    assert!(body["status"]["conditions"][0]["reason"] == "Ready");
+    assert_eq!(
+        (
+            body["status"]["conditions"][0]["status"].as_str(),
+            body["status"]["conditions"][0]["reason"].as_str(),
+        ),
+        (Some("True"), Some("Ready"))
+    );
 }
 
 /// current=5 partitions, spec=2 → no mutating admin calls,
 /// status `Ready=False reason=ImmutableFieldChanged`.
 #[tokio::test]
-async fn partition_decrease_sets_immutable_field_changed() {
-    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
-    let client = mock_client(&state, NS);
-    let ctx = Arc::new(fixture_ctx(client, NS));
+async fn immutable_topic_field_change_cases() {
+    for (name, current_partitions, desired_partitions, desired_replicas) in [
+        ("partition decrease", 5, 2, 1),
+        ("replication-factor change", 3, 3, 2),
+    ] {
+        let state = MockState::new(standard_kube_rules(TOPIC_NAME));
+        let client = mock_client(&state, NS);
+        let ctx = Arc::new(fixture_ctx(client, NS));
+        let fake = FakeAdminClient::new();
+        fake.add_topic(
+            TOPIC_NAME,
+            TopicState {
+                partitions: current_partitions,
+                replicas: 1,
+                topic_id: Some(uuid::Uuid::nil()),
+                config_overrides: std::collections::BTreeMap::new(),
+            },
+        );
+        let fake = Arc::new(tokio::sync::Mutex::new(fake));
+        let fake_for_assert = fake.clone();
+        ctx.insert_admin_client_for_test(CLUSTER, fake).await;
 
-    let fake = FakeAdminClient::new();
-    fake.add_topic(
-        TOPIC_NAME,
-        TopicState {
-            partitions: 5,
-            replicas: 1,
-            topic_id: Some(uuid::Uuid::nil()),
-            config_overrides: std::collections::BTreeMap::new(),
-        },
-    );
-    let fake = Arc::new(tokio::sync::Mutex::new(fake));
-    let fake_for_assert = fake.clone();
-    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
+        let topic = topic_with_finalizer(TOPIC_NAME, desired_partitions, desired_replicas, None);
+        reconcile(Arc::new(topic), ctx).await.unwrap();
 
-    let kt = topic_with_finalizer(TOPIC_NAME, 2, 1, None);
-    reconcile(Arc::new(kt), ctx).await.unwrap();
-
-    let calls = fake_for_assert.lock().await.calls();
-    for c in &calls {
-        assert!(
-            !matches!(
-                c,
+        let calls = fake_for_assert.lock().await.calls();
+        let has_mutation = calls.iter().any(|call| {
+            matches!(
+                call,
                 RecordedCall::CreateTopics(_)
                     | RecordedCall::DeleteTopics(_)
                     | RecordedCall::CreatePartitions(_)
                     | RecordedCall::IncrementalAlterConfigs(_)
+            )
+        });
+        let body = last_status_patch_body(&state, TOPIC_NAME);
+        let condition = &body["status"]["conditions"][0];
+        assert_eq!(
+            (
+                has_mutation,
+                condition["status"].as_str(),
+                condition["reason"].as_str(),
             ),
-            "no mutating admin calls expected on immutable path; got {c:?}",
+            (false, Some("False"), Some("ImmutableFieldChanged")),
+            "case {name}: {calls:?}"
         );
     }
-
-    let body = last_status_patch_body(&state, TOPIC_NAME);
-    let cond = &body["status"]["conditions"][0];
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "ImmutableFieldChanged");
-}
-
-/// `current.replication_factor=1`, spec=2 → no mutating admin
-/// calls, status `Ready=False reason=ImmutableFieldChanged`.
-#[tokio::test]
-async fn replicas_change_sets_immutable_field_changed() {
-    let state = MockState::new(standard_kube_rules(TOPIC_NAME));
-    let client = mock_client(&state, NS);
-    let ctx = Arc::new(fixture_ctx(client, NS));
-
-    let fake = FakeAdminClient::new();
-    fake.add_topic(
-        TOPIC_NAME,
-        TopicState {
-            partitions: 3,
-            replicas: 1,
-            topic_id: Some(uuid::Uuid::nil()),
-            config_overrides: std::collections::BTreeMap::new(),
-        },
-    );
-    let fake = Arc::new(tokio::sync::Mutex::new(fake));
-    let fake_for_assert = fake.clone();
-    ctx.insert_admin_client_for_test(CLUSTER, fake).await;
-
-    let kt = topic_with_finalizer(TOPIC_NAME, 3, 2, None);
-    reconcile(Arc::new(kt), ctx).await.unwrap();
-
-    let calls = fake_for_assert.lock().await.calls();
-    for c in &calls {
-        assert!(
-            !matches!(
-                c,
-                RecordedCall::CreateTopics(_)
-                    | RecordedCall::DeleteTopics(_)
-                    | RecordedCall::CreatePartitions(_)
-                    | RecordedCall::IncrementalAlterConfigs(_)
-            ),
-            "no mutating admin calls expected when replicas change; got {c:?}",
-        );
-    }
-
-    let body = last_status_patch_body(&state, TOPIC_NAME);
-    let cond = &body["status"]["conditions"][0];
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "ImmutableFieldChanged");
 }
 
 /// current overrides `{foo: 1}`, desired `{bar: 2}` →
@@ -616,12 +608,20 @@ async fn config_diff_sets_and_deletes() {
                 if topic == TOPIC_NAME && key == "foo"
         )
     });
-    assert!(has_set_bar, "expected SET bar=2, got {ops:?}");
-    assert!(has_delete_foo, "expected DELETE foo, got {ops:?}");
+    assert_eq!(
+        (has_set_bar, has_delete_foo),
+        (true, true),
+        "expected SET bar=2 and DELETE foo, got {ops:?}"
+    );
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
-    assert!(body["status"]["conditions"][0]["status"] == "True");
-    assert!(body["status"]["conditions"][0]["reason"] == "Ready");
+    assert_eq!(
+        (
+            body["status"]["conditions"][0]["status"].as_str(),
+            body["status"]["conditions"][0]["reason"].as_str(),
+        ),
+        (Some("True"), Some("Ready"))
+    );
 }
 
 /// deletionTimestamp set, preserveTopic=false → one `DeleteTopics`
@@ -705,8 +705,10 @@ async fn creates_topic_broker_error_surfaces_in_status() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "BrokerError");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("BrokerError"))
+    );
     let msg = cond["message"].as_str().unwrap();
     assert!(msg.contains("CreateTopics"), "message {msg:?}");
     assert!(msg.contains("TOPIC_ALREADY_EXISTS"), "message {msg:?}");
@@ -740,8 +742,10 @@ async fn create_partitions_broker_error_surfaces_in_status() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "BrokerError");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("BrokerError"))
+    );
     let msg = cond["message"].as_str().unwrap();
     assert!(msg.contains("CreatePartitions"), "message {msg:?}");
     assert!(msg.contains("INVALID_PARTITIONS"), "message {msg:?}");
@@ -781,8 +785,10 @@ async fn incremental_alter_configs_broker_error_surfaces_in_status() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert!(cond["status"] == "False");
-    assert!(cond["reason"] == "BrokerError");
+    assert_eq!(
+        (cond["status"].as_str(), cond["reason"].as_str()),
+        (Some("False"), Some("BrokerError"))
+    );
     let msg = cond["message"].as_str().unwrap();
     assert!(msg.contains("IncrementalAlterConfigs"), "message {msg:?}");
     assert!(msg.contains("INVALID_CONFIG"), "message {msg:?}");

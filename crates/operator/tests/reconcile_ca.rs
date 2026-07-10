@@ -301,14 +301,20 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
         .iter()
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
-    assert!(cluster_ca_cond["status"] == "True", "body = {body}");
-    assert!(cluster_ca_cond["reason"] == "CaReady", "body = {body}");
     let clients_ca_cond = conds
         .iter()
         .find(|c| c["type"] == "ClientsCaReady")
         .unwrap_or_else(|| panic!("ClientsCaReady condition missing, body = {body}"));
-    check!(clients_ca_cond["status"] == "True", "body = {body}");
-    check!(clients_ca_cond["reason"] == "CaReady", "body = {body}");
+    assert_eq!(
+        (
+            cluster_ca_cond["status"].as_str(),
+            cluster_ca_cond["reason"].as_str(),
+            clients_ca_cond["status"].as_str(),
+            clients_ca_cond["reason"].as_str(),
+        ),
+        (Some("True"), Some("CaReady"), Some("True"), Some("CaReady")),
+        "body = {body}"
+    );
 
     check!(
         state.remaining_rules() == 0,
@@ -482,17 +488,17 @@ async fn byo_mode_adopts_pre_existing_secrets_does_not_overwrite() {
         .iter()
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
-    assert!(
-        cluster_ca_cond["status"] == "True",
-        "BYO present: ClusterCaReady must be True, body = {body}"
-    );
     let clients_ca_cond = conds
         .iter()
         .find(|c| c["type"] == "ClientsCaReady")
         .unwrap_or_else(|| panic!("ClientsCaReady condition missing, body = {body}"));
-    assert!(
-        clients_ca_cond["status"] == "True",
-        "BYO present: ClientsCaReady must be True, body = {body}"
+    assert_eq!(
+        (
+            cluster_ca_cond["status"].as_str(),
+            clients_ca_cond["status"].as_str()
+        ),
+        (Some("True"), Some("True")),
+        "BYO CA conditions, body = {body}"
     );
 
     assert!(
@@ -616,13 +622,13 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
         .iter()
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
-    check!(
-        cluster_ca_cond["status"] == "False",
-        "ByoCaMissing: ClusterCaReady must be False, body = {body}"
-    );
-    check!(
-        cluster_ca_cond["reason"] == "ByoCaMissing",
-        "ByoCaMissing: reason must be ByoCaMissing, body = {body}"
+    assert_eq!(
+        (
+            cluster_ca_cond["status"].as_str(),
+            cluster_ca_cond["reason"].as_str()
+        ),
+        (Some("False"), Some("ByoCaMissing")),
+        "body = {body}"
     );
 
     check!(

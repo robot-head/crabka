@@ -1206,7 +1206,7 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 
     use super::*;
@@ -1252,17 +1252,23 @@ mod tests {
             "demo-broker-headless.default.svc.cluster.local",
         )
         .unwrap();
-        assert!(dep.metadata.name.as_deref() == Some("gw"));
-        let owner = &dep.metadata.owner_references.as_ref().unwrap()[0];
-        let expected = OwnerReference {
-            api_version: "crabka.io/v1alpha1".into(),
-            block_owner_deletion: Some(true),
-            controller: Some(true),
-            kind: "KafkaGrpcGateway".into(),
-            name: "gw".into(),
-            uid: "gw-uid".into(),
-        };
-        assert!(*owner == expected);
+        assert_eq!(
+            (
+                dep.metadata.name,
+                dep.metadata.owner_references.unwrap_or_default(),
+            ),
+            (
+                Some("gw".into()),
+                vec![OwnerReference {
+                    api_version: "crabka.io/v1alpha1".into(),
+                    block_owner_deletion: Some(true),
+                    controller: Some(true),
+                    kind: "KafkaGrpcGateway".into(),
+                    name: "gw".into(),
+                    uid: "gw-uid".into(),
+                }],
+            )
+        );
     }
 
     #[test]
@@ -1274,19 +1280,15 @@ mod tests {
         let mounts = container.volume_mounts.as_ref().expect("volume mounts");
         let names: std::collections::BTreeSet<&str> =
             mounts.iter().map(|m| m.name.as_str()).collect();
-        for want in [
-            "serving",
-            "broker-client",
-            "cluster-ca",
-            "clients-ca",
-            "config",
-        ] {
-            assert!(names.contains(want), "missing mount {want}; got {names:?}");
-        }
-        assert!(
-            mounts.len() == 5,
-            "expected exactly 5 mounts, got {}",
-            mounts.len()
+        assert_eq!(
+            names,
+            std::collections::BTreeSet::from([
+                "broker-client",
+                "clients-ca",
+                "cluster-ca",
+                "config",
+                "serving",
+            ])
         );
 
         // The five backing Secret volumes must exist too.
@@ -1295,18 +1297,16 @@ mod tests {
             .iter()
             .filter_map(|v| v.secret.as_ref().and_then(|s| s.secret_name.clone()))
             .collect();
-        for want in [
-            "gw-serving",
-            "gw-broker",
-            "demo-cluster-ca-cert",
-            "demo-clients-ca-cert",
-            "gw-config",
-        ] {
-            assert!(
-                secret_names.contains(want),
-                "missing backing Secret volume {want}; got {secret_names:?}"
-            );
-        }
+        assert_eq!(
+            secret_names,
+            std::collections::BTreeSet::from([
+                "demo-clients-ca-cert".to_string(),
+                "demo-cluster-ca-cert".to_string(),
+                "gw-broker".to_string(),
+                "gw-config".to_string(),
+                "gw-serving".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -1347,10 +1347,6 @@ mod tests {
 
         // The advertised-addr arg uses the `$(POD_IP)` shell-expansion form.
         let args = container.args.as_ref().expect("args");
-        assert!(
-            args.iter().any(|a| a == "--advertised-addr=$(POD_IP):9500"),
-            "args: {args:?}"
-        );
 
         // POD_IP is sourced from the downward API `status.podIP`.
         let env = container.env.as_ref().expect("env");
@@ -1360,29 +1356,35 @@ mod tests {
             .as_ref()
             .and_then(|v| v.field_ref.as_ref())
             .expect("POD_IP fieldRef");
-        assert!(fr.field_path == "status.podIP");
 
         // client-id is the pod name.
         let client_id = env
             .iter()
             .find(|e| e.name == "CRABKA_GATEWAY_CLIENT_ID")
             .expect("client id env");
-        assert!(client_id.value.as_deref() == Some("$(POD_NAME)"));
+        assert_eq!(
+            (
+                args.iter()
+                    .any(|arg| arg == "--advertised-addr=$(POD_IP):9500"),
+                fr.field_path.as_str(),
+                client_id.value.as_deref(),
+            ),
+            (true, "status.podIP", Some("$(POD_NAME)")),
+            "args: {args:?}"
+        );
     }
 
     #[test]
-    fn deployment_default_replicas_is_one() {
-        let gw = gateway_fixture("gw", "demo");
-        let dep = deployment(&gw, "demo", "img:1", "boot:9092", "sni").unwrap();
-        assert!(dep.spec.unwrap().replicas == Some(1));
-    }
-
-    #[test]
-    fn deployment_honors_explicit_replicas() {
-        let mut gw = gateway_fixture("gw", "demo");
-        gw.spec.replicas = Some(3);
-        let dep = deployment(&gw, "demo", "img:1", "boot:9092", "sni").unwrap();
-        assert!(dep.spec.unwrap().replicas == Some(3));
+    fn deployment_uses_default_or_explicit_replicas() {
+        for (name, configured, expected) in [
+            ("default replica count", None, 1),
+            ("explicit replica count", Some(3), 3),
+        ] {
+            let mut gw = gateway_fixture("gw", "demo");
+            gw.spec.replicas = configured;
+            let dep = deployment(&gw, "demo", "img:1", "boot:9092", "sni").unwrap();
+            assert_eq!(dep.spec.unwrap().replicas, Some(expected), "case {name}");
+        }
     }
 
     #[test]
@@ -1398,14 +1400,19 @@ mod tests {
             .containers
             .remove(0);
         let readiness = container.readiness_probe.expect("readiness probe");
-        let get = readiness.http_get.expect("httpGet readiness");
-        assert!(get.path.as_deref() == Some("/readyz"));
+        let readiness_get = readiness.http_get.expect("httpGet readiness");
         let liveness = container.liveness_probe.expect("liveness probe");
-        let get = liveness.http_get.expect("httpGet liveness");
-        assert!(get.path.as_deref() == Some("/healthz"));
+        let liveness_get = liveness.http_get.expect("httpGet liveness");
         // containerPort 9500.
         let ports = container.ports.expect("ports");
-        assert!(ports.iter().any(|p| p.container_port == 9500));
+        assert_eq!(
+            (
+                readiness_get.path.as_deref(),
+                liveness_get.path.as_deref(),
+                ports.iter().any(|p| p.container_port == 9500),
+            ),
+            (Some("/readyz"), Some("/healthz"), true)
+        );
     }
 
     #[test]
@@ -1447,54 +1454,64 @@ mod tests {
         let gw = gateway_fixture("gw", "demo");
         let svc = service(&gw, "demo").unwrap();
         let spec = svc.spec.expect("svc spec");
-        assert!(spec.type_.as_deref() == Some("ClusterIP"));
         let selector = spec.selector.expect("selector");
         let labels = gateway_labels("demo", "gw");
-        assert!(
-            selector == labels,
-            "selector {selector:?} != labels {labels:?}"
-        );
         let port = &spec.ports.expect("ports")[0];
-        assert!(port.port == 9500);
-        // Owner-ref present.
-        assert!(svc.metadata.owner_references.as_ref().unwrap()[0].name == "gw");
+        assert_eq!(
+            (
+                spec.type_.as_deref(),
+                selector,
+                port.port,
+                svc.metadata.owner_references.as_ref().unwrap()[0]
+                    .name
+                    .as_str(),
+            ),
+            (Some("ClusterIP"), labels, 9500, "gw")
+        );
     }
 
     #[test]
     fn child_kafkauser_is_tls_with_broad_acls() {
         let gw = gateway_fixture("gw", "demo");
         let user = child_kafkauser(&gw, "demo").unwrap();
-        check!(user.metadata.name.as_deref() == Some("gw-broker"));
-        // TLS auth.
-        assert!(matches!(user.spec.authentication, Authentication::Tls(_)));
-        // crabka.io/cluster label links it to the parent.
-        check!(
-            user.metadata
-                .labels
-                .as_ref()
-                .and_then(|l| l.get("crabka.io/cluster"))
-                .map(String::as_str)
-                == Some("demo")
+        let expected_labels = BTreeMap::from([
+            ("crabka.io/cluster".to_string(), "demo".to_string()),
+            ("crabka.io/gateway".to_string(), "gw".to_string()),
+        ]);
+        assert_eq!(
+            (
+                user.metadata.name,
+                user.metadata.namespace,
+                user.metadata.labels,
+                user.metadata.owner_references,
+                user.spec,
+            ),
+            (
+                Some("gw-broker".into()),
+                Some("default".into()),
+                Some(expected_labels),
+                Some(vec![OwnerReference {
+                    api_version: "crabka.io/v1alpha1".into(),
+                    block_owner_deletion: Some(true),
+                    controller: Some(true),
+                    kind: "KafkaGrpcGateway".into(),
+                    name: "gw".into(),
+                    uid: "gw-uid".into(),
+                }]),
+                KafkaUserSpec {
+                    authentication: Authentication::Tls(TlsAuth::default()),
+                    authorization: Some(Authorization::Simple(SimpleAuthorization {
+                        acls: vec![
+                            broad_acl(AclResourceKind::Topic, "*"),
+                            broad_acl(AclResourceKind::Group, "*"),
+                            broad_acl(AclResourceKind::TransactionalId, "*"),
+                            broad_acl(AclResourceKind::Cluster, "kafka-cluster"),
+                        ],
+                    })),
+                    quotas: None,
+                },
+            )
         );
-        // Owner-ref → the gateway CR.
-        check!(user.metadata.owner_references.as_ref().unwrap()[0].kind == "KafkaGrpcGateway");
-        // Broad ALLOW ACLs over Topic/Group/TransactionalId/Cluster.
-        let Some(Authorization::Simple(authz)) = &user.spec.authorization else {
-            panic!("expected simple authorization");
-        };
-        let kinds: Vec<AclResourceKind> = authz.acls.iter().map(|a| a.resource.kind).collect();
-        for want in [
-            AclResourceKind::Topic,
-            AclResourceKind::Group,
-            AclResourceKind::TransactionalId,
-            AclResourceKind::Cluster,
-        ] {
-            assert!(kinds.contains(&want), "missing ACL kind {want:?}");
-        }
-        for rule in &authz.acls {
-            assert!(rule.permission == AclPermission::Allow);
-            assert!(rule.operations.contains(&AclOp::All));
-        }
     }
 
     #[test]
@@ -1540,7 +1557,26 @@ mod tests {
         outbound_secrets.insert("processed".to_string(), "SIGN-HMAC".to_string());
 
         let secret = config_secret(&gw, &webhook_secrets, &outbound_secrets).unwrap();
-        assert!(secret.metadata.name.as_deref() == Some("gw-config"));
+        assert_eq!(
+            (
+                secret.metadata.name.as_deref(),
+                secret.metadata.owner_references.as_deref(),
+            ),
+            (
+                Some("gw-config"),
+                Some(
+                    [OwnerReference {
+                        api_version: "crabka.io/v1alpha1".into(),
+                        block_owner_deletion: Some(true),
+                        controller: Some(true),
+                        kind: "KafkaGrpcGateway".into(),
+                        name: "gw".into(),
+                        uid: "gw-uid".into(),
+                    }]
+                    .as_slice()
+                ),
+            )
+        );
         let data = secret.data.unwrap();
 
         let webhooks_toml = String::from_utf8(data["webhooks.toml"].0.clone()).unwrap();
@@ -1570,9 +1606,6 @@ mod tests {
                 "missing {want} in {outbound_toml}"
             );
         }
-
-        // The owner-ref points at the gateway.
-        assert!(secret.metadata.owner_references.as_ref().unwrap()[0].name == "gw");
     }
 
     #[test]
@@ -1598,13 +1631,16 @@ mod tests {
         let data = secret.data.unwrap();
         let outbound_toml = String::from_utf8(data["outbound.toml"].0.clone()).unwrap();
         let parsed: toml::Value = toml::from_str(&outbound_toml).expect("valid TOML");
-        assert!(parsed.get("subscriptions").is_some());
-        assert!(parsed.get("allowed_targets").is_some());
         let subs = parsed["subscriptions"].as_array().unwrap();
-        assert!(subs[0]["name"].as_str() == Some("s"));
         let allowed = parsed["allowed_targets"].as_array().unwrap();
-        assert!(allowed[0]["host"].as_str() == Some("h.example.com"));
-        assert!(allowed[0]["scheme"].as_str() == Some("https"));
+        assert_eq!(
+            (
+                subs[0]["name"].as_str(),
+                allowed[0]["host"].as_str(),
+                allowed[0]["scheme"].as_str(),
+            ),
+            (Some("s"), Some("h.example.com"), Some("https"))
+        );
     }
 
     #[test]
@@ -1633,8 +1669,13 @@ mod tests {
             .map(|v| v["host"].as_str().unwrap().to_string())
             .collect();
         // Port stripped from the subscription host.
-        assert!(hosts.contains("a.example.com"), "{hosts:?}");
-        assert!(hosts.contains("b.example.com"), "{hosts:?}");
+        assert_eq!(
+            hosts,
+            std::collections::BTreeSet::from([
+                "a.example.com".to_string(),
+                "b.example.com".to_string(),
+            ])
+        );
     }
 
     #[test]
@@ -1831,44 +1872,39 @@ mod tests {
             ],
         );
         let (bootstrap, sni) = resolve_broker_endpoint(&parent, "default").expect("resolved");
-        assert!(
-            bootstrap == "demo-broker-headless.default.svc.cluster.local:9093",
-            "must resolve the secured listener bootstrap, got {bootstrap}"
-        );
-        assert!(
-            sni == "demo-broker-headless.default.svc.cluster.local",
-            "SNI must be the headless-svc SAN, got {sni}"
+        assert_eq!(
+            (bootstrap.as_str(), sni.as_str()),
+            (
+                "demo-broker-headless.default.svc.cluster.local:9093",
+                "demo-broker-headless.default.svc.cluster.local",
+            )
         );
     }
 
     #[test]
-    fn resolve_broker_endpoint_none_without_tls_listener() {
-        // Only a plaintext PLAIN listener → no eligible endpoint.
-        let parent = parent_with_listeners(
+    fn resolve_broker_endpoint_ineligible_cases() {
+        let without_tls = parent_with_listeners(
             vec![plain_listener("PLAIN", 9092)],
             vec![internal_status("PLAIN", 9092)],
         );
-        assert!(resolve_broker_endpoint(&parent, "default").is_none());
-    }
-
-    #[test]
-    fn resolve_broker_endpoint_none_when_tls_listener_has_no_auth() {
-        // A TLS listener with no `authentication` is anonymous-over-TLS, not
-        // mTLS — the gateway's client cert wouldn't authenticate it, so it is
-        // not eligible.
         let anon_tls = Listener {
             authentication: None,
             ..tls_mtls_listener("anon", 9093)
         };
-        let parent = parent_with_listeners(vec![anon_tls], vec![internal_status("anon", 9093)]);
-        assert!(resolve_broker_endpoint(&parent, "default").is_none());
-    }
-
-    #[test]
-    fn resolve_broker_endpoint_none_when_bootstrap_not_in_status() {
-        // Eligible spec listener, but its bootstrap hasn't resolved into
-        // status.listeners yet (ListenersReady not reached) → None.
-        let parent = parent_with_listeners(vec![tls_mtls_listener("secured", 9093)], vec![]);
-        assert!(resolve_broker_endpoint(&parent, "default").is_none());
+        let anonymous_tls =
+            parent_with_listeners(vec![anon_tls], vec![internal_status("anon", 9093)]);
+        let unresolved_bootstrap =
+            parent_with_listeners(vec![tls_mtls_listener("secured", 9093)], vec![]);
+        for (name, parent) in [
+            ("no TLS listener", without_tls),
+            ("anonymous TLS listener", anonymous_tls),
+            ("bootstrap absent from status", unresolved_bootstrap),
+        ] {
+            assert_eq!(
+                resolve_broker_endpoint(&parent, "default"),
+                None,
+                "case {name}"
+            );
+        }
     }
 }

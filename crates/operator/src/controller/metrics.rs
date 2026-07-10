@@ -445,10 +445,11 @@ mod tests {
     fn render_metrics_service_is_headless_with_named_port() {
         let svc = render_metrics_service(&test_kafka(), &ServiceMonitorSpec::default()).unwrap();
         let spec = svc.spec.unwrap();
-        assert!(spec.cluster_ip.as_deref() == Some("None"));
-        assert!(
-            spec.ports
-                == Some(vec![k8s_openapi::api::core::v1::ServicePort {
+        assert_eq!(
+            (spec.cluster_ip.as_deref(), spec.ports),
+            (
+                Some("None"),
+                Some(vec![k8s_openapi::api::core::v1::ServicePort {
                     app_protocol: None,
                     name: Some("metrics".into()),
                     node_port: None,
@@ -459,7 +460,8 @@ mod tests {
                             "metrics".into()
                         )
                     ),
-                }])
+                }]),
+            )
         );
     }
 }

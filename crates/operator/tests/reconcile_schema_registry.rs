@@ -121,8 +121,10 @@ async fn kafka_present_but_not_ready_gates_with_no_children() {
     let body: serde_json::Value = serde_json::from_slice(patch.body()).unwrap();
     let conds = body["status"]["conditions"].as_array().unwrap();
     let kr = conds.iter().find(|c| c["type"] == "KafkaReady").unwrap();
-    assert!(kr["status"] == "False");
-    assert!(kr["reason"] == "KafkaNotReady");
+    assert_eq!(
+        (kr["status"].as_str(), kr["reason"].as_str()),
+        (Some("False"), Some("KafkaNotReady"))
+    );
 }
 
 #[tokio::test]
@@ -258,8 +260,10 @@ async fn missing_cluster_label_sets_status() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap();
-    assert!(ready["status"] == "False");
-    assert!(ready["reason"] == "MissingClusterLabel");
+    assert_eq!(
+        (ready["status"].as_str(), ready["reason"].as_str()),
+        (Some("False"), Some("MissingClusterLabel"))
+    );
 }
 
 #[tokio::test]
@@ -661,20 +665,20 @@ async fn kafka_client_sasl_ssl_renders_to_args_and_env() {
         .iter()
         .find(|e| e["name"] == "SCHEMA_REGISTRY_KAFKA_SASL_USERNAME")
         .unwrap();
-    assert_eq!(
-        sasl_user["valueFrom"]["secretKeyRef"]["name"],
-        "kafka-creds"
-    );
-    assert_eq!(sasl_user["valueFrom"]["secretKeyRef"]["key"], "username");
     let sasl_pass = env
         .iter()
         .find(|e| e["name"] == "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD")
         .unwrap();
     assert_eq!(
-        sasl_pass["valueFrom"]["secretKeyRef"]["name"],
-        "kafka-creds"
+        (
+            &sasl_user["valueFrom"]["secretKeyRef"],
+            &sasl_pass["valueFrom"]["secretKeyRef"],
+        ),
+        (
+            &serde_json::json!({"name": "kafka-creds", "key": "username"}),
+            &serde_json::json!({"name": "kafka-creds", "key": "password"}),
+        )
     );
-    assert_eq!(sasl_pass["valueFrom"]["secretKeyRef"]["key"], "password");
     // Volume + mount for kafka-tls CA
     let vols = body["spec"]["template"]["spec"]["volumes"]
         .as_array()

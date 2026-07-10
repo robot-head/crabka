@@ -23,7 +23,7 @@ use crabka_admin_ui::{
     error::UiError,
     server::{AppState, SESSION_COOKIE_NAME, router, router_with_factory},
     server_fns::{AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow, UserRow},
-    session::{SessionRecord, SessionStore},
+    session::{SessionRecord, SessionStore, SessionUser},
     views::{ReadRouteState, Route, RoutePage, render_page, render_route_html},
 };
 use tower::ServiceExt as _;
@@ -135,22 +135,47 @@ async fn healthz_returns_ok() {
 }
 
 #[tokio::test]
-async fn root_without_cookie_renders_login_instead_of_operations_shell() {
-    let response = get("/").await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get(header::CONTENT_TYPE),
-        Some(&header::HeaderValue::from_static(
-            "text/html; charset=utf-8"
-        ))
-    );
-
-    let body = response_text(response).await;
-    assert!(body.contains("<!doctype html>"));
-    assert!(body.contains("Sign in to Crabka Admin"));
-    assert!(!body.contains("operations-shell"));
-    assert!(!body.contains("Crabka Operations"));
+async fn unauthenticated_login_page_cases() {
+    for (name, path, required, forbidden) in [
+        (
+            "protected root",
+            "/",
+            vec!["<!doctype html>", "Sign in to Crabka Admin"],
+            vec!["operations-shell", "Crabka Operations"],
+        ),
+        (
+            "login route",
+            "/login",
+            vec![
+                "Sign in to Crabka",
+                "method=\"post\"",
+                "name=\"username\"",
+                "name=\"password\"",
+            ],
+            vec![],
+        ),
+    ] {
+        let response = get(path).await;
+        assert_eq!(
+            (
+                response.status(),
+                response.headers().get(header::CONTENT_TYPE),
+            ),
+            (
+                StatusCode::OK,
+                Some(&header::HeaderValue::from_static(
+                    "text/html; charset=utf-8"
+                )),
+            ),
+            "case {name}"
+        );
+        let body = response_text(response).await;
+        assert!(
+            required.iter().all(|needle| body.contains(needle))
+                && forbidden.iter().all(|needle| !body.contains(needle)),
+            "case {name}: {body}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -171,25 +196,6 @@ async fn root_with_valid_cookie_renders_overview_shell() {
     let body = response_text(response).await;
     assert_eq!(body, render_page(&RoutePage::overview()));
     assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn login_returns_html_with_login_prompt() {
-    let response = get("/login").await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get(header::CONTENT_TYPE),
-        Some(&header::HeaderValue::from_static(
-            "text/html; charset=utf-8"
-        ))
-    );
-
-    let body = response_text(response).await;
-    assert!(body.contains("Sign in to Crabka"));
-    assert!(body.contains("method=\"post\""));
-    assert!(body.contains("name=\"username\""));
-    assert!(body.contains("name=\"password\""));
 }
 
 #[tokio::test]
@@ -301,18 +307,10 @@ async fn authenticated_post_mutation_routes_call_admin_mutation_seam() {
         assert!(text.contains(expected_resource), "{path} returned {text}");
     }
 
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 11);
-    assert_eq!(factory.create_topic.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.delete_topic.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.create_partitions.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.alter_configs.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.create_acl.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.delete_acl.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.upsert_scram.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.delete_scram.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.upsert_quota.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.delete_quota.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.move_log_dir.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        factory.mutation_counts(),
+        [11, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+    );
 }
 
 #[tokio::test]
@@ -324,8 +322,13 @@ async fn post_mutation_routes_authenticate_before_decoding_request_body() {
     let response = post_json_from(app, "/topics/create", "not-json", None).await;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(factory.total_mutation_calls(), 0);
+    assert_eq!(
+        (
+            factory.mutation_seam_calls.load(Ordering::SeqCst),
+            factory.total_mutation_calls(),
+        ),
+        (0, 0)
+    );
     let text = response_text(response).await;
     assert!(text.contains("not authenticated"));
 }
@@ -340,8 +343,13 @@ async fn post_mutation_routes_reject_stale_cookie_before_decoding_request_body()
     let response = post_json_from(app, "/topics/create", "not-json", Some(cookie)).await;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(factory.total_mutation_calls(), 0);
+    assert_eq!(
+        (
+            factory.mutation_seam_calls.load(Ordering::SeqCst),
+            factory.total_mutation_calls(),
+        ),
+        (0, 0)
+    );
     let text = response_text(response).await;
     assert!(text.contains("not authenticated"));
 }
@@ -358,8 +366,13 @@ async fn post_mutation_routes_return_bad_request_for_authenticated_malformed_jso
     let response = post_json_from(app, "/topics/create", "not-json", Some(cookie)).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(factory.total_mutation_calls(), 0);
+    assert_eq!(
+        (
+            factory.mutation_seam_calls.load(Ordering::SeqCst),
+            factory.total_mutation_calls(),
+        ),
+        (0, 0)
+    );
     let text = response_text(response).await;
     assert!(text.contains("invalid JSON request"));
 }
@@ -379,8 +392,13 @@ async fn authenticated_post_mutation_routes_reject_oversized_body_before_deseria
     let response = post_json_from(app, "/topics/create", oversized_body, Some(cookie)).await;
 
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(factory.total_mutation_calls(), 0);
+    assert_eq!(
+        (
+            factory.mutation_seam_calls.load(Ordering::SeqCst),
+            factory.total_mutation_calls(),
+        ),
+        (0, 0)
+    );
     let text = response_text(response).await;
     assert!(text.contains("request body too large"));
 }
@@ -439,12 +457,7 @@ async fn authenticated_read_routes_call_injected_seams_and_render_rows() {
         assert!(body.contains(expected), "{path} row content");
     }
 
-    assert_eq!(factory.topics.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.groups.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.acls.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.users.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.quotas.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.log_dirs.load(Ordering::SeqCst), 1);
+    assert_eq!(factory.read_counts(), [1; 6]);
 }
 
 #[tokio::test]
@@ -539,13 +552,7 @@ async fn missing_or_invalid_cookie_does_not_call_injected_seams() {
             assert_eq!(body, render_page(&RoutePage::login()), "{path} login page");
         }
 
-        assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(factory.topics.load(Ordering::SeqCst), 0);
-        assert_eq!(factory.groups.load(Ordering::SeqCst), 0);
-        assert_eq!(factory.acls.load(Ordering::SeqCst), 0);
-        assert_eq!(factory.users.load(Ordering::SeqCst), 0);
-        assert_eq!(factory.quotas.load(Ordering::SeqCst), 0);
-        assert_eq!(factory.log_dirs.load(Ordering::SeqCst), 0);
+        assert_eq!(factory.read_counts_with_seam(), [0; 7]);
     }
 }
 
@@ -562,8 +569,10 @@ impl LoginBroker for RecordingLoginBroker {
         password: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
         Box::pin(async move {
-            assert_eq!(username, "alice");
-            assert_eq!(password, "login-route-password-sentinel");
+            assert_eq!(
+                (username, password),
+                ("alice", "login-route-password-sentinel")
+            );
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -594,6 +603,47 @@ struct RecordingAdminSeamFactory {
 }
 
 impl RecordingAdminSeamFactory {
+    fn read_counts(&self) -> [usize; 6] {
+        [
+            self.topics.load(Ordering::SeqCst),
+            self.groups.load(Ordering::SeqCst),
+            self.acls.load(Ordering::SeqCst),
+            self.users.load(Ordering::SeqCst),
+            self.quotas.load(Ordering::SeqCst),
+            self.log_dirs.load(Ordering::SeqCst),
+        ]
+    }
+
+    fn read_counts_with_seam(&self) -> [usize; 7] {
+        let [topics, groups, acls, users, quotas, log_dirs] = self.read_counts();
+        [
+            self.read_seam_calls.load(Ordering::SeqCst),
+            topics,
+            groups,
+            acls,
+            users,
+            quotas,
+            log_dirs,
+        ]
+    }
+
+    fn mutation_counts(&self) -> [usize; 12] {
+        [
+            self.mutation_seam_calls.load(Ordering::SeqCst),
+            self.create_topic.load(Ordering::SeqCst),
+            self.delete_topic.load(Ordering::SeqCst),
+            self.create_partitions.load(Ordering::SeqCst),
+            self.alter_configs.load(Ordering::SeqCst),
+            self.create_acl.load(Ordering::SeqCst),
+            self.delete_acl.load(Ordering::SeqCst),
+            self.upsert_scram.load(Ordering::SeqCst),
+            self.delete_scram.load(Ordering::SeqCst),
+            self.upsert_quota.load(Ordering::SeqCst),
+            self.delete_quota.load(Ordering::SeqCst),
+            self.move_log_dir.load(Ordering::SeqCst),
+        ]
+    }
+
     fn total_mutation_calls(&self) -> usize {
         self.create_topic.load(Ordering::SeqCst)
             + self.delete_topic.load(Ordering::SeqCst)
@@ -618,7 +668,13 @@ impl AdminSeamFactory for RecordingAdminSeamFactory {
         _cfg: &AdminUiConfig,
         record: &SessionRecord,
     ) -> Result<Self::Reader<'a>, UiError> {
-        assert_eq!(record.user.username, "alice");
+        assert_eq!(
+            record.user,
+            SessionUser {
+                username: "alice".to_string(),
+                principal: "User:alice".to_string(),
+            }
+        );
         self.read_seam_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.clone())
     }
@@ -628,7 +684,13 @@ impl AdminSeamFactory for RecordingAdminSeamFactory {
         _cfg: &AdminUiConfig,
         record: &SessionRecord,
     ) -> Result<Self::Mutations<'a>, UiError> {
-        assert_eq!(record.user.username, "alice");
+        assert_eq!(
+            record.user,
+            SessionUser {
+                username: "alice".to_string(),
+                principal: "User:alice".to_string(),
+            }
+        );
         self.mutation_seam_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.clone())
     }

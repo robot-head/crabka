@@ -167,8 +167,7 @@ async fn operator_client_round_trips_against_real_rebalancer() {
         .get_proposal(&proposal.id)
         .await
         .expect("get_proposal");
-    assert!(fetched.id == proposal.id);
-    assert!(fetched.status == ProposalStatus::Computed);
+    assert_eq!(fetched, proposal);
 
     // GetProposal on an unknown id surfaces a Connect error mapped to Rpc.
     match client.get_proposal("does-not-exist").await {

@@ -24,9 +24,14 @@ fn build_security_uses_scram_sha512_only() {
 
     let security = build_scram_sha512_security(&cfg, "alice", SCRAM_PLAINTEXT_PASSWORD);
 
-    assert_eq!(security.protocol, ListenerProtocol::SaslPlaintext);
-    assert!(security.tls.is_none());
-    assert!(security.sasl_host.is_none());
+    assert_eq!(
+        (
+            &security.protocol,
+            security.tls.is_some(),
+            security.sasl_host.as_deref()
+        ),
+        (&ListenerProtocol::SaslPlaintext, false, None)
+    );
     assert_scram_sha512_credentials(security.sasl.as_ref(), "alice", SCRAM_PLAINTEXT_PASSWORD);
 }
 
@@ -45,14 +50,22 @@ fn build_security_preserves_sasl_ssl_tls_material() {
     let security = build_scram_sha512_security(&cfg, "carol", SCRAM_SSL_PASSWORD);
     let tls = security.tls.expect("SASL_SSL carries TLS config");
 
-    assert_eq!(security.protocol, ListenerProtocol::SaslSsl);
-    assert_eq!(tls.trust_roots_pem, Some(PathBuf::from("ca.pem")));
-    assert_eq!(tls.server_name, "broker.example.test");
     assert_eq!(
-        tls.client_identity,
-        Some((PathBuf::from("client.crt"), PathBuf::from("client.key")))
+        (
+            &security.protocol,
+            tls.trust_roots_pem,
+            tls.server_name,
+            tls.client_identity,
+            security.sasl_host.as_deref(),
+        ),
+        (
+            &ListenerProtocol::SaslSsl,
+            Some(PathBuf::from("ca.pem")),
+            "broker.example.test".to_string(),
+            Some((PathBuf::from("client.crt"), PathBuf::from("client.key"))),
+            None,
+        )
     );
-    assert!(security.sasl_host.is_none());
     assert_scram_sha512_credentials(security.sasl.as_ref(), "carol", SCRAM_SSL_PASSWORD);
 }
 
@@ -91,21 +104,31 @@ async fn login_uses_broker_probe_and_creates_session() {
         .await
         .expect("broker probe succeeds");
 
-    assert_eq!(success.username, "alice");
-    assert_eq!(success.principal, "User:alice");
+    assert_eq!(
+        (success.username.as_str(), success.principal.as_str()),
+        ("alice", "User:alice")
+    );
     let calls = broker.calls.lock().expect("calls lock is not poisoned");
-    assert_eq!(calls.len(), 1);
-    let call = &calls[0];
-    assert_eq!(call.bootstrap_addrs, ["127.0.0.1:9092"]);
-    assert_eq!(call.username, "alice");
-    assert!(call.password_matched);
-    assert_eq!(call.password_len, EXPECTED_PASSWORD.len());
+    assert_eq!(
+        calls.as_slice(),
+        [RecordedLoginCall {
+            bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
+            username: "alice".to_string(),
+            password_matched: true,
+            password_len: EXPECTED_PASSWORD.len(),
+        }]
+    );
     drop(calls);
 
     let session_id = SessionId::try_from(success.session_id.as_str()).expect("session id is valid");
     let session = sessions.get(&session_id).expect("login creates session");
-    assert_eq!(session.user.username, "alice");
-    assert_eq!(session.user.principal, "User:alice");
+    assert_eq!(
+        session.user,
+        crabka_admin_ui::session::SessionUser {
+            username: "alice".to_string(),
+            principal: "User:alice".to_string(),
+        }
+    );
 }
 
 #[test]
@@ -147,11 +170,14 @@ fn assert_scram_sha512_credentials(
         panic!("expected SCRAM credentials");
     };
 
-    assert_eq!(*mechanism, SaslMechanism::ScramSha512);
-    assert_eq!(username, expected_username);
-    assert!(
-        password == expected_password,
-        "SCRAM password did not match expected test sentinel"
+    assert_eq!(
+        (*mechanism, username.as_str(), password.as_str()),
+        (
+            SaslMechanism::ScramSha512,
+            expected_username,
+            expected_password
+        ),
+        "SCRAM credentials did not match expected test values"
     );
 }
 
@@ -164,7 +190,7 @@ struct RecordingLoginBroker {
     calls: Mutex<Vec<RecordedLoginCall>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct RecordedLoginCall {
     bootstrap_addrs: Vec<String>,
     username: String,

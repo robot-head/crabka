@@ -96,25 +96,32 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_empty_object_uses_defaults() {
-        let v: CertificateAuthority = serde_json::from_value(serde_json::json!({})).expect("parse");
-        assert!(v == CertificateAuthority::default());
-    }
-
-    #[test]
-    fn byo_round_trips() {
-        let v: CertificateAuthority = serde_json::from_value(serde_json::json!({
-            "generateCertificateAuthority": false,
-            "validityDays": 90,
-            "renewalDays": 7,
-        }))
-        .expect("parse");
-        assert!(
-            v == CertificateAuthority {
-                generate_certificate_authority: false,
-                validity_days: 90,
-                renewal_days: 7,
-            }
-        );
+    fn certificate_authority_deserialization_cases() {
+        for (name, json, expected) in [
+            (
+                "empty object uses defaults",
+                serde_json::json!({}),
+                CertificateAuthority::default(),
+            ),
+            (
+                "bring-your-own CA",
+                serde_json::json!({
+                    "generateCertificateAuthority": false,
+                    "validityDays": 90,
+                    "renewalDays": 7,
+                }),
+                CertificateAuthority {
+                    generate_certificate_authority: false,
+                    validity_days: 90,
+                    renewal_days: 7,
+                },
+            ),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<CertificateAuthority>(json).expect("parse"),
+                expected,
+                "case {name}"
+            );
+        }
     }
 }

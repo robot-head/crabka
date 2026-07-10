@@ -411,16 +411,18 @@ async fn pool_persistent_claim_renders_volume_claim_template() {
     let vct = body["spec"]["volumeClaimTemplates"]
         .as_array()
         .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
-    assert!(vct.len() == 1, "body = {body}");
     let pvc = &vct[0];
-    assert!(pvc["metadata"]["name"] == "data", "body = {body}");
-    assert!(
-        pvc["spec"]
-            == serde_json::json!({
+    assert_eq!(
+        (vct.len(), &pvc["metadata"]["name"], &pvc["spec"]),
+        (
+            1,
+            &serde_json::json!("data"),
+            &serde_json::json!({
                 "accessModes": ["ReadWriteOnce"],
                 "resources": { "requests": { "storage": "10Gi" } },
                 "storageClassName": "fast-ssd"
             }),
+        ),
         "body = {body}"
     );
 
@@ -606,34 +608,49 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
         serde_json::from_slice(sts_patch.body()).expect("STS PATCH body is JSON");
 
     // One PVC template per disk: primary `data` + `data-1`.
-    let vct = body["spec"]["volumeClaimTemplates"]
-        .as_array()
-        .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
-    assert!(vct.len() == 2, "body = {body}");
-    let want_templates = [
-        (
-            "data",
-            serde_json::json!({
-                "accessModes": ["ReadWriteOnce"],
-                "resources": { "requests": { "storage": "1Gi" } }
-            }),
-        ),
-        (
-            "data-1",
-            serde_json::json!({
-                "accessModes": ["ReadWriteOnce"],
-                "resources": { "requests": { "storage": "2Gi" } },
-                "storageClassName": "fast"
-            }),
-        ),
-    ];
-    for (i, (want_name, want_spec)) in want_templates.iter().enumerate() {
-        assert!(
-            vct[i]["metadata"]["name"] == *want_name,
-            "disk {i}; body = {body}"
-        );
-        assert!(vct[i]["spec"] == *want_spec, "disk {i}; body = {body}");
-    }
+    assert_eq!(
+        body["spec"]["volumeClaimTemplates"],
+        serde_json::json!([
+            {
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "metadata": {
+                    "name": "data",
+                    "labels": {
+                        "app.kubernetes.io/instance": "demo",
+                        "app.kubernetes.io/managed-by": "crabka-operator",
+                        "app.kubernetes.io/name": "crabka-broker",
+                        "app.kubernetes.io/version": "0.1.1",
+                        "crabka.io/pool": "brokers",
+                    },
+                },
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": { "requests": { "storage": "1Gi" } }
+                },
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "metadata": {
+                    "name": "data-1",
+                    "labels": {
+                        "app.kubernetes.io/instance": "demo",
+                        "app.kubernetes.io/managed-by": "crabka-operator",
+                        "app.kubernetes.io/name": "crabka-broker",
+                        "app.kubernetes.io/version": "0.1.1",
+                        "crabka.io/pool": "brokers",
+                    },
+                },
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": { "requests": { "storage": "2Gi" } },
+                    "storageClassName": "fast"
+                },
+            },
+        ]),
+        "body = {body}"
+    );
 
     // Set-wide retention honors the JBOD-level deleteClaim.
     assert!(
@@ -778,13 +795,13 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
         .iter()
         .find(|m| m["name"] == "broker-config")
         .unwrap_or_else(|| panic!("broker-config volumeMount missing; mounts = {volume_mounts:?}"));
-    assert!(
-        config_mount["mountPath"] == "/etc/crabka/config",
-        "broker-config must mount at /etc/crabka/config; body = {body}"
-    );
-    assert!(
-        config_mount["readOnly"] == serde_json::Value::Bool(true),
-        "broker-config mount must be readOnly; body = {body}"
+    assert_eq!(
+        (
+            config_mount["mountPath"].as_str(),
+            config_mount["readOnly"].as_bool(),
+        ),
+        (Some("/etc/crabka/config"), Some(true)),
+        "body = {body}"
     );
 
     // 4. CRABKA_ADVERTISED_LISTENER must not be in the broker container env.

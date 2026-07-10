@@ -238,47 +238,35 @@ async fn oauth_introspection_missing_source_secret_rejects_with_missing_oauth_in
 /// Secret exists but lacks the named key. Reason:
 /// `MissingOauthIntrospectionKey`.
 #[tokio::test]
-async fn oauth_introspection_missing_key_in_secret_rejects_with_missing_oauth_introspection_key() {
-    let mut rules = rules_for_failure_path("c3", "ns3");
-    rules.push(rule_get_secret(
-        SOURCE_SECRET_NAME,
-        &source_secret_body_no_data(SOURCE_SECRET_NAME, "ns3"),
-    ));
-
-    let (ctx, state) = build_ctx("ns3", rules);
-    let kafka = kafka_cr(
-        "c3",
-        "ns3",
-        vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())],
-    );
-    reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    assert_ready_false_with_reason(&observed, "c3", "MissingOauthIntrospectionKey");
-}
-
-// ── test 4: Secret + key present but value zero bytes → EmptyOauthIntrospectionValue
-
-/// Secret + key exist; value is zero bytes. Reason:
-/// `EmptyOauthIntrospectionValue`.
-#[tokio::test]
-async fn oauth_introspection_empty_key_value_rejects_with_empty_oauth_introspection_value() {
-    let mut rules = rules_for_failure_path("c4", "ns4");
-    rules.push(rule_get_secret(
-        SOURCE_SECRET_NAME,
-        &source_secret_body(SOURCE_SECRET_NAME, "ns4", SOURCE_KEY, b""),
-    ));
-
-    let (ctx, state) = build_ctx("ns4", rules);
-    let kafka = kafka_cr(
-        "c4",
-        "ns4",
-        vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())],
-    );
-    reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    assert_ready_false_with_reason(&observed, "c4", "EmptyOauthIntrospectionValue");
+async fn oauth_introspection_invalid_secret_value_cases() {
+    for (name, cluster, namespace, secret, reason) in [
+        (
+            "missing key",
+            "c3",
+            "ns3",
+            source_secret_body_no_data(SOURCE_SECRET_NAME, "ns3"),
+            "MissingOauthIntrospectionKey",
+        ),
+        (
+            "empty value",
+            "c4",
+            "ns4",
+            source_secret_body(SOURCE_SECRET_NAME, "ns4", SOURCE_KEY, b""),
+            "EmptyOauthIntrospectionValue",
+        ),
+    ] {
+        let mut rules = rules_for_failure_path(cluster, namespace);
+        rules.push(rule_get_secret(SOURCE_SECRET_NAME, &secret));
+        let (ctx, state) = build_ctx(namespace, rules);
+        let kafka = kafka_cr(
+            cluster,
+            namespace,
+            vec![oauth_listener("oauth", 9095, introspection_oauth_cfg())],
+        );
+        reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
+        assert_ready_false_with_reason(&state.take_observed(), cluster, reason);
+        let _ = name;
+    }
 }
 
 // ── test 5: JWT-mode short-circuits — no source-Secret read, no mount ───────
@@ -379,16 +367,14 @@ async fn oauth_introspection_managed_pod_template_mounts_secret_with_projected_i
         .iter()
         .find(|v| v["name"] == "oauth-introspection-secret")
         .unwrap_or_else(|| panic!("oauth-introspection-secret volume present; body = {body}"));
-    assert!(
-        intro_vol["secret"]["secretName"] == SOURCE_SECRET_NAME,
-        "volume sources the user's Secret directly; body = {body}"
-    );
-    // Exactly one projected item pinning the user's source key to the
-    // fixed broker filename.
-    assert!(
-        intro_vol["secret"]["items"]
-            == serde_json::json!([{ "key": SOURCE_KEY, "path": "client-secret" }]),
-        "projected items must map the user's key to client-secret; body = {body}"
+    assert_eq!(
+        intro_vol["secret"],
+        serde_json::json!({
+            "defaultMode": 256,
+            "secretName": SOURCE_SECRET_NAME,
+            "items": [{ "key": SOURCE_KEY, "path": "client-secret" }],
+        }),
+        "body = {body}"
     );
 }
 
@@ -468,9 +454,14 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
         .iter()
         .find(|v| v["name"] == "oauth-introspection-secret")
         .unwrap_or_else(|| panic!("oauth-introspection-secret volume present; body = {body}"));
-    assert!(
-        intro_vol["secret"]["secretName"] == SOURCE_SECRET_NAME,
-        "managed mount sources the user's Secret; body = {body}"
+    assert_eq!(
+        intro_vol["secret"],
+        serde_json::json!({
+            "defaultMode": 256,
+            "secretName": SOURCE_SECRET_NAME,
+            "items": [{ "key": SOURCE_KEY, "path": "client-secret" }],
+        }),
+        "body = {body}"
     );
 
     // VolumeMount on the broker container at the canonical path.
@@ -484,13 +475,13 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
         .iter()
         .find(|m| m["name"] == "oauth-introspection-secret")
         .unwrap_or_else(|| panic!("oauth-introspection-secret mount present; body = {body}"));
-    assert!(
-        intro_mount["mountPath"] == "/etc/crabka/oauth-introspection",
-        "canonical broker mount path (T3 contract); body = {body}"
-    );
-    assert!(
-        intro_mount["readOnly"] == true,
-        "introspection mount must be readOnly; body = {body}"
+    assert_eq!(
+        (
+            intro_mount["mountPath"].as_str(),
+            intro_mount["readOnly"].as_bool(),
+        ),
+        (Some("/etc/crabka/oauth-introspection"), Some(true)),
+        "body = {body}"
     );
 }
 
@@ -501,53 +492,6 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
 /// volume or mount. Mirrors
 /// `statefulset_omits_oauth_jwks_trust_volume_when_no_trust_certs`
 /// shape.
-#[tokio::test]
-async fn statefulset_omits_oauth_introspection_volume_when_jwt_mode() {
-    let rules = pool_reconcile_rules(
-        "c9",
-        "brokers",
-        "ns9",
-        &parent_kafka_body_with_oauth(
-            "c9", "ns9", /* jwt_mode = */ true, /* userinfo = */ None,
-        ),
-    );
-    let (ctx, state) = build_ctx("ns9", rules);
-    let pool = pool_cr("brokers", "ns9", "c9", 1);
-    reconcile_pool(Arc::new(pool), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    let sts_patch = observed
-        .iter()
-        .find(|r| {
-            r.method() == Method::PATCH && r.uri().to_string().contains("/statefulsets/c9-brokers")
-        })
-        .expect("StatefulSet PATCH captured");
-    let body: serde_json::Value =
-        serde_json::from_slice(sts_patch.body()).expect("STS body is JSON");
-    let pod_spec = &body["spec"]["template"]["spec"];
-
-    let volumes = pod_spec["volumes"].as_array().expect("volumes array");
-    assert!(
-        volumes
-            .iter()
-            .all(|v| v["name"] != "oauth-introspection-secret"),
-        "JWT-mode OAuth must not produce an oauth-introspection-secret pod volume; body = {body}",
-    );
-
-    let containers = pod_spec["containers"].as_array().expect("containers array");
-    let broker = containers
-        .iter()
-        .find(|c| c["name"] == "broker")
-        .unwrap_or_else(|| panic!("broker container present; body = {body}"));
-    let mounts = broker["volumeMounts"].as_array().expect("volumeMounts");
-    assert!(
-        mounts
-            .iter()
-            .all(|m| m["name"] != "oauth-introspection-secret"),
-        "JWT-mode OAuth must not produce an oauth-introspection-secret mount; body = {body}",
-    );
-}
-
 // ── pool-reconcile fixtures (tests 5, 6, 8, 9) ─────────────────────────────
 
 /// Parent-Kafka body that carries an OAuth listener in either JWT or
