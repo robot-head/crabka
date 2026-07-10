@@ -14,6 +14,7 @@ pub mod registry;
 pub mod split;
 pub mod split_hooks;
 pub mod tenant;
+pub mod transfer;
 pub mod transport;
 pub mod tso;
 
@@ -21,6 +22,7 @@ pub mod tso;
 pub use transport::{serve_tcp, spawn_loopback};
 
 pub use self::{
+    barrier::{BarrierError, Range0Barrier, Range0EndSampler},
     coordinator::{
         LocalCoordinator, LocalCoordinatorError, LocalTransactionRecord, NetCoordinator,
         NetDecision, PreparedParticipant, TransactionDecision, TransactionPhase, TxnRpc,
@@ -43,6 +45,7 @@ pub use self::{
         RangeMapMetadataReader, RangeMapMetadataWriter,
     },
     naming::{CheckpointPrefix, TopicName, TransactionalId, checkpoint_prefix, txn_id, wal_topic},
+    range0_tail::{Range0Frame, Range0Tail, Range0TailError},
     registry::{RangeEndpoint, RangeRegistry, RegistryError},
     split::{
         CheckpointManifest, ConvertTableCommand, InDoubtMarker, MergeRangeCommand,
@@ -57,8 +60,12 @@ pub use self::{
     },
     tenant::{
         GatewayCommitFault, LocalSqlSplitError, MultiRangeTenant, MultiRangeTenantConfig,
-        MultiRangeTenantHandles, RouteRecord, StatementKind, TenantError,
+        MultiRangeTenantHandles, ReadOnlyRange0Replica, RouteRecord, StatementKind, TenantError,
         pgexec_timestamp_oracle_from_rpc, tso_rpc_from_horizon,
+    },
+    transfer::{
+        ClaimedStagedSuccessor, CommittedTailRecord, RangeTransferBarrier, RangeTransferCapability,
+        RangeTransferError, StagedRangeSuccessor, TableTransferRequest,
     },
     transport::{
         FramedTcpClient, RangeRequest, RangeResponse, RangeService, RangeTlsClientConfig,

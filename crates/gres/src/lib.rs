@@ -1692,6 +1692,16 @@ async fn open_multirange_runtime(
         return Ok(GresRuntime::multi(gateway));
     }
 
+    if tenant_config
+        .hosted_ranges
+        .as_ref()
+        .is_some_and(|ranges| !ranges.contains(&crabka_gres_ranges::RangeId::COORDINATOR))
+    {
+        return invalid_input(
+            "live rN-only substrate runtime is disabled: read-only range-0 follower broker wiring is not available",
+        );
+    }
+
     let checkpoint_store = config
         .checkpoints
         .as_ref()

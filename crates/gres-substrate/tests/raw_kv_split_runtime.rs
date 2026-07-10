@@ -196,10 +196,109 @@ async fn raw_kv_split_retries_restore_after_state_save_failure() {
     );
 }
 
+#[tokio::test]
+async fn raw_kv_split_keeps_successor_closed_until_prologue_state_is_durable() {
+    let runtime = RawKvSplitRuntime::new("raw-split-prologue-retry");
+    runtime
+        .add_serving_range(RangeId::new(1))
+        .expect("source range");
+    let successor_key = key::row_key(25, 1);
+    runtime
+        .write_row(RangeId::new(1), successor_key.clone(), b"restored".to_vec())
+        .await
+        .expect("source write");
+
+    let state_store = FailOnceAfterPrologue::default();
+    assert!(
+        run_split("prologue-retry", split_command(), &state_store, &runtime)
+            .await
+            .is_err()
+    );
+    assert!(
+        !runtime
+            .is_serving(RangeId::new(2))
+            .expect("successor closed")
+    );
+    assert!(
+        runtime
+            .write_row(
+                RangeId::new(2),
+                successor_key.clone(),
+                b"must-not-enter-wal".to_vec(),
+            )
+            .await
+            .is_err()
+    );
+
+    run_split("prologue-retry", split_command(), &state_store, &runtime)
+        .await
+        .expect("retry reuses the closed prologue result");
+    assert!(
+        runtime
+            .is_serving(RangeId::new(2))
+            .expect("successor serving")
+    );
+    assert!(
+        runtime
+            .kv(RangeId::new(2))
+            .expect("successor")
+            .get(&successor_key)
+            .expect("restored row")
+            == Some(b"restored".to_vec())
+    );
+
+    runtime
+        .write_row(
+            RangeId::new(2),
+            successor_key,
+            b"post-prologue-write".to_vec(),
+        )
+        .await
+        .expect("writes open after prologue state persists");
+    let checkpoint = runtime
+        .force_checkpoint(RangeId::new(2))
+        .await
+        .expect("checkpoint after post-prologue write");
+    assert!(checkpoint.manifest.wal_generation == 1);
+}
+
 #[derive(Default)]
 struct FailOnceAfterRestore {
     states: Mutex<std::collections::BTreeMap<String, SplitState>>,
     fail_once: AtomicBool,
+}
+
+#[derive(Default)]
+struct FailOnceAfterPrologue {
+    states: Mutex<std::collections::BTreeMap<String, SplitState>>,
+    fail_once: AtomicBool,
+}
+
+#[async_trait]
+impl SplitStateStore for FailOnceAfterPrologue {
+    async fn load_split_state(&self, operation_id: &str) -> Result<Option<SplitState>, SplitError> {
+        Ok(self
+            .states
+            .lock()
+            .expect("test store lock")
+            .get(operation_id)
+            .cloned())
+    }
+
+    async fn save_split_state(&self, state: &SplitState) -> Result<(), SplitError> {
+        if state.next_step == SplitStep::InheritInDoubtMarkers
+            && !self.fail_once.swap(true, Ordering::SeqCst)
+        {
+            return Err(SplitError::Store(
+                "injected save failure after successful prologue".into(),
+            ));
+        }
+        self.states
+            .lock()
+            .expect("test store lock")
+            .insert(state.operation_id.clone(), state.clone());
+        Ok(())
+    }
 }
 
 #[async_trait]

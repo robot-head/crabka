@@ -29,7 +29,7 @@ pub use log_dirs::{AlterReplicaLogDirOutcome, LogDirInfo, LogDirPartitionInfo, L
 pub use quotas::{QuotaOp, UserQuotaConfig, diff_user_quotas};
 pub use topics::{
     CreatePartitionsOp, CreatePartitionsOutcome, CreateTopicOutcome, CreateTopicSpec,
-    DeleteTopicOutcome, TopicMetadata, TopicMetadataEntry,
+    DeleteRecordsOp, DeleteRecordsOutcome, DeleteTopicOutcome, TopicMetadata, TopicMetadataEntry,
 };
 pub use users::{
     AclEntry, AclEntryFilter, AclOperation, CreateAclOutcome, DEFAULT_SCRAM_ITERATIONS,
@@ -62,6 +62,11 @@ pub trait AdminClientLike: Send {
         ops: &[CreatePartitionsOp],
         timeout_ms: i32,
     ) -> Result<Vec<CreatePartitionsOutcome>, AdminError>;
+    async fn delete_records(
+        &mut self,
+        ops: &[DeleteRecordsOp],
+        timeout_ms: i32,
+    ) -> Result<Vec<DeleteRecordsOutcome>, AdminError>;
     async fn describe_configs(
         &mut self,
         topics: &[&str],
@@ -153,6 +158,13 @@ impl AdminClientLike for AdminClient {
         timeout_ms: i32,
     ) -> Result<Vec<CreatePartitionsOutcome>, AdminError> {
         AdminClient::create_partitions(self, ops, timeout_ms).await
+    }
+    async fn delete_records(
+        &mut self,
+        ops: &[DeleteRecordsOp],
+        timeout_ms: i32,
+    ) -> Result<Vec<DeleteRecordsOutcome>, AdminError> {
+        AdminClient::delete_records(self, ops, timeout_ms).await
     }
     async fn describe_configs(
         &mut self,

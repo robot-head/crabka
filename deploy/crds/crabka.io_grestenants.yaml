@@ -70,7 +70,13 @@ spec:
                 - name
                 type: object
               ranges:
-                description: Optional ordered range layout. Omitted means one open-ended range r0.
+                description: |-
+                  Optional ordered range layout. Omitted means one open-ended range r0.
+
+                  The operator currently accepts only a single range. It reports a
+                  `Ready=False` `MultiRangeUnsupported` condition for a multi-range
+                  layout rather than rendering unsafe per-range computes that would each
+                  host range r0 and write its WAL.
                 items:
                   description: One row-key range in a tenant layout.
                   properties:

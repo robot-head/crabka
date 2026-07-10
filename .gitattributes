@@ -21,6 +21,10 @@ crates/protocol/generated/**           text eol=lf
 crates/protocol-codegen/tests/snapshots/**  text eol=lf
 crates/protocol/tests/corpus/*.hex     text eol=lf
 
+# PostgreSQL regression expected output uses fixed-width fields.
+crates/gres-conformance/corpus-regress/boolean/boolean.out -whitespace
+crates/gres-conformance/corpus-regress/int4/int4.out       -whitespace
+
 # Binary files we shouldn't touch.
 *.jar      binary
 *.png      binary

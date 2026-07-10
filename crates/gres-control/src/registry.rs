@@ -17,8 +17,8 @@ use tokio::sync::{Mutex, watch};
 use crate::{
     ControlError,
     record::{
-        FinalCheckpoint, RangeLayoutMerge, RangeLayoutMove, RangeLayoutMutation, RangeLayoutSplit,
-        RegistryKey, TENANT_REGISTRY_TOPIC, TenantName, TenantRecord, decode_registry_record,
+        FinalCheckpoint, RangeLayoutMerge, RangeLayoutMutation, RangeLayoutSplit, RegistryKey,
+        TENANT_REGISTRY_TOPIC, TenantName, TenantRecord, decode_registry_record,
         encode_registry_record, encode_tenant_config_record, tenant_config_topic,
         tenant_registry_key,
     },
@@ -80,7 +80,7 @@ pub trait TenantRegistryStore {
     fn get(&self, tenant: &TenantName) -> Option<TenantRecord>;
     /// Return all tenants ordered by name.
     fn list(&self) -> Vec<TenantRecord>;
-    /// Apply a versioned split/merge/move mutation without overwriting concurrent changes.
+    /// Apply a versioned split/merge mutation without overwriting concurrent changes.
     fn mutate_range_layout_if_version(
         &mut self,
         tenant: &TenantName,
@@ -111,19 +111,6 @@ pub trait TenantRegistryStore {
             tenant,
             expected_record_version,
             RangeLayoutMutation::Merge(merge),
-        )
-    }
-    /// Move one tenant range when the tenant is still at `expected_record_version`.
-    fn move_range_layout_if_version(
-        &mut self,
-        tenant: &TenantName,
-        expected_record_version: u64,
-        move_range: RangeLayoutMove,
-    ) -> Result<Option<TenantRecord>, ControlError> {
-        self.mutate_range_layout_if_version(
-            tenant,
-            expected_record_version,
-            RangeLayoutMutation::Move(move_range),
         )
     }
 }
@@ -488,20 +475,6 @@ impl Registry {
         .await
     }
 
-    pub async fn move_range_layout_if_version(
-        &mut self,
-        tenant: &str,
-        expected_record_version: u64,
-        move_range: RangeLayoutMove,
-    ) -> Result<(), ControlError> {
-        self.mutate_range_layout_if_version(
-            tenant,
-            expected_record_version,
-            RangeLayoutMutation::Move(move_range),
-        )
-        .await
-    }
-
     /// Produce the per-tenant runtime snapshot consumed by substrate computes.
     pub async fn upsert_tenant_config(
         &self,
@@ -857,7 +830,6 @@ fn is_layout_mutation_already_applied(
     match mutation {
         RangeLayoutMutation::Split(split) => is_split_already_applied(current, split),
         RangeLayoutMutation::Merge(merge) => is_merge_already_applied(current, merge),
-        RangeLayoutMutation::Move(move_range) => is_move_already_applied(current, move_range),
     }
 }
 
@@ -897,18 +869,6 @@ fn is_merge_already_applied(current: &TenantRecord, merge: &RangeLayoutMerge) ->
     };
 
     left.endpoint == merge.merged_endpoint && left.wal_generation >= merge.merged_wal_generation
-}
-
-fn is_move_already_applied(current: &TenantRecord, move_range: &RangeLayoutMove) -> bool {
-    let Some(range) = current
-        .ranges
-        .iter()
-        .find(|range| range.range_id == move_range.range_id)
-    else {
-        return false;
-    };
-
-    range.endpoint == move_range.endpoint && range.wal_generation >= move_range.wal_generation
 }
 
 async fn ensure_registry_topic(bootstrap: &str, replicas: i32) -> Result<WireUuid, ControlError> {
@@ -1339,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_store_versioned_layout_mutations_are_idempotent() {
+    fn in_memory_store_versioned_split_is_idempotent() {
         let mut store = InMemoryRegistryStore::new();
         let name = tenant_name("tenant-a");
         store.upsert(ranged_record("tenant-a", 4)).unwrap();
@@ -1362,101 +1322,6 @@ mod tests {
         assert!(split.ranges.len() == 2);
         assert!(split.ranges[0].wal_generation == 7);
         assert!(split.ranges[1].wal_generation == 3);
-
-        store
-            .move_range_layout_if_version(
-                &name,
-                5,
-                RangeLayoutMove {
-                    range_id: 1,
-                    endpoint: "tenant-a-r1-new.gres.svc:7432".to_string(),
-                    wal_generation: 2,
-                },
-            )
-            .unwrap();
-        let moved = store.get(&name).unwrap();
-        store
-            .move_range_layout_if_version(
-                &name,
-                5,
-                RangeLayoutMove {
-                    range_id: 1,
-                    endpoint: "tenant-a-r1-new.gres.svc:7432".to_string(),
-                    wal_generation: 2,
-                },
-            )
-            .unwrap();
-
-        assert!(store.get(&name).unwrap() == moved);
-        assert!(moved.record_version == 6);
-        assert!(moved.ranges[1].wal_generation == 3);
-        assert!(moved.ranges[1].endpoint == "tenant-a-r1-new.gres.svc:7432");
-    }
-
-    #[test]
-    fn in_memory_store_compare_move_rejects_stale_source_endpoint() {
-        let mut store = InMemoryRegistryStore::new();
-        let name = tenant_name("tenant-a");
-        store.upsert(ranged_record("tenant-a", 4)).unwrap();
-        store
-            .move_range_layout_if_version(
-                &name,
-                4,
-                RangeLayoutMove {
-                    range_id: 0,
-                    endpoint: "tenant-a-r0-new.gres.svc:7432".to_string(),
-                    wal_generation: 8,
-                },
-            )
-            .unwrap();
-
-        let result = store.move_range_layout_if_version(
-            &name,
-            4,
-            RangeLayoutMove {
-                range_id: 0,
-                endpoint: "tenant-a-r0-other.gres.svc:7432".to_string(),
-                wal_generation: 9,
-            },
-        );
-        let latest = store.get(&name).unwrap();
-
-        assert!(result.is_err());
-        assert!(latest.ranges[0].endpoint == "tenant-a-r0-new.gres.svc:7432");
-        assert!(latest.ranges[0].wal_generation == 8);
-    }
-
-    #[test]
-    fn in_memory_store_compare_move_allows_already_at_target_retry() {
-        let mut store = InMemoryRegistryStore::new();
-        let name = tenant_name("tenant-a");
-        store.upsert(ranged_record("tenant-a", 4)).unwrap();
-        store
-            .move_range_layout_if_version(
-                &name,
-                4,
-                RangeLayoutMove {
-                    range_id: 0,
-                    endpoint: "tenant-a-r0-new.gres.svc:7432".to_string(),
-                    wal_generation: 8,
-                },
-            )
-            .unwrap();
-        let moved = store.get(&name).unwrap();
-
-        store
-            .move_range_layout_if_version(
-                &name,
-                5,
-                RangeLayoutMove {
-                    range_id: 0,
-                    endpoint: "tenant-a-r0-new.gres.svc:7432".to_string(),
-                    wal_generation: 8,
-                },
-            )
-            .unwrap();
-
-        assert!(store.get(&name).unwrap() == moved);
     }
 
     #[test]
@@ -1517,32 +1382,6 @@ mod tests {
     }
 
     #[test]
-    fn in_memory_versioned_move_mutates_layout_and_retries_idempotently() {
-        let mut store = InMemoryRegistryStore::new();
-        let name = tenant_name("tenant-a");
-        store.upsert(ranged_record("tenant-a", 4)).unwrap();
-        let move_range = RangeLayoutMove {
-            range_id: 0,
-            endpoint: "tenant-a-r0-new.gres.svc:7432".to_string(),
-            wal_generation: 8,
-        };
-
-        let first = store
-            .move_range_layout_if_version(&name, 4, move_range.clone())
-            .unwrap()
-            .unwrap();
-        let retry = store
-            .move_range_layout_if_version(&name, 4, move_range)
-            .unwrap()
-            .unwrap();
-
-        assert!(first == retry);
-        assert!(first.record_version == 5);
-        assert!(first.ranges[0].endpoint == "tenant-a-r0-new.gres.svc:7432");
-        assert!(first.ranges[0].wal_generation == 8);
-    }
-
-    #[test]
     fn in_memory_versioned_merge_mutates_layout_and_retries_idempotently() {
         let mut store = InMemoryRegistryStore::new();
         let name = tenant_name("tenant-a");
@@ -1578,44 +1417,6 @@ mod tests {
         assert!(first.ranges[0].range_id == 0);
         assert!(first.ranges[0].endpoint == "tenant-a-r0-merged.gres.svc:7432");
         assert!(first.ranges[0].wal_generation == 9);
-    }
-
-    #[test]
-    fn in_memory_versioned_retry_rejects_conflicting_requested_layout() {
-        let mut store = InMemoryRegistryStore::new();
-        let name = tenant_name("tenant-a");
-        store.upsert(ranged_record("tenant-a", 4)).unwrap();
-        store
-            .move_range_layout_if_version(
-                &name,
-                4,
-                RangeLayoutMove {
-                    range_id: 0,
-                    endpoint: "tenant-a-r0-new.gres.svc:7432".to_string(),
-                    wal_generation: 8,
-                },
-            )
-            .unwrap();
-
-        let result = store.move_range_layout_if_version(
-            &name,
-            4,
-            RangeLayoutMove {
-                range_id: 0,
-                endpoint: "tenant-a-r0-conflict.gres.svc:7432".to_string(),
-                wal_generation: 8,
-            },
-        );
-
-        assert!(matches!(
-            result,
-            Err(ControlError::RegistryVersionConflict {
-                expected: 4,
-                actual: 5,
-                ..
-            })
-        ));
-        assert!(store.get(&name).unwrap().ranges[0].endpoint == "tenant-a-r0-new.gres.svc:7432");
     }
 
     #[test]

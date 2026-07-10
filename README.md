@@ -197,6 +197,7 @@ flowchart LR
 | Rust clients | [`crabka-client-core`](crates/client-core), [`crabka-client-producer`](crates/client-producer), [`crabka-client-consumer`](crates/client-consumer), [`crabka-client-admin`](crates/client-admin), [`crabka-client-streams`](crates/client-streams) |
 | Services and integration | [`crabka-schema-registry`](crates/schema-registry), [`crabka-grpc-gateway`](crates/grpc-gateway), [`crabka-connect`](crates/connect), [`crabka-connect-postgres`](crates/connect-postgres), [`crabka-replicator`](crates/replicator) |
 | Operations and observability | [`crabka-operator`](crates/operator), [`crabka-rebalancer`](crates/rebalancer), [`crabka-bench-driver`](crates/bench-driver), [`crabka-blockstore`](crates/blockstore), [`crabka-metrics`](crates/metrics), [`crabka-observability`](crates/observability) |
+| Postgres-compatible engine (Chapter Gres) | [`crabka-gres`](crates/gres), [`crabka-gres-control`](crates/gres-control), [`crabka-gres-balancer`](crates/gres-balancer), [`crabka-pgexec`](crates/pgexec), [`crabka-pgwire`](crates/pgwire), [`crabka-pgtypes`](crates/pgtypes), [`crabka-pgparser`](crates/pgparser), [`crabka-pgkv`](crates/pgkv), [`crabka-pgmvcc`](crates/pgmvcc), [`crabka-pgcatalog`](crates/pgcatalog), [`crabka-gres-fdw`](crates/gres-fdw) |
 
 Crate READMEs and rustdoc contain API-level usage details.
 

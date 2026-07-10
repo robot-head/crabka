@@ -13,6 +13,7 @@ use crabka_operator::{
     },
 };
 use http::Method;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use kube::runtime::controller::Action;
 use tokio::sync::Mutex;
 
@@ -418,6 +419,61 @@ async fn explicit_multi_range_tenant_is_rejected_before_unready_dependencies_can
     assert!(observed.len() == 1);
     let body: serde_json::Value = serde_json::from_slice(observed[0].body()).unwrap();
     assert!(body["status"]["conditions"][0]["reason"] == "MultiRangeUnsupported");
+}
+
+#[tokio::test]
+async fn deleting_multi_range_tenant_cleans_up_and_removes_its_finalizer() {
+    let mut deleting_tenant = multi_range_tenant();
+    deleting_tenant.metadata.deletion_timestamp = Some(Time(
+        "2026-07-10T00:00:00Z"
+            .parse()
+            .expect("deletion timestamp parses"),
+    ));
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: "/greses/fleet".into(),
+            response: json_response(200, &gres_body("fleet", "ns")),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkas/demo".into(),
+            response: json_response(200, &ready_kafka_body("demo", "ns")),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/grestenants/tenant-a".into(),
+            response: json_response(200, &tenant_body()),
+        },
+    ];
+    let state = MockState::new(rules);
+    let ctx = fixture_ctx(mock_client(&state, "ns"), "ns");
+    let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    let control = Arc::new(FakeGresControl::default());
+    ctx.insert_admin_client_for_test("demo", admin.clone())
+        .await;
+    ctx.insert_gres_control_for_test("demo", control.clone())
+        .await;
+
+    let action = reconcile(Arc::new(deleting_tenant), Arc::new(ctx))
+        .await
+        .expect("deleting tenants bypass the multi-range rejection");
+
+    assert!(action == Action::await_change());
+    assert!(control.deletes.lock().await.as_slice() == [TenantName::try_from("tenant-a").unwrap()]);
+    let calls = admin.lock().await.calls();
+    assert!(calls.len() == 2);
+    assert!(calls.iter().any(|call| matches!(call, RecordedCall::AlterUserScramCredentials { upsertions, deletions } if upsertions.is_empty() && deletions.iter().any(|deletion| deletion.username == "gres-tenant-a"))));
+    assert!(calls.iter().any(|call| matches!(call, RecordedCall::DeleteAcls(filters) if filters.len() == 1 && filters[0].principal.as_deref() == Some("User:gres-tenant-a"))));
+
+    let observed = state.take_observed();
+    assert!(observed.len() == 3);
+    let finalizer_patch = observed
+        .iter()
+        .find(|request| request.method() == Method::PATCH)
+        .expect("finalizer removal patch captured");
+    let body: serde_json::Value = serde_json::from_slice(finalizer_patch.body()).unwrap();
+    assert!(body["metadata"]["finalizers"] == serde_json::json!([]));
 }
 
 #[tokio::test]

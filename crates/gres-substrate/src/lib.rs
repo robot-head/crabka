@@ -14,6 +14,7 @@
 pub mod apply;
 pub mod checkpoint;
 pub mod error;
+pub mod follower;
 pub mod frame;
 pub mod recovery;
 pub mod replay;
@@ -36,6 +37,7 @@ pub use self::{
         restore_table_transfer_from_manifest_and_replay_tail, rewrite_for_checkpoint,
     },
     error::SubstrateError,
+    follower::{BrokerRange0EndSampler, CommittedEndSampler, ReadOnlyRange0Follower},
     frame::WalFrame,
     recovery::{
         CommittedWalReader, InMemoryWalLog, LiveRecovered, LiveRecoveryConfig, RecoveryBarrier,

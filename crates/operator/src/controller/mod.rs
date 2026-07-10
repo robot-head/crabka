@@ -4,6 +4,8 @@
 
 pub mod cluster_ca;
 pub mod common;
+pub mod gres;
+pub mod gres_tenant;
 pub mod grpc_gateway;
 pub mod kafka;
 pub mod kafka_node_pool;
