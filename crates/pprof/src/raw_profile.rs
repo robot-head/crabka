@@ -186,32 +186,31 @@ mod tests {
             .sum();
         let sample_type = inner.sample_type[0];
 
-        assert_eq!(total, 10);
-        assert_eq!(inner.sample.len(), 2);
-        assert!(inner.sample.iter().all(|sample| sample.value != vec![0]));
-        assert!(inner.function.iter().all(|function| function.id > 0));
-        assert!(inner.location.iter().all(|location| location.id > 0));
-        assert!(
+        assert2::assert!(total == 10);
+        assert2::assert!(inner.sample.len() == 2);
+        assert2::assert!(inner.sample.iter().all(|sample| sample.value != vec![0]));
+        assert2::assert!(inner.function.iter().all(|function| function.id > 0));
+        assert2::assert!(inner.location.iter().all(|location| location.id > 0));
+        assert2::assert!(
             inner
                 .sample
                 .iter()
                 .flat_map(|sample| sample.location_id.iter())
                 .all(|location_id| *location_id > 0)
         );
-        assert_eq!(
-            sample_paths(inner),
-            vec![
-                vec!["leaf_a".to_string(), "root_fn".to_string()],
-                vec!["leaf_b".to_string(), "root_fn".to_string()],
-            ]
+        assert2::assert!(
+            sample_paths(inner)
+                == vec![
+                    vec!["leaf_a".to_string(), "root_fn".to_string()],
+                    vec!["leaf_b".to_string(), "root_fn".to_string()],
+                ]
         );
-        assert_eq!(
-            inner.string_table[usize::try_from(sample_type.r#type).unwrap()].as_str(),
-            "cpu"
+        assert2::assert!(
+            inner.string_table[usize::try_from(sample_type.r#type).unwrap()].as_str() == "cpu"
         );
-        assert_eq!(
-            inner.string_table[usize::try_from(sample_type.unit).unwrap()].as_str(),
-            "nanoseconds"
+        assert2::assert!(
+            inner.string_table[usize::try_from(sample_type.unit).unwrap()].as_str()
+                == "nanoseconds"
         );
     }
 
@@ -232,9 +231,9 @@ mod tests {
             .map(|sample| sample.value.iter().sum::<i64>())
             .sum();
 
-        assert!(inner.sample.len() <= 4);
-        assert_eq!(total, 10);
-        assert!(inner.string_table.iter().any(|value| value == "other"));
+        assert2::assert!(inner.sample.len() <= 4);
+        assert2::assert!(total == 10);
+        assert2::assert!(inner.string_table.iter().any(|value| value == "other"));
     }
 
     fn sample_paths(profile: &crate::proto::Profile) -> Vec<Vec<String>> {

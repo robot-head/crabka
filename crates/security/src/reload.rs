@@ -85,8 +85,6 @@ impl DynamicServerConfig {
 mod tests {
     use std::{fs::File, io::Write, path::PathBuf};
 
-    use assert2::assert;
-
     use super::*;
     use crate::tls::ClientAuthMode;
 
@@ -140,10 +138,7 @@ mod tests {
         // returns the latest, so `after != before` is the post-swap
         // invariant. Use raw pointer comparison: `ServerConfig` is not
         // `PartialEq`, but `Arc::ptr_eq` is exactly what we want.
-        assert!(
-            !Arc::ptr_eq(&snap_before, &snap_after),
-            "after-reload snapshot must point at a fresh ServerConfig"
-        );
+        assert2::assert!(!Arc::ptr_eq(&snap_before, &snap_after));
     }
 
     /// Reload error leaves the prior config in place. We can't easily
@@ -184,9 +179,6 @@ mod tests {
         let _ = err;
 
         let snap_after = dynamic.current();
-        assert!(
-            Arc::ptr_eq(&snap_before, &snap_after),
-            "failed reload must leave previous ServerConfig in place"
-        );
+        assert2::assert!(Arc::ptr_eq(&snap_before, &snap_after));
     }
 }

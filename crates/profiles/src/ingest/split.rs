@@ -153,7 +153,7 @@ fn labels_key(labels: &Labels) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_blockstore::Labels;
     use crabka_pprof::PprofProfile;
 
@@ -207,18 +207,18 @@ mod tests {
         };
 
         let out = split_sample_types(&raw).unwrap();
-        assert!(out.len() == 2);
+        assert2::assert!(out.len() == 2);
 
         let types: Vec<&str> = out
             .iter()
             .map(|profile| profile.profile_type.as_str())
             .collect();
-        assert!(
+        assert2::assert!(
             types
                 .iter()
                 .any(|profile_type| profile_type == &"memory:alloc_objects:count:space:bytes")
         );
-        assert!(
+        assert2::assert!(
             types
                 .iter()
                 .any(|profile_type| profile_type == &"memory:alloc_space:bytes:space:bytes")
@@ -302,7 +302,7 @@ mod tests {
         })
         .unwrap();
 
-        assert!(out[0].samples[0].stacktrace_location_refs == vec![1]);
+        assert2::assert!(out[0].samples[0].stacktrace_location_refs == vec![1]);
     }
 
     #[test]

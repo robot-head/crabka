@@ -795,7 +795,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!(actions.iter().any(|a| matches!(
+        assert2::assert!(actions.iter().any(|a| matches!(
             a,
             Action::ReplyVote {
                 to: NodeId(2),
@@ -803,7 +803,7 @@ mod tests {
                 ..
             }
         )));
-        assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(NodeId(2))); // binding
+        assert2::assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(NodeId(2))); // binding
     }
 
     #[test]
@@ -828,7 +828,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!(
+        assert2::assert!(
             actions
                 .iter()
                 .any(|a| matches!(a, Action::ReplyVote { granted: false, .. }))
@@ -857,7 +857,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!((m.quorum_state().voted_key, m.quorum_state().leader_epoch) == (None, 0));
+        assert2::assert!((m.quorum_state().voted_key, m.quorum_state().leader_epoch) == (None, 0));
     }
 
     #[test]
@@ -899,7 +899,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!(actions.iter().any(|a| matches!(
+        assert2::assert!(actions.iter().any(|a| matches!(
             a,
             Action::ReplyVote {
                 to: NodeId(3),
@@ -932,7 +932,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!(
+        assert2::assert!(
             actions
                 .iter()
                 .any(|a| matches!(a, Action::ReplyVote { granted: false, .. }))
@@ -947,8 +947,8 @@ mod tests {
             last_epoch: 1,
         };
         let actions = m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
-        assert!(matches!(m.role(), Role::Prospective { .. }));
-        assert!(
+        assert2::assert!(matches!(m.role(), Role::Prospective { .. }));
+        assert2::assert!(
             actions
                 .iter()
                 .any(|a| matches!(a, Action::SendVoteRequest { pre_vote: true, .. }))
@@ -981,7 +981,7 @@ mod tests {
                 m.quorum_state().voted_key.map(|k| k.id),
             ) == (true, 1, Some(NodeId(1)))
         );
-        assert!(actions.iter().any(|a| matches!(
+        assert2::assert!(actions.iter().any(|a| matches!(
             a,
             Action::SendVoteRequest {
                 pre_vote: false,
@@ -1038,8 +1038,8 @@ mod tests {
             last_epoch: 1,
         };
         let actions = m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
-        assert!(matches!(m.role(), Role::Observer { .. }));
-        assert!(
+        assert2::assert!(matches!(m.role(), Role::Observer { .. }));
+        assert2::assert!(
             !actions
                 .iter()
                 .any(|a| matches!(a, Action::SendVoteRequest { .. }))
@@ -1110,8 +1110,8 @@ mod tests {
             SimInstant(11),
         );
         // immediately start pre-vote (Prospective), not wait for timeout
-        assert!(matches!(m.role(), Role::Prospective { .. }));
-        assert!(
+        assert2::assert!(matches!(m.role(), Role::Prospective { .. }));
+        assert2::assert!(
             actions
                 .iter()
                 .any(|a| matches!(a, Action::SendVoteRequest { pre_vote: true, .. }))
@@ -1134,7 +1134,7 @@ mod tests {
             &log,
             SimInstant(10),
         );
-        assert!((actions.is_empty(), m.quorum_state().leader_id) == (true, None));
+        assert2::assert!((actions.is_empty(), m.quorum_state().leader_id) == (true, None));
     }
 
     #[test]
@@ -1168,7 +1168,7 @@ mod tests {
             &log,
             SimInstant(2002),
         );
-        assert!(matches!(
+        assert2::assert!(matches!(
             m.role(),
             Role::Leader {
                 epoch_start_offset: 0,
@@ -1187,7 +1187,7 @@ mod tests {
             SimInstant(2100),
         );
         // majority of {self=10, 2=8} = 8, and 8 > epoch_start_offset 0 → advances
-        assert!(
+        assert2::assert!(
             a2.iter()
                 .any(|a| matches!(a, Action::AdvanceHighWatermark(8)))
         );
@@ -1202,7 +1202,7 @@ mod tests {
         );
         // sorted match offsets {10,8,4}; majority (2nd highest) = 8 → no regress
         if let Role::Leader { high_watermark, .. } = m.role() {
-            assert!(*high_watermark == 8);
+            assert2::assert!(*high_watermark == 8);
         } else {
             panic!()
         }
@@ -1251,7 +1251,7 @@ mod tests {
             SimInstant(2100),
         );
         if let Role::Leader { high_watermark, .. } = m.role() {
-            assert!(*high_watermark == 8);
+            assert2::assert!(*high_watermark == 8);
         } else {
             panic!("expected leader")
         }
@@ -1268,12 +1268,12 @@ mod tests {
             &log,
             SimInstant(2101),
         );
-        assert!(
+        assert2::assert!(
             !a.iter()
                 .any(|x| matches!(x, Action::AdvanceHighWatermark(_)))
         );
         if let Role::Leader { high_watermark, .. } = m.role() {
-            assert!(*high_watermark == 8);
+            assert2::assert!(*high_watermark == 8);
         } else {
             panic!("expected leader")
         }
@@ -1308,7 +1308,7 @@ mod tests {
             &log,
             SimInstant(2002),
         );
-        assert!(matches!(
+        assert2::assert!(matches!(
             m.role(),
             Role::Leader {
                 epoch_start_offset: 10,
@@ -1325,12 +1325,12 @@ mod tests {
             &log,
             SimInstant(2100),
         );
-        assert!(
+        assert2::assert!(
             !a2.iter()
                 .any(|a| matches!(a, Action::AdvanceHighWatermark(_)))
         );
         if let Role::Leader { high_watermark, .. } = m.role() {
-            assert!(*high_watermark == 0);
+            assert2::assert!(*high_watermark == 0);
         } else {
             panic!()
         }
@@ -1387,7 +1387,7 @@ mod tests {
             &log,
             SimInstant(2100),
         );
-        assert!(actions.iter().any(|a| matches!(
+        assert2::assert!(actions.iter().any(|a| matches!(
             a,
             Action::TruncateTo(LogOffsetMetadata {
                 offset: 5,
@@ -1407,7 +1407,7 @@ mod tests {
             last_epoch: 1,
         };
         m.on_event(Event::ElectionTimeout, &log, SimInstant(2000)); // → Prospective, epoch 0
-        assert!(matches!(m.role(), Role::Prospective { .. }));
+        assert2::assert!(matches!(m.role(), Role::Prospective { .. }));
         let actions = m.on_event(
             Event::ReceiveVoteResponse {
                 from: NodeId(2),
@@ -1418,9 +1418,9 @@ mod tests {
             SimInstant(2001),
         );
         // Pre-vote majority (self + 2) → promote to Candidate and bump the epoch.
-        assert!(matches!(m.role(), Role::Candidate { .. }));
+        assert2::assert!(matches!(m.role(), Role::Candidate { .. }));
         check!(m.quorum_state().leader_epoch == 1);
-        assert!(actions.iter().any(|a| matches!(
+        assert2::assert!(actions.iter().any(|a| matches!(
             a,
             Action::SendVoteRequest {
                 pre_vote: false,
@@ -1448,7 +1448,7 @@ mod tests {
             &log,
             SimInstant(2001),
         ); // → Candidate @ epoch 1
-        assert!(matches!(m.role(), Role::Candidate { .. }));
+        assert2::assert!(matches!(m.role(), Role::Candidate { .. }));
         // A duplicate/late pre-vote grant still tagged epoch 0 arrives.
         let actions = m.on_event(
             Event::ReceiveVoteResponse {
@@ -1470,7 +1470,7 @@ mod tests {
         // The ignored stale grant must not have entered the real-vote tally:
         // after promotion the Candidate's grant set holds only our self-vote.
         if let Role::Candidate { granted, .. } = m.role() {
-            assert!((granted.len(), granted.contains(&NodeId(3))) == (1, false));
+            assert2::assert!((granted.len(), granted.contains(&NodeId(3))) == (1, false));
         } else {
             panic!("expected Candidate");
         }
@@ -1520,7 +1520,7 @@ mod tests {
             &log,
             SimInstant(10),
         );
-        assert!(matches!(
+        assert2::assert!(matches!(
             m.role(),
             Role::Follower {
                 leader_id: NodeId(2),
@@ -1528,7 +1528,7 @@ mod tests {
             }
         ));
         check!(m.quorum_state().leader_id == Some(NodeId(2)));
-        assert!(actions.iter().any(|a| matches!(
+        assert2::assert!(actions.iter().any(|a| matches!(
             a,
             Action::SendFetch {
                 leader_id: NodeId(2)
@@ -1560,7 +1560,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!((actions.is_empty(), m.quorum_state().voted_key) == (true, None));
+        assert2::assert!((actions.is_empty(), m.quorum_state().voted_key) == (true, None));
     }
 
     #[test]
@@ -1587,7 +1587,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!((actions.is_empty(), m.quorum_state().voted_key) == (true, None));
+        assert2::assert!((actions.is_empty(), m.quorum_state().voted_key) == (true, None));
     }
 
     #[test]
@@ -1614,7 +1614,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!(actions.iter().any(|a| matches!(
+        assert2::assert!(actions.iter().any(|a| matches!(
             a,
             Action::ReplyVote {
                 to: NodeId(2),
@@ -1622,7 +1622,7 @@ mod tests {
                 ..
             }
         )));
-        assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(NodeId(2)));
+        assert2::assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(NodeId(2)));
     }
 
     #[test]
@@ -1652,7 +1652,7 @@ mod tests {
             &log,
             SimInstant(11),
         );
-        assert!(actions.iter().any(|a| matches!(
+        assert2::assert!(actions.iter().any(|a| matches!(
             a,
             Action::TruncateTo(LogOffsetMetadata {
                 offset: 5,

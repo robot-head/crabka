@@ -1,7 +1,5 @@
 use std::path::Path;
 
-use assert2::assert;
-
 const KNOWN_UNSUPPORTED: &[(&str, &str)] = &[];
 
 #[allow(clippy::unnecessary_wraps)]
@@ -20,10 +18,7 @@ fn traceql_case_file(path: &Path) -> datatest_stable::Result<()> {
         })
         .collect::<Vec<_>>();
 
-    assert!(
-        failing.is_empty(),
-        "traceql golden regressions: {failing:?}"
-    );
+    assert2::assert!(failing.is_empty());
     Ok(())
 }
 

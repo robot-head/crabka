@@ -289,7 +289,7 @@ fn decode_record_header<B: Buf>(buf: &mut B) -> Result<RecordHeader, String> {
 
 #[cfg(test)]
 mod record_tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::*;
@@ -344,15 +344,15 @@ mod record_tests {
             ("keyed with headers", fixture_keyed_record),
             ("large payload", fixture_large_payload_record),
         ];
-        for (case, fixture) in cases {
+        for (_case, fixture) in cases {
             let record = fixture();
             let mut buf = BytesMut::new();
             record.encode(&mut buf).unwrap();
-            assert!(buf.len() == record.encoded_len(), "case {case}");
+            assert2::assert!(buf.len() == record.encoded_len());
 
             let mut cur: &[u8] = &buf[..];
             let decoded = Record::decode(&mut cur).unwrap();
-            assert!((decoded, cur.is_empty()) == (record, true), "case {case}");
+            assert2::assert!((decoded, cur.is_empty()) == (record, true));
         }
     }
 
@@ -372,7 +372,7 @@ mod record_tests {
         let mut cur: &[u8] = &buf[..];
         match Record::decode(&mut cur) {
             Err(RecordsError::RecordParse(msg)) => {
-                assert!(msg.contains("negative header count"), "got: {msg}");
+                assert2::assert!(msg.contains("negative header count"));
             }
             other => panic!("expected RecordParse, got {other:?}"),
         }
@@ -398,7 +398,7 @@ mod record_tests {
 
         let mut cur: &[u8] = &buf[..];
         // Must return an Err (EOF reading the first header), not OOM.
-        assert!(Record::decode(&mut cur).is_err());
+        assert2::assert!(Record::decode(&mut cur).is_err());
     }
 }
 
@@ -632,7 +632,7 @@ impl RecordBatch {
 
 #[cfg(test)]
 mod batch_tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_compression::CompressionType;
 
     use super::*;
@@ -701,15 +701,15 @@ mod batch_tests {
             ("single", fixture_single_record_batch),
             ("multiple", fixture_multi_record_batch),
         ];
-        for (case, fixture) in cases {
+        for (_case, fixture) in cases {
             let mut batch = fixture();
             batch.attributes = batch.attributes.with_compression(CompressionType::None);
             let mut buf = BytesMut::new();
             batch.encode(&mut buf).unwrap();
-            assert!(buf.len() == batch.encoded_len(), "case {case}");
+            assert2::assert!(buf.len() == batch.encoded_len());
             let mut cur: &[u8] = &buf[..];
             let decoded = RecordBatch::decode(&mut cur).unwrap();
-            assert!((decoded, cur.is_empty()) == (batch, true), "case {case}");
+            assert2::assert!((decoded, cur.is_empty()) == (batch, true));
         }
     }
 
@@ -725,7 +725,7 @@ mod batch_tests {
             buf.put_u8(0);
         }
         let mut cur: &[u8] = &buf[..];
-        assert!(matches!(
+        assert2::assert!(matches!(
             RecordBatch::decode(&mut cur),
             Err(RecordsError::UnsupportedMagic { found: 1 })
         ));
@@ -739,7 +739,7 @@ mod batch_tests {
         // Corrupt the CRC bytes (offsets 17..21).
         buf[17] ^= 0xFF;
         let mut cur: &[u8] = &buf[..];
-        assert!(matches!(
+        assert2::assert!(matches!(
             RecordBatch::decode(&mut cur),
             Err(RecordsError::CrcMismatch { .. })
         ));
@@ -747,7 +747,7 @@ mod batch_tests {
 
     #[test]
     fn compressed_roundtrip_cases() {
-        for (case, codec) in [
+        for (_case, codec) in [
             ("gzip", CompressionType::Gzip),
             ("snappy", CompressionType::Snappy),
             ("lz4", CompressionType::Lz4),
@@ -759,7 +759,7 @@ mod batch_tests {
             batch.encode(&mut buf).unwrap();
             let mut cur: &[u8] = &buf[..];
             let decoded = RecordBatch::decode(&mut cur).unwrap();
-            assert!((decoded, cur.is_empty()) == (batch, true), "case {case}");
+            assert2::assert!((decoded, cur.is_empty()) == (batch, true));
         }
     }
 
@@ -793,7 +793,7 @@ mod batch_tests {
             .iter()
             .map(|r| stamped.base_timestamp + r.timestamp_delta)
             .collect();
-        assert!(absolutes == vec![1000, 1005]);
+        assert2::assert!(absolutes == vec![1000, 1005]);
     }
 
     #[test]
@@ -827,16 +827,16 @@ mod batch_tests {
 
         let mut cur: &[u8] = &buf[..];
         let decoded = RecordBatch::decode(&mut cur).unwrap();
-        assert!(cur.is_empty());
+        assert2::assert!(cur.is_empty());
 
-        assert!(decoded.delete_horizon_ms() == Some(9999));
+        assert2::assert!(decoded.delete_horizon_ms() == Some(9999));
 
         let absolutes: Vec<i64> = decoded
             .records
             .iter()
             .map(|r| decoded.base_timestamp + r.timestamp_delta)
             .collect();
-        assert!(absolutes == vec![1000, 1005]);
+        assert2::assert!(absolutes == vec![1000, 1005]);
     }
 
     #[test]
@@ -862,7 +862,7 @@ mod batch_tests {
 
         let mut cur: &[u8] = &buf[..];
         // Must return an Err (EOF reading the first record), not OOM.
-        assert!(RecordBatch::decode(&mut cur).is_err());
+        assert2::assert!(RecordBatch::decode(&mut cur).is_err());
     }
 }
 

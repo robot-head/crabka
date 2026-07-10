@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_operator::{
     controller::grpc_gateway::reconcile,
     crd::grpc_gateway::{KafkaGrpcGateway, KafkaGrpcGatewaySpec},
@@ -187,9 +187,8 @@ async fn happy_path_all_objects_created_ready() {
     let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
 
     // Action must be a 30-second requeue.
-    assert!(
-        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
-        "expected requeue(30s), got {action:?}"
+    assert2::assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30))
     );
 
     let observed = state.take_observed();
@@ -212,10 +211,7 @@ async fn happy_path_all_objects_created_ready() {
         .unwrap_or_else(|| {
             panic!("KafkaUser PATCH missing spec.authentication.type; body = {user_body}")
         });
-    assert!(
-        auth_type == "tls",
-        "KafkaUser must have authentication.type=tls; got {auth_type}"
-    );
+    assert2::assert!(auth_type == "tls");
 
     // --- Assert Deployment PATCH body has exactly 5 volume mounts ---
     let dep_patch = observed
@@ -235,15 +231,15 @@ async fn happy_path_all_objects_created_ready() {
         .iter()
         .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
         .collect();
-    assert_eq!(
-        mount_names,
-        BTreeSet::from([
-            "broker-client",
-            "clients-ca",
-            "cluster-ca",
-            "config",
-            "serving"
-        ])
+    assert2::assert!(
+        mount_names
+            == BTreeSet::from([
+                "broker-client",
+                "clients-ca",
+                "cluster-ca",
+                "config",
+                "serving"
+            ])
     );
 
     // --- Assert Deployment PATCH body has broker-TLS CLI args ---
@@ -285,10 +281,7 @@ async fn happy_path_all_objects_created_ready() {
             true,
         ),
     ] {
-        assert!(
-            args_joined.contains(needle) == want,
-            "Deployment arg fragment {needle:?}: expected present={want}; args = {args_joined}"
-        );
+        assert2::assert!(args_joined.contains(needle) == want);
     }
 
     // --- Assert final status carries Ready=True / Available ---
@@ -311,16 +304,8 @@ async fn happy_path_all_objects_created_ready() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {status_body}"));
-    assert_eq!(
-        ready["status"].as_str(),
-        Some("True"),
-        "body = {status_body}"
-    );
-    assert_eq!(
-        ready["reason"].as_str(),
-        Some("Available"),
-        "body = {status_body}"
-    );
+    assert2::assert!(ready["status"].as_str() == Some("True"));
+    assert2::assert!(ready["reason"].as_str() == Some("Available"));
 
     // All 12 rules must have been consumed.
     check!(
@@ -457,9 +442,8 @@ async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
     let gw = gw_cr(GW);
     let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
 
-    assert!(
-        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
-        "expected requeue(30s) from no-TLS-listener gate, got {action:?}"
+    assert2::assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30))
     );
 
     let observed = state.take_observed();
@@ -483,12 +467,8 @@ async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {body}"));
-    assert_eq!(ready["status"].as_str(), Some("False"), "body = {body}");
-    assert_eq!(
-        ready["reason"].as_str(),
-        Some("NoTlsListener"),
-        "body = {body}"
-    );
+    assert2::assert!(ready["status"].as_str() == Some("False"));
+    assert2::assert!(ready["reason"].as_str() == Some("NoTlsListener"));
 
     // No Deployment or Service PATCH must have happened.
     let unexpected: Vec<_> = observed
@@ -500,16 +480,9 @@ async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
         })
         .map(|r| r.uri().to_string())
         .collect();
-    assert!(
-        unexpected.is_empty(),
-        "no-TLS-listener gate must prevent Deployment/Service render; unexpected PATCHes: {unexpected:?}"
-    );
+    assert2::assert!(unexpected.is_empty());
 
-    assert!(
-        state.remaining_rules() == 0,
-        "all FIFO rules must be consumed, {} remaining",
-        state.remaining_rules()
-    );
+    assert2::assert!(state.remaining_rules() == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -555,9 +528,8 @@ async fn version_gate_blocks_when_kafka_not_validated() {
     let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
 
     // Returns a 30-second requeue (waiting for version validation).
-    assert!(
-        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
-        "expected requeue(30s) from version gate, got {action:?}"
+    assert2::assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30))
     );
 
     let observed = state.take_observed();
@@ -581,12 +553,8 @@ async fn version_gate_blocks_when_kafka_not_validated() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {body}"));
-    assert_eq!(ready["status"].as_str(), Some("False"), "body = {body}");
-    assert_eq!(
-        ready["reason"].as_str(),
-        Some("WaitingForVersionValidation"),
-        "body = {body}"
-    );
+    assert2::assert!(ready["status"].as_str() == Some("False"));
+    assert2::assert!(ready["reason"].as_str() == Some("WaitingForVersionValidation"));
 
     // NO Deployment, Service, or KafkaUser PATCHes must have happened.
     let unexpected: Vec<_> = observed
@@ -599,15 +567,8 @@ async fn version_gate_blocks_when_kafka_not_validated() {
         })
         .map(|r| r.uri().to_string())
         .collect();
-    assert!(
-        unexpected.is_empty(),
-        "version gate must prevent child object creation; unexpected PATCHes: {unexpected:?}"
-    );
+    assert2::assert!(unexpected.is_empty());
 
     // Both rules consumed (GET + PATCH status).
-    assert!(
-        state.remaining_rules() == 0,
-        "all FIFO rules must be consumed, {} remaining",
-        state.remaining_rules()
-    );
+    assert2::assert!(state.remaining_rules() == 0);
 }

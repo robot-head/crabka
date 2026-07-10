@@ -152,8 +152,6 @@ impl ReplicaState {
 mod tests {
     use std::time::{Duration, Instant};
 
-    use assert2::assert;
-
     use super::*;
 
     /// Shorthand for wrapping a raw offset in the test asserts below.
@@ -178,7 +176,7 @@ mod tests {
             hw: Offset(0),
             current_leader_epoch: LeaderEpoch(0),
         };
-        assert!(s == expected);
+        assert2::assert!(s == expected);
     }
 
     #[test]
@@ -206,7 +204,7 @@ mod tests {
             hw: Offset(0),
             current_leader_epoch: LeaderEpoch(0),
         };
-        assert!(s == expected);
+        assert2::assert!(s == expected);
     }
 
     #[test]
@@ -226,8 +224,8 @@ mod tests {
             NodeId(1),
             now(),
         );
-        assert!(s.per_follower.get(&NodeId(2)).map(|f| f.leo) == Some(o(50)));
-        assert!(s.per_follower.get(&NodeId(3)).map(|f| f.leo) == Some(o(75)));
+        assert2::assert!(s.per_follower.get(&NodeId(2)).map(|f| f.leo) == Some(o(50)));
+        assert2::assert!(s.per_follower.get(&NodeId(3)).map(|f| f.leo) == Some(o(75)));
     }
 
     #[test]
@@ -248,7 +246,7 @@ mod tests {
             NodeId(1),
             now(),
         );
-        assert!(!s.per_follower.contains_key(&NodeId(3)));
+        assert2::assert!(!s.per_follower.contains_key(&NodeId(3)));
     }
 
     #[test]
@@ -271,11 +269,8 @@ mod tests {
             NodeId(1),
             now(),
         );
-        assert!(
-            s.per_follower.contains_key(&NodeId(3)),
-            "a replica catching up toward ISR re-admission must keep its progress"
-        );
-        assert!(s.per_follower.get(&NodeId(3)).map(|f| f.leo) == Some(o(75)));
+        assert2::assert!(s.per_follower.contains_key(&NodeId(3)));
+        assert2::assert!(s.per_follower.get(&NodeId(3)).map(|f| f.leo) == Some(o(75)));
     }
 
     #[test]
@@ -291,7 +286,7 @@ mod tests {
         let steps = [(2, 50, 0), (3, 75, 50), (2, 80, 75)];
         for (follower, leo, expected_hw) in steps {
             let hw = s.update_follower_leo(NodeId(follower), o(leo), o(100), now());
-            assert!(hw == o(expected_hw), "step: follower {follower} leo {leo}");
+            assert2::assert!(hw == o(expected_hw));
         }
     }
 
@@ -306,7 +301,7 @@ mod tests {
         );
         s.update_follower_leo(NodeId(2), o(100), o(100), now());
         s.update_follower_leo(NodeId(3), o(30), o(100), now());
-        assert!(s.hw == o(30));
+        assert2::assert!(s.hw == o(30));
     }
 
     #[test]
@@ -322,8 +317,8 @@ mod tests {
         // re-admission, but it is excluded from HW; per_follower[2] = 0 from
         // install, so HW = min(100, 0) = 0.
         let hw = s.update_follower_leo(NodeId(3), o(999), o(100), now());
-        assert!(hw == o(0));
-        assert!(s.hw == o(0));
+        assert2::assert!(hw == o(0));
+        assert2::assert!(s.hw == o(0));
     }
 
     #[test]
@@ -331,7 +326,7 @@ mod tests {
         let mut s = fresh();
         s.install_isr(&[NodeId(1)], &[NodeId(1)], NodeId(1), now());
         let hw = s.recompute_hw_for_leader_append(o(42));
-        assert!(hw == o(42));
+        assert2::assert!(hw == o(42));
     }
 
     #[test]
@@ -344,15 +339,15 @@ mod tests {
             now(),
         );
         let hw = s.update_follower_leo(NodeId(2), o(200), o(100), now());
-        assert!(hw == o(100));
-        assert!(s.per_follower.get(&NodeId(2)).map(|f| f.leo) == Some(o(100)));
+        assert2::assert!(hw == o(100));
+        assert2::assert!(s.per_follower.get(&NodeId(2)).map(|f| f.leo) == Some(o(100)));
     }
 
     #[test]
     fn empty_isr_hw_equals_leader_leo() {
         let mut s = fresh();
         let hw = s.recompute_hw_for_leader_append(o(50));
-        assert!(hw == o(50));
+        assert2::assert!(hw == o(50));
     }
 
     #[test]
@@ -370,7 +365,7 @@ mod tests {
         let t1 = t0 + Duration::from_millis(10);
         s.update_follower_leo(NodeId(2), o(5), o(10), t1);
         let t_after = s.per_follower.get(&NodeId(2)).unwrap().last_fetch;
-        assert!(t_after > t_install);
+        assert2::assert!(t_after > t_install);
     }
 
     #[test]
@@ -394,11 +389,11 @@ mod tests {
             .unwrap();
         // Not yet caught up — last_caught_up is the install time (t0), which is
         // strictly before the most recent fetch time (t1).
-        assert!(lag <= lag_fetch);
+        assert2::assert!(lag <= lag_fetch);
         let t2 = t1 + Duration::from_millis(10);
         s.update_follower_leo(NodeId(2), o(10), o(10), t2);
         let lag2 = s.per_follower.get(&NodeId(2)).unwrap().last_caught_up;
-        assert!(lag2 > lag);
+        assert2::assert!(lag2 > lag);
     }
 
     #[test]
@@ -414,7 +409,7 @@ mod tests {
 
         let t_caught_in_isr = t0 + Duration::from_millis(10);
         s.update_follower_leo(NodeId(3), o(10), o(10), t_caught_in_isr);
-        assert!(s.per_follower.get(&NodeId(3)).unwrap().last_caught_up == t_caught_in_isr);
+        assert2::assert!(s.per_follower.get(&NodeId(3)).unwrap().last_caught_up == t_caught_in_isr);
 
         s.install_isr(
             &[NodeId(1), NodeId(2)],
@@ -425,11 +420,15 @@ mod tests {
         let t_lagging = t_caught_in_isr + Duration::from_millis(10);
         s.update_follower_leo(NodeId(3), o(9), o(10), t_lagging);
         let lagging = s.per_follower.get(&NodeId(3)).unwrap();
-        assert!((lagging.last_fetch, lagging.last_caught_up) == (t_lagging, t_caught_in_isr));
+        assert2::assert!(
+            (lagging.last_fetch, lagging.last_caught_up) == (t_lagging, t_caught_in_isr)
+        );
 
         let t_caught_out_of_isr = t_lagging + Duration::from_millis(10);
         s.update_follower_leo(NodeId(3), o(10), o(10), t_caught_out_of_isr);
-        assert!(s.per_follower.get(&NodeId(3)).unwrap().last_caught_up == t_caught_out_of_isr);
+        assert2::assert!(
+            s.per_follower.get(&NodeId(3)).unwrap().last_caught_up == t_caught_out_of_isr
+        );
     }
 }
 

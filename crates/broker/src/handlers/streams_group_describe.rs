@@ -221,7 +221,6 @@ fn task_map_to_ids(map: &BTreeMap<String, Vec<i32>>) -> Vec<TaskIds> {
 mod tests {
     use std::time::Duration;
 
-    use assert2::assert;
     use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
     use crabka_protocol::{
         UnknownTaggedFields, owned::streams_group_describe_response as response_mod,
@@ -416,7 +415,7 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -436,7 +435,7 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -469,7 +468,7 @@ mod tests {
             groups: vec![error_group("stopped", codes::COORDINATOR_LOAD_IN_PROGRESS)],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -528,14 +527,14 @@ mod tests {
             authorized_operations: i32::MIN,
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(rendered == expected);
+        assert2::assert!(rendered == expected);
     }
 
     #[test]
     fn render_topology_preserves_subtopology_and_topic_info_fields() {
         let topology = render_topology(topology_value());
 
-        assert!(topology == expected_rendered_topology());
+        assert2::assert!(topology == expected_rendered_topology());
     }
 
     #[test]
@@ -546,6 +545,6 @@ mod tests {
             expected_task_ids("a", vec![1, 2]),
             expected_task_ids("z", vec![9]),
         ];
-        assert!(tasks == expected);
+        assert2::assert!(tasks == expected);
     }
 }

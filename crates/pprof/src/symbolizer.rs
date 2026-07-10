@@ -416,7 +416,7 @@ impl<R: NativeResolver> SymbolSource for LazySymbolizer<R> {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use assert2::{assert, check};
+    use assert2::check;
     // Only used by the ELF/DWARF self-symbolization tests below, which run on Linux.
     #[cfg(target_os = "linux")]
     use object::{Object, ObjectSymbol};
@@ -432,8 +432,8 @@ mod tests {
     impl NativeResolver for FixedResolver {
         fn symbolize(&self, request: &SymbolizeRequest) -> Option<Vec<NativeSymbol>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            assert_eq!(request.build_id.as_str(), "build-a");
-            assert_eq!(request.address, self.expected_address);
+            assert2::assert!(request.build_id.as_str() == "build-a");
+            assert2::assert!(request.address == self.expected_address);
             Some(vec![NativeSymbol {
                 function: "native_main".to_string(),
                 file: "main.c".to_string(),
@@ -510,8 +510,8 @@ mod tests {
 
         let frames = source.resolve(0, stack);
 
-        assert!(frames[0].function == "known");
-        assert!(resolver.calls.load(Ordering::Relaxed) == 0);
+        assert2::assert!(frames[0].function == "known");
+        assert2::assert!(resolver.calls.load(Ordering::Relaxed) == 0);
     }
 
     // Reads DWARF embedded in the test binary itself. Only Linux ships DWARF in
@@ -552,7 +552,7 @@ mod tests {
             })
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             frames
                 .iter()
                 .any(|frame| frame.function.contains("object_symbol_anchor"))
@@ -599,7 +599,7 @@ mod tests {
             })
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             frames
                 .iter()
                 .any(|frame| frame.function.contains("object_symbol_anchor"))
@@ -611,7 +611,7 @@ mod tests {
             return;
         }
 
-        assert!(frames.iter().any(is_object_symbol_anchor_location));
+        assert2::assert!(frames.iter().any(is_object_symbol_anchor_location));
     }
 
     #[cfg(target_os = "linux")]
@@ -652,7 +652,7 @@ mod tests {
             let mut request = [0_u8; 1024];
             let read = std::io::Read::read(&mut stream, &mut request).unwrap();
             let request = String::from_utf8_lossy(&request[..read]);
-            assert!(request.starts_with("GET /buildid/deadbeef/debuginfo "));
+            assert2::assert!(request.starts_with("GET /buildid/deadbeef/debuginfo "));
             served_clone.fetch_add(1, Ordering::Relaxed);
             let header = format!(
                 "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
@@ -712,16 +712,16 @@ mod tests {
             })
             .unwrap();
 
-        assert!(out[0].function == "native_main");
-        assert!(fixed.calls.load(Ordering::Relaxed) == 1);
+        assert2::assert!(out[0].function == "native_main");
+        assert2::assert!(fixed.calls.load(Ordering::Relaxed) == 1);
     }
 
     #[test]
     fn object_symbol_resolver_rejects_invalid_object_bytes() {
         let bytes = b"not an object file".to_vec();
 
-        assert!(parse_object_guarded(&bytes).is_err());
-        assert!(ObjectSymbolResolver::from_bytes(bytes).is_err());
+        assert2::assert!(parse_object_guarded(&bytes).is_err());
+        assert2::assert!(ObjectSymbolResolver::from_bytes(bytes).is_err());
     }
 
     #[cfg(target_os = "linux")]
@@ -744,12 +744,12 @@ mod tests {
         let first = resolver.symbolize(&request).unwrap();
         let second = resolver.symbolize(&request).unwrap();
 
-        assert!(
+        assert2::assert!(
             first
                 .iter()
                 .any(|frame| frame.function.contains("object_symbol_anchor"))
         );
-        assert!(first == second);
+        assert2::assert!(first == second);
     }
 
     #[cfg(target_os = "linux")]
@@ -785,7 +785,7 @@ mod tests {
                 (!names.is_empty()).then_some((*address, names))
             })
             .expect("test binary has an uncovered zero-size symbol");
-        assert!(
+        assert2::assert!(
             nearest_symbol_name(&object, zero_addr)
                 .is_some_and(|name| zero_names.iter().any(|candidate| candidate == &name))
         );
@@ -801,7 +801,7 @@ mod tests {
             })
             .expect("anchor has a sized symbol");
         let at_end = nearest_symbol_name(&object, anchor.address() + anchor.size());
-        assert!(!at_end.is_some_and(|name| name.contains("object_symbol_anchor")));
+        assert2::assert!(!at_end.is_some_and(|name| name.contains("object_symbol_anchor")));
     }
 
     #[test]
@@ -814,7 +814,7 @@ mod tests {
             // Minimum length is two hex digits.
             "ab",
         ] {
-            assert!(is_valid_build_id(build_id), "{build_id}");
+            assert2::assert!(is_valid_build_id(build_id));
         }
     }
 
@@ -836,7 +836,7 @@ mod tests {
             "dead beef",
             "build-a",
         ] {
-            assert!(!is_valid_build_id(build_id), "{build_id:?}");
+            assert2::assert!(!is_valid_build_id(build_id));
         }
     }
 
@@ -852,7 +852,7 @@ mod tests {
             address: 0x10,
         });
 
-        assert!(out.is_none());
+        assert2::assert!(out.is_none());
     }
 
     #[test]
@@ -860,7 +860,7 @@ mod tests {
         let base = reqwest::Url::parse("https://debuginfod.example/").unwrap();
         let url = DebuginfodResolver::build_url(&base, "deadbeef").unwrap();
 
-        assert!(url.as_str() == "https://debuginfod.example/buildid/deadbeef/debuginfo");
+        assert2::assert!(url.as_str() == "https://debuginfod.example/buildid/deadbeef/debuginfo");
     }
 
     #[test]
@@ -868,7 +868,7 @@ mod tests {
         let base = reqwest::Url::parse("https://proxy.example/debuginfod").unwrap();
         let url = DebuginfodResolver::build_url(&base, "abcd").unwrap();
 
-        assert!(url.as_str() == "https://proxy.example/debuginfod/buildid/abcd/debuginfo");
+        assert2::assert!(url.as_str() == "https://proxy.example/debuginfod/buildid/abcd/debuginfo");
     }
 
     #[test]
@@ -880,20 +880,17 @@ mod tests {
         let cap_usize = usize::try_from(cap).unwrap();
         let oversized = vec![0_u8; cap_usize + 1];
         let out = read_capped_reader(&oversized[..], cap);
-        assert!(out.is_none());
+        assert2::assert!(out.is_none());
 
         let exact = vec![7_u8; cap_usize];
         let out = read_capped_reader(&exact[..], cap).unwrap();
-        assert!(out.len() == cap_usize);
+        assert2::assert!(out.len() == cap_usize);
     }
 
     #[test]
     fn content_length_cap_allows_absent_and_exact_lengths_only() {
         for (content_length, want) in [(None, true), (Some(10), true), (Some(11), false)] {
-            assert!(
-                content_length_within_cap(content_length, 10) == want,
-                "{content_length:?}"
-            );
+            assert2::assert!(content_length_within_cap(content_length, 10) == want);
         }
     }
 
@@ -934,8 +931,8 @@ mod tests {
         });
 
         server_thread.join().unwrap();
-        assert!(out.is_none());
-        assert!(followed.load(Ordering::Relaxed) == 0);
+        assert2::assert!(out.is_none());
+        assert2::assert!(followed.load(Ordering::Relaxed) == 0);
     }
 
     #[cfg(target_os = "linux")]
@@ -962,10 +959,7 @@ mod tests {
             match listener.accept() {
                 Ok(stream) => return stream,
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "timed out waiting for debuginfod request"
-                    );
+                    assert2::assert!(std::time::Instant::now() < deadline);
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
                 Err(err) => panic!("accept failed: {err}"),

@@ -169,7 +169,6 @@ impl GssapiClientExchange {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::gssapi::{GssError, GssInitiator, InitStep};
@@ -218,7 +217,7 @@ mod tests {
             ClientStep::Token(..) => panic!("expected final reply token"),
         };
         // reply = wrapped (identity) choice: selected 0x01 auth + 3-byte size
-        assert!(reply[0] == 0x01);
+        assert2::assert!(reply[0] == 0x01);
     }
 
     #[test]
@@ -231,7 +230,7 @@ mod tests {
             "Establishing",
             "max_recv_size",
         ] {
-            assert!(rendered.contains(part), "missing {part:?} in {rendered}");
+            assert2::assert!(rendered.contains(part));
         }
 
         // First step: still negotiating -> stays `Establishing`.
@@ -250,7 +249,7 @@ mod tests {
             "AwaitingOffer",
             "max_recv_size",
         ] {
-            assert!(rendered.contains(part), "missing {part:?} in {rendered}");
+            assert2::assert!(rendered.contains(part));
         }
     }
 
@@ -268,7 +267,7 @@ mod tests {
         };
 
         let integrity_only_offer = vec![0x02u8, 0x00, 0x10, 0x00];
-        assert!(matches!(
+        assert2::assert!(matches!(
             ex.step(Some(&integrity_only_offer)),
             Err(ClientExchangeError::NoCommonLayer)
         ));

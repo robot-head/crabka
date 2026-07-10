@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_traces::metricsgen::{
     MetricsGenConfig, MetricsGenService, MockClock, MockRemoteWriteSink, MockSpanSource, SpanKind,
     SpanRecord, StatusCode,
@@ -64,14 +64,14 @@ async fn metrics_generator_end_to_end_red_and_service_graph() {
         ),
     ]);
 
-    assert!(service.poll_once(100).await.unwrap() == 2);
+    assert2::assert!(service.poll_once(100).await.unwrap() == 2);
     clock.set(15_000_000_000);
-    assert!(service.collect_once().await.unwrap() == 1);
+    assert2::assert!(service.collect_once().await.unwrap() == 1);
 
     let writes = sink.writes();
-    assert!(writes.len() == 1);
+    assert2::assert!(writes.len() == 1);
     let payload = &writes[0];
-    assert!(payload.tenant == "tenant-1");
+    assert2::assert!(payload.tenant == "tenant-1");
 
     let calls = payload.series.iter().find(|s| {
         s.name == "traces_spanmetrics_calls_total"
@@ -79,14 +79,14 @@ async fn metrics_generator_end_to_end_red_and_service_graph() {
                 .iter()
                 .any(|(k, v)| k == "span_name" && v == "GET /checkout")
     });
-    assert!(calls.is_some());
+    assert2::assert!(calls.is_some());
 
     let latency = payload
         .series
         .iter()
         .find(|s| s.name == "traces_spanmetrics_latency")
         .unwrap();
-    assert!(
+    assert2::assert!(
         latency
             .exemplars
             .iter()

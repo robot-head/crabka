@@ -307,7 +307,7 @@ pub fn recompute_high_watermark(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use proptest::prelude::*;
 
     use super::*;
@@ -361,21 +361,17 @@ mod tests {
 
     #[test]
     fn jitter_zero_base_is_zero() {
-        assert!(election_jitter_ms(7, 3, 0) == 0);
+        assert2::assert!(election_jitter_ms(7, 3, 0) == 0);
     }
 
     #[test]
     fn jitter_uses_node_and_epoch_hash_inputs() {
-        for (name, node, epoch, expected) in [
+        for (_name, node, epoch, expected) in [
             ("node one epoch zero", 1, 0, 485),
             ("node two epoch zero", 2, 0, 354),
             ("node one epoch one", 1, 1, 446),
         ] {
-            assert_eq!(
-                election_jitter_ms(node, epoch, 1000),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(election_jitter_ms(node, epoch, 1000) == expected);
         }
     }
 

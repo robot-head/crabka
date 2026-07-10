@@ -1022,7 +1022,6 @@ pub fn render_bootstrap_route(
 
 #[cfg(test)]
 mod service_rendering_tests {
-    use assert2::assert;
 
     use super::*;
     use crate::crd::{BootstrapConfig, BrokerOverride, KafkaSpec, ListenerConfiguration};
@@ -1077,15 +1076,15 @@ mod service_rendering_tests {
         let svc = render_broker_service(&k, &listener, 0, "demo-pool-0").unwrap();
         let spec = svc.spec.as_ref().unwrap();
         let sel = spec.selector.as_ref().unwrap();
-        assert_eq!(svc.metadata.name.as_deref(), Some("demo-external-0"));
-        assert_eq!(spec.type_.as_deref(), Some("NodePort"));
-        assert_eq!(
+        assert2::assert!(svc.metadata.name.as_deref() == Some("demo-external-0"));
+        assert2::assert!(spec.type_.as_deref() == Some("NodePort"));
+        assert2::assert!(
             sel.get("statefulset.kubernetes.io/pod-name")
-                .map(String::as_str),
-            Some("demo-pool-0")
+                .map(String::as_str)
+                == Some("demo-pool-0")
         );
-        assert_eq!(spec.ports.as_ref().unwrap()[0].port, 9094);
-        assert_eq!(spec.ports.as_ref().unwrap()[0].node_port, Some(32100));
+        assert2::assert!(spec.ports.as_ref().unwrap()[0].port == 9094);
+        assert2::assert!(spec.ports.as_ref().unwrap()[0].node_port == Some(32100));
     }
 
     #[test]
@@ -1110,8 +1109,8 @@ mod service_rendering_tests {
         };
         let svc = render_broker_service(&k, &listener, 0, "demo-pool-0").unwrap();
         let spec = svc.spec.as_ref().unwrap();
-        assert_eq!(spec.type_.as_deref(), Some("LoadBalancer"));
-        assert_eq!(spec.load_balancer_ip.as_deref(), Some("10.0.0.5"));
+        assert2::assert!(spec.type_.as_deref() == Some("LoadBalancer"));
+        assert2::assert!(spec.load_balancer_ip.as_deref() == Some("10.0.0.5"));
     }
 
     #[test]
@@ -1136,16 +1135,10 @@ mod service_rendering_tests {
         let svc = render_bootstrap_service(&k, &listener).unwrap();
         let spec = svc.spec.as_ref().unwrap();
         let sel = spec.selector.as_ref().unwrap();
-        assert_eq!(
-            svc.metadata.name.as_deref(),
-            Some("demo-external-bootstrap")
-        );
-        assert_eq!(
-            sel.get("app.kubernetes.io/instance").map(String::as_str),
-            Some("demo")
-        );
-        assert_eq!(sel.get("statefulset.kubernetes.io/pod-name"), None);
-        assert_eq!(spec.ports.as_ref().unwrap()[0].node_port, Some(32099));
+        assert2::assert!(svc.metadata.name.as_deref() == Some("demo-external-bootstrap"));
+        assert2::assert!(sel.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo"));
+        assert2::assert!(sel.get("statefulset.kubernetes.io/pod-name") == None);
+        assert2::assert!(spec.ports.as_ref().unwrap()[0].node_port == Some(32099));
     }
 
     fn ingress_listener(type_: ListenerType) -> Listener {
@@ -1177,14 +1170,14 @@ mod service_rendering_tests {
         let l = ingress_listener(ListenerType::Ingress);
         let svc = render_broker_service(&k, &l, 0, "demo-pool-0").unwrap();
         let spec = svc.spec.as_ref().unwrap();
-        assert_eq!(spec.type_.as_deref(), Some("ClusterIP"));
-        assert_eq!(
+        assert2::assert!(spec.type_.as_deref() == Some("ClusterIP"));
+        assert2::assert!(
             spec.selector
                 .as_ref()
                 .unwrap()
                 .get("statefulset.kubernetes.io/pod-name")
-                .map(String::as_str),
-            Some("demo-pool-0")
+                .map(String::as_str)
+                == Some("demo-pool-0")
         );
     }
 
@@ -1193,7 +1186,7 @@ mod service_rendering_tests {
         let k = kafka("demo");
         let l = ingress_listener(ListenerType::Route);
         let svc = render_bootstrap_service(&k, &l).unwrap();
-        assert!(svc.spec.as_ref().unwrap().type_.as_deref() == Some("ClusterIP"));
+        assert2::assert!(svc.spec.as_ref().unwrap().type_.as_deref() == Some("ClusterIP"));
     }
 
     #[test]
@@ -1207,21 +1200,20 @@ mod service_rendering_tests {
         let path = &rule.http.as_ref().unwrap().paths[0];
         let backend = path.backend.service.as_ref().unwrap();
         let tls = &spec.tls.as_ref().unwrap()[0];
-        assert_eq!(ing.metadata.name.as_deref(), Some("demo-ext-0"));
-        assert_eq!(
+        assert2::assert!(ing.metadata.name.as_deref() == Some("demo-ext-0"));
+        assert2::assert!(
             ann.get("nginx.ingress.kubernetes.io/ssl-passthrough")
-                .map(String::as_str),
-            Some("true")
+                .map(String::as_str)
+                == Some("true")
         );
-        assert_eq!(spec.ingress_class_name.as_deref(), Some("nginx"));
-        assert_eq!(rule.host.as_deref(), Some("broker-0.kafka.example.com"));
-        assert_eq!(backend.name.as_str(), "demo-ext-0");
-        assert_eq!(backend.port.as_ref().unwrap().number, Some(9094));
-        assert_eq!(
-            tls.hosts.as_deref(),
-            Some(["broker-0.kafka.example.com".to_string()].as_slice())
+        assert2::assert!(spec.ingress_class_name.as_deref() == Some("nginx"));
+        assert2::assert!(rule.host.as_deref() == Some("broker-0.kafka.example.com"));
+        assert2::assert!(backend.name.as_str() == "demo-ext-0");
+        assert2::assert!(backend.port.as_ref().unwrap().number == Some(9094));
+        assert2::assert!(
+            tls.hosts.as_deref() == Some(["broker-0.kafka.example.com".to_string()].as_slice())
         );
-        assert_eq!(tls.secret_name.as_deref(), None);
+        assert2::assert!(tls.secret_name.as_deref() == None);
     }
 
     #[test]
@@ -1230,8 +1222,8 @@ mod service_rendering_tests {
         let l = ingress_listener(ListenerType::Ingress);
         let ing = render_bootstrap_ingress(&k, &l, "bootstrap.kafka.example.com").unwrap();
         let rule = &ing.spec.as_ref().unwrap().rules.as_ref().unwrap()[0];
-        assert_eq!(ing.metadata.name.as_deref(), Some("demo-ext-bootstrap"));
-        assert_eq!(rule.host.as_deref(), Some("bootstrap.kafka.example.com"));
+        assert2::assert!(ing.metadata.name.as_deref() == Some("demo-ext-bootstrap"));
+        assert2::assert!(rule.host.as_deref() == Some("bootstrap.kafka.example.com"));
     }
 
     #[test]
@@ -1252,7 +1244,7 @@ mod service_rendering_tests {
             ("/spec/to/kind", serde_json::json!("Service")),
             ("/spec/to/name", serde_json::json!("demo-ext-0")),
         ] {
-            assert!(route.pointer(pointer) == Some(&want), "pointer {pointer}");
+            assert2::assert!(route.pointer(pointer) == Some(&want));
         }
     }
 
@@ -1269,14 +1261,13 @@ mod service_rendering_tests {
             ),
             ("/spec/to/name", serde_json::json!("demo-ext-bootstrap")),
         ] {
-            assert!(route.pointer(pointer) == Some(&want), "pointer {pointer}");
+            assert2::assert!(route.pointer(pointer) == Some(&want));
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::crd::{BrokerOverride, ListenerConfiguration};
@@ -1307,10 +1298,7 @@ mod tests {
 
     #[test]
     fn gssapi_keytab_path_is_dir_plus_keytab() {
-        assert!(
-            GSSAPI_KEYTAB_PATH == format!("{GSSAPI_KEYTAB_DIR}/keytab"),
-            "the mounted keytab dir + item path must equal the rendered keytab_path"
-        );
+        assert2::assert!(GSSAPI_KEYTAB_PATH == format!("{GSSAPI_KEYTAB_DIR}/keytab"));
     }
 
     #[test]
@@ -1326,7 +1314,7 @@ mod tests {
             brokers: vec![],
             ingress_class: Some("nginx".into()),
         });
-        for (name, listeners) in [
+        for (_name, listeners) in [
             ("empty", vec![]),
             ("one internal", vec![internal("PLAIN", 9092)]),
             ("valid ingress", vec![internal("PLAIN", 9092), ing]),
@@ -1361,7 +1349,7 @@ mod tests {
                 }],
             ),
         ] {
-            assert_eq!(validate_listeners(&listeners, None), Ok(()), "case {name}");
+            assert2::assert!(validate_listeners(&listeners, None) == Ok(()));
         }
     }
 
@@ -1397,7 +1385,7 @@ mod tests {
             configuration: None,
             network_policy_peers: None,
         };
-        for (name, listeners, selected, expected) in [
+        for (_name, listeners, selected, expected) in [
             (
                 "duplicate name",
                 vec![internal("PLAIN", 9092), nodeport("PLAIN", 9094)],
@@ -1463,14 +1451,14 @@ mod tests {
             ),
         ] {
             let actual = validate_listeners(&listeners, selected).unwrap_err();
-            assert_eq!(actual, expected, "case {name}");
-            assert_eq!(actual.reason(), expected.reason(), "case {name}");
+            assert2::assert!(actual == expected);
+            assert2::assert!(actual.reason() == expected.reason());
         }
     }
 
     #[test]
     fn effective_inter_broker_name_cases() {
-        for (name, listeners, explicit, expected) in [
+        for (_name, listeners, explicit, expected) in [
             ("explicit name", vec![], Some("FOO"), "FOO"),
             (
                 "first internal listener",
@@ -1484,10 +1472,8 @@ mod tests {
             ),
             ("empty defaults", vec![], None, "PLAIN"),
         ] {
-            assert_eq!(
-                effective_inter_broker_listener_name(&listeners, explicit),
-                expected,
-                "case {name}"
+            assert2::assert!(
+                effective_inter_broker_listener_name(&listeners, explicit) == expected
             );
         }
     }
@@ -1549,12 +1535,12 @@ mod tests {
         let mut literal_issuer = oauth_cfg_minimal();
         literal_issuer.valid_issuer_uri = "kafka-cluster".into();
 
-        for (name, config) in [
+        for (_name, config) in [
             ("HTTP JWKS URI", http_jwks),
             ("literal non-URI issuer", literal_issuer),
         ] {
             let listeners = vec![oauth_listener("oauth", 9095, true, config)];
-            assert_eq!(validate_listeners(&listeners, None), Ok(()), "case {name}");
+            assert2::assert!(validate_listeners(&listeners, None) == Ok(()));
         }
     }
 
@@ -1567,7 +1553,7 @@ mod tests {
         let mut short_refresh = oauth_cfg_minimal();
         short_refresh.jwks_refresh_seconds = Some(29);
 
-        for (name, tls, config, expected_error, expected_reason) in [
+        for (_name, tls, config, expected_error, expected_reason) in [
             (
                 "transport TLS required",
                 false,
@@ -1603,8 +1589,8 @@ mod tests {
             let listeners = vec![oauth_listener("oauth", 9095, tls, config)];
             let actual_error = validate_listeners(&listeners, None).unwrap_err();
             let actual_reason = actual_error.reason();
-            assert_eq!(actual_error, expected_error, "case {name}");
-            assert_eq!(actual_reason, expected_reason, "case {name}");
+            assert2::assert!(actual_error == expected_error);
+            assert2::assert!(actual_reason == expected_reason);
         }
     }
 
@@ -1615,7 +1601,7 @@ mod tests {
         let mut bearer_disabled = oauth_cfg_minimal();
         bearer_disabled.enable_oauth_bearer = false;
 
-        for (name, first, second) in [
+        for (_name, first, second) in [
             ("identical configs", identical.clone(), identical),
             (
                 "different bearer enablement",
@@ -1627,7 +1613,7 @@ mod tests {
                 oauth_listener("oauth-a", 9095, true, first),
                 oauth_listener("oauth-b", 9096, true, second),
             ];
-            assert_eq!(validate_listeners(&listeners, None), Ok(()), "case {name}");
+            assert2::assert!(validate_listeners(&listeners, None) == Ok(()));
         }
     }
 
@@ -1826,11 +1812,7 @@ mod tests {
             let err = validate_listeners(&listeners, None).expect_err(&format!(
                 "expected ConflictingOAuthListenerConfig when only `{field}` differs"
             ));
-            assert_eq!(
-                err,
-                ValidationError::ConflictingOAuthListenerConfig,
-                "field {field}"
-            );
+            assert2::assert!(err == ValidationError::ConflictingOAuthListenerConfig);
         }
     }
 
@@ -1918,11 +1900,7 @@ mod tests {
             let err = validate_listeners(&listeners, None).expect_err(&format!(
                 "expected ConflictingOAuthListenerConfig when only `{field}` differs"
             ));
-            assert_eq!(
-                err,
-                ValidationError::ConflictingOAuthListenerConfig,
-                "field {field}"
-            );
+            assert2::assert!(err == ValidationError::ConflictingOAuthListenerConfig);
         }
     }
 
@@ -1980,7 +1958,7 @@ mod tests {
         let mut jwt_with_userinfo = oauth_cfg_minimal();
         jwt_with_userinfo.user_info_endpoint_uri = Some("https://idp.example/userinfo".into());
 
-        for (name, cfg, expected) in [
+        for (_name, cfg, expected) in [
             (
                 "JWT without JWKS endpoint",
                 cfg,
@@ -2033,11 +2011,7 @@ mod tests {
             ),
         ] {
             let listeners = vec![oauth_listener("oauth", 9095, true, cfg)];
-            assert_eq!(
-                validate_listeners(&listeners, None),
-                Err(expected),
-                "case {name}"
-            );
+            assert2::assert!(validate_listeners(&listeners, None) == Err(expected));
         }
     }
 
@@ -2079,10 +2053,7 @@ mod tests {
                 configuration: None,
                 network_policy_peers: None,
             };
-            assert!(
-                listener_protocol(&l) == expected,
-                "tls={tls}, auth={auth:?}"
-            );
+            assert2::assert!(listener_protocol(&l) == expected);
         }
     }
 
@@ -2150,7 +2121,7 @@ mod tests {
             gssapi_listener("g2", 9093, false, gssapi_cfg_with_service("other")),
         ];
 
-        for (name, listeners, expected, expected_reason) in [
+        for (_name, listeners, expected, expected_reason) in [
             (
                 "missing keytab",
                 vec![missing_keytab],
@@ -2174,22 +2145,22 @@ mod tests {
         ] {
             let actual = validate_listeners(&listeners, None).unwrap_err();
             let reason = actual.reason();
-            assert_eq!(actual, expected, "case {name}");
-            assert_eq!(reason, expected_reason, "case {name}");
+            assert2::assert!(actual == expected);
+            assert2::assert!(reason == expected_reason);
         }
     }
 
     #[test]
     fn gssapi_listener_allows_plaintext_and_ssl() {
-        for (name, tls) in [("plaintext", false), ("TLS", true)] {
+        for (_name, tls) in [("plaintext", false), ("TLS", true)] {
             let listener = gssapi_listener("g", 9092, tls, gssapi_cfg_with_service("kafka"));
-            assert_eq!(validate_listeners(&[listener], None), Ok(()), "case {name}");
+            assert2::assert!(validate_listeners(&[listener], None) == Ok(()));
         }
     }
 
     #[test]
     fn inter_broker_gssapi_cases() {
-        for (name, kerberos_enabled, expected) in [
+        for (_name, kerberos_enabled, expected) in [
             (
                 "missing inter-broker Kerberos configuration",
                 false,
@@ -2200,10 +2171,8 @@ mod tests {
             ("Kerberos configuration present", true, Ok(())),
         ] {
             let listener = gssapi_listener("ib", 9092, false, gssapi_cfg_with_service("kafka"));
-            assert_eq!(
-                validate_inter_broker_gssapi(&[listener], "ib", kerberos_enabled),
-                expected,
-                "case {name}"
+            assert2::assert!(
+                validate_inter_broker_gssapi(&[listener], "ib", kerberos_enabled) == expected
             );
         }
     }
@@ -2215,7 +2184,7 @@ mod tests {
         let mut jwks_policy = oauth_introspection_cfg_minimal();
         jwks_policy.jwks_min_refresh_pause_seconds = Some(1);
 
-        for (name, cfg, expected) in [
+        for (_name, cfg, expected) in [
             (
                 "valid token type",
                 valid_token_type,
@@ -2232,11 +2201,7 @@ mod tests {
             ),
         ] {
             let listeners = vec![oauth_listener("oauth", 9096, true, cfg)];
-            assert_eq!(
-                validate_listeners(&listeners, None),
-                Err(expected),
-                "case {name}"
-            );
+            assert2::assert!(validate_listeners(&listeners, None) == Err(expected));
         }
     }
 }
@@ -2428,7 +2393,6 @@ pub fn compute_advertised(
 mod advertised_tests {
     use std::collections::HashMap;
 
-    use assert2::assert;
     use k8s_openapi::api::core::v1::{
         LoadBalancerIngress, LoadBalancerStatus, Node, NodeAddress, NodeStatus, Service,
         ServicePort, ServiceSpec, ServiceStatus,
@@ -2523,7 +2487,7 @@ mod advertised_tests {
         ] {
             let actual = compute_advertised(&listener, 0, pod_fqdn, None, &HashMap::new(), None)
                 .unwrap_or_else(|error| panic!("{name}: {error:?}"));
-            assert!(actual == expected, "{name}");
+            assert2::assert!(actual == expected);
         }
     }
 
@@ -2532,7 +2496,7 @@ mod advertised_tests {
         let l = nodeport("ext", 9094);
         let nodes = HashMap::new();
         let err = compute_advertised(&l, 0, "pod", None, &nodes, None).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             AdvertisedError::PodNotScheduled { broker: 0 }
         ));
@@ -2577,7 +2541,7 @@ mod advertised_tests {
             ..Default::default()
         };
         let a = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap();
-        assert!(
+        assert2::assert!(
             a == AdvertisedAddress {
                 host: "1.2.3.4".into(),
                 port: 32100
@@ -2618,9 +2582,8 @@ mod advertised_tests {
             ..Default::default()
         };
         let a = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap();
-        assert_eq!(
-            a,
-            AdvertisedAddress {
+        assert2::assert!(
+            a == AdvertisedAddress {
                 host: "10.0.0.1".to_string(),
                 port: 32100,
             }
@@ -2660,7 +2623,7 @@ mod advertised_tests {
             ..Default::default()
         };
         let err = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap_err();
-        assert!(matches!(err, AdvertisedError::NodePortNotAllocated { .. }));
+        assert2::assert!(matches!(err, AdvertisedError::NodePortNotAllocated { .. }));
     }
 
     #[test]
@@ -2686,7 +2649,7 @@ mod advertised_tests {
             }),
         };
         let a = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap();
-        assert!(
+        assert2::assert!(
             a == AdvertisedAddress {
                 host: "lb.example.com".into(),
                 port: 9094
@@ -2707,7 +2670,7 @@ mod advertised_tests {
             status: None,
         };
         let err = compute_advertised(&l, 0, "pod", Some("n1"), &nodes, Some(&svc)).unwrap_err();
-        assert!(matches!(err, AdvertisedError::LoadBalancerPending { .. }));
+        assert2::assert!(matches!(err, AdvertisedError::LoadBalancerPending { .. }));
     }
 
     #[test]
@@ -2739,9 +2702,8 @@ mod advertised_tests {
             ..Default::default()
         };
         let a = compute_advertised(&l, 0, "pod", None, &nodes, Some(&svc)).unwrap();
-        assert_eq!(
-            a,
-            AdvertisedAddress {
+        assert2::assert!(
+            a == AdvertisedAddress {
                 host: "public.host".to_string(),
                 port: 32100,
             }
@@ -2776,7 +2738,7 @@ mod advertised_tests {
         let l = ingress("ext", 9094, None);
         let nodes = HashMap::new();
         let err = compute_advertised(&l, 0, "pod", None, &nodes, None).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             AdvertisedError::IngressBrokerHostMissing { broker: 0, .. }
         ));
@@ -3387,7 +3349,6 @@ pub fn synthesized_default_listener() -> Listener {
 
 #[cfg(test)]
 mod toml_rendering_tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -3422,18 +3383,15 @@ mod toml_rendering_tests {
         // Sanity: parses cleanly with the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        assert_eq!(parsed.broker_id, Some(0));
-        assert_eq!(parsed.inter_broker_listener_name.as_deref(), Some("PLAIN"));
-        assert_eq!(parsed.heartbeat_interval_ms, Some(500));
-        assert_eq!(parsed.heartbeat_timeout_ms, Some(3000));
-        assert_eq!(parsed.replica_lag_time_max_ms, Some(2000));
-        assert_eq!(parsed.controller_election_timeout_ms, Some(500));
-        assert_eq!(parsed.controller_heartbeat_interval_ms, Some(100));
-        assert_eq!(parsed.listeners.len(), 1);
-        assert_eq!(
-            parsed.listeners[0].advertised.as_str(),
-            "demo-0.svc.local:9092"
-        );
+        assert2::assert!(parsed.broker_id == Some(0));
+        assert2::assert!(parsed.inter_broker_listener_name.as_deref() == Some("PLAIN"));
+        assert2::assert!(parsed.heartbeat_interval_ms == Some(500));
+        assert2::assert!(parsed.heartbeat_timeout_ms == Some(3000));
+        assert2::assert!(parsed.replica_lag_time_max_ms == Some(2000));
+        assert2::assert!(parsed.controller_election_timeout_ms == Some(500));
+        assert2::assert!(parsed.controller_heartbeat_interval_ms == Some(100));
+        assert2::assert!(parsed.listeners.len() == 1);
+        assert2::assert!(parsed.listeners[0].advertised.as_str() == "demo-0.svc.local:9092");
     }
 
     #[test]
@@ -3467,15 +3425,12 @@ mod toml_rendering_tests {
         let listeners_pos = toml_str
             .find("[[listeners]]")
             .expect("[[listeners]] header must be present");
-        assert!(
-            key_pos < listeners_pos,
-            "controller_quorum_voters must precede [[listeners]], got:\n{toml_str}"
-        );
+        assert2::assert!(key_pos < listeners_pos);
 
         // Round-trips through the broker's FileConfig with the exact set.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        assert!(parsed.controller_quorum_voters == voters);
+        assert2::assert!(parsed.controller_quorum_voters == voters);
     }
 
     #[test]
@@ -3505,13 +3460,13 @@ mod toml_rendering_tests {
         );
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        assert!(!toml_str.contains("controller_quorum_voters"));
-        assert!(!toml_str.contains("controller_server_name"));
-        assert!(!toml_str.contains("[server_properties]"));
-        assert!(!toml_str.contains("[authorization]"));
-        assert!(!toml_str.contains("[remote_storage]"));
-        assert!(parsed.controller_quorum_voters.is_empty());
-        assert_eq!(parsed.controller_server_name, None);
+        assert2::assert!(!toml_str.contains("controller_quorum_voters"));
+        assert2::assert!(!toml_str.contains("controller_server_name"));
+        assert2::assert!(!toml_str.contains("[server_properties]"));
+        assert2::assert!(!toml_str.contains("[authorization]"));
+        assert2::assert!(!toml_str.contains("[remote_storage]"));
+        assert2::assert!(parsed.controller_quorum_voters.is_empty());
+        assert2::assert!(parsed.controller_server_name == None);
     }
 
     #[test]
@@ -3552,15 +3507,12 @@ mod toml_rendering_tests {
         let listeners_pos = toml_str
             .find("[[listeners]]")
             .expect("[[listeners]] header must be present");
-        assert!(
-            key_pos < listeners_pos,
-            "controller_server_name must precede [[listeners]], got:\n{toml_str}"
-        );
+        assert2::assert!(key_pos < listeners_pos);
 
         // Round-trips through the broker's FileConfig with the exact value.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        assert!(parsed.controller_server_name.as_deref() == Some(server_name));
+        assert2::assert!(parsed.controller_server_name.as_deref() == Some(server_name));
     }
 
     #[test]
@@ -3608,11 +3560,11 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(t1 == t2);
+        assert2::assert!(t1 == t2);
         // Sorted property keys (BTreeMap iteration).
         let a_pos = t1.find("a.first").unwrap();
         let z_pos = t1.find("z.last").unwrap();
-        assert!(a_pos < z_pos);
+        assert2::assert!(a_pos < z_pos);
     }
 
     #[test]
@@ -3650,11 +3602,7 @@ mod toml_rendering_tests {
             "type = \"simple\"",
             "super_users = [\"ANONYMOUS\"]",
         ] {
-            assert!(
-                t.contains(needle),
-                "expected {needle:?} in the auto-injected [authorization] block when \
-                 delegation tokens are enabled, got:\n{t}"
-            );
+            assert2::assert!(t.contains(needle));
         }
         // Round-trip: the broker's FileConfig must accept the rendered
         // block and the `[authorization].super_users` field must carry
@@ -3664,13 +3612,13 @@ mod toml_rendering_tests {
         let authz = parsed
             .authorization
             .expect("[authorization] block must round-trip into FileConfig");
-        assert_eq!(
-            authz,
-            crabka_broker::file_config::FileAuthorizationConfig {
-                authz_type: crabka_broker::file_config::AuthzType::Simple,
-                super_users: vec!["ANONYMOUS".to_string()],
-                opa: None,
-            }
+        assert2::assert!(
+            authz
+                == crabka_broker::file_config::FileAuthorizationConfig {
+                    authz_type: crabka_broker::file_config::AuthzType::Simple,
+                    super_users: vec!["ANONYMOUS".to_string()],
+                    opa: None,
+                }
         );
     }
 
@@ -3699,16 +3647,8 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            !t.contains("super_users"),
-            "super_users must be absent when delegation tokens are disabled, got:\n{t}"
-        );
-        assert!(
-            !t.contains("[authorization]"),
-            "[authorization] block must be omitted when both `authorization` and \
-             `delegation_token_enabled` are unset; broker falls back to AllowAll, \
-             got:\n{t}"
-        );
+        assert2::assert!(!t.contains("super_users"));
+        assert2::assert!(!t.contains("[authorization]"));
     }
 
     // -----------------------------------------------------------------
@@ -3751,18 +3691,14 @@ mod toml_rendering_tests {
             ("super_users = [\"admin\"]", true),
             ("[authorization.opa]", false),
         ] {
-            assert!(
-                t.contains(needle) == want,
-                "needle {needle:?}: expected contains == {want}, got:\n{t}"
-            );
+            assert2::assert!(t.contains(needle) == want);
         }
         // Round-trip through the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let a = parsed.authorization.expect("[authorization] present");
-        assert_eq!(
-            a,
-            crabka_broker::file_config::FileAuthorizationConfig {
+        assert2::assert!(
+            a == crabka_broker::file_config::FileAuthorizationConfig {
                 authz_type: crabka_broker::file_config::AuthzType::Simple,
                 super_users: vec!["admin".to_string()],
                 opa: None,
@@ -3816,10 +3752,7 @@ mod toml_rendering_tests {
             ("expire_after_ms = 60000", true),
             ("initial_cache_capacity", false),
         ] {
-            assert!(
-                t.contains(needle) == want,
-                "needle {needle:?}: expected contains == {want}, got:\n{t}"
-            );
+            assert2::assert!(t.contains(needle) == want);
         }
     }
 
@@ -3857,7 +3790,7 @@ mod toml_rendering_tests {
             "type = \"simple\"",
             "super_users = [\"ANONYMOUS\"]",
         ] {
-            assert!(t.contains(needle), "needle {needle:?}, TOML:\n{t}");
+            assert2::assert!(t.contains(needle));
         }
         // Verify the merge path too: explicit Simple + delegation_token
         // merges ANONYMOUS into the user's super-users list.
@@ -3880,10 +3813,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            t2.contains("super_users = [\"User:admin\", \"ANONYMOUS\"]"),
-            "delegation_token must merge ANONYMOUS into user-authored super_users, got:\n{t2}"
-        );
+        assert2::assert!(t2.contains("super_users = [\"User:admin\", \"ANONYMOUS\"]"));
     }
 
     // ── tiered storage TOML render ───────────────────────────────────
@@ -3920,21 +3850,21 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        for (name, expected) in [
+        for (_name, expected) in [
             ("remote storage block", "[remote_storage]"),
             (
                 "canonical storage directory",
                 "storage_dir = \"/var/lib/crabka/remote\"",
             ),
         ] {
-            assert!(t.contains(expected), "case {name}; got:\n{t}");
+            assert2::assert!(t.contains(expected));
         }
         // Round-trip: the broker's FileConfig must accept the rendered
         // block and surface the path as the broker's tier storage dir.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let rs = parsed.remote_storage.expect("[remote_storage] round-trips");
-        assert!(rs.storage_dir.as_deref() == Some("/var/lib/crabka/remote"));
+        assert2::assert!(rs.storage_dir.as_deref() == Some("/var/lib/crabka/remote"));
     }
 
     // ── S3 tiered storage TOML render ────────────────────────────────
@@ -3988,7 +3918,7 @@ mod toml_rendering_tests {
             "num_partitions = 8",
             "replication = 1",
         ] {
-            assert!(t.contains(needle), "needle {needle:?} missing, got:\n{t}");
+            assert2::assert!(t.contains(needle));
         }
         // Round-trip through the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
@@ -3998,9 +3928,9 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .kafka_metadata
             .expect("kafka_metadata round-trips");
-        assert_eq!(km.bootstrap.as_str(), "127.0.0.1:9094");
-        assert_eq!(km.num_partitions, Some(8));
-        assert_eq!(km.replication, Some(1));
+        assert2::assert!(km.bootstrap.as_str() == "127.0.0.1:9094");
+        assert2::assert!(km.num_partitions == Some(8));
+        assert2::assert!(km.replication == Some(1));
     }
 
     #[test]
@@ -4039,11 +3969,11 @@ mod toml_rendering_tests {
             "",
         );
         // The block must always be emitted so the broker knows to select InMemory.
-        for (name, expected) in [
+        for (_name, expected) in [
             ("Kafka metadata block", "[remote_storage.kafka_metadata]"),
             ("in-memory flag", "in_memory = true"),
         ] {
-            assert!(t.contains(expected), "case {name}; got:\n{t}");
+            assert2::assert!(t.contains(expected));
         }
     }
 
@@ -4081,10 +4011,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            t.contains("[remote_storage.kafka_metadata]"),
-            "expected kafka_metadata block by default, got:\n{t}"
-        );
+        assert2::assert!(t.contains("[remote_storage.kafka_metadata]"));
     }
 
     #[test]
@@ -4125,8 +4052,8 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(t.contains("[remote_storage.kafka_metadata]"));
-        assert!(!t.contains("bootstrap ="));
+        assert2::assert!(t.contains("[remote_storage.kafka_metadata]"));
+        assert2::assert!(!t.contains("bootstrap ="));
     }
 
     #[test]
@@ -4185,25 +4112,22 @@ mod toml_rendering_tests {
             ("access_key_id", false),
             ("secret_access_key", false),
         ] {
-            assert!(
-                t.contains(needle) == want,
-                "needle {needle:?}: expected contains == {want}, got:\n{t}"
-            );
+            assert2::assert!(t.contains(needle) == want);
         }
         // Broker round-trip.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let rs = parsed.remote_storage.expect("[remote_storage] round-trips");
         let s3 = rs.s3.expect("[remote_storage.s3] round-trips");
-        assert_eq!(s3.bucket.as_str(), "crabka-tier");
-        assert_eq!(s3.region.as_str(), "us-east-1");
-        assert_eq!(s3.prefix.as_deref(), Some("cluster-a"));
-        assert_eq!(s3.endpoint.as_deref(), Some("http://minio.svc:9000"));
-        assert!(s3.allow_http);
-        assert_eq!(s3.multipart_threshold, Some(4096));
-        assert_eq!(s3.multipart_chunk_size, Some(1024));
-        assert_eq!(s3.access_key_id.as_deref(), None);
-        assert_eq!(s3.secret_access_key.as_deref(), None);
+        assert2::assert!(s3.bucket.as_str() == "crabka-tier");
+        assert2::assert!(s3.region.as_str() == "us-east-1");
+        assert2::assert!(s3.prefix.as_deref() == Some("cluster-a"));
+        assert2::assert!(s3.endpoint.as_deref() == Some("http://minio.svc:9000"));
+        assert2::assert!(s3.allow_http);
+        assert2::assert!(s3.multipart_threshold == Some(4096));
+        assert2::assert!(s3.multipart_chunk_size == Some(1024));
+        assert2::assert!(s3.access_key_id.as_deref() == None);
+        assert2::assert!(s3.secret_access_key.as_deref() == None);
     }
 
     /// Minimal S3 spec — only `bucket` + `region` set. Optional fields
@@ -4259,10 +4183,7 @@ mod toml_rendering_tests {
             ("multipart_chunk_size", false),
             ("storage_dir", false),
         ] {
-            assert!(
-                t.contains(needle) == want,
-                "needle {needle:?}: expected contains == {want}, got:\n{t}"
-            );
+            assert2::assert!(t.contains(needle) == want);
         }
         // Broker round-trip.
         let parsed: crabka_broker::file_config::FileConfig =
@@ -4272,8 +4193,8 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .s3
             .expect("[remote_storage.s3] round-trips");
-        assert_eq!(s3.bucket.as_str(), "b");
-        assert_eq!(s3.region.as_str(), "r");
+        assert2::assert!(s3.bucket.as_str() == "b");
+        assert2::assert!(s3.region.as_str() == "r");
     }
 
     /// Reserved TOML metacharacters (`"`, `\`) in a user-supplied
@@ -4326,7 +4247,7 @@ mod toml_rendering_tests {
             .expect("[remote_storage]")
             .s3
             .expect("[remote_storage.s3]");
-        assert!(s3.prefix.as_deref() == Some(r#"weird"prefix\"#));
+        assert2::assert!(s3.prefix.as_deref() == Some(r#"weird"prefix\"#));
     }
 
     /// GCS backend with an explicit service-account key Secret: the
@@ -4393,10 +4314,7 @@ mod toml_rendering_tests {
             ("multipart_chunk_size = 1024", true),
             ("storage_dir", false),
         ] {
-            assert!(
-                t.contains(needle) == want,
-                "needle {needle:?}: expected contains == {want}, got:\n{t}"
-            );
+            assert2::assert!(t.contains(needle) == want);
         }
         // Broker round-trip: the rendered TOML must parse into FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
@@ -4406,16 +4324,15 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .gcs
             .expect("[remote_storage.gcs] round-trips");
-        assert_eq!(gcs.bucket.as_str(), "crabka-tier");
-        assert_eq!(gcs.prefix.as_deref(), Some("cluster-a"));
-        assert_eq!(gcs.endpoint.as_deref(), Some("http://fake-gcs.svc:4443"));
-        assert!(gcs.allow_http);
-        assert_eq!(
-            gcs.service_account_path.as_deref(),
-            Some("/etc/crabka/gcs-credentials/key.json")
+        assert2::assert!(gcs.bucket.as_str() == "crabka-tier");
+        assert2::assert!(gcs.prefix.as_deref() == Some("cluster-a"));
+        assert2::assert!(gcs.endpoint.as_deref() == Some("http://fake-gcs.svc:4443"));
+        assert2::assert!(gcs.allow_http);
+        assert2::assert!(
+            gcs.service_account_path.as_deref() == Some("/etc/crabka/gcs-credentials/key.json")
         );
-        assert_eq!(gcs.multipart_threshold, Some(4096));
-        assert_eq!(gcs.multipart_chunk_size, Some(1024));
+        assert2::assert!(gcs.multipart_threshold == Some(4096));
+        assert2::assert!(gcs.multipart_chunk_size == Some(1024));
     }
 
     /// Keyless GCS (Workload Identity / ADC): with `credentials` unset,
@@ -4466,10 +4383,7 @@ mod toml_rendering_tests {
             ("endpoint =", false),
             ("allow_http", false),
         ] {
-            assert!(
-                t.contains(needle) == want,
-                "needle {needle:?}: expected contains == {want}, got:\n{t}"
-            );
+            assert2::assert!(t.contains(needle) == want);
         }
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
@@ -4478,8 +4392,8 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .gcs
             .expect("[remote_storage.gcs] round-trips");
-        assert_eq!(gcs.bucket.as_str(), "b");
-        assert_eq!(gcs.service_account_path, None);
+        assert2::assert!(gcs.bucket.as_str() == "b");
+        assert2::assert!(gcs.service_account_path == None);
     }
 
     #[test]
@@ -4522,17 +4436,15 @@ mod toml_rendering_tests {
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
         let controller_listener_protocol = parsed.controller_listener_protocol;
         let parsed_tls = parsed.tls_config.expect("tls_config emitted");
-        assert_eq!(
-            controller_listener_protocol,
-            Some(crabka_security::ListenerProtocol::Ssl)
+        assert2::assert!(
+            controller_listener_protocol == Some(crabka_security::ListenerProtocol::Ssl)
         );
-        assert_eq!(
-            parsed_tls.cert_path,
-            std::path::PathBuf::from("/etc/crabka/broker-tls/0.crt")
+        assert2::assert!(
+            parsed_tls.cert_path == std::path::PathBuf::from("/etc/crabka/broker-tls/0.crt")
         );
-        assert_eq!(
-            parsed_tls.trust_roots_path,
-            Some(std::path::PathBuf::from("/etc/crabka/cluster-ca/ca.crt"))
+        assert2::assert!(
+            parsed_tls.trust_roots_path
+                == Some(std::path::PathBuf::from("/etc/crabka/cluster-ca/ca.crt"))
         );
     }
 
@@ -4563,8 +4475,8 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(!toml_str.contains("[tls_config]"));
-        assert!(!toml_str.contains("controller_listener_protocol"));
+        assert2::assert!(!toml_str.contains("[tls_config]"));
+        assert2::assert!(!toml_str.contains("controller_listener_protocol"));
     }
 
     #[test]
@@ -4615,7 +4527,7 @@ mod toml_rendering_tests {
             "sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }",
             "[tls_config]",
         ] {
-            assert!(toml.contains(needle), "needle {needle:?}, TOML: {toml}");
+            assert2::assert!(toml.contains(needle));
         }
     }
 
@@ -4747,10 +4659,7 @@ mod toml_rendering_tests {
             (r#"enabled_mechanisms = ["GSSAPI"]"#, true),
             ("[inter_broker_credentials]", false),
         ] {
-            assert!(
-                toml.contains(needle) == want,
-                "needle {needle:?}: expected contains == {want}, toml:\n{toml}"
-            );
+            assert2::assert!(toml.contains(needle) == want);
         }
     }
 
@@ -4785,7 +4694,7 @@ mod toml_rendering_tests {
             r#"client_principal = "kafka@EXAMPLE.COM""#,
             r#"kdc_url = "tcp://kdc:88""#,
         ] {
-            assert!(toml.contains(needle), "needle {needle:?}, toml:\n{toml}");
+            assert2::assert!(toml.contains(needle));
         }
     }
 
@@ -4823,7 +4732,7 @@ mod toml_rendering_tests {
             "allowable_clock_skew_ms = 30000",
             "custom_claim_check = '''$.scope[?@ == 'kafka-broker']'''",
         ] {
-            assert!(toml.contains(needle), "needle {needle:?}, TOML: {toml}");
+            assert2::assert!(toml.contains(needle));
         }
     }
 
@@ -4886,10 +4795,7 @@ mod toml_rendering_tests {
             ("jwks_refresh_interval_ms", false),
             ("allowable_clock_skew_ms", false),
         ] {
-            assert!(
-                toml.contains(needle) == want,
-                "needle {needle:?}: expected contains == {want}, TOML: {toml}"
-            );
+            assert2::assert!(toml.contains(needle) == want);
         }
     }
 
@@ -4917,10 +4823,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            toml.contains("idp_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
-            "TOML: {toml}"
-        );
+        assert2::assert!(toml.contains("idp_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""));
     }
 
     #[test]
@@ -4968,7 +4871,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(!toml.contains("idp_tls_trust"), "TOML: {toml}");
+        assert2::assert!(!toml.contains("idp_tls_trust"));
     }
 
     #[test]
@@ -4996,10 +4899,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            toml.contains("max_session_lifetime_seconds = 300"),
-            "expected TOML to contain max_session_lifetime_seconds = 300; got:\n{toml}"
-        );
+        assert2::assert!(toml.contains("max_session_lifetime_seconds = 300"));
     }
 
     #[test]
@@ -5030,10 +4930,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            !toml.contains("max_session_lifetime_seconds"),
-            "TOML must omit max_session_lifetime_seconds when unset; got:\n{toml}"
-        );
+        assert2::assert!(!toml.contains("max_session_lifetime_seconds"));
     }
 
     #[test]
@@ -5060,11 +4957,8 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"),
-            "TOML: {toml}"
-        );
-        assert!(toml.contains("protocol = \"SaslSsl\""));
+        assert2::assert!(toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"));
+        assert2::assert!(toml.contains("protocol = \"SaslSsl\""));
     }
 
     #[test]
@@ -5088,8 +4982,8 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-        assert!(!toml.contains("sasl_config"), "TOML: {toml}");
+        assert2::assert!(toml.contains("[oauthbearer]"));
+        assert2::assert!(!toml.contains("sasl_config"));
     }
 
     #[test]
@@ -5110,7 +5004,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(!toml.contains("[oauthbearer]"), "TOML: {toml}");
+        assert2::assert!(!toml.contains("[oauthbearer]"));
     }
 
     #[test]
@@ -5140,25 +5034,18 @@ mod toml_rendering_tests {
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml).expect("rendered TOML must parse with broker FileConfig");
         let ob = parsed.oauthbearer.expect("oauthbearer block emitted");
-        assert_eq!(
-            ob.jwks_endpoint_uri.as_deref(),
-            Some("https://kc.example.com/realms/kafka/protocol/openid-connect/certs")
+        assert2::assert!(
+            ob.jwks_endpoint_uri.as_deref()
+                == Some("https://kc.example.com/realms/kafka/protocol/openid-connect/certs")
         );
-        assert_eq!(
-            ob.valid_issuer_uri.as_deref(),
-            Some("https://kc.example.com/realms/kafka")
+        assert2::assert!(
+            ob.valid_issuer_uri.as_deref() == Some("https://kc.example.com/realms/kafka")
         );
-        assert_eq!(ob.expected_audience.as_deref(), Some("kafka"));
-        assert_eq!(
-            ob.principal_claim_name.as_deref(),
-            Some("preferred_username")
-        );
-        assert_eq!(
-            ob.custom_claim_check.as_deref(),
-            Some("$.scope[?@ == 'kafka-broker']")
-        );
-        assert_eq!(ob.jwks_refresh_interval_ms, Some(300_000));
-        assert_eq!(ob.allowable_clock_skew_ms, Some(30_000));
+        assert2::assert!(ob.expected_audience.as_deref() == Some("kafka"));
+        assert2::assert!(ob.principal_claim_name.as_deref() == Some("preferred_username"));
+        assert2::assert!(ob.custom_claim_check.as_deref() == Some("$.scope[?@ == 'kafka-broker']"));
+        assert2::assert!(ob.jwks_refresh_interval_ms == Some(300_000));
+        assert2::assert!(ob.allowable_clock_skew_ms == Some(30_000));
     }
 
     #[test]
@@ -5200,7 +5087,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(a == b);
+        assert2::assert!(a == b);
     }
 
     #[test]
@@ -5262,10 +5149,7 @@ mod toml_rendering_tests {
             jwks_refresh_interval_ms = 300000\n\
             allowable_clock_skew_ms = 60000\n\
             custom_claim_check = '''$.scope[?@ == 'kafka.write']'''\n";
-        assert!(
-            toml.contains(expected),
-            "expected canonical [oauthbearer] block not found.\n--- expected ---\n{expected}\n--- got ---\n{toml}"
-        );
+        assert2::assert!(toml.contains(expected));
     }
 
     // -----------------------------------------------------------------
@@ -5334,7 +5218,7 @@ mod toml_rendering_tests {
             "introspection_client_id = \"kafka-broker\"",
             "introspection_client_secret_path = \"/etc/crabka/oauth-introspection/client-secret\"",
         ] {
-            assert!(toml.contains(needle), "missing {needle:?} in TOML: {toml}");
+            assert2::assert!(toml.contains(needle));
         }
     }
 
@@ -5362,7 +5246,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(!toml.contains("jwks_endpoint_uri"), "TOML: {toml}");
+        assert2::assert!(!toml.contains("jwks_endpoint_uri"));
     }
 
     #[test]
@@ -5385,10 +5269,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            toml.contains("userinfo_endpoint_uri = \"https://idp.example/userinfo\""),
-            "TOML: {toml}"
-        );
+        assert2::assert!(toml.contains("userinfo_endpoint_uri = \"https://idp.example/userinfo\""));
     }
 
     #[test]
@@ -5412,10 +5293,7 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert!(
-            toml.contains("introspection_http_timeout_ms = 15000"),
-            "TOML: {toml}"
-        );
+        assert2::assert!(toml.contains("introspection_http_timeout_ms = 15000"));
     }
 
     #[test]
@@ -5447,10 +5325,7 @@ mod toml_rendering_tests {
             introspection_client_id = \"kafka-broker\"\n\
             introspection_client_secret_path = \"/etc/crabka/oauth-introspection/client-secret\"\n\
             introspection_http_timeout_ms = 15000\n";
-        assert!(
-            toml.contains(expected),
-            "expected canonical introspection-mode block not found.\n--- expected ---\n{expected}\n--- got ---\n{toml}"
-        );
+        assert2::assert!(toml.contains(expected));
     }
 
     #[test]
@@ -5493,7 +5368,7 @@ mod toml_rendering_tests {
             "client_ca_path = \"/etc/crabka/clients-ca/ca.crt\"",
             "client_auth = \"Required\"",
         ] {
-            assert!(toml.contains(needle), "missing {needle:?} in TOML: {toml}");
+            assert2::assert!(toml.contains(needle));
         }
     }
 
@@ -5524,7 +5399,7 @@ mod toml_rendering_tests {
         let mut ignore_key_use = oauth_full_cfg();
         ignore_key_use.jwks_ignore_key_use = Some(true);
 
-        for (name, oauth, needle, expected_present) in [
+        for (_name, oauth, needle, expected_present) in [
             (
                 "custom claim check",
                 oauth,
@@ -5597,11 +5472,7 @@ mod toml_rendering_tests {
                 &[],
                 "",
             );
-            assert_eq!(
-                toml.contains(needle),
-                expected_present,
-                "case {name}: {toml}"
-            );
+            assert2::assert!(toml.contains(needle) == expected_present);
         }
     }
 
@@ -5632,10 +5503,7 @@ mod toml_rendering_tests {
             "jwks_expiry_seconds",
             "jwks_ignore_key_use",
         ] {
-            assert!(
-                !toml.contains(key),
-                "TOML must omit {key} when None; got:\n{toml}"
-            );
+            assert2::assert!(!toml.contains(key));
         }
     }
 }
@@ -5694,19 +5562,18 @@ pub fn canonical_listener_intent(
 
 #[cfg(test)]
 mod intent_tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn empty_listeners_yields_empty_string() {
-        assert!(canonical_listener_intent(&[], None) == "");
+        assert2::assert!(canonical_listener_intent(&[], None) == "");
     }
 
     #[test]
     fn non_empty_listeners_yield_content() {
         let l = vec![synthesized_default_listener()];
-        assert!(!canonical_listener_intent(&l, Some("PLAIN")).is_empty());
+        assert2::assert!(!canonical_listener_intent(&l, Some("PLAIN")).is_empty());
     }
 
     #[test]
@@ -5737,11 +5604,11 @@ mod intent_tests {
         }];
         let a = canonical_listener_intent(&l, Some("PLAIN"));
         let b = canonical_listener_intent(&l, Some("PLAIN"));
-        assert!(a == b);
+        assert2::assert!(a == b);
         // Sorted by broker id.
         let h0 = a.find("broker0.advertisedHost").unwrap();
         let h1 = a.find("broker1.advertisedHost").unwrap();
-        assert!(h0 < h1);
+        assert2::assert!(h0 < h1);
     }
 }
 
@@ -5962,7 +5829,7 @@ mod san_tests {
 
     #[test]
     fn compute_extra_sans_internal_cases_return_empty() {
-        for (name, listeners) in [
+        for (_name, listeners) in [
             (
                 "plaintext internal listener",
                 vec![Listener {
@@ -5980,10 +5847,9 @@ mod san_tests {
                 vec![internal_tls("internal", 9093)],
             ),
         ] {
-            assert_eq!(
-                compute_extra_sans(0, &listeners, &ListenerObservedAddresses::default()),
-                Ok(vec![]),
-                "case {name}"
+            assert2::assert!(
+                compute_extra_sans(0, &listeners, &ListenerObservedAddresses::default())
+                    == Ok(vec![])
             );
         }
     }
@@ -6007,8 +5873,8 @@ mod san_tests {
             ..Default::default()
         };
         let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.10".parse().unwrap())));
-        assert!(sans.contains(&SubjectAltName::Dns("node1.example.com".into())));
+        assert2::assert!(sans.contains(&SubjectAltName::Ip("203.0.113.10".parse().unwrap())));
+        assert2::assert!(sans.contains(&SubjectAltName::Dns("node1.example.com".into())));
     }
 
     #[test]
@@ -6028,8 +5894,8 @@ mod san_tests {
             .insert(0, vec![LbIngress::Ip("203.0.113.20".parse().unwrap())]);
         observed.lb_bootstrap = vec![LbIngress::Ip("203.0.113.30".parse().unwrap())];
         let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.20".parse().unwrap())));
-        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.30".parse().unwrap())));
+        assert2::assert!(sans.contains(&SubjectAltName::Ip("203.0.113.20".parse().unwrap())));
+        assert2::assert!(sans.contains(&SubjectAltName::Ip("203.0.113.30".parse().unwrap())));
     }
 
     #[test]
@@ -6045,7 +5911,7 @@ mod san_tests {
         }];
         let observed = ListenerObservedAddresses::default();
         let result = compute_extra_sans(0, &listeners, &observed);
-        assert!(matches!(
+        assert2::assert!(matches!(
             result,
             Err(SanComputationError::SansNotReady { broker_id: 0, .. })
         ));
@@ -6053,7 +5919,7 @@ mod san_tests {
 
     #[test]
     fn compute_extra_sans_ingress_and_route_include_config_hostnames() {
-        for (name, listener_type) in [
+        for (_name, listener_type) in [
             ("ingress", ListenerType::Ingress),
             ("route", ListenerType::Route),
         ] {
@@ -6079,13 +5945,11 @@ mod san_tests {
             }];
             let observed = ListenerObservedAddresses::default();
             let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-            assert_eq!(
-                sans,
-                vec![
+            assert2::assert!(
+                sans == vec![
                     SubjectAltName::Dns("bootstrap.kafka.example.com".into()),
                     SubjectAltName::Dns("broker-0.kafka.example.com".into()),
-                ],
-                "case {name}"
+                ]
             );
         }
     }
@@ -6097,7 +5961,7 @@ mod weak_auth_tests {
 
     #[test]
     fn weak_auth_warning_scram_cases() {
-        for (name, listener_name, tls, authentication, expected) in [
+        for (_name, listener_name, tls, authentication, expected) in [
             (
                 "SCRAM-SHA-512 without TLS",
                 "scram-plain",
@@ -6130,7 +5994,7 @@ mod weak_auth_tests {
                 configuration: None,
                 network_policy_peers: None,
             }];
-            assert_eq!(weak_auth_warnings(&listeners), expected, "case {name}");
+            assert2::assert!(weak_auth_warnings(&listeners) == expected);
         }
     }
 
@@ -6175,7 +6039,7 @@ mod weak_auth_tests {
 
     #[test]
     fn weak_auth_warning_oauth_uri_cases() {
-        for (name, uri, expected) in [
+        for (_name, uri, expected) in [
             (
                 "HTTP JWKS URI",
                 "http://idp/jwks",
@@ -6183,11 +6047,7 @@ mod weak_auth_tests {
             ),
             ("HTTPS JWKS URI", "https://idp/jwks", vec![]),
         ] {
-            assert_eq!(
-                weak_auth_warnings(&[oauth_listener("oauth", uri)]),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(weak_auth_warnings(&[oauth_listener("oauth", uri)]) == expected);
         }
     }
 }

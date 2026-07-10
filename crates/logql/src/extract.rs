@@ -230,79 +230,79 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(extraction.expression(), "trace:id.request-id");
+        assert2::assert!(extraction.expression() == "trace:id.request-id");
     }
 
     #[test]
     fn json_path_parse_advances_over_dot_separators() {
-        assert_eq!(
-            JsonPath::parse("request.headers").unwrap(),
-            JsonPath {
-                parts: vec![
-                    JsonPathPart::Field("request".to_string()),
-                    JsonPathPart::Field("headers".to_string()),
-                ],
-            }
+        assert2::assert!(
+            JsonPath::parse("request.headers").unwrap()
+                == JsonPath {
+                    parts: vec![
+                        JsonPathPart::Field("request".to_string()),
+                        JsonPathPart::Field("headers".to_string()),
+                    ],
+                }
         );
     }
 
     #[test]
     fn json_path_parse_rejects_empty_dot_field_segments() {
         for path in [".request", "request.", "request..headers"] {
-            assert!(JsonPath::parse(path).is_err(), "{path}");
+            assert2::assert!(JsonPath::parse(path).is_err());
         }
     }
 
     #[test]
     fn json_path_parse_advances_over_array_indexes() {
-        assert_eq!(
-            JsonPath::parse("servers[10]").unwrap(),
-            JsonPath {
-                parts: vec![
-                    JsonPathPart::Field("servers".to_string()),
-                    JsonPathPart::Index(10),
-                ],
-            }
+        assert2::assert!(
+            JsonPath::parse("servers[10]").unwrap()
+                == JsonPath {
+                    parts: vec![
+                        JsonPathPart::Field("servers".to_string()),
+                        JsonPathPart::Index(10),
+                    ],
+                }
         );
     }
 
     #[test]
     fn json_path_parse_accepts_bracket_start_field() {
-        assert_eq!(
-            JsonPath::parse(r#"["request"].headers"#).unwrap(),
-            JsonPath {
-                parts: vec![
-                    JsonPathPart::Field("request".to_string()),
-                    JsonPathPart::Field("headers".to_string()),
-                ],
-            }
+        assert2::assert!(
+            JsonPath::parse(r#"["request"].headers"#).unwrap()
+                == JsonPath {
+                    parts: vec![
+                        JsonPathPart::Field("request".to_string()),
+                        JsonPathPart::Field("headers".to_string()),
+                    ],
+                }
         );
     }
 
     #[test]
     fn json_path_bracket_strings_decode_escaped_characters() {
-        assert_eq!(
-            JsonPath::parse(r#"headers["quoted\"name"]"#).unwrap(),
-            JsonPath {
-                parts: vec![
-                    JsonPathPart::Field("headers".to_string()),
-                    JsonPathPart::Field("quoted\"name".to_string()),
-                ],
-            }
+        assert2::assert!(
+            JsonPath::parse(r#"headers["quoted\"name"]"#).unwrap()
+                == JsonPath {
+                    parts: vec![
+                        JsonPathPart::Field("headers".to_string()),
+                        JsonPathPart::Field("quoted\"name".to_string()),
+                    ],
+                }
         );
     }
 
     #[test]
     fn json_path_field_names_accept_identifier_punctuation() {
-        assert_eq!(
-            JsonPath::parse("trace:id.request-id._meta").unwrap(),
-            JsonPath {
-                parts: vec![
-                    JsonPathPart::Field("trace:id".to_string()),
-                    JsonPathPart::Field("request-id".to_string()),
-                    JsonPathPart::Field("_meta".to_string()),
-                ],
-            }
+        assert2::assert!(
+            JsonPath::parse("trace:id.request-id._meta").unwrap()
+                == JsonPath {
+                    parts: vec![
+                        JsonPathPart::Field("trace:id".to_string()),
+                        JsonPathPart::Field("request-id".to_string()),
+                        JsonPathPart::Field("_meta".to_string()),
+                    ],
+                }
         );
     }
 
@@ -310,8 +310,8 @@ mod tests {
     fn logfmt_flags_preserve_non_strict_keep_empty_config() {
         let config = LogfmtParserConfig::flags(false, true).unwrap();
 
-        assert!(!config.strict());
-        assert!(config.keep_empty());
+        assert2::assert!(!config.strict());
+        assert2::assert!(config.keep_empty());
     }
 
     #[test]

@@ -151,7 +151,6 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::txn::state::TopicPartition;
@@ -190,6 +189,6 @@ mod tests {
                 unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
             },
         ];
-        assert!(t == expected);
+        assert2::assert!(t == expected);
     }
 }

@@ -305,9 +305,8 @@ mod tests {
         // Query window ends at 300, frontier 200 => window reaches hot.
         let blocks = vec![block("b1", 0, 100, &[500])];
         let plan = plan_search_jobs(&blocks, 300, 200, 10_000);
-        assert_eq!(
-            plan,
-            JobPlan {
+        assert2::assert!(
+            plan == JobPlan {
                 jobs: vec![
                     JobShard::Live,
                     JobShard::Block {
@@ -328,9 +327,8 @@ mod tests {
         let blocks = vec![block("b2", -1000, -10, &[10_000, 10_000, 10_000])];
         let plan = plan_search_jobs(&blocks, -10, 0, 10_000);
         // Each job is a single-row-group range; no Live job.
-        assert_eq!(
-            plan,
-            JobPlan {
+        assert2::assert!(
+            plan == JobPlan {
                 jobs: vec![
                     JobShard::Block {
                         block_id: "b2".to_string(),
@@ -357,9 +355,8 @@ mod tests {
     fn empty_blocks_with_hot_window_is_just_live() {
         let blocks: Vec<BlockMetaInfo> = vec![];
         let plan = plan_search_jobs(&blocks, i64::MAX, 0, 10_000);
-        assert_eq!(
-            plan,
-            JobPlan {
+        assert2::assert!(
+            plan == JobPlan {
                 jobs: vec![JobShard::Live],
                 total_blocks: 0,
             }
@@ -375,8 +372,8 @@ mod tests {
             .iter()
             .filter(|j| matches!(j, JobShard::Block { .. }))
             .collect();
-        assert_eq!(rg_jobs.len(), 1);
-        assert!(matches!(
+        assert2::assert!(rg_jobs.len() == 1);
+        assert2::assert!(matches!(
             rg_jobs[0],
             JobShard::Block {
                 row_group_start: 0,
@@ -393,7 +390,7 @@ mod tests {
             block("b2", 500, 600, &[500]),
         ]);
         let got = cat.blocks("t1", 0, 200).await.unwrap();
-        assert_eq!(got.len(), 1);
-        assert_eq!(got[0].block_id.as_str(), "b1");
+        assert2::assert!(got.len() == 1);
+        assert2::assert!(got[0].block_id.as_str() == "b1");
     }
 }

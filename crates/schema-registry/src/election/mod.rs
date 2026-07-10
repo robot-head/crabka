@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn advertised_url_cases() {
-        for (name, input, expected) in [
+        for (_name, input, expected) in [
             (
                 "valid",
                 "http://10.0.0.5:8081",
@@ -91,7 +91,7 @@ mod tests {
             let expected = expected.map(|(host, port, scheme, eligible)| {
                 (host.to_owned(), port, scheme.to_owned(), eligible)
             });
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 }

@@ -39,7 +39,7 @@ pub(crate) fn resolve_txn_version(image: &MetadataImage) -> TxnVersion {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
 
     use super::*;
@@ -57,34 +57,25 @@ mod tests {
 
     #[test]
     fn resolves_levels() {
-        for (case, level, want) in [
+        for (_case, level, want) in [
             ("feature absent", None, TxnVersion::Classic),
             ("classic level", Some(0), TxnVersion::Classic),
             ("flexible level", Some(1), TxnVersion::Flexible),
             ("verified level", Some(2), TxnVersion::Verified),
         ] {
-            assert!(
-                resolve_txn_version(&image_with_tv(level)) == want,
-                "case: {case}; level {level:?}"
-            );
+            assert2::assert!(resolve_txn_version(&image_with_tv(level)) == want);
         }
     }
 
     #[test]
     fn behavior_predicates() {
-        for (case, v, want_flexible, want_verified) in [
+        for (_case, v, want_flexible, want_verified) in [
             ("classic behavior", TxnVersion::Classic, false, false),
             ("flexible behavior", TxnVersion::Flexible, true, false),
             ("verified behavior", TxnVersion::Verified, true, true),
         ] {
-            assert!(
-                v.flexible_records() == want_flexible,
-                "case: {case}; {v:?} flexible_records"
-            );
-            assert!(
-                v.verified() == want_verified,
-                "case: {case}; {v:?} verified"
-            );
+            assert2::assert!(v.flexible_records() == want_flexible);
+            assert2::assert!(v.verified() == want_verified);
         }
     }
 }

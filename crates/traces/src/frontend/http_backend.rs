@@ -455,7 +455,7 @@ mod tests {
             metrics: crate::frontend::wire::Metrics::default(),
         };
         let values = body.into_typed_values();
-        assert_eq!(values.len(), 1);
-        assert_eq!(values[0].value.as_str(), "GET");
+        assert2::assert!(values.len() == 1);
+        assert2::assert!(values[0].value.as_str() == "GET");
     }
 }

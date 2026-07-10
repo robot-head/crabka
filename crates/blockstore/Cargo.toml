@@ -19,6 +19,7 @@ categories = ["database-implementations"]
 workspace = true
 
 [dependencies]
+assert2 = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
 datafusion = { workspace = true }
@@ -35,7 +36,6 @@ regex = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -18,34 +18,20 @@ fn new_sim(voter_ids: &[NodeId]) -> Sim<SimLog> {
     Sim::new_with(voter_ids, |_id| SimLog::default())
 }
 
-use assert2::assert;
-
 #[test]
 fn three_nodes_elect_exactly_one_leader() {
     let mut sim = new_sim(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
-    assert!(
-        sim.leaders().len() == 1,
-        "expected exactly one leader, got {:?}",
-        sim.leaders()
-    );
+    assert2::assert!(sim.leaders().len() == 1);
     // Every voter agrees on a single leader epoch.
-    assert!(
-        sim.distinct_epochs().len() == 1,
-        "voters disagree on epoch: {:?}",
-        sim.distinct_epochs()
-    );
+    assert2::assert!(sim.distinct_epochs().len() == 1);
 }
 
 #[test]
 fn re_elects_single_leader_after_leader_partition() {
     let mut sim = new_sim(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
-    assert!(
-        sim.leaders().len() == 1,
-        "no initial leader: {:?}",
-        sim.leaders()
-    );
+    assert2::assert!(sim.leaders().len() == 1);
     let old_leader = sim.leaders()[0];
 
     // Isolate the leader; the majority side must elect a new one.
@@ -56,33 +42,21 @@ fn re_elects_single_leader_after_leader_partition() {
         .into_iter()
         .filter(|&l| l != old_leader)
         .collect();
-    assert!(
-        new_leaders.len() == 1,
-        "majority side must elect exactly one new leader, got {new_leaders:?}"
-    );
+    assert2::assert!(new_leaders.len() == 1);
 
     // Heal the partition; the old leader rejoins and steps down to follower,
     // leaving a single leader cluster-wide.
     sim.heal(old_leader);
     sim.run_until_stable(10_000);
-    assert!(
-        sim.leaders().len() == 1,
-        "cluster must converge to one leader, got {:?}",
-        sim.leaders()
-    );
-    assert!(
-        sim.leaders()[0] == new_leaders[0],
-        "the post-partition leader should remain leader; got {:?} expected {}",
-        sim.leaders(),
-        new_leaders[0]
-    );
+    assert2::assert!(sim.leaders().len() == 1);
+    assert2::assert!(sim.leaders()[0] == new_leaders[0]);
 }
 
 #[test]
 fn committed_high_watermark_agrees_across_voters() {
     let mut sim = new_sim(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
-    assert!(sim.leaders().len() == 1, "no leader: {:?}", sim.leaders());
+    assert2::assert!(sim.leaders().len() == 1);
     let leader = sim.leaders()[0];
 
     // The leader already appended its LeaderChange control record at promotion;
@@ -96,15 +70,6 @@ fn committed_high_watermark_agrees_across_voters() {
     // The HWM must reach the appended offset (current-epoch entries are now
     // majority-replicated — this is the FIX-2 leader-completeness gate) and all
     // voters must have replicated up to it.
-    assert!(
-        sim.leader_high_watermark(leader) >= target,
-        "HWM {} did not reach appended offset {}",
-        sim.leader_high_watermark(leader),
-        target
-    );
-    assert!(
-        sim.all_voters_fetched_to(sim.leader_high_watermark(leader)),
-        "not all voters replicated up to HWM {}",
-        sim.leader_high_watermark(leader)
-    );
+    assert2::assert!(sim.leader_high_watermark(leader) >= target);
+    assert2::assert!(sim.all_voters_fetched_to(sim.leader_high_watermark(leader)));
 }

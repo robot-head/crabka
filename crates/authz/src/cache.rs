@@ -46,7 +46,7 @@ impl AclSource for AclCache {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_metadata::{
         AclOperation, MetadataImage, MetadataRecord, PermissionType, ResourceType,
     };
@@ -154,18 +154,15 @@ mod tests {
         for &(rt, name) in probes {
             let from_image = sorted_keys(AclSource::matching_acls(&image, rt, name));
             let from_cache = sorted_keys(AclSource::matching_acls(&cache, rt, name));
-            assert!(
-                from_image == from_cache,
-                "drift at ({rt:?}, {name:?}): image={from_image:?} cache={from_cache:?}"
-            );
+            assert2::assert!(from_image == from_cache);
         }
     }
 
     #[test]
     fn len_and_is_empty_track_entries() {
         let empty = AclCache::default();
-        assert!(empty.is_empty());
-        assert_eq!(empty.len(), 0);
+        assert2::assert!(empty.is_empty());
+        assert2::assert!(empty.len() == 0);
 
         let cache = AclCache::new(vec![entry(
             ResourceType::Topic,
@@ -173,7 +170,7 @@ mod tests {
             "foo",
             AclOperation::Read,
         )]);
-        assert!(!cache.is_empty());
-        assert_eq!(cache.len(), 1);
+        assert2::assert!(!cache.is_empty());
+        assert2::assert!(cache.len() == 1);
     }
 }

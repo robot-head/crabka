@@ -258,7 +258,6 @@ fn read_u16(r: &mut Reader<'_>) -> Result<u16, CodecError> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::assert;
     use crabka_ids::LeaderEpoch;
     use crabka_remote_storage::{
         RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentState,
@@ -306,7 +305,7 @@ mod tests {
         let snap = sample_snapshot();
         let bytes = snap.encode();
         let back = Snapshot::decode(&bytes).expect("decodes");
-        assert!(back == snap);
+        assert2::assert!(back == snap);
     }
 
     #[test]
@@ -335,9 +334,9 @@ mod tests {
             }),
         ];
 
-        for (name, bytes, accepts) in cases {
+        for (_name, bytes, accepts) in cases {
             let err = Snapshot::decode(&bytes).unwrap_err();
-            assert!(accepts(&err), "case {name}: {err:?}");
+            assert2::assert!(accepts(&err));
         }
     }
 
@@ -349,9 +348,9 @@ mod tests {
         let snap = sample_snapshot();
         snap.write_atomic(&path).expect("write");
         let loaded = Snapshot::load(&path).expect("load").expect("present");
-        assert!(loaded == snap);
+        assert2::assert!(loaded == snap);
         // No temp file left behind.
-        assert!(
+        assert2::assert!(
             std::fs::read_dir(&dir)
                 .unwrap()
                 .filter_map(Result::ok)
@@ -364,7 +363,7 @@ mod tests {
     fn load_absent_file_is_ok_none() {
         let path = std::env::temp_dir().join("crabka-snap-does-not-exist-xyz");
         let _ = std::fs::remove_file(&path);
-        assert!(Snapshot::load(&path).unwrap() == None);
+        assert2::assert!(Snapshot::load(&path).unwrap() == None);
     }
 
     #[test]
@@ -373,7 +372,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("snapshot");
         std::fs::write(&path, [0xFF, 0xFF, 0x00, 0x01]).unwrap();
-        assert!(Snapshot::load(&path).is_err());
+        assert2::assert!(Snapshot::load(&path).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

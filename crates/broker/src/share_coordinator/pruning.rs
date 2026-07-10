@@ -22,13 +22,12 @@ pub fn redundant_offset(per_key_last_snapshot: &[Offset]) -> Option<Offset> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn redundant_offset_scenarios() {
-        for (case, input, expected) in [
+        for (_case, input, expected) in [
             ("empty input", vec![], None),
             ("single key", vec![Offset(42)], Some(Offset(42))),
             (
@@ -42,7 +41,7 @@ mod tests {
                 Some(Offset(0)),
             ),
         ] {
-            assert!(redundant_offset(&input) == expected, "case {case}");
+            assert2::assert!(redundant_offset(&input) == expected);
         }
     }
 }

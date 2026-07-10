@@ -63,15 +63,12 @@ mod tests {
     #[test]
     fn defaults_to_on_update() {
         let strategy = EmitStrategy::default();
-        assert_eq!(
-            (strategy.is_on_update(), strategy.is_on_close()),
-            (true, false)
-        );
+        assert2::assert!((strategy.is_on_update(), strategy.is_on_close()) == (true, false));
     }
 
     #[test]
     fn on_window_close_is_close() {
         let e = EmitStrategy::on_window_close();
-        assert_eq!((e.is_on_update(), e.is_on_close()), (false, true));
+        assert2::assert!((e.is_on_update(), e.is_on_close()) == (false, true));
     }
 }

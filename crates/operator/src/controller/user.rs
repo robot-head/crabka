@@ -1056,7 +1056,7 @@ async fn patch_status(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::crd::{
@@ -1079,7 +1079,7 @@ mod tests {
 
     #[test]
     fn principal_cases() {
-        for (name, authentication, expected) in [
+        for (_name, authentication, expected) in [
             (
                 "SCRAM user",
                 Authentication::ScramSha512(crate::crd::ScramSha512Auth::default()),
@@ -1091,17 +1091,13 @@ mod tests {
                 "User:CN=alice",
             ),
         ] {
-            assert_eq!(
-                principal_for("alice", &authentication),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(principal_for("alice", &authentication) == expected);
         }
     }
 
     #[test]
     fn expand_spec_acls_with_no_authorization_is_empty() {
-        assert!(expand_spec_acls(None, "User:alice").is_empty());
+        assert2::assert!(expand_spec_acls(None, "User:alice").is_empty());
     }
 
     #[test]
@@ -1110,7 +1106,7 @@ mod tests {
             acls: vec![rule(AclResourceKind::Topic, "orders", &[AclOp::Read])],
         });
         let entries = expand_spec_acls(Some(&auth), "User:alice");
-        assert!(
+        assert2::assert!(
             entries
                 == vec![AclEntry {
                     resource_type: ResourceType::Topic,
@@ -1135,9 +1131,8 @@ mod tests {
         });
         let entries = expand_spec_acls(Some(&auth), "User:alice");
         let ops: Vec<_> = entries.iter().map(|e| e.operation).collect();
-        assert_eq!(
-            ops,
-            [
+        assert2::assert!(
+            ops == [
                 AclOperation::Read,
                 AclOperation::Describe,
                 AclOperation::Write
@@ -1183,8 +1178,8 @@ mod tests {
         desired.insert(add.clone());
 
         let (adds, dels) = diff_acls(&current, &desired);
-        assert_eq!(adds, vec![add]);
-        assert_eq!(dels, vec![drop]);
+        assert2::assert!(adds == vec![add]);
+        assert2::assert!(dels == vec![drop]);
     }
 
     #[test]
@@ -1201,8 +1196,8 @@ mod tests {
         };
         s.insert(e);
         let (adds, dels) = diff_acls(&s, &s);
-        assert_eq!(adds, vec![]);
-        assert_eq!(dels, vec![]);
+        assert2::assert!(adds == vec![]);
+        assert2::assert!(dels == vec![]);
     }
 
     #[test]
@@ -1224,7 +1219,7 @@ mod tests {
             quotas: None,
         };
         let err = validate_spec(&spec).unwrap_err();
-        assert!(err.contains("operations is empty"), "got: {err}");
+        assert2::assert!(err.contains("operations is empty"));
     }
 
     #[test]
@@ -1237,7 +1232,7 @@ mod tests {
             quotas: None,
         };
         let err = validate_spec(&spec).unwrap_err();
-        assert!(err.contains("resource.name is empty"), "got: {err}");
+        assert2::assert!(err.contains("resource.name is empty"));
     }
 
     #[test]
@@ -1252,7 +1247,7 @@ mod tests {
             permission_type: PermissionType::Allow,
         };
         let f = entry_to_exact_filter(&e);
-        assert!(
+        assert2::assert!(
             f == AclEntryFilter {
                 resource_type: Some(ResourceType::Topic),
                 resource_name: Some("orders".into()),
@@ -1283,7 +1278,7 @@ mod tests {
         // `tls-external` users share SCRAM's bare-name principal shape:
         // credentials are managed out-of-band but the operator still
         // pins ACLs / quotas under `User:<metadata.name>`.
-        assert!(principal_for("alice", &Authentication::TlsExternal) == "User:alice");
+        assert2::assert!(principal_for("alice", &Authentication::TlsExternal) == "User:alice");
     }
 
     #[test]
@@ -1293,7 +1288,7 @@ mod tests {
             authorization: None,
             quotas: None,
         };
-        assert!(validate_spec(&spec).is_ok());
+        assert2::assert!(validate_spec(&spec).is_ok());
     }
 
     #[test]
@@ -1308,6 +1303,6 @@ mod tests {
                 ..Default::default()
             }),
         };
-        assert!(validate_spec(&spec).is_ok());
+        assert2::assert!(validate_spec(&spec).is_ok());
     }
 }

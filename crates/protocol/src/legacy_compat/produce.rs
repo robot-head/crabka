@@ -98,7 +98,7 @@ impl From<crate::owned::produce_response::BatchIndexAndErrorMessage>
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::Bytes;
 
     use super::*;
@@ -132,7 +132,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(vec![]),
         };
-        assert!(converted == expected);
+        assert2::assert!(converted == expected);
     }
 
     #[test]
@@ -177,6 +177,6 @@ mod tests {
             throttle_time_ms: 81,
             unknown_tagged_fields: UnknownTaggedFields(vec![]),
         };
-        assert!(converted == expected);
+        assert2::assert!(converted == expected);
     }
 }

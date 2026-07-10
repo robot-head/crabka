@@ -211,7 +211,6 @@ pub(crate) async fn group_is_empty(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::assert;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -291,7 +290,7 @@ mod tests {
             responses: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -367,7 +366,7 @@ mod tests {
                 },
             ),
         ];
-        for (case, authorizer, share_enabled, topic_name, partitions, expected) in cases {
+        for (_case, authorizer, share_enabled, topic_name, partitions, expected) in cases {
             let (broker_handle, _dir) = start_broker(authorizer, share_enabled).await;
             let broker = broker_handle.broker_arc_for_test();
             let principal = principal();
@@ -380,7 +379,7 @@ mod tests {
                 .expect("handle");
             let resp = decode_response(&resp);
 
-            assert!(resp == expected, "case: {case}");
+            assert2::assert!(resp == expected);
             broker_handle.shutdown().await;
         }
     }
@@ -392,7 +391,7 @@ mod tests {
         let broker = broker_handle.broker_arc_for_test();
         let coordinator = broker.group_coordinator.clone();
 
-        assert!(group_is_empty(Some(&coordinator), "absent").await);
+        assert2::assert!(group_is_empty(Some(&coordinator), "absent").await);
 
         coordinator.mark_share("busy");
         let actor = coordinator.get_or_create_share("busy");
@@ -413,9 +412,9 @@ mod tests {
             .await
             .expect("send heartbeat");
         let resp = rx.await.expect("heartbeat response");
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert2::assert!(resp.error_code == codes::NONE);
 
-        assert!(!group_is_empty(Some(&coordinator), "busy").await);
+        assert2::assert!(!group_is_empty(Some(&coordinator), "busy").await);
         broker_handle.shutdown().await;
     }
 
@@ -462,7 +461,7 @@ mod tests {
             .expect("read state")
             .expect("state present");
 
-        assert!(
+        assert2::assert!(
             (
                 state.state_epoch,
                 state.leader_epoch,

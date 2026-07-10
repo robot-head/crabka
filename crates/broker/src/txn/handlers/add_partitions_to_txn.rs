@@ -467,7 +467,6 @@ fn encode_response(resp: &AddPartitionsToTxnResponse, version: i16) -> Result<By
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
-    use assert2::assert;
     use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnTransaction;
     use crabka_security::Principal;
 
@@ -489,8 +488,8 @@ mod tests {
             topic: "b".into(),
             partition: PartitionIndex(0),
         };
-        assert!(verify_partition_code(&e, &present) == codes::NONE);
-        assert!(verify_partition_code(&e, &absent) == codes::TRANSACTION_ABORTABLE);
+        assert2::assert!(verify_partition_code(&e, &present) == codes::NONE);
+        assert2::assert!(verify_partition_code(&e, &absent) == codes::TRANSACTION_ABORTABLE);
     }
 
     fn topic(name: &str, partitions: &[i32]) -> AddPartitionsToTxnTopic {
@@ -539,7 +538,7 @@ mod tests {
             ),
             topic_result("denied", &[(3, codes::TOPIC_AUTHORIZATION_FAILED)]),
         ];
-        assert!(rows == expected);
+        assert2::assert!(rows == expected);
     }
 
     #[test]
@@ -556,7 +555,7 @@ mod tests {
             ),
             topic_result("denied", &[(3, codes::TOPIC_AUTHORIZATION_FAILED)]),
         ];
-        assert!(rows == expected);
+        assert2::assert!(rows == expected);
     }
 
     #[test]
@@ -572,7 +571,7 @@ mod tests {
                 (5, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED),
             ],
         )];
-        assert!(rows == expected);
+        assert2::assert!(rows == expected);
     }
 
     crate::test_support::wire_helpers!(
@@ -593,7 +592,7 @@ mod tests {
         };
 
         let bytes = encode_response(&resp, 4).expect("encode response");
-        assert!(!bytes.is_empty());
+        assert2::assert!(!bytes.is_empty());
         let decoded = decode_response(&bytes, 4);
 
         let expected = AddPartitionsToTxnResponse {
@@ -607,7 +606,7 @@ mod tests {
             results_by_topic_v3_and_below: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(decoded == expected);
+        assert2::assert!(decoded == expected);
     }
 
     #[test]
@@ -618,7 +617,7 @@ mod tests {
         };
 
         let bytes = encode_response(&resp, 3).expect("encode response");
-        assert!(!bytes.is_empty());
+        assert2::assert!(!bytes.is_empty());
         let decoded = decode_response(&bytes, 3);
 
         let expected = AddPartitionsToTxnResponse {
@@ -628,7 +627,7 @@ mod tests {
             results_by_topic_v3_and_below: vec![topic_result("alpha", &[(7, codes::NONE)])],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(decoded == expected);
+        assert2::assert!(decoded == expected);
     }
 
     fn principal() -> Principal {
@@ -684,7 +683,7 @@ mod tests {
             results_by_topic_v3_and_below: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -727,7 +726,7 @@ mod tests {
             )],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

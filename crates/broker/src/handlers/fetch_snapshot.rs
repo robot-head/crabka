@@ -141,7 +141,7 @@ fn build_response(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_raft::SnapshotSlice;
 
     use super::*;
@@ -204,11 +204,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         let part = &resp.topics[0].partitions[0];
         let mut buf = bytes::BytesMut::new();
         part.unaligned_records.encode_to(&mut buf).unwrap();
-        assert!(&buf[..] == b"abc");
+        assert2::assert!(&buf[..] == b"abc");
     }
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
             error_code: codes::INCONSISTENT_CLUSTER_ID,
             ..Default::default()
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -285,6 +285,6 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 }

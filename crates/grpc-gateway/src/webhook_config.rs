@@ -328,7 +328,7 @@ mod tests {
 
     #[test]
     fn signed_hmac_values_verify_only_for_the_signed_body() {
-        for (name, secret, signed_body, verified_body, encoding, expected) in [
+        for (_name, secret, signed_body, verified_body, encoding, expected) in [
             (
                 "hex-round-trip",
                 b"outbound-secret".as_slice(),
@@ -358,10 +358,8 @@ mod tests {
                 SigEncoding::Hex => sign_hmac_hex(secret, signed_body),
                 SigEncoding::Base64 => sign_hmac_base64(secret, signed_body),
             };
-            assert_eq!(
-                verify_signature(secret, verified_body, &signature, &encoding, None),
-                expected,
-                "case {name}"
+            assert2::assert!(
+                verify_signature(secret, verified_body, &signature, &encoding, None) == expected
             );
         }
     }
@@ -377,7 +375,7 @@ mod tests {
         let prefixed = format!("sha256={}", hmac_hex(b"key", b"data"));
         let missing_prefix = hmac_hex(b"key", b"data");
 
-        for (name, secret, body, signature, encoding, prefix, expected) in [
+        for (_name, secret, body, signature, encoding, prefix, expected) in [
             (
                 "valid-hex",
                 b"my-secret".as_slice(),
@@ -451,10 +449,8 @@ mod tests {
                 false,
             ),
         ] {
-            assert_eq!(
-                verify_signature(secret, body, signature, &encoding, prefix),
-                expected,
-                "case {name}"
+            assert2::assert!(
+                verify_signature(secret, body, signature, &encoding, prefix) == expected
             );
         }
     }
@@ -479,18 +475,18 @@ key_source = "header:X-Delivery"
         let compiled = file.compile().expect("compile");
         let ep = compiled.get("github").expect("key present");
 
-        assert_eq!(ep.target_topic.as_str(), "events");
-        assert_eq!(ep.principal.as_str(), "webhook:github");
-        assert_eq!(ep.secret.as_deref(), Some(b"s3cr3t".as_slice()));
-        assert_eq!(ep.signature_header.as_deref(), Some("X-Hub-Signature-256"));
-        assert_eq!(ep.signature_prefix.as_deref(), Some("sha256="));
-        assert_eq!(ep.timestamp_header.as_deref(), None);
-        assert_eq!(ep.timestamp_tolerance_secs, 300);
-        assert!(ep.idempotency_source.is_some());
-        assert!(ep.key_source.is_some());
-        assert_eq!(ep.max_body_bytes, 1024 * 1024);
-        assert_eq!(ep.schema_subject.as_deref(), None);
-        assert_eq!(ep.schema_format, SchemaFormat::Json);
+        assert2::assert!(ep.target_topic.as_str() == "events");
+        assert2::assert!(ep.principal.as_str() == "webhook:github");
+        assert2::assert!(ep.secret.as_deref() == Some(b"s3cr3t".as_slice()));
+        assert2::assert!(ep.signature_header.as_deref() == Some("X-Hub-Signature-256"));
+        assert2::assert!(ep.signature_prefix.as_deref() == Some("sha256="));
+        assert2::assert!(ep.timestamp_header.as_deref() == None);
+        assert2::assert!(ep.timestamp_tolerance_secs == 300);
+        assert2::assert!(ep.idempotency_source.is_some());
+        assert2::assert!(ep.key_source.is_some());
+        assert2::assert!(ep.max_body_bytes == 1024 * 1024);
+        assert2::assert!(ep.schema_subject.as_deref() == None);
+        assert2::assert!(ep.schema_format == SchemaFormat::Json);
     }
 
     #[test]
@@ -504,18 +500,18 @@ principal = "svc:stripe-ingest"
         let file: WebhooksFile = toml::from_str(toml).expect("parse");
         let compiled = file.compile().expect("compile");
         let ep = &compiled["stripe"];
-        assert_eq!(ep.target_topic.as_str(), "payments");
-        assert_eq!(ep.principal.as_str(), "svc:stripe-ingest");
-        assert_eq!(ep.secret.as_deref(), None);
-        assert_eq!(ep.signature_header.as_deref(), None);
-        assert_eq!(ep.signature_prefix.as_deref(), None);
-        assert_eq!(ep.timestamp_header.as_deref(), None);
-        assert_eq!(ep.timestamp_tolerance_secs, 300);
-        assert!(ep.idempotency_source.is_none());
-        assert!(ep.key_source.is_none());
-        assert_eq!(ep.max_body_bytes, 1024 * 1024);
-        assert_eq!(ep.schema_subject.as_deref(), None);
-        assert_eq!(ep.schema_format, SchemaFormat::Json);
+        assert2::assert!(ep.target_topic.as_str() == "payments");
+        assert2::assert!(ep.principal.as_str() == "svc:stripe-ingest");
+        assert2::assert!(ep.secret.as_deref() == None);
+        assert2::assert!(ep.signature_header.as_deref() == None);
+        assert2::assert!(ep.signature_prefix.as_deref() == None);
+        assert2::assert!(ep.timestamp_header.as_deref() == None);
+        assert2::assert!(ep.timestamp_tolerance_secs == 300);
+        assert2::assert!(ep.idempotency_source.is_none());
+        assert2::assert!(ep.key_source.is_none());
+        assert2::assert!(ep.max_body_bytes == 1024 * 1024);
+        assert2::assert!(ep.schema_subject.as_deref() == None);
+        assert2::assert!(ep.schema_format == SchemaFormat::Json);
     }
 
     #[test]
@@ -546,7 +542,7 @@ secret = "s"
 signature_header = "X-Sig"
 signature_encoding = "md5"
 "#;
-        for (name, input, needle) in [
+        for (_name, input, needle) in [
             (
                 "secret_without_header",
                 secret_without_header,
@@ -562,7 +558,7 @@ signature_encoding = "md5"
         ] {
             let file: WebhooksFile = toml::from_str(input).expect("parse");
             let error = file.compile().expect_err("case must fail");
-            assert!(error.contains(needle), "case {name}: {error}");
+            assert2::assert!(error.contains(needle));
         }
     }
 
@@ -570,7 +566,7 @@ signature_encoding = "md5"
     fn compile_empty_file() {
         let file: WebhooksFile = toml::from_str("").expect("parse");
         let compiled = file.compile().expect("compile");
-        assert!(compiled.is_empty());
+        assert2::assert!(compiled.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -581,7 +577,7 @@ signature_encoding = "md5"
     fn extract_header_source_cases() {
         use axum::http::HeaderMap;
 
-        for (name, source_name, header, expected) in [
+        for (_name, source_name, header, expected) in [
             (
                 "present",
                 "x-delivery",
@@ -595,10 +591,8 @@ signature_encoding = "md5"
                 headers.insert(header_name, value.parse().unwrap());
             }
             let source = Source::Header(source_name.to_string());
-            assert_eq!(
-                extract_source(&source, &headers, None),
-                expected.map(str::to_string),
-                "case {name}"
+            assert2::assert!(
+                extract_source(&source, &headers, None) == expected.map(str::to_string)
             );
         }
     }
@@ -609,7 +603,7 @@ signature_encoding = "md5"
         use jsonpath_rust::parser::parse_json_path;
 
         let headers = HeaderMap::new();
-        for (name, query, body, expected) in [
+        for (_name, query, body, expected) in [
             (
                 "match",
                 "$.id",
@@ -625,10 +619,8 @@ signature_encoding = "md5"
             ("no_body", "$.id", None, None),
         ] {
             let source = Source::JsonPath(parse_json_path(query).expect("compile"));
-            assert_eq!(
-                extract_source(&source, &headers, body.as_ref()),
-                expected.map(str::to_string),
-                "case {name}"
+            assert2::assert!(
+                extract_source(&source, &headers, body.as_ref()) == expected.map(str::to_string)
             );
         }
     }

@@ -74,7 +74,6 @@ impl SharePartitionState {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -98,7 +97,7 @@ mod tests {
             delivery_complete_count: 0,
             state_batches: vec![batch(0, 9), batch(10, 19), batch(20, 29)],
         });
-        assert!(
+        assert2::assert!(
             s == SharePartitionState {
                 state_epoch: 2,
                 leader_epoch: 3,
@@ -129,7 +128,7 @@ mod tests {
             last_snapshot_offset: Offset(0),
             updates_since_snapshot: 1,
         };
-        assert!(s == expected);
+        assert2::assert!(s == expected);
     }
 
     #[test]
@@ -151,7 +150,7 @@ mod tests {
                 batch(30, 39),
             ],
         );
-        assert!(
+        assert2::assert!(
             s == SharePartitionState {
                 state_batches: vec![
                     batch(0, 9),
@@ -176,7 +175,7 @@ mod tests {
         };
         // A written batch entirely below the SPSO is ignored.
         s.merge_batches(Offset(50), &[batch(0, 9)]);
-        assert!(
+        assert2::assert!(
             s == SharePartitionState {
                 start_offset: Offset(50),
                 ..Default::default()
@@ -202,6 +201,6 @@ mod tests {
             delivery_complete_count: 0,
             state_batches: vec![batch(10, 19)],
         };
-        assert!(snap == expected);
+        assert2::assert!(snap == expected);
     }
 }

@@ -162,9 +162,8 @@ mod tests {
         let first_segment = started(10, 0, 99);
         swap.add_remote_log_segment_metadata(first_segment.clone())
             .unwrap();
-        assert_eq!(
-            first.list_remote_log_segments(&tp()).unwrap(),
-            vec![first_segment.clone()]
+        assert2::assert!(
+            first.list_remote_log_segments(&tp()).unwrap() == vec![first_segment.clone()]
         );
 
         // Swap in a fresh empty backing impl; reads now show the new
@@ -174,23 +173,16 @@ mod tests {
         swap.swap(second.clone());
         // The previous `first` is undisturbed — the facade just stopped
         // pointing at it.
-        assert_eq!(swap.list_remote_log_segments(&tp()).unwrap(), Vec::new());
-        assert_eq!(
-            first.list_remote_log_segments(&tp()).unwrap(),
-            vec![first_segment.clone()]
+        assert2::assert!(swap.list_remote_log_segments(&tp()).unwrap() == Vec::new());
+        assert2::assert!(
+            first.list_remote_log_segments(&tp()).unwrap() == vec![first_segment.clone()]
         );
 
         // Writes after the swap go to `second`.
         let second_segment = started(11, 100, 199);
         swap.add_remote_log_segment_metadata(second_segment.clone())
             .unwrap();
-        assert_eq!(
-            second.list_remote_log_segments(&tp()).unwrap(),
-            vec![second_segment]
-        );
-        assert_eq!(
-            first.list_remote_log_segments(&tp()).unwrap(),
-            vec![first_segment]
-        );
+        assert2::assert!(second.list_remote_log_segments(&tp()).unwrap() == vec![second_segment]);
+        assert2::assert!(first.list_remote_log_segments(&tp()).unwrap() == vec![first_segment]);
     }
 }

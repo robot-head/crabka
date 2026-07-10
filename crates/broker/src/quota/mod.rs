@@ -109,7 +109,7 @@ mod tests {
         atomic::{AtomicBool, Ordering},
     };
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::{test_support::image_with_quota, *};
 
@@ -154,7 +154,7 @@ mod tests {
         check!(buckets.is_empty());
         check!(!bucket_entity_key_called.load(Ordering::Relaxed));
         check!(!initial_rate_called.load(Ordering::Relaxed));
-        assert!(!delay_for_overage_called.load(Ordering::Relaxed));
+        assert2::assert!(!delay_for_overage_called.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
 
             check!(delay == Duration::ZERO, "case {case}");
             check!(buckets.is_empty(), "case {case}");
-            assert!(!initial_rate_called.load(Ordering::Relaxed), "case {case}");
+            assert2::assert!(!initial_rate_called.load(Ordering::Relaxed));
         }
     }
 
@@ -214,7 +214,7 @@ mod tests {
         );
 
         check!(delay == Duration::ZERO);
-        assert!(buckets.is_empty());
+        assert2::assert!(buckets.is_empty());
     }
 
     #[test]
@@ -242,6 +242,6 @@ mod tests {
         );
 
         check!(delay == Duration::from_secs(1));
-        assert!(buckets.len() == 1);
+        assert2::assert!(buckets.len() == 1);
     }
 }

@@ -126,7 +126,6 @@ impl RemoteLogMetadataRecord {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -136,7 +135,7 @@ mod tests {
             RemoteLogMetadataRecord::SegmentMetadata(RemoteLogSegmentMetadataRecord::default());
         let bytes = rec.encode_value().expect("encodes");
         let back = RemoteLogMetadataRecord::decode_value(&bytes).expect("decodes");
-        assert!(back == rec);
+        assert2::assert!(back == rec);
     }
 
     #[test]
@@ -145,7 +144,7 @@ mod tests {
         // apiKey 99 is not modeled.
         let bytes = encode_value(99, 0, &[0xAA]);
         let rec = RemoteLogMetadataRecord::decode_value(&bytes).expect("decodes");
-        assert!(matches!(
+        assert2::assert!(matches!(
             rec,
             RemoteLogMetadataRecord::Unknown { api_key: 99, .. }
         ));

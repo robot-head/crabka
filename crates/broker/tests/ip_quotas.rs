@@ -14,7 +14,6 @@
 
 use std::{io, net::SocketAddr};
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
 use crabka_protocol::{
@@ -312,7 +311,7 @@ async fn drive_describe_client_quotas_sasl(
     let resp = DescribeClientQuotasResponse::decode(&mut cur, VERSION)
         .expect("decode DescribeClientQuotasResponse");
 
-    assert!(resp.error_code == 0, "DescribeClientQuotas top-level error");
+    assert2::assert!(resp.error_code == 0);
 
     resp.entries
         .unwrap_or_default()
@@ -351,7 +350,7 @@ async fn ip_quota_alter_then_describe_round_trip() {
         false,
     )
     .await;
-    assert!(alter_resp[0].1 == 0, "alter should succeed");
+    assert2::assert!(alter_resp[0].1 == 0);
 
     // Wait until the quota is visible in the image.
     handle
@@ -372,7 +371,7 @@ async fn ip_quota_alter_then_describe_round_trip() {
         false,
     )
     .await;
-    assert!(
+    assert2::assert!(
         (
             desc.len(),
             desc[0]
@@ -458,10 +457,7 @@ async fn connection_creation_rate_throttles_accept() {
     // conn5=free(refilled). Total: 2 sleeps ≈ 2s.
     // Tolerance: >=1.5s proves the throttle fired. This is stable even with
     // slight timing variations in the test runner.
-    assert!(
-        elapsed >= std::time::Duration::from_millis(1500),
-        "expected >=1.5s of throttle, got {elapsed:?}"
-    );
+    assert2::assert!(elapsed >= std::time::Duration::from_millis(1500));
 }
 
 /// Test 3: No connection_creation_rate quota configured. Open 5 connections;
@@ -480,10 +476,7 @@ async fn unthrottled_ip_unaffected() {
     let elapsed = started.elapsed();
     drop(streams);
 
-    assert!(
-        elapsed < std::time::Duration::from_millis(500),
-        "expected fast unthrottled connect, got {elapsed:?}"
-    );
+    assert2::assert!(elapsed < std::time::Duration::from_millis(500));
 }
 
 /// Start a single-broker PLAINTEXT cluster with explicit connection caps
@@ -529,10 +522,7 @@ async fn max_connections_per_ip_refuses_excess_and_frees_on_close() {
     // request round-trip fails (peer closed the connection).
     let mut c2 = TcpStream::connect(addr).await.expect("tcp connect c2");
     let c2_result = round_trip(&mut c2, 18, 0, 1, false, &av_body).await;
-    assert!(
-        c2_result.is_err(),
-        "c2 must be refused while c1 holds the only per-IP slot, got {c2_result:?}"
-    );
+    assert2::assert!(c2_result.is_err());
 
     // Closing c1 frees the slot. The decrement happens when the c1 handler task
     // observes the close, so retry briefly until a fresh connection succeeds.
@@ -543,10 +533,7 @@ async fn max_connections_per_ip_refuses_excess_and_frees_on_close() {
         if round_trip(&mut c3, 18, 0, 1, false, &av_body).await.is_ok() {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "per-IP slot was not freed after c1 closed"
-        );
+        assert2::assert!(std::time::Instant::now() < deadline);
         // intentional: the per-IP ConnectionGuard decrement is coordinator-local
         // (not in the metadata image and has no metric); each iteration re-drives
         // the real connect+round-trip under test, so keep the bounded retry poll.

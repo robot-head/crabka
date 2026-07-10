@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -56,7 +56,7 @@ async fn otlp_lands_as_span_block() {
         )
         .await
         .unwrap();
-    assert!(resp.status() == StatusCode::OK);
+    assert2::assert!(resp.status() == StatusCode::OK);
 
     let mut consumer = Consumer::builder()
         .bootstrap(proc.bootstrap.clone())
@@ -136,10 +136,7 @@ async fn create_topic(client: &crabka_client_core::Client, name: &str, partition
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "CreateTopics failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn poll_until_records(

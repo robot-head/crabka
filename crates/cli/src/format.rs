@@ -662,7 +662,6 @@ fn base64_encode(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -674,7 +673,7 @@ mod tests {
             ("2.8", None),     // below MIN / unknown
             ("9.9-IV0", None), // unknown
         ] {
-            assert_eq!(resolve_release_level(input).ok(), want, "release {input}");
+            assert2::assert!(resolve_release_level(input).ok() == want);
         }
     }
 
@@ -695,17 +694,9 @@ mod tests {
             });
             let expected = feat.default_level(bootstrap_mv);
             if expected > 0 {
-                assert!(
-                    found == Some(expected),
-                    "feature {} not seeded at its release default",
-                    feat.name()
-                );
+                assert2::assert!(found == Some(expected));
             } else {
-                assert!(
-                    found.is_none(),
-                    "feature {} defaults to 0 and must not be seeded",
-                    feat.name()
-                );
+                assert2::assert!(found.is_none());
             }
         }
     }
@@ -715,7 +706,7 @@ mod tests {
     // `--release-version` and asserts the FeatureLevel record is present.
     #[test]
     fn max_version_string_resolves_to_max() {
-        assert!(
+        assert2::assert!(
             resolve_release_level("4.0").unwrap()
                 == crabka_metadata::metadata_version::METADATA_VERSION_MAX
         );
@@ -723,11 +714,10 @@ mod tests {
 
     #[test]
     fn parse_feature_spec_happy_path() {
-        assert_eq!(
-            parse_feature_spec("group.version=1").unwrap(),
-            ("group.version".to_string(), 1)
+        assert2::assert!(
+            parse_feature_spec("group.version=1").unwrap() == ("group.version".to_string(), 1)
         );
-        assert!(
+        assert2::assert!(
             parse_feature_spec("metadata.version=20").unwrap()
                 == ("metadata.version".to_string(), 20)
         );
@@ -741,10 +731,7 @@ mod tests {
             "group.version=",    // empty level
             "=1",                // empty name
         ] {
-            assert!(
-                parse_feature_spec(bad).is_err(),
-                "expected error for {bad:?}"
-            );
+            assert2::assert!(parse_feature_spec(bad).is_err());
         }
     }
 
@@ -754,23 +741,23 @@ mod tests {
         // an explicit non-metadata feature becomes an override.
         let (mv, ov) =
             resolve_format_features(None, &[("group.version".into(), 1)]).expect("resolve");
-        assert_eq!(mv, crabka_metadata::metadata_version::METADATA_VERSION_MAX);
-        assert_eq!(ov.get("group.version"), Some(&1));
+        assert2::assert!(mv == crabka_metadata::metadata_version::METADATA_VERSION_MAX);
+        assert2::assert!(ov.get("group.version") == Some(&1));
     }
 
     #[test]
     fn resolve_features_metadata_version_feature_sets_bootstrap_mv() {
         let (mv, ov) =
             resolve_format_features(None, &[("metadata.version".into(), 20)]).expect("resolve");
-        assert_eq!(mv, 20);
-        assert_eq!(ov.get("metadata.version"), Some(&20));
+        assert2::assert!(mv == 20);
+        assert2::assert!(ov.get("metadata.version") == Some(&20));
     }
 
     #[test]
     fn resolve_features_release_version_sets_bootstrap_mv() {
         let (mv, ov) = resolve_format_features(Some("4.0-IV0"), &[]).expect("resolve");
-        assert_eq!(mv, 22);
-        assert!(ov.is_empty());
+        assert2::assert!(mv == 22);
+        assert2::assert!(ov.is_empty());
     }
 
     #[test]
@@ -779,8 +766,8 @@ mod tests {
         let (mv, ov) =
             resolve_format_features(Some("4.0-IV0"), &[("transaction.version".into(), 2)])
                 .expect("resolve");
-        assert_eq!(mv, 22);
-        assert_eq!(ov.get("transaction.version"), Some(&2));
+        assert2::assert!(mv == 22);
+        assert2::assert!(ov.get("transaction.version") == Some(&2));
     }
 
     #[test]
@@ -788,14 +775,14 @@ mod tests {
         // Ambiguity: both --release-version and --feature metadata.version set MV.
         let err = resolve_format_features(Some("4.0-IV0"), &[("metadata.version".into(), 24)])
             .unwrap_err();
-        assert!(err.contains("metadata.version"), "{err}");
+        assert2::assert!(err.contains("metadata.version"));
     }
 
     #[test]
     fn resolve_features_rejects_unknown_feature() {
         let err = resolve_format_features(None, &[("bogus.version".into(), 1)]).unwrap_err();
-        assert!(err.contains("Unsupported feature"), "{err}");
-        assert!(err.contains("bogus.version"), "{err}");
+        assert2::assert!(err.contains("Unsupported feature"));
+        assert2::assert!(err.contains("bogus.version"));
     }
 
     #[test]
@@ -805,25 +792,21 @@ mod tests {
             ("metadata.version", 99), // metadata.version supports 7..=25
             ("metadata.version", 1),
         ] {
-            assert!(
-                resolve_format_features(None, &[(name.into(), level)]).is_err(),
-                "expected error for {name}={level}"
-            );
+            assert2::assert!(resolve_format_features(None, &[(name.into(), level)]).is_err());
         }
     }
 
     #[test]
     fn resolve_features_rejects_bad_release_string() {
-        assert!(resolve_format_features(Some("2.8"), &[]).is_err());
+        assert2::assert!(resolve_format_features(Some("2.8"), &[]).is_err());
     }
 
     #[test]
     fn parse_scram_spec_happy_path() {
         let spec = parse_scram_spec("SCRAM-SHA-512=[name=alice,password=hunter2,iterations=8192]")
             .unwrap();
-        assert_eq!(
-            spec,
-            ScramSpec {
+        assert2::assert!(
+            spec == ScramSpec {
                 mechanism: SaslMechanism::ScramSha512,
                 name: "alice".to_string(),
                 password: "hunter2".to_string(),
@@ -835,47 +818,47 @@ mod tests {
     #[test]
     fn parse_scram_spec_iterations_default() {
         let spec = parse_scram_spec("SCRAM-SHA-512=[name=bob,password=p]").unwrap();
-        assert_eq!(spec.iterations, 4096);
+        assert2::assert!(spec.iterations == 4096);
     }
 
     #[test]
     fn parse_scram_spec_sha256_prefix() {
         let spec = parse_scram_spec("SCRAM-SHA-256=[name=alice,password=hunter2,iterations=8192]")
             .unwrap();
-        assert_eq!(spec.name.as_str(), "alice");
-        assert_eq!(spec.mechanism, SaslMechanism::ScramSha256);
+        assert2::assert!(spec.name.as_str() == "alice");
+        assert2::assert!(spec.mechanism == SaslMechanism::ScramSha256);
     }
 
     #[test]
     fn parse_scram_spec_rejects_missing_prefix() {
-        assert!(parse_scram_spec("PLAIN=[name=a,password=b]").is_err());
+        assert2::assert!(parse_scram_spec("PLAIN=[name=a,password=b]").is_err());
     }
 
     #[test]
     fn parse_scram_spec_rejects_missing_name() {
-        assert!(parse_scram_spec("SCRAM-SHA-512=[password=p,iterations=4096]").is_err());
+        assert2::assert!(parse_scram_spec("SCRAM-SHA-512=[password=p,iterations=4096]").is_err());
     }
 
     #[test]
     fn parse_scram_spec_rejects_unknown_attr() {
-        assert!(parse_scram_spec("SCRAM-SHA-512=[name=a,password=b,foo=bar]").is_err());
+        assert2::assert!(parse_scram_spec("SCRAM-SHA-512=[name=a,password=b,foo=bar]").is_err());
     }
 
     #[test]
     fn parse_acl_spec_minimal() {
         let s = "principal=User:admin,host=*,operation=All,permission=Allow,resource=Cluster:kafka-cluster";
         let entry = parse_acl_spec(s).unwrap();
-        assert_eq!(
-            entry,
-            AclEntry {
-                resource_type: crabka_metadata::ResourceType::Cluster,
-                resource_name: "kafka-cluster".to_string(),
-                pattern_type: crabka_metadata::PatternType::Literal,
-                principal: "User:admin".to_string(),
-                host: "*".to_string(),
-                operation: crabka_metadata::AclOperation::All,
-                permission_type: crabka_metadata::PermissionType::Allow,
-            }
+        assert2::assert!(
+            entry
+                == AclEntry {
+                    resource_type: crabka_metadata::ResourceType::Cluster,
+                    resource_name: "kafka-cluster".to_string(),
+                    pattern_type: crabka_metadata::PatternType::Literal,
+                    principal: "User:admin".to_string(),
+                    host: "*".to_string(),
+                    operation: crabka_metadata::AclOperation::All,
+                    permission_type: crabka_metadata::PermissionType::Allow,
+                }
         );
     }
 
@@ -883,23 +866,22 @@ mod tests {
     fn parse_acl_spec_with_prefixed_pattern() {
         let s = "principal=User:alice,host=*,operation=Read,permission=Allow,resource=Topic:team-:Prefixed";
         let entry = parse_acl_spec(s).unwrap();
-        assert_eq!(entry.pattern_type, crabka_metadata::PatternType::Prefixed);
-        assert_eq!(entry.resource_name.as_str(), "team-");
+        assert2::assert!(entry.pattern_type == crabka_metadata::PatternType::Prefixed);
+        assert2::assert!(entry.resource_name.as_str() == "team-");
     }
 
     #[test]
     fn parse_acl_spec_unknown_key_errors() {
         let s = "principal=User:admin,host=*,bogus=x";
-        assert!(parse_acl_spec(s).is_err());
+        assert2::assert!(parse_acl_spec(s).is_err());
     }
 
     #[test]
     fn parses_initial_controller_spec() {
         let v =
             parse_initial_controller("3@host:9093:00000000-0000-0000-0000-000000000003").unwrap();
-        assert_eq!(
-            v,
-            Voter {
+        assert2::assert!(
+            v == Voter {
                 id: crabka_metadata::NodeId(3),
                 directory_id: Uuid::from_u128(3),
                 endpoints: vec![VoterEndpoint {
@@ -914,12 +896,12 @@ mod tests {
 
     #[test]
     fn rejects_initial_controller_without_at() {
-        assert!(parse_initial_controller("3:host:9093:uuid").is_err());
+        assert2::assert!(parse_initial_controller("3:host:9093:uuid").is_err());
     }
 
     #[test]
     fn rejects_initial_controller_bad_uuid() {
-        assert!(parse_initial_controller("3@host:9093:not-a-uuid").is_err());
+        assert2::assert!(parse_initial_controller("3@host:9093:not-a-uuid").is_err());
     }
 
     #[test]
@@ -941,11 +923,7 @@ mod tests {
         ] {
             let spec =
                 format!("principal=User:u,host=*,operation={s},permission=Allow,resource=Topic:t");
-            assert_eq!(
-                parse_acl_spec(&spec).unwrap().operation,
-                op,
-                "operation {s}"
-            );
+            assert2::assert!(parse_acl_spec(&spec).unwrap().operation == op);
         }
     }
 
@@ -961,8 +939,8 @@ mod tests {
             let spec =
                 format!("principal=User:u,host=*,operation=All,permission=Deny,resource={s}:n");
             let entry = parse_acl_spec(&spec).unwrap();
-            assert_eq!(entry.resource_type, rt, "resource {s}");
-            assert_eq!(entry.permission_type, PermissionType::Deny, "resource {s}");
+            assert2::assert!(entry.resource_type == rt);
+            assert2::assert!(entry.permission_type == PermissionType::Deny);
         }
     }
 
@@ -981,7 +959,7 @@ mod tests {
             "principal=User:u,host=*,operation=All,resource=Topic:t",
             "principal=User:u,host=*,operation=All,permission=Allow",
         ] {
-            assert!(parse_acl_spec(bad).is_err(), "expected error for {bad:?}");
+            assert2::assert!(parse_acl_spec(bad).is_err());
         }
     }
 
@@ -993,7 +971,7 @@ mod tests {
             "SCRAM-SHA-512=[name=a,badattr]",   // malformed attr (no '=')
             "SCRAM-SHA-512=[name=a,iterations=4096]", // missing password
         ] {
-            assert!(parse_scram_spec(bad).is_err(), "expected error for {bad:?}");
+            assert2::assert!(parse_scram_spec(bad).is_err());
         }
     }
 
@@ -1005,10 +983,7 @@ mod tests {
             "3@host:notaport:00000000-0000-0000-0000-000000000003",   // bad port
             "3@hostonly:00000000-0000-0000-0000-000000000003",        // missing host:port
         ] {
-            assert!(
-                parse_initial_controller(bad).is_err(),
-                "expected error for {bad:?}"
-            );
+            assert2::assert!(parse_initial_controller(bad).is_err());
         }
     }
 
@@ -1024,7 +999,7 @@ mod tests {
             (b"fooba".as_slice(), "Zm9vYmE="),
             (b"foobar".as_slice(), "Zm9vYmFy"),
         ] {
-            assert_eq!(base64_encode(input), want, "input {input:?}");
+            assert2::assert!(base64_encode(input) == want);
         }
     }
 }

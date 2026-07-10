@@ -63,7 +63,6 @@ impl<'a> Arbitrary<'a> for ApiVersionsResponse {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -83,7 +82,7 @@ mod tests {
         }
 
         let s = found.expect("expected at least one generated string");
-        assert!(s.bytes().all(|b| (0x20..=0x7E).contains(&b)));
+        assert2::assert!(s.bytes().all(|b| (0x20..=0x7E).contains(&b)));
     }
 
     #[test]
@@ -95,14 +94,14 @@ mod tests {
             if let Ok(req) = ApiVersionsRequest::arbitrary(&mut u)
                 && req != ApiVersionsRequest::default()
             {
-                assert!(req.client_software_name.bytes().all(|b| b.is_ascii()));
-                assert!(req.client_software_version.bytes().all(|b| b.is_ascii()));
+                assert2::assert!(req.client_software_name.bytes().all(|b| b.is_ascii()));
+                assert2::assert!(req.client_software_version.bytes().all(|b| b.is_ascii()));
                 found = true;
                 break;
             }
         }
 
-        assert!(found);
+        assert2::assert!(found);
     }
 
     #[test]
@@ -126,7 +125,7 @@ mod tests {
             }
         }
 
-        assert!(found);
+        assert2::assert!(found);
     }
 
     #[test]
@@ -153,6 +152,6 @@ mod tests {
             }
         }
 
-        assert!(found);
+        assert2::assert!(found);
     }
 }

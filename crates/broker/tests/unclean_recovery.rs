@@ -41,7 +41,6 @@
 
 use std::{io, net::SocketAddr, time::Duration};
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::BrokerHandle;
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicConfigRecord};
@@ -146,11 +145,7 @@ async fn create_topic_plaintext(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(
-        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
-        "CreateTopics({name}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Drive `ElectLeaders` over a fresh PLAINTEXT connection. Asserts the
@@ -183,11 +178,7 @@ async fn drive_elect_leaders(
     let resp = ElectLeadersResponse::decode(&mut cur, ELECT_LEADERS_VERSION)
         .expect("decode ElectLeadersResponse");
 
-    assert!(
-        resp.error_code == 0,
-        "top-level error_code must be 0, got {}",
-        resp.error_code
-    );
+    assert2::assert!(resp.error_code == 0);
 
     resp.replica_election_results
         .into_iter()
@@ -285,15 +276,13 @@ async fn unclean_recovery_elects_longest_log_replica() {
         .partition_record_for_test(topic, 0)
         .expect("partition record present after wait_until_partition_present");
     eprintln!("partition before divergence: {pr_before:?}");
-    assert!(
+    assert2::assert!(
         pr_before.replicas
             == vec![
                 crabka_broker::NodeId(1),
                 crabka_broker::NodeId(2),
                 crabka_broker::NodeId(3)
-            ],
-        "expected RF=3 replicas [1,2,3]; got {:?}",
-        pr_before.replicas
+            ]
     );
 
     // ── Set unclean.recovery.strategy=Aggressive so UNCLEAN routes through
@@ -365,10 +354,7 @@ async fn unclean_recovery_elects_longest_log_replica() {
     let end2 = h2.local_log_end_offset(topic, 0).await.expect("leo b2");
     let end3 = h3.local_log_end_offset(topic, 0).await.expect("leo b3");
     eprintln!("LEO end offsets: b1={end1} b2={end2} b3={end3}");
-    assert!(
-        end2 > end1 && end2 > end3,
-        "broker 2 must hold the strictly-highest LEO (b1={end1} b2={end2} b3={end3})"
-    );
+    assert2::assert!(end2 > end1 && end2 > end3);
 
     // ── ElectLeaders(UNCLEAN) must reach the raft leader, the only node that
     //    runs the URM and has authoritative liveness state. Discover it. ──
@@ -386,10 +372,7 @@ async fn unclean_recovery_elects_longest_log_replica() {
 
     // ── Trigger offset-aware recovery (election_type = 1 = UNCLEAN). ──
     let result = drive_elect_leaders(elect_addr, topic, vec![0], 1).await;
-    assert!(
-        result == vec![(0, 0)],
-        "expected error_code=0 for UNCLEAN election; got {result:?}"
-    );
+    assert2::assert!(result == vec![(0, 0)]);
 
     // ── The load-bearing assertion: the elected leader is broker 2 (the
     //    highest-LEO survivor), NOT broker 1 (the first-alive replica). ──
@@ -397,11 +380,7 @@ async fn unclean_recovery_elects_longest_log_replica() {
     let final_leader = h1
         .partition_leader_for_test(topic, 0)
         .expect("leader present");
-    assert!(
-        final_leader == 2,
-        "URM must elect the highest-LEO survivor (broker 2), not the \
-         first-alive replica (broker 1); got leader={final_leader}"
-    );
+    assert2::assert!(final_leader == 2);
     // ISR collapses to the singleton elected leader.
     wait_partition_isr_only(h1, topic, 0, &[2]).await;
 

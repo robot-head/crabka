@@ -51,7 +51,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -538,7 +538,7 @@ async fn ingest_all_doors() -> TestResult<Vec<SpanRecord>> {
                 .body(Body::from(trace_a_otlp_bytes()))?,
         )
         .await?;
-    assert!(resp.status() == StatusCode::OK);
+    assert2::assert!(resp.status() == StatusCode::OK);
     let _ = resp.into_body().collect().await?;
 
     // D2 — Tempo push `POST /api/push` (Trace B, the PARTIAL trace).
@@ -552,7 +552,7 @@ async fn ingest_all_doors() -> TestResult<Vec<SpanRecord>> {
                 .body(Body::from(trace_b_otlp_bytes()))?,
         )
         .await?;
-    assert!(resp.status() == StatusCode::OK);
+    assert2::assert!(resp.status() == StatusCode::OK);
     let _ = resp.into_body().collect().await?;
 
     // D3 — Zipkin v2 `POST /api/v2/spans`.
@@ -570,7 +570,7 @@ async fn ingest_all_doors() -> TestResult<Vec<SpanRecord>> {
                 .body(Body::from(zipkin))?,
         )
         .await?;
-    assert!(resp.status() == StatusCode::ACCEPTED);
+    assert2::assert!(resp.status() == StatusCode::ACCEPTED);
     let _ = resp.into_body().collect().await?;
 
     // D4 — Jaeger binary thrift `POST /api/traces`.
@@ -584,7 +584,7 @@ async fn ingest_all_doors() -> TestResult<Vec<SpanRecord>> {
                 .body(Body::from(jaeger_binary_batch()))?,
         )
         .await?;
-    assert!(resp.status() == StatusCode::ACCEPTED);
+    assert2::assert!(resp.status() == StatusCode::ACCEPTED);
     let _ = resp.into_body().collect().await?;
 
     // D5 — OTLP gRPC, in-process via the production service struct.
@@ -656,7 +656,7 @@ async fn ingest_all_doors() -> TestResult<Vec<SpanRecord>> {
                 .body(Body::from(jaeger_compact_batch()))?,
         )
         .await?;
-    assert!(resp.status() == StatusCode::ACCEPTED);
+    assert2::assert!(resp.status() == StatusCode::ACCEPTED);
     let _ = resp.into_body().collect().await?;
 
     let records = sink
@@ -682,13 +682,10 @@ fn assert_all_doors_present(records: &[SpanRecord]) {
         "jaeger grpc op",    // D6
         "compact thrift op", // D7
     ] {
-        assert!(
-            names.contains(&expected),
-            "missing door contribution {expected:?}; saw {names:?}"
-        );
+        assert2::assert!(names.contains(&expected));
     }
     // All doors used the same tenant header.
-    assert!(records.iter().all(|r| r.tenant == TENANT));
+    assert2::assert!(records.iter().all(|r| r.tenant == TENANT));
 
     let by_name = |name: &str| -> &SpanRecord {
         records
@@ -738,15 +735,9 @@ fn assert_all_doors_present(records: &[SpanRecord]) {
     ];
     for (name, service, error_status) in cases {
         let record = by_name(name);
-        assert!(
-            resource_attr(&record.span, "service.name") == Some(service),
-            "door span {name:?} service.name"
-        );
+        assert2::assert!(resource_attr(&record.span, "service.name") == Some(service));
         if let Some(expected) = error_status {
-            assert!(
-                record.span.status.as_i32() == expected,
-                "door span {name:?}: error -> ERROR"
-            );
+            assert2::assert!(record.span.status.as_i32() == expected);
         }
     }
 }
@@ -977,11 +968,7 @@ async fn get_json(client: &reqwest::Client, url: &str) -> TestResult<JsonValue> 
         .await?;
     let status = resp.status();
     let body = resp.bytes().await?;
-    assert!(
-        status == ReqwestStatusCode::OK,
-        "GET {url} failed: {status} {}",
-        String::from_utf8_lossy(&body)
-    );
+    assert2::assert!(status == ReqwestStatusCode::OK);
     Ok(serde_json::from_slice(&body)?)
 }
 
@@ -1065,7 +1052,7 @@ fn metric_points_total_sums_tempo_samples() {
         ]
     });
 
-    assert!(metric_points_total(&metrics) > 0.0);
+    assert2::assert!(metric_points_total(&metrics) > 0.0);
 }
 
 /// Percent-encode a `TraceQL` query so it survives the Grafana proxy query string.
@@ -1138,11 +1125,8 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &format!("{grafana_base}/api/datasources/uid/{GRAFANA_TEMPO_DATASOURCE_UID}"),
     )
     .await?;
-    assert_eq!(fetched["type"].as_str(), Some("tempo"));
-    assert_eq!(
-        fetched["url"].as_str(),
-        Some(crabka.container_base_url.as_str())
-    );
+    assert2::assert!(fetched["type"].as_str() == Some("tempo"));
+    assert2::assert!(fetched["url"].as_str() == Some(crabka.container_base_url.as_str()));
 
     let proxy = |path: &str| {
         format!("{grafana_base}/api/datasources/proxy/uid/{GRAFANA_TEMPO_DATASOURCE_UID}/{path}")
@@ -1156,10 +1140,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
     ];
     for (path, expected_body) in cases {
         let (status, body) = get_text(&client, &proxy(path)).await?;
-        assert!(
-            (status, body.as_str()) == (ReqwestStatusCode::OK, expected_body),
-            "endpoint {path:?}"
-        );
+        assert2::assert!((status, body.as_str()) == (ReqwestStatusCode::OK, expected_body));
     }
 
     // E4 — trace-by-id, Trace A: COMPLETE, all 4 spans, root span present. The
@@ -1190,7 +1171,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .flat_map(|rs| rs["scopeSpans"].as_array().into_iter().flatten())
         .flat_map(|ss| ss["spans"].as_array().into_iter().flatten())
         .count();
-    assert!(trace_a_spans == 4, "expected 4 spans in Trace A: {trace_a}");
+    assert2::assert!(trace_a_spans == 4);
     let root_b64 = b64(&ROOT_SPAN_ID);
     let has_root = trace_a["trace"]["resourceSpans"]
         .as_array()
@@ -1199,7 +1180,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .flat_map(|rs| rs["scopeSpans"].as_array().into_iter().flatten())
         .flat_map(|ss| ss["spans"].as_array().into_iter().flatten())
         .any(|span| span["spanId"].as_str() == Some(root_b64.as_str()));
-    assert!(has_root, "root span (base64 spanId) not found: {trace_a}");
+    assert2::assert!(has_root);
 
     // E5 — trace-by-id, Trace B: PARTIAL, truncated to MAX_TRACE_SPANS.
     let trace_b = get_json(
@@ -1207,11 +1188,8 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &proxy(&format!("api/v2/traces/{TRACE_B_HEX}?{range}")),
     )
     .await?;
-    assert_eq!(trace_b["status"].as_str(), Some("PARTIAL"));
-    assert_eq!(
-        trace_b["message"].as_str(),
-        Some("trace truncated after 4 spans")
-    );
+    assert2::assert!(trace_b["status"].as_str() == Some("PARTIAL"));
+    assert2::assert!(trace_b["message"].as_str() == Some("trace truncated after 4 spans"));
     let returned_spans: usize = trace_b["trace"]["resourceSpans"]
         .as_array()
         .into_iter()
@@ -1219,10 +1197,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .flat_map(|rs| rs["scopeSpans"].as_array().into_iter().flatten())
         .flat_map(|ss| ss["spans"].as_array().into_iter().flatten())
         .count();
-    assert!(
-        returned_spans == MAX_TRACE_SPANS,
-        "expected 4 returned spans"
-    );
+    assert2::assert!(returned_spans == MAX_TRACE_SPANS);
 
     // E4b — trace-by-id PROTOBUF, the format Grafana's Tempo *backend* uses for
     // the trace-view: GET /api/v2/traces/{id} with Accept: application/protobuf
@@ -1239,37 +1214,29 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .header("x-scope-orgid", TENANT)
         .send()
         .await?;
-    assert_eq!(
-        pb.status(),
-        ReqwestStatusCode::OK,
-        "protobuf negotiation should set content-type"
-    );
-    assert_eq!(
+    assert2::assert!(pb.status() == ReqwestStatusCode::OK);
+    assert2::assert!(
         pb.headers()
             .get("content-type")
-            .and_then(|value| value.to_str().ok()),
-        Some("application/protobuf"),
-        "protobuf negotiation should set content-type"
+            .and_then(|value| value.to_str().ok())
+            == Some("application/protobuf")
     );
     let decoded = TraceByIdResponse::decode(pb.bytes().await?)?
         .trace
         .expect("TraceByIDResponse carries the trace");
-    assert!(
-        decoded.resource_spans.len() == 1,
-        "protobuf trace groups under the root service: {decoded:?}"
-    );
+    assert2::assert!(decoded.resource_spans.len() == 1);
     let pb_spans: usize = decoded
         .resource_spans
         .iter()
         .flat_map(|rs| rs.scope_spans.iter())
         .map(|ss| ss.spans.len())
         .sum();
-    assert!(pb_spans == 4, "protobuf trace should carry all 4 spans");
+    assert2::assert!(pb_spans == 4);
 
     // E6 — bad-length trace id -> 400.
     let (status, body) = get_text(&client, &proxy("api/v2/traces/abcd")).await?;
-    assert!(status == ReqwestStatusCode::BAD_REQUEST);
-    assert!(body.contains("trace id must be 32 hex chars"));
+    assert2::assert!(status == ReqwestStatusCode::BAD_REQUEST);
+    assert2::assert!(body.contains("trace id must be 32 hex chars"));
 
     // E7 — absent trace -> 404.
     let (status, body) = get_text(
@@ -1279,14 +1246,14 @@ async fn grafana_e2e_full_surface() -> TestResult {
         )),
     )
     .await?;
-    assert!(status == ReqwestStatusCode::NOT_FOUND);
-    assert!(body.contains("trace not found"));
+    assert2::assert!(status == ReqwestStatusCode::NOT_FOUND);
+    assert2::assert!(body.contains("trace not found"));
 
     // E8 — TraceQL selector search.
     let q = enc("{ resource.service.name = \"checkout-frontend\" }");
     let search = get_json(&client, &proxy(&format!("api/search?q={q}&{range}"))).await?;
-    assert_eq!(search["traces"][0]["traceID"].as_str(), Some(TRACE_A_HEX));
-    assert!(
+    assert2::assert!(search["traces"][0]["traceID"].as_str() == Some(TRACE_A_HEX));
+    assert2::assert!(
         search["metrics"]["inspectedSpans"]
             .as_u64()
             .is_some_and(|n| n > 0)
@@ -1303,7 +1270,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .into_iter()
         .flatten()
         .any(|trace| trace["traceID"].as_str() == Some(TRACE_A_HEX));
-    assert!(found_a, "legacy tags search missing Trace A: {search}");
+    assert2::assert!(found_a);
 
     // E10 — duration-filtered search. Trace A (~33ms) is kept by [25ms,40ms].
     let q = enc("{ resource.service.name = \"checkout-frontend\" }");
@@ -1314,13 +1281,12 @@ async fn grafana_e2e_full_surface() -> TestResult {
         )),
     )
     .await?;
-    assert!(
+    assert2::assert!(
         search["traces"]
             .as_array()
             .into_iter()
             .flatten()
-            .any(|trace| trace["traceID"].as_str() == Some(TRACE_A_HEX)),
-        "duration window [25ms,40ms] should keep Trace A: {search}"
+            .any(|trace| trace["traceID"].as_str() == Some(TRACE_A_HEX))
     );
     // The same selector with a tight max excludes Trace A's ~33ms trace.
     let search = get_json(
@@ -1328,10 +1294,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &proxy(&format!("api/search?q={q}&maxDuration=5ms&{range}")),
     )
     .await?;
-    assert!(
-        search["traces"].as_array().is_some_and(Vec::is_empty),
-        "maxDuration=5ms should exclude Trace A: {search}"
-    );
+    assert2::assert!(search["traces"].as_array().is_some_and(Vec::is_empty));
 
     // E11 — limit/spss caps.
     let q = enc("{ resource.service.name = \"checkout-frontend\" }");
@@ -1341,10 +1304,10 @@ async fn grafana_e2e_full_surface() -> TestResult {
     )
     .await?;
     let traces = search["traces"].as_array().expect("traces array");
-    assert!(traces.len() <= 1);
+    assert2::assert!(traces.len() <= 1);
     for trace in traces {
         for span_set in trace["spanSets"].as_array().into_iter().flatten() {
-            assert!(
+            assert2::assert!(
                 span_set["spans"]
                     .as_array()
                     .is_some_and(|spans| spans.len() <= 1)
@@ -1355,16 +1318,12 @@ async fn grafana_e2e_full_surface() -> TestResult {
     // E12 — error-status search resolves the error span.
     let q = enc("{ span:status = error }");
     let search = get_json(&client, &proxy(&format!("api/search?q={q}&{range}"))).await?;
-    assert!(
+    assert2::assert!(
         search["traces"]
             .as_array()
-            .is_some_and(|traces| !traces.is_empty()),
-        "error-status search empty: {search}"
+            .is_some_and(|traces| !traces.is_empty())
     );
-    assert!(
-        search_contains_span_id_hex(&search, ERROR_SPAN_ID_HEX),
-        "error search missing span {ERROR_SPAN_ID_HEX}: {search}"
-    );
+    assert2::assert!(search_contains_span_id_hex(&search, ERROR_SPAN_ID_HEX));
 
     // E13 — v2 tags: scopes present (resource w/ service.name; intrinsic; link/event/instrumentation).
     let tags = get_json(&client, &proxy(&format!("api/v2/search/tags?{range}"))).await?;
@@ -1375,10 +1334,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .filter_map(|scope| scope["name"].as_str())
         .collect();
     for required in ["resource", "intrinsic", "link", "event", "instrumentation"] {
-        assert!(
-            scope_names.contains(&required),
-            "missing scope {required}: {tags}"
-        );
+        assert2::assert!(scope_names.contains(&required));
     }
     let cases = [
         ("resource", "service.name"),
@@ -1386,10 +1342,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         ("intrinsic", "span:duration"),
     ];
     for (scope, tag) in cases {
-        assert!(
-            scope_tags(&tags, scope).contains(&tag.to_string()),
-            "missing {scope} tag {tag}: {tags}"
-        );
+        assert2::assert!(scope_tags(&tags, scope).contains(&tag.to_string()));
     }
 
     // E14 — v2 tags scoped to resource only.
@@ -1404,16 +1357,13 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .flatten()
         .filter_map(|scope| scope["name"].as_str())
         .collect();
-    assert!(
-        scope_names == vec!["resource"],
-        "expected only resource scope: {tags}"
-    );
-    assert!(scope_tags(&tags, "resource").contains(&"service.name".to_string()));
+    assert2::assert!(scope_names == vec!["resource"]);
+    assert2::assert!(scope_tags(&tags, "resource").contains(&"service.name".to_string()));
 
     // E15 — invalid scope -> 400.
     let (status, body) = get_text(&client, &proxy("api/v2/search/tags?scope=bogus")).await?;
-    assert!(status == ReqwestStatusCode::BAD_REQUEST);
-    assert!(body.contains("invalid scope"));
+    assert2::assert!(status == ReqwestStatusCode::BAD_REQUEST);
+    assert2::assert!(body.contains("invalid scope"));
 
     // E16 — v2 typed values for resource.service.name.
     let values = get_json(
@@ -1433,8 +1383,8 @@ async fn grafana_e2e_full_surface() -> TestResult {
     // groups each trace under one root); checkout-frontend (Trace A) and
     // bulk-svc (Trace B) are both roots. cart-backend is a non-root service, so
     // it appears as a span attribute, not a resource value.
-    assert!(typed.contains(&("string", "checkout-frontend")), "{values}");
-    assert!(typed.contains(&("string", "bulk-svc")), "{values}");
+    assert2::assert!(typed.contains(&("string", "checkout-frontend")));
+    assert2::assert!(typed.contains(&("string", "bulk-svc")));
 
     // E17 — v2 typed values for the intrinsic span:duration (type "duration").
     let values = get_json(
@@ -1447,12 +1397,11 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .into_iter()
         .flatten()
         .all(|v| v["type"].as_str() == Some("duration"));
-    assert!(
+    assert2::assert!(
         values["tagValues"]
             .as_array()
             .is_some_and(|vs| !vs.is_empty())
-            && all_durations,
-        "span.duration values must all be typed duration: {values}"
+            && all_durations
     );
 
     // E18 — legacy v1 flat tags.
@@ -1463,8 +1412,8 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .flatten()
         .filter_map(JsonValue::as_str)
         .collect();
-    assert!(names.contains(&"service.name"), "{tags}");
-    assert!(tags["metrics"]["inspectedBytes"].as_str() == Some("0"));
+    assert2::assert!(names.contains(&"service.name"));
+    assert2::assert!(tags["metrics"]["inspectedBytes"].as_str() == Some("0"));
 
     // E19 — legacy v1 flat values (plain strings).
     let values = get_json(
@@ -1480,7 +1429,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .flatten()
         .filter_map(JsonValue::as_str)
         .collect();
-    assert!(plain.contains(&"checkout-frontend"), "{values}");
+    assert2::assert!(plain.contains(&"checkout-frontend"));
 
     // E20 — TraceQL metrics query_range (poll until ingested samples appear).
     let mq = enc("{ resource.service.name = \"checkout-frontend\" } | rate()");
@@ -1491,12 +1440,12 @@ async fn grafana_e2e_full_surface() -> TestResult {
         )),
     )
     .await?;
-    assert!(
+    assert2::assert!(
         metrics["series"]
             .as_array()
             .is_some_and(|series| !series.is_empty())
     );
-    assert!(metric_points_total(&metrics) > 0.0);
+    assert2::assert!(metric_points_total(&metrics) > 0.0);
 
     // E21 — query_range with exemplars disabled: every series has empty exemplars.
     let metrics = get_json(
@@ -1506,13 +1455,12 @@ async fn grafana_e2e_full_surface() -> TestResult {
         )),
     )
     .await?;
-    assert!(
+    assert2::assert!(
         metrics["series"]
             .as_array()
             .into_iter()
             .flatten()
-            .all(|series| series["exemplars"].as_array().is_some_and(Vec::is_empty)),
-        "exemplars=0 should clear all exemplars: {metrics}"
+            .all(|series| series["exemplars"].as_array().is_some_and(Vec::is_empty))
     );
 
     // E22 — instant metrics via `time` (each series collapsed to one point).
@@ -1522,21 +1470,19 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &proxy(&format!("api/metrics/query?q={iq}&time={now_secs}")),
     )
     .await?;
-    assert!(
+    assert2::assert!(
         metrics["series"]
             .as_array()
-            .is_some_and(|series| !series.is_empty()),
-        "instant query must collapse each series to one sample: {metrics}"
+            .is_some_and(|series| !series.is_empty())
     );
-    assert!(
+    assert2::assert!(
         metrics["series"]
             .as_array()
             .into_iter()
             .flatten()
             .all(|series| series["samples"]
                 .as_array()
-                .is_some_and(|samples| samples.len() == 1)),
-        "instant query must collapse each series to one sample: {metrics}"
+                .is_some_and(|samples| samples.len() == 1))
     );
 
     // E23 — instant metrics via start/end bounds (single sample at `end`).
@@ -1558,10 +1504,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
                     && samples[0]["timestampMs"].as_str() == Some(expected_end_ms.as_str())
             })
         });
-    assert!(
-        single_sample_at_end,
-        "instant bounds sample not at end: {metrics}"
-    );
+    assert2::assert!(single_sample_at_end);
 
     // E24 — q-derived tag discovery (matching_traces -> scoped_tags_from_traces),
     // distinct from the global-index path in E13/E18.
@@ -1579,10 +1522,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .flatten()
         .filter_map(JsonValue::as_str)
         .collect();
-    assert!(
-        derived_names.contains(&"service.name"),
-        "q-derived tags missing service.name: {tags}"
-    );
+    assert2::assert!(derived_names.contains(&"service.name"));
 
     // E25 — q-derived tag values (matching_traces -> tag_values_from_traces).
     let values = get_json(
@@ -1598,10 +1538,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .flatten()
         .filter_map(JsonValue::as_str)
         .collect();
-    assert!(
-        derived_values.contains(&"checkout-frontend"),
-        "q-derived values missing checkout-frontend: {values}"
-    );
+    assert2::assert!(derived_values.contains(&"checkout-frontend"));
 
     // E26 — metrics query_range defaults `step` when omitted.
     let metrics = get_json(
@@ -1611,12 +1548,12 @@ async fn grafana_e2e_full_surface() -> TestResult {
         )),
     )
     .await?;
-    assert!(
+    assert2::assert!(
         metrics["series"]
             .as_array()
             .is_some_and(|series| !series.is_empty())
     );
-    assert!(metric_points_total(&metrics) > 0.0);
+    assert2::assert!(metric_points_total(&metrics) > 0.0);
 
     // E27-E28 — Grafana's Tempo datasource normalizes some malformed metric
     // requests before proxying them, so validate these Crabka API contracts
@@ -1632,8 +1569,8 @@ async fn grafana_e2e_full_surface() -> TestResult {
         )),
     )
     .await?;
-    assert!(status == ReqwestStatusCode::BAD_REQUEST);
-    assert!(body.contains("step must be positive"), "{body}");
+    assert2::assert!(status == ReqwestStatusCode::BAD_REQUEST);
+    assert2::assert!(body.contains("step must be positive"));
 
     // E28 — metrics query_range rejects end < start -> 400.
     let (status, body) = get_text(
@@ -1643,8 +1580,8 @@ async fn grafana_e2e_full_surface() -> TestResult {
         )),
     )
     .await?;
-    assert!(status == ReqwestStatusCode::BAD_REQUEST);
-    assert!(body.contains("end must be >= start"), "{body}");
+    assert2::assert!(status == ReqwestStatusCode::BAD_REQUEST);
+    assert2::assert!(body.contains("end must be >= start"));
 
     // ----- §5: Service Graph full loop through real Prometheus. -----
     let prom = start_prometheus().await?;
@@ -1682,11 +1619,8 @@ async fn grafana_e2e_full_surface() -> TestResult {
         source,
         sink,
     );
-    assert!(svc.poll_once(usize::MAX).await? == 2);
-    assert!(
-        svc.collect_once().await? == 1,
-        "expected one tenant payload flushed"
-    );
+    assert2::assert!(svc.poll_once(usize::MAX).await? == 2);
+    assert2::assert!(svc.collect_once().await? == 1);
 
     // Provision the Grafana Prometheus datasource (the Service-Graph backend).
     let prom_ds = json!({
@@ -1709,7 +1643,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &format!("{grafana_base}/api/datasources/uid/{GRAFANA_PROM_DATASOURCE_UID}"),
     )
     .await?;
-    assert!(fetched["type"].as_str() == Some("prometheus"));
+    assert2::assert!(fetched["type"].as_str() == Some("prometheus"));
 
     let prom_proxy = |query: &str| {
         format!(
@@ -1744,10 +1678,7 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &prom_proxy("traces_service_graph_request_server_seconds_count"),
     )
     .await?;
-    assert!(
-        result["data"]["result"][0]["value"][1].as_str() == Some("1"),
-        "server histogram count: {result}"
-    );
+    assert2::assert!(result["data"]["result"][0]["value"][1].as_str() == Some("1"));
 
     crabka.shutdown();
     // Keep `grafana` and `prom` bindings alive until here; they stop on drop.

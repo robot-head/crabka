@@ -303,7 +303,7 @@ fn flush_inline(buf: &mut BytesMut, ops: &mut Vec<FetchWriteOp>) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::{
@@ -352,23 +352,12 @@ mod tests {
         resp.encode(&mut canonical, version).unwrap();
         let plan = resp.write_plan(version).unwrap();
         let assembled = concat_plan(&plan);
-        assert!(
-            &assembled[..] == &canonical[..],
-            "{case_name}: write_plan != encode at version {version}: plan_len={} encode_len={}",
-            assembled.len(),
-            canonical.len()
-        );
+        assert2::assert!(&assembled[..] == &canonical[..]);
         // The plan's total length must also equal encoded_len (the frame
         // length prefix the broker writes is derived from encoded_len).
         let plan_total: usize = plan.iter().map(FetchWriteOp::len).sum();
-        assert!(
-            plan_total == resp.encoded_len(version),
-            "{case_name}: plan length != encoded_len at version {version}"
-        );
-        assert!(
-            plan_total == canonical.len(),
-            "{case_name}: plan length != encoded bytes at version {version}"
-        );
+        assert2::assert!(plan_total == resp.encoded_len(version));
+        assert2::assert!(plan_total == canonical.len());
     }
 
     fn multi_partition_response(version: i16) -> FetchResponse {

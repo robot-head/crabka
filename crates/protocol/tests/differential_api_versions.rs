@@ -1,4 +1,3 @@
-use assert2::assert;
 mod support;
 use bytes::BytesMut;
 use crabka_protocol::{
@@ -20,7 +19,7 @@ fn rust_encode<T: Encode>(t: &T, version: i16) -> Vec<u8> {
 fn rust_decode<T: for<'a> Decode<'a>>(bytes: &[u8], version: i16) -> T {
     let mut cur: &[u8] = bytes;
     let v = T::decode(&mut cur, version).unwrap();
-    assert!(cur.is_empty(), "Rust decoder left trailing bytes");
+    assert2::assert!(cur.is_empty());
     v
 }
 
@@ -31,10 +30,7 @@ fn apiversions_request_v0_byte_equal() {
     let req = ApiVersionsRequest::default();
     let rust = rust_encode(&req, 0);
     let java = o.encode(18, 0, true, &json!({}));
-    assert!(
-        rust == java,
-        "v0 byte mismatch\n  rust: {rust:?}\n  java: {java:?}"
-    );
+    assert2::assert!(rust == java);
 }
 
 #[test]
@@ -56,10 +52,7 @@ fn apiversions_request_v3_byte_equal() {
             "clientSoftwareVersion": "0.0.0",
         }),
     );
-    assert!(
-        rust == java,
-        "v3 byte mismatch\n  rust: {rust:?}\n  java: {java:?}"
-    );
+    assert2::assert!(rust == java);
 }
 
 #[test]
@@ -103,12 +96,7 @@ fn apiversions_response_v3_byte_equal() {
             "throttleTimeMs": 5,
         }),
     );
-    assert!(
-        rust == java,
-        "v3 response byte mismatch\n  rust hex: {}\n  java hex: {}",
-        hex::encode(&rust),
-        hex::encode(&java)
-    );
+    assert2::assert!(rust == java);
 }
 
 #[test]
@@ -141,5 +129,5 @@ fn apiversions_response_decode_matches_java() {
         zk_migration_ready: false,
         unknown_tagged_fields: UnknownTaggedFields::default(),
     };
-    assert!(decoded == expected);
+    assert2::assert!(decoded == expected);
 }

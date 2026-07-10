@@ -561,7 +561,7 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_metadata::{
         BrokerEndpoint, BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord,
         TopicRecord,
@@ -738,7 +738,7 @@ mod tests {
             _client_id: &str,
             req: crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest,
         ) -> Result<(), String> {
-            assert!(!req.directories.is_empty());
+            assert2::assert!(!req.directories.is_empty());
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -793,7 +793,7 @@ mod tests {
             )
             .await
             .expect_err("no controller leader must fail");
-        assert!(err == "no controller leader");
+        assert2::assert!(err == "no controller leader");
     }
 
     #[test]
@@ -803,8 +803,8 @@ mod tests {
             partition_record("t", 0, NodeId(1), vec![NodeId(1), NodeId(2), NodeId(3)], 0),
         ]);
         let d = desired_follower_set(NodeId(2), &img);
-        assert!(d.contains(&("t".into(), 0)));
-        assert!(d.len() == 1);
+        assert2::assert!(d.contains(&("t".into(), 0)));
+        assert2::assert!(d.len() == 1);
     }
 
     #[test]
@@ -849,12 +849,8 @@ mod tests {
             // Self is not a replica at all → excluded.
             ("non-replica", NodeId(99), HashSet::new()),
         ];
-        for (case, node_id, want) in cases {
-            assert!(
-                desired_follower_set(node_id, &img) == want,
-                "case {case}: node {}",
-                node_id.0,
-            );
+        for (_case, node_id, want) in cases {
+            assert2::assert!(desired_follower_set(node_id, &img) == want);
         }
     }
 
@@ -872,7 +868,7 @@ mod tests {
 
         let local = desired_local_set(NodeId(2), &img);
 
-        assert!(
+        assert2::assert!(
             local
                 == HashSet::from_iter([
                     ("a".to_string(), 0),
@@ -916,7 +912,7 @@ mod tests {
         )
         .await;
         let st = part.replica_state.lock().await;
-        assert!(st.isr.len() == 3);
+        assert2::assert!(st.isr.len() == 3);
     }
 
     #[test]
@@ -997,18 +993,22 @@ mod tests {
         ]);
         let d = desired_follower_set(NodeId(2), &img);
         // b/1 is excluded: self is leader for it.
-        assert!(d == HashSet::from_iter([("a".to_string(), 0), ("b".to_string(), 0)]));
-        assert!(d.contains(&("a".into(), 0)));
-        assert!(d.contains(&("b".into(), 0)));
-        assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
-        assert!(d.len() == 2);
+        assert2::assert!(d == HashSet::from_iter([("a".to_string(), 0), ("b".to_string(), 0)]));
+        assert2::assert!(d.contains(&("a".into(), 0)));
+        assert2::assert!(d.contains(&("b".into(), 0)));
+        assert2::assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
+        assert2::assert!(d.len() == 2);
     }
 
     #[test]
     fn resolve_leader_endpoint_prefers_matching_listener() {
         let broker = broker_record(NodeId(1));
-        assert!(resolve_leader_endpoint(&broker, "INTERNAL") == ("internal-host".into(), 19092));
-        assert!(resolve_leader_endpoint(&broker, "EXTERNAL") == ("legacy-host".into(), 9092));
+        assert2::assert!(
+            resolve_leader_endpoint(&broker, "INTERNAL") == ("internal-host".into(), 19092)
+        );
+        assert2::assert!(
+            resolve_leader_endpoint(&broker, "EXTERNAL") == ("legacy-host".into(), 9092)
+        );
     }
 
     #[tokio::test]
@@ -1024,17 +1024,16 @@ mod tests {
         let part = partitions
             .get("t", PartitionIndex(0))
             .expect("local leader materialized");
-        assert!(
+        assert2::assert!(
             (
                 part.current_leader
                     .load(std::sync::atomic::Ordering::Acquire),
                 part.current_leader_epoch
                     .load(std::sync::atomic::Ordering::Acquire),
-            ) == (2, 7),
-            "leader cache updated"
+            ) == (2, 7)
         );
         let state = part.replica_state.lock().await;
-        assert!(state.isr == [NodeId(1), NodeId(2), NodeId(3)].into_iter().collect());
+        assert2::assert!(state.isr == [NodeId(1), NodeId(2), NodeId(3)].into_iter().collect());
     }
 
     #[tokio::test]
@@ -1051,7 +1050,7 @@ mod tests {
             .get("t", PartitionIndex(0))
             .expect("local follower materialized");
         let state = part.replica_state.lock().await;
-        assert!(state.isr.is_empty());
+        assert2::assert!(state.isr.is_empty());
     }
 
     #[tokio::test]
@@ -1110,15 +1109,15 @@ mod tests {
 
         supervisor.report_dir_assignments(&local_set, &img).await;
 
-        assert!(reporter.calls.load(Ordering::SeqCst) == 1);
-        assert!(supervisor.reported_dirs.contains_key(&("t".to_string(), 0)));
+        assert2::assert!(reporter.calls.load(Ordering::SeqCst) == 1);
+        assert2::assert!(supervisor.reported_dirs.contains_key(&("t".to_string(), 0)));
 
         let part = partitions
             .get("t", PartitionIndex(0))
             .expect("materialized");
         let dir = part.log_dir.load();
         let expected = supervisor.log_dir_ids.id_for(&dir).expect("dir id");
-        assert!(
+        assert2::assert!(
             supervisor
                 .reported_dirs
                 .get(&("t".to_string(), 0))
@@ -1134,7 +1133,7 @@ mod tests {
 
         supervisor.materialize_local_partition("t", 0).unwrap();
 
-        assert!(partitions.contains("t", PartitionIndex(0)));
+        assert2::assert!(partitions.contains("t", PartitionIndex(0)));
     }
 
     #[tokio::test]
@@ -1148,7 +1147,7 @@ mod tests {
 
         supervisor.run().await;
 
-        assert!(partitions.contains("t", PartitionIndex(0)));
+        assert2::assert!(partitions.contains("t", PartitionIndex(0)));
     }
 
     #[tokio::test]
@@ -1223,7 +1222,7 @@ mod tests {
         })
         .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert!(snap.retention_ms == Some(std::time::Duration::from_mins(1)));
+        assert2::assert!(snap.retention_ms == Some(std::time::Duration::from_mins(1)));
     }
 
     #[tokio::test]
@@ -1284,7 +1283,7 @@ mod tests {
         })
         .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert!(snap.retention_ms == LogConfig::default().retention_ms);
+        assert2::assert!(snap.retention_ms == LogConfig::default().retention_ms);
     }
 
     #[tokio::test]
@@ -1339,7 +1338,7 @@ mod tests {
             .get("t", PartitionIndex(0))
             .expect("part present");
         let loaded_dir = part.log_dir.load();
-        assert!(**loaded_dir == dir.path().to_path_buf());
+        assert2::assert!(**loaded_dir == dir.path().to_path_buf());
 
         let dir_uuid = log_dir_ids.id_for(dir.path()).expect("dir uuid resolvable");
 
@@ -1355,8 +1354,8 @@ mod tests {
             &img,
             &reported_dirs,
         );
-        assert!(wire == vec![(topic_id, 0, dir_uuid)]);
-        assert!(updates == vec![("t".to_string(), 0, dir_uuid)]);
+        assert2::assert!(wire == vec![(topic_id, 0, dir_uuid)]);
+        assert2::assert!(updates == vec![("t".to_string(), 0, dir_uuid)]);
 
         // Simulate a successful send: insert the tracker update.
         for (topic, partition, uuid) in updates {
@@ -1371,7 +1370,7 @@ mod tests {
             &img,
             &reported_dirs,
         );
-        assert!(wire2.is_empty());
-        assert!(updates2.is_empty());
+        assert2::assert!(wire2.is_empty());
+        assert2::assert!(updates2.is_empty());
     }
 }

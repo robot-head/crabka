@@ -5,7 +5,7 @@
 //! (using real PEM material from `crabka_security::ca`), calls
 //! `run_renewal_check`, and asserts on the observed request log.
 
-use assert2::{assert, check};
+use assert2::check;
 #[path = "shared/mod.rs"]
 mod shared;
 
@@ -249,7 +249,7 @@ async fn cronjob_reissues_aging_broker_leafs() {
         .expect("renewal check succeeds");
 
     let observed = state.take_observed();
-    let methods_uris: Vec<(Method, String)> = observed
+    let _methods_uris: Vec<(Method, String)> = observed
         .iter()
         .map(|r| (r.method().clone(), r.uri().to_string()))
         .collect();
@@ -261,10 +261,7 @@ async fn cronjob_reissues_aging_broker_leafs() {
                 .to_string()
                 .contains(&format!("/secrets/{cluster}-kafka-brokers"))
     });
-    assert!(
-        keystore_patch.is_some(),
-        "expected PATCH to kafka-brokers keystore; requests: {methods_uris:?}",
-    );
+    assert2::assert!(keystore_patch.is_some());
 
     // PATCH body must contain "0.crt" key and it must differ from the seeded cert.
     let patch_body: serde_json::Value =
@@ -274,10 +271,7 @@ async fn cronjob_reissues_aging_broker_leafs() {
         .expect("data[0.crt] present in PATCH body");
     let b64 = base64::engine::general_purpose::STANDARD;
     let old_crt_b64 = b64.encode(old_leaf.cert_pem.as_bytes());
-    assert!(
-        new_crt_b64 != old_crt_b64.as_str(),
-        "renewed cert must differ from the pre-seeded cert"
-    );
+    assert2::assert!(new_crt_b64 != old_crt_b64.as_str());
 
     // Must have emitted a BrokerCertRenewed event.
     let event_post = observed.iter().find(|r| {
@@ -286,22 +280,11 @@ async fn cronjob_reissues_aging_broker_leafs() {
                 .to_string()
                 .contains(&format!("/namespaces/{ns}/events"))
     });
-    assert!(
-        event_post.is_some(),
-        "expected POST to /events; requests: {methods_uris:?}",
-    );
+    assert2::assert!(event_post.is_some());
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
-    assert_eq!(
-        event_body["reason"].as_str(),
-        Some("BrokerCertRenewed"),
-        "body = {event_body}"
-    );
-    assert_eq!(
-        event_body["type"].as_str(),
-        Some("Normal"),
-        "body = {event_body}"
-    );
+    assert2::assert!(event_body["reason"].as_str() == Some("BrokerCertRenewed"));
+    assert2::assert!(event_body["type"].as_str() == Some("Normal"));
 
     check!(state.remaining_rules() == 0, "all rules consumed");
 }
@@ -423,7 +406,7 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
         .expect("renewal check succeeds");
 
     let observed = state.take_observed();
-    let methods_uris: Vec<(Method, String)> = observed
+    let _methods_uris: Vec<(Method, String)> = observed
         .iter()
         .map(|r| (r.method().clone(), r.uri().to_string()))
         .collect();
@@ -437,10 +420,7 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
                 .contains(&format!("{cluster}-cluster-ca"))
                 && !r.uri().to_string().contains("/status"))
     });
-    assert!(
-        ca_secret_patch.is_none(),
-        "cluster-ca Secret must NOT be patched (no rotation); requests: {methods_uris:?}",
-    );
+    assert2::assert!(ca_secret_patch.is_none());
 
     // Must have emitted a Normal CaRenewalScheduled event.
     let event_post = observed.iter().find(|r| {
@@ -449,22 +429,11 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
                 .to_string()
                 .contains(&format!("/namespaces/{ns}/events"))
     });
-    assert!(
-        event_post.is_some(),
-        "expected POST to /events; requests: {methods_uris:?}",
-    );
+    assert2::assert!(event_post.is_some());
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
-    assert_eq!(
-        event_body["reason"].as_str(),
-        Some("CaRenewalScheduled"),
-        "body = {event_body}"
-    );
-    assert_eq!(
-        event_body["type"].as_str(),
-        Some("Normal"),
-        "body = {event_body}"
-    );
+    assert2::assert!(event_body["reason"].as_str() == Some("CaRenewalScheduled"));
+    assert2::assert!(event_body["type"].as_str() == Some("Normal"));
 
     // Must have PATCHed the Kafka CR metadata with the ca-renew-after annotation
     // (the nudge), NOT the status with CaRotationRequired.
@@ -473,18 +442,12 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
             && r.uri().to_string().contains(&format!("/kafkas/{cluster}"))
             && !r.uri().to_string().contains("/status")
     });
-    assert!(
-        meta_patch.is_some(),
-        "expected metadata PATCH to /kafkas/{cluster}; requests: {methods_uris:?}",
-    );
+    assert2::assert!(meta_patch.is_some());
     let meta_body: serde_json::Value =
         serde_json::from_slice(meta_patch.unwrap().body()).expect("metadata PATCH body is JSON");
-    assert!(
-        meta_body["metadata"]["annotations"]["crabka.io/ca-renew-after"].is_string(),
-        "metadata PATCH must stamp crabka.io/ca-renew-after; body = {meta_body}",
-    );
+    assert2::assert!(meta_body["metadata"]["annotations"]["crabka.io/ca-renew-after"].is_string());
 
-    assert!(state.remaining_rules() == 0, "all rules consumed");
+    assert2::assert!(state.remaining_rules() == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +580,7 @@ async fn cronjob_byo_ca_expiring_emits_byo_event() {
         .expect("renewal check succeeds");
 
     let observed = state.take_observed();
-    let methods_uris: Vec<(Method, String)> = observed
+    let _methods_uris: Vec<(Method, String)> = observed
         .iter()
         .map(|r| (r.method().clone(), r.uri().to_string()))
         .collect();
@@ -629,10 +592,7 @@ async fn cronjob_byo_ca_expiring_emits_byo_event() {
                 .to_string()
                 .contains(&format!("{cluster}-cluster-ca"))
     });
-    assert!(
-        ca_patch.is_none(),
-        "BYO CA must NOT be patched; requests: {methods_uris:?}",
-    );
+    assert2::assert!(ca_patch.is_none());
 
     // Must have emitted a ByoCaExpiringSoon Warning event.
     let event_post = observed.iter().find(|r| {
@@ -641,22 +601,11 @@ async fn cronjob_byo_ca_expiring_emits_byo_event() {
                 .to_string()
                 .contains(&format!("/namespaces/{ns}/events"))
     });
-    assert!(
-        event_post.is_some(),
-        "expected POST to /events; requests: {methods_uris:?}",
-    );
+    assert2::assert!(event_post.is_some());
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
-    assert_eq!(
-        event_body["reason"].as_str(),
-        Some("ByoCaExpiringSoon"),
-        "body = {event_body}"
-    );
-    assert_eq!(
-        event_body["type"].as_str(),
-        Some("Warning"),
-        "body = {event_body}"
-    );
+    assert2::assert!(event_body["reason"].as_str() == Some("ByoCaExpiringSoon"));
+    assert2::assert!(event_body["type"].as_str() == Some("Warning"));
 
     // Must NOT have PATCHed Kafka status (no CaRotationRequired condition for BYO).
     let status_patch = observed.iter().find(|r| {
@@ -665,10 +614,7 @@ async fn cronjob_byo_ca_expiring_emits_byo_event() {
                 .to_string()
                 .contains(&format!("/kafkas/{cluster}/status"))
     });
-    assert!(
-        status_patch.is_none(),
-        "BYO CA must NOT set CaRotationRequired status condition; requests: {methods_uris:?}",
-    );
+    assert2::assert!(status_patch.is_none());
 
-    assert!(state.remaining_rules() == 0, "all rules consumed");
+    assert2::assert!(state.remaining_rules() == 0);
 }

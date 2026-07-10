@@ -183,7 +183,7 @@ async fn static_mixed_jvm_crabka_quorum() {
         ])
         .status()
         .expect("docker run JVM controller");
-    assert!(status.success(), "docker run failed");
+    assert2::assert!(status.success());
     eprintln!("JVM controller (id 3) container started");
 
     // ── observe for ~40s ────────────────────────────────────────────────────
@@ -416,7 +416,7 @@ async fn contested_election_crabka_counts_jvm_prevote() {
         ])
         .status()
         .expect("docker run JVM controller");
-    assert!(status.success(), "docker run failed");
+    assert2::assert!(status.success());
 
     // ── Phase 1: a Crabka node leads and the JVM joins as a follower. ───────
     let deadline = std::time::Instant::now() + Duration::from_secs(50);
@@ -596,15 +596,6 @@ async fn contested_election_crabka_counts_jvm_prevote() {
     docker_rm(CONTESTED_CONTAINER);
     survivor.shutdown().await;
 
-    assert!(
-        recovered,
-        "surviving Crabka voter {survivor_id} did not win a new election at a \
-         higher epoch after the leader died — the JVM's pre-vote grant was not \
-         counted (KIP-996 interop regression). survivor view: leader={:?} epoch={} (was {epoch0})",
-        final_qs.current_leader, final_qs.current_term
-    );
-    assert!(
-        !jvm_fatal_fault,
-        "JVM controller fatal-faulted during the contested election; see /tmp/jvm_contested.log"
-    );
+    assert2::assert!(recovered);
+    assert2::assert!(!jvm_fatal_fault);
 }

@@ -105,13 +105,12 @@ impl Default for LogConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn defaults_match_kafka_4x() {
-        assert!(
+        assert2::assert!(
             LogConfig::default()
                 == LogConfig {
                     segment_bytes: 1 << 30,
@@ -134,24 +133,26 @@ mod tests {
     #[test]
     fn default_cleanup_policy_is_delete() {
         let c = LogConfig::default();
-        assert!(c.cleanup_policy == CleanupPolicy::Delete);
+        assert2::assert!(c.cleanup_policy == CleanupPolicy::Delete);
     }
 
     #[test]
     fn default_compression_is_producer_passthrough() {
         let c = LogConfig::default();
-        assert!(c.compression_type == None);
+        assert2::assert!(c.compression_type == None);
     }
 
     #[test]
     fn default_local_retention_is_none() {
         let c = LogConfig::default();
-        assert_eq!(c.local_retention_ms, None);
-        assert_eq!(c.local_retention_bytes, None);
+        assert2::assert!(c.local_retention_ms == None);
+        assert2::assert!(c.local_retention_bytes == None);
     }
 
     #[test]
     fn default_delete_retention_is_24h() {
-        assert!(LogConfig::default().delete_retention_ms == std::time::Duration::from_hours(24));
+        assert2::assert!(
+            LogConfig::default().delete_retention_ms == std::time::Duration::from_hours(24)
+        );
     }
 }

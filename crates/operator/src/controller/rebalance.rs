@@ -663,7 +663,6 @@ async fn remove_command_annotation(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::{
@@ -700,7 +699,7 @@ mod tests {
 
     #[test]
     fn decide_initial_and_approval_cases() {
-        for (name, state, command, has_session, expected) in [
+        for (_name, state, command, has_session, expected) in [
             (
                 "new creates proposal",
                 RebalanceState::New,
@@ -737,13 +736,13 @@ mod tests {
                 RebalanceAction::Idle,
             ),
         ] {
-            assert_eq!(decide(state, command, has_session), expected, "case {name}");
+            assert2::assert!(decide(state, command, has_session) == expected);
         }
     }
 
     #[test]
     fn decide_refresh_stop_and_poll_cases() {
-        for (name, state, command, has_session, expected) in [
+        for (_name, state, command, has_session, expected) in [
             (
                 "refresh proposal-ready",
                 RebalanceState::ProposalReady,
@@ -808,7 +807,7 @@ mod tests {
                 RebalanceAction::CreateProposal,
             ),
         ] {
-            assert_eq!(decide(state, command, has_session), expected, "case {name}");
+            assert2::assert!(decide(state, command, has_session) == expected);
         }
     }
 
@@ -817,7 +816,7 @@ mod tests {
     #[test]
     fn create_computed_becomes_proposal_ready() {
         let o = Outcome::from_create(&proposal("p1", ProposalStatus::Computed));
-        assert!(
+        assert2::assert!(
             o == Outcome {
                 state: RebalanceState::ProposalReady,
                 reason: "ProposalReady".into(),
@@ -842,7 +841,7 @@ mod tests {
     fn poll_executing_stays_rebalancing_with_short_requeue() {
         let o = Outcome::from_execute_or_poll(&proposal("p", ProposalStatus::Executing));
         // `new_session: None` — poll must not rewrite the session.
-        assert!(
+        assert2::assert!(
             o == Outcome {
                 state: RebalanceState::Rebalancing,
                 reason: "Rebalancing".into(),
@@ -858,7 +857,7 @@ mod tests {
     #[test]
     fn poll_completed_becomes_ready() {
         let o = Outcome::from_execute_or_poll(&proposal("p", ProposalStatus::Completed));
-        assert!(
+        assert2::assert!(
             o == Outcome {
                 state: RebalanceState::Ready,
                 reason: "Ready".into(),
@@ -876,7 +875,7 @@ mod tests {
         let mut p = proposal("p", ProposalStatus::Failed);
         p.failure_reason = Some("broker 2 down".into());
         let o = Outcome::from_execute_or_poll(&p);
-        assert!(
+        assert2::assert!(
             o == Outcome {
                 state: RebalanceState::NotReady,
                 reason: "RebalanceFailed".into(),
@@ -892,7 +891,7 @@ mod tests {
     #[test]
     fn cancel_becomes_stopped() {
         let o = Outcome::from_cancel(&proposal("p", ProposalStatus::Cancelled));
-        assert!(
+        assert2::assert!(
             o == Outcome {
                 state: RebalanceState::Stopped,
                 reason: "Stopped".into(),
@@ -909,7 +908,7 @@ mod tests {
 
     #[test]
     fn current_state_cases() {
-        for (name, status, expected) in [
+        for (_name, status, expected) in [
             ("missing status", None, RebalanceState::New),
             (
                 "active condition",
@@ -942,7 +941,7 @@ mod tests {
         ] {
             let mut kafka = cr("x");
             kafka.status = status;
-            assert_eq!(current_state(&kafka), expected, "case {name}");
+            assert2::assert!(current_state(&kafka) == expected);
         }
     }
 
@@ -950,7 +949,7 @@ mod tests {
 
     #[test]
     fn read_command_cases() {
-        for (name, value, expected) in [
+        for (_name, value, expected) in [
             ("approve", "approve", Some(RebalanceCommand::Approve)),
             ("unknown", "yolo", None),
         ] {
@@ -960,7 +959,7 @@ mod tests {
                     .into_iter()
                     .collect(),
             );
-            assert_eq!(read_command(&kafka), expected, "case {name}");
+            assert2::assert!(read_command(&kafka) == expected);
         }
     }
 
@@ -977,7 +976,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        for (name, kafka, expected) in [
+        for (_name, kafka, expected) in [
             (
                 "explicit",
                 explicit,
@@ -990,11 +989,7 @@ mod tests {
             ),
             ("missing", cr("x"), None),
         ] {
-            assert_eq!(
-                resolve_endpoint(&kafka, "kafka").unwrap().as_deref(),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(resolve_endpoint(&kafka, "kafka").unwrap().as_deref() == expected);
         }
     }
 
@@ -1015,13 +1010,13 @@ mod tests {
             "http://demo-rebalancer.kafka.svc.cluster.local",
             "HTTP://Demo-Rebalancer.Kafka.SVC.Cluster.Local:9300",
         ] {
-            assert!(validate_endpoint(ep).is_ok(), "should accept {ep:?}");
+            assert2::assert!(validate_endpoint(ep).is_ok());
         }
     }
 
     #[test]
     fn endpoint_rejection_cases() {
-        for (name, endpoint, message_fragments) in [
+        for (_name, endpoint, message_fragments) in [
             (
                 "cloud metadata IP",
                 "http://169.254.169.254/latest/meta-data/",
@@ -1051,12 +1046,10 @@ mod tests {
             ),
         ] {
             let err = resolve_with_endpoint(endpoint).unwrap_err();
-            assert!(
+            assert2::assert!(
                 message_fragments
                     .iter()
-                    .any(|fragment| err.message.contains(fragment)),
-                "case {name}: {}",
-                err.message
+                    .any(|fragment| err.message.contains(fragment))
             );
         }
     }

@@ -384,7 +384,7 @@ mod tests {
 
         // Inner is empty; fetch must return the cached entry.
         let got = s.fetch(key, 0, 100).await;
-        assert_eq!(got, vec![(sk, val)]);
+        assert2::assert!(got == vec![(sk, val)]);
     }
 
     #[tokio::test]
@@ -396,12 +396,12 @@ mod tests {
         s.put(sk.clone(), val.clone(), ctx());
 
         let flushed = s.flush().await;
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(&flushed[0].0, &sk);
-        assert_eq!(&flushed[0].1.value, &Some(val.clone()));
+        assert2::assert!(flushed.len() == 1);
+        assert2::assert!(&flushed[0].0 == &sk);
+        assert2::assert!(&flushed[0].1.value == &Some(val.clone()));
 
         // Inner now contains the written-through entry.
-        assert_eq!(inner_get(&s, &sk).await, Some(val));
+        assert2::assert!(inner_get(&s, &sk).await == Some(val));
     }
 
     #[tokio::test]
@@ -414,14 +414,10 @@ mod tests {
         s.delete(sk.clone(), ctx());
 
         let flushed = s.flush().await;
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].1.value.as_ref(), None);
+        assert2::assert!(flushed.len() == 1);
+        assert2::assert!(flushed[0].1.value.as_ref() == None);
 
-        assert_eq!(
-            inner_get(&s, &sk).await,
-            None,
-            "tombstone deleted the inner value"
-        );
+        assert2::assert!(inner_get(&s, &sk).await == None);
     }
 
     #[tokio::test]
@@ -445,9 +441,8 @@ mod tests {
 
         // Single-key fetch over [0, 20]: merged, cache-wins, window-key order.
         let got = s.fetch(key, 0, 20).await;
-        assert_eq!(
-            got,
-            vec![
+        assert2::assert!(
+            got == vec![
                 (win_lo.clone(), cache_lo.clone()),   // cache wins over inner-lo
                 (win_mid.clone(), cache_mid.clone()), // cache-only middle window
                 (win_hi.clone(), wrapped(2, b"inner-hi")), // inner-only last window
@@ -456,13 +451,13 @@ mod tests {
 
         // fetch_all over the same start range returns the same merged set.
         let got_all = s.fetch_all(0, 20).await;
-        assert_eq!(
-            got_all,
-            vec![
-                (win_lo, cache_lo),
-                (win_mid, cache_mid),
-                (win_hi, wrapped(2, b"inner-hi")),
-            ]
+        assert2::assert!(
+            got_all
+                == vec![
+                    (win_lo, cache_lo),
+                    (win_mid, cache_mid),
+                    (win_hi, wrapped(2, b"inner-hi")),
+                ]
         );
     }
 
@@ -475,7 +470,7 @@ mod tests {
         s.delete(sk.clone(), ctx());
 
         let got = s.fetch(key, 0, 100).await;
-        assert!(got.is_empty(), "cache tombstone hides the inner value");
+        assert2::assert!(got.is_empty());
     }
 
     #[tokio::test]
@@ -489,14 +484,11 @@ mod tests {
 
         // Range [0, 10] excludes window 50.
         let got = s.fetch_all(0, 10).await;
-        assert_eq!(got, vec![(a0.clone(), wrapped(1, b"a0"))]);
+        assert2::assert!(got == vec![(a0.clone(), wrapped(1, b"a0"))]);
 
         // Range [0, 50] includes both, in windowed-key order (a@0 < b@50).
         let got_both = s.fetch_all(0, 50).await;
-        assert_eq!(
-            got_both,
-            vec![(a0, wrapped(1, b"a0")), (b50, wrapped(2, b"b50"))]
-        );
+        assert2::assert!(got_both == vec![(a0, wrapped(1, b"a0")), (b50, wrapped(2, b"b50"))]);
     }
 
     #[tokio::test]
@@ -511,12 +503,12 @@ mod tests {
 
         let drained = s.flush_with_old().await;
         let (k, old, new, _ctx) = &drained[0];
-        assert_eq!(drained.len(), 1);
-        assert_eq!(k, &sk);
-        assert_eq!(old.as_ref(), Some(&wrapped(1, b"old")));
-        assert_eq!(new.as_ref(), Some(&wrapped(2, b"new")));
+        assert2::assert!(drained.len() == 1);
+        assert2::assert!(k == &sk);
+        assert2::assert!(old.as_ref() == Some(&wrapped(1, b"old")));
+        assert2::assert!(new.as_ref() == Some(&wrapped(2, b"new")));
         // Write-through landed in the inner store.
-        assert_eq!(inner_get(&s, &sk).await, Some(wrapped(2, b"new")));
+        assert2::assert!(inner_get(&s, &sk).await == Some(wrapped(2, b"new")));
     }
 
     /// `flush_with_old` on a tombstone returns `new = None` and deletes the inner
@@ -531,11 +523,11 @@ mod tests {
 
         let drained = s.flush_with_old().await;
         let (k, old, new, _ctx) = &drained[0];
-        assert_eq!(drained.len(), 1);
-        assert_eq!(k, &sk);
-        assert_eq!(old.as_ref(), Some(&wrapped(1, b"old")));
-        assert_eq!(new.as_ref(), None);
-        assert_eq!(inner_get(&s, &sk).await, None); // deleted through
+        assert2::assert!(drained.len() == 1);
+        assert2::assert!(k == &sk);
+        assert2::assert!(old.as_ref() == Some(&wrapped(1, b"old")));
+        assert2::assert!(new.as_ref() == None);
+        assert2::assert!(inner_get(&s, &sk).await == None); // deleted through
     }
 
     /// `range` overlays the cache on the inner store over a raw windowed-key
@@ -558,7 +550,7 @@ mod tests {
         let lo = store_key(key, 0, 0);
         let hi = store_key(key, i64::MAX, 0);
         let r = s.range(&lo, &hi).await;
-        assert_eq!(r, vec![(k0, wrapped(1, b"i0")), (k1, wrapped(9, b"c1"))]);
+        assert2::assert!(r == vec![(k0, wrapped(1, b"i0")), (k1, wrapped(9, b"c1"))]);
     }
 
     /// `scan_all` overlays the full cache on the full inner store: cache wins on
@@ -581,9 +573,8 @@ mod tests {
         s.delete(k3.clone(), ctx()); // tombstone hides inner i3
 
         let r = s.scan_all().await;
-        assert_eq!(
-            r,
-            vec![
+        assert2::assert!(
+            r == vec![
                 (k0, wrapped(1, b"i0")),
                 (k1, wrapped(9, b"c1")),
                 (k2, wrapped(9, b"c2")),
@@ -598,12 +589,12 @@ mod tests {
         let sk = store_key(b"a", 0, 0);
 
         s.put_inner(sk.clone(), wrapped(1, b"v")).await;
-        assert_eq!(s.get(&sk).await, Some(wrapped(1, b"v")));
-        assert!(s.flush().await.is_empty());
+        assert2::assert!(s.get(&sk).await == Some(wrapped(1, b"v")));
+        assert2::assert!(s.flush().await.is_empty());
 
         s.delete_inner(&sk).await;
-        assert_eq!(s.get(&sk).await, None);
-        assert!(s.flush().await.is_empty());
+        assert2::assert!(s.get(&sk).await == None);
+        assert2::assert!(s.flush().await.is_empty());
     }
 
     /// `clear` empties both the cache layer and the inner store.
@@ -616,8 +607,8 @@ mod tests {
 
         s.clear().await;
 
-        assert!(s.scan_all().await.is_empty());
-        assert!(s.flush().await.is_empty());
-        assert_eq!(s.get(&k0).await, None);
+        assert2::assert!(s.scan_all().await.is_empty());
+        assert2::assert!(s.flush().await.is_empty());
+        assert2::assert!(s.get(&k0).await == None);
     }
 }

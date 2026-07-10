@@ -353,7 +353,7 @@ mod tests {
         store.put(sk, b(b"v"), ctx()).await;
 
         let found = store.find_sessions(b"k", 0, 100).await;
-        assert_eq!(found, vec![(0, 10, b(b"v"))]);
+        assert2::assert!(found == vec![(0, 10, b(b"v"))]);
     }
 
     /// `flush` returns the drained dirty entry and writes it through to the inner
@@ -366,14 +366,14 @@ mod tests {
         store.put(sk.clone(), b(b"v"), ctx()).await;
 
         let flushed = store.flush().await;
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(&flushed[0].0, &sk);
-        assert_eq!(&flushed[0].1.value, &Some(b(b"v")));
+        assert2::assert!(flushed.len() == 1);
+        assert2::assert!(&flushed[0].0 == &sk);
+        assert2::assert!(&flushed[0].1.value == &Some(b(b"v")));
 
         // Inner now has the write-through value; the cache is clean, so this
         // exercises the inner-store read path of the merge.
         let found = store.find_sessions(b"k", 0, 100).await;
-        assert_eq!(found, vec![(0, 10, b(b"v"))]);
+        assert2::assert!(found == vec![(0, 10, b(b"v"))]);
     }
 
     /// `find_sessions` merges cache + inner over the session-key range: results
@@ -396,13 +396,13 @@ mod tests {
         store.put(session_key(b"k", 0, 20), b(b"c2"), ctx()).await;
 
         let found = store.find_sessions(b"k", 0, 100).await;
-        assert_eq!(
-            found,
-            vec![
-                (0, 10, b(b"c1")), // cache wins over inner's [0,10] -> i1
-                (0, 20, b(b"c2")), // cache-only
-                (0, 30, b(b"i2")), // inner-only; end asc puts it last
-            ]
+        assert2::assert!(
+            found
+                == vec![
+                    (0, 10, b(b"c1")), // cache wins over inner's [0,10] -> i1
+                    (0, 20, b(b"c2")), // cache-only
+                    (0, 30, b(b"i2")), // inner-only; end asc puts it last
+                ]
         );
     }
 
@@ -414,13 +414,10 @@ mod tests {
         let store = CachingSessionStore::new(cache(), Box::new(inner));
 
         // Sanity: visible before the remove.
-        assert_eq!(
-            store.find_sessions(b"k", 0, 100).await,
-            vec![(0, 10, b(b"i1"))]
-        );
+        assert2::assert!(store.find_sessions(b"k", 0, 100).await == vec![(0, 10, b(b"i1"))]);
 
         store.remove(session_key(b"k", 0, 10), ctx()).await;
-        assert!(store.find_sessions(b"k", 0, 100).await.is_empty());
+        assert2::assert!(store.find_sessions(b"k", 0, 100).await.is_empty());
     }
 
     /// Sessions belonging to a different key sharing a byte prefix are excluded.
@@ -431,7 +428,7 @@ mod tests {
         store.put(session_key(b"kk", 0, 10), b(b"b"), ctx()).await; // "k" prefix
 
         let found = store.find_sessions(b"k", 0, 100).await;
-        assert_eq!(found, vec![(0, 10, b(b"a"))]);
+        assert2::assert!(found == vec![(0, 10, b(b"a"))]);
     }
 
     /// `get` is cache-first: a staged value wins, and a miss falls through to the
@@ -444,14 +441,14 @@ mod tests {
         let store = CachingSessionStore::new(cache(), Box::new(inner));
 
         // Cache miss falls through to inner.
-        assert_eq!(store.get(&sk).await, Some(b(b"inner")));
+        assert2::assert!(store.get(&sk).await == Some(b(b"inner")));
 
         // Staged value wins over inner.
         store.put(sk.clone(), b(b"cached"), ctx()).await;
-        assert_eq!(store.get(&sk).await, Some(b(b"cached")));
+        assert2::assert!(store.get(&sk).await == Some(b(b"cached")));
 
         // Genuinely-absent key returns None.
-        assert_eq!(store.get(&session_key(b"k", 0, 99)).await, None);
+        assert2::assert!(store.get(&session_key(b"k", 0, 99)).await == None);
     }
 
     /// `range` overlays the cache on the inner store over a raw key range: cache
@@ -473,7 +470,7 @@ mod tests {
         let lo = session_key(b"k", 0, 0);
         let hi = session_key(b"k", i64::MAX, i64::MAX);
         let r = store.range(&lo, &hi).await;
-        assert_eq!(r, vec![(k0, b(b"i0")), (k1, b(b"c1"))]);
+        assert2::assert!(r == vec![(k0, b(b"i0")), (k1, b(b"c1"))]);
     }
 
     /// `scan_all` overlays the full cache on the full inner store: cache wins on
@@ -496,7 +493,7 @@ mod tests {
         store.remove(k3.clone(), ctx()).await; // tombstone hides inner i3
 
         let r = store.scan_all().await;
-        assert_eq!(r, vec![(k0, b(b"i0")), (k1, b(b"c1")), (k2, b(b"c2"))]);
+        assert2::assert!(r == vec![(k0, b(b"i0")), (k1, b(b"c1")), (k2, b(b"c2"))]);
     }
 
     /// `put_inner` / `delete_inner` bypass the cache (no dirty entry staged).
@@ -506,12 +503,12 @@ mod tests {
         let sk = session_key(b"k", 0, 10);
 
         store.put_inner(sk.clone(), b(b"v")).await;
-        assert_eq!(store.get(&sk).await, Some(b(b"v")));
-        assert!(store.flush().await.is_empty());
+        assert2::assert!(store.get(&sk).await == Some(b(b"v")));
+        assert2::assert!(store.flush().await.is_empty());
 
         store.delete_inner(&sk).await;
-        assert_eq!(store.get(&sk).await, None);
-        assert!(store.flush().await.is_empty());
+        assert2::assert!(store.get(&sk).await == None);
+        assert2::assert!(store.flush().await.is_empty());
     }
 
     /// `clear` empties both the cache layer and the inner store.
@@ -543,11 +540,11 @@ mod tests {
 
         store.remove(sk.clone(), ctx()).await;
         let flushed = store.flush().await;
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].1.value.as_ref(), None);
+        assert2::assert!(flushed.len() == 1);
+        assert2::assert!(flushed[0].1.value.as_ref() == None);
 
         // Inner value deleted through.
-        assert_eq!(store.get(&sk).await, None);
+        assert2::assert!(store.get(&sk).await == None);
     }
 
     /// `flush_with_old` captures the inner OLD value before writing the staged new
@@ -563,14 +560,11 @@ mod tests {
 
         let drained = store.flush_with_old().await;
         let (k, old, new, _ctx) = &drained[0];
-        assert_eq!(drained.len(), 1);
-        assert_eq!(k, &sk);
-        assert_eq!(old.as_ref(), Some(&b(b"old")));
-        assert_eq!(new.as_ref(), Some(&b(b"new")));
+        assert2::assert!(drained.len() == 1);
+        assert2::assert!(k == &sk);
+        assert2::assert!(old.as_ref() == Some(&b(b"old")));
+        assert2::assert!(new.as_ref() == Some(&b(b"new")));
         // Write-through landed; the (now-clean) merge reads the new value.
-        assert_eq!(
-            store.find_sessions(b"k", 0, 100).await,
-            vec![(0, 10, b(b"new"))]
-        );
+        assert2::assert!(store.find_sessions(b"k", 0, 100).await == vec![(0, 10, b(b"new"))]);
     }
 }

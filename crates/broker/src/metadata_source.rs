@@ -302,7 +302,6 @@ mod tests {
         },
     };
 
-    use assert2::assert;
     use bytes::BytesMut;
     use crabka_metadata::{MetadataRecord, TopicRecord};
     use crabka_protocol::{
@@ -417,7 +416,7 @@ mod tests {
     }
 
     fn not_leader_none(result: &Result<(), RaftError>) {
-        assert!(matches!(
+        assert2::assert!(matches!(
             result,
             Err(RaftError::NotLeader {
                 current_leader: None
@@ -457,7 +456,7 @@ mod tests {
         // hinted voter and drop the fallbacks, leaving no peer to retry when the
         // hint is stale.
         let order = build_forward_order(&voters(), Some(crabka_audit::NodeId(2)));
-        assert!(
+        assert2::assert!(
             order
                 == vec![
                     (crabka_raft::NodeId(2), "h2:9093".to_string()),
@@ -472,7 +471,7 @@ mod tests {
         // No leader hint → fall back to trying every voter. A flipped predicate
         // (`== None`) would push nothing, so the forward could reach no peer.
         let order = build_forward_order(&voters(), None);
-        assert!(order == voters());
+        assert2::assert!(order == voters());
     }
 
     #[test]
@@ -480,7 +479,7 @@ mod tests {
         // Hint names a voter not in the set → no leader-first entry, but every
         // voter is still tried (hint 9 != each id).
         let order = build_forward_order(&voters(), Some(crabka_audit::NodeId(9)));
-        assert!(order == voters());
+        assert2::assert!(order == voters());
     }
 
     #[tokio::test]
@@ -494,7 +493,7 @@ mod tests {
         wait_for_controller_leader(&ctrl).await;
         let source: &dyn MetadataSource = &ctrl;
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             source.add_learner(NodeId(2), Node::default()).await,
             Err(RaftError::Unsupported(_))
         ));
@@ -503,7 +502,7 @@ mod tests {
             .await
             .expect("submit metadata");
         source.trigger_snapshot().await.expect("snapshot");
-        assert!(matches!(
+        assert2::assert!(matches!(
             source.read_snapshot_range(0, 1),
             SnapshotRange::Slice(_)
         ));
@@ -533,15 +532,15 @@ mod tests {
         });
         let source = ObserverSource::new(observer.clone(), writer.clone());
 
-        assert!(source.current_image().cluster_id() == cluster_id);
+        assert2::assert!(source.current_image().cluster_id() == cluster_id);
         source
             .submit_change(vec![topic_record("forwarded-topic")])
             .await
             .expect("submit via writer");
         {
             let calls = writer.calls.lock().unwrap();
-            assert!(calls.len() == 1);
-            assert!(
+            assert2::assert!(calls.len() == 1);
+            assert2::assert!(
                 matches!(&calls[0][0], MetadataRecord::V1Topic(t) if t.name == "forwarded-topic")
             );
         }
@@ -550,7 +549,7 @@ mod tests {
         not_leader_none(&source.add_learner(NodeId(2), Node::default()).await);
         not_leader_none(&source.trigger_snapshot().await);
         source.cancel().await;
-        assert!(observer.task_drained_for_test().await);
+        assert2::assert!(observer.task_drained_for_test().await);
     }
 
     #[tokio::test]
@@ -577,8 +576,8 @@ mod tests {
             .await
             .expect("applied");
 
-        assert!(submit_requests.load(Ordering::SeqCst) == 1);
-        assert!(
+        assert2::assert!(submit_requests.load(Ordering::SeqCst) == 1);
+        assert2::assert!(
             client_ids
                 .lock()
                 .unwrap()
@@ -608,7 +607,7 @@ mod tests {
             .await
             .expect_err("metadata error");
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))
         ));
@@ -635,7 +634,7 @@ mod tests {
             .await
             .expect_err("not leader");
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             RaftError::NotLeader {
                 current_leader: Some(NodeId(7))
@@ -664,7 +663,7 @@ mod tests {
             .await
             .expect_err("not leader");
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             RaftError::NotLeader {
                 current_leader: None

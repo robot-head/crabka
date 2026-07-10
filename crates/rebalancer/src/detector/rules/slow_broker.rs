@@ -80,8 +80,6 @@ impl Rule for SlowBroker {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::assert;
-
     use super::*;
     use crate::{
         capacity::BrokerCapacities,
@@ -181,7 +179,7 @@ mod tests {
 
         let cores = SlowBroker::per_broker_cores(&ctx);
 
-        assert!((cores[&1] - 2.0).abs() < 1e-9);
+        assert2::assert!((cores[&1] - 2.0).abs() < 1e-9);
     }
 
     #[test]
@@ -207,7 +205,7 @@ mod tests {
             now_ms: 1000,
             cfg: &cfg,
         };
-        assert!(SlowBroker.evaluate(&ctx).is_empty());
+        assert2::assert!(SlowBroker.evaluate(&ctx).is_empty());
     }
 
     #[test]
@@ -235,11 +233,11 @@ mod tests {
             cfg: &cfg,
         };
         let hits = SlowBroker.evaluate(&ctx);
-        assert_eq!(
+        assert2::assert!(
             hits.iter()
                 .map(|hit| (&hit.key, hit.severity))
-                .collect::<Vec<_>>(),
-            vec![(&AnomalyKey::Broker(1), AnomalySeverity::Warning)]
+                .collect::<Vec<_>>()
+                == vec![(&AnomalyKey::Broker(1), AnomalySeverity::Warning)]
         );
     }
 
@@ -267,15 +265,15 @@ mod tests {
 
         let hits = SlowBroker.evaluate(&ctx);
 
-        assert_eq!(
+        assert2::assert!(
             hits.iter()
                 .map(|hit| (
                     &hit.key,
                     hit.details.contains("median 4.00"),
                     hit.details.contains("threshold 6.00"),
                 ))
-                .collect::<Vec<_>>(),
-            vec![(&AnomalyKey::Broker(4), true, true)]
+                .collect::<Vec<_>>()
+                == vec![(&AnomalyKey::Broker(4), true, true)]
         );
     }
 
@@ -301,7 +299,7 @@ mod tests {
             cfg: &cfg,
         };
 
-        assert!(SlowBroker.evaluate(&ctx).is_empty());
+        assert2::assert!(SlowBroker.evaluate(&ctx).is_empty());
     }
 
     #[test]
@@ -325,7 +323,7 @@ mod tests {
             cfg: &cfg,
         };
 
-        assert!(SlowBroker.evaluate(&ctx).is_empty());
+        assert2::assert!(SlowBroker.evaluate(&ctx).is_empty());
     }
 
     #[test]
@@ -348,6 +346,6 @@ mod tests {
             now_ms: 1000,
             cfg: &cfg,
         };
-        assert!(SlowBroker.evaluate(&ctx).is_empty());
+        assert2::assert!(SlowBroker.evaluate(&ctx).is_empty());
     }
 }

@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn envelope_renders_each_value_shape() {
-        for (name, value, expected_value) in [
+        for (_name, value, expected_value) in [
             (
                 "raw-json",
                 Some(br#"{"type":"order","n":7}"#.as_slice()),
@@ -525,14 +525,14 @@ mod tests {
                 "key": B64STD.encode(b"k1"),
                 "value": expected_value,
             });
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 
     #[test]
     fn filter_cases() {
         let q = parse_json_path("$.deliver").expect("compile");
-        for (name, value, expected) in [
+        for (_name, value, expected) in [
             ("truthy_path", Some(br#"{"deliver":true}"#.as_slice()), true),
             (
                 "false_path",
@@ -544,7 +544,7 @@ mod tests {
             ("empty_value", None, false),
         ] {
             let rec = rec_with_value(value);
-            assert_eq!(passes_filter(&q, &rec), expected, "case {name}");
+            assert2::assert!(passes_filter(&q, &rec) == expected);
         }
     }
 
@@ -552,18 +552,18 @@ mod tests {
     fn backoff_grows_and_caps_at_max() {
         // attempt 1: exp = min(100, 1000) = 100, range [50, 100].
         let d1 = backoff_with_jitter(1, 100, 1000);
-        assert!(d1.as_millis() >= 50 && d1.as_millis() <= 100, "{d1:?}");
+        assert2::assert!(d1.as_millis() >= 50 && d1.as_millis() <= 100);
         // attempt 10 saturates the cap: exp = min(100 * 2^9, 1000) = 1000,
         // range [500, 1000]; must not panic on the large shift.
         let d10 = backoff_with_jitter(10, 100, 1000);
-        assert!(d10.as_millis() >= 500 && d10.as_millis() <= 1000, "{d10:?}");
+        assert2::assert!(d10.as_millis() >= 500 && d10.as_millis() <= 1000);
     }
 
     #[test]
     fn backoff_does_not_overflow_on_high_attempt() {
         // 2^(u32::MAX - 1) overflows a u64 shift; saturating_pow must clamp.
         let d = backoff_with_jitter(u32::MAX, 500, 30_000);
-        assert!(d.as_millis() >= 15_000 && d.as_millis() <= 30_000, "{d:?}");
+        assert2::assert!(d.as_millis() >= 15_000 && d.as_millis() <= 30_000);
     }
 
     // -----------------------------------------------------------------------
@@ -620,11 +620,11 @@ mod tests {
             ),
         ];
 
-        for (name, codec, decode_to_json, value, expected) in cases {
+        for (_name, codec, decode_to_json, value, expected) in cases {
             let sub = sub_with_decode(decode_to_json);
             let rec = rec_with_value(value);
             let actual = decoded_body(codec.as_ref(), &sub, &rec).await;
-            assert_eq!(actual, expected, "decode-to-JSON case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 }

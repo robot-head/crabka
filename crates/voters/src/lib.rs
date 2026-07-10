@@ -108,7 +108,7 @@ impl VoterSet {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -130,21 +130,17 @@ mod tests {
         let base = VoterSet::from_voters([sample(NodeId(1))]);
         let added = base.with_voter(sample(NodeId(2)));
         let removed = added.without_voter(NodeId(1));
-        assert_eq!(base.ids().into_iter().collect::<Vec<_>>(), vec![NodeId(1)]);
-        assert_eq!(
-            added.ids().into_iter().collect::<Vec<_>>(),
-            vec![NodeId(1), NodeId(2)]
-        );
-        assert_eq!(
-            removed.ids().into_iter().collect::<Vec<_>>(),
-            vec![NodeId(2)]
-        );
+        assert2::assert!(base.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(1)]);
+        assert2::assert!(added.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(1), NodeId(2)]);
+        assert2::assert!(removed.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(2)]);
     }
 
     #[test]
     fn ids_are_sorted() {
         let set = VoterSet::from_voters([sample(NodeId(3)), sample(NodeId(1)), sample(NodeId(2))]);
-        assert!(set.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(1), NodeId(2), NodeId(3)]);
+        assert2::assert!(
+            set.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(1), NodeId(2), NodeId(3)]
+        );
     }
 
     #[test]

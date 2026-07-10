@@ -315,7 +315,6 @@ fn proto_uuid_to_opt(u: ProtoUuid) -> Option<Uuid> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::assert;
     use crabka_protocol::UnknownTaggedFields;
 
     use super::*;
@@ -331,7 +330,7 @@ mod tests {
             }],
             5_000,
         );
-        assert!(
+        assert2::assert!(
             req == CreateTopicsRequest {
                 topics: vec![CreatableTopic {
                     name: "foo".to_string(),
@@ -382,14 +381,14 @@ mod tests {
                 }),
             },
         ];
-        assert!(any_not_controller(&outcomes, |o| o.error.as_ref()));
+        assert2::assert!(any_not_controller(&outcomes, |o| o.error.as_ref()));
 
         let all_ok = vec![CreateTopicOutcome {
             name: "a".into(),
             topic_id: None,
             error: None,
         }];
-        assert!(!any_not_controller(&all_ok, |o| o.error.as_ref()));
+        assert2::assert!(!any_not_controller(&all_ok, |o| o.error.as_ref()));
     }
 
     /// Spec test name: `repeated_not_controller_errors_return_exhausted`
@@ -409,7 +408,7 @@ mod tests {
                 message: None,
             }),
         }];
-        assert!(!any_not_controller(&outcomes, |o| o.error.as_ref()));
+        assert2::assert!(!any_not_controller(&outcomes, |o| o.error.as_ref()));
     }
 
     // ── controller_endpoint resolver ───────────────────────────────
@@ -444,7 +443,7 @@ mod tests {
             ..Default::default()
         };
         let addr = controller_endpoint(&resp);
-        assert!(addr.as_deref() == Some("h2:9093"));
+        assert2::assert!(addr.as_deref() == Some("h2:9093"));
     }
 
     /// When the controller id doesn't appear in the broker list (e.g.
@@ -465,7 +464,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(controller_endpoint(&resp).is_none());
+        assert2::assert!(controller_endpoint(&resp).is_none());
     }
 
     // ── parse_metadata ─────────────────────────────────────────────────
@@ -495,7 +494,7 @@ mod tests {
             ..Default::default()
         };
         let md = parse_metadata(resp);
-        assert!(
+        assert2::assert!(
             md == TopicMetadata {
                 controller_id: -1,
                 topics: vec![
@@ -534,7 +533,7 @@ mod tests {
             ..Default::default()
         };
         let md = parse_metadata(resp);
-        assert!(md.topics[0].topic_id.is_none());
+        assert2::assert!(md.topics[0].topic_id.is_none());
     }
 
     #[test]
@@ -555,7 +554,7 @@ mod tests {
             ..Default::default()
         };
         let md = parse_metadata(resp);
-        assert!(
+        assert2::assert!(
             (
                 md.topics[0].partition_count,
                 md.topics[0].replication_factor
@@ -589,7 +588,7 @@ mod tests {
             ..Default::default()
         };
         let outcomes = parse_create_topics(resp);
-        assert!(
+        assert2::assert!(
             outcomes
                 == vec![
                     CreateTopicOutcome {
@@ -635,7 +634,7 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_delete_topics(resp);
-        assert!(
+        assert2::assert!(
             outs == vec![
                 DeleteTopicOutcome {
                     // `name: None` falls through to `unwrap_or_default()`
@@ -680,7 +679,7 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_create_partitions(resp);
-        assert!(
+        assert2::assert!(
             outs == vec![
                 CreatePartitionsOutcome {
                     name: "ok".to_string(),

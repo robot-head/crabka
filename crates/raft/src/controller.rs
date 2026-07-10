@@ -765,7 +765,7 @@ pub fn metadata_log_nonempty(dir: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod bootstrap_mode_tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use tempfile::TempDir;
 
     use super::*;
@@ -791,14 +791,11 @@ mod bootstrap_mode_tests {
             }],
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
-        for (name, node_id, expected) in [
+        for (_name, node_id, expected) in [
             ("registered voter", NodeId(2), Some(format!("{host}:9093"))),
             ("unknown voter", NodeId(99), None),
         ] {
-            assert!(
-                controller_endpoint_addr(&voters, node_id) == expected,
-                "case {name}"
-            );
+            assert2::assert!(controller_endpoint_addr(&voters, node_id) == expected);
         }
     }
 
@@ -828,7 +825,7 @@ mod bootstrap_mode_tests {
             ],
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
-        assert!(
+        assert2::assert!(
             controller_endpoint_addr(&voters, NodeId(7))
                 == Some("controller-host:9093".to_string())
         );
@@ -939,7 +936,7 @@ mod bootstrap_mode_tests {
         .unwrap();
 
         let latest = load_latest_checkpoint(dir.path()).expect("checkpoint");
-        assert!(latest == ((2, 3), b"best".to_vec()));
+        assert2::assert!(latest == ((2, 3), b"best".to_vec()));
     }
 
     #[tokio::test]
@@ -957,7 +954,7 @@ mod bootstrap_mode_tests {
 
         match ctrl.read_snapshot_range(3, 10) {
             SnapshotRange::Slice(slice) => {
-                assert!(
+                assert2::assert!(
                     slice
                         == SnapshotSlice {
                             end_offset: 10,
@@ -973,7 +970,7 @@ mod bootstrap_mode_tests {
             ),
         }
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             ctrl.read_snapshot_range(4, 10),
             SnapshotRange::OutOfRange
         ));
@@ -997,7 +994,7 @@ mod bootstrap_mode_tests {
         )
         .await
         .expect_err("static raft rejects add_learner");
-        assert!(matches!(add_err, RaftError::Unsupported(_)));
+        assert2::assert!(matches!(add_err, RaftError::Unsupported(_)));
 
         let change_err = <ControllerHandle as crate::reconfig::ReconfigOps>::change_membership(
             &ctrl,
@@ -1005,7 +1002,7 @@ mod bootstrap_mode_tests {
         )
         .await
         .expect_err("static raft rejects change_membership");
-        assert!(matches!(change_err, RaftError::Unsupported(_)));
+        assert2::assert!(matches!(change_err, RaftError::Unsupported(_)));
         ctrl.shutdown().await;
     }
 
@@ -1047,7 +1044,7 @@ mod bootstrap_mode_tests {
         .expect("submit ops-b timed out")
         .expect("submit ops-b");
 
-        assert!(
+        assert2::assert!(
             (
                 ctrl.current_image().topic("ops-a").is_some(),
                 ctrl.current_image().topic("ops-b").is_some(),
@@ -1055,8 +1052,8 @@ mod bootstrap_mode_tests {
         );
         let leader_last =
             <ControllerHandle as crate::reconfig::ReconfigOps>::leader_last_index(&ctrl);
-        assert!(leader_last >= 2);
-        assert!(
+        assert2::assert!(leader_last >= 2);
+        assert2::assert!(
             <ControllerHandle as crate::reconfig::ReconfigOps>::observer_index(&ctrl, NodeId(1))
                 == Some(leader_last)
         );
@@ -1073,7 +1070,7 @@ mod bootstrap_mode_tests {
         };
         let ctrl = Controller::start(cfg).await.expect("join start");
 
-        assert!(
+        assert2::assert!(
             (
                 <ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl),
                 <ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl),
@@ -1111,7 +1108,7 @@ mod bootstrap_mode_tests {
 
     #[test]
     fn metadata_log_nonempty_detects_quorum_state_and_log_segments_only() {
-        for (case, file, expected) in [
+        for (_case, file, expected) in [
             ("empty directory", None, false),
             (
                 "quorum state file",
@@ -1133,7 +1130,7 @@ mod bootstrap_mode_tests {
             if let Some((name, contents)) = file {
                 std::fs::write(dir.path().join(name), contents).unwrap();
             }
-            assert!(metadata_log_nonempty(dir.path()) == expected, "case {case}");
+            assert2::assert!(metadata_log_nonempty(dir.path()) == expected);
         }
     }
 
@@ -1152,25 +1149,25 @@ mod bootstrap_mode_tests {
             Vec<crabka_metadata::MetadataRecord>,
         > as wincode::Serialize>::serialize(&records)
         .expect("wincode");
-        assert!(body.len() == expected_wincode.len() + 4);
+        assert2::assert!(body.len() == expected_wincode.len() + 4);
 
         let mut cur: &[u8] = &body;
         let req =
             crate::wire::CrabkaSubmitChangeRequest::decode_v0(&mut cur).expect("decode frame");
-        assert!(req.records.as_ref() == expected_wincode.as_slice());
+        assert2::assert!(req.records.as_ref() == expected_wincode.as_slice());
         // The framed payload IS the wincode encoding of the original records, so
         // it deserializes back to them — proving no double-framing / corruption.
         let decoded = <serde_wincode::SerdeCompat<
             Vec<crabka_metadata::MetadataRecord>,
         > as wincode::Deserialize>::deserialize(&req.records)
         .expect("wincode decode");
-        assert!(decoded == records);
+        assert2::assert!(decoded == records);
     }
 
     #[test]
     fn translate_submit_change_response_maps_each_error_code() {
         // 0 => applied.
-        assert!(
+        assert2::assert!(
             translate_submit_change_response(&submit_change_response_bytes(0, -1), NodeId(5))
                 .is_ok()
         );
@@ -1178,7 +1175,7 @@ mod bootstrap_mode_tests {
         // 2 => leader rejected at apply-time: a TopicExists metadata error.
         let err = translate_submit_change_response(&submit_change_response_bytes(2, -1), NodeId(5))
             .expect_err("code 2 is an error");
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))
         ));
@@ -1187,7 +1184,7 @@ mod bootstrap_mode_tests {
         // leader_hint when non-negative.
         let err = translate_submit_change_response(&submit_change_response_bytes(1, 9), NodeId(5))
             .expect_err("code 1 is an error");
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             RaftError::NotLeader {
                 current_leader: Some(NodeId(9))
@@ -1198,7 +1195,7 @@ mod bootstrap_mode_tests {
         // leader id — distinguishing the `>= 0` guard.
         let err = translate_submit_change_response(&submit_change_response_bytes(3, -1), NodeId(5))
             .expect_err("code 3 is an error");
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             RaftError::NotLeader {
                 current_leader: None
@@ -1212,7 +1209,7 @@ mod bootstrap_mode_tests {
         // as a protocol error rather than being silently treated as success.
         let err = translate_submit_change_response(&[0u8; 3], NodeId(5))
             .expect_err("truncated decodes err");
-        assert!(matches!(err, RaftError::Protocol(_)));
+        assert2::assert!(matches!(err, RaftError::Protocol(_)));
     }
 
     #[tokio::test]
@@ -1254,7 +1251,7 @@ mod bootstrap_mode_tests {
         )
         .await
         .expect_err("not leader");
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             RaftError::NotLeader {
                 current_leader: Some(NodeId(4))
@@ -1282,7 +1279,7 @@ mod bootstrap_mode_tests {
         )
         .await
         .expect_err("network error");
-        assert!(matches!(err, RaftError::Network(_)));
+        assert2::assert!(matches!(err, RaftError::Network(_)));
     }
 
     #[tokio::test]
@@ -1316,10 +1313,7 @@ mod bootstrap_mode_tests {
             ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         match Controller::start(cfg2).await {
-            Err(err) => assert!(
-                matches!(err, RaftError::Startup(_)),
-                "Bootstrap on existing log must return Startup; got: {err:?}"
-            ),
+            Err(err) => assert2::assert!(matches!(err, RaftError::Startup(_))),
             Ok(ctrl) => {
                 ctrl.shutdown().await;
                 panic!("Bootstrap on existing log must error but succeeded");
@@ -1335,10 +1329,7 @@ mod bootstrap_mode_tests {
             ..ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf())
         };
         match Controller::start(cfg).await {
-            Err(err) => assert!(
-                matches!(err, RaftError::Startup(_)),
-                "Rejoin on empty log must return Startup; got: {err:?}"
-            ),
+            Err(err) => assert2::assert!(matches!(err, RaftError::Startup(_))),
             Ok(ctrl) => {
                 ctrl.shutdown().await;
                 panic!("Rejoin on empty log must error but succeeded");
@@ -1374,7 +1365,7 @@ mod bootstrap_mode_tests {
         let slice = tokio::time::timeout(TEST_OP_TIMEOUT, ctrl.metadata_records(0, usize::MAX))
             .await
             .expect("metadata_records timed out");
-        assert!(slice.high_watermark >= 1);
+        assert2::assert!(slice.high_watermark >= 1);
         let image = MetadataImage::new(Uuid::nil());
         let mut buf: &[u8] = &slice.records;
         let mut found = false;
@@ -1394,7 +1385,7 @@ mod bootstrap_mode_tests {
                 }
             }
         }
-        assert!(found, "topic 't' must appear in fetched metadata records");
+        assert2::assert!(found);
         ctrl.shutdown().await;
     }
 
@@ -1431,8 +1422,8 @@ mod bootstrap_mode_tests {
         .await
         .expect("fetch_metadata_from timed out")
         .expect("fetch");
-        assert!(resp.error_code == 0);
-        assert!(resp.high_watermark >= 1);
+        assert2::assert!(resp.error_code == 0);
+        assert2::assert!(resp.high_watermark >= 1);
 
         let image = MetadataImage::new(Uuid::nil());
         let mut buf: &[u8] = &resp.records;
@@ -1453,10 +1444,7 @@ mod bootstrap_mode_tests {
                 }
             }
         }
-        assert!(
-            found,
-            "topic 'fetched' must appear in fetched metadata records"
-        );
+        assert2::assert!(found);
         ctrl.shutdown().await;
     }
 
@@ -1490,11 +1478,8 @@ mod bootstrap_mode_tests {
         .expect("fetch_metadata_from timed out")
         .expect("fetch");
 
-        assert!(resp.error_code == 0);
-        assert!(
-            client_ids.lock().unwrap().as_slice() == ["metadata-fetch-client"],
-            "fetch_metadata_from must preserve the controller client id"
-        );
+        assert2::assert!(resp.error_code == 0);
+        assert2::assert!(client_ids.lock().unwrap().as_slice() == ["metadata-fetch-client"]);
         ctrl.shutdown().await;
     }
 
@@ -1510,7 +1495,7 @@ mod bootstrap_mode_tests {
             .await
             .expect("Join on empty log starts ok");
         // Without voters this node never elects.
-        assert!(ctrl.watch_leader().borrow().is_none());
+        assert2::assert!(ctrl.watch_leader().borrow().is_none());
         ctrl.shutdown().await;
     }
 }

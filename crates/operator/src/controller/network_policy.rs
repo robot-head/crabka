@@ -231,7 +231,6 @@ pub(crate) async fn reconcile_network_policy(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::{
@@ -304,14 +303,12 @@ mod tests {
         let from = inter.from.as_ref().unwrap();
         let pod = from[0].pod_selector.as_ref().unwrap();
         let labels = pod.match_labels.as_ref().unwrap();
-        assert_eq!(from.len(), 1);
-        assert_eq!(
-            labels.get("app.kubernetes.io/name").map(String::as_str),
-            Some(APP_LABEL)
+        assert2::assert!(from.len() == 1);
+        assert2::assert!(
+            labels.get("app.kubernetes.io/name").map(String::as_str) == Some(APP_LABEL)
         );
-        assert_eq!(
-            labels.get("app.kubernetes.io/instance").map(String::as_str),
-            Some("demo")
+        assert2::assert!(
+            labels.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo")
         );
     }
 
@@ -346,7 +343,7 @@ mod tests {
                 _ => panic!("expected int port"),
             })
             .collect();
-        assert_eq!(operator_ports, vec![9092, 9094]);
+        assert2::assert!(operator_ports == vec![9092, 9094]);
     }
 
     #[test]
@@ -361,7 +358,7 @@ mod tests {
             namespace_selector: None,
         };
 
-        for (name, peers, expected) in [
+        for (_name, peers, expected) in [
             ("peers unset allow all", None, (3, true, false)),
             ("empty peers deny all", Some(vec![]), (2, false, false)),
             ("named peer restricts", Some(vec![peer]), (3, false, true)),
@@ -387,9 +384,9 @@ mod tests {
                 })
             });
             let (expected_rule_count, expected_allow_all, expected_restricted) = expected;
-            assert_eq!(rules.len(), expected_rule_count, "case {name}");
-            assert_eq!(allow_all, expected_allow_all, "case {name}");
-            assert_eq!(restricted, expected_restricted, "case {name}");
+            assert2::assert!(rules.len() == expected_rule_count);
+            assert2::assert!(allow_all == expected_allow_all);
+            assert2::assert!(restricted == expected_restricted);
         }
     }
 
@@ -403,7 +400,7 @@ mod tests {
                 end_port: None,
             }]),
         };
-        for (name, enabled, expected) in [
+        for (_name, enabled, expected) in [
             ("metrics disabled", false, vec![]),
             ("metrics enabled", true, vec![expected_rule]),
         ] {
@@ -413,7 +410,7 @@ mod tests {
                 .into_iter()
                 .cloned()
                 .collect::<Vec<_>>();
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 
@@ -431,14 +428,8 @@ mod tests {
             .match_labels
             .as_ref()
             .unwrap();
-        assert_eq!(
-            sel.get("app.kubernetes.io/name").map(String::as_str),
-            Some(APP_LABEL)
-        );
-        assert_eq!(
-            sel.get("app.kubernetes.io/instance").map(String::as_str),
-            Some("demo")
-        );
+        assert2::assert!(sel.get("app.kubernetes.io/name").map(String::as_str) == Some(APP_LABEL));
+        assert2::assert!(sel.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo"));
     }
 
     #[test]
@@ -446,19 +437,16 @@ mod tests {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
         let spec = np.spec.as_ref().unwrap();
-        assert_eq!(
-            spec.policy_types.as_deref(),
-            Some(["Ingress".to_string()].as_slice())
-        );
-        assert_eq!(spec.egress.as_deref(), None);
+        assert2::assert!(spec.policy_types.as_deref() == Some(["Ingress".to_string()].as_slice()));
+        assert2::assert!(spec.egress.as_deref() == None);
     }
 
     #[test]
     fn render_name_and_namespace() {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
-        assert_eq!(np.metadata.name.as_deref(), Some("demo-broker-policy"));
-        assert_eq!(np.metadata.namespace.as_deref(), Some("default"));
+        assert2::assert!(np.metadata.name.as_deref() == Some("demo-broker-policy"));
+        assert2::assert!(np.metadata.namespace.as_deref() == Some("default"));
     }
 
     #[test]
@@ -466,7 +454,7 @@ mod tests {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
         let refs = np.metadata.owner_references.as_ref().unwrap();
-        assert!(
+        assert2::assert!(
             refs == &vec![
                 k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
                     api_version: "crabka.io/v1alpha1".into(),

@@ -97,7 +97,7 @@ mod tests {
 
     #[test]
     fn split_banner_cases() {
-        for (case, src, expected) in [
+        for (_case, src, expected) in [
             (
                 "leading comment block",
                 "// AUTO-GENERATED foo\n// line two\n\npub struct X;\n",
@@ -105,7 +105,7 @@ mod tests {
             ),
             ("no banner", "pub struct X;\n", ("", "pub struct X;\n")),
         ] {
-            assert_eq!(split_banner(src), expected, "case {case}");
+            assert2::assert!(split_banner(src) == expected);
         }
     }
 

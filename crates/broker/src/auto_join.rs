@@ -388,14 +388,14 @@ mod tests {
     #[test]
     fn controller_listener_uses_bound_controller_endpoint() {
         let listener = controller_listener("192.0.2.10:19093".parse().unwrap());
-        assert_eq!(
-            listener,
-            Listener {
-                name: "CONTROLLER".to_string(),
-                host: "192.0.2.10".to_string(),
-                port: 19093,
-                ..Default::default()
-            }
+        assert2::assert!(
+            listener
+                == Listener {
+                    name: "CONTROLLER".to_string(),
+                    host: "192.0.2.10".to_string(),
+                    port: 19093,
+                    ..Default::default()
+                }
         );
     }
 
@@ -407,17 +407,13 @@ mod tests {
                 .map(|s| s.parse().unwrap())
                 .collect();
 
-        for (case, attempt, expected_index) in [
+        for (_case, attempt, expected_index) in [
             ("first server", 0, 0),
             ("last server", 2, 2),
             ("wrap to first", 3, 0),
             ("wrap to last", 5, 2),
         ] {
-            assert_eq!(
-                select_bootstrap_server(&servers, attempt),
-                servers[expected_index],
-                "case {case}"
-            );
+            assert2::assert!(select_bootstrap_server(&servers, attempt) == servers[expected_index]);
         }
     }
 
@@ -433,9 +429,8 @@ mod tests {
             listener,
         );
 
-        assert_eq!(
-            req,
-            AddRaftVoterRequest {
+        assert2::assert!(
+            req == AddRaftVoterRequest {
                 cluster_id: Some(cluster_id.to_string()),
                 timeout_ms: 30_000,
                 voter_id: 7,
@@ -468,14 +463,14 @@ mod tests {
         let decoded =
             AddRaftVoterRequest::decode(&mut bytes.freeze(), version).expect("decode request");
 
-        assert!(decoded.ack_when_committed);
+        assert2::assert!(decoded.ack_when_committed);
     }
 
     #[test]
     fn auto_join_connection_options_uses_joiner_client_id() {
         let opts = auto_join_connection_options();
 
-        assert_eq!(opts.client_id, "crabka-auto-join");
+        assert2::assert!(opts.client_id == "crabka-auto-join");
     }
 
     #[test]
@@ -486,7 +481,7 @@ mod tests {
             ..Default::default()
         };
 
-        for (case, error_code, expected) in [
+        for (_case, error_code, expected) in [
             ("accepted", codes::NONE, JoinOutcome::Accepted),
             (
                 "not leader",
@@ -501,10 +496,8 @@ mod tests {
             ),
             ("unexpected", 1234, JoinOutcome::Unexpected(1234)),
         ] {
-            assert_eq!(
-                log_join_outcome(NodeId(1), target, &response(error_code)),
-                expected,
-                "case {case}"
+            assert2::assert!(
+                log_join_outcome(NodeId(1), target, &response(error_code)) == expected
             );
         }
     }
@@ -527,7 +520,7 @@ mod tests {
         )
         .await
         .expect_err("closed port must not produce a successful default response");
-        assert!(err.contains("dial"), "unexpected error: {err}");
+        assert2::assert!(err.contains("dial"));
     }
 
     /// `run` returns immediately when `auto_join` is disabled — no panic, no
@@ -586,10 +579,7 @@ mod tests {
             .await
             .expect("already-voter auto join returns without dialing");
 
-        assert_eq!(
-            source.controller_bound_addr_calls.load(Ordering::Relaxed),
-            1
-        );
-        assert_eq!(source.current_image_calls.load(Ordering::Relaxed), 1);
+        assert2::assert!(source.controller_bound_addr_calls.load(Ordering::Relaxed) == 1);
+        assert2::assert!(source.current_image_calls.load(Ordering::Relaxed) == 1);
     }
 }

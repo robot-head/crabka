@@ -258,7 +258,7 @@ fn duration_as_f64(duration_ns: i64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::metricsgen::{
@@ -349,22 +349,28 @@ mod tests {
         let out = reg.drain(1_000);
 
         let calls_x = find(&out, "traces_spanmetrics_calls_total", "GET /x");
-        assert!(matches!(calls_x.sample, SeriesSample::Counter(c) if (c - 2.0).abs() < 1e-9));
+        assert2::assert!(
+            matches!(calls_x.sample, SeriesSample::Counter(c) if (c - 2.0).abs() < 1e-9)
+        );
         let size_x = find(&out, "traces_spanmetrics_size_total", "GET /x");
-        assert!(matches!(size_x.sample, SeriesSample::Counter(c) if (c - 250.0).abs() < 1e-9));
+        assert2::assert!(
+            matches!(size_x.sample, SeriesSample::Counter(c) if (c - 250.0).abs() < 1e-9)
+        );
 
-        assert_eq!(
-            calls_x.labels,
-            vec![
-                ("service".to_string(), "api".to_string()),
-                ("span_kind".to_string(), "SPAN_KIND_SERVER".to_string()),
-                ("span_name".to_string(), "GET /x".to_string()),
-                ("status_code".to_string(), "STATUS_CODE_OK".to_string()),
-            ]
+        assert2::assert!(
+            calls_x.labels
+                == vec![
+                    ("service".to_string(), "api".to_string()),
+                    ("span_kind".to_string(), "SPAN_KIND_SERVER".to_string()),
+                    ("span_name".to_string(), "GET /x".to_string()),
+                    ("status_code".to_string(), "STATUS_CODE_OK".to_string()),
+                ]
         );
 
         let calls_y = find(&out, "traces_spanmetrics_calls_total", "GET /y");
-        assert!(matches!(calls_y.sample, SeriesSample::Counter(c) if (c - 1.0).abs() < 1e-9));
+        assert2::assert!(
+            matches!(calls_y.sample, SeriesSample::Counter(c) if (c - 1.0).abs() < 1e-9)
+        );
     }
 
     #[test]
@@ -379,7 +385,7 @@ mod tests {
         let out = reg.drain(1_000);
         let calls = find(&out, "traces_spanmetrics_calls_total", "GET /x");
 
-        assert!(
+        assert2::assert!(
             calls
                 .labels
                 .iter()
@@ -414,18 +420,18 @@ mod tests {
                 sum,
                 count,
             } => {
-                assert!((*count - 2.0).abs() < 1e-9);
-                assert!((*sum - 0.012).abs() < 1e-6);
+                assert2::assert!((*count - 2.0).abs() < 1e-9);
+                assert2::assert!((*sum - 0.012).abs() < 1e-6);
                 let le_8ms = buckets
                     .iter()
                     .find(|(le, _)| (*le - 0.008).abs() < 1e-9)
                     .unwrap();
-                assert!((le_8ms.1 - 2.0).abs() < 1e-9);
+                assert2::assert!((le_8ms.1 - 2.0).abs() < 1e-9);
                 let le_4ms = buckets
                     .iter()
                     .find(|(le, _)| (*le - 0.004).abs() < 1e-9)
                     .unwrap();
-                assert!(le_4ms.1.abs() < 1e-9);
+                assert2::assert!(le_4ms.1.abs() < 1e-9);
             }
             other => panic!("expected ClassicHistogram, got {other:?}"),
         }
@@ -448,14 +454,14 @@ mod tests {
         ));
         let out = reg.drain(1_000);
         let lat = find(&out, "traces_spanmetrics_latency", "GET /x");
-        assert!(lat.exemplars.len() == 1);
+        assert2::assert!(lat.exemplars.len() == 1);
         let ex = &lat.exemplars[0];
-        assert!(
+        assert2::assert!(
             ex.labels
                 .iter()
                 .any(|(k, v)| { k == "trace_id" && v == "abababababababababababababababab" })
         );
-        assert!((ex.value - 0.005).abs() < 1e-6);
+        assert2::assert!((ex.value - 0.005).abs() < 1e-6);
     }
 
     #[test]
@@ -471,7 +477,7 @@ mod tests {
         ));
         let out = reg.drain(1_000);
         let lat = find(&out, "traces_spanmetrics_latency", "GET /x");
-        assert!(lat.exemplars.is_empty());
+        assert2::assert!(lat.exemplars.is_empty());
     }
 
     #[test]
@@ -490,7 +496,7 @@ mod tests {
 
         reg.record_span(&mk());
         let first = reg.drain(1_000);
-        assert!(matches!(
+        assert2::assert!(matches!(
             find(&first, "traces_spanmetrics_calls_total", "GET /x").sample,
             SeriesSample::Counter(c) if (c - 1.0).abs() < 1e-9
         ));
@@ -499,7 +505,7 @@ mod tests {
         // (monotonic), not a per-interval delta — it must read 2, not reset to 1.
         reg.record_span(&mk());
         let second = reg.drain(2_000);
-        assert!(matches!(
+        assert2::assert!(matches!(
             find(&second, "traces_spanmetrics_calls_total", "GET /x").sample,
             SeriesSample::Counter(c) if (c - 2.0).abs() < 1e-9
         ));

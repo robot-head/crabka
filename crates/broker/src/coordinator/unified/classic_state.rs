@@ -472,7 +472,7 @@ mod classic_state_model;
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -504,9 +504,9 @@ mod tests {
     #[test]
     fn empty_to_preparing_on_first_join() {
         let mut g = Group::new("g");
-        assert!(g.state == GroupState::Empty);
+        assert2::assert!(g.state == GroupState::Empty);
         g.add_member(sample_member("m1"));
-        assert!(g.state == GroupState::PreparingRebalance);
+        assert2::assert!(g.state == GroupState::PreparingRebalance);
     }
 
     #[test]
@@ -538,7 +538,7 @@ mod tests {
         let mut a = HashMap::new();
         a.insert("m1".into(), Bytes::from_static(b"assignment-bytes"));
         g.install_assignments(a);
-        assert!(
+        assert2::assert!(
             (g.state, g.members["m1"].assignment.as_deref())
                 == (GroupState::Stable, Some(b"assignment-bytes" as &[u8]))
         );
@@ -549,7 +549,7 @@ mod tests {
         let mut g = Group::new("g");
         g.add_member(sample_member("m1"));
         g.remove_member("m1");
-        assert!((g.state, g.leader_id.as_deref()) == (GroupState::Empty, None));
+        assert2::assert!((g.state, g.leader_id.as_deref()) == (GroupState::Empty, None));
     }
 
     fn static_member(member_id: &str, instance_id: &str) -> Member {
@@ -560,12 +560,12 @@ mod tests {
     fn static_rejoin_preserves_stable_state_and_assignment() {
         let mut g = Group::new("g");
         let outcome = g.add_member(static_member("m1", "inst-a"));
-        assert!(outcome == AddMemberOutcome::NewMember);
+        assert2::assert!(outcome == AddMemberOutcome::NewMember);
         g.complete_rebalance("range");
         let mut a = HashMap::new();
         a.insert("m1".into(), Bytes::from_static(b"assignment-bytes"));
         g.install_assignments(a);
-        assert!(g.state == GroupState::Stable);
+        assert2::assert!(g.state == GroupState::Stable);
 
         // Rejoin with the same instance id but a fresh `member_id` (the
         // client restarted; KIP-394 bootstrap gave it a new id).
@@ -640,9 +640,11 @@ mod tests {
     fn remove_static_member_clears_index() {
         let mut g = Group::new("g");
         g.add_member(static_member("m1", "inst-a"));
-        assert!(g.current_member_id_for_instance("inst-a") == Some("m1"));
+        assert2::assert!(g.current_member_id_for_instance("inst-a") == Some("m1"));
         g.remove_member("m1");
-        assert!((g.current_member_id_for_instance("inst-a"), g.state) == (None, GroupState::Empty));
+        assert2::assert!(
+            (g.current_member_id_for_instance("inst-a"), g.state) == (None, GroupState::Empty)
+        );
     }
 
     #[test]
@@ -653,10 +655,10 @@ mod tests {
         let mut g = Group::new("g");
         g.add_member(static_member("m1", "inst-a"));
         g.add_member(static_member("m2", "inst-a"));
-        assert!(g.current_member_id_for_instance("inst-a") == Some("m2"));
+        assert2::assert!(g.current_member_id_for_instance("inst-a") == Some("m2"));
         // m1 is no longer in members (replaced), so this is a no-op.
         g.remove_member("m1");
-        assert!(
+        assert2::assert!(
             (
                 g.current_member_id_for_instance("inst-a"),
                 g.members.contains_key("m2"),
@@ -718,15 +720,12 @@ mod tests {
             ("empty members", vec![], None),
         ];
 
-        for (case, member_specs, expected) in cases {
+        for (_case, member_specs, expected) in cases {
             let members = member_specs
                 .into_iter()
                 .map(|(id, protocols)| (id.to_string(), member_with_protocols(id, protocols)))
                 .collect();
-            assert!(
-                select_protocol(&members).as_deref() == expected,
-                "case {case}"
-            );
+            assert2::assert!(select_protocol(&members).as_deref() == expected);
         }
     }
 
@@ -742,7 +741,7 @@ mod tests {
             vec![("range", b"r2"), ("cooperative_sticky", b"c2")],
         ));
         g.resolve_selected_protocol_metadata("cooperative_sticky");
-        assert!(
+        assert2::assert!(
             (
                 g.members["m1"].protocol_metadata.as_ref(),
                 g.members["m2"].protocol_metadata.as_ref(),
@@ -760,7 +759,7 @@ mod tests {
         g.complete_rebalance("range");
         g.state = GroupState::Stable;
         let dropped = g.expire_dead_members(Instant::now());
-        assert!((dropped, g.state) == (vec!["m1".to_string()], GroupState::Empty));
+        assert2::assert!((dropped, g.state) == (vec!["m1".to_string()], GroupState::Empty));
     }
 
     #[test]
@@ -772,7 +771,7 @@ mod tests {
         g.add_member(m);
         g.rebalance_deadline = Some(Instant::now() + Duration::from_secs(3));
         g.rebalance_from_empty = true;
-        assert!(g.joined_this_round.contains("m1"));
+        assert2::assert!(g.joined_this_round.contains("m1"));
 
         let dropped = g.expire_dead_members(Instant::now());
 

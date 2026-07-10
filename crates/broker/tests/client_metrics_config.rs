@@ -11,7 +11,7 @@
 
 #![allow(clippy::default_trait_access)]
 
-use assert2::{assert, check};
+use assert2::check;
 mod support;
 
 use crabka_protocol::owned::{
@@ -100,18 +100,9 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
         .await
         .expect("IncrementalAlterConfigs");
 
-    assert!(
-        alter_resp.responses.len() == 1,
-        "expected exactly one resource response, got {}",
-        alter_resp.responses.len()
-    );
+    assert2::assert!(alter_resp.responses.len() == 1);
     let resource_resp = &alter_resp.responses[0];
-    assert!(
-        resource_resp.error_code == 0,
-        "IncrementalAlterConfigs CLIENT_METRICS must succeed; error_code={} message={:?}",
-        resource_resp.error_code,
-        resource_resp.error_message
-    );
+    assert2::assert!(resource_resp.error_code == 0);
 
     // ── Step 2: DescribeConfigs ───────────────────────────────────────────────
     let describe_req = DescribeConfigsRequest {
@@ -129,11 +120,7 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
     let describe_resp: DescribeConfigsResponse =
         client.send(describe_req).await.expect("DescribeConfigs");
 
-    assert!(
-        describe_resp.results.len() == 1,
-        "expected exactly one describe result, got {}",
-        describe_resp.results.len()
-    );
+    assert2::assert!(describe_resp.results.len() == 1);
     let result = &describe_resp.results[0];
     check!(
         (
@@ -148,7 +135,7 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
     // Assert the three expected config entries.
     let find_config = |name: &str| result.configs.iter().find(|c| c.name == name);
 
-    assert!(
+    assert2::assert!(
         (
             find_config("metrics").map(|cfg| (cfg.value.as_deref(), cfg.config_source)),
             find_config("interval.ms").map(|cfg| (cfg.value.as_deref(), cfg.config_source)),
@@ -178,13 +165,5 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
         .config_resources
         .iter()
         .any(|r| r.resource_type == RESOURCE_TYPE_CLIENT_METRICS && r.resource_name == "sub-a");
-    assert!(
-        (list_resp.error_code, found) == (0, true),
-        "ListConfigResources must contain CLIENT_METRICS 'sub-a'; got: {:?}",
-        list_resp
-            .config_resources
-            .iter()
-            .map(|r| (r.resource_type, &r.resource_name))
-            .collect::<Vec<_>>()
-    );
+    assert2::assert!((list_resp.error_code, found) == (0, true));
 }

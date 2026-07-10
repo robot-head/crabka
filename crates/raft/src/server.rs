@@ -599,7 +599,7 @@ fn build_describe_cluster_body(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::{BufMut, Bytes};
     use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
     use crabka_protocol::Decode;
@@ -782,8 +782,8 @@ mod tests {
                 false,
             ),
         ];
-        for (case, err, want) in cases {
-            assert!(super::is_eof(&err) == want, "case {case}");
+        for (_case, err, want) in cases {
+            assert2::assert!(super::is_eof(&err) == want);
         }
     }
 
@@ -852,7 +852,7 @@ mod tests {
                 3,
             ),
         ];
-        for (case, frame, needed) in cases {
+        for (_case, frame, needed) in cases {
             let (mut client, mut server) = tokio::io::duplex(128);
             let writer = tokio::spawn(async move {
                 client.write_all(&frame).await.unwrap();
@@ -862,15 +862,12 @@ mod tests {
                 .await
                 .expect_err("short frame");
 
-            assert!(
-                matches!(
-                    err,
-                    super::RaftError::Protocol(
-                        crabka_protocol::ProtocolError::UnexpectedEof { needed: n }
-                    ) if n == needed
-                ),
-                "case: {case}, err: {err:?}"
-            );
+            assert2::assert!(matches!(
+                err,
+                super::RaftError::Protocol(
+                    crabka_protocol::ProtocolError::UnexpectedEof { needed: n }
+                ) if n == needed
+            ));
             writer.await.unwrap();
         }
     }
@@ -892,7 +889,7 @@ mod tests {
 
         let (_, _, _, body) = super::read_one_request(&mut server).await.expect("decode");
 
-        assert!(body.as_ref() == &[1, b'p', b'a', b'y']);
+        assert2::assert!(body.as_ref() == &[1, b'p', b'a', b'y']);
         writer.await.unwrap();
     }
 
@@ -915,7 +912,7 @@ mod tests {
         let vote_resp = super::dispatch(ApiKey(api_key::VOTE), vote, &engine)
             .await
             .expect("vote dispatch");
-        assert!(PeerResponse::decode_vote(&vote_resp).is_some());
+        assert2::assert!(PeerResponse::decode_vote(&vote_resp).is_some());
 
         let fetch = PeerRequest::Fetch {
             from: NodeId(2),
@@ -926,7 +923,7 @@ mod tests {
         let fetch_resp = super::dispatch(ApiKey(api_key::FETCH), fetch, &engine)
             .await
             .expect("fetch dispatch");
-        assert!(PeerResponse::decode_fetch(&fetch_resp).is_some());
+        assert2::assert!(PeerResponse::decode_fetch(&fetch_resp).is_some());
 
         let snapshot = PeerRequest::FetchSnapshot {
             from: NodeId(2),
@@ -938,7 +935,7 @@ mod tests {
         let snapshot_resp = super::dispatch(ApiKey(api_key::FETCH_SNAPSHOT), snapshot, &engine)
             .await
             .expect("snapshot dispatch");
-        assert!(matches!(
+        assert2::assert!(matches!(
             PeerResponse::decode_fetch_snapshot(&snapshot_resp),
             Some(PeerResponse::FetchSnapshot { error_code: 98, .. })
         ));
@@ -951,7 +948,7 @@ mod tests {
         let begin_resp = super::dispatch(ApiKey(api_key::BEGIN_QUORUM_EPOCH), begin, &engine)
             .await
             .expect("begin dispatch");
-        assert!(!begin_resp.is_empty());
+        assert2::assert!(!begin_resp.is_empty());
 
         let end = PeerRequest::EndQuorumEpoch {
             leader_id: NodeId(1),
@@ -961,7 +958,7 @@ mod tests {
         let end_resp = super::dispatch(ApiKey(api_key::END_QUORUM_EPOCH), end, &engine)
             .await
             .expect("end dispatch");
-        assert!(!end_resp.is_empty());
+        assert2::assert!(!end_resp.is_empty());
     }
 
     #[tokio::test]
@@ -977,8 +974,8 @@ mod tests {
         .await
         .expect("submit dispatch");
         let ok = decode_submit_change_response(&ok_body);
-        assert_eq!(ok.error_code, 0);
-        assert_eq!(ok.leader_hint, -1);
+        assert2::assert!(ok.error_code == 0);
+        assert2::assert!(ok.leader_hint == -1);
 
         let bad_req = CrabkaSubmitChangeRequest {
             records: Bytes::from_static(b"not-wincode"),
@@ -993,8 +990,8 @@ mod tests {
         .await
         .expect("decode failure dispatch");
         let err = decode_submit_change_response(&err_body);
-        assert_eq!(err.error_code, 2);
-        assert_eq!(err.leader_hint, -1);
+        assert2::assert!(err.error_code == 2);
+        assert2::assert!(err.leader_hint == -1);
     }
 
     #[tokio::test]
@@ -1010,7 +1007,7 @@ mod tests {
         )
         .await
         .expect("first submit");
-        assert!(decode_submit_change_response(&first).error_code == 0);
+        assert2::assert!(decode_submit_change_response(&first).error_code == 0);
 
         let duplicate = super::dispatch(
             ApiKey(API_KEY_SUBMIT_CHANGE),
@@ -1020,8 +1017,8 @@ mod tests {
         .await
         .expect("duplicate submit");
         let duplicate = decode_submit_change_response(&duplicate);
-        assert_eq!(duplicate.error_code, 2);
-        assert_eq!(duplicate.leader_hint, -1);
+        assert2::assert!(duplicate.error_code == 2);
+        assert2::assert!(duplicate.leader_hint == -1);
     }
 
     #[tokio::test]
@@ -1106,18 +1103,15 @@ mod tests {
             let v = req_v.clamp(0, 4);
             let mut cur = &body[..];
             let resp = ApiVersionsResponse::decode(&mut cur, v).expect("decode body");
-            assert!(cur.is_empty(), "no trailing bytes (req_v={req_v})");
-            assert!(resp.error_code == 0);
+            assert2::assert!(cur.is_empty());
+            assert2::assert!(resp.error_code == 0);
             let keys: std::collections::BTreeSet<i16> =
                 resp.api_keys.iter().map(|k| k.api_key).collect();
             for want in [1i16, 18, 52, 53, 54, 59] {
-                assert!(
-                    keys.contains(&want),
-                    "missing api_key {want} at req_v={req_v}"
-                );
+                assert2::assert!(keys.contains(&want));
             }
             let vote = resp.api_keys.iter().find(|k| k.api_key == 52).unwrap();
-            assert!(vote.min_version == 0 && vote.max_version == 2);
+            assert2::assert!(vote.min_version == 0 && vote.max_version == 2);
         }
     }
 
@@ -1135,7 +1129,7 @@ mod tests {
         let av = super::api_versions_response_body(4);
         let mut cur = &av[..];
         let avr = ApiVersionsResponse::decode(&mut cur, 4).unwrap();
-        assert!(avr.api_keys.iter().any(|k| k.api_key == 60));
+        assert2::assert!(avr.api_keys.iter().any(|k| k.api_key == 60));
 
         let voters = vec![
             (1i32, "c1".to_string(), 9093i32),
@@ -1155,7 +1149,7 @@ mod tests {
                     .unwrap();
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
-            assert!(cur.is_empty(), "no trailing bytes (v={version})");
+            assert2::assert!(cur.is_empty());
             check!(
                 (
                     resp.endpoint_type,

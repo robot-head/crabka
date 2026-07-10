@@ -29,7 +29,6 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use assert2::assert;
 use base64::Engine as _;
 use crabka_operator::{
     controller::{
@@ -215,12 +214,8 @@ fn assert_ready_false_with_reason(
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition present; body = {body}"));
-    assert_eq!(ready["status"].as_str(), Some("False"), "body = {body}");
-    assert_eq!(
-        ready["reason"].as_str(),
-        Some(expected_reason),
-        "body = {body}"
-    );
+    assert2::assert!(ready["status"].as_str() == Some("False"));
+    assert2::assert!(ready["reason"].as_str() == Some(expected_reason));
 }
 
 /// Extract the `broker-0.toml` string from the `ConfigMap` PATCH captured
@@ -409,19 +404,12 @@ async fn gssapi_listener_renders_gssapi_toml_block_and_mechanism() {
     let observed = state.take_observed();
 
     // Keytab-Secret existence check fired.
-    assert!(
-        observed.iter().any(|r| {
-            r.method() == Method::GET
-                && r.uri()
-                    .to_string()
-                    .contains(&format!("/secrets/{KEYTAB_SECRET_NAME}"))
-        }),
-        "keytab Secret GET must fire; observed: {:?}",
-        observed
-            .iter()
-            .map(|r| format!("{} {}", r.method(), r.uri()))
-            .collect::<Vec<_>>(),
-    );
+    assert2::assert!(observed.iter().any(|r| {
+        r.method() == Method::GET
+            && r.uri()
+                .to_string()
+                .contains(&format!("/secrets/{KEYTAB_SECRET_NAME}"))
+    }));
 
     let toml = extract_broker0_toml(&observed, "c1");
     // `[inter_broker_credentials]` must be absent: the synthesized inter-broker
@@ -432,10 +420,7 @@ async fn gssapi_listener_renders_gssapi_toml_block_and_mechanism() {
         ("sasl_config = { enabled_mechanisms = [\"GSSAPI\"] }", true),
         ("[inter_broker_credentials]", false),
     ] {
-        assert!(
-            toml.contains(needle) == want,
-            "needle {needle:?}, want present = {want}; TOML: {toml}"
-        );
+        assert2::assert!(toml.contains(needle) == want);
     }
 }
 
@@ -485,26 +470,24 @@ async fn gssapi_listener_statefulset_mounts_keytab_volume() {
         .iter()
         .find(|m| m["name"] == "gssapi-keytab")
         .unwrap_or_else(|| panic!("gssapi-keytab mount present; body = {body}"));
-    assert_eq!(
-        kt_vol,
-        &serde_json::json!({
-            "name": "gssapi-keytab",
-            "secret": {
-                "defaultMode": 256,
-                "secretName": KEYTAB_SECRET_NAME,
-                "items": [{ "key": KEYTAB_KEY, "path": "keytab" }],
-            },
-        }),
-        "body = {body}"
+    assert2::assert!(
+        kt_vol
+            == &serde_json::json!({
+                "name": "gssapi-keytab",
+                "secret": {
+                    "defaultMode": 256,
+                    "secretName": KEYTAB_SECRET_NAME,
+                    "items": [{ "key": KEYTAB_KEY, "path": "keytab" }],
+                },
+            })
     );
-    assert_eq!(
-        kt_mount,
-        &serde_json::json!({
-            "mountPath": "/etc/crabka/gssapi-keytab",
-            "name": "gssapi-keytab",
-            "readOnly": true,
-        }),
-        "body = {body}"
+    assert2::assert!(
+        kt_mount
+            == &serde_json::json!({
+                "mountPath": "/etc/crabka/gssapi-keytab",
+                "name": "gssapi-keytab",
+                "readOnly": true,
+            })
     );
 }
 
@@ -529,11 +512,8 @@ async fn gssapi_listener_missing_keytab_secret_rejects_with_missing_gssapi_keyta
     assert_ready_false_with_reason(&observed, "c2", "MissingGssapiKeytabSecret");
 
     // No ConfigMap PATCH on a failure path.
-    assert!(
-        !observed.iter().any(|r| r.method() == Method::PATCH
-            && r.uri().to_string().contains("/configmaps/c2-broker-config")),
-        "broker-config ConfigMap must not be PATCHed on MissingGssapiKeytabSecret",
-    );
+    assert2::assert!(!observed.iter().any(|r| r.method() == Method::PATCH
+        && r.uri().to_string().contains("/configmaps/c2-broker-config")));
 }
 
 // ── test 3: inter-broker GSSAPI → [inter_broker_credentials] TOML ───────────
@@ -575,7 +555,7 @@ async fn inter_broker_gssapi_renders_inter_broker_credentials_block() {
         "client_principal = \"kafka@EXAMPLE.COM\"",
         "kdc_url = \"tcp://kdc:88\"",
     ] {
-        assert!(toml.contains(needle), "missing {needle:?}; TOML: {toml}");
+        assert2::assert!(toml.contains(needle));
     }
 }
 
@@ -660,13 +640,12 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
 
     // [gssapi] survives the round trip with every field intact.
     let g = bc.gssapi.expect("bc.gssapi must be Some after round trip");
-    assert_eq!(g.service_name.as_str(), "kafka");
-    assert_eq!(g.principal_to_local_rules.len(), 2);
-    assert_eq!(g.realm.as_deref(), Some("EXAMPLE.COM"));
-    assert_eq!(g.kdc.as_deref(), Some("tcp://kdc:88"));
-    assert_eq!(
-        g.keytab_path.as_path(),
-        std::path::Path::new("/etc/crabka/gssapi-keytab/keytab")
+    assert2::assert!(g.service_name.as_str() == "kafka");
+    assert2::assert!(g.principal_to_local_rules.len() == 2);
+    assert2::assert!(g.realm.as_deref() == Some("EXAMPLE.COM"));
+    assert2::assert!(g.kdc.as_deref() == Some("tcp://kdc:88"));
+    assert2::assert!(
+        g.keytab_path.as_path() == std::path::Path::new("/etc/crabka/gssapi-keytab/keytab")
     );
 
     // [inter_broker_credentials] survives as the Gssapi variant with the
@@ -674,7 +653,7 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
     let creds = bc
         .inter_broker_credentials
         .expect("bc.inter_broker_credentials must be Some after round trip");
-    assert!(
+    assert2::assert!(
         creds
             == crabka_broker::config::InterBrokerCredentials::Gssapi {
                 keytab_path: std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"),
@@ -737,33 +716,30 @@ async fn krb5_conf_statefulset_mounts_volume_and_sets_env() {
         .iter()
         .find(|e| e["name"] == "KRB5_CONFIG")
         .unwrap_or_else(|| panic!("KRB5_CONFIG env present; body = {body}"));
-    assert_eq!(
-        krb5_vol,
-        &serde_json::json!({
-            "name": "krb5-conf",
-            "secret": {
-                "defaultMode": 256,
-                "items": [{ "key": KRB5_KEY, "path": "krb5.conf" }],
-                "secretName": KRB5_SECRET_NAME,
-            },
-        }),
-        "body = {body}"
+    assert2::assert!(
+        krb5_vol
+            == &serde_json::json!({
+                "name": "krb5-conf",
+                "secret": {
+                    "defaultMode": 256,
+                    "items": [{ "key": KRB5_KEY, "path": "krb5.conf" }],
+                    "secretName": KRB5_SECRET_NAME,
+                },
+            })
     );
-    assert_eq!(
-        krb5_mount,
-        &serde_json::json!({
-            "mountPath": "/etc/crabka/krb5",
-            "name": "krb5-conf",
-            "readOnly": true,
-        }),
-        "body = {body}"
+    assert2::assert!(
+        krb5_mount
+            == &serde_json::json!({
+                "mountPath": "/etc/crabka/krb5",
+                "name": "krb5-conf",
+                "readOnly": true,
+            })
     );
-    assert_eq!(
-        krb5_config,
-        &serde_json::json!({
-            "name": "KRB5_CONFIG",
-            "value": "/etc/crabka/krb5/krb5.conf",
-        }),
-        "body = {body}"
+    assert2::assert!(
+        krb5_config
+            == &serde_json::json!({
+                "name": "KRB5_CONFIG",
+                "value": "/etc/crabka/krb5/krb5.conf",
+            })
     );
 }

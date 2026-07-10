@@ -758,10 +758,7 @@ where
         let retention = table
             .versioned_retention_ms
             .expect("grace requires a versioned table");
-        assert!(
-            grace_ms < retention,
-            "grace_ms must be < history_retention_ms"
-        );
+        assert2::assert!(grace_ms < retention);
 
         let key_serde = self.key_serde.clone();
         let value_serde = self.value_serde.clone();
@@ -831,11 +828,7 @@ where
         VTS: Clone,
         LF: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
     {
-        assert!(
-            !self.key_changing,
-            "join: the stream key was changed upstream (map/select_key/flat_map/group_by); \
-             call `.repartition(..)` before joining to re-partition by the new key"
-        );
+        assert2::assert!(!self.key_changing);
         let table_store = table
             .store_name()
             .expect("join requires a materialized table (a store-backed KTable)")

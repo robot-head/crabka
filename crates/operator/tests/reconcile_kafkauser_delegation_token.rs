@@ -18,7 +18,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_operator::{
     controller::user::reconcile,
     crd::{Authentication, DelegationTokenAuth, KafkaUser, KafkaUserSpec},
@@ -173,14 +173,11 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
     // ── Admin-call shape ────────────────────────────────────────────
     let calls = fake_for_assert.lock().await.calls();
     // Describe (empty) → Create.
-    assert!(
-        calls.iter().any(|c| matches!(
-            c,
-            RecordedCall::DescribeDelegationTokensOwnedBy { owner_principal }
-                if owner_principal == "User:alice"
-        )),
-        "expected DescribeDelegationTokensOwnedBy for User:alice, got: {calls:?}",
-    );
+    assert2::assert!(calls.iter().any(|c| matches!(
+        c,
+        RecordedCall::DescribeDelegationTokensOwnedBy { owner_principal }
+            if owner_principal == "User:alice"
+    )));
     let create_call = calls.iter().find_map(|c| match c {
         RecordedCall::CreateDelegationToken {
             owner_principal_name,
@@ -195,9 +192,8 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
     });
     // Owner principal name carries no `User:` prefix; unset
     // spec.max_lifetime_ms → -1 (broker default).
-    assert!(
-        create_call == Some(("alice".to_string(), vec!["User:bob".to_string()], -1_i64,)),
-        "CreateDelegationToken must have been issued with these exact args",
+    assert2::assert!(
+        create_call == Some(("alice".to_string(), vec!["User:bob".to_string()], -1_i64,))
     );
 
     // ── Secret PATCH body: four KIP-48 keys ────────────────────────
@@ -212,10 +208,7 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
     let body: serde_json::Value = serde_json::from_slice(secret_patch.body()).unwrap();
     let data = body["data"].as_object().expect("data object");
     for key in ["token-id", "hmac", "password", "sasl.jaas.config"] {
-        assert!(
-            data.contains_key(key),
-            "Secret.data missing {key}: {data:?}",
-        );
+        assert2::assert!(data.contains_key(key));
     }
 
     // ── Status PATCH body: token fields + conditions ───────────────
@@ -238,20 +231,18 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
         .as_i64()
         .expect("delegationTokenMaxTimestampMs is i64");
     let conds = status["conditions"].as_array().expect("conditions array");
-    assert!(status["delegationTokenId"].is_string(), "status: {status}");
-    assert!(expiry > 0, "status: {status}");
-    assert!(max_ts >= expiry, "status: {status}");
-    assert!(
+    assert2::assert!(status["delegationTokenId"].is_string());
+    assert2::assert!(expiry > 0);
+    assert2::assert!(max_ts >= expiry);
+    assert2::assert!(
         conds
             .iter()
-            .any(|c| c["type"] == "Ready" && c["status"] == "True" && c["reason"] == "TokenReady"),
-        "status: {status}"
+            .any(|c| c["type"] == "Ready" && c["status"] == "True" && c["reason"] == "TokenReady")
     );
-    assert!(
+    assert2::assert!(
         conds.iter().any(|c| c["type"] == "TokenIssued"
             && c["status"] == "True"
-            && c["reason"] == "Issued"),
-        "status: {status}"
+            && c["reason"] == "Issued")
     );
 }
 
@@ -338,10 +329,7 @@ async fn delegation_token_user_reconcile_renews_when_within_threshold() {
         .iter()
         .filter(|c| matches!(c, RecordedCall::RenewDelegationToken { .. }))
         .count();
-    assert!(
-        renews == 1,
-        "expected exactly one Renew call, got: {calls:?}"
-    );
+    assert2::assert!(renews == 1);
     let creates = calls
         .iter()
         .filter(|c| matches!(c, RecordedCall::CreateDelegationToken { .. }))
@@ -403,7 +391,7 @@ async fn delegation_token_user_deletion_expires_token_and_removes_secret() {
     {
         let store = fake_for_assert.lock().await;
         let tokens = store.delegation_tokens.lock().unwrap();
-        assert!(tokens.len() == 1, "pass 1 must mint exactly one token");
+        assert2::assert!(tokens.len() == 1);
     }
 
     // ── Pass 2: delete ────────────────────────────────────────────
@@ -425,18 +413,12 @@ async fn delegation_token_user_deletion_expires_token_and_removes_secret() {
             )
         })
         .count();
-    assert!(
-        describes == 2,
-        "expected 2 Describes (provision + finalizer), got: {calls:?}"
-    );
+    assert2::assert!(describes == 2);
     let expires = calls
         .iter()
         .filter(|c| matches!(c, RecordedCall::ExpireDelegationToken { .. }))
         .count();
-    assert!(
-        expires == 1,
-        "expected exactly one Expire from the finalizer, got: {calls:?}"
-    );
+    assert2::assert!(expires == 1);
 
     // ── Token store is now empty (Expire dropped the entry). ──────
     let store = fake_for_assert.lock().await;
@@ -447,10 +429,7 @@ async fn delegation_token_user_deletion_expires_token_and_removes_secret() {
         .iter()
         .filter(|t| t.owner.principal_type == "User" && t.owner.name == "alice")
         .count();
-    assert!(
-        owned == 0,
-        "Expire must have removed every token owned by User:alice"
-    );
+    assert2::assert!(owned == 0);
 
     // ── Finalizer-removal PATCH landed on the KafkaUser itself. ───
     let observed = state.take_observed();
@@ -462,10 +441,7 @@ async fn delegation_token_user_deletion_expires_token_and_removes_secret() {
     let patch = finalizer_patch.expect("finalizer-removal PATCH must have been observed");
     let body: serde_json::Value = serde_json::from_slice(patch.body()).unwrap();
     // The patch body clears the finalizer list.
-    assert!(
-        body["metadata"]["finalizers"] == json!([]),
-        "finalizer-removal PATCH must empty the finalizer list"
-    );
+    assert2::assert!(body["metadata"]["finalizers"] == json!([]));
 
     // 404 the would-be Secret GET (the operator doesn't issue one in
     // the finalizer arm — owner-references cascade), so the cluster
@@ -483,8 +459,5 @@ async fn delegation_token_user_deletion_expires_token_and_removes_secret() {
         .collect();
     // Only the pass-1 Secret PATCH should be present; pass-2 must not
     // re-touch the Secret (owner-ref cascade does the cleanup).
-    assert!(
-        secret_patches.len() <= 1,
-        "finalizer arm must not re-apply the Secret, got patches: {secret_patches:?}",
-    );
+    assert2::assert!(secret_patches.len() <= 1);
 }

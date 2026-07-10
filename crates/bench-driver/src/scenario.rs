@@ -306,19 +306,18 @@ pub struct RunOutput {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn stack_broker_pod_regex_distinguishes_stacks() {
-        assert_eq!(Stack::Crabka.broker_pod_regex(), "^demo-broker");
-        assert_eq!(Stack::Kafka.broker_pod_regex(), "^demo-kafka-");
+        assert2::assert!(Stack::Crabka.broker_pod_regex() == "^demo-broker");
+        assert2::assert!(Stack::Kafka.broker_pod_regex() == "^demo-kafka-");
         // The crabka prefix must match BOTH the single-pool e2e naming and the
         // multi-pool bench naming (used by failover.rs `starts_with`).
         let p = Stack::Crabka.broker_pod_regex().trim_start_matches('^');
-        assert!("demo-brokers-0".starts_with(p));
-        assert!("demo-broker-0-0".starts_with(p));
+        assert2::assert!("demo-brokers-0".starts_with(p));
+        assert2::assert!("demo-broker-0-0".starts_with(p));
     }
 
     #[test]
@@ -329,7 +328,7 @@ mod tests {
             (Acks::Leader, P::One),
             (Acks::All, P::All),
         ] {
-            assert_eq!(acks.into_producer(), want, "case {acks:?}");
+            assert2::assert!(acks.into_producer() == want);
         }
     }
 
@@ -343,13 +342,13 @@ mod tests {
             (Compression::Lz4, PC::Lz4),
             (Compression::Zstd, PC::Zstd),
         ] {
-            assert_eq!(compression.into_producer(), want, "case {compression:?}");
+            assert2::assert!(compression.into_producer() == want);
         }
     }
 
     #[test]
     fn compression_default_is_none() {
-        assert_eq!(Compression::default(), Compression::None);
+        assert2::assert!(Compression::default() == Compression::None);
     }
 
     #[test]
@@ -372,9 +371,9 @@ duration_s: 60
 warmup_s: 10
 ";
         let s: Scenario = serde_yaml::from_str(y).expect("parse");
-        assert_eq!(s.name.as_str(), "small-msg-saturate");
-        assert_eq!(s.partitions, 6);
-        assert!(matches!(s.mode, LoadMode::Saturate));
+        assert2::assert!(s.name.as_str() == "small-msg-saturate");
+        assert2::assert!(s.partitions == 6);
+        assert2::assert!(matches!(s.mode, LoadMode::Saturate));
     }
 
     #[test]
@@ -386,7 +385,7 @@ mode:
   msgs_per_sec: 20000
 ";
         let s: Scenario = serde_yaml::from_str(y).unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             s.mode,
             LoadMode::FixedRate {
                 msgs_per_sec: 20000
@@ -438,7 +437,7 @@ mode:
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: RunOutput = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.scenario.name.as_str(), "x");
-        assert_eq!(back.notes, vec!["test".to_owned()]);
+        assert2::assert!(back.scenario.name.as_str() == "x");
+        assert2::assert!(back.notes == vec!["test".to_owned()]);
     }
 }

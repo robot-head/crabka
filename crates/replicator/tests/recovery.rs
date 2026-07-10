@@ -133,17 +133,10 @@ async fn restart_resumes_with_no_gap() {
     // ── Step 7: assertions ────────────────────────────────────────────────────
 
     // (a) No gap: every one of the 20 distinct keys made it across the restart.
-    assert!(
-        keys.len() == 20,
-        "expected 20 distinct keys on target after restart, got {} — data gap",
-        keys.len()
-    );
+    assert2::assert!(keys.len() == 20);
     for i in 0..20u32 {
         let key = format!("k{i}").into_bytes();
-        assert!(
-            keys.contains(&key),
-            "key k{i} is MISSING from target after restart — data gap detected"
-        );
+        assert2::assert!(keys.contains(&key));
     }
 
     // (b) RESUMED, not re-read from 0. A full re-read would deliver the first

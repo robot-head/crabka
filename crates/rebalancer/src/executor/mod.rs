@@ -396,7 +396,7 @@ enum WaitOutcome {
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::{
@@ -587,10 +587,10 @@ mod tests {
         exec.run().await;
 
         let after = state.store.get("p1").unwrap();
-        assert!(after.status == ProposalStatus::Failed);
-        assert!(after.failure_reason.as_deref().unwrap().contains("Submit"));
+        assert2::assert!(after.status == ProposalStatus::Failed);
+        assert2::assert!(after.failure_reason.as_deref().unwrap().contains("Submit"));
         let kinds: Vec<&str> = client.calls().iter().map(kind).collect();
-        assert!(kinds.contains(&"del"));
+        assert2::assert!(kinds.contains(&"del"));
     }
 
     #[tokio::test]
@@ -626,13 +626,13 @@ mod tests {
         handle.await.unwrap();
 
         let after = state.store.get("p1").unwrap();
-        assert!(after.status == ProposalStatus::Cancelled);
+        assert2::assert!(after.status == ProposalStatus::Cancelled);
         let cancels: usize = client
             .calls()
             .iter()
             .filter(|c| matches!(c, MockCall::Cancel(_)))
             .count();
-        assert!(cancels >= 1);
+        assert2::assert!(cancels >= 1);
     }
 
     #[tokio::test]
@@ -648,13 +648,9 @@ mod tests {
         exec.run().await;
 
         let after = state.store.get("p1").unwrap();
-        assert!(
-            after.status == ProposalStatus::Cancelled,
-            "cancel-before-Submit must produce Cancelled, not {:?}",
-            after.status
-        );
+        assert2::assert!(after.status == ProposalStatus::Cancelled);
         // After cancellation the backend should have been tombstoned.
-        assert!(state.state_topic.loaded().is_none());
+        assert2::assert!(state.state_topic.loaded().is_none());
     }
 
     #[tokio::test]
@@ -674,17 +670,14 @@ mod tests {
         exec.run().await;
 
         let writes = backend.writes();
-        assert!(
-            writes.iter().any(|f| {
-                f.phase == Phase::ClearThrottle
-                    && f.target_terminal_status == Some(ProposalStatus::Failed)
-                    && f.failure_reason
-                        .as_deref()
-                        .is_some_and(|reason| reason.contains("Submit"))
-            }),
-            "expected a persisted failed ClearThrottle phase, got {writes:?}"
-        );
-        assert!(backend.deletes.load(Ordering::SeqCst) == 1);
+        assert2::assert!(writes.iter().any(|f| {
+            f.phase == Phase::ClearThrottle
+                && f.target_terminal_status == Some(ProposalStatus::Failed)
+                && f.failure_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("Submit"))
+        }));
+        assert2::assert!(backend.deletes.load(Ordering::SeqCst) == 1);
     }
 
     #[tokio::test]
@@ -718,7 +711,7 @@ mod tests {
         exec.run().await;
 
         let after = state.store.get("p1").unwrap();
-        assert!(after.status == ProposalStatus::Completed);
+        assert2::assert!(after.status == ProposalStatus::Completed);
         let dels: usize = client
             .calls()
             .iter()
@@ -732,7 +725,7 @@ mod tests {
                 )
             })
             .count();
-        assert!(dels == 1);
+        assert2::assert!(dels == 1);
     }
 
     #[tokio::test]
@@ -754,8 +747,8 @@ mod tests {
             .expect("clear-throttle resume should terminate");
 
         let after = state.store.get("p1").unwrap();
-        assert!(after.status == ProposalStatus::Completed);
-        assert!(
+        assert2::assert!(after.status == ProposalStatus::Completed);
+        assert2::assert!(
             !client
                 .calls()
                 .iter()

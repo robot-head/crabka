@@ -56,7 +56,7 @@ pub fn encode_control_batch(base_offset: i64, key: Bytes, value: Bytes) -> Bytes
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::Buf;
 
     use super::*;
@@ -65,8 +65,8 @@ mod tests {
     fn control_key_is_version_then_type() {
         let key = control_record_key(ControlRecordType::SnapshotHeader);
         let mut cur: &[u8] = &key;
-        assert!(cur.get_i16() == 0); // version
-        assert!(cur.get_i16() == 3); // SnapshotHeader type
+        assert2::assert!(cur.get_i16() == 0); // version
+        assert2::assert!(cur.get_i16() == 3); // SnapshotHeader type
     }
 
     #[test]
@@ -75,10 +75,10 @@ mod tests {
         let batch = encode_control_batch(42, key, bytes::Bytes::from_static(b"\x00\x00"));
         let mut cur: &[u8] = &batch;
         let decoded = RecordBatch::decode(&mut cur).expect("control batch decodes");
-        assert!(decoded.base_offset == 42);
-        assert!(cur.is_empty());
+        assert2::assert!(decoded.base_offset == 42);
+        assert2::assert!(cur.is_empty());
         // magic byte at offset 16, attributes i16 at offset 21..23; control bit = 0x20.
         let attrs = i16::from_be_bytes([batch[21], batch[22]]);
-        assert!(attrs & 0x20 != 0);
+        assert2::assert!(attrs & 0x20 != 0);
     }
 }

@@ -1329,7 +1329,7 @@ fn child_count_for(nested_sets: &[NestedSet], idx: usize) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::arrow::array::AsArray;
 
     use super::*;
@@ -1386,7 +1386,7 @@ mod tests {
             .column(0)
             .as_primitive::<datafusion::arrow::datatypes::Int64Type>()
             .value(0);
-        assert!(c == 2);
+        assert2::assert!(c == 2);
 
         let df = r
             .ctx
@@ -1399,8 +1399,8 @@ mod tests {
         let pid = out[0]
             .column(0)
             .as_primitive::<datafusion::arrow::datatypes::Int32Type>();
-        assert_eq!(pid.value(0), -1);
-        assert_eq!(pid.value(1), 1); // root: Tempo nestedSetParent sentinel
+        assert2::assert!(pid.value(0) == -1);
+        assert2::assert!(pid.value(1) == 1); // root: Tempo nestedSetParent sentinel
     }
 
     #[tokio::test]
@@ -1408,7 +1408,7 @@ mod tests {
         let mut s = InMemorySpanStore::new();
         s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
         let got = s.trace_by_id("t", &[7; 16]).await.unwrap().unwrap();
-        assert!(
+        assert2::assert!(
             got == TraceSpans {
                 trace_id: [7; 16],
                 root_service_name: "svc".into(),
@@ -1435,7 +1435,7 @@ mod tests {
                 }],
             }
         );
-        assert!(s.trace_by_id("t", &[9; 16]).await.unwrap().is_none());
+        assert2::assert!(s.trace_by_id("t", &[9; 16]).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1454,7 +1454,7 @@ mod tests {
         );
 
         let got = s.tag_names("t", None, 0, 10_000).await.unwrap();
-        assert!(
+        assert2::assert!(
             got == vec![
                 ScopedTag {
                     scope: TagScope::Resource,
@@ -1493,7 +1493,7 @@ mod tests {
             .tag_names("t", Some(TagScope::Instrumentation), 0, 10_000)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             got == vec![ScopedTag {
                 scope: TagScope::Instrumentation,
                 tags: vec![
@@ -1524,7 +1524,7 @@ mod tests {
             .tag_names("t", Some(TagScope::Event), 0, 10_000)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             event_names
                 == vec![ScopedTag {
                     scope: TagScope::Event,
@@ -1540,7 +1540,7 @@ mod tests {
             .tag_names("t", Some(TagScope::Link), 0, 10_000)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             link_names
                 == vec![ScopedTag {
                     scope: TagScope::Link,
@@ -1564,12 +1564,11 @@ mod tests {
         ];
         for (tag, type_, value) in cases {
             let got = s.tag_values("t", tag, 0, 10_000).await.unwrap();
-            assert!(
+            assert2::assert!(
                 got == vec![TypedValue {
                     type_: type_.into(),
                     value: value.into(),
-                }],
-                "tag {tag}"
+                }]
             );
         }
     }
@@ -1583,7 +1582,7 @@ mod tests {
             .tag_names("t", Some(TagScope::Intrinsic), 0, 10_000)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             got == vec![ScopedTag {
                 scope: TagScope::Intrinsic,
                 tags: vec![
@@ -1635,7 +1634,7 @@ mod tests {
         );
 
         let resource = s.tag_values("t", "service.name", 0, 10_000).await.unwrap();
-        assert!(
+        assert2::assert!(
             resource
                 == vec![TypedValue {
                     type_: "string".into(),
@@ -1644,7 +1643,7 @@ mod tests {
         );
 
         let span = s.tag_values("t", ".svc", 0, 10_000).await.unwrap();
-        assert!(
+        assert2::assert!(
             span == vec![
                 TypedValue {
                     type_: "string".into(),
@@ -1661,7 +1660,7 @@ mod tests {
             .tag_values("t", "instrumentation:name", 0, 10_000)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             instrumentation
                 == vec![TypedValue {
                     type_: "string".into(),
@@ -1673,7 +1672,7 @@ mod tests {
             .tag_values("t", "span:childCount", 0, 10_000)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             child_count
                 == vec![
                     TypedValue {
@@ -1770,7 +1769,7 @@ mod tests {
             .scan_with_options("t", &[], 0, 10_000, &options)
             .await
             .unwrap();
-        assert!(row_count(&r).await == 1);
+        assert2::assert!(row_count(&r).await == 1);
 
         // The typed span attributes (Int/Float/Bool) and the projected event &
         // link attribute columns are present and carry the right values.
@@ -1785,7 +1784,7 @@ mod tests {
             .unwrap();
         let out = df.collect().await.unwrap();
         let batch = &out[0];
-        assert!(
+        assert2::assert!(
             batch
                 .column(0)
                 .as_primitive::<datafusion::arrow::datatypes::Int64Type>()
@@ -1885,10 +1884,9 @@ mod tests {
             ),
         ];
         for (key, op, value) in cases {
-            let desc = format!("{key} {op:?} {value:?}");
-            assert!(
-                scan_matches(&[matcher(MatchScope::Intrinsic, key, op, value)]).await == 1,
-                "intrinsic {desc} should match"
+            let _desc = format!("{key} {op:?} {value:?}");
+            assert2::assert!(
+                scan_matches(&[matcher(MatchScope::Intrinsic, key, op, value)]).await == 1
             );
         }
     }
@@ -1896,7 +1894,7 @@ mod tests {
     #[tokio::test]
     async fn enum_intrinsics_match_by_name_and_int() {
         // kind=server (2) and status=error (2) via enum string names.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Intrinsic,
                 "span:kind",
@@ -1906,7 +1904,7 @@ mod tests {
             .await
                 == 1
         );
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Intrinsic,
                 "span:status",
@@ -1917,7 +1915,7 @@ mod tests {
                 == 1
         );
         // Same intrinsics via integer enum values.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Intrinsic,
                 "span:kind",
@@ -1928,7 +1926,7 @@ mod tests {
                 == 1
         );
         // An unknown enum name yields no match.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Intrinsic,
                 "span:status",
@@ -1939,7 +1937,7 @@ mod tests {
                 == 0
         );
         // A float/bool expected value cannot match an enum intrinsic.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Intrinsic,
                 "span:kind",
@@ -1954,7 +1952,7 @@ mod tests {
     #[tokio::test]
     async fn scope_matchers_cover_resource_instrumentation_span_and_both() {
         // Resource service.name.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Resource,
                 "service.name",
@@ -1966,7 +1964,7 @@ mod tests {
         );
         // Resource non-service.name key falls back to nil matching (no match
         // for an Eq-with-value).
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Resource,
                 "other",
@@ -1977,7 +1975,7 @@ mod tests {
                 == 0
         );
         // Instrumentation by bare name/version keys.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Instrumentation,
                 "name",
@@ -1987,7 +1985,7 @@ mod tests {
             .await
                 == 1
         );
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Instrumentation,
                 "version",
@@ -1998,7 +1996,7 @@ mod tests {
                 == 1
         );
         // Span attribute, typed Int.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Span,
                 "http.status",
@@ -2009,7 +2007,7 @@ mod tests {
                 == 1
         );
         // Both scope: resource OR span attribute. The span attribute matches.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Both,
                 "http.method",
@@ -2020,7 +2018,7 @@ mod tests {
                 == 1
         );
         // Parent scope always matches (returns true).
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Parent,
                 "anything",
@@ -2035,7 +2033,7 @@ mod tests {
     #[tokio::test]
     async fn span_attr_matchers_cover_all_value_types() {
         // Float attribute.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Span,
                 "ratio",
@@ -2046,7 +2044,7 @@ mod tests {
                 == 1
         );
         // Bool attribute.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Span,
                 "ok",
@@ -2056,7 +2054,7 @@ mod tests {
             .await
                 == 1
         );
-        for (name, cmp, value, expected) in [
+        for (_name, cmp, value, expected) in [
             (
                 "matching regex",
                 MatchCmp::Re,
@@ -2077,14 +2075,13 @@ mod tests {
                 1,
             ),
         ] {
-            assert_eq!(
-                scan_matches(&[matcher(MatchScope::Span, "http.method", cmp, value)]).await,
-                expected,
-                "case {name}"
+            assert2::assert!(
+                scan_matches(&[matcher(MatchScope::Span, "http.method", cmp, value)]).await
+                    == expected
             );
         }
         // Eq against Nil on an absent attribute -> matches (absent).
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Span,
                 "missing",
@@ -2101,7 +2098,7 @@ mod tests {
     #[tokio::test]
     async fn event_and_link_scope_matchers_select_rows() {
         // Event-scope attribute matcher selects the matching event row.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Event,
                 "ev.attr",
@@ -2112,7 +2109,7 @@ mod tests {
                 == 1
         );
         // Event intrinsic name matcher.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Intrinsic,
                 "event:name",
@@ -2123,7 +2120,7 @@ mod tests {
                 == 1
         );
         // Event intrinsic timeSinceStart matcher.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Intrinsic,
                 "event:timeSinceStart",
@@ -2134,7 +2131,7 @@ mod tests {
                 == 1
         );
         // Link-scope attribute matcher.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Link,
                 "ln.attr",
@@ -2145,7 +2142,7 @@ mod tests {
                 == 1
         );
         // Link intrinsic traceID / spanID matchers (hex).
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Intrinsic,
                 "link:traceID",
@@ -2155,7 +2152,7 @@ mod tests {
             .await
                 == 1
         );
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Intrinsic,
                 "link:spanID",
@@ -2188,7 +2185,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(row_count(&r).await == 0);
+        assert2::assert!(row_count(&r).await == 0);
 
         // `event:name = nil` must match a span with no events (absence).
         let r = s
@@ -2205,7 +2202,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(row_count(&r).await == 1);
+        assert2::assert!(row_count(&r).await == 1);
 
         // Same for links.
         let r = s
@@ -2222,7 +2219,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(row_count(&r).await == 1);
+        assert2::assert!(row_count(&r).await == 1);
     }
 
     #[tokio::test]
@@ -2246,7 +2243,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(row_count(&r).await == 0);
+        assert2::assert!(row_count(&r).await == 0);
     }
 
     // ---- tag_values: drive every intrinsic/value collector branch ----
@@ -2274,13 +2271,12 @@ mod tests {
             ("instrumentation:name", "string", "tracer"),
             ("instrumentation:version", "string", "1.2.3"),
         ] {
-            assert!(
+            assert2::assert!(
                 tag_values_for(tag).await
                     == vec![TypedValue {
                         type_: type_.into(),
                         value: value.into(),
-                    }],
-                "tag {tag}"
+                    }]
             );
         }
     }
@@ -2293,13 +2289,12 @@ mod tests {
             // root: Tempo nestedSetParent sentinel
             ("span:nestedSetParent", "-1"),
         ] {
-            assert!(
+            assert2::assert!(
                 tag_values_for(tag).await
                     == vec![TypedValue {
                         type_: "int".into(),
                         value: value.into(),
-                    }],
-                "tag {tag}"
+                    }]
             );
         }
     }
@@ -2313,13 +2308,12 @@ mod tests {
             (".ratio", "float", "0.5"),
             (".ok", "bool", "true"),
         ] {
-            assert!(
+            assert2::assert!(
                 tag_values_for(tag).await
                     == vec![TypedValue {
                         type_: type_.into(),
                         value: value.into(),
-                    }],
-                "tag {tag}"
+                    }]
             );
         }
     }
@@ -2327,14 +2321,14 @@ mod tests {
     #[tokio::test]
     async fn tag_values_cover_scoped_attribute_prefixes() {
         // `span.` and `resource.` prefixes route to the right scope.
-        assert!(
+        assert2::assert!(
             tag_values_for("span.http.method").await
                 == vec![TypedValue {
                     type_: "string".into(),
                     value: "GET".into(),
                 }]
         );
-        assert!(
+        assert2::assert!(
             tag_values_for("resource.service.name").await
                 == vec![TypedValue {
                     type_: "string".into(),
@@ -2345,7 +2339,7 @@ mod tests {
 
     #[tokio::test]
     async fn tag_values_empty_for_unknown_tag() {
-        assert!(tag_values_for("does.not.exist").await.is_empty());
+        assert2::assert!(tag_values_for("does.not.exist").await.is_empty());
     }
 
     // ---- time-window filtering ----
@@ -2376,7 +2370,7 @@ mod tests {
             value: MatchValue::Str("checkout".into()),
             negated: true,
         };
-        assert!(scan_matches(&[neg]).await == 0);
+        assert2::assert!(scan_matches(&[neg]).await == 0);
     }
 
     // ---- comparison operator coverage for typed matchers ----
@@ -2405,13 +2399,10 @@ mod tests {
                 MatchValue::Int(val),
             )])
             .await;
-            assert!(
-                got == expected,
-                "duration {op:?} {val} -> {got}, want {expected}"
-            );
+            assert2::assert!(got == expected);
         }
         // A non-int expected value against an int intrinsic does not match.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Intrinsic,
                 "span:duration",
@@ -2448,13 +2439,10 @@ mod tests {
                 MatchValue::Float(val),
             )])
             .await;
-            assert!(
-                got == expected,
-                "ratio {op:?} {val} -> {got}, want {expected}"
-            );
+            assert2::assert!(got == expected);
         }
         // A non-float expected value against a float attribute does not match.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Span,
                 "ratio",
@@ -2469,7 +2457,7 @@ mod tests {
     #[tokio::test]
     async fn bool_attr_matches_eq_neq_and_rejects_ordering() {
         // rich_span has attr ok == true.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Span,
                 "ok",
@@ -2479,7 +2467,7 @@ mod tests {
             .await
                 == 1
         );
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Span,
                 "ok",
@@ -2490,7 +2478,7 @@ mod tests {
                 == 0
         );
         // Ordering operators against a bool attribute are always false.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Span,
                 "ok",
@@ -2501,7 +2489,7 @@ mod tests {
                 == 0
         );
         // A non-bool expected value against a bool attribute does not match.
-        assert!(
+        assert2::assert!(
             scan_matches(&[matcher(
                 MatchScope::Span,
                 "ok",
@@ -2515,7 +2503,7 @@ mod tests {
 
     #[tokio::test]
     async fn string_attr_ordering_ops_and_negated_regex_are_false() {
-        for (name, cmp, value, expected) in [
+        for (_name, cmp, value, expected) in [
             (
                 "string ordering is false",
                 MatchCmp::Lt,
@@ -2535,10 +2523,9 @@ mod tests {
                 0,
             ),
         ] {
-            assert_eq!(
-                scan_matches(&[matcher(MatchScope::Span, "http.method", cmp, value)]).await,
-                expected,
-                "case {name}"
+            assert2::assert!(
+                scan_matches(&[matcher(MatchScope::Span, "http.method", cmp, value)]).await
+                    == expected
             );
         }
     }
@@ -2577,7 +2564,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert!(row_count(&r).await == 1, "kind name {name} should resolve");
+            assert2::assert!(row_count(&r).await == 1);
         }
 
         for (name, status) in [("unset", 0), ("ok", 1), ("error", 2)] {
@@ -2597,10 +2584,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            assert!(
-                row_count(&r).await == 1,
-                "status name {name} should resolve"
-            );
+            assert2::assert!(row_count(&r).await == 1);
         }
     }
 
@@ -2623,7 +2607,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(row_count(&r).await == 1);
+        assert2::assert!(row_count(&r).await == 1);
     }
 
     #[tokio::test]
@@ -2633,7 +2617,7 @@ mod tests {
         s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
 
         // tag_values for span:parentID yields nothing for a parentless span.
-        assert!(
+        assert2::assert!(
             s.tag_values("t", "span:parentID", 0, 10_000)
                 .await
                 .unwrap()
@@ -2654,7 +2638,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(row_count(&r).await == 1);
+        assert2::assert!(row_count(&r).await == 1);
     }
 
     #[tokio::test]
@@ -2662,7 +2646,7 @@ mod tests {
         let mut s = InMemorySpanStore::new();
         // span() leaves status_message empty.
         s.push_trace("t", "svc", "op", vec![span(1, None, "root", vec![])]);
-        assert!(
+        assert2::assert!(
             s.tag_values("t", "span:statusMessage", 0, 10_000)
                 .await
                 .unwrap()
@@ -2706,7 +2690,7 @@ mod tests {
 
         // Presence: span HAS events -> `event:name != nil` is true. The `!` on
         // `!span.events.is_empty()` is load-bearing: removing it flips this.
-        assert!(intrinsic(
+        assert2::assert!(intrinsic(
             &trace,
             "event:name",
             MatchCmp::Neq,
@@ -2714,13 +2698,13 @@ mod tests {
         ));
         // Value match on the event name distinguishes this arm from the `_ => true`
         // fallthrough.
-        assert!(intrinsic(
+        assert2::assert!(intrinsic(
             &trace,
             "event:name",
             MatchCmp::Eq,
             MatchValue::Str("cache.miss".into())
         ));
-        assert!(!intrinsic(
+        assert2::assert!(!intrinsic(
             &trace,
             "event:name",
             MatchCmp::Eq,
@@ -2730,7 +2714,7 @@ mod tests {
         // A span with NO events: `event:name != nil` is false (absence). This is
         // the other side of the `!`.
         let empty = stored_trace_with(span(1, None, "root", vec![]));
-        assert!(!intrinsic(
+        assert2::assert!(!intrinsic(
             &empty,
             "event:name",
             MatchCmp::Neq,
@@ -2753,14 +2737,11 @@ mod tests {
             (MatchCmp::Eq, MatchValue::Int(50), true),
             (MatchCmp::Eq, MatchValue::Int(51), false),
         ] {
-            assert!(
-                intrinsic(&trace, "event:timeSinceStart", cmp, value.clone()) == want,
-                "case {cmp:?} {value:?}"
-            );
+            assert2::assert!(intrinsic(&trace, "event:timeSinceStart", cmp, value.clone()) == want);
         }
 
         let empty = stored_trace_with(span(1, None, "root", vec![]));
-        assert!(!intrinsic(
+        assert2::assert!(!intrinsic(
             &empty,
             "event:timeSinceStart",
             MatchCmp::Neq,
@@ -2807,21 +2788,18 @@ mod tests {
                 false,
             ),
         ] {
-            assert!(
-                intrinsic(&trace, tag, cmp, value.clone()) == want,
-                "case {tag} {cmp:?} {value:?}"
-            );
+            assert2::assert!(intrinsic(&trace, tag, cmp, value.clone()) == want);
         }
 
         // No links: presence is false (other side of the `!`).
         let empty = stored_trace_with(span(1, None, "root", vec![]));
-        assert!(!intrinsic(
+        assert2::assert!(!intrinsic(
             &empty,
             "link:traceID",
             MatchCmp::Neq,
             MatchValue::Nil
         ));
-        assert!(!intrinsic(
+        assert2::assert!(!intrinsic(
             &empty,
             "link:spanID",
             MatchCmp::Neq,
@@ -2869,10 +2847,7 @@ mod tests {
                 false,
             ),
         ] {
-            assert!(
-                intrinsic(&trace, tag, MatchCmp::Eq, value.clone()) == want,
-                "case {tag} {value:?}"
-            );
+            assert2::assert!(intrinsic(&trace, tag, MatchCmp::Eq, value.clone()) == want);
         }
     }
 
@@ -2886,10 +2861,7 @@ mod tests {
             ("span:nestedSetRight", 2, true),
             ("span:nestedSetRight", 1, false),
         ] {
-            assert!(
-                intrinsic(&trace, tag, MatchCmp::Eq, MatchValue::Int(value)) == want,
-                "case {tag} {value}"
-            );
+            assert2::assert!(intrinsic(&trace, tag, MatchCmp::Eq, MatchValue::Int(value)) == want);
         }
     }
 
@@ -2901,7 +2873,7 @@ mod tests {
         let mut values = BTreeSet::new();
         let empty = span(1, None, "root", vec![]); // version is empty
         collect_span_intrinsic_values(&empty, &[], 0, "instrumentation:version", &mut values);
-        assert!(values.is_empty());
+        assert2::assert!(values.is_empty());
 
         // A non-empty version is collected.
         let mut values = BTreeSet::new();
@@ -2916,7 +2888,7 @@ mod tests {
             "instrumentation:version",
             &mut values,
         );
-        assert!(values == BTreeSet::from([("string".to_string(), "1.2.3".to_string())]));
+        assert2::assert!(values == BTreeSet::from([("string".to_string(), "1.2.3".to_string())]));
     }
 
     #[test]
@@ -2928,10 +2900,7 @@ mod tests {
             (MatchCmp::Neq, MatchValue::Nil, Some(true)),
             (MatchCmp::Eq, MatchValue::Int(1), None),
         ] {
-            assert!(
-                present_value_matches(cmp, &value) == want,
-                "case {cmp:?} {value:?}"
-            );
+            assert2::assert!(present_value_matches(cmp, &value) == want);
         }
     }
 
@@ -2942,16 +2911,16 @@ mod tests {
         // to false.
         let eq_nil = matcher(MatchScope::Event, "x", MatchCmp::Eq, MatchValue::Nil);
         let neq_nil = matcher(MatchScope::Event, "x", MatchCmp::Neq, MatchValue::Nil);
-        assert!(event_matcher_matches_absence(&eq_nil));
-        assert!(!event_matcher_matches_absence(&neq_nil));
+        assert2::assert!(event_matcher_matches_absence(&eq_nil));
+        assert2::assert!(!event_matcher_matches_absence(&neq_nil));
     }
 
     #[test]
     fn link_matcher_matches_absence_link_attr_uses_nil_semantics() {
         let eq_nil = matcher(MatchScope::Link, "x", MatchCmp::Eq, MatchValue::Nil);
         let neq_nil = matcher(MatchScope::Link, "x", MatchCmp::Neq, MatchValue::Nil);
-        assert!(link_matcher_matches_absence(&eq_nil));
-        assert!(!link_matcher_matches_absence(&neq_nil));
+        assert2::assert!(link_matcher_matches_absence(&eq_nil));
+        assert2::assert!(!link_matcher_matches_absence(&neq_nil));
     }
 
     #[test]
@@ -2975,8 +2944,8 @@ mod tests {
             MatchCmp::Eq,
             MatchValue::Str("wrong".into()),
         );
-        assert!(link_matcher_matches_link(&link, &hit));
-        assert!(!link_matcher_matches_link(&link, &miss));
+        assert2::assert!(link_matcher_matches_link(&link, &hit));
+        assert2::assert!(!link_matcher_matches_link(&link, &miss));
     }
 
     #[test]
@@ -2999,8 +2968,8 @@ mod tests {
             MatchCmp::Eq,
             MatchValue::Str("other".into()),
         );
-        assert!(instrumentation_matches(&span, &hit));
-        assert!(!instrumentation_matches(&span, &miss));
+        assert2::assert!(instrumentation_matches(&span, &hit));
+        assert2::assert!(!instrumentation_matches(&span, &miss));
     }
 
     #[test]
@@ -3032,7 +3001,7 @@ mod tests {
             MatchCmp::Eq,
             MatchValue::Str("yes".into()),
         );
-        assert!(matcher_matches(
+        assert2::assert!(matcher_matches(
             &trace,
             &trace.spans[0],
             &trace.nested,
@@ -3047,7 +3016,7 @@ mod tests {
             MatchCmp::Eq,
             MatchValue::Str("no".into()),
         );
-        assert!(!matcher_matches(
+        assert2::assert!(!matcher_matches(
             &trace,
             &trace.spans[0],
             &trace.nested,
@@ -3061,7 +3030,7 @@ mod tests {
             MatchCmp::Eq,
             MatchValue::Str("yes".into()),
         );
-        assert!(matcher_matches(
+        assert2::assert!(matcher_matches(
             &trace,
             &trace.spans[0],
             &trace.nested,
@@ -3074,7 +3043,7 @@ mod tests {
             MatchCmp::Eq,
             MatchValue::Str("no".into()),
         );
-        assert!(!matcher_matches(
+        assert2::assert!(!matcher_matches(
             &trace,
             &trace.spans[0],
             &trace.nested,
@@ -3113,7 +3082,7 @@ mod tests {
             value: MatchValue::Str("cache.miss".into()),
             negated: true,
         };
-        assert!(span_matches(
+        assert2::assert!(span_matches(
             &trace,
             &trace.spans[0],
             &trace.nested,

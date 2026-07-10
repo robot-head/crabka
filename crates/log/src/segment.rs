@@ -1003,7 +1003,7 @@ impl Segment {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::Bytes;
     use crabka_ids::Offset;
     use crabka_protocol::records::{Record, RecordBatch};
@@ -1081,7 +1081,7 @@ mod tests {
         // Target ts is the very last record's, so the loop must advance
         // through every window before matching.
         let target = 1_000 + (n - 1);
-        for (name, threshold, expected) in [
+        for (_name, threshold, expected) in [
             (
                 "match at final record",
                 target,
@@ -1089,10 +1089,8 @@ mod tests {
             ),
             ("no matching record", 10_001, None),
         ] {
-            assert_eq!(
-                seg.scan_from_floor_windowed(Offset(0), 1, |ts| ts >= threshold),
-                expected,
-                "case {name}"
+            assert2::assert!(
+                seg.scan_from_floor_windowed(Offset(0), 1, |ts| ts >= threshold) == expected
             );
         }
         drop(dir);
@@ -1114,7 +1112,7 @@ mod tests {
         seg.append(&sample_batch(0, 1, 100), 0).unwrap();
         seg.append(&sample_batch(1, 3, 200), 0).unwrap();
         let got = seg.scan_from_floor_windowed(Offset(0), WINDOW, |ts| ts >= 202);
-        assert!(got == Some((Offset(3), 202)));
+        assert2::assert!(got == Some((Offset(3), 202)));
         drop(dir);
     }
 
@@ -1126,12 +1124,12 @@ mod tests {
         seg.append(&sample_batch(0, 3, 100), 0).unwrap();
         // Second batch: offsets 3,4 ts 200,201 — segment max becomes 201 @4.
         seg.append(&sample_batch(3, 2, 200), 0).unwrap();
-        assert!(seg.offset_of_max_timestamp() == Some((Offset(4), 201)));
+        assert2::assert!(seg.offset_of_max_timestamp() == Some((Offset(4), 201)));
 
         // Empty segment → None.
         let dir2 = tempdir().unwrap();
         let empty = Segment::create(dir2.path(), Offset(0)).unwrap();
-        assert!(empty.offset_of_max_timestamp() == None);
+        assert2::assert!(empty.offset_of_max_timestamp() == None);
         drop(dir);
         drop(dir2);
     }
@@ -1157,7 +1155,7 @@ mod tests {
             });
         }
         seg.append(&b, 0).unwrap();
-        assert!(seg.offset_of_max_timestamp() == Some((Offset(0), 500)));
+        assert2::assert!(seg.offset_of_max_timestamp() == Some((Offset(0), 500)));
         drop(dir);
     }
 
@@ -1170,8 +1168,8 @@ mod tests {
         seg.append(&b1, 4096).unwrap();
         seg.append(&b2, 4096).unwrap();
         let read = seg.read(Offset(0), usize::MAX).unwrap();
-        assert_eq!(seg.last_offset(), Offset(4));
-        assert_eq!(read, vec![b1, b2]);
+        assert2::assert!(seg.last_offset() == Offset(4));
+        assert2::assert!(read == vec![b1, b2]);
     }
 
     #[test]
@@ -1187,11 +1185,10 @@ mod tests {
         let position = seg.append(&sample_batch(2, 1, 300), 0).unwrap();
 
         let read = seg.read(Offset(0), usize::MAX).unwrap();
-        assert!(position > 0);
-        assert_eq!(seg.last_offset(), Offset(2));
-        assert_eq!(
-            read,
-            vec![
+        assert2::assert!(position > 0);
+        assert2::assert!(seg.last_offset() == Offset(2));
+        assert2::assert!(
+            read == vec![
                 sample_batch(0, 1, 100),
                 sample_batch(1, 1, 200),
                 sample_batch(2, 1, 300),
@@ -1224,16 +1221,8 @@ mod tests {
 
         // Reopen with validation: the tail scan must clip the garbage.
         let seg = Segment::open_active(dir.path(), Offset(0), true).unwrap();
-        assert_eq!(
-            seg.last_offset(),
-            Offset(4),
-            "garbage tail must be truncated"
-        );
-        assert_eq!(
-            seg.size_bytes(),
-            valid_size,
-            "garbage tail must be truncated"
-        );
+        assert2::assert!(seg.last_offset() == Offset(4));
+        assert2::assert!(seg.size_bytes() == valid_size);
     }
 
     // `Segment::read` maps the absolute fetch offset to a relative index key
@@ -1251,16 +1240,8 @@ mod tests {
         seg.append(&sample_batch(103, 2, 200), 0).unwrap(); // offsets 103..=104
         seg.append(&sample_batch(105, 1, 300), 0).unwrap(); // offset 105
         let read = seg.read(Offset(103), usize::MAX).unwrap();
-        assert_eq!(
-            seg.last_offset(),
-            Offset(105),
-            "read(103) must return batches at 103 and 105"
-        );
-        assert_eq!(
-            read,
-            vec![sample_batch(103, 2, 200), sample_batch(105, 1, 300)],
-            "read(103) must return batches at 103 and 105"
-        );
+        assert2::assert!(seg.last_offset() == Offset(105));
+        assert2::assert!(read == vec![sample_batch(103, 2, 200), sample_batch(105, 1, 300)]);
     }
 
     // `Segment::read_raw` maps the fetch offset to the relative index key the
@@ -1277,15 +1258,8 @@ mod tests {
         seg.append(&sample_batch(105, 1, 300), 0).unwrap(); // offset 105
 
         let r = seg.read_raw(Offset(103), Offset(1000), usize::MAX).unwrap();
-        assert!(
-            !r.is_empty(),
-            "read_raw(103) must return data starting at offset 103"
-        );
-        assert_eq!(
-            r.start_offset,
-            Offset(103),
-            "read_raw(103) must return data starting at offset 103"
-        );
+        assert2::assert!(!r.is_empty());
+        assert2::assert!(r.start_offset == Offset(103));
     }
 
     /// `Segment::read` accumulates consumed bytes as `before - cursor.len()`
@@ -1305,14 +1279,12 @@ mod tests {
         let max_bytes = usize::try_from(seg.size_bytes()).unwrap();
 
         let read = seg.read(Offset(0), max_bytes).unwrap();
-        assert_eq!(
-            read,
-            vec![
+        assert2::assert!(
+            read == vec![
                 sample_batch(0, 1, 100),
                 sample_batch(1, 1, 200),
                 sample_batch(2, 1, 300),
-            ],
-            "all three batches must fit the exact-size budget"
+            ]
         );
     }
 
@@ -1328,9 +1300,9 @@ mod tests {
         let position = seg.append(&sample_batch(1, 1, 300), 0).unwrap();
 
         let read = seg.read(Offset(0), usize::MAX).unwrap();
-        assert_eq!(position, expected_position);
-        assert_eq!(seg.last_offset(), Offset(1));
-        assert_eq!(read, vec![sample_batch(0, 1, 100), sample_batch(1, 1, 300)]);
+        assert2::assert!(position == expected_position);
+        assert2::assert!(seg.last_offset() == Offset(1));
+        assert2::assert!(read == vec![sample_batch(0, 1, 100), sample_batch(1, 1, 300)]);
     }
 
     /// `truncate_to_relative` decides which batches to drop by each batch's last
@@ -1346,21 +1318,13 @@ mod tests {
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         seg.append(&sample_batch(0, 3, 100), 0).unwrap(); // offsets 0..=2
         seg.append(&sample_batch(3, 3, 200), 0).unwrap(); // offsets 3..=5
-        assert!(seg.last_offset() == 5);
+        assert2::assert!(seg.last_offset() == 5);
 
         // target_abs = base(0) + rel(3) = 3. Drop batches with last >= 3.
         seg.truncate_to_relative(3).unwrap();
         let read = seg.read(Offset(0), usize::MAX).unwrap();
-        assert_eq!(
-            seg.last_offset(),
-            Offset(2),
-            "batch B must be truncated away"
-        );
-        assert_eq!(
-            read,
-            vec![sample_batch(0, 3, 100)],
-            "batch B must be truncated away"
-        );
+        assert2::assert!(seg.last_offset() == Offset(2));
+        assert2::assert!(read == vec![sample_batch(0, 3, 100)]);
     }
 
     #[test]
@@ -1371,7 +1335,7 @@ mod tests {
         seg.append(&sample_batch(3, 2, 2_000_000), 4096).unwrap();
         let read = seg.read(Offset(4), usize::MAX).unwrap();
         // Offset 4 falls inside the second batch (offsets 3..=4).
-        assert_eq!(read, vec![sample_batch(3, 2, 2_000_000)]);
+        assert2::assert!(read == vec![sample_batch(3, 2, 2_000_000)]);
     }
 
     #[test]
@@ -1379,9 +1343,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         seg.seal();
-        assert!(seg.is_sealed());
+        assert2::assert!(seg.is_sealed());
         let err = seg.append(&sample_batch(0, 1, 0), 4096).unwrap_err();
-        assert!(matches!(err, LogError::Io(_)));
+        assert2::assert!(matches!(err, LogError::Io(_)));
     }
 
     #[test]
@@ -1390,7 +1354,7 @@ mod tests {
         let mut seg = Segment::create(dir.path(), Offset(0)).unwrap();
         seg.append(&sample_batch(0, 2, 1_000), 4096).unwrap();
         let read = seg.read(Offset(100), usize::MAX).unwrap();
-        assert!(read.is_empty());
+        assert2::assert!(read.is_empty());
     }
 
     #[test]
@@ -1439,9 +1403,9 @@ mod tests {
         let r = seg
             .read_raw(Offset(0), Offset(3), 10 * 1024 * 1024)
             .unwrap();
-        assert_eq!(r.start_offset, Offset(0));
-        assert_eq!(r.last_offset, Offset(2));
-        assert_eq!(&r.bytes[..], &wire[..]);
+        assert2::assert!(r.start_offset == Offset(0));
+        assert2::assert!(r.last_offset == Offset(2));
+        assert2::assert!(&r.bytes[..] == &wire[..]);
         drop(dir);
     }
 
@@ -1459,9 +1423,9 @@ mod tests {
         let r = seg
             .read_raw(Offset(0), Offset(2), 10 * 1024 * 1024)
             .unwrap();
-        assert_eq!(r.start_offset, Offset(0));
-        assert_eq!(r.last_offset, Offset(1));
-        assert_eq!(&r.bytes[..], &expected[..]);
+        assert2::assert!(r.start_offset == Offset(0));
+        assert2::assert!(r.last_offset == Offset(1));
+        assert2::assert!(&r.bytes[..] == &expected[..]);
         drop(dir);
     }
 
@@ -1473,9 +1437,9 @@ mod tests {
         batch.encode(&mut expected).unwrap();
         seg.append(&batch, 0).unwrap();
         let r = seg.read_raw(Offset(0), Offset(1), 1).unwrap();
-        assert_eq!(r.start_offset, Offset(0));
-        assert_eq!(r.last_offset, Offset(0));
-        assert_eq!(&r.bytes[..], &expected[..]);
+        assert2::assert!(r.start_offset == Offset(0));
+        assert2::assert!(r.last_offset == Offset(0));
+        assert2::assert!(&r.bytes[..] == &expected[..]);
         drop(dir);
     }
 
@@ -1491,7 +1455,7 @@ mod tests {
         let mut off = region.offset;
         while filled < buf.len() {
             let n = region.file.read_at(&mut buf[filled..], off).unwrap();
-            assert!(n > 0, "unexpected EOF reading FileRegion");
+            assert2::assert!(n > 0);
             filled += n;
             off += n as u64;
         }
@@ -1516,17 +1480,17 @@ mod tests {
             ("one-batch anti-stall", 0, 5, 1),
             ("last batch", 4, 5, 10 * 1024 * 1024),
         ];
-        for (name, fo, lo, mb) in cases {
+        for (_name, fo, lo, mb) in cases {
             let raw = seg.read_raw(Offset(fo), Offset(lo), mb).unwrap();
             let desc = seg.read_raw_desc(Offset(fo), Offset(lo), mb).unwrap();
-            assert_eq!(desc.start_offset, raw.start_offset, "case {name}: first={fo}, last={lo}, max_bytes={mb}");
-            assert_eq!(desc.last_offset, raw.last_offset, "case {name}: first={fo}, last={lo}, max_bytes={mb}");
+            assert2::assert!(desc.start_offset == raw.start_offset);
+            assert2::assert!(desc.last_offset == raw.last_offset);
             match &desc.region {
                 Some(region) => {
-                    assert_eq!(region.len, raw.bytes.len(), "case {name}: first={fo}, last={lo}, max_bytes={mb}");
-                    assert_eq!(region_bytes(region), raw.bytes.to_vec(), "case {name}: first={fo}, last={lo}, max_bytes={mb}");
+                    assert2::assert!(region.len == raw.bytes.len());
+                    assert2::assert!(region_bytes(region) == raw.bytes.to_vec());
                 }
-                None => assert!(raw.bytes.is_empty()),
+                None => assert2::assert!(raw.bytes.is_empty()),
             }
         }
         drop(dir);
@@ -1546,10 +1510,10 @@ mod tests {
         let raw = seg.read_raw(Offset(0), Offset(6), 80).unwrap();
         let desc = seg.read_raw_desc(Offset(0), Offset(6), 80).unwrap();
         let region = desc.region.expect("non-empty");
-        assert_eq!(desc.start_offset, raw.start_offset);
-        assert_eq!(desc.last_offset, raw.last_offset);
-        assert_eq!(region.len, raw.bytes.len());
-        assert_eq!(region_bytes(&region), raw.bytes.to_vec());
+        assert2::assert!(desc.start_offset == raw.start_offset);
+        assert2::assert!(desc.last_offset == raw.last_offset);
+        assert2::assert!(region.len == raw.bytes.len());
+        assert2::assert!(region_bytes(&region) == raw.bytes.to_vec());
         drop(dir);
     }
     } // sendfile_cfg!
@@ -1582,7 +1546,7 @@ mod tests {
             0,
         )
         .unwrap();
-        assert!(seg.last_offset() == 0);
+        assert2::assert!(seg.last_offset() == 0);
 
         // Read back the raw .log bytes.
         let mut on_disk = Vec::new();
@@ -1590,13 +1554,13 @@ mod tests {
         let mut expected_wire = wire.to_vec();
         expected_wire[0..8].copy_from_slice(&assigned_base.0.to_be_bytes());
         expected_wire[12..16].copy_from_slice(&stamped_epoch.to_be_bytes());
-        assert_eq!(on_disk, expected_wire);
+        assert2::assert!(on_disk == expected_wire);
 
         // And it decodes (CRC still valid).
         let mut cur: &[u8] = &on_disk;
         let decoded = crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
-        assert_eq!(decoded.base_offset, assigned_base.0);
-        assert_eq!(decoded.partition_leader_epoch, stamped_epoch);
+        assert2::assert!(decoded.base_offset == assigned_base.0);
+        assert2::assert!(decoded.partition_leader_epoch == stamped_epoch);
         drop(dir);
     }
 
@@ -1614,9 +1578,9 @@ mod tests {
             .unwrap();
         // Reading at offset 2 (inside the batch) returns the batch.
         let read = seg.read(Offset(2), usize::MAX).unwrap();
-        assert_eq!(seg.last_offset(), Offset(2));
-        assert_eq!(seg.max_timestamp(), 5_000);
-        assert_eq!(read, vec![producer]);
+        assert2::assert!(seg.last_offset() == Offset(2));
+        assert2::assert!(seg.max_timestamp() == 5_000);
+        assert2::assert!(read == vec![producer]);
         drop(dir);
     }
 
@@ -1629,7 +1593,7 @@ mod tests {
         let err = seg
             .append_verbatim(&wire.freeze(), Offset(0), 0, 0, LeaderEpoch(0), 0)
             .unwrap_err();
-        assert!(matches!(err, LogError::Io(_)));
+        assert2::assert!(matches!(err, LogError::Io(_)));
         drop(dir);
     }
 }

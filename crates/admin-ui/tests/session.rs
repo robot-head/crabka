@@ -14,12 +14,12 @@ fn session_store_creates_and_retrieves_user() {
     });
 
     let record = store.get(&id).expect("session exists");
-    assert_eq!(
-        record.user,
-        SessionUser {
-            username: "alice".to_string(),
-            principal: "User:alice".to_string(),
-        }
+    assert2::assert!(
+        record.user
+            == SessionUser {
+                username: "alice".to_string(),
+                principal: "User:alice".to_string(),
+            }
     );
 }
 
@@ -31,8 +31,8 @@ fn logout_removes_session() {
         principal: "User:bob".to_string(),
     });
 
-    assert!(store.remove(&id));
-    assert!(store.get(&id).is_none());
+    assert2::assert!(store.remove(&id));
+    assert2::assert!(store.get(&id).is_none());
 }
 
 #[test]
@@ -43,7 +43,7 @@ fn expired_session_returns_none_without_panicking() {
         principal: "User:carol".to_string(),
     });
 
-    assert!(store.get(&id).is_none());
+    assert2::assert!(store.get(&id).is_none());
 }
 
 #[test]
@@ -53,8 +53,8 @@ fn session_id_try_from_accepts_cookie_uuid_and_rejects_invalid_value() {
 
     let parsed = SessionId::try_from(cookie_value).expect("uuid cookie value is valid");
 
-    assert_eq!(parsed, id);
-    assert!(SessionId::try_from("not-a-uuid").is_err());
+    assert2::assert!(parsed == id);
+    assert2::assert!(SessionId::try_from("not-a-uuid").is_err());
 }
 
 #[test]
@@ -63,7 +63,7 @@ fn session_id_debug_redacts_cookie_value() {
 
     let debug_output = format!("{id:?}");
 
-    assert!(!debug_output.contains(id.expose_for_cookie()));
+    assert2::assert!(!debug_output.contains(id.expose_for_cookie()));
 }
 
 #[test]
@@ -76,7 +76,7 @@ fn oversized_ttl_session_creation_does_not_panic() {
         })
     });
 
-    assert!(result.is_ok());
+    assert2::assert!(result.is_ok());
 }
 
 #[test]
@@ -89,6 +89,6 @@ fn session_store_debug_does_not_include_session_storage() {
 
     let debug_output = format!("{store:?}");
 
-    assert!(!debug_output.contains("sessions"));
-    assert!(!debug_output.contains("erin"));
+    assert2::assert!(!debug_output.contains("sessions"));
+    assert2::assert!(!debug_output.contains("erin"));
 }

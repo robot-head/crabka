@@ -85,19 +85,10 @@ fn base_add() -> RemoteLogSegmentMetadata {
 fn assert_byte_exact(case: &str, event: &MetadataEvent) {
     let want = golden(case);
     let got = event.encode();
-    assert_eq!(
-        got.as_ref(),
-        want.as_slice(),
-        "case `{case}`: Crabka encode != JVM golden\n  got : {}\n  want: {}",
-        hex(got.as_ref()),
-        hex(&want),
-    );
+    assert2::assert!(got.as_ref() == want.as_slice());
     let decoded = MetadataEvent::decode(&want)
         .unwrap_or_else(|e| panic!("case `{case}`: Crabka failed to decode JVM bytes: {e}"));
-    assert_eq!(
-        &decoded, event,
-        "case `{case}`: Crabka decode(JVM) != event"
-    );
+    assert2::assert!(&decoded == event);
 }
 
 fn hex(bytes: &[u8]) -> String {

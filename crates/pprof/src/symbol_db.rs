@@ -474,7 +474,7 @@ fn drop_go_type_parameters(input: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn string_zero_is_empty() {
         let db = SymbolDb::default();
-        assert!(db.string(0) == "");
+        assert2::assert!(db.string(0) == "");
     }
 
     #[test]
@@ -523,7 +523,7 @@ mod tests {
         let (mut db, [a, b, c]) = db_with_abc();
         let id1 = db.intern_stacktrace(0, &[a, b, c]);
         let id2 = db.intern_stacktrace(0, &[a, b, c]);
-        assert!(id1 == id2);
+        assert2::assert!(id1 == id2);
     }
 
     #[test]
@@ -543,7 +543,7 @@ mod tests {
 
         let frames = db.resolve(0, id);
         let names: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
-        assert!(names == vec!["a", "b"]);
+        assert2::assert!(names == vec!["a", "b"]);
     }
 
     #[test]
@@ -551,9 +551,9 @@ mod tests {
         let (mut db, [a, b, c]) = db_with_abc();
         let abc = db.intern_stacktrace(0, &[a, b, c]);
         let ab = db.intern_stacktrace(0, &[a, b]);
-        assert!(abc != ab);
+        assert2::assert!(abc != ab);
         let other = db.intern_stacktrace(1, &[a, b, c]);
-        assert!(db.resolve(1, other).len() == 3);
+        assert2::assert!(db.resolve(1, other).len() == 3);
     }
 
     #[test]
@@ -578,7 +578,7 @@ mod tests {
         let id = db.intern_stacktrace(0, &[a, b, c]);
         let frames = db.resolve(0, id);
         let names: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
-        assert!(names == vec!["a", "b", "c"]);
+        assert2::assert!(names == vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -587,7 +587,7 @@ mod tests {
         let _ = db.intern_stacktrace(0, &[a, b, c]);
         let invalid = u32::try_from(i64::from(i32::MAX) + 1).unwrap();
 
-        assert!(db.resolve(0, invalid).is_empty());
+        assert2::assert!(db.resolve(0, invalid).is_empty());
 
         let mut raw_db = SymbolDb::new();
         let filename = raw_db.intern_string("/bin/app");
@@ -615,7 +615,7 @@ mod tests {
         });
         let _ = raw_db.intern_stacktrace(0, &[loc_a, loc_b]);
 
-        assert!(raw_db.raw_locations(0, invalid).is_empty());
+        assert2::assert!(raw_db.raw_locations(0, invalid).is_empty());
     }
 
     #[test]
@@ -652,7 +652,7 @@ mod tests {
         let id = db.intern_stacktrace(0, &[loc]);
         let frames = db.resolve(0, id);
         let names: Vec<&str> = frames.iter().map(|frame| frame.function.as_str()).collect();
-        assert!(names == vec!["inner", "outer"]);
+        assert2::assert!(names == vec!["inner", "outer"]);
     }
 
     #[test]
@@ -680,23 +680,25 @@ mod tests {
 
         let frames = db.resolve(0, id);
 
-        assert!(frames[0].function == "github.com/dgraph-io/ristretto/v2.(*Cache).processItems");
+        assert2::assert!(
+            frames[0].function == "github.com/dgraph-io/ristretto/v2.(*Cache).processItems"
+        );
     }
 
     #[test]
     fn drop_go_type_parameters_handles_multiple_nested_and_unclosed_shapes() {
-        assert!(
+        assert2::assert!(
             drop_go_type_parameters("pkg.(*Cache[go.shape.string]).Get[go.shape.int]").as_ref()
                 == "pkg.(*Cache).Get"
         );
-        assert!(
+        assert2::assert!(
             drop_go_type_parameters("pkg.F[go.shape.struct{Field [go.shape.int]}].G").as_ref()
                 == "pkg.F.G"
         );
         let unclosed = "pkg.F[go.shape.string";
-        assert!(drop_go_type_parameters(unclosed).as_ref() == unclosed);
+        assert2::assert!(drop_go_type_parameters(unclosed).as_ref() == unclosed);
         let ordinary_generic = "pkg.F[int]";
-        assert!(drop_go_type_parameters(ordinary_generic).as_ref() == ordinary_generic);
+        assert2::assert!(drop_go_type_parameters(ordinary_generic).as_ref() == ordinary_generic);
     }
 
     #[test]
@@ -718,7 +720,7 @@ mod tests {
         let (mut db, [a, b, c]) = db_with_abc();
         let id = db.intern_stacktrace(0, &[a, b, c]);
         let source: &dyn SymbolSource = &db;
-        assert!(source.resolve(0, id) == db.resolve(0, id));
+        assert2::assert!(source.resolve(0, id) == db.resolve(0, id));
     }
 
     #[test]
@@ -744,7 +746,7 @@ mod tests {
 
         dest.copy_partition_from(&source, 0, 17).unwrap();
 
-        assert!(dest.resolve(17, id) == source.resolve(0, id));
+        assert2::assert!(dest.resolve(17, id) == source.resolve(0, id));
     }
 
     #[test]
@@ -755,7 +757,7 @@ mod tests {
 
         dest.copy_partition_from(&source, 0, 17).unwrap();
 
-        assert!(dest.intern_stacktrace(17, &[a, b]) == id);
-        assert!(dest.copy_partition_from(&source, 0, 17).is_err());
+        assert2::assert!(dest.intern_stacktrace(17, &[a, b]) == id);
+        assert2::assert!(dest.copy_partition_from(&source, 0, 17).is_err());
     }
 }

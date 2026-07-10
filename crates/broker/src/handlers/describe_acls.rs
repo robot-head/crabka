@@ -176,7 +176,6 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_metadata::{
         AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
     };
@@ -273,7 +272,7 @@ mod tests {
             operation: None,
             permission_type: None,
         };
-        assert!(built == expected);
+        assert2::assert!(built == expected);
     }
 
     #[test]
@@ -285,10 +284,10 @@ mod tests {
             ("pattern_type_filter", |r| r.pattern_type_filter = 99),
             ("operation", |r| r.operation = 99),
         ];
-        for (axis, corrupt) in cases {
+        for (_axis, corrupt) in cases {
             let mut req = request(Some("orders"), Some("User:alice"), OPERATION_READ);
             corrupt(&mut req);
-            assert!(build_filter(&req).is_err(), "axis {axis}");
+            assert2::assert!(build_filter(&req).is_err());
         }
     }
 
@@ -302,7 +301,7 @@ mod tests {
             resources: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(err == expected_err);
+        assert2::assert!(err == expected_err);
 
         let desc = acl_description(&acl("orders", "User:alice", AclOperation::Read));
         let expected_desc = AclDescription {
@@ -312,7 +311,7 @@ mod tests {
             permission_type: PERMISSION_ALLOW,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(desc == expected_desc);
+        assert2::assert!(desc == expected_desc);
 
         let resource = describe_acls_resource(
             RESOURCE_TYPE_TOPIC,
@@ -327,7 +326,7 @@ mod tests {
             acls: vec![desc],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resource == expected_resource);
+        assert2::assert!(resource == expected_resource);
 
         let resp = describe_acls_response(vec![resource.clone()]);
         let expected_resp = DescribeAclsResponse {
@@ -337,7 +336,7 @@ mod tests {
             resources: vec![resource],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected_resp);
+        assert2::assert!(resp == expected_resp);
     }
 
     #[tokio::test]
@@ -365,7 +364,7 @@ mod tests {
             resources: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -390,7 +389,7 @@ mod tests {
             resources: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -440,7 +439,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -455,6 +454,6 @@ mod tests {
             permission_type: PERMISSION_ALLOW,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(desc == expected);
+        assert2::assert!(desc == expected);
     }
 }

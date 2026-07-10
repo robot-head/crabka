@@ -381,8 +381,8 @@ mod tests {
             realm: "MyRealm".to_string(),
             ..input()
         });
-        assert!(s.require_auth);
-        assert_eq!(s.realm.as_str(), "MyRealm");
+        assert2::assert!(s.require_auth);
+        assert2::assert!(s.realm.as_str() == "MyRealm");
     }
 
     // ---- basic -----------------------------------------------------------
@@ -394,16 +394,16 @@ mod tests {
             ..input()
         });
         let b = s.basic.expect("Basic enabled by inline users");
-        assert_eq!(
-            b.users,
-            [
-                ("alice".to_string(), "pw".to_string()),
-                ("bob".to_string(), "bpw".to_string())
-            ]
-            .into_iter()
-            .collect()
+        assert2::assert!(
+            b.users
+                == [
+                    ("alice".to_string(), "pw".to_string()),
+                    ("bob".to_string(), "bpw".to_string())
+                ]
+                .into_iter()
+                .collect()
         );
-        assert_eq!(b.file, None);
+        assert2::assert!(b.file == None);
     }
 
     #[test]
@@ -414,11 +414,11 @@ mod tests {
             ..input()
         });
         let b = s.basic.expect("Basic still enabled");
-        assert_eq!(
-            b.users,
-            [("alice".to_string(), "pw".to_string())]
-                .into_iter()
-                .collect()
+        assert2::assert!(
+            b.users
+                == [("alice".to_string(), "pw".to_string())]
+                    .into_iter()
+                    .collect()
         );
     }
 
@@ -430,8 +430,8 @@ mod tests {
             ..input()
         });
         let b = s.basic.expect("Basic enabled by file");
-        assert_eq!(b.users, std::collections::HashMap::new());
-        assert_eq!(b.file, Some(path));
+        assert2::assert!(b.users == std::collections::HashMap::new());
+        assert2::assert!(b.file == Some(path));
     }
 
     #[test]
@@ -443,13 +443,13 @@ mod tests {
             ..input()
         });
         let b = s.basic.expect("Basic enabled");
-        assert_eq!(
-            b.users,
-            [("alice".to_string(), "pw".to_string())]
-                .into_iter()
-                .collect()
+        assert2::assert!(
+            b.users
+                == [("alice".to_string(), "pw".to_string())]
+                    .into_iter()
+                    .collect()
         );
-        assert_eq!(b.file, Some(path));
+        assert2::assert!(b.file == Some(path));
     }
 
     // ---- bearer ----------------------------------------------------------
@@ -460,7 +460,7 @@ mod tests {
             bearer: "off".to_string(),
             ..input()
         });
-        assert!(s.bearer.is_none());
+        assert2::assert!(s.bearer.is_none());
     }
 
     #[test]
@@ -473,7 +473,7 @@ mod tests {
         let b = s.bearer.expect("Bearer enabled");
         match &*b.validator {
             OAuthBearerValidator::Unsecured(v) => {
-                assert_eq!(v.principal_claim_name, "preferred_username");
+                assert2::assert!(v.principal_claim_name == "preferred_username");
             }
             other => panic!("expected Unsecured validator, got {other:?}"),
         }
@@ -485,7 +485,7 @@ mod tests {
             bearer: "signed".to_string(),
             ..input()
         };
-        assert!(build_security(&bad).is_err());
+        assert2::assert!(build_security(&bad).is_err());
     }
 
     // ---- tls -------------------------------------------------------------
@@ -505,19 +505,11 @@ mod tests {
                 ..input()
             });
             let tls = s.tls.unwrap_or_else(|| panic!("TLS enabled for {mode}"));
-            assert_eq!(tls.cert_chain_path, PathBuf::from("/c.pem"), "case {mode}");
-            assert_eq!(tls.private_key_path, PathBuf::from("/k.pem"), "case {mode}");
-            assert_eq!(
-                tls.client_ca_path,
-                Some(PathBuf::from("/ca.pem")),
-                "case {mode}"
-            );
-            assert_eq!(
-                tls.trust_roots_path,
-                Some(PathBuf::from("/ca.pem")),
-                "case {mode}"
-            );
-            assert_eq!(tls.client_auth, expected, "case {mode}");
+            assert2::assert!(tls.cert_chain_path == PathBuf::from("/c.pem"));
+            assert2::assert!(tls.private_key_path == PathBuf::from("/k.pem"));
+            assert2::assert!(tls.client_ca_path == Some(PathBuf::from("/ca.pem")));
+            assert2::assert!(tls.trust_roots_path == Some(PathBuf::from("/ca.pem")));
+            assert2::assert!(tls.client_auth == expected);
         }
     }
 
@@ -550,8 +542,8 @@ mod tests {
                 },
             ),
         ];
-        for (name, bad) in cases {
-            assert!(build_security(&bad).is_err(), "TLS error case {name}");
+        for (_name, bad) in cases {
+            assert2::assert!(build_security(&bad).is_err());
         }
     }
 
@@ -566,9 +558,8 @@ mod tests {
             ..input()
         });
         let a = s.authz.expect("authz enabled");
-        assert_eq!(
-            a,
-            crate::config::AuthzConfig {
+        assert2::assert!(
+            a == crate::config::AuthzConfig {
                 enabled: true,
                 super_users: ["admin".to_string(), "root".to_string()]
                     .into_iter()
@@ -585,9 +576,8 @@ mod tests {
             ..input()
         });
         let a = s.authz.expect("authz enabled");
-        assert_eq!(
-            a,
-            crate::config::AuthzConfig {
+        assert2::assert!(
+            a == crate::config::AuthzConfig {
                 enabled: true,
                 super_users: std::collections::HashSet::new(),
                 acl_refresh: std::time::Duration::from_secs(30),
@@ -599,7 +589,7 @@ mod tests {
 
     #[test]
     fn client_plaintext_protocol_cases_are_none() {
-        for (name, protocol) in [
+        for (_name, protocol) in [
             ("canonical_uppercase", "PLAINTEXT"),
             ("case_insensitive_lowercase", "plaintext"),
         ] {
@@ -607,7 +597,7 @@ mod tests {
                 kafka_security_protocol: protocol.to_string(),
                 ..input()
             });
-            assert!(security.client.is_none(), "case {name}");
+            assert2::assert!(security.client.is_none());
         }
     }
 
@@ -621,11 +611,11 @@ mod tests {
         });
         let c = s.client.expect("SSL ⇒ Some(ClientSecurity)");
         let tls = c.tls.expect("SSL requires TLS");
-        assert_eq!(c.protocol, ListenerProtocol::Ssl);
-        assert_eq!(tls.trust_roots_pem, Some(PathBuf::from("/broker-ca.pem")));
-        assert_eq!(tls.server_name, "broker.internal".to_string());
-        assert_eq!(tls.client_identity, None);
-        assert!(c.sasl.is_none());
+        assert2::assert!(c.protocol == ListenerProtocol::Ssl);
+        assert2::assert!(tls.trust_roots_pem == Some(PathBuf::from("/broker-ca.pem")));
+        assert2::assert!(tls.server_name == "broker.internal".to_string());
+        assert2::assert!(tls.client_identity == None);
+        assert2::assert!(c.sasl.is_none());
     }
 
     #[test]
@@ -635,9 +625,9 @@ mod tests {
             ..input()
         });
         let tls = s.client.unwrap().tls.unwrap();
-        assert_eq!(tls.server_name, "localhost".to_string());
-        assert_eq!(tls.trust_roots_pem, None);
-        assert_eq!(tls.client_identity, None);
+        assert2::assert!(tls.server_name == "localhost".to_string());
+        assert2::assert!(tls.trust_roots_pem == None);
+        assert2::assert!(tls.client_identity == None);
     }
 
     #[test]
@@ -654,10 +644,10 @@ mod tests {
             SaslCredentials::Plain { username, password } => (username, password),
             other => panic!("expected PLAIN, got {other:?}"),
         };
-        assert_eq!(c.protocol, ListenerProtocol::SaslPlaintext);
-        assert!(c.tls.is_none());
-        assert_eq!(credentials.0.as_str(), "u");
-        assert_eq!(credentials.1.as_str(), "p");
+        assert2::assert!(c.protocol == ListenerProtocol::SaslPlaintext);
+        assert2::assert!(c.tls.is_none());
+        assert2::assert!(credentials.0.as_str() == "u");
+        assert2::assert!(credentials.1.as_str() == "p");
     }
 
     #[test]
@@ -670,9 +660,9 @@ mod tests {
             ..input()
         });
         let c = s.client.expect("SASL_SSL ⇒ Some");
-        assert_eq!(c.protocol, ListenerProtocol::SaslSsl);
-        assert!(c.tls.is_some());
-        assert!(matches!(c.sasl, Some(SaslCredentials::Scram { .. })));
+        assert2::assert!(c.protocol == ListenerProtocol::SaslSsl);
+        assert2::assert!(c.tls.is_some());
+        assert2::assert!(matches!(c.sasl, Some(SaslCredentials::Scram { .. })));
     }
 
     #[test]
@@ -690,7 +680,7 @@ mod tests {
             });
             match s.client.unwrap().sasl.unwrap() {
                 SaslCredentials::Scram { mechanism, .. } => {
-                    assert_eq!(mechanism, want, "mechanism for {mech}");
+                    assert2::assert!(mechanism == want);
                 }
                 other => panic!("expected SCRAM for {mech}, got {other:?}"),
             }
@@ -699,7 +689,7 @@ mod tests {
 
     #[test]
     fn invalid_client_security_cases() {
-        for (name, protocol, mechanism, username, password) in [
+        for (_name, protocol, mechanism, username, password) in [
             (
                 "missing_username",
                 "SASL_PLAINTEXT",
@@ -730,7 +720,7 @@ mod tests {
                 kafka_sasl_password: password.map(str::to_owned),
                 ..input()
             };
-            assert!(build_security(&bad).is_err(), "case {name}");
+            assert2::assert!(build_security(&bad).is_err());
         }
     }
 
@@ -739,7 +729,7 @@ mod tests {
     #[test]
     fn bearer_jwks_off_variant_returns_none_handle() {
         let out = build_security(&input()).unwrap();
-        assert!(out.jwks_handle.is_none());
+        assert2::assert!(out.jwks_handle.is_none());
     }
 
     #[test]
@@ -752,13 +742,12 @@ mod tests {
         let out = build_security(&i).unwrap();
         let bearer_configured = out.bearer.is_some();
         let h = out.jwks_handle.unwrap();
-        assert!(bearer_configured);
-        assert_eq!(
-            h.endpoint_uri.as_str(),
-            "https://idp.example.com/.well-known/jwks.json"
+        assert2::assert!(bearer_configured);
+        assert2::assert!(
+            h.endpoint_uri.as_str() == "https://idp.example.com/.well-known/jwks.json"
         );
-        assert_eq!(h.ca_path, None);
-        assert_eq!(h.refresh_ms, 60_000);
+        assert2::assert!(h.ca_path == None);
+        assert2::assert!(h.refresh_ms == 60_000);
     }
 
     #[test]
@@ -769,7 +758,7 @@ mod tests {
             ..input()
         };
         let err = build_security(&i).unwrap_err().to_string();
-        assert!(err.contains("--bearer-jwks-endpoint-uri"), "got: {err}");
+        assert2::assert!(err.contains("--bearer-jwks-endpoint-uri"));
     }
 
     #[test]
@@ -788,10 +777,10 @@ mod tests {
             panic!("expected signed validator");
         };
         let h = out.jwks_handle.as_ref().unwrap();
-        assert_eq!(h.endpoint_uri.as_str(), "https://idp/jwks");
-        assert_eq!(validator.valid_issuer.as_deref(), Some("https://idp"));
-        assert_eq!(validator.expected_audience.as_deref(), Some("kafka-sr"));
-        assert_eq!(validator.principal_claim_name.as_str(), "email");
+        assert2::assert!(h.endpoint_uri.as_str() == "https://idp/jwks");
+        assert2::assert!(validator.valid_issuer.as_deref() == Some("https://idp"));
+        assert2::assert!(validator.expected_audience.as_deref() == Some("kafka-sr"));
+        assert2::assert!(validator.principal_claim_name.as_str() == "email");
     }
 
     #[test]
@@ -803,6 +792,6 @@ mod tests {
             ..input()
         };
         let out = build_security(&i).unwrap();
-        assert_eq!(out.jwks_handle.unwrap().refresh_ms, 120_000);
+        assert2::assert!(out.jwks_handle.unwrap().refresh_ms == 120_000);
     }
 }

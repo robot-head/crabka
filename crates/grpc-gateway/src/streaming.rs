@@ -375,7 +375,7 @@ mod tests {
     fn subscribe_predicate_matching_cases() {
         use pb::field_predicate::Value;
 
-        for (name, path, value, matching, nonmatching) in [
+        for (_name, path, value, matching, nonmatching) in [
             (
                 "string_field",
                 "$.entity_type",
@@ -412,14 +412,11 @@ mod tests {
             }])
             .expect("predicate compiles");
 
-            assert!(
-                decoded_record_matches(&predicates, &decoded_json(matching)),
-                "case {name}"
-            );
-            assert!(
-                !decoded_record_matches(&predicates, &decoded_json(nonmatching)),
-                "case {name}"
-            );
+            assert2::assert!(decoded_record_matches(&predicates, &decoded_json(matching)));
+            assert2::assert!(!decoded_record_matches(
+                &predicates,
+                &decoded_json(nonmatching)
+            ));
         }
     }
 
@@ -431,7 +428,7 @@ mod tests {
             value: Some(pb::field_predicate::Value::DoubleValue(f64::INFINITY)),
         }]);
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             result,
             Err(err) if err == "Subscribe predicate double_value must be finite"
         ));
@@ -453,7 +450,7 @@ mod tests {
             json: None,
         };
 
-        assert!(!decoded_record_matches(&predicates, &decoded));
+        assert2::assert!(!decoded_record_matches(&predicates, &decoded));
     }
 
     #[test]
@@ -475,25 +472,25 @@ mod tests {
 
         let inbound = inbound_from_decoded_record(record);
 
-        assert_eq!(
-            inbound,
-            pb::Inbound {
-                topic: "metadata".to_string(),
-                partition: 2,
-                offset: 9,
-                key: Some(b"k".to_vec()),
-                value: b"\x08\x07".to_vec(),
-                headers: std::collections::HashMap::new(),
-                timestamp_ms: 1234,
-                structured: Some(pb::StructuredValue {
-                    json: br#"{"entity_type":"NETWORK_NODE"}"#.to_vec(),
-                }),
-                schema: Some(pb::SchemaSelector {
-                    subject: "metadata-value".to_string(),
-                    id: 17,
-                    format: pb::SchemaFormat::Protobuf as i32,
-                }),
-            }
+        assert2::assert!(
+            inbound
+                == pb::Inbound {
+                    topic: "metadata".to_string(),
+                    partition: 2,
+                    offset: 9,
+                    key: Some(b"k".to_vec()),
+                    value: b"\x08\x07".to_vec(),
+                    headers: std::collections::HashMap::new(),
+                    timestamp_ms: 1234,
+                    structured: Some(pb::StructuredValue {
+                        json: br#"{"entity_type":"NETWORK_NODE"}"#.to_vec(),
+                    }),
+                    schema: Some(pb::SchemaSelector {
+                        subject: "metadata-value".to_string(),
+                        id: 17,
+                        format: pb::SchemaFormat::Protobuf as i32,
+                    }),
+                }
         );
     }
 }

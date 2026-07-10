@@ -45,13 +45,12 @@ pub enum ClientError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn display_messages() {
-        for (name, error, expected) in [
+        for (_name, error, expected) in [
             (
                 "timeout",
                 ClientError::Timeout(Duration::from_secs(5)),
@@ -69,7 +68,7 @@ mod tests {
                 "incompatible version: broker supports 0..=5, client wants 7..=10 for api_key 0",
             ),
         ] {
-            assert!(error.to_string() == expected, "case {name}");
+            assert2::assert!(error.to_string() == expected);
         }
     }
 }

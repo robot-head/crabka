@@ -95,12 +95,7 @@ fn docker_pull(image: &str) {
         .args(["pull", image])
         .output()
         .expect("spawn docker pull");
-    assert!(
-        out.status.success(),
-        "docker pull {image} failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 fn docker_run_schema_registry() -> String {
@@ -122,14 +117,9 @@ fn docker_run_schema_registry() -> String {
         ])
         .output()
         .expect("spawn docker run schema-registry");
-    assert!(
-        out.status.success(),
-        "docker run schema-registry failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert!(!id.is_empty(), "empty container id from docker run");
+    assert2::assert!(!id.is_empty());
     eprintln!("CAPTURE schema-registry container id={id}");
     id
 }
@@ -139,11 +129,7 @@ fn docker_mapped_port(id: &str) -> u16 {
         .args(["port", id, "8081"])
         .output()
         .expect("spawn docker port");
-    assert!(
-        out.status.success(),
-        "docker port {id} 8081 failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     let port = text
         .lines()
@@ -215,14 +201,11 @@ async fn set_subject_compat(http: &reqwest::Client, base: &str, subject: &str, l
         .await
         .unwrap_or_else(|e| panic!("PUT {url} failed: {e}"));
     let status = resp.status();
-    let text = resp
+    let _text = resp
         .text()
         .await
         .unwrap_or_else(|e| panic!("read body of PUT {url}: {e}"));
-    assert!(
-        status.is_success(),
-        "PUT /config/{subject} returned {status}: {text}"
-    );
+    assert2::assert!(status.is_success());
     eprintln!("CAPTURE set {subject} compat={level}");
 }
 
@@ -242,10 +225,7 @@ async fn register_writer(http: &reqwest::Client, base: &str, subject: &str, sche
         .text()
         .await
         .unwrap_or_else(|e| panic!("read body of POST {url}: {e}"));
-    assert!(
-        status.is_success(),
-        "register writer for {subject} returned {status}: {text}"
-    );
+    assert2::assert!(status.is_success());
     eprintln!("CAPTURE registered writer for {subject}: {text}");
 }
 
@@ -265,10 +245,7 @@ async fn check_compat(http: &reqwest::Client, base: &str, subject: &str, reader:
         .text()
         .await
         .unwrap_or_else(|e| panic!("read body of POST {url}: {e}"));
-    assert!(
-        status.is_success(),
-        "compat check for {subject} returned {status}: {text}"
-    );
+    assert2::assert!(status.is_success());
     let v: serde_json::Value =
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse compat response {text}: {e}"));
     let result = v
@@ -354,12 +331,7 @@ async fn capture_avro_compat_matrix() {
     let matrix = run_compat_capture(&container_id).await;
 
     // Sanity: exactly 21 entries (7 cases × 3 levels).
-    assert_eq!(
-        matrix.len(),
-        21,
-        "expected 21 matrix entries, got {}",
-        matrix.len()
-    );
+    assert2::assert!(matrix.len() == 21);
 
     let json = serde_json::to_string_pretty(&matrix).expect("serialize matrix");
     write_compat_fixture("avro_matrix.json", &json);

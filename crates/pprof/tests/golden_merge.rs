@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_pprof::{
     EngineOpts, FlameEngine, FlameGraph, FunctionRec, InMemoryProfileStore, Level, LineRec,
     LocationRec, ProfileType,
@@ -95,7 +95,7 @@ async fn merge(label_selector: &str, max_nodes: i64) -> FlameGraph {
 async fn full_merge_pins_four_int_levels_and_fold_before_symbolize() {
     let fg = merge("{}", 2_048).await;
 
-    assert!(
+    assert2::assert!(
         fg == FlameGraph {
             names: ["total", "main", "work", "inline_helper", "alloc", "other"]
                 .map(String::from)
@@ -173,5 +173,5 @@ async fn max_nodes_truncates_to_synthetic_other_and_conserves_total() {
 fn profile_type_round_trips_fixture_type() {
     let profile_type = ProfileType::parse(CPU_PROFILE).unwrap();
 
-    assert!(profile_type.to_string() == CPU_PROFILE);
+    assert2::assert!(profile_type.to_string() == CPU_PROFILE);
 }

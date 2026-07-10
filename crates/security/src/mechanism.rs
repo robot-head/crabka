@@ -52,7 +52,7 @@ impl SaslMechanism {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -64,14 +64,14 @@ mod tests {
             SaslMechanism::ScramSha512,
             SaslMechanism::OAuthBearer,
         ] {
-            assert!(SaslMechanism::from_wire(m.wire_name()) == Some(m));
+            assert2::assert!(SaslMechanism::from_wire(m.wire_name()) == Some(m));
         }
     }
 
     #[test]
     fn from_wire_unknown_returns_none() {
         for wire in ["SCRAM-SHA-128", "OAUTH", ""] {
-            assert!(SaslMechanism::from_wire(wire) == None, "case {wire:?}");
+            assert2::assert!(SaslMechanism::from_wire(wire) == None);
         }
     }
 
@@ -88,7 +88,7 @@ mod tests {
             "scram-sha-256",
             "OAuthBearer",
         ] {
-            assert!(SaslMechanism::from_wire(wire) == None, "case {wire:?}");
+            assert2::assert!(SaslMechanism::from_wire(wire) == None);
         }
     }
 
@@ -106,7 +106,7 @@ mod tests {
     #[test]
     fn gssapi_mechanism_roundtrips_wire_name() {
         use std::str::FromStr;
-        assert!(
+        assert2::assert!(
             (
                 SaslMechanism::from_str("GSSAPI").unwrap(),
                 SaslMechanism::Gssapi.wire_name(),
@@ -116,12 +116,12 @@ mod tests {
 
     #[test]
     fn is_scram_predicate() {
-        for (case, mechanism, want) in [
+        for (_case, mechanism, want) in [
             ("PLAIN", SaslMechanism::Plain, false),
             ("SCRAM SHA-256", SaslMechanism::ScramSha256, true),
             ("SCRAM SHA-512", SaslMechanism::ScramSha512, true),
         ] {
-            assert!(mechanism.is_scram() == want, "case {case}");
+            assert2::assert!(mechanism.is_scram() == want);
         }
     }
 }

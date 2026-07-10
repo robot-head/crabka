@@ -351,7 +351,7 @@ mod tests {
             ("DELETE", "/mode"),
             ("POST", "/mode/s"),
         ] {
-            assert_eq!(t(m, p), None, "{m} {p} should have no authz target");
+            assert2::assert!(t(m, p) == None);
         }
     }
 
@@ -369,9 +369,8 @@ mod tests {
             permission_type: crabka_client_admin::PermissionType::Allow,
         };
         let meta = acl_entry_from_admin(admin);
-        assert_eq!(
-            meta,
-            crabka_metadata::AclEntry {
+        assert2::assert!(
+            meta == crabka_metadata::AclEntry {
                 resource_type: crabka_metadata::ResourceType::TransactionalId,
                 resource_name: "my-txn".to_string(),
                 pattern_type: crabka_metadata::PatternType::Literal,
@@ -551,11 +550,11 @@ mod tests {
 
     #[test]
     fn route_mappings_are_named_and_table_driven() {
-        for (name, method, path, expected) in ROUTE_MAPPING_CASES {
+        for (_name, method, path, expected) in ROUTE_MAPPING_CASES {
             let expected = expected.map(|(resource_type, resource_name, operation)| {
                 (resource_type, resource_name.to_string(), operation)
             });
-            assert_eq!(t(method, path), expected, "case {name}");
+            assert2::assert!(t(method, path) == expected);
         }
     }
 
@@ -601,7 +600,7 @@ mod tests {
     #[test]
     fn authorize_decisions_are_named_and_table_driven() {
         for (
-            name,
+            _name,
             super_users,
             enabled,
             acls,
@@ -668,10 +667,9 @@ mod tests {
             ),
         ] {
             let authz = with_acls(super_users, enabled, acls);
-            assert_eq!(
-                authz.authorize(&principal, &host(), resource_type, resource_name, operation,),
-                expected,
-                "case {name}"
+            assert2::assert!(
+                authz.authorize(&principal, &host(), resource_type, resource_name, operation,)
+                    == expected
             );
         }
     }
@@ -707,7 +705,7 @@ mod tests {
 
     #[tokio::test]
     async fn middleware_statuses_are_named_and_table_driven() {
-        for (name, matching_acl, method, path, forwarded, expected) in [
+        for (_name, matching_acl, method, path, forwarded, expected) in [
             (
                 "deny-without-acl",
                 false,
@@ -752,7 +750,7 @@ mod tests {
                 .oneshot(request.body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(response.status(), expected, "case {name}");
+            assert2::assert!(response.status() == expected);
         }
     }
 }

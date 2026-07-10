@@ -430,7 +430,7 @@ fn compute_active_revoke_split(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -444,9 +444,9 @@ mod tests {
     #[test]
     fn add_member_marks_dirty_first_time() {
         let mut g = StreamsGroupState::new("g");
-        assert!(!g.dirty);
+        assert2::assert!(!g.dirty);
         g.add_or_update_member(StreamsMemberState::joining("m1", "c1", "h1"));
-        assert!((g.members.len(), g.dirty) == (1, true));
+        assert2::assert!((g.members.len(), g.dirty) == (1, true));
     }
 
     #[test]
@@ -458,7 +458,7 @@ mod tests {
         let mut m = StreamsMemberState::joining("m1", "c1", "h1");
         m.topology_epoch = 0;
         g.add_or_update_member(m);
-        assert!(!g.dirty);
+        assert2::assert!(!g.dirty);
     }
 
     #[test]
@@ -469,7 +469,7 @@ mod tests {
         let mut m = StreamsMemberState::joining("m1", "c1", "h1");
         m.topology_epoch = 3;
         g.add_or_update_member(m);
-        assert!(g.dirty);
+        assert2::assert!(g.dirty);
     }
 
     #[test]
@@ -478,10 +478,10 @@ mod tests {
         g.add_or_update_member(StreamsMemberState::joining("m1", "c1", "h1"));
         g.dirty = false;
         let removed = g.remove_member("m1");
-        assert!((removed.is_some(), g.dirty) == (true, true));
+        assert2::assert!((removed.is_some(), g.dirty) == (true, true));
         // Removing a now-absent member does not re-dirty.
         g.dirty = false;
-        assert!((g.remove_member("m1").is_none(), g.dirty) == (true, false));
+        assert2::assert!((g.remove_member("m1").is_none(), g.dirty) == (true, false));
     }
 
     #[test]
@@ -489,7 +489,7 @@ mod tests {
         let mut g = StreamsGroupState::new("g");
         g.dirty = false;
         g.bump_epoch();
-        assert!((g.group_epoch, g.dirty) == (1, true));
+        assert2::assert!((g.group_epoch, g.dirty) == (1, true));
     }
 
     #[test]
@@ -600,7 +600,7 @@ mod tests {
         g.install_target(target);
 
         // After install the member is mid-revocation.
-        assert!(
+        assert2::assert!(
             g.members["m1"].assignment_state == StreamsMemberAssignmentState::UnrevokedActiveTasks
         );
 
@@ -629,7 +629,7 @@ mod tests {
 
     #[test]
     fn group_state_phase_as_str_strings() {
-        for (case, phase, want) in [
+        for (_case, phase, want) in [
             ("empty", StreamsGroupStatePhase::Empty, "Empty"),
             ("not ready", StreamsGroupStatePhase::NotReady, "NotReady"),
             ("assigning", StreamsGroupStatePhase::Assigning, "Assigning"),
@@ -640,14 +640,14 @@ mod tests {
             ),
             ("stable", StreamsGroupStatePhase::Stable, "Stable"),
         ] {
-            assert!(phase.as_str() == want, "case {case}");
+            assert2::assert!(phase.as_str() == want);
         }
-        assert!(StreamsGroupStatePhase::default() == StreamsGroupStatePhase::Empty);
+        assert2::assert!(StreamsGroupStatePhase::default() == StreamsGroupStatePhase::Empty);
     }
 
     #[test]
     fn assignment_state_i8_roundtrips() {
-        for (case, state) in [
+        for (_case, state) in [
             ("stable", StreamsMemberAssignmentState::Stable),
             (
                 "unrevoked active tasks",
@@ -658,25 +658,24 @@ mod tests {
                 StreamsMemberAssignmentState::UnreleasedActiveTasks,
             ),
         ] {
-            assert!(
-                StreamsMemberAssignmentState::from_i8(state.as_i8()) == Some(state),
-                "case {case}"
-            );
+            assert2::assert!(StreamsMemberAssignmentState::from_i8(state.as_i8()) == Some(state));
         }
-        assert!(StreamsMemberAssignmentState::from_i8(99).is_none());
-        assert!(StreamsMemberAssignmentState::default() == StreamsMemberAssignmentState::Stable);
+        assert2::assert!(StreamsMemberAssignmentState::from_i8(99).is_none());
+        assert2::assert!(
+            StreamsMemberAssignmentState::default() == StreamsMemberAssignmentState::Stable
+        );
     }
 
     #[test]
     fn normalize_sorts_dedups_and_drops_empty() {
         let m = normalize_task_map(task_map(&[("sub0", &[2, 0, 1, 1]), ("sub1", &[])]));
-        assert!(m == task_map(&[("sub0", &[0, 1, 2])]));
+        assert2::assert!(m == task_map(&[("sub0", &[0, 1, 2])]));
     }
 
     #[test]
     fn merge_task_maps_unions_and_normalizes() {
         let mut dst = task_map(&[("sub0", &[0, 2])]);
         merge_task_maps(&mut dst, &task_map(&[("sub0", &[1, 2]), ("sub1", &[3])]));
-        assert!(dst == task_map(&[("sub0", &[0, 1, 2]), ("sub1", &[3])]));
+        assert2::assert!(dst == task_map(&[("sub0", &[0, 1, 2]), ("sub1", &[3])]));
     }
 }

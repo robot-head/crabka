@@ -1273,8 +1273,8 @@ mod tests {
         }])
         .await;
         let pos = task.position();
-        assert_eq!(pos.offset("in", 2), Some(0));
-        assert_eq!(pos.offset("in", 9), None);
+        assert2::assert!(pos.offset("in", 2) == Some(0));
+        assert2::assert!(pos.offset("in", 9) == None);
     }
 
     // ── record-cache flush on commit (sub-task 3e) ───────────────────────────

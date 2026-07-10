@@ -20,7 +20,6 @@ use std::{
     time::Duration,
 };
 
-use assert2::assert;
 use bytes::Bytes;
 use crabka_raft::{
     RaftError,
@@ -164,10 +163,7 @@ where
         if let Some(v) = f() {
             return v;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "await_until timed out"
-        );
+        assert2::assert!(tokio::time::Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
 }
@@ -209,11 +205,7 @@ async fn await_single_leader(net: &SimNet, ids: &[NodeId], timeout: Duration) ->
                 }
             }
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "no single agreed leader within timeout: {:?}",
-            leaders(&net, &ids).await
-        );
+        assert2::assert!(tokio::time::Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
 }
@@ -235,10 +227,7 @@ async fn three_engines_elect_one_leader() {
     }
 
     let (leader, epoch) = await_single_leader(&net, &ids, Duration::from_secs(10)).await;
-    assert!(
-        epoch >= 1,
-        "leader epoch should have advanced past bootstrap"
-    );
+    assert2::assert!(epoch >= 1);
     // Exactly one node reports itself as the leader.
     let mut self_leaders = 0;
     for &id in &ids {
@@ -247,11 +236,8 @@ async fn three_engines_elect_one_leader() {
             self_leaders += 1;
         }
     }
-    assert!(
-        self_leaders == 1,
-        "exactly one self-leader, got {self_leaders}"
-    );
-    assert!(ids.contains(&leader));
+    assert2::assert!(self_leaders == 1);
+    assert2::assert!(ids.contains(&leader));
 
     for &id in &ids {
         net.get(id).unwrap().shutdown().await;
@@ -286,8 +272,8 @@ async fn bare_majority_two_of_three_elects_with_uniform_timeouts() {
     // livelocks well past the deadline.
     let (leader, epoch) =
         await_single_leader(&net, &[NodeId(1), NodeId(2)], Duration::from_secs(8)).await;
-    assert!(epoch >= 1);
-    assert!(leader == 1 || leader == 2, "leader must be a live voter");
+    assert2::assert!(epoch >= 1);
+    assert2::assert!(leader == 1 || leader == 2);
 
     for &id in &[NodeId(1), NodeId(2)] {
         net.get(id).unwrap().shutdown().await;
@@ -322,10 +308,7 @@ async fn follower_submit_change_propagates() {
         Err(RaftError::NotLeader { current_leader }) => current_leader,
         other => panic!("follower submit should reject with NotLeader, got {other:?}"),
     };
-    assert!(
-        leader_hint == Some(leader),
-        "leader hint should point at the elected leader"
-    );
+    assert2::assert!(leader_hint == Some(leader));
 
     // Forward to the leader (record-carrying replication commits it on a majority).
     tokio::time::timeout(
@@ -346,10 +329,7 @@ async fn follower_submit_change_propagates() {
             ctrl.current_image().topic("orders").map(|_| ())
         })
         .await;
-        assert!(
-            ctrl.current_image().topic("orders").is_some(),
-            "node {id} missing replicated topic"
-        );
+        assert2::assert!(ctrl.current_image().topic("orders").is_some());
     }
 
     for &id in &ids {
@@ -383,8 +363,8 @@ async fn leader_failure_reelects() {
     // The two survivors must elect a NEW single leader at a higher epoch.
     let survivors: Vec<NodeId> = ids.iter().copied().filter(|&id| id != leader).collect();
     let (new_leader, epoch2) = await_single_leader(&net, &survivors, Duration::from_secs(15)).await;
-    assert!(new_leader != leader, "a new leader must be chosen");
-    assert!(epoch2 > epoch1, "new term must have a higher epoch");
+    assert2::assert!(new_leader != leader);
+    assert2::assert!(epoch2 > epoch1);
 
     // A submit to the new leader commits across the two survivors.
     tokio::time::timeout(
@@ -473,10 +453,7 @@ async fn restart_recovers_image() {
     )
     .expect("reopen");
     // The recovered image must contain the committed topic.
-    assert!(
-        reopened.current_image().topic("persistent").is_some(),
-        "reopened node did not recover its image"
-    );
+    assert2::assert!(reopened.current_image().topic("persistent").is_some());
     net.register(victim, reopened);
 
     for &id in &ids {
@@ -557,19 +534,13 @@ async fn lagging_follower_catches_up_via_snapshot() {
     })
     .await;
     let leader_log_start = leader_ctrl.quorum_snapshot().log_start_offset;
-    assert!(
-        leader_log_start > 0,
-        "leader did not prune its log (log_start_offset still 0); snapshot never happened"
-    );
+    assert2::assert!(leader_log_start > 0);
 
     // Capture the leader's converged image to compare against.
     let leader_image = leader_ctrl.current_image();
     // Sanity: every burst topic is in the leader image.
     for i in 0..burst {
-        assert!(
-            leader_image.topic(&format!("t{i}")).is_some(),
-            "leader image missing burst topic t{i}"
-        );
+        assert2::assert!(leader_image.topic(&format!("t{i}")).is_some());
     }
 
     // Now bring the lagging node 3 up on a FRESH empty tempdir: its LEO is 0,
@@ -590,17 +561,11 @@ async fn lagging_follower_catches_up_via_snapshot() {
     })
     .await;
 
-    assert!(
-        *lag.current_image() == *leader_image,
-        "lagging follower image did not converge to the leader's via snapshot"
-    );
+    assert2::assert!(*lag.current_image() == *leader_image);
     // It really used a snapshot: the follower's log_start is at the snapshot
     // boundary, not 0 (a pure log replication from 0 would leave it at 0).
     let lag_snap = lag.quorum_snapshot();
-    assert!(
-        lag_snap.log_start_offset > 0,
-        "lagging follower's log_start is still 0 — it did not install a snapshot"
-    );
+    assert2::assert!(lag_snap.log_start_offset > 0);
 
     for &id in &ids {
         if let Some(c) = net.get(id) {

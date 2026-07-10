@@ -333,15 +333,14 @@ fn disk_stats(_dir: &std::path::Path) -> Option<(i64, i64)> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn filter_all_allows_everything() {
         let f = Filter::All;
-        assert!(f.allows("any", 0));
-        assert!(f.allows("other", 99));
+        assert2::assert!(f.allows("any", 0));
+        assert2::assert!(f.allows("other", 99));
     }
 
     #[test]
@@ -349,16 +348,13 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("t".to_string(), vec![0, 2]);
         let f = Filter::Topics(m);
-        for (case, topic, partition, want) in [
+        for (_case, topic, partition, want) in [
             ("selected first partition", "t", 0, true),
             ("unselected partition", "t", 1, false),
             ("selected second partition", "t", 2, true),
             ("other topic", "other", 0, false),
         ] {
-            assert!(
-                f.allows(topic, partition) == want,
-                "case: {case}; {topic}-{partition}"
-            );
+            assert2::assert!(f.allows(topic, partition) == want);
         }
     }
 
@@ -367,15 +363,12 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("t".to_string(), vec![]);
         let f = Filter::Topics(m);
-        for (case, topic, partition, want) in [
+        for (_case, topic, partition, want) in [
             ("matching topic first partition", "t", 0, true),
             ("matching topic arbitrary partition", "t", 7, true),
             ("other topic", "u", 0, false),
         ] {
-            assert!(
-                f.allows(topic, partition) == want,
-                "case: {case}; {topic}-{partition}"
-            );
+            assert2::assert!(f.allows(topic, partition) == want);
         }
     }
 
@@ -412,7 +405,7 @@ mod tests {
     #[test]
     fn log_dir_capacity_returns_minus_one_for_missing_path() {
         let phantom = std::path::Path::new("/nonexistent/crabka/test/dir/should/not/exist");
-        assert!(log_dir_capacity(phantom) == (-1, -1));
+        assert2::assert!(log_dir_capacity(phantom) == (-1, -1));
     }
 
     /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>` via the
@@ -478,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn offset_lag_missing_partition_is_zero() {
         let reg = crate::partition_registry::PartitionRegistry::new();
-        assert!(offset_lag_for(&reg, "ghost", 0).await == 0);
+        assert2::assert!(offset_lag_for(&reg, "ghost", 0).await == 0);
     }
 
     /// A materialized partition with LEO ahead of HW reports `LEO - HW`
@@ -489,10 +482,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = crate::partition_registry::PartitionRegistry::new();
         let part = partition_with_leo(dir.path(), "t", crabka_ids::PartitionIndex(0), 5);
-        assert!(part.log_end_offset() == crabka_log::Offset(5));
+        assert2::assert!(part.log_end_offset() == crabka_log::Offset(5));
         reg.insert("t".to_string(), crabka_ids::PartitionIndex(0), part);
         // Fresh partition HW is 0 → lag == LEO == 5 (not -1, not 0).
-        assert!(offset_lag_for(&reg, "t", 0).await == 5);
+        assert2::assert!(offset_lag_for(&reg, "t", 0).await == 5);
     }
 
     /// Build a `FutureLogState` whose future log has LEO `future_count`.
@@ -523,7 +516,7 @@ mod tests {
         let reg = crate::partition_registry::PartitionRegistry::new();
         let future_logs = dashmap::DashMap::new();
         let lag = future_offset_lag(&reg, &future_logs, "ghost", crabka_ids::PartitionIndex(0));
-        assert!(lag == 0);
+        assert2::assert!(lag == 0);
     }
 
     /// `future_offset_lag` is `current_log.LEO − future_log.LEO`, clamped at 0.
@@ -536,7 +529,7 @@ mod tests {
         let fut_dir = tempfile::tempdir().unwrap();
         let reg = crate::partition_registry::PartitionRegistry::new();
         let part = partition_with_leo(cur_dir.path(), "t", crabka_ids::PartitionIndex(3), 5);
-        assert!(part.log_end_offset() == crabka_log::Offset(5));
+        assert2::assert!(part.log_end_offset() == crabka_log::Offset(5));
         reg.insert("t".to_string(), crabka_ids::PartitionIndex(3), part);
 
         let future_logs = dashmap::DashMap::new();
@@ -546,7 +539,7 @@ mod tests {
         );
 
         let lag = future_offset_lag(&reg, &future_logs, "t", crabka_ids::PartitionIndex(3));
-        assert!(lag == 3, "current LEO 5 − future LEO 2 == 3, got {lag}");
+        assert2::assert!(lag == 3);
     }
 
     #[test]
@@ -563,7 +556,7 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert!(cluster_describe_denied(
+        assert2::assert!(cluster_describe_denied(
             &authorizer,
             &image,
             &principal,
@@ -575,6 +568,6 @@ mod tests {
         let resp =
             DescribeLogDirsResponse::decode(&mut cur, describe_log_dirs_response::MAX_VERSION)
                 .unwrap();
-        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert2::assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
     }
 }

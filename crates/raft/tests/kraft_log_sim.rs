@@ -204,41 +204,35 @@ fn committed_batches(sim: &Sim<KraftBackedLog>, node: NodeId, hwm: i64) -> Vec<R
         .collect()
 }
 
-use assert2::{assert, check};
+use assert2::check;
 
 #[test]
 fn voters_logs_byte_identical_up_to_hwm_over_real_log() {
     let mut sim = new_with_kraft_log(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
-    assert!(sim.leaders().len() == 1, "no leader: {:?}", sim.leaders());
+    assert2::assert!(sim.leaders().len() == 1);
     let leader = sim.leaders()[0];
 
     sim.leader_append(leader, 5); // 5 real batches stamped in the leader's epoch
     sim.run_until_stable(10_000);
 
     let hwm = sim.leader_high_watermark(leader);
-    assert!(hwm >= 5, "hwm {hwm} did not reach the 5 appended records");
+    assert2::assert!(hwm >= 5);
 
     // Every voter's committed batches are byte-identical to the leader's.
     let leader_committed = committed_batches(&sim, leader, hwm);
-    assert!(!leader_committed.is_empty());
+    assert2::assert!(!leader_committed.is_empty());
     for v in sim.voters() {
         let voter_committed = committed_batches(&sim, v, hwm);
-        assert!(
-            voter_committed == leader_committed,
-            "voter {v} committed log diverges from leader {leader}"
-        );
+        assert2::assert!(voter_committed == leader_committed);
     }
 
     // The raw committed bytes also agree across all voters (true byte-exactness:
     // same encoded v2 batches, same offsets, same epochs).
     let leader_bytes = committed_bytes(&sim, leader);
-    assert!(!leader_bytes.is_empty());
+    assert2::assert!(!leader_bytes.is_empty());
     for v in sim.voters() {
-        assert!(
-            committed_bytes(&sim, v) == leader_bytes,
-            "voter {v} committed bytes diverge from leader {leader}"
-        );
+        assert2::assert!(committed_bytes(&sim, v) == leader_bytes);
     }
 }
 
@@ -246,7 +240,7 @@ fn voters_logs_byte_identical_up_to_hwm_over_real_log() {
 fn follower_truncates_real_log_on_divergence_then_reconverges() {
     let mut sim = new_with_kraft_log(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
-    assert!(sim.leaders().len() == 1, "no leader: {:?}", sim.leaders());
+    assert2::assert!(sim.leaders().len() == 1);
     let leader = sim.leaders()[0];
 
     // Get the leader to commit some real data first.
@@ -262,19 +256,10 @@ fn follower_truncates_real_log_on_divergence_then_reconverges() {
     let f = sim.voters().into_iter().find(|&v| v != leader).unwrap();
     let before = sim.log_end_offset(f);
     sim.inject_conflicting_tail(f, 7, 2);
-    assert!(
-        sim.log_end_offset(f) == before + 2,
-        "conflicting tail should have extended the follower's real log"
-    );
-    assert!(
-        sim.log_end_offset(f) > leader_end,
-        "follower must now be longer than the leader (divergent tail present)"
-    );
+    assert2::assert!(sim.log_end_offset(f) == before + 2);
+    assert2::assert!(sim.log_end_offset(f) > leader_end);
     // The conflicting tail bumped the follower's last epoch above the leader's.
-    assert!(
-        LogView::last_epoch(sim.node_log(f)) == 7,
-        "injected tail should sit at the conflicting epoch"
-    );
+    assert2::assert!(LogView::last_epoch(sim.node_log(f)) == 7);
 
     // The leader produces more authoritative data. When the divergent follower
     // pulls it on its next fetch, it must first truncate its conflicting tail
@@ -293,10 +278,7 @@ fn follower_truncates_real_log_on_divergence_then_reconverges() {
     // The follower's KraftLog was truncated on disk (its end offset dropped back
     // to the leader's authoritative length) and re-replicated to match exactly:
     // same record bytes at the same offsets, byte-identical committed log.
-    assert!(
-        sim.log_end_offset(f) == sim.log_end_offset(leader),
-        "follower {f} log end should match the leader after truncation+reconverge"
-    );
+    assert2::assert!(sim.log_end_offset(f) == sim.log_end_offset(leader));
     let hwm = sim.leader_high_watermark(leader);
     check!(
         committed_batches(&sim, f, hwm) == committed_batches(&sim, leader, hwm),
@@ -322,19 +304,15 @@ fn follower_truncates_real_log_on_divergence_then_reconverges() {
 fn hwm_agrees_and_never_exceeds_any_voter_log_end() {
     let mut sim = new_with_kraft_log(&[NodeId(1), NodeId(2), NodeId(3)]);
     sim.run_until_stable(10_000);
-    assert!(sim.leaders().len() == 1, "no leader: {:?}", sim.leaders());
+    assert2::assert!(sim.leaders().len() == 1);
     let leader = sim.leaders()[0];
 
     sim.leader_append(leader, 3);
     sim.run_until_stable(10_000);
 
     let hwm = sim.leader_high_watermark(leader);
-    assert!(hwm >= 3, "hwm {hwm} did not reach the 3 appended records");
+    assert2::assert!(hwm >= 3);
     for v in sim.voters() {
-        assert!(
-            hwm <= sim.log_end_offset(v),
-            "hwm {hwm} exceeds voter {v} log end {}",
-            sim.log_end_offset(v)
-        );
+        assert2::assert!(hwm <= sim.log_end_offset(v));
     }
 }

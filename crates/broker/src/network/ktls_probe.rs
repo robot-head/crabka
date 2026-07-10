@@ -158,9 +158,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     async fn linux_probe_maps_injected_results() {
         super::set_test_probe_result(super::TestProbeResult::Failure);
-        assert!(!super::probe_ktls_support().await);
+        assert2::assert!(!super::probe_ktls_support().await);
 
         super::set_test_probe_result(super::TestProbeResult::Success);
-        assert!(super::probe_ktls_support().await);
+        assert2::assert!(super::probe_ktls_support().await);
     }
 }

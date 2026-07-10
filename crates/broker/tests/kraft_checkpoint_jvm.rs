@@ -7,7 +7,6 @@
 
 use std::{io::Write, process::Command};
 
-use assert2::assert;
 use crabka_protocol::records::metadata::checkpoint::build_bootstrap_checkpoint;
 
 const KAFKA_IMAGE: &str = "mirror.gcr.io/apache/kafka:4.0.0";
@@ -49,7 +48,7 @@ fn jvm_dump_log_parses_crabka_bootstrap_checkpoint() {
         String::from_utf8_lossy(&out.stderr)
     );
     eprintln!("{text}");
-    assert!(out.status.success(), "kafka-dump-log must succeed: {text}");
+    assert2::assert!(out.status.success());
     // (needle, expected presence in the dump-log output)
     let cases = [
         ("SnapshotHeader", true),
@@ -60,10 +59,6 @@ fn jvm_dump_log_parses_crabka_bootstrap_checkpoint() {
         ("isvalid: false", false),
     ];
     for (needle, expected) in cases {
-        assert!(
-            text.contains(needle) == expected,
-            "kafka-dump-log output must {} {needle:?}: {text}",
-            if expected { "contain" } else { "not contain" },
-        );
+        assert2::assert!(text.contains(needle) == expected);
     }
 }

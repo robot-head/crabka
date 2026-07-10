@@ -55,7 +55,7 @@ impl Assignor for RangeAssignor {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_protocol::primitives::uuid::Uuid;
 
     use super::*;
@@ -154,11 +154,8 @@ mod tests {
             ),
         ];
 
-        for (case, members, topics, expected) in cases {
-            assert!(
-                RangeAssignor.assign(&members, &topics) == expected,
-                "case {case}"
-            );
+        for (_case, members, topics, expected) in cases {
+            assert2::assert!(RangeAssignor.assign(&members, &topics) == expected);
         }
     }
 
@@ -171,6 +168,6 @@ mod tests {
         };
         let a1 = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
         let a2 = RangeAssignor.assign(&[member("m2", &[t]), member("m1", &[t])], &topics);
-        assert!(a1 == a2);
+        assert2::assert!(a1 == a2);
     }
 }

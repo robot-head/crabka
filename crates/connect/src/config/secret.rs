@@ -119,12 +119,9 @@ mod tests {
     fn secret_string_redacts_debug_and_display() {
         let secret = SecretString::new("super-secret");
 
-        assert_eq!(
-            format!("{secret:?}"),
-            "SecretString([REDACTED])".to_string()
-        );
-        assert_eq!(secret.to_string(), "[REDACTED]".to_string());
-        assert_eq!(secret.expose_secret(), "super-secret");
+        assert2::assert!(format!("{secret:?}") == "SecretString([REDACTED])".to_string());
+        assert2::assert!(secret.to_string() == "[REDACTED]".to_string());
+        assert2::assert!(secret.expose_secret() == "super-secret");
     }
 
     #[test]
@@ -136,11 +133,11 @@ mod tests {
 
         let parsed: SecretRef = serde_json::from_value(value).unwrap();
 
-        assert_eq!(
-            parsed,
-            SecretRef::Env {
-                name: "POSTGRES_PASSWORD".into()
-            }
+        assert2::assert!(
+            parsed
+                == SecretRef::Env {
+                    name: "POSTGRES_PASSWORD".into()
+                }
         );
     }
 
@@ -154,7 +151,7 @@ mod tests {
 
         let err = serde_json::from_value::<SecretRef>(value).unwrap_err();
 
-        assert!(err.to_string().contains("unknown field"));
+        assert2::assert!(err.to_string().contains("unknown field"));
     }
 
     #[tokio::test]
@@ -167,7 +164,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             SecretResolutionError::EnvVar {
                 name,
@@ -187,7 +184,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             SecretResolutionError::UnsupportedReference { provider: "vault" }
         ));
@@ -200,10 +197,7 @@ mod tests {
             source: Some(Box::new(env::VarError::NotPresent)),
         };
 
-        assert_eq!(
-            err.to_string(),
-            "secret provider failed: vault token expired"
-        );
-        assert!(std::error::Error::source(&err).is_some());
+        assert2::assert!(err.to_string() == "secret provider failed: vault token expired");
+        assert2::assert!(std::error::Error::source(&err).is_some());
     }
 }

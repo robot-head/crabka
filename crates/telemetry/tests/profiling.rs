@@ -23,20 +23,20 @@ mod unix_only {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert2::assert!(resp.status() == StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
             .unwrap();
         // A pprof CPU profile is a non-empty gzip/protobuf blob.
-        assert!(!body.is_empty(), "expected a non-empty pprof profile");
-        assert!(body.starts_with(&[0x1f, 0x8b]), "expected gzip header");
+        assert2::assert!(!body.is_empty());
+        assert2::assert!(body.starts_with(&[0x1f, 0x8b]));
 
         let mut decoder = flate2::read::GzDecoder::new(&body[..]);
         let mut raw = Vec::new();
         decoder
             .read_to_end(&mut raw)
             .expect("profile body should be valid gzip");
-        assert!(!raw.is_empty(), "expected gzip to contain pprof bytes");
+        assert2::assert!(!raw.is_empty());
     }
 
     async fn unused_loopback_addr() -> SocketAddr {
@@ -76,8 +76,8 @@ mod unix_only {
         .unwrap();
 
         let response = http_get(addr, "/ready").await;
-        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-        assert!(response.contains("\r\n\r\nready"), "{response}");
+        assert2::assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert2::assert!(response.contains("\r\n\r\nready"));
     }
 
     #[tokio::test]
@@ -92,7 +92,7 @@ mod unix_only {
             .unwrap();
 
         let response = http_get(addr, "/__missing").await;
-        assert!(response.starts_with("HTTP/1.1 404 Not Found"), "{response}");
+        assert2::assert!(response.starts_with("HTTP/1.1 404 Not Found"));
     }
 
     #[tokio::test]
@@ -110,7 +110,7 @@ mod unix_only {
         .unwrap();
 
         let response = http_get(addr, "/ready-env").await;
-        assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
-        assert!(response.contains("\r\n\r\nready-env"), "{response}");
+        assert2::assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert2::assert!(response.contains("\r\n\r\nready-env"));
     }
 }

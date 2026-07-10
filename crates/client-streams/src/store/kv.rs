@@ -499,9 +499,8 @@ mod tests {
         let r = s
             .range(&Bytes::from_static(&[1, 0]), &Bytes::from_static(&[2, 0]))
             .await; // [lo, hi)
-        assert_eq!(
-            r,
-            vec![
+        assert2::assert!(
+            r == vec![
                 (Bytes::from_static(&[1, 0]), Bytes::from_static(b"a")),
                 (Bytes::from_static(&[1, 5]), Bytes::from_static(b"b")),
             ]
@@ -524,14 +523,14 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(*got.downcast::<Option<i64>>().unwrap(), Some(2));
+        assert2::assert!(*got.downcast::<Option<i64>>().unwrap() == Some(2));
         let miss = q
             .iq2_execute(&Iq2Query::Key {
                 key: Box::new("z".to_string()),
             })
             .await
             .unwrap();
-        assert_eq!(*miss.downcast::<Option<i64>>().unwrap(), None);
+        assert2::assert!(*miss.downcast::<Option<i64>>().unwrap() == None);
 
         // RangeQuery inclusive [a,b] ascending.
         let r = q
@@ -542,9 +541,9 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            *r.downcast::<Vec<(String, i64)>>().unwrap(),
-            vec![("a".to_string(), 1), ("b".to_string(), 2)]
+        assert2::assert!(
+            *r.downcast::<Vec<(String, i64)>>().unwrap()
+                == vec![("a".to_string(), 1), ("b".to_string(), 2)]
         );
 
         // Unbounded both sides, descending → all, reversed.
@@ -556,13 +555,13 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            *all_desc.downcast::<Vec<(String, i64)>>().unwrap(),
-            vec![
-                ("c".to_string(), 3),
-                ("b".to_string(), 2),
-                ("a".to_string(), 1)
-            ]
+        assert2::assert!(
+            *all_desc.downcast::<Vec<(String, i64)>>().unwrap()
+                == vec![
+                    ("c".to_string(), 3),
+                    ("b".to_string(), 2),
+                    ("a".to_string(), 1)
+                ]
         );
 
         // Wrong key type → KeyTypeMismatch.
@@ -571,7 +570,7 @@ mod tests {
                 key: Box::new(7_i64),
             })
             .await;
-        assert_eq!(bad.err(), Some(Iq2Failure::KeyTypeMismatch));
+        assert2::assert!(bad.err() == Some(Iq2Failure::KeyTypeMismatch));
     }
 
     #[tokio::test]

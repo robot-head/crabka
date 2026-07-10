@@ -104,7 +104,7 @@ impl Annotations {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_blockstore::Labels;
 
     use super::*;
@@ -129,7 +129,7 @@ mod tests {
                 "string",
             ),
         ] {
-            assert!(result.result_type() == want, "case {result:?}");
+            assert2::assert!(result.result_type() == want);
         }
     }
 
@@ -142,7 +142,7 @@ mod tests {
             ts_ms: 1000,
             value: SampleValue::Float(1.0),
         };
-        assert!(sample.value == SampleValue::Float(1.0));
+        assert2::assert!(sample.value == SampleValue::Float(1.0));
     }
 
     #[test]
@@ -159,18 +159,18 @@ mod tests {
 
         annotations.extend(&other);
 
-        assert_eq!(
-            annotations,
-            Annotations {
-                warnings: vec![
-                    "mixed float and histogram samples".to_string(),
-                    "counter reset detected".to_string(),
-                ],
-                infos: vec![
-                    "histogram ignored".to_string(),
-                    "stale sample skipped".to_string(),
-                ],
-            }
+        assert2::assert!(
+            annotations
+                == Annotations {
+                    warnings: vec![
+                        "mixed float and histogram samples".to_string(),
+                        "counter reset detected".to_string(),
+                    ],
+                    infos: vec![
+                        "histogram ignored".to_string(),
+                        "stale sample skipped".to_string(),
+                    ],
+                }
         );
     }
 
@@ -181,12 +181,12 @@ mod tests {
         let mut infos = Annotations::new();
         infos.info("info");
 
-        for (case, annotations, want) in [
+        for (_case, annotations, want) in [
             ("new", Annotations::new(), true),
             ("warn", warnings, false),
             ("info", infos, false),
         ] {
-            assert!(annotations.is_empty() == want, "case {case}");
+            assert2::assert!(annotations.is_empty() == want);
         }
     }
 }

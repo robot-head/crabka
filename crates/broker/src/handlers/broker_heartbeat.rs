@@ -300,7 +300,6 @@ mod tests {
         time::Duration,
     };
 
-    use assert2::assert;
     use bytes::BytesMut;
     use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
     use crabka_protocol::{Encode, primitives::uuid::Uuid as ProtocolUuid};
@@ -469,10 +468,7 @@ mod tests {
             {
                 return;
             }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "broker did not become controller leader"
-            );
+            assert2::assert!(std::time::Instant::now() <= deadline);
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
@@ -484,11 +480,8 @@ mod tests {
             ("other leader", Some(NodeId(2)), false),
             ("no leader", None, false),
         ];
-        for (case, leader, want) in cases {
-            assert!(
-                is_controller_leader(leader, NodeId(1)) == want,
-                "case: {case}; leader {leader:?}"
-            );
+        for (_case, leader, want) in cases {
+            assert2::assert!(is_controller_leader(leader, NodeId(1)) == want);
         }
     }
 
@@ -502,7 +495,7 @@ mod tests {
             should_shut_down: false,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(not_controller_response() == expected_not_controller);
+        assert2::assert!(not_controller_response() == expected_not_controller);
 
         let expected_success = BrokerHeartbeatResponse {
             throttle_time_ms: 0,
@@ -512,7 +505,7 @@ mod tests {
             should_shut_down: true,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(success_response(true) == expected_success);
+        assert2::assert!(success_response(true) == expected_success);
 
         let expected_denied = BrokerHeartbeatResponse {
             throttle_time_ms: 0,
@@ -522,7 +515,7 @@ mod tests {
             should_shut_down: false,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(denied_response_body() == expected_denied);
+        assert2::assert!(denied_response_body() == expected_denied);
     }
 
     #[test]
@@ -531,13 +524,13 @@ mod tests {
             offline_log_dirs: vec![],
             ..Default::default()
         };
-        assert!(!has_offline_log_dirs(&empty));
+        assert2::assert!(!has_offline_log_dirs(&empty));
 
         let reported = BrokerHeartbeatRequest {
             offline_log_dirs: vec![ProtocolUuid(uuid::Uuid::from_u128(0xD1).into_bytes())],
             ..Default::default()
         };
-        assert!(has_offline_log_dirs(&reported));
+        assert2::assert!(has_offline_log_dirs(&reported));
     }
 
     #[tokio::test]
@@ -582,9 +575,9 @@ mod tests {
             directories: vec![bad, good],
             partition_epoch: 1,
         })];
-        assert!(*changes == expected_changes);
+        assert2::assert!(*changes == expected_changes);
         // No unclean recovery needed (broker 2 is alive and in ISR).
-        assert!(recoveries == vec![]);
+        assert2::assert!(recoveries == vec![]);
     }
 
     #[tokio::test]
@@ -615,8 +608,8 @@ mod tests {
 
         // No change submitted and no recovery needed.
         let changes = captured.lock().unwrap();
-        assert!(changes.is_empty());
-        assert!(recoveries.is_empty());
+        assert2::assert!(changes.is_empty());
+        assert2::assert!(recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -642,8 +635,8 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert!(drained); // untransferable partition is not counted
-        assert!(captured.lock().unwrap().is_empty()); // nothing to transfer
+        assert2::assert!(drained); // untransferable partition is not counted
+        assert2::assert!(captured.lock().unwrap().is_empty()); // nothing to transfer
     }
 
     #[tokio::test]
@@ -665,13 +658,13 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert!(!drained); // still leading a transferable partition pre-submit
+        assert2::assert!(!drained); // still leading a transferable partition pre-submit
         let changes = captured.lock().unwrap();
-        assert!(changes.len() == 1);
+        assert2::assert!(changes.len() == 1);
         let MetadataRecord::V1Partition(pr) = &changes[0] else {
             panic!("expected V1Partition change")
         };
-        assert!(pr.leader == crabka_audit::NodeId(2)); // leadership handed to the live ISR replica
+        assert2::assert!(pr.leader == crabka_audit::NodeId(2)); // leadership handed to the live ISR replica
     }
 
     /// Empty ACLs + no super-users → every principal is denied
@@ -691,7 +684,7 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert!(cluster_action_denied(
+        assert2::assert!(cluster_action_denied(
             &authorizer,
             &image,
             &principal,
@@ -707,7 +700,7 @@ mod tests {
             error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
             ..Default::default()
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -720,7 +713,7 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert!(!cluster_action_denied(
+        assert2::assert!(!cluster_action_denied(
             &crate::authorizer::AllowAllAuthorizer,
             &image,
             &principal,
@@ -757,7 +750,7 @@ mod tests {
             should_shut_down: false,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
 
         broker_handle.shutdown().await;
     }

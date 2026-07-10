@@ -2540,7 +2540,7 @@ mod tests {
             QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[NodeId(1)])),
             400,
         );
-        assert!(initial_election_at(&single, None, base, NodeId(1), 0, 400) == Some(base));
+        assert2::assert!(initial_election_at(&single, None, base, NodeId(1), 0, 400) == Some(base));
 
         let known_leader = QuorumStateMachine::new(
             NodeId(1),
@@ -2550,7 +2550,7 @@ mod tests {
             ),
             400,
         );
-        assert!(
+        assert2::assert!(
             initial_election_at(&known_leader, Some(NodeId(2)), base, NodeId(1), 0, 400).is_none()
         );
 
@@ -2562,7 +2562,7 @@ mod tests {
             ),
             400,
         );
-        assert!(initial_election_at(&non_voter, None, base, NodeId(4), 0, 400).is_none());
+        assert2::assert!(initial_election_at(&non_voter, None, base, NodeId(4), 0, 400).is_none());
 
         let multi = QuorumStateMachine::new(
             NodeId(1),
@@ -2575,49 +2575,41 @@ mod tests {
         let jitter = crate::kraft::core::election_jitter_ms(NodeId(1), 0, 400);
         let at =
             initial_election_at(&multi, None, base, NodeId(1), 0, 400).expect("multi voter timer");
-        assert!(at.duration_since(base) == Duration::from_millis(400 + jitter));
+        assert2::assert!(at.duration_since(base) == Duration::from_millis(400 + jitter));
     }
 
     #[test]
     fn initial_state_voters_preserves_configured_quorum_ids() {
         let (engine, _dir) = build_engine_only(NodeId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
-        assert_eq!(
-            initial_state_voters(&engine.core),
-            vec![NodeId(1), NodeId(2), NodeId(3)]
+        assert2::assert!(
+            initial_state_voters(&engine.core) == vec![NodeId(1), NodeId(2), NodeId(3)]
         );
-        assert_eq!(
-            engine.quorum_tx.borrow().voters.clone(),
-            vec![NodeId(1), NodeId(2), NodeId(3)]
+        assert2::assert!(
+            engine.quorum_tx.borrow().voters.clone() == vec![NodeId(1), NodeId(2), NodeId(3)]
         );
     }
 
     #[test]
     fn heartbeat_period_is_one_third_of_election_timeout_with_floor() {
-        for (case, timeout_ms, want_ms) in [
+        for (_case, timeout_ms, want_ms) in [
             ("ordinary timeout", 1000, 333),
             ("short timeout", 120, 40),
             ("floor below three milliseconds", 2, 1),
             ("zero timeout floor", 0, 1),
         ] {
-            assert!(
-                heartbeat_period(timeout_ms) == Duration::from_millis(want_ms),
-                "case {case}"
-            );
+            assert2::assert!(heartbeat_period(timeout_ms) == Duration::from_millis(want_ms));
         }
     }
 
     #[test]
     fn election_timer_only_starts_non_leader_voters() {
-        for (case, is_voter, is_leader, want) in [
+        for (_case, is_voter, is_leader, want) in [
             ("non-leader voter", true, false, true),
             ("leader voter", true, true, false),
             ("non-voter follower", false, false, false),
             ("non-voter leader", false, true, false),
         ] {
-            assert!(
-                election_timer_starts_election(is_voter, is_leader) == want,
-                "case {case}"
-            );
+            assert2::assert!(election_timer_starts_election(is_voter, is_leader) == want);
         }
     }
 
@@ -2654,41 +2646,39 @@ mod tests {
                 None,
             ),
         ] {
-            assert!(following_leader_for_role(&role) == want, "role {role:?}");
+            assert2::assert!(following_leader_for_role(&role) == want);
         }
     }
 
     #[test]
     fn fetch_records_are_served_only_by_clean_leader_fetches() {
-        for (case, has_snapshot, has_divergence, is_leader, want) in [
+        for (_case, has_snapshot, has_divergence, is_leader, want) in [
             ("clean leader", false, false, true, true),
             ("snapshot response", true, false, true, false),
             ("divergence response", false, true, true, false),
             ("clean follower", false, false, false, false),
         ] {
-            assert!(
-                should_serve_fetch_records(has_snapshot, has_divergence, is_leader) == want,
-                "case {case}"
+            assert2::assert!(
+                should_serve_fetch_records(has_snapshot, has_divergence, is_leader) == want
             );
         }
     }
 
     #[test]
     fn leadership_loss_detection_handles_stepdown_and_epoch_bump() {
-        for (case, was_leader, is_leader, held_epoch, current_epoch, want) in [
+        for (_case, was_leader, is_leader, held_epoch, current_epoch, want) in [
             ("leader stepped down", true, false, 3, 3, true),
             ("leader epoch advanced", true, true, 3, 4, true),
             ("leadership unchanged", true, true, 3, 3, false),
             ("follower epoch advanced", false, false, 3, 4, false),
         ] {
-            assert!(
+            assert2::assert!(
                 should_fail_waiters_on_leadership_change(
                     was_leader,
                     is_leader,
                     held_epoch,
                     current_epoch
-                ) == want,
-                "case {case}"
+                ) == want
             );
         }
     }
@@ -2697,187 +2687,169 @@ mod tests {
     fn deadline_instant_offsets_from_engine_clock_base() {
         let base = Instant::now();
         let at = instant_from_clock_base(base, SimInstant(250));
-        assert!(at.checked_duration_since(base) == Some(Duration::from_millis(250)));
+        assert2::assert!(at.checked_duration_since(base) == Some(Duration::from_millis(250)));
     }
 
     #[test]
     fn submit_offset_helpers_use_base_plus_blob_count() {
-        for (case, base, count, want) in [
+        for (_case, base, count, want) in [
             ("empty submission", 9, 0, 9),
             ("three-record submission", 9, 3, 12),
         ] {
-            assert!(
-                assigned_record_offset(Offset(base), count) == want,
-                "case {case}"
-            );
-            assert!(
-                submit_waiter_need_offset(Offset(base), usize::try_from(count).unwrap()) == want,
-                "case {case}"
+            assert2::assert!(assigned_record_offset(Offset(base), count) == want);
+            assert2::assert!(
+                submit_waiter_need_offset(Offset(base), usize::try_from(count).unwrap()) == want
             );
         }
     }
 
     #[test]
     fn append_result_must_match_previous_log_end_and_advance_log() {
-        for (case, expected_base, returned_base, log_end_after, want) in [
+        for (_case, expected_base, returned_base, log_end_after, want) in [
             ("matching advancing append", 4, 4, 5, true),
             ("negative returned base", 4, -1, 5, false),
             ("mismatched returned base", 4, 5, 5, false),
             ("log did not advance", 4, 4, 4, false),
         ] {
-            assert!(
+            assert2::assert!(
                 append_result_is_consistent(
                     Offset(expected_base),
                     Offset(returned_base),
                     Offset(log_end_after)
-                ) == want,
-                "case {case}"
+                ) == want
             );
         }
-        assert!(validate_append_result("test", Offset(4), Offset(4), Offset(5)).is_ok());
-        assert!(validate_append_result("test", Offset(4), Offset(-1), Offset(4)).is_err());
+        assert2::assert!(validate_append_result("test", Offset(4), Offset(4), Offset(5)).is_ok());
+        assert2::assert!(validate_append_result("test", Offset(4), Offset(-1), Offset(4)).is_err());
     }
 
     #[test]
     fn single_voter_majority_detection_is_exact() {
-        for (case, majority, want) in [
+        for (_case, majority, want) in [
             ("single vote", 1, true),
             ("no votes", 0, false),
             ("multiple votes", 2, false),
         ] {
-            assert!(is_single_voter_majority(majority) == want, "case {case}");
+            assert2::assert!(is_single_voter_majority(majority) == want);
         }
     }
 
     #[test]
     fn apply_window_includes_only_newly_committed_batch_bases() {
-        for (case, base_offset, prev_hwm, applied_hwm, want) in [
+        for (_case, base_offset, prev_hwm, applied_hwm, want) in [
             ("first newly committed batch", 5, 5, 6, true),
             ("interior newly committed batch", 6, 5, 8, true),
             ("already applied batch", 4, 5, 8, false),
             ("exclusive applied boundary", 8, 5, 8, false),
         ] {
-            assert!(
+            assert2::assert!(
                 batch_base_in_apply_window(base_offset, Offset(prev_hwm), Offset(applied_hwm))
-                    == want,
-                "case {case}"
+                    == want
             );
         }
     }
 
     #[test]
     fn snapshot_threshold_uses_positive_hwm_delta_from_last_snapshot() {
-        for (case, hwm, last_snapshot_end, want) in [
+        for (_case, hwm, last_snapshot_end, want) in [
             ("positive committed delta", 10, 4, 6),
             ("snapshot ahead of HWM", 4, 10, 0),
         ] {
-            assert!(
-                committed_records_since_snapshot(Offset(hwm), Offset(last_snapshot_end)) == want,
-                "case {case}"
+            assert2::assert!(
+                committed_records_since_snapshot(Offset(hwm), Offset(last_snapshot_end)) == want
             );
         }
-        for (case, advanced, interval, want) in [
+        for (_case, advanced, interval, want) in [
             ("exact threshold", 3, 3, true),
             ("above threshold", 4, 3, true),
             ("below threshold", 2, 3, false),
         ] {
-            assert!(
-                snapshot_interval_reached(advanced, interval) == want,
-                "case {case}"
-            );
+            assert2::assert!(snapshot_interval_reached(advanced, interval) == want);
         }
     }
 
     #[test]
     fn expected_hwm_after_advance_is_monotonic_and_clamped_to_log_end() {
-        for (case, prev_hwm, new_hwm, log_end, want) in [
+        for (_case, prev_hwm, new_hwm, log_end, want) in [
             ("clamp above log end", 2, 5, 4, 4),
             ("prevent regression", 2, 1, 4, 2),
             ("ordinary advance", 2, 3, 4, 3),
         ] {
-            assert!(
+            assert2::assert!(
                 expected_hwm_after_advance(Offset(prev_hwm), Offset(new_hwm), Offset(log_end))
-                    == want,
-                "case {case}"
+                    == want
             );
         }
-        for (case, applied_hwm, expected_hwm, want) in [
+        for (_case, applied_hwm, expected_hwm, want) in [
             ("exact expected HWM", 4, 4, true),
             ("beyond expected HWM", 5, 4, true),
             ("below expected HWM", 3, 4, false),
         ] {
-            assert!(
-                hwm_advanced_as_expected(Offset(applied_hwm), Offset(expected_hwm)) == want,
-                "case {case}"
+            assert2::assert!(
+                hwm_advanced_as_expected(Offset(applied_hwm), Offset(expected_hwm)) == want
             );
         }
     }
 
     #[test]
     fn waiter_resolution_requires_hwm_to_reach_need_offset() {
-        for (case, hwm, need_offset, want) in [
+        for (_case, hwm, need_offset, want) in [
             ("HWM reaches waiter", 5, 5, true),
             ("HWM passes waiter", 6, 5, true),
             ("HWM below waiter", 4, 5, false),
         ] {
-            assert!(
-                hwm_reaches_waiter(Offset(hwm), Offset(need_offset)) == want,
-                "case {case}"
-            );
+            assert2::assert!(hwm_reaches_waiter(Offset(hwm), Offset(need_offset)) == want);
         }
     }
 
     #[test]
     fn metadata_fetch_window_is_committed_half_open_range() {
-        for (case, fetch_offset, hwm, want) in [
+        for (_case, fetch_offset, hwm, want) in [
             ("first committed offset", 0, 1, true),
             ("last committed offset", 4, 5, true),
             ("negative offset", -1, 5, false),
             ("exclusive HWM boundary", 5, 5, false),
         ] {
-            assert!(
+            assert2::assert!(
                 metadata_fetch_offset_in_committed_window(Offset(fetch_offset), Offset(hwm))
-                    == want,
-                "case {case}"
+                    == want
             );
         }
-        assert!(fetch_batch_committed_before_hwm(4, Offset(5)));
-        assert!(!fetch_batch_committed_before_hwm(5, Offset(5)));
+        assert2::assert!(fetch_batch_committed_before_hwm(4, Offset(5)));
+        assert2::assert!(!fetch_batch_committed_before_hwm(5, Offset(5)));
     }
 
     #[test]
     fn fetch_record_offsets_are_inside_log_window_only() {
-        for (case, fetch_offset, log_end, want) in [
+        for (_case, fetch_offset, log_end, want) in [
             ("first available record", 0, 1, true),
             ("last available record", 4, 5, true),
             ("negative offset", -1, 5, false),
             ("exclusive log-end boundary", 5, 5, false),
         ] {
-            assert!(
-                fetch_offset_has_records(Offset(fetch_offset), Offset(log_end)) == want,
-                "case {case}"
+            assert2::assert!(
+                fetch_offset_has_records(Offset(fetch_offset), Offset(log_end)) == want
             );
         }
     }
 
     #[test]
     fn fetch_epoch_uses_installed_snapshot_epoch_only_at_empty_boundary() {
-        for (case, installed, log_start, log_end, last_epoch, want) in [
+        for (_case, installed, log_start, log_end, last_epoch, want) in [
             ("empty log with installed snapshot", Some(7), 10, 10, 3, 7),
             ("non-empty log with snapshot", Some(7), 10, 11, 3, 3),
             ("empty log without snapshot", None, 10, 10, 3, 3),
         ] {
-            assert!(
+            assert2::assert!(
                 fetch_epoch_for_request(installed, Offset(log_start), Offset(log_end), last_epoch)
-                    == want,
-                "case {case}"
+                    == want
             );
         }
     }
 
     #[test]
     fn fetch_batch_classifier_separates_duplicate_append_and_gap() {
-        for (case, base_offset, log_end, want) in [
+        for (_case, base_offset, log_end, want) in [
             (
                 "duplicate batch",
                 4,
@@ -2887,16 +2859,13 @@ mod tests {
             ("contiguous append", 5, 5, FetchBatchDisposition::Append),
             ("offset gap", 6, 5, FetchBatchDisposition::Gap),
         ] {
-            assert!(
-                classify_fetch_batch(Offset(base_offset), Offset(log_end)) == want,
-                "case {case}"
-            );
+            assert2::assert!(classify_fetch_batch(Offset(base_offset), Offset(log_end)) == want);
         }
     }
 
     #[test]
     fn snapshot_fetch_hint_starts_only_for_future_non_duplicate_snapshots() {
-        for (case, snapshot_id, log_end, in_flight, want) in [
+        for (_case, snapshot_id, log_end, in_flight, want) in [
             ("future snapshot", (11, 2), 10, None, true),
             ("snapshot at log end", (10, 2), 10, None, false),
             (
@@ -2908,44 +2877,39 @@ mod tests {
             ),
             ("newer in-flight snapshot", (12, 2), 10, Some((11, 2)), true),
         ] {
-            assert!(
-                should_start_snapshot_fetch(snapshot_id, Offset(log_end), in_flight) == want,
-                "case {case}"
+            assert2::assert!(
+                should_start_snapshot_fetch(snapshot_id, Offset(log_end), in_flight) == want
             );
         }
     }
 
     #[test]
     fn snapshot_fetch_response_is_invalid_unless_success_from_active_leader() {
-        for (case, error_code, response_epoch, current_epoch, want) in [
+        for (_case, error_code, response_epoch, current_epoch, want) in [
             ("successful active leader", 0, 2, 2, false),
             ("error from active leader", 1, 2, 2, true),
             ("success from wrong epoch", 0, 3, 2, true),
             ("error from wrong epoch", 1, 3, 2, true),
         ] {
-            assert!(
+            assert2::assert!(
                 snapshot_fetch_response_invalid(
                     error_code,
                     NodeId(response_epoch),
                     NodeId(current_epoch)
-                ) == want,
-                "case {case}"
+                ) == want
             );
         }
     }
 
     #[test]
     fn checkpoint_id_ordering_prefers_higher_offset_then_epoch_without_equal_replacement() {
-        for (case, candidate, current, want) in [
+        for (_case, candidate, current, want) in [
             ("higher offset", (11, 1), (10, 9), true),
             ("same offset higher epoch", (10, 9), (10, 2), true),
             ("same offset lower epoch", (10, 2), (10, 9), false),
             ("equal checkpoint", (10, 9), (10, 9), false),
         ] {
-            assert!(
-                checkpoint_id_is_newer(candidate, current) == want,
-                "case {case}"
-            );
+            assert2::assert!(checkpoint_id_is_newer(candidate, current) == want);
         }
     }
 
@@ -2956,12 +2920,12 @@ mod tests {
 
         engine.execute_local_only(vec![Action::AppendLeaderChange { epoch: 4 }]);
 
-        assert!(engine.log.log_end_offset() == start + 1);
+        assert2::assert!(engine.log.log_end_offset() == start + 1);
         let batches = engine
             .log
             .read_decoded(start, MAX_APPLY_BYTES)
             .expect("read appended leader-change");
-        assert!(batches.len() == 1);
+        assert2::assert!(batches.len() == 1);
         let batch = &batches[0];
         check!(
             (
@@ -3002,45 +2966,41 @@ mod tests {
         let voters: Vec<i32> = decoded.voters.iter().map(|v| v.voter_id).collect();
         let granting_voters: Vec<i32> =
             decoded.granting_voters.iter().map(|v| v.voter_id).collect();
-        assert_eq!(voters, vec![1, 2, 3]);
-        assert_eq!(granting_voters, vec![1, 2, 3]);
+        assert2::assert!(voters == vec![1, 2, 3]);
+        assert2::assert!(granting_voters == vec![1, 2, 3]);
     }
 
     fn elect_single_voter_engine(engine: &mut Engine) {
         engine.on_event(Event::ElectionTimeout);
-        assert!(
-            engine.core.role().is_leader(),
-            "engine did not become leader: {:?}",
-            engine.core.role()
-        );
+        assert2::assert!(engine.core.role().is_leader());
     }
 
     #[tokio::test]
     async fn engine_following_leader_reflects_current_role() {
         let (mut follower, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
-        assert!(follower.following_leader().is_none());
+        assert2::assert!(follower.following_leader().is_none());
 
         follower.on_event(Event::ReceiveBeginQuorumEpoch {
             leader_id: NodeId(2),
             leader_epoch: 1,
         });
-        assert!(follower.following_leader() == Some(NodeId(2)));
+        assert2::assert!(follower.following_leader() == Some(NodeId(2)));
 
         let (mut leader, _leader_dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         elect_single_voter_engine(&mut leader);
-        assert!(leader.following_leader().is_none());
+        assert2::assert!(leader.following_leader().is_none());
     }
 
     #[test]
     fn direct_single_voter_submit_applies_image_and_resolves_waiter() {
         let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         elect_single_voter_engine(&mut engine);
-        assert!(engine.image.topic("direct").is_none());
+        assert2::assert!(engine.image.topic("direct").is_none());
 
         let (reply, mut rx) = oneshot::channel();
         engine.on_submit_change(topic_record("direct"), reply);
 
-        assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(()))));
         check!(
             (
                 engine.image.topic("direct").is_some(),
@@ -3059,7 +3019,7 @@ mod tests {
 
         let (reply, mut rx) = oneshot::channel();
         engine.on_submit_change(topic_record("anchor"), reply);
-        assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(()))));
 
         let base = engine.log.log_end_offset();
         let reg = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
@@ -3074,8 +3034,8 @@ mod tests {
         let (reply, mut rx) = oneshot::channel();
         engine.on_submit_change(vec![reg], reply);
 
-        assert!(matches!(rx.try_recv(), Ok(Ok(()))));
-        assert!(engine.image.broker_epoch(NodeId(7)) == Some(base.0));
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+        assert2::assert!(engine.image.broker_epoch(NodeId(7)) == Some(base.0));
     }
 
     #[test]
@@ -3084,12 +3044,12 @@ mod tests {
         elect_single_voter_engine(&mut engine);
         let (reply, mut rx) = oneshot::channel();
         engine.on_submit_change(topic_record("replayed"), reply);
-        assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+        assert2::assert!(matches!(rx.try_recv(), Ok(Ok(()))));
 
         let mut recovered = MetadataImage::new(uuid::Uuid::nil());
         replay_committed(&engine.log, &mut recovered, Offset(0));
 
-        assert!(recovered.topic("replayed").is_some());
+        assert2::assert!(recovered.topic("replayed").is_some());
     }
 
     #[test]
@@ -3118,18 +3078,18 @@ mod tests {
 
         engine.try_resolve_waiters();
 
-        assert!(matches!(ready_rx.try_recv(), Ok(Ok(()))));
-        assert!(matches!(
+        assert2::assert!(matches!(ready_rx.try_recv(), Ok(Ok(()))));
+        assert2::assert!(matches!(
             future_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
-        assert_eq!(
+        assert2::assert!(
             engine
                 .commit_waiters
                 .iter()
                 .map(|waiter| waiter.need_offset)
-                .collect::<Vec<_>>(),
-            vec![Offset(6)]
+                .collect::<Vec<_>>()
+                == vec![Offset(6)]
         );
     }
 
@@ -3153,21 +3113,21 @@ mod tests {
 
         engine.fail_waiters_reached_by(Offset(5), "test hwm stall");
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             ready_rx.try_recv(),
             Ok(Err(RaftError::ChangeRejected(_)))
         ));
-        assert!(matches!(
+        assert2::assert!(matches!(
             future_rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
-        assert_eq!(
+        assert2::assert!(
             engine
                 .commit_waiters
                 .iter()
                 .map(|waiter| waiter.need_offset)
-                .collect::<Vec<_>>(),
-            vec![Offset(6)]
+                .collect::<Vec<_>>()
+                == vec![Offset(6)]
         );
     }
 
@@ -3203,21 +3163,21 @@ mod tests {
         let mut peers = Vec::new();
         for _ in 0..2 {
             let send = recv_peer_send(&mut sends).await;
-            assert!(send.api_key == api_key::END_QUORUM_EPOCH);
+            assert2::assert!(send.api_key == api_key::END_QUORUM_EPOCH);
             match wire::decode_end(&send.body) {
                 Some(wire::PeerRequest::EndQuorumEpoch {
                     leader_id,
                     leader_epoch,
                 }) => {
-                    assert_eq!(leader_id, NodeId(1));
-                    assert_eq!(leader_epoch, 4);
+                    assert2::assert!(leader_id == NodeId(1));
+                    assert2::assert!(leader_epoch == 4);
                 }
                 other => panic!("unexpected end quorum request: {other:?}"),
             }
             peers.push(send.peer);
         }
         peers.sort_unstable();
-        assert!(peers == vec![NodeId(2), NodeId(3)]);
+        assert2::assert!(peers == vec![NodeId(2), NodeId(3)]);
     }
 
     #[test]
@@ -3229,13 +3189,13 @@ mod tests {
         engine.log.append(&mut second).expect("append second");
         engine.log.advance_hwm(Offset(1));
 
-        assert!(
+        assert2::assert!(
             engine
                 .metadata_fetch_slice(-1, MAX_APPLY_BYTES)
                 .records
                 .is_empty()
         );
-        assert!(
+        assert2::assert!(
             engine
                 .metadata_fetch_slice(1, MAX_APPLY_BYTES)
                 .records
@@ -3282,8 +3242,8 @@ mod tests {
                 fetch_offset,
                 ..
             }) => {
-                assert_eq!(fetch_epoch, 7);
-                assert_eq!(fetch_offset, 10);
+                assert2::assert!(fetch_epoch == 7);
+                assert2::assert!(fetch_offset == 10);
             }
             other => panic!("unexpected fetch request: {other:?}"),
         }
@@ -3301,8 +3261,8 @@ mod tests {
                 fetch_offset,
                 ..
             }) => {
-                assert_eq!(fetch_epoch, 9);
-                assert_eq!(fetch_offset, 11);
+                assert2::assert!(fetch_epoch == 9);
+                assert2::assert!(fetch_offset == 11);
             }
             other => panic!("unexpected fetch request: {other:?}"),
         }
@@ -3314,16 +3274,16 @@ mod tests {
         let mut batch = one_offset_batch(0, 1, b"a");
         engine.log.append(&mut batch).expect("append");
 
-        assert!(engine.serve_fetch_records(Offset(-1)).is_empty());
-        assert!(engine.serve_fetch_records(Offset(1)).is_empty());
+        assert2::assert!(engine.serve_fetch_records(Offset(-1)).is_empty());
+        assert2::assert!(engine.serve_fetch_records(Offset(1)).is_empty());
         let records = engine.serve_fetch_records(Offset(0));
         let decoded = decode_batches(&records).expect("decode served records");
-        assert_eq!(
+        assert2::assert!(
             decoded
                 .iter()
                 .map(|batch| batch.base_offset)
-                .collect::<Vec<_>>(),
-            vec![0]
+                .collect::<Vec<_>>()
+                == vec![0]
         );
     }
 
@@ -3357,12 +3317,12 @@ mod tests {
                 position,
                 ..
             }) => {
-                assert_eq!(snapshot_id, (11, 3));
-                assert_eq!(position, 0);
+                assert2::assert!(snapshot_id == (11, 3));
+                assert2::assert!(position == 0);
             }
             other => panic!("unexpected fetch snapshot request: {other:?}"),
         }
-        assert!(
+        assert2::assert!(
             engine
                 .snapshot_fetch
                 .as_ref()
@@ -3370,7 +3330,7 @@ mod tests {
         );
 
         engine.on_fetch_response(NodeId(2), &body);
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(StdDuration::from_millis(20), async {
                 loop {
                     let send = recv_peer_send(&mut sends).await;
@@ -3389,7 +3349,7 @@ mod tests {
             .expect("install snapshot");
         engine.snapshot_fetch = None;
         engine.on_fetch_response(NodeId(2), &body);
-        assert!(engine.snapshot_fetch.is_none());
+        assert2::assert!(engine.snapshot_fetch.is_none());
     }
 
     #[tokio::test]
@@ -3416,9 +3376,9 @@ mod tests {
         }
         .encode();
         engine.on_fetch_snapshot_response(NodeId(2), &error_body);
-        assert!(engine.snapshot_fetch.is_none());
+        assert2::assert!(engine.snapshot_fetch.is_none());
         let send = recv_peer_send_with_api(&mut sends, api_key::FETCH).await;
-        assert!(send.peer == 2);
+        assert2::assert!(send.peer == 2);
 
         engine.snapshot_fetch = Some(SnapshotFetchState::new((12, 3), NodeId(2)));
         let ok_body = wire::PeerResponse::FetchSnapshot {
@@ -3430,14 +3390,14 @@ mod tests {
         }
         .encode();
         engine.on_fetch_snapshot_response(NodeId(3), &ok_body);
-        assert!(engine.snapshot_fetch.is_none());
+        assert2::assert!(engine.snapshot_fetch.is_none());
         let send = recv_peer_send_with_api(&mut sends, api_key::FETCH).await;
-        assert!(send.peer == 3);
+        assert2::assert!(send.peer == 3);
     }
 
     #[tokio::test(start_paused = true)]
     async fn sleep_until_opt_waits_for_some_and_never_completes_for_none() {
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(StdDuration::from_millis(1), sleep_until_opt(None))
                 .await
                 .is_err()
@@ -3445,13 +3405,13 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_millis(50);
         let mut sleep = Box::pin(sleep_until_opt(Some(deadline)));
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(StdDuration::from_millis(1), &mut sleep)
                 .await
                 .is_err()
         );
         tokio::time::advance(Duration::from_millis(50)).await;
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(StdDuration::from_millis(1), sleep)
                 .await
                 .is_ok()
@@ -3504,11 +3464,7 @@ mod tests {
             }
         })
         .await;
-        assert!(
-            result.is_ok(),
-            "leader did not reach {want:?}; current {:?}",
-            *ctrl.watch_leader().borrow()
-        );
+        assert2::assert!(result.is_ok());
     }
 
     async fn submit_change_with_timeout(
@@ -3525,14 +3481,14 @@ mod tests {
     async fn single_voter_engine_starts_with_no_initial_leader() {
         let (ctrl, _dir) = build(NodeId(1), &[NodeId(1)]);
         let initial = *ctrl.watch_leader().borrow();
-        assert!(initial.is_none());
+        assert2::assert!(initial.is_none());
         ctrl.shutdown().await;
     }
 
     #[tokio::test]
     async fn node_id_reports_configured_node() {
         let (ctrl, _dir) = build(NodeId(7), &[NodeId(7)]);
-        assert!(ctrl.node_id() == 7);
+        assert2::assert!(ctrl.node_id() == 7);
         ctrl.shutdown().await;
     }
 
@@ -3569,17 +3525,17 @@ mod tests {
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
         await_leader(&ctrl, Some(NodeId(1))).await;
 
-        assert!(ctrl.current_image().topic("t").is_none());
+        assert2::assert!(ctrl.current_image().topic("t").is_none());
 
         let off = ctrl
             .test_append_and_commit(topic_record("t"))
             .await
             .unwrap();
-        assert!(off >= 0);
+        assert2::assert!(off >= 0);
 
         let mut img_rx = ctrl.watch_image();
-        assert!(img_rx.borrow_and_update().topic("t").is_some());
-        assert!(ctrl.current_image().topic("t").is_some());
+        assert2::assert!(img_rx.borrow_and_update().topic("t").is_some());
+        assert2::assert!(ctrl.current_image().topic("t").is_some());
         ctrl.shutdown().await;
     }
 
@@ -3592,12 +3548,12 @@ mod tests {
         ctrl.test_append_and_commit(topic_record("t"))
             .await
             .unwrap();
-        assert!(ctrl.current_image().topic("t").is_some());
+        assert2::assert!(ctrl.current_image().topic("t").is_some());
 
         ctrl.test_append_and_commit(topic_record("t"))
             .await
             .unwrap();
-        assert!(ctrl.current_image().topic("t").is_some());
+        assert2::assert!(ctrl.current_image().topic("t").is_some());
         ctrl.shutdown().await;
     }
 
@@ -3647,10 +3603,7 @@ mod tests {
             .unwrap();
         }
         let leader = *ctrl.watch_leader().borrow();
-        assert!(
-            leader == Some(NodeId(2)),
-            "follower spuriously left leader 2: {leader:?}"
-        );
+        assert2::assert!(leader == Some(NodeId(2)));
         ctrl.shutdown().await;
     }
 
@@ -3669,11 +3622,11 @@ mod tests {
         .await
         .expect("submit did not hang")
         .expect("submit ok");
-        assert!(ctrl.current_image().topic("orders").is_some());
+        assert2::assert!(ctrl.current_image().topic("orders").is_some());
 
         let qs = ctrl.quorum_state().await.unwrap();
-        assert_eq!(qs.leader_id, Some(NodeId(1)));
-        assert!(qs.high_watermark > 0);
+        assert2::assert!(qs.leader_id == Some(NodeId(1)));
+        assert2::assert!(qs.high_watermark > 0);
         ctrl.shutdown().await;
     }
 
@@ -3688,7 +3641,7 @@ mod tests {
             .unwrap();
         let dup =
             submit_change_with_timeout(&ctrl, topic_record("t"), "duplicate-test submit").await;
-        assert!(matches!(dup, Err(RaftError::Metadata(_))), "got {dup:?}");
+        assert2::assert!(matches!(dup, Err(RaftError::Metadata(_))));
         ctrl.shutdown().await;
     }
 
@@ -3725,15 +3678,12 @@ mod tests {
             .await
             .expect("submit did not hang on leadership loss")
             .expect("join");
-        assert!(
-            matches!(
-                result,
-                Err(RaftError::NotLeader {
-                    current_leader: Some(NodeId(2))
-                })
-            ),
-            "got {result:?}"
-        );
+        assert2::assert!(matches!(
+            result,
+            Err(RaftError::NotLeader {
+                current_leader: Some(NodeId(2))
+            })
+        ));
         ctrl.shutdown().await;
     }
 
@@ -3742,7 +3692,7 @@ mod tests {
         let (ctrl, _dir) = build(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)]);
         // Never elected; node 1 is Unattached → not leader.
         let r = ctrl.submit_change(topic_record("t")).await;
-        assert!(matches!(r, Err(RaftError::NotLeader { .. })), "got {r:?}");
+        assert2::assert!(matches!(r, Err(RaftError::NotLeader { .. })));
         ctrl.shutdown().await;
     }
 
@@ -3819,10 +3769,7 @@ mod tests {
             .expect("join");
 
         check!(ra.is_ok(), "A (first valid) should commit: {ra:?}");
-        assert!(
-            matches!(rb, Err(RaftError::Metadata(_))),
-            "B (duplicate) should be rejected: {rb:?}"
-        );
+        assert2::assert!(matches!(rb, Err(RaftError::Metadata(_))));
         check!(
             rc.is_ok(),
             "C (distinct valid) must NOT bleed B's rejection: {rc:?}"
@@ -3858,7 +3805,7 @@ mod tests {
             submit_change_with_timeout(&ctrl, topic_record("recovered"), "recovery seed")
                 .await
                 .unwrap();
-            assert!(ctrl.current_image().topic("recovered").is_some());
+            assert2::assert!(ctrl.current_image().topic("recovered").is_some());
             ctrl.trigger_snapshot().await.unwrap();
             ctrl.shutdown().await;
             // Give the loop a moment to fully drain.
@@ -3876,7 +3823,7 @@ mod tests {
             0,
         )
         .expect("reopen");
-        assert!(ctrl2.current_image().topic("recovered").is_some());
+        assert2::assert!(ctrl2.current_image().topic("recovered").is_some());
         ctrl2.shutdown().await;
     }
 
@@ -3920,7 +3867,7 @@ mod tests {
 
         let loaded = load_quorum_state(dir.path(), uuid::Uuid::nil(), &voter_set(&[NodeId(1)]));
 
-        assert!(matches!(loaded, Err(RaftError::Storage(_))));
+        assert2::assert!(matches!(loaded, Err(RaftError::Storage(_))));
     }
 
     #[test]
@@ -3931,7 +3878,7 @@ mod tests {
         let loaded = load_quorum_state(dir.path(), uuid::Uuid::nil(), &voter_set(&[NodeId(1)]))
             .expect("short file is ignored");
 
-        assert!(loaded.is_none());
+        assert2::assert!(loaded.is_none());
     }
 
     // ---- snapshot trigger + prune ----
@@ -3959,15 +3906,11 @@ mod tests {
         let cp = load_latest_checkpoint(&checkpoint_dir(dir.path()))
             .expect("scan checkpoints")
             .expect("a checkpoint exists");
-        assert!(!cp.is_empty());
+        assert2::assert!(!cp.is_empty());
 
         // The log was pruned: log-start advanced past 0.
         let qs = ctrl.quorum_state().await.unwrap();
-        assert!(
-            qs.log_start_offset > 0,
-            "log not pruned: log_start_offset = {}",
-            qs.log_start_offset
-        );
+        assert2::assert!(qs.log_start_offset > 0);
         ctrl.shutdown().await;
     }
 
@@ -3979,11 +3922,11 @@ mod tests {
         write_checkpoint(&cp_dir, 10, 9, b"ten-nine").expect("write checkpoint 10/9");
         write_checkpoint(&cp_dir, 11, 1, b"eleven-one").expect("write checkpoint 11/1");
 
-        assert!(latest_checkpoint_id(&cp_dir) == Some((11, 1)));
+        assert2::assert!(latest_checkpoint_id(&cp_dir) == Some((11, 1)));
         let latest = load_latest_checkpoint(&cp_dir)
             .expect("load latest")
             .expect("latest exists");
-        assert!(latest == b"eleven-one");
+        assert2::assert!(latest == b"eleven-one");
     }
 
     #[test]
@@ -3996,21 +3939,20 @@ mod tests {
 
         retain_latest_checkpoint(&cp_dir);
 
-        for (case, end_offset, epoch, want_present) in [
+        for (_case, end_offset, epoch, want_present) in [
             ("matching checkpoint", 6, 1, true),
             ("wrong end offset", 5, 1, false),
             ("wrong epoch", 6, 0, false),
         ] {
-            assert!(
-                load_checkpoint_by_id(&cp_dir, end_offset, epoch).is_some() == want_present,
-                "case {case}"
+            assert2::assert!(
+                load_checkpoint_by_id(&cp_dir, end_offset, epoch).is_some() == want_present
             );
         }
         let entries: Vec<_> = std::fs::read_dir(&cp_dir)
             .expect("read checkpoint dir")
             .collect::<Result<Vec<_>, _>>()
             .expect("read entries");
-        assert!(entries.len() == 1);
+        assert2::assert!(entries.len() == 1);
     }
 
     #[tokio::test]
@@ -4039,15 +3981,15 @@ mod tests {
             .await
             .expect("first registration");
         let e1 = ctrl.current_image().broker_epoch(NodeId(7));
-        assert!(e1 == Some(base1), "epoch {e1:?} != commit offset {base1}");
+        assert2::assert!(e1 == Some(base1));
 
         let base2 = ctrl.quorum_state().await.unwrap().log_end_offset;
         submit_change_with_timeout(&ctrl, reg(7), "broker re-registration")
             .await
             .expect("re-registration");
         let e2 = ctrl.current_image().broker_epoch(NodeId(7));
-        assert!(e2 == Some(base2), "re-reg epoch {e2:?} != offset {base2}");
-        assert!(base2 > base1 && e2 > e1, "epoch must strictly increase");
+        assert2::assert!(e2 == Some(base2));
+        assert2::assert!(base2 > base1 && e2 > e1);
 
         ctrl.shutdown().await;
     }

@@ -167,8 +167,6 @@ pub fn resolve_message(spec: &MessageSpec) -> Result<HashMap<String, Resolution>
 mod tests {
     use std::path::PathBuf;
 
-    use assert2::assert;
-
     use super::*;
     use crate::ir;
 
@@ -186,7 +184,7 @@ mod tests {
     fn api_versions_request_has_no_nested_structs() {
         let spec = load("ApiVersionsRequest");
         let map = resolve_message(&spec).unwrap();
-        assert!(map.is_empty(), "found unexpected struct refs: {map:?}");
+        assert2::assert!(map.is_empty());
     }
 
     #[test]
@@ -194,9 +192,6 @@ mod tests {
         let spec = load("MetadataRequest");
         let map = resolve_message(&spec).unwrap();
         // MetadataRequest declares a nested MetadataRequestTopic struct.
-        assert!(
-            map.contains_key("MetadataRequestTopic"),
-            "did not resolve MetadataRequestTopic: {map:?}"
-        );
+        assert2::assert!(map.contains_key("MetadataRequestTopic"));
     }
 }

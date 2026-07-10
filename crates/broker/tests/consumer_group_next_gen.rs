@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::owned::{
@@ -38,10 +38,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 fn heartbeat(group: &str, member_id: &str, epoch: i32) -> ConsumerGroupHeartbeatRequest {
@@ -71,23 +68,23 @@ async fn single_member_full_lifecycle() {
     req.subscribed_topic_names = Some(vec!["t1".into()]);
     let resp = client.send(req).await.unwrap();
     let member_id = resp.member_id.clone().unwrap();
-    assert!((resp.error_code, resp.member_epoch) == (0, 1));
+    assert2::assert!((resp.error_code, resp.member_epoch) == (0, 1));
     let assigned = resp.assignment.as_ref().unwrap();
     let total_partitions: usize = assigned
         .topic_partitions
         .iter()
         .map(|t| t.partitions.len())
         .sum();
-    assert!(total_partitions == 4);
+    assert2::assert!(total_partitions == 4);
 
     let mut hb2 = heartbeat("g1", &member_id, 1);
     hb2.subscribed_topic_names = Some(vec!["t1".into()]);
     let resp2 = client.send(hb2).await.unwrap();
-    assert!((resp2.error_code, resp2.member_epoch) == (0, 1));
+    assert2::assert!((resp2.error_code, resp2.member_epoch) == (0, 1));
 
     let leave = heartbeat("g1", &member_id, -1);
     let resp3 = client.send(leave).await.unwrap();
-    assert!(resp3.error_code == 0);
+    assert2::assert!(resp3.error_code == 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -106,13 +103,13 @@ async fn two_members_split_partitions() {
     let mut a = heartbeat("g2", "", 0);
     a.subscribed_topic_names = Some(vec!["t2".into()]);
     let ra = client.send(a).await.unwrap();
-    assert!(ra.error_code == 0, "A join failed: {:?}", ra.error_code);
+    assert2::assert!(ra.error_code == 0);
     let mid_a = ra.member_id.unwrap();
 
     let mut b = heartbeat("g2", "", 0);
     b.subscribed_topic_names = Some(vec!["t2".into()]);
     let rb = client.send(b).await.unwrap();
-    assert!(rb.error_code == 0, "B join failed: {:?}", rb.error_code);
+    assert2::assert!(rb.error_code == 0);
     let mid_b = rb.member_id.unwrap();
     let b_epoch = rb.member_epoch;
 
@@ -123,7 +120,7 @@ async fn two_members_split_partitions() {
     let mut a3 = heartbeat("g2", &mid_a, ra.member_epoch);
     a3.subscribed_topic_names = Some(vec!["t2".into()]);
     let ra3 = client.send(a3).await.unwrap();
-    assert!(ra3.error_code == 0, "A re-hb failed: {:?}", ra3.error_code);
+    assert2::assert!(ra3.error_code == 0);
 
     // B re-heartbeats to acquire the partitions A just released. Per KIP-848 the
     // coordinator withholds a partition from its new owner until the previous
@@ -133,7 +130,7 @@ async fn two_members_split_partitions() {
     let mut b3 = heartbeat("g2", &mid_b, b_epoch);
     b3.subscribed_topic_names = Some(vec!["t2".into()]);
     let rb3 = client.send(b3).await.unwrap();
-    assert!(rb3.error_code == 0, "B re-hb failed: {:?}", rb3.error_code);
+    assert2::assert!(rb3.error_code == 0);
 
     let parts_a: usize = ra3
         .assignment
@@ -149,7 +146,7 @@ async fn two_members_split_partitions() {
         .iter()
         .map(|t| t.partitions.len())
         .sum();
-    assert!(parts_a + parts_b == 4);
+    assert2::assert!(parts_a + parts_b == 4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -179,7 +176,7 @@ async fn classic_group_locked_against_next_gen() {
     let mut req = heartbeat("g3", "", 0);
     req.subscribed_topic_names = Some(vec!["t3".into()]);
     let resp = client.send(req).await.unwrap();
-    assert!(resp.error_code == crabka_broker::codes::GROUP_ID_NOT_FOUND);
+    assert2::assert!(resp.error_code == crabka_broker::codes::GROUP_ID_NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -202,7 +199,7 @@ async fn kill_switch_returns_group_id_not_found() {
     let mut req = heartbeat("g4", "", 0);
     req.subscribed_topic_names = Some(vec!["t".into()]);
     let resp = client.send(req).await.unwrap();
-    assert!(resp.error_code == crabka_broker::codes::GROUP_ID_NOT_FOUND);
+    assert2::assert!(resp.error_code == crabka_broker::codes::GROUP_ID_NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -256,28 +253,25 @@ async fn stale_epoch_rejected() {
     let mut req = heartbeat("g6", "", 0);
     req.subscribed_topic_names = Some(vec!["t6".into()]);
     let r = client.send(req).await.unwrap();
-    assert!(r.error_code == 0);
+    assert2::assert!(r.error_code == 0);
     let mid = r.member_id.unwrap();
 
     // B joins; group_epoch goes 1→2, B's member_epoch = 2, A's is still 1.
     let mut req2 = heartbeat("g6", "", 0);
     req2.subscribed_topic_names = Some(vec!["t6".into()]);
     let rb = client.send(req2).await.unwrap();
-    assert!(rb.error_code == 0);
+    assert2::assert!(rb.error_code == 0);
 
     // A catches up: heartbeat at epoch 1 succeeds and advances A's epoch to 2.
     let mut catch_up = heartbeat("g6", &mid, 1);
     catch_up.subscribed_topic_names = Some(vec!["t6".into()]);
     let rc = client.send(catch_up).await.unwrap();
-    assert!(
-        (rc.error_code, rc.member_epoch) == (0, 2),
-        "A should be at epoch 2 after catch-up"
-    );
+    assert2::assert!((rc.error_code, rc.member_epoch) == (0, 2));
 
     // Now A re-heartbeats at the OLD epoch 1; A's stored epoch is 2 → STALE.
     let stale = heartbeat("g6", &mid, 1);
     let resp = client.send(stale).await.unwrap();
-    assert!(resp.error_code == crabka_broker::codes::STALE_MEMBER_EPOCH);
+    assert2::assert!(resp.error_code == crabka_broker::codes::STALE_MEMBER_EPOCH);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -298,9 +292,8 @@ async fn first_join_with_client_member_id_echoes_and_assigns() {
     req.subscribed_topic_names = Some(vec!["tc".into()]);
     let resp = client.send(req).await.unwrap();
 
-    assert!(
-        (resp.error_code, resp.member_id.as_deref()) == (0, Some("client-generated-id")),
-        "broker must echo the client-supplied member id"
+    assert2::assert!(
+        (resp.error_code, resp.member_id.as_deref()) == (0, Some("client-generated-id"))
     );
     let parts: usize = resp
         .assignment
@@ -309,10 +302,7 @@ async fn first_join_with_client_member_id_echoes_and_assigns() {
         .iter()
         .map(|t| t.partitions.len())
         .sum();
-    assert!(
-        parts == 2,
-        "single member should be assigned both partitions"
-    );
+    assert2::assert!(parts == 2);
 }
 
 /// `kafka-consumer-groups.sh --list` sends `ListGroups` (api_key 16) with
@@ -336,7 +326,7 @@ async fn list_groups_includes_next_gen_consumer_group() {
     let mut req = heartbeat("glist", "", 0);
     req.subscribed_topic_names = Some(vec!["tlist".into()]);
     let resp = client.send(req).await.unwrap();
-    assert!(resp.error_code == 0, "join failed: {:?}", resp.error_code);
+    assert2::assert!(resp.error_code == 0);
 
     // types_filter = ["consumer"] → contains glist tagged "consumer".
     let resp = client
@@ -346,7 +336,7 @@ async fn list_groups_includes_next_gen_consumer_group() {
         })
         .await
         .expect("ListGroups[consumer]");
-    assert!(resp.error_code == 0, "list error: {:?}", resp.error_code);
+    assert2::assert!(resp.error_code == 0);
     let row = resp
         .groups
         .iter()
@@ -357,11 +347,7 @@ async fn list_groups_includes_next_gen_consumer_group() {
                 resp.groups.iter().map(|g| &g.group_id).collect::<Vec<_>>()
             )
         });
-    assert!(
-        row.group_type == "consumer",
-        "expected group_type=consumer, got {:?}",
-        row.group_type
-    );
+    assert2::assert!(row.group_type == "consumer");
 
     // types_filter = ["share"] → glist must NOT appear.
     let resp = client
@@ -371,11 +357,7 @@ async fn list_groups_includes_next_gen_consumer_group() {
         })
         .await
         .expect("ListGroups[share]");
-    assert!(
-        !resp.groups.iter().any(|g| g.group_id == "glist"),
-        "consumer group glist must be excluded under types_filter=[share], got {:?}",
-        resp.groups.iter().map(|g| &g.group_id).collect::<Vec<_>>()
-    );
+    assert2::assert!(!resp.groups.iter().any(|g| g.group_id == "glist"));
 
     // No filter → glist appears exactly once, tagged "consumer".
     let resp = client
@@ -387,8 +369,5 @@ async fn list_groups_includes_next_gen_consumer_group() {
         .iter()
         .filter(|g| g.group_id == "glist")
         .collect();
-    assert!(
-        (matches.len(), matches[0].group_type.as_str()) == (1, "consumer"),
-        "unfiltered list must contain one consumer glist row: {matches:?}"
-    );
+    assert2::assert!((matches.len(), matches[0].group_type.as_str()) == (1, "consumer"));
 }

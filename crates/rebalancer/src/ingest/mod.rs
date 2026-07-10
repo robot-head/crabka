@@ -148,7 +148,6 @@ fn normalize_cluster_id(cluster_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -156,7 +155,7 @@ mod tests {
     fn snapshot_starts_as_none() {
         let s = new_shared_snapshot();
         let g = s.load();
-        assert!(g.as_ref().is_none());
+        assert2::assert!(g.as_ref().is_none());
     }
 
     #[test]
@@ -173,21 +172,17 @@ mod tests {
         let g = s.load();
         let inner: &Option<ClusterState> = &g;
         let v = inner.as_ref().expect("Some after swap");
-        assert_eq!(v.snapshot_at_ms, 42);
-        assert_eq!(v.cluster_id.as_deref(), Some("c"));
+        assert2::assert!(v.snapshot_at_ms == 42);
+        assert2::assert!(v.cluster_id.as_deref() == Some("c"));
     }
 
     #[test]
     fn normalize_cluster_id_drops_empty_ids_only() {
-        for (name, input, expected) in [
+        for (_name, input, expected) in [
             ("empty", "", None),
             ("named", "cluster-a", Some("cluster-a")),
         ] {
-            assert_eq!(
-                normalize_cluster_id(input).as_deref(),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(normalize_cluster_id(input).as_deref() == expected);
         }
     }
 }

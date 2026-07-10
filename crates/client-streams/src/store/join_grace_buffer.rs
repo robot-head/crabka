@@ -228,9 +228,9 @@ mod tests {
         s.put("a".into(), 1, 100).await; // out-of-order, same key
         s.put("b".into(), 3, 150).await;
         let due = s.drain_due(150).await; // everything ts <= 150, ascending (ts, seq)
-        assert_eq!(due, vec![("a".into(), 1, 100), ("b".into(), 3, 150)]);
+        assert2::assert!(due == vec![("a".into(), 1, 100), ("b".into(), 3, 150)]);
         let rest = s.drain_due(i64::MAX).await; // remaining ts=200
-        assert_eq!(rest, vec![("a".into(), 2, 200)]);
+        assert2::assert!(rest == vec![("a".into(), 2, 200)]);
     }
 
     #[tokio::test]

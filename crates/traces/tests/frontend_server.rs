@@ -3,7 +3,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_traces::frontend::{
     QueryFrontend,
     backend::{MockQuerier, SearchPartial, TracePartial},
@@ -77,8 +77,8 @@ async fn server_round_trips_search_and_echo() {
         .unwrap();
     let status = echo.status();
     let body = echo.text().await.unwrap();
-    assert!(status.is_success());
-    assert_eq!(body.as_str(), "echo");
+    assert2::assert!(status.is_success());
+    assert2::assert!(body.as_str() == "echo");
 
     let url = format!("http://{addr}/api/search?q=%7B%20%7D&start=0&end=100&limit=20&spss=3");
     let resp = client
@@ -88,7 +88,7 @@ async fn server_round_trips_search_and_echo() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success());
+    assert2::assert!(resp.status().is_success());
     let body: serde_json::Value = resp.json().await.unwrap();
     check!(
         (
@@ -119,7 +119,7 @@ async fn server_search_requires_query() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status() == reqwest::StatusCode::BAD_REQUEST);
+    assert2::assert!(resp.status() == reqwest::StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -168,9 +168,9 @@ async fn server_by_id_returns_v2_envelope() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success());
+    assert2::assert!(resp.status().is_success());
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(
+    assert2::assert!(
         (
             &body["status"],
             &body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"]
@@ -201,7 +201,7 @@ async fn server_by_id_404_when_missing() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status() == reqwest::StatusCode::NOT_FOUND);
+    assert2::assert!(resp.status() == reqwest::StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -235,9 +235,9 @@ async fn server_tags_round_trip() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success());
+    assert2::assert!(resp.status().is_success());
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(
+    assert2::assert!(
         body["scopes"][0]
             == serde_json::json!({
                 "name": "span",

@@ -94,7 +94,6 @@ impl FromIterator<(String, String)> for Labels {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -106,7 +105,7 @@ mod tests {
         let mut b = Labels::new();
         b.insert("env", "prod");
         b.insert("app", "api");
-        assert!(a.fingerprint() == b.fingerprint());
+        assert2::assert!(a.fingerprint() == b.fingerprint());
     }
 
     #[test]
@@ -115,12 +114,12 @@ mod tests {
         a.insert("app", "api");
         let mut b = Labels::new();
         b.insert("app", "web");
-        assert!(a.fingerprint() != b.fingerprint());
+        assert2::assert!(a.fingerprint() != b.fingerprint());
     }
 
     #[test]
     fn fingerprint_is_injective_across_delimiter_ambiguity() {
-        for (name, left, right) in [
+        for (_name, left, right) in [
             (
                 "embedded equals sign",
                 Labels::from_pairs([("a", "b=c")]),
@@ -132,25 +131,25 @@ mod tests {
                 Labels::from_pairs([("x", "y\nz=")]),
             ),
         ] {
-            assert!(left.fingerprint() != right.fingerprint(), "case {name}");
+            assert2::assert!(left.fingerprint() != right.fingerprint());
         }
     }
 
     #[test]
     fn get_and_iter_round_trip() {
         let mut l = Labels::new();
-        assert_eq!(&l, &Labels::new());
+        assert2::assert!(&l == &Labels::new());
         l.insert("app", "api");
-        assert_eq!(&l, &Labels::from_pairs([("app", "api")]));
-        assert_eq!(l.get("app"), Some("api"));
-        assert_eq!(l.get("missing"), None);
+        assert2::assert!(&l == &Labels::from_pairs([("app", "api")]));
+        assert2::assert!(l.get("app") == Some("api"));
+        assert2::assert!(l.get("missing") == None);
         l.insert("env", "prod");
         let pairs = l
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        assert_eq!(&l, &Labels::from_pairs([("app", "api"), ("env", "prod")]));
-        assert_eq!(pairs, vec![("app", "api"), ("env", "prod")]);
+        assert2::assert!(&l == &Labels::from_pairs([("app", "api"), ("env", "prod")]));
+        assert2::assert!(pairs == vec![("app", "api"), ("env", "prod")]);
     }
 
     #[test]
@@ -166,6 +165,6 @@ mod tests {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        assert!(pairs == vec![("app", "api"), ("env", "prod")]);
+        assert2::assert!(pairs == vec![("app", "api"), ("env", "prod")]);
     }
 }

@@ -32,8 +32,8 @@ mod tests {
             (ListenerProtocol::SaslPlaintext, false, true),
             (ListenerProtocol::SaslSsl, true, true),
         ] {
-            assert_eq!(protocol.requires_tls(), tls, "case {protocol:?}");
-            assert_eq!(protocol.requires_sasl(), sasl, "case {protocol:?}");
+            assert2::assert!(protocol.requires_tls() == tls);
+            assert2::assert!(protocol.requires_sasl() == sasl);
         }
     }
 }

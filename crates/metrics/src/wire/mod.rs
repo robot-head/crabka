@@ -60,7 +60,7 @@ mod tests {
         let bytes = req.encode_to_vec();
         let back = pb::v1::WriteRequest::decode(bytes.as_slice()).unwrap();
 
-        assert_eq!(back, req);
+        assert2::assert!(back == req);
     }
 
     #[test]
@@ -81,6 +81,6 @@ mod tests {
         let bytes = req.encode_to_vec();
         let back = pb::v2::Request::decode(bytes.as_slice()).unwrap();
 
-        assert_eq!(back, req);
+        assert2::assert!(back == req);
     }
 }

@@ -18,7 +18,7 @@ use crabka_remote_storage::TopicIdPartition;
 /// Panics when `partition_count <= 0`.
 #[must_use]
 pub fn metadata_partition_for(tp: &TopicIdPartition, partition_count: i32) -> i32 {
-    assert!(partition_count > 0, "partition_count must be positive");
+    assert2::assert!(partition_count > 0);
     let mut h = DefaultHasher::new();
     for byte in tp.topic_id.as_bytes() {
         h.write_u8(*byte);
@@ -58,7 +58,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use uuid::Uuid;
 
     use super::*;
@@ -75,7 +75,7 @@ mod tests {
     fn is_in_range() {
         for p in 0..10 {
             let bucket = metadata_partition_for(&tp("orders", p), 50);
-            assert!((0..50).contains(&bucket), "bucket {bucket} out of [0,50)");
+            assert2::assert!((0..50).contains(&bucket));
         }
     }
 
@@ -83,7 +83,7 @@ mod tests {
     fn is_deterministic_across_calls() {
         let a = metadata_partition_for(&tp("orders", 7), 50);
         let b = metadata_partition_for(&tp("orders", 7), 50);
-        assert!(a == b);
+        assert2::assert!(a == b);
     }
 
     #[test]
@@ -91,7 +91,7 @@ mod tests {
         // Identity is (topic_id, partition); name is informational.
         let a = metadata_partition_for(&tp("orders", 3), 50);
         let b = metadata_partition_for(&tp("renamed", 3), 50);
-        assert!(a == b, "renaming a topic must not re-bucket its metadata");
+        assert2::assert!(a == b);
     }
 
     #[test]
@@ -101,17 +101,13 @@ mod tests {
             seen.insert(metadata_partition_for(&tp("orders", p), 50));
         }
         // Sanity: a hash that always returned 0 would land only one bucket.
-        assert!(
-            seen.len() > 5,
-            "hash should spread across buckets, got {}",
-            seen.len()
-        );
+        assert2::assert!(seen.len() > 5);
     }
 
     #[test]
     fn single_partition_count_collapses_to_zero() {
         for p in 0..20 {
-            assert!(metadata_partition_for(&tp("t", p), 1) == 0);
+            assert2::assert!(metadata_partition_for(&tp("t", p), 1) == 0);
         }
     }
 
@@ -133,12 +129,12 @@ mod tests {
         let mut expected: Vec<i32> = vec![pa, pb];
         expected.sort_unstable();
         expected.dedup();
-        assert!(got == expected);
+        assert2::assert!(got == expected);
     }
 
     #[test]
     fn metadata_partitions_for_empty_is_empty() {
         let none: [TopicIdPartition; 0] = [];
-        assert!(metadata_partitions_for(none.iter(), 50).is_empty());
+        assert2::assert!(metadata_partitions_for(none.iter(), 50).is_empty());
     }
 }

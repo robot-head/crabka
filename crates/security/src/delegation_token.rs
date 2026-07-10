@@ -43,7 +43,7 @@ pub fn compute_token_hmac(secret_key: &[u8], token_id: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -64,22 +64,22 @@ mod tests {
     fn hmac_is_deterministic_for_same_inputs() {
         let h1 = compute_token_hmac(b"k", "tok-1");
         let h2 = compute_token_hmac(b"k", "tok-1");
-        assert_eq!(&h1, &h2);
-        assert_eq!(h1.len(), 32);
+        assert2::assert!(&h1 == &h2);
+        assert2::assert!(h1.len() == 32);
     }
 
     #[test]
     fn hmac_diverges_on_key_change() {
         let h1 = compute_token_hmac(b"k1", "tok-1");
         let h2 = compute_token_hmac(b"k2", "tok-1");
-        assert!(h1 != h2);
+        assert2::assert!(h1 != h2);
     }
 
     #[test]
     fn secret_bytes_debug_does_not_leak_bytes() {
         let s = SecretBytes::new(b"super-secret-master-key".to_vec());
         let d = format!("{s:?}");
-        assert!(d.contains("redacted"), "got {d:?}");
-        assert!(!d.contains("super-secret"), "got {d:?}");
+        assert2::assert!(d.contains("redacted"));
+        assert2::assert!(!d.contains("super-secret"));
     }
 }

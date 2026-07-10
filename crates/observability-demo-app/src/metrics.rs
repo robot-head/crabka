@@ -206,7 +206,6 @@ async fn export(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -230,13 +229,13 @@ mod tests {
             "crabka_demo_process_stage_latency_seconds",
             "crabka_demo_order_processing_latency_seconds",
         ] {
-            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
+            assert2::assert!(buf.contains(needle));
         }
-        assert!(buf.contains("category=\"books\""));
-        assert!(buf.contains("region=\"us-east\""));
-        assert!(buf.contains("payment_method=\"card\""));
-        assert!(buf.contains("outcome=\"fulfilled\""));
-        assert!(buf.contains("stage=\"validate\""));
+        assert2::assert!(buf.contains("category=\"books\""));
+        assert2::assert!(buf.contains("region=\"us-east\""));
+        assert2::assert!(buf.contains("payment_method=\"card\""));
+        assert2::assert!(buf.contains("outcome=\"fulfilled\""));
+        assert2::assert!(buf.contains("stage=\"validate\""));
     }
 
     #[test]
@@ -245,7 +244,7 @@ mod tests {
         m.record_produced("toys", "eu-west", "wire", 10.0, 0.001);
         m.record_produced("toys", "eu-west", "wire", 20.0, 0.001);
         m.record_produced("toys", "ap-south", "wire", 30.0, 0.001);
-        assert!(
+        assert2::assert!(
             m.orders_produced
                 .get_or_create(&ProducedLabel {
                     category: "toys".into(),
@@ -255,7 +254,7 @@ mod tests {
                 .get()
                 == 2
         );
-        assert!(
+        assert2::assert!(
             m.orders_produced
                 .get_or_create(&ProducedLabel {
                     category: "toys".into(),

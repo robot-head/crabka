@@ -204,7 +204,6 @@ fn err_response(code: i16) -> DescribeDelegationTokenResponse {
 mod tests {
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-    use assert2::assert;
     use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
     use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenOwner;
     use crabka_raft::ControllerHandle;
@@ -225,7 +224,7 @@ mod tests {
         let mut rx = handle.watch_leader();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while rx.borrow().is_none() {
-            assert!(std::time::Instant::now() < deadline, "no leader in 5s");
+            assert2::assert!(std::time::Instant::now() < deadline);
             let _ = tokio::time::timeout(Duration::from_millis(100), rx.changed()).await;
         }
         handle
@@ -312,7 +311,7 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
+        assert2::assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
         controller.cancel().await;
     }
 
@@ -337,11 +336,11 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert!(resp.error_code == 0);
+        assert2::assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
         let expected: std::collections::HashSet<&str> = ["t-a", "t-b"].into_iter().collect();
-        assert!(ids == expected);
+        assert2::assert!(ids == expected);
         controller.cancel().await;
     }
 
@@ -382,11 +381,11 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert!(resp.error_code == 0);
+        assert2::assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
-        assert!(ids.len() == 1);
-        assert!(ids.contains("t-b"));
+        assert2::assert!(ids.len() == 1);
+        assert2::assert!(ids.contains("t-b"));
         controller.cancel().await;
     }
 
@@ -418,11 +417,11 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert!(resp.error_code == 0);
+        assert2::assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
-        assert!(ids.len() == 1);
-        assert!(ids.contains("t-a"));
+        assert2::assert!(ids.len() == 1);
+        assert2::assert!(ids.contains("t-a"));
         controller.cancel().await;
     }
 
@@ -466,13 +465,10 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert!(resp.error_code == 0);
+        assert2::assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
-        assert!(
-            ids.contains("t-a"),
-            "expected ACL Describe on TOKEN:User:alice to make t-a visible to bob; got {ids:?}"
-        );
+        assert2::assert!(ids.contains("t-a"));
         controller.cancel().await;
     }
 
@@ -509,13 +505,9 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert!(resp.error_code == 0);
+        assert2::assert!(resp.error_code == 0);
         // bob owns nothing — ACL extension MUST NOT surface alice's t-a.
-        assert!(
-            resp.tokens.is_empty(),
-            "token-authed bob must not see alice's token via ACL; got {:?}",
-            resp.tokens.iter().map(|t| &t.token_id).collect::<Vec<_>>()
-        );
+        assert2::assert!(resp.tokens.is_empty());
         controller.cancel().await;
     }
 }

@@ -7,7 +7,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::Bytes;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
@@ -81,10 +81,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 /// Finalize `streams.version` to level 1 so the heartbeat/describe handlers
@@ -102,10 +99,7 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert!(
-        resp.error_code == 0,
-        "streams.version finalize failed: {resp:?}"
-    );
+    assert2::assert!(resp.error_code == 0);
 }
 
 async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
@@ -157,12 +151,9 @@ async fn classic_join_sync(client: &Client, group_id: &str) -> (String, i32) {
     .await
     .expect("JoinGroup1 timeout")
     .expect("JoinGroup1");
-    assert!(
-        r1.error_code == ERR_MEMBER_ID_REQUIRED,
-        "expected MEMBER_ID_REQUIRED, got {r1:?}"
-    );
+    assert2::assert!(r1.error_code == ERR_MEMBER_ID_REQUIRED);
     let member_id = r1.member_id.clone();
-    assert!(!member_id.is_empty());
+    assert2::assert!(!member_id.is_empty());
 
     // Round 2: rejoin with assigned member_id — broker blocks for the
     // initial-rebalance-delay then returns as sole leader.
@@ -173,10 +164,7 @@ async fn classic_join_sync(client: &Client, group_id: &str) -> (String, i32) {
     .await
     .expect("JoinGroup2 timeout")
     .expect("JoinGroup2");
-    assert!(
-        r2.error_code == ERR_NONE,
-        "second JoinGroup must succeed, got {r2:?}"
-    );
+    assert2::assert!(r2.error_code == ERR_NONE);
     let generation_id = r2.generation_id;
 
     // SyncGroup: sole leader supplies its own assignment.
@@ -196,10 +184,7 @@ async fn classic_join_sync(client: &Client, group_id: &str) -> (String, i32) {
         })
         .await
         .expect("SyncGroup");
-    assert!(
-        r3.error_code == ERR_NONE,
-        "SyncGroup must succeed, got {r3:?}"
-    );
+    assert2::assert!(r3.error_code == ERR_NONE);
 
     (member_id, generation_id)
 }
@@ -348,10 +333,7 @@ async fn commit_offset_simple(
         })
         .await
         .expect("OffsetCommit");
-    assert!(
-        cr.topics[0].partitions[0].error_code == ERR_NONE,
-        "OffsetCommit (simple consumer) failed: {cr:?}"
-    );
+    assert2::assert!(cr.topics[0].partitions[0].error_code == ERR_NONE);
 }
 
 fn rejoin_config(log_dir: std::path::PathBuf) -> BrokerConfig {
@@ -418,11 +400,9 @@ async fn drained_streams_group_downgrades_and_preserves_offsets() {
     broker
         .wait_until_group_type("g", crabka_broker::coordinator::unified::GroupType::Classic)
         .await;
-    assert!(
+    assert2::assert!(
         broker.group_type_for_test("g")
-            == Some(crabka_broker::coordinator::unified::GroupType::Classic),
-        "group_type must be Classic after downgrade, got {:?}",
-        broker.group_type_for_test("g")
+            == Some(crabka_broker::coordinator::unified::GroupType::Classic)
     );
 
     // ── Phase 3: committed offset survives the flip. ──
@@ -443,11 +423,7 @@ async fn drained_streams_group_downgrades_and_preserves_offsets() {
         .await
         .expect("OffsetFetch");
     let part = &fr.groups[0].topics[0].partitions[0];
-    assert!(
-        (part.error_code, part.committed_offset) == (ERR_NONE, 42),
-        "committed offset must survive classic↔streams downgrade, got {}",
-        part.committed_offset
-    );
+    assert2::assert!((part.error_code, part.committed_offset) == (ERR_NONE, 42));
 }
 
 /// A streams group with a LIVE member rejects a classic JoinGroup with
@@ -464,7 +440,7 @@ async fn streams_group_with_live_member_rejects_classic_join() {
     // Live streams member (converge, do NOT leave).
     let (_mid, resp) =
         streams_join_and_converge(&streams_client, "g2", topology("in2"), 1, CONVERGE_TRIES).await;
-    assert!(resp.error_code == ERR_NONE);
+    assert2::assert!(resp.error_code == ERR_NONE);
     broker
         .wait_until_group_type(
             "g2",
@@ -472,7 +448,7 @@ async fn streams_group_with_live_member_rejects_classic_join() {
         )
         .await;
     broker.wait_until_streams_group_member_count("g2", 1).await;
-    assert!(
+    assert2::assert!(
         broker.group_type_for_test("g2")
             == Some(crabka_broker::coordinator::unified::GroupType::Streams)
     );
@@ -486,16 +462,10 @@ async fn streams_group_with_live_member_rejects_classic_join() {
     .await
     .expect("JoinGroup timeout")
     .expect("JoinGroup");
-    assert!(
-        r.error_code == ERR_GROUP_ID_NOT_FOUND,
-        "classic join for streams group with live member must return \
-         GROUP_ID_NOT_FOUND (69), got {}",
-        r.error_code
-    );
-    assert!(
+    assert2::assert!(r.error_code == ERR_GROUP_ID_NOT_FOUND);
+    assert2::assert!(
         broker.group_type_for_test("g2")
-            == Some(crabka_broker::coordinator::unified::GroupType::Streams),
-        "group_type must remain Streams after rejected downgrade"
+            == Some(crabka_broker::coordinator::unified::GroupType::Streams)
     );
 }
 
@@ -533,7 +503,7 @@ async fn converted_group_admin_views_respect_type_lock() {
 
     let (_sm, hb) =
         streams_join_and_converge(&streams_client, "g3", topology("in3"), 1, CONVERGE_TRIES).await;
-    assert!(hb.error_code == ERR_NONE);
+    assert2::assert!(hb.error_code == ERR_NONE);
     broker
         .wait_until_group_type(
             "g3",
@@ -541,7 +511,7 @@ async fn converted_group_admin_views_respect_type_lock() {
         )
         .await;
     broker.wait_until_streams_group_member_count("g3", 1).await;
-    assert!(
+    assert2::assert!(
         broker.group_type_for_test("g3")
             == Some(crabka_broker::coordinator::unified::GroupType::Streams)
     );
@@ -552,13 +522,11 @@ async fn converted_group_admin_views_respect_type_lock() {
         .await
         .expect("ListGroups");
     let rows: Vec<_> = lg.groups.iter().filter(|g| g.group_id == "g3").collect();
-    assert!(
+    assert2::assert!(
         (
             rows.len(),
             rows[0].group_type.eq_ignore_ascii_case("streams"),
-        ) == (1, true),
-        "g3 must be typed streams, got {:?}",
-        rows[0].group_type
+        ) == (1, true)
     );
 
     // DeleteGroups via the classic path must NOT remove the live streams group's
@@ -570,15 +538,10 @@ async fn converted_group_admin_views_respect_type_lock() {
         })
         .await
         .expect("DeleteGroups");
-    assert!(
-        dg.results[0].error_code == ERR_NON_EMPTY_GROUP,
-        "delete of a live streams group must be NON_EMPTY_GROUP, got {}",
-        dg.results[0].error_code
-    );
-    assert!(
+    assert2::assert!(dg.results[0].error_code == ERR_NON_EMPTY_GROUP);
+    assert2::assert!(
         broker.group_type_for_test("g3")
-            == Some(crabka_broker::coordinator::unified::GroupType::Streams),
-        "the streams group must survive the rejected delete"
+            == Some(crabka_broker::coordinator::unified::GroupType::Streams)
     );
 }
 
@@ -602,7 +565,7 @@ async fn downgrade_survives_restart() {
 
         let (mid, resp) =
             streams_join_and_converge(&sc, "g4", topology("in4"), 1, CONVERGE_TRIES).await;
-        assert!(resp.error_code == ERR_NONE, "streams converge: {resp:?}");
+        assert2::assert!(resp.error_code == ERR_NONE);
 
         // Commit offset 42 via simple consumer path (see watch-item).
         commit_offset_simple(&sc, "g4", "in4", topic_id, 0, 42).await;
@@ -620,7 +583,7 @@ async fn downgrade_survives_restart() {
                 crabka_broker::coordinator::unified::GroupType::Classic,
             )
             .await;
-        assert!(
+        assert2::assert!(
             broker.group_type_for_test("g4")
                 == Some(crabka_broker::coordinator::unified::GroupType::Classic)
         );
@@ -633,14 +596,10 @@ async fn downgrade_survives_restart() {
         // Replay must reconstruct g4 as a classic actor from the committed
         // offset. Offset-only groups are Kafka-typeless, so they do not carry a
         // Classic type lock in `group_type_for_test`.
-        assert!(
-            broker.classic_group_inspect_for_test("g4").await.is_some(),
-            "offset-only replay must seed a classic actor for g4"
-        );
-        assert!(
+        assert2::assert!(broker.classic_group_inspect_for_test("g4").await.is_some());
+        assert2::assert!(
             broker.group_type_for_test("g4")
-                != Some(crabka_broker::coordinator::unified::GroupType::Streams),
-            "group must not replay as Streams after downgrade"
+                != Some(crabka_broker::coordinator::unified::GroupType::Streams)
         );
         let fr = cc
             .send(OffsetFetchRequest {
@@ -658,9 +617,6 @@ async fn downgrade_survives_restart() {
             })
             .await
             .expect("OffsetFetch");
-        assert!(
-            fr.groups[0].topics[0].partitions[0].committed_offset == 42,
-            "committed offset must survive downgrade + restart"
-        );
+        assert2::assert!(fr.groups[0].topics[0].partitions[0].committed_offset == 42);
     }
 }

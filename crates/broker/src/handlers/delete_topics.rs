@@ -310,7 +310,7 @@ pub(crate) async fn handle(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
     use crabka_security::Principal;
 
@@ -388,7 +388,7 @@ mod tests {
             error_message: None,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(unknown_id == expected_unknown);
+        assert2::assert!(unknown_id == expected_unknown);
 
         let denied = delete_topic_result(
             Some("secret".into()),
@@ -402,7 +402,7 @@ mod tests {
             error_message: None,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(denied == expected_denied);
+        assert2::assert!(denied == expected_denied);
 
         let resp = delete_topics_response(vec![denied], 123);
         let expected_resp = DeleteTopicsResponse {
@@ -410,7 +410,7 @@ mod tests {
             responses: vec![expected_denied],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected_resp);
+        assert2::assert!(resp == expected_resp);
     }
 
     #[test]
@@ -431,7 +431,7 @@ mod tests {
             resource_type: "Topic".into(),
             name: "ok".into(),
         }];
-        assert!(resources == expected);
+        assert2::assert!(resources == expected);
     }
 
     #[test]
@@ -442,10 +442,7 @@ mod tests {
         let ctx = test_context(&p, &peer);
 
         audit_deleted_topics(log.as_ref(), &ctx, Vec::new());
-        assert!(
-            rx.try_recv().is_err(),
-            "empty audit resource list is a no-op"
-        );
+        assert2::assert!(rx.try_recv().is_err());
 
         audit_deleted_topics(
             log.as_ref(),
@@ -479,8 +476,8 @@ mod tests {
 
     #[test]
     fn should_wait_for_quota_delay_only_waits_for_positive_delay() {
-        assert!(!should_wait_for_quota_delay(Duration::ZERO));
-        assert!(should_wait_for_quota_delay(Duration::from_millis(1)));
+        assert2::assert!(!should_wait_for_quota_delay(Duration::ZERO));
+        assert2::assert!(should_wait_for_quota_delay(Duration::from_millis(1)));
     }
 
     #[tokio::test]
@@ -504,7 +501,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -540,7 +537,7 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

@@ -850,17 +850,16 @@ pub(crate) fn parse_quantity(s: &str) -> Result<i128, &'static str> {
 
 #[cfg(test)]
 mod config_hash_tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn config_hash_known_vectors() {
-        for (name, input, expected) in [
+        for (_name, input, expected) in [
             ("hello", "hello", "2cf24dba5fb0a30e"),
             ("empty string", "", "e3b0c44298fc1c14"),
         ] {
-            assert!(config_hash(input) == expected, "case {name}");
+            assert2::assert!(config_hash(input) == expected);
         }
     }
 
@@ -869,7 +868,7 @@ mod config_hash_tests {
         // K8s label values are limited to 63 characters. Our truncated
         // hash must always fit; this test guards against future widening.
         let h = config_hash("any content at all");
-        assert!(h.len() <= 63, "hash {h} exceeds K8s label limit");
+        assert2::assert!(h.len() <= 63);
     }
 
     #[test]
@@ -911,9 +910,9 @@ mod config_hash_tests {
         spec_b.listeners = vec![crate::controller::listeners::synthesized_default_listener()];
         spec_b.inter_broker_listener_name = Some("PLAIN".into());
         let h_with_listener = combined_config_hash(&spec_b, None, None, None);
-        assert!(h == h_again);
-        assert!(h == config_hash(config_only_form));
-        assert!(h != h_with_listener);
+        assert2::assert!(h == h_again);
+        assert2::assert!(h == config_hash(config_only_form));
+        assert2::assert!(h != h_with_listener);
     }
 
     #[test]
@@ -956,8 +955,8 @@ mod config_hash_tests {
                 ..Default::default()
             });
         }
-        assert!(h_off != h_on);
-        assert!(h_on == combined_config_hash(&spec_on_diff_interval, None, None, None));
+        assert2::assert!(h_off != h_on);
+        assert2::assert!(h_on == combined_config_hash(&spec_on_diff_interval, None, None, None));
     }
 
     #[test]
@@ -993,8 +992,8 @@ mod config_hash_tests {
             None,
             None,
         );
-        assert!(h_none != h_a);
-        assert!(h_a != h_b);
+        assert2::assert!(h_none != h_a);
+        assert2::assert!(h_a != h_b);
     }
 
     #[test]
@@ -1023,7 +1022,7 @@ mod config_hash_tests {
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
         let h2 = combined_config_hash(&spec, Some("ca-pem"), None, None);
-        assert!(h1 == h2);
+        assert2::assert!(h1 == h2);
     }
 
     #[test]
@@ -1083,9 +1082,9 @@ mod config_hash_tests {
         // Exactly one toml key per broker; the old broker.env /
         // broker.properties keys are dropped.
         let keys: Vec<&str> = data.keys().map(String::as_str).collect();
-        assert_eq!(keys, vec!["broker-0.toml", "broker-1.toml"]);
-        assert!(data["broker-0.toml"].contains("demo-0.svc"));
-        assert!(data["broker-1.toml"].contains("demo-1.svc"));
+        assert2::assert!(keys == vec!["broker-0.toml", "broker-1.toml"]);
+        assert2::assert!(data["broker-0.toml"].contains("demo-0.svc"));
+        assert2::assert!(data["broker-1.toml"].contains("demo-1.svc"));
     }
 
     #[test]
@@ -1118,9 +1117,9 @@ mod config_hash_tests {
         let h_pin = combined_config_hash(&spec, None, Some("3.6"), None);
         // A different pin differs again.
         let h_pin2 = combined_config_hash(&spec, None, Some("3.7"), None);
-        assert_eq!(h_default.clone(), config_hash(""));
-        assert!(h_default != h_pin);
-        assert!(h_pin != h_pin2);
+        assert2::assert!(h_default.clone() == config_hash(""));
+        assert2::assert!(h_default != h_pin);
+        assert2::assert!(h_pin != h_pin2);
     }
 
     #[test]
@@ -1171,10 +1170,7 @@ mod config_hash_tests {
 
         let cm = render_configmap(&k, &listeners, &per_broker, "PLAIN", None, None, None).unwrap();
         let toml = &cm.data.unwrap()["broker-0.toml"];
-        assert!(
-            !toml.contains("metadata.version"),
-            "metadata.version must never be injected into broker config, got:\n{toml}"
-        );
+        assert2::assert!(!toml.contains("metadata.version"));
     }
 }
 
@@ -1196,7 +1192,7 @@ mod rollout_tests {
 
     #[test]
     fn rollout_plan_cases() {
-        for (name, pools, expected) in [
+        for (_name, pools, expected) in [
             (
                 "initial quorum",
                 vec![
@@ -1255,20 +1251,19 @@ mod rollout_tests {
             ),
         ] {
             let plan = plan_rollout(&pools, "H1");
-            assert_eq!(targets(&plan), expected, "case {name}");
+            assert2::assert!(targets(&plan) == expected);
         }
     }
 }
 
 #[cfg(test)]
 mod parse_quantity_tests {
-    use assert2::assert;
 
     use super::parse_quantity;
 
     #[test]
     fn quantity_parse_success_cases() {
-        for (name, input, expected) in [
+        for (_name, input, expected) in [
             ("binary kibibytes", "1Ki", 1024),
             ("binary mebibytes", "512Mi", 512 * 1024 * 1024),
             ("binary gibibytes", "10Gi", 10 * 1024 * 1024 * 1024),
@@ -1278,13 +1273,13 @@ mod parse_quantity_tests {
             ("decimal mantissa", "1.5Gi", 1_610_612_736),
             ("bare bytes", "1024", 1024),
         ] {
-            assert_eq!(parse_quantity(input).unwrap(), expected, "case {name}");
+            assert2::assert!(parse_quantity(input).unwrap() == expected);
         }
     }
 
     #[test]
     fn quantity_parse_error_cases() {
-        for (name, input) in [
+        for (_name, input) in [
             ("empty", ""),
             ("non-numeric", "banana"),
             ("invalid suffix", "1.5x"),
@@ -1294,7 +1289,7 @@ mod parse_quantity_tests {
             ("zero gibibytes", "0Gi"),
             ("negative", "-10Gi"),
         ] {
-            assert!(parse_quantity(input).is_err(), "case {name}");
+            assert2::assert!(parse_quantity(input).is_err());
         }
     }
 }
@@ -1344,14 +1339,14 @@ mod cluster_object_tests {
             .iter()
             .map(|port| (port.name.as_deref(), port.port))
             .collect::<Vec<_>>();
-        assert_eq!(spec.publish_not_ready_addresses, Some(true));
-        assert_eq!(spec.cluster_ip.as_deref(), Some("None"));
-        assert_eq!(
-            actual_ports,
-            vec![
-                (Some("kafka-internal"), BROKER_PORT),
-                (Some("controller"), CONTROLLER_PORT),
-            ]
+        assert2::assert!(spec.publish_not_ready_addresses == Some(true));
+        assert2::assert!(spec.cluster_ip.as_deref() == Some("None"));
+        assert2::assert!(
+            actual_ports
+                == vec![
+                    (Some("kafka-internal"), BROKER_PORT),
+                    (Some("controller"), CONTROLLER_PORT),
+                ]
         );
     }
 
@@ -1413,13 +1408,10 @@ mod cluster_object_tests {
             let listeners_pos = toml.find("[[listeners]]").unwrap();
             // The server-name top-level scalar must also precede [[listeners]].
             let server_name_pos = toml.find("controller_server_name").unwrap();
-            assert!(toml.contains(expected), "broker-{id}.toml: {toml}");
-            assert!(
-                toml.contains(expected_server_name),
-                "broker-{id}.toml: {toml}"
-            );
-            assert!(key_pos < listeners_pos, "broker-{id}.toml: {toml}");
-            assert!(server_name_pos < listeners_pos, "broker-{id}.toml: {toml}");
+            assert2::assert!(toml.contains(expected));
+            assert2::assert!(toml.contains(expected_server_name));
+            assert2::assert!(key_pos < listeners_pos);
+            assert2::assert!(server_name_pos < listeners_pos);
         }
     }
 }

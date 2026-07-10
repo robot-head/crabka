@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_operator::{
     controller::kafka::reconcile,
     crd::{
@@ -162,12 +162,8 @@ fn assert_listeners_invalid_with_reason(
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert_eq!(valid["status"].as_str(), Some("False"), "body = {body}");
-    assert_eq!(
-        valid["reason"].as_str(),
-        Some(expected_reason),
-        "body = {body}"
-    );
+    assert2::assert!(valid["status"].as_str() == Some("False"));
+    assert2::assert!(valid["reason"].as_str() == Some(expected_reason));
 
     // The ConfigMap PATCH must be absent on the validation-fail path.
     check!(
@@ -242,7 +238,7 @@ async fn oauth_listener_renders_oauthbearer_toml_block() {
         "jwks_refresh_interval_ms = 300000",
         "allowable_clock_skew_ms = 30000",
     ] {
-        assert!(toml.contains(needle), "missing {needle:?} in TOML: {toml}");
+        assert2::assert!(toml.contains(needle));
     }
 }
 
@@ -266,11 +262,8 @@ async fn oauth_listener_appends_oauthbearer_to_sasl_mechanisms() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c2");
 
-    assert!(
-        toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"),
-        "TOML: {toml}"
-    );
-    assert!(toml.contains("protocol = \"SaslSsl\""), "TOML: {toml}");
+    assert2::assert!(toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"));
+    assert2::assert!(toml.contains("protocol = \"SaslSsl\""));
 }
 
 // ── test 3: enable_oauth_bearer=false keeps the block, drops the mechanism ──
@@ -293,8 +286,8 @@ async fn oauth_listener_with_enable_false_omits_mechanism_but_keeps_config_block
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c3");
 
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(!toml.contains("sasl_config"), "TOML: {toml}");
+    assert2::assert!(toml.contains("[oauthbearer]"));
+    assert2::assert!(!toml.contains("sasl_config"));
 }
 
 // ── test 4: oauth without transport TLS → ListenersValid=False ──────────────
@@ -373,23 +366,12 @@ async fn oauth_listener_with_http_jwks_uri_reconciles_but_emits_weak_auth_event(
         });
     let body: serde_json::Value =
         serde_json::from_slice(event_post.body()).expect("event body is JSON");
-    assert_eq!(
-        body["reason"].as_str(),
-        Some("WeakAuth"),
-        "event body = {body}"
-    );
-    assert_eq!(
-        body["type"].as_str(),
-        Some("Warning"),
-        "event body = {body}"
-    );
+    assert2::assert!(body["reason"].as_str() == Some("WeakAuth"));
+    assert2::assert!(body["type"].as_str() == Some("Warning"));
     let msg = body["message"]
         .as_str()
         .unwrap_or_else(|| panic!("event message missing; body = {body}"));
-    assert!(
-        msg.contains("http://") && msg.contains("oauth"),
-        "WeakAuth message must mention http:// + listener name; got: {msg}"
-    );
+    assert2::assert!(msg.contains("http://") && msg.contains("oauth"));
 
     // Reconcile must still succeed — Ready=True path. Verify the ConfigMap
     // PATCH was issued (proves we made it past validation).
@@ -479,16 +461,12 @@ async fn two_oauth_listeners_with_identical_config_reconcile_clean() {
     let toml = extract_broker0_toml(&observed, "c10");
 
     // Exactly one [oauthbearer] block.
-    assert!(
-        toml.matches("[oauthbearer]").count() == 1,
-        "expected exactly one [oauthbearer] block; TOML: {toml}"
-    );
+    assert2::assert!(toml.matches("[oauthbearer]").count() == 1);
     // Both listeners advertise OAUTHBEARER.
-    assert!(
+    assert2::assert!(
         toml.matches("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }")
             .count()
-            == 2,
-        "both listeners must advertise OAUTHBEARER; TOML: {toml}"
+            == 2
     );
 
     // Ready=True wiring.
@@ -504,7 +482,7 @@ async fn two_oauth_listeners_with_identical_config_reconcile_clean() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert!(valid["status"] == "True", "body = {body}");
+    assert2::assert!(valid["status"] == "True");
 }
 
 // ── test 11: two oauth listeners differing only in enable_oauth_bearer ──────
@@ -536,16 +514,12 @@ async fn two_oauth_listeners_differing_only_in_enable_oauth_bearer_reconcile_cle
     let toml = extract_broker0_toml(&observed, "c11");
 
     // Single broker-global [oauthbearer] block.
-    assert!(
-        toml.matches("[oauthbearer]").count() == 1,
-        "expected exactly one [oauthbearer] block; TOML: {toml}"
-    );
+    assert2::assert!(toml.matches("[oauthbearer]").count() == 1);
     // Only the enable=true listener advertises the mechanism.
-    assert!(
+    assert2::assert!(
         toml.matches("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }")
             .count()
-            == 1,
-        "only the enable=true listener must advertise OAUTHBEARER; TOML: {toml}"
+            == 1
     );
 
     // Ready=True wiring.
@@ -561,7 +535,7 @@ async fn two_oauth_listeners_differing_only_in_enable_oauth_bearer_reconcile_cle
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert!(valid["status"] == "True", "body = {body}");
+    assert2::assert!(valid["status"] == "True");
 }
 
 // ── test 12: divergent oauth configs rejected with ConflictingOAuthConfig ───
@@ -736,17 +710,11 @@ async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_idp_tls
     let mgd_bytes = base64::engine::general_purpose::STANDARD
         .decode(mgd_b64)
         .expect("managed Secret ca.crt is base64");
-    assert!(
-        mgd_bytes == pem.to_vec(),
-        "managed Secret bundle must match source PEM bytes"
-    );
+    assert2::assert!(mgd_bytes == pem.to_vec());
 
     // (2) ConfigMap render contains the idp_tls_trust pointer.
     let toml = extract_broker0_toml(&observed, "c14");
-    assert!(
-        toml.contains("idp_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
-        "broker-0.toml must reference the mounted trust bundle; TOML: {toml}"
-    );
+    assert2::assert!(toml.contains("idp_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""));
 
     // (3) ListenersValid=True on the status PATCH.
     let status_patch = observed
@@ -761,7 +729,7 @@ async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_idp_tls
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert!(valid["status"] == "True", "body = {body}");
+    assert2::assert!(valid["status"] == "True");
 }
 
 // ── test 15: divergent access_token_is_jwt rejected with ConflictingOAuthConfig
@@ -860,11 +828,8 @@ async fn oauth_listener_with_max_seconds_without_reauthentication_renders_broker
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c16");
 
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(
-        toml.contains("max_session_lifetime_seconds = 300"),
-        "expected rendered broker TOML to include max_session_lifetime_seconds = 300;\nTOML: {toml}"
-    );
+    assert2::assert!(toml.contains("[oauthbearer]"));
+    assert2::assert!(toml.contains("max_session_lifetime_seconds = 300"));
 }
 
 // ── test 17: divergent maxSecondsWithoutReauthentication → ConflictingOAuthConfig
@@ -924,7 +889,7 @@ async fn oauth_optional_fields_render_broker_toml_cases() {
     jwks.jwks_min_refresh_pause_seconds = Some(2);
     jwks.jwks_expiry_seconds = Some(3600);
     jwks.jwks_ignore_key_use = Some(true);
-    for (name, namespace, cluster, cfg, expected_fragments) in [
+    for (_name, namespace, cluster, cfg, expected_fragments) in [
         (
             "custom claim check",
             "ns18",
@@ -983,12 +948,11 @@ async fn oauth_optional_fields_render_broker_toml_cases() {
         reconcile(Arc::new(kafka), ctx).await.unwrap();
 
         let toml = extract_broker0_toml(&state.take_observed(), cluster);
-        assert!(toml.contains("[oauthbearer]"), "case {name}: {toml}");
-        assert!(
+        assert2::assert!(toml.contains("[oauthbearer]"));
+        assert2::assert!(
             expected_fragments
                 .iter()
-                .all(|fragment| toml.contains(fragment)),
-            "case {name}: {toml}"
+                .all(|fragment| toml.contains(fragment))
         );
     }
 }

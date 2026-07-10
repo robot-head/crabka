@@ -468,7 +468,7 @@ pub(super) fn validate_commit(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::owned::{
         join_group_request::JoinGroupRequestProtocol, leave_group_request::MemberIdentity,
         sync_group_request::SyncGroupRequestAssignment,
@@ -504,10 +504,9 @@ mod tests {
             let mut g = ClassicState::new("g");
             let action = handle_join(&mut g, &join_req("", instance_id), "h");
             match action {
-                JoinAction::Immediate(r) => assert!(
+                JoinAction::Immediate(r) => assert2::assert!(
                     (r.error_code, r.member_id.starts_with(expected_prefix))
-                        == (codes::MEMBER_ID_REQUIRED, true),
-                    "case {case}"
+                        == (codes::MEMBER_ID_REQUIRED, true)
                 ),
                 _ => panic!("case {case}: expected Immediate MEMBER_ID_REQUIRED"),
             }
@@ -520,7 +519,9 @@ mod tests {
         g.protocol_type = Some("connect".into());
         let action = handle_join(&mut g, &join_req("m1", None), "h");
         match action {
-            JoinAction::Immediate(r) => assert!(r.error_code == codes::INCONSISTENT_GROUP_PROTOCOL),
+            JoinAction::Immediate(r) => {
+                assert2::assert!(r.error_code == codes::INCONSISTENT_GROUP_PROTOCOL);
+            }
             _ => panic!("expected Immediate INCONSISTENT_GROUP_PROTOCOL"),
         }
     }
@@ -533,7 +534,7 @@ mod tests {
         // A different member id claiming the same instance is fenced.
         let action = handle_join(&mut g, &join_req("m2", Some("inst-a")), "h");
         match action {
-            JoinAction::Immediate(r) => assert!(r.error_code == codes::FENCED_INSTANCE_ID),
+            JoinAction::Immediate(r) => assert2::assert!(r.error_code == codes::FENCED_INSTANCE_ID),
             _ => panic!("expected Immediate FENCED_INSTANCE_ID"),
         }
     }
@@ -542,7 +543,7 @@ mod tests {
     fn join_new_member_parks_and_opens_deadline() {
         let mut g = ClassicState::new("g");
         let action = handle_join(&mut g, &join_req("m1", None), "h");
-        assert!(matches!(action, JoinAction::Park));
+        assert2::assert!(matches!(action, JoinAction::Park));
         check!(g.rebalance_deadline.is_some());
         check!(g.state == GroupState::PreparingRebalance);
     }
@@ -555,7 +556,7 @@ mod tests {
         let mut a = std::collections::HashMap::new();
         a.insert("m1".to_string(), Bytes::from_static(b"asn"));
         g.install_assignments(a);
-        assert!(g.state == GroupState::Stable);
+        assert2::assert!(g.state == GroupState::Stable);
         // Rejoin the same instance with the pinned member_id (KIP-345: a
         // restarted static client re-supplies the id it got back from the
         // MEMBER_ID_REQUIRED round-trip) → static rejoin into Stable skips the
@@ -563,7 +564,7 @@ mod tests {
         let action = handle_join(&mut g, &join_req("m1", Some("inst-a")), "h");
         match action {
             JoinAction::Immediate(r) => {
-                assert!((r.error_code, r.generation_id) == (codes::NONE, g.generation_id));
+                assert2::assert!((r.error_code, r.generation_id) == (codes::NONE, g.generation_id));
             }
             _ => panic!("expected Immediate success (static rejoin)"),
         }
@@ -576,13 +577,13 @@ mod tests {
         g.complete_rebalance("range"); // gen 1, Stable-ish path
         g.state = GroupState::Stable;
         // m2 joins → Preparing, only m2 joined this round → Park.
-        assert!(matches!(
+        assert2::assert!(matches!(
             handle_join(&mut g, &join_req("m2", None), "h"),
             JoinAction::Park
         ));
         // m1 rejoins → all members joined this round, from a live (Stable)
         // group → CompleteNow.
-        assert!(matches!(
+        assert2::assert!(matches!(
             handle_join(&mut g, &join_req("m1", None), "h"),
             JoinAction::CompleteNow
         ));
@@ -604,7 +605,7 @@ mod tests {
         check!((g.state, g.generation_id) == (GroupState::Empty, 1));
         // First real member rejoins the re-emptied group: Park (batch the
         // herd), NOT CompleteNow, even though the group has rebalanced before.
-        assert!(matches!(
+        assert2::assert!(matches!(
             handle_join(&mut g, &join_req("m1", None), "h"),
             JoinAction::Park
         ));
@@ -616,17 +617,14 @@ mod tests {
         let mut g = ClassicState::new("g");
         let _ = handle_join(&mut g, &join_req("m1", None), "h");
         let _ = handle_join(&mut g, &join_req("m2", None), "h");
-        assert!(try_complete(&mut g).is_ok());
+        assert2::assert!(try_complete(&mut g).is_ok());
         let leader = g.leader_id.clone().unwrap();
         let follower = if leader == "m1" { "m2" } else { "m1" };
-        for (case, member_id, expected_empty) in [
+        for (_case, member_id, expected_empty) in [
             ("leader lists members", leader.as_str(), false),
             ("follower omits members", follower, true),
         ] {
-            assert!(
-                build_join_result(&g, member_id).members.is_empty() == expected_empty,
-                "case {case}"
-            );
+            assert2::assert!(build_join_result(&g, member_id).members.is_empty() == expected_empty);
         }
     }
 
@@ -647,7 +645,7 @@ mod tests {
             ..Default::default()
         }];
         let _ = handle_join(&mut g, &b, "h");
-        assert!(try_complete(&mut g).is_err());
+        assert2::assert!(try_complete(&mut g).is_err());
     }
 
     // ── handle_sync ─────────────────────────────────────────────────────────
@@ -684,7 +682,7 @@ mod tests {
         ] {
             match handle_sync(&mut g, &sync_req(member_id, generation)) {
                 SyncAction::Immediate(r) => {
-                    assert!(r.error_code == expected, "case {case}");
+                    assert2::assert!(r.error_code == expected);
                 }
                 _ => panic!("case {case}: expected immediate sync error"),
             }
@@ -698,7 +696,7 @@ mod tests {
         let leader = g.leader_id.clone().unwrap();
         let follower = if leader == "m1" { "m2" } else { "m1" };
         // Follower before the leader syncs → Park (not yet Stable).
-        assert!(matches!(
+        assert2::assert!(matches!(
             handle_sync(&mut g, &sync_req(follower, cur_gen)),
             SyncAction::Park
         ));
@@ -718,14 +716,16 @@ mod tests {
         ];
         match handle_sync(&mut g, &req) {
             SyncAction::LeaderInstalled(r) => {
-                assert!((r.error_code, r.assignment) == (codes::NONE, Bytes::from_static(b"L")));
+                assert2::assert!(
+                    (r.error_code, r.assignment) == (codes::NONE, Bytes::from_static(b"L"))
+                );
             }
             _ => panic!("expected LeaderInstalled"),
         }
-        assert!(g.state == GroupState::Stable);
+        assert2::assert!(g.state == GroupState::Stable);
         // Now the follower (re-sync) reads its assignment immediately.
         match handle_sync(&mut g, &sync_req(follower, cur_gen)) {
-            SyncAction::Immediate(r) => assert!(r.assignment == Bytes::from_static(b"F")),
+            SyncAction::Immediate(r) => assert2::assert!(r.assignment == Bytes::from_static(b"F")),
             _ => panic!("expected Immediate follower assignment"),
         }
     }
@@ -734,7 +734,7 @@ mod tests {
     fn read_sync_result_rebalance_in_progress_when_not_stable() {
         let mut g = stable_two_member_group(); // CompletingRebalance, not Stable
         let r = read_sync_result(&g, "m1", None, None);
-        assert!(r.error_code == codes::REBALANCE_IN_PROGRESS);
+        assert2::assert!(r.error_code == codes::REBALANCE_IN_PROGRESS);
         // Drive to Stable, then it returns NONE.
         let leader = g.leader_id.clone().unwrap();
         let cur_gen = g.generation_id;
@@ -746,7 +746,7 @@ mod tests {
         }];
         let _ = handle_sync(&mut g, &req);
         let r = read_sync_result(&g, &leader, None, None);
-        assert!(r.error_code == codes::NONE);
+        assert2::assert!(r.error_code == codes::NONE);
     }
 
     // ── handle_heartbeat ─────────────────────────────────────────────────────
@@ -762,9 +762,11 @@ mod tests {
         };
         let cur_gen = g.generation_id;
         // Not Stable yet → REBALANCE_IN_PROGRESS.
-        assert!(handle_heartbeat(&mut g, &hb("m1", cur_gen)) == codes::REBALANCE_IN_PROGRESS);
+        assert2::assert!(
+            handle_heartbeat(&mut g, &hb("m1", cur_gen)) == codes::REBALANCE_IN_PROGRESS
+        );
         g.state = GroupState::Stable;
-        for (case, member, gen_id, want) in [
+        for (_case, member, gen_id, want) in [
             ("unknown member", "ghost", cur_gen, codes::UNKNOWN_MEMBER_ID),
             (
                 "wrong generation",
@@ -774,10 +776,7 @@ mod tests {
             ),
             ("accepted", "m1", cur_gen, codes::NONE),
         ] {
-            assert!(
-                handle_heartbeat(&mut g, &hb(member, gen_id)) == want,
-                "case {case}"
-            );
+            assert2::assert!(handle_heartbeat(&mut g, &hb(member, gen_id)) == want);
         }
     }
 
@@ -841,7 +840,7 @@ mod tests {
     fn validate_commit_branches() {
         let mut g = stable_two_member_group();
         g.state = GroupState::Stable;
-        for (case, member, instance, gen_id, want) in [
+        for (_case, member, instance, gen_id, want) in [
             // Simple consumer (no member, no instance) → allowed.
             ("simple consumer", "", None, -1, None),
             // Unknown member → UNKNOWN_MEMBER_ID.
@@ -871,10 +870,7 @@ mod tests {
                 Some(codes::UNKNOWN_MEMBER_ID),
             ),
         ] {
-            assert!(
-                validate_commit(&g, member, instance, gen_id) == want,
-                "case {case}"
-            );
+            assert2::assert!(validate_commit(&g, member, instance, gen_id) == want);
         }
     }
 }

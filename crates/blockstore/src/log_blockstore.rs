@@ -1512,7 +1512,7 @@ pub enum BlockStoreError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::prelude::{col, lit};
     use object_store::{local::LocalFileSystem, path::Path as ObjectPath};
 
@@ -1526,9 +1526,9 @@ mod tests {
             ("service".to_string(), "api".to_string()),
         ]);
 
-        assert_eq!(label_set, expected);
-        assert!(series_fingerprint(&expected) != 0);
-        assert!(
+        assert2::assert!(label_set == expected);
+        assert2::assert!(series_fingerprint(&expected) != 0);
+        assert2::assert!(
             series_fingerprint(&labels([("a", "bc")]))
                 != series_fingerprint(&labels([("ab", "c")]))
         );
@@ -1584,13 +1584,12 @@ mod tests {
             ),
         ];
 
-        for (case, name, op, value, expected) in cases {
-            assert_eq!(
+        for (_case, name, op, value, expected) in cases {
+            assert2::assert!(
                 LabelPredicate::new(name, op, value)
                     .unwrap()
-                    .matches(&label_set),
-                expected,
-                "case {case}"
+                    .matches(&label_set)
+                    == expected
             );
         }
         check!(LabelPredicate::new("service", MatchOp::RegexEqual, "[").is_err());
@@ -1616,30 +1615,25 @@ mod tests {
         ];
         expected_tenant_a_series.sort_by_key(|(fingerprint, _)| *fingerprint);
 
-        assert_eq!(
-            index.labels_for("tenant-a", api_prod).cloned(),
-            Some(api_prod_labels)
+        assert2::assert!(index.labels_for("tenant-a", api_prod).cloned() == Some(api_prod_labels));
+        assert2::assert!(index.labels_for("tenant-b", api_prod).cloned() == None);
+        assert2::assert!(
+            index.labels_for("tenant-b", other_tenant).cloned() == Some(other_tenant_labels)
         );
-        assert_eq!(index.labels_for("tenant-b", api_prod).cloned(), None);
-        assert_eq!(
-            index.labels_for("tenant-b", other_tenant).cloned(),
-            Some(other_tenant_labels)
+        assert2::assert!(
+            index.label_names("tenant-a")
+                == BTreeSet::from(["env".into(), "region".into(), "service".into()])
         );
-        assert_eq!(
-            index.label_names("tenant-a"),
-            BTreeSet::from(["env".into(), "region".into(), "service".into()])
+        assert2::assert!(index.label_names("missing") == BTreeSet::new());
+        assert2::assert!(
+            index.label_values("tenant-a", "service")
+                == BTreeSet::from(["api".into(), "worker".into()])
         );
-        assert_eq!(index.label_names("missing"), BTreeSet::new());
-        assert_eq!(
-            index.label_values("tenant-a", "service"),
-            BTreeSet::from(["api".into(), "worker".into()])
+        assert2::assert!(
+            index.label_values("tenant-b", "service") == BTreeSet::from(["api".into()])
         );
-        assert_eq!(
-            index.label_values("tenant-b", "service"),
-            BTreeSet::from(["api".into()])
-        );
-        assert_eq!(index.label_values("tenant-a", "missing"), BTreeSet::new());
-        assert_eq!(index.tenant_series("tenant-a"), expected_tenant_a_series);
+        assert2::assert!(index.label_values("tenant-a", "missing") == BTreeSet::new());
+        assert2::assert!(index.tenant_series("tenant-a") == expected_tenant_a_series);
 
         let exact_api_prod = [
             LabelPredicate::new("service", MatchOp::Equal, "api").unwrap(),
@@ -1688,12 +1682,8 @@ mod tests {
             ),
         ];
 
-        for (name, tenant, predicates, expected) in match_cases {
-            assert_eq!(
-                index.match_series(tenant, predicates),
-                expected,
-                "case {name}"
-            );
+        for (_name, tenant, predicates, expected) in match_cases {
+            assert2::assert!(index.match_series(tenant, predicates) == expected);
         }
     }
 
@@ -1710,15 +1700,15 @@ mod tests {
             ("strictly after", TimeRange::new(21, 30).unwrap(), false),
         ];
 
-        for (name, other, expected) in overlap_cases {
-            assert_eq!(first.overlaps(other), expected, "case {name}");
+        for (_name, other, expected) in overlap_cases {
+            assert2::assert!(first.overlaps(other) == expected);
         }
         check!(TimeRange::new(21, 20).is_err());
-        assert_eq!(key.object_key(), object_key.to_string());
-        assert_eq!(block_path(root, &key), root.join(object_key));
-        assert_eq!(
-            log_block_object_path(&prefix, &key).to_string(),
-            format!("observability/logs/{object_key}")
+        assert2::assert!(key.object_key() == object_key.to_string());
+        assert2::assert!(block_path(root, &key) == root.join(object_key));
+        assert2::assert!(
+            log_block_object_path(&prefix, &key).to_string()
+                == format!("observability/logs/{object_key}")
         );
     }
 
@@ -1972,11 +1962,9 @@ mod tests {
         ];
 
         check!(provider.planned_blocks() == std::slice::from_ref(&block));
-        for (name, filter, expected) in filter_cases {
-            assert_eq!(
-                provider.supports_filters_pushdown(&[filter]).unwrap(),
-                vec![expected],
-                "case {name}"
+        for (_name, filter, expected) in filter_cases {
+            assert2::assert!(
+                provider.supports_filters_pushdown(&[filter]).unwrap() == vec![expected]
             );
         }
         check!(
@@ -2177,8 +2165,8 @@ mod tests {
             ),
         ];
 
-        for (name, actual, expected) in path_cases {
-            assert!(actual.to_string() == expected, "case {name}");
+        for (_name, actual, expected) in path_cases {
+            assert2::assert!(actual.to_string() == expected);
         }
         check!(
             log_tenant_index_shard_list_offset_start_ns(TimeRange::new(100, 100).unwrap()) == 99

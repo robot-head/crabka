@@ -13,7 +13,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use assert2::assert;
 use async_trait::async_trait;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
@@ -156,26 +155,20 @@ async fn operator_client_round_trips_against_real_rebalancer() {
     // CreateProposal — single-broker cluster ⇒ Computed (likely zero
     // movements). The point is the wire round-trip + enum decode.
     let proposal = client.create_proposal(&[]).await.expect("create_proposal");
-    assert!(
-        proposal.status == ProposalStatus::Computed,
-        "CreateProposal must decode to Computed"
-    );
-    assert!(!proposal.id.is_empty(), "proposal must carry an id");
+    assert2::assert!(proposal.status == ProposalStatus::Computed);
+    assert2::assert!(!proposal.id.is_empty());
 
     // GetProposal round-trips the same proposal back by id.
     let fetched = client
         .get_proposal(&proposal.id)
         .await
         .expect("get_proposal");
-    assert_eq!(fetched, proposal);
+    assert2::assert!(fetched == proposal);
 
     // GetProposal on an unknown id surfaces a Connect error mapped to Rpc.
     match client.get_proposal("does-not-exist").await {
         Err(RebalancerError::Rpc { code, .. }) => {
-            assert!(
-                !code.is_empty(),
-                "unknown-proposal error must carry a Connect code"
-            );
+            assert2::assert!(!code.is_empty());
         }
         other => panic!("expected Rpc error for unknown proposal, got {other:?}"),
     }
@@ -184,11 +177,11 @@ async fn operator_client_round_trips_against_real_rebalancer() {
     // Connect FailedPrecondition — verifies the error decode path.
     match client.execute_proposal(&proposal.id, Some(1_000_000)).await {
         Err(RebalancerError::Rpc { code, .. }) => {
-            assert!(!code.is_empty(), "execute rejection must carry a code");
+            assert2::assert!(!code.is_empty());
         }
         // If the optimizer happened to produce movements (it shouldn't on
         // a single broker) execution would start instead; accept that too.
-        Ok(p) => assert!(p.status == ProposalStatus::Executing),
+        Ok(p) => assert2::assert!(p.status == ProposalStatus::Executing),
         other => panic!("unexpected execute outcome: {other:?}"),
     }
 

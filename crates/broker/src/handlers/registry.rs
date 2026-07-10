@@ -233,15 +233,11 @@ macro_rules! plain_dispatches {
     ($register_fn:ident; $(($api:ident, $request:ident, $handler:path)),+ $(,)?) => {
         fn $register_fn(registry: &mut DispatchRegistry) {
             $(
-                assert!(
-                    registry.register(DispatchEntry::plain(
+                assert2::assert!(registry.register(DispatchEntry::plain(
                         ApiKey::$api,
                         crabka_protocol::owned::$request::FLEXIBLE_MIN,
                         $handler,
-                    )),
-                    "duplicate dispatch registration for {:?}",
-                    ApiKey::$api
-                );
+                    )));
             )+
         }
     };
@@ -282,15 +278,11 @@ macro_rules! context_dispatches {
 
         fn $register_fn(registry: &mut DispatchRegistry) {
             $(
-                assert!(
-                    registry.register(DispatchEntry::context(
+                assert2::assert!(registry.register(DispatchEntry::context(
                         ApiKey::$api,
                         crabka_protocol::owned::$request::FLEXIBLE_MIN,
                         $adapter,
-                    )),
-                    "duplicate dispatch registration for {:?}",
-                    ApiKey::$api
-                );
+                    )));
             )+
         }
     };
@@ -320,15 +312,11 @@ macro_rules! decoded_context_dispatches {
 
         fn $register_fn(registry: &mut DispatchRegistry) {
             $(
-                assert!(
-                    registry.register(DispatchEntry::decoded_context(
+                assert2::assert!(registry.register(DispatchEntry::decoded_context(
                         ApiKey::$api,
                         crabka_protocol::owned::$request_mod::FLEXIBLE_MIN,
                         $adapter,
-                    )),
-                    "duplicate dispatch registration for {:?}",
-                    ApiKey::$api
-                );
+                    )));
             )+
         }
     };
@@ -754,8 +742,6 @@ pub(crate) fn build_registry() -> DispatchRegistry {
 mod tests {
     use std::collections::BTreeSet;
 
-    use assert2::assert;
-
     use super::*;
     use crate::handlers;
 
@@ -772,12 +758,14 @@ mod tests {
         let api_versions = registry
             .get(ApiKey::ApiVersions as i16)
             .expect("ApiVersions");
-        assert!(api_versions.is_plain());
-        assert!(api_versions.quota_policy() == RequestQuotaPolicy::ApplyFallbackAccounting);
-        assert!(api_versions.body_flexible(3));
-        assert!(!api_versions.body_flexible(2));
+        assert2::assert!(api_versions.is_plain());
+        assert2::assert!(
+            api_versions.quota_policy() == RequestQuotaPolicy::ApplyFallbackAccounting
+        );
+        assert2::assert!(api_versions.body_flexible(3));
+        assert2::assert!(!api_versions.body_flexible(2));
 
-        for (case, key) in [
+        for (_case, key) in [
             ("add offsets to transaction", 25),
             ("write transaction markers", 27),
             ("fetch snapshot", 59),
@@ -793,7 +781,7 @@ mod tests {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert!(entry.is_plain(), "case: {case}; api_key {key}");
+            assert2::assert!(entry.is_plain());
         }
     }
 
@@ -801,7 +789,7 @@ mod tests {
     fn registry_registers_raw_context_handlers() {
         let registry = build_registry();
 
-        for (case, api_key) in named_api_keys![
+        for (_case, api_key) in named_api_keys![
             Produce,
             Metadata,
             OffsetCommit,
@@ -855,13 +843,10 @@ mod tests {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert!(
-                matches!(
-                    entry.kind(),
-                    DispatchKind::Context(_) | DispatchKind::Produce(_)
-                ),
-                "case: {case}; api_key {key}"
-            );
+            assert2::assert!(matches!(
+                entry.kind(),
+                DispatchKind::Context(_) | DispatchKind::Produce(_)
+            ));
         }
     }
 
@@ -869,14 +854,11 @@ mod tests {
     fn registry_registers_telemetry_handlers() {
         let registry = build_registry();
 
-        for (case, key) in [("get telemetry subscriptions", 71), ("push telemetry", 72)] {
+        for (_case, key) in [("get telemetry subscriptions", 71), ("push telemetry", 72)] {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert!(
-                matches!(entry.kind(), DispatchKind::Telemetry(_)),
-                "case: {case}; api_key {key}"
-            );
+            assert2::assert!(matches!(entry.kind(), DispatchKind::Telemetry(_)));
         }
     }
 
@@ -884,7 +866,7 @@ mod tests {
     fn registry_registers_decoded_context_handlers() {
         let registry = build_registry();
 
-        for (case, api_key) in named_api_keys![
+        for (_case, api_key) in named_api_keys![
             DescribeAcls,
             CreateAcls,
             DeleteAcls,
@@ -901,13 +883,10 @@ mod tests {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert!(
-                matches!(
-                    entry.kind(),
-                    DispatchKind::DecodedContext(_) | DispatchKind::EncodedContext(_)
-                ),
-                "case: {case}; api_key {key}"
-            );
+            assert2::assert!(matches!(
+                entry.kind(),
+                DispatchKind::DecodedContext(_) | DispatchKind::EncodedContext(_)
+            ));
         }
     }
 
@@ -915,7 +894,7 @@ mod tests {
     fn registry_registers_auth_handlers() {
         let registry = build_registry();
 
-        for (case, key) in [
+        for (_case, key) in [
             ("alter replica log directories", 34),
             ("create delegation token", 38),
             ("renew delegation token", 39),
@@ -925,10 +904,7 @@ mod tests {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert!(
-                matches!(entry.kind(), DispatchKind::Auth(_)),
-                "case: {case}; api_key {key}"
-            );
+            assert2::assert!(matches!(entry.kind(), DispatchKind::Auth(_)));
         }
     }
 
@@ -936,7 +912,7 @@ mod tests {
     fn registry_reports_missing_keys() {
         let registry = build_registry();
 
-        assert!(registry.get(9999).is_none());
+        assert2::assert!(registry.get(9999).is_none());
     }
 
     #[test]
@@ -948,7 +924,7 @@ mod tests {
             .map(|api| api.api_key)
             .collect();
 
-        assert!(registered == advertised);
+        assert2::assert!(registered == advertised);
     }
 
     #[test]
@@ -997,11 +973,8 @@ mod tests {
             ("unknown API", 999, 0, false),
         ];
 
-        for (case, api_key, version, want) in cases {
-            assert!(
-                registry.body_flexible(api_key, version) == want,
-                "case: {case}; api_key {api_key} version {version}"
-            );
+        for (_case, api_key, version, want) in cases {
+            assert2::assert!(registry.body_flexible(api_key, version) == want);
         }
     }
 
@@ -1012,7 +985,7 @@ mod tests {
             .get_plain(ApiKey::ApiVersions as i16)
             .expect("plain ApiVersions handler");
 
-        assert!(std::ptr::fn_addr_eq(
+        assert2::assert!(std::ptr::fn_addr_eq(
             handler,
             handlers::api_versions::handle as PlainHandler
         ));

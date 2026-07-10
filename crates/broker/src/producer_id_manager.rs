@@ -54,19 +54,18 @@ impl ProducerIdManager {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn allocate_returns_monotonic_pids_starting_at_base() {
         let m = ProducerIdManager::new();
-        for (case, want_pid) in [
+        for (_case, want_pid) in [
             ("base", PID_BASE),
             ("second", PID_BASE + 1),
             ("third", PID_BASE + 2),
         ] {
-            assert!(m.allocate() == (ProducerId(want_pid), 0), "case {case}");
+            assert2::assert!(m.allocate() == (ProducerId(want_pid), 0));
         }
     }
 
@@ -75,7 +74,7 @@ mod tests {
         let m = ProducerIdManager::new();
         let (pid, _) = m.allocate();
         for (bump_pid, want) in [(pid, Some(1)), (pid, Some(2)), (ProducerId(9999), None)] {
-            assert!(m.bump_epoch(bump_pid) == want, "pid {bump_pid}");
+            assert2::assert!(m.bump_epoch(bump_pid) == want);
         }
     }
 }

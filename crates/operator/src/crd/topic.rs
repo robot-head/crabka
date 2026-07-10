@@ -73,7 +73,7 @@ pub struct KafkaTopicStatus {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -81,17 +81,17 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaTopic::crd();
-        assert_eq!(crd.spec.group.as_str(), "crabka.io");
-        assert_eq!(crd.spec.names.kind.as_str(), "KafkaTopic");
-        assert_eq!(crd.spec.names.plural.as_str(), "kafkatopics");
-        assert_eq!(crd.spec.names.short_names, Some(vec!["kt".to_string()]));
-        assert_eq!(
+        assert2::assert!(crd.spec.group.as_str() == "crabka.io");
+        assert2::assert!(crd.spec.names.kind.as_str() == "KafkaTopic");
+        assert2::assert!(crd.spec.names.plural.as_str() == "kafkatopics");
+        assert2::assert!(crd.spec.names.short_names == Some(vec!["kt".to_string()]));
+        assert2::assert!(
             crd.spec
                 .versions
                 .iter()
                 .map(|v| v.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["v1alpha1"]
+                .collect::<Vec<_>>()
+                == vec!["v1alpha1"]
         );
     }
 
@@ -116,10 +116,10 @@ mod tests {
             "\"partitions\":3",
             "\"preserveTopic\":true",
         ] {
-            assert!(json.contains(want), "case {want:?}; got: {json}");
+            assert2::assert!(json.contains(want));
         }
         let back: KafkaTopic = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == kt.spec);
+        assert2::assert!(back.spec == kt.spec);
     }
 
     #[test]
@@ -135,9 +135,8 @@ mod tests {
             },
         );
         let actual = serde_json::to_value(&kt.spec).unwrap();
-        assert_eq!(
-            actual,
-            serde_json::json!({"partitions": 1, "replicas": 1, "preserveTopic": false})
+        assert2::assert!(
+            actual == serde_json::json!({"partitions": 1, "replicas": 1, "preserveTopic": false})
         );
     }
 
@@ -150,9 +149,9 @@ mod tests {
             topic_id: None,
         };
         let actual = serde_json::to_value(&status).unwrap();
-        assert_eq!(
-            actual,
-            serde_json::json!({"conditions": [], "observedGeneration": 1, "topicName": "foo"})
+        assert2::assert!(
+            actual
+                == serde_json::json!({"conditions": [], "observedGeneration": 1, "topicName": "foo"})
         );
     }
 
@@ -160,7 +159,7 @@ mod tests {
     fn minimum_required_spec_parses() {
         let json = r#"{"partitions":1,"replicas":1}"#;
         let spec: KafkaTopicSpec = serde_json::from_str(json).unwrap();
-        assert!(
+        assert2::assert!(
             spec == KafkaTopicSpec {
                 topic_name: None,
                 partitions: 1,

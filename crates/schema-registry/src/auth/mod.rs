@@ -226,7 +226,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_credentials_cases_respect_auth_requirement() {
-        for (name, require_auth, expected) in [
+        for (_name, require_auth, expected) in [
             (
                 "optional_auth_is_anonymous",
                 false,
@@ -240,7 +240,7 @@ mod tests {
         ] {
             let state = state_with_basic(require_auth);
             let decision = resolve(&header_map(None), None, &state, 0).await;
-            assert_eq!(decision, expected, "case {name}");
+            assert2::assert!(decision == expected);
         }
     }
 
@@ -255,20 +255,20 @@ mod tests {
             0,
         )
         .await;
-        assert_eq!(decision, AuthDecision::Unauthorized);
+        assert2::assert!(decision == AuthDecision::Unauthorized);
     }
 
     #[tokio::test]
     async fn good_basic_authenticates() {
         let st = state_with_basic(false);
         let decision = resolve(&header_map(Some(&basic_b64("alice", "pw"))), None, &st, 0).await;
-        assert_eq!(
-            decision,
-            AuthDecision::Authn(Principal {
-                name: "alice".to_string(),
-                auth_method: AuthMethod::SaslPlain,
-                groups: Vec::new(),
-            })
+        assert2::assert!(
+            decision
+                == AuthDecision::Authn(Principal {
+                    name: "alice".to_string(),
+                    auth_method: AuthMethod::SaslPlain,
+                    groups: Vec::new(),
+                })
         );
     }
 
@@ -298,7 +298,7 @@ mod tests {
             b64(br#"{"sub":"svc-account","exp":4102444800}"#),
         );
         match resolve(&header_map(Some(&format!("Bearer {token}"))), None, &st, 0).await {
-            AuthDecision::Authn(p) => assert_eq!(p.name, "svc-account"),
+            AuthDecision::Authn(p) => assert2::assert!(p.name == "svc-account"),
             AuthDecision::Unauthorized => panic!("expected svc-account Authn"),
         }
     }
@@ -311,13 +311,13 @@ mod tests {
             require_auth: false,
             realm: "schema-registry".to_string(),
         };
-        for (name, authorization) in [
+        for (_name, authorization) in [
             ("bearer", "Bearer some.jwt.token".to_string()),
             ("basic", basic_b64("alice", "pw")),
         ] {
             let decision =
                 resolve(&header_map(Some(authorization.as_str())), None, &state, 0).await;
-            assert_eq!(decision, AuthDecision::Unauthorized, "case {name}");
+            assert2::assert!(decision == AuthDecision::Unauthorized);
         }
     }
 
@@ -330,13 +330,9 @@ mod tests {
             ("missing colon", format!("Basic {no_colon}")),
         ];
         let st = state_with_basic(false);
-        for (name, authorization) in cases {
+        for (_name, authorization) in cases {
             let decision = resolve(&header_map(Some(&authorization)), None, &st, 0).await;
-            assert_eq!(
-                decision,
-                AuthDecision::Unauthorized,
-                "invalid Basic case {name}"
-            );
+            assert2::assert!(decision == AuthDecision::Unauthorized);
         }
     }
 
@@ -357,7 +353,7 @@ mod tests {
             0,
         )
         .await;
-        assert_eq!(decision, AuthDecision::Authn(mtls));
+        assert2::assert!(decision == AuthDecision::Authn(mtls));
     }
 
     /// Model A: `auth_layer` TRUSTS a request carrying `FORWARD_HEADER` and runs
@@ -381,7 +377,7 @@ mod tests {
             axum::middleware::from_fn_with_state(Arc::new(st), auth_layer),
         );
 
-        for (name, forwarded, expected) in [
+        for (_name, forwarded, expected) in [
             ("forwarded_request", true, StatusCode::OK),
             ("non_forwarded_request", false, StatusCode::UNAUTHORIZED),
         ] {
@@ -394,7 +390,7 @@ mod tests {
                 .oneshot(request.body(Body::empty()).unwrap())
                 .await
                 .unwrap();
-            assert_eq!(response.status(), expected, "case {name}");
+            assert2::assert!(response.status() == expected);
         }
     }
 
@@ -461,12 +457,11 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
-        assert_eq!(status, StatusCode::UNAUTHORIZED);
-        assert_eq!(www.as_str(), r#"basic realm="SchemaRegistry-Props""#);
-        assert_eq!(content_type.as_str(), crate::error::CONTENT_TYPE);
-        assert_eq!(
-            body.as_ref(),
-            br#"{"error_code":401,"message":"Unauthorized"}"#.as_slice()
+        assert2::assert!(status == StatusCode::UNAUTHORIZED);
+        assert2::assert!(www.as_str() == r#"basic realm="SchemaRegistry-Props""#);
+        assert2::assert!(content_type.as_str() == crate::error::CONTENT_TYPE);
+        assert2::assert!(
+            body.as_ref() == br#"{"error_code":401,"message":"Unauthorized"}"#.as_slice()
         );
     }
 }

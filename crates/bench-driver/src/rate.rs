@@ -34,7 +34,6 @@ impl Pacer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -46,7 +45,7 @@ mod tests {
             p.await_token().await;
         }
         let elapsed = start.elapsed();
-        assert!(elapsed >= Duration::from_millis(5));
+        assert2::assert!(elapsed >= Duration::from_millis(5));
     }
 
     #[tokio::test]

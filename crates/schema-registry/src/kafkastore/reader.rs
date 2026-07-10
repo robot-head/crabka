@@ -225,13 +225,9 @@ mod tests {
         apply_record(&store, SchemaRecord::Schema(k, v));
         apply_record(&store, SchemaRecord::Noop);
         let snapshot = store.read();
-        assert_eq!(
-            snapshot.versions("av-value", false).unwrap(),
-            vec![SchemaVersion(1)]
-        );
-        assert_eq!(
-            snapshot.schema_by_id(SchemaId(1), false).unwrap().1,
-            "{\"type\":\"int\"}".to_owned()
+        assert2::assert!(snapshot.versions("av-value", false).unwrap() == vec![SchemaVersion(1)]);
+        assert2::assert!(
+            snapshot.schema_by_id(SchemaId(1), false).unwrap().1 == "{\"type\":\"int\"}".to_owned()
         );
     }
 
@@ -267,8 +263,8 @@ mod tests {
                 FetchErrorAction::RetrySameConnection,
             ),
         ];
-        for (name, error, expected) in cases {
-            assert_eq!(fetch_error_action(&error), expected, "case {name}");
+        for (_name, error, expected) in cases {
+            assert2::assert!(fetch_error_action(&error) == expected);
         }
     }
 
@@ -304,7 +300,7 @@ mod tests {
                 }),
             ),
         );
-        assert_eq!(store.read().global_mode(), "READONLY");
+        assert2::assert!(store.read().global_mode() == "READONLY");
         apply_record(
             &store,
             SchemaRecord::Mode(
@@ -316,7 +312,7 @@ mod tests {
                 None,
             ),
         );
-        assert_eq!(store.read().global_mode(), "READWRITE");
+        assert2::assert!(store.read().global_mode() == "READWRITE");
         // subject mode set then clear
         apply_record(
             &store,
@@ -331,7 +327,7 @@ mod tests {
                 }),
             ),
         );
-        assert_eq!(store.read().subject_mode("s"), Some("IMPORT"));
+        assert2::assert!(store.read().subject_mode("s") == Some("IMPORT"));
         apply_record(
             &store,
             SchemaRecord::Mode(
@@ -343,7 +339,7 @@ mod tests {
                 None,
             ),
         );
-        assert_eq!(store.read().subject_mode("s"), None);
+        assert2::assert!(store.read().subject_mode("s") == None);
         // soft-delete the subject, then permanently delete its version via a tombstone
         apply_record(
             &store,
@@ -359,11 +355,11 @@ mod tests {
                 },
             ),
         );
-        assert!(store.read().versions("s", false).is_none());
+        assert2::assert!(store.read().versions("s", false).is_none());
         apply_record(
             &store,
             SchemaRecord::Tombstone(SchemaKey::new("s", SchemaVersion(1))),
         );
-        assert!(store.read().versions("s", true).is_none());
+        assert2::assert!(store.read().versions("s", true).is_none());
     }
 }

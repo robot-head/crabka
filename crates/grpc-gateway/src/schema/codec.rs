@@ -215,7 +215,7 @@ mod tests {
 
     #[test]
     fn subject_for_appends_value_suffix() {
-        assert_eq!(subject_for("orders"), "orders-value");
+        assert2::assert!(subject_for("orders") == "orders-value");
     }
 
     #[tokio::test]
@@ -226,7 +226,7 @@ mod tests {
             .encode("orders", EncodeBody::Raw(input.clone()))
             .await
             .unwrap();
-        assert_eq!(out, input, "frame_raw=false must pass raw bytes unchanged");
+        assert2::assert!(out == input);
     }
 
     #[tokio::test]
@@ -240,7 +240,7 @@ mod tests {
         // Confluent frame: 0x00 then id=5 big-endian, then the payload verbatim
         // (Avro adds no message-index prefix).
         let expected = [&[0x00, 0x00, 0x00, 0x00, 0x05][..], input.as_ref()].concat();
-        assert_eq!(out, Bytes::from(expected));
+        assert2::assert!(out == Bytes::from(expected));
     }
 
     #[tokio::test]
@@ -262,8 +262,8 @@ mod tests {
             .await
             .unwrap();
         // [00][id=5 BE][avro datum…]
-        assert_eq!(&out[..5], &[0x00, 0x00, 0x00, 0x00, 0x05]);
-        assert!(out.len() > 5, "framed Avro payload must follow the header");
+        assert2::assert!(&out[..5] == &[0x00, 0x00, 0x00, 0x00, 0x05]);
+        assert2::assert!(out.len() > 5);
     }
 
     #[tokio::test]
@@ -293,20 +293,16 @@ mod tests {
             .expect("framed value carries a JSON view");
         let expected: serde_json::Value = serde_json::from_slice(json_in).unwrap();
         let actual: serde_json::Value = serde_json::from_slice(json_out).unwrap();
-        assert_eq!(
-            decoded.value, expected_value,
-            "complete decoded value should match"
+        assert2::assert!(decoded.value == expected_value);
+        assert2::assert!(
+            decoded.schema
+                == Some(SchemaMeta {
+                    subject: "orders-value".to_string(),
+                    id: 5,
+                    format: SchemaFormat::Avro,
+                })
         );
-        assert_eq!(
-            decoded.schema,
-            Some(SchemaMeta {
-                subject: "orders-value".to_string(),
-                id: 5,
-                format: SchemaFormat::Avro,
-            }),
-            "complete decoded value should match"
-        );
-        assert_eq!(actual, expected, "complete decoded value should match");
+        assert2::assert!(actual == expected);
     }
 
     #[tokio::test]
@@ -327,20 +323,20 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(&out[..5], &[0x00, 0x00, 0x00, 0x00, 0x05]);
+        assert2::assert!(&out[..5] == &[0x00, 0x00, 0x00, 0x00, 0x05]);
     }
 
     #[tokio::test]
     async fn decode_unframed_values_pass_through() {
-        for (name, value) in [
+        for (_name, value) in [
             ("non-magic", Bytes::from_static(b"\x01not-confluent-framed")),
             ("empty", Bytes::new()),
         ] {
             let codec = avro_codec(false);
             let decoded = codec.decode("orders", value.clone()).await.unwrap();
-            assert_eq!(decoded.value, value, "case {name}");
-            assert_eq!(decoded.schema, None, "case {name}");
-            assert_eq!(decoded.json, None, "case {name}");
+            assert2::assert!(decoded.value == value);
+            assert2::assert!(decoded.schema == None);
+            assert2::assert!(decoded.json == None);
         }
     }
 }

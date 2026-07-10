@@ -2,7 +2,6 @@
 // used non-standard function names ("roundtrip_default_*"). Both are preserved
 // here for continuity. Relocated from hand-written wrappers.
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::{
     Decode, Encode,
@@ -16,36 +15,34 @@ use crabka_protocol::{
 
 #[test]
 fn owned_describe_groups_request_roundtrip_cases() {
-    for (case, version) in [("minimum", MIN_VERSION), ("maximum", MAX_VERSION)] {
+    for (_case, version) in [("minimum", MIN_VERSION), ("maximum", MAX_VERSION)] {
         let request = DescribeGroupsRequest::default();
         let mut buf = BytesMut::new();
         request.encode(&mut buf, version).unwrap();
-        assert!(request.encoded_len(version) == buf.len(), "case {case}");
+        assert2::assert!(request.encoded_len(version) == buf.len());
         let mut cur = &buf[..];
-        assert!(
+        assert2::assert!(
             (
                 DescribeGroupsRequest::decode(&mut cur, version).unwrap(),
                 cur.is_empty()
-            ) == (request, true),
-            "case {case}"
+            ) == (request, true)
         );
     }
 }
 
 #[test]
 fn owned_describe_groups_response_roundtrip_cases() {
-    for (case, version) in [("minimum", RESP_MIN), ("maximum", RESP_MAX)] {
+    for (_case, version) in [("minimum", RESP_MIN), ("maximum", RESP_MAX)] {
         let response = DescribeGroupsResponse::default();
         let mut buf = BytesMut::new();
         response.encode(&mut buf, version).unwrap();
-        assert!(response.encoded_len(version) == buf.len(), "case {case}");
+        assert2::assert!(response.encoded_len(version) == buf.len());
         let mut cur = &buf[..];
-        assert!(
+        assert2::assert!(
             (
                 DescribeGroupsResponse::decode(&mut cur, version).unwrap(),
                 cur.is_empty()
-            ) == (response, true),
-            "case {case}"
+            ) == (response, true)
         );
     }
 }

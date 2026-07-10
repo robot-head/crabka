@@ -182,8 +182,6 @@ fn load_private_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>, TlsError> 
 mod tests {
     use std::{fs::File, io::Write};
 
-    use assert2::assert;
-
     use super::*;
 
     fn install_provider() {
@@ -247,7 +245,7 @@ mod tests {
             client_ca_path: None,
             client_auth: ClientAuthMode::Disabled,
         };
-        assert!(cfg.build_server_config().is_err());
+        assert2::assert!(cfg.build_server_config().is_err());
     }
 
     #[test]
@@ -263,10 +261,7 @@ mod tests {
             client_auth: ClientAuthMode::Required,
         };
         let err = cfg.build_server_config().unwrap_err();
-        assert!(
-            matches!(err, TlsError::MissingClientCa),
-            "expected MissingClientCa, got {err:?}"
-        );
+        assert2::assert!(matches!(err, TlsError::MissingClientCa));
     }
 
     #[test]

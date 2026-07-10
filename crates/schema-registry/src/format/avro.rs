@@ -60,16 +60,12 @@ mod tests {
         let old = r#"{"type":"record","name":"U","fields":[{"name":"id","type":"int"}]}"#;
         let new = r#"{"type":"record","name":"U","fields":[{"name":"id","type":"int"},{"name":"x","type":"int","default":0}]}"#;
         let new_nodef = r#"{"type":"record","name":"U","fields":[{"name":"id","type":"int"},{"name":"x","type":"int"}]}"#;
-        for (name, reader, writer, compatible) in [
+        for (_name, reader, writer, compatible) in [
             ("new_reads_old", new, old, true),
             ("old_reads_new", old, new, true),
             ("missing_default", new_nodef, old, false),
         ] {
-            assert_eq!(
-                check(reader, writer, &[], &[]).is_ok(),
-                compatible,
-                "case {name}"
-            );
+            assert2::assert!(check(reader, writer, &[], &[]).is_ok() == compatible);
         }
     }
 
@@ -84,11 +80,11 @@ mod tests {
             ty: crate::format::SchemaType::Avro,
             schema: money.into(),
         }];
-        for (name, refs, valid) in [
+        for (_name, refs, valid) in [
             ("unresolved", &[][..], false),
             ("resolved", refs.as_slice(), true),
         ] {
-            assert_eq!(parse(candidate, refs).is_ok(), valid, "case {name}");
+            assert2::assert!(parse(candidate, refs).is_ok() == valid);
         }
     }
 }

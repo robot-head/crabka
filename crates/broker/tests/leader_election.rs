@@ -13,7 +13,6 @@
 
 use std::time::{Duration, Instant};
 
-use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
@@ -63,7 +62,7 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i1
         })
         .await
         .expect("CreateTopics");
-    assert!(resp.topics[0].error_code == 0, "CreateTopics: {resp:?}");
+    assert2::assert!(resp.topics[0].error_code == 0);
     broker.wait_until_partition_present(name, 0).await;
 }
 
@@ -186,11 +185,8 @@ async fn broker_death_elects_new_leader() {
         .expect("topic");
     let p = t.partitions.first().expect("partition");
     let (new_leader, new_epoch) = (p.leader_id, p.leader_epoch);
-    assert!(
-        new_leader == 2 || new_leader == 3,
-        "unexpected new leader: {new_leader}"
-    );
-    assert!(new_epoch > 0, "leader_epoch should bump after election");
+    assert2::assert!(new_leader == 2 || new_leader == 3);
+    assert2::assert!(new_epoch > 0);
 
     // Clean up surviving brokers.
     for (h, _, _) in cluster {
@@ -218,11 +214,8 @@ async fn acks_all_completes_after_isr_shrink() {
         .await
         .expect("acks=-1 after shrink");
     let elapsed = start.elapsed();
-    assert!(offset == 0);
-    assert!(
-        elapsed < Duration::from_secs(10),
-        "shrink should be quick on for_tests config; took {elapsed:?}"
-    );
+    assert2::assert!(offset == 0);
+    assert2::assert!(elapsed < Duration::from_secs(10));
 
     for (h, _, _) in cluster {
         h.shutdown().await;

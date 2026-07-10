@@ -125,14 +125,11 @@ mod tests {
             timestamp_ms: 100,
         };
         // Key is versionless (JVM MM2 serializeKey writes no version header).
-        assert_eq!(hb.key_bytes(), b"\x00\x07us-east\x00\x07eu-west".to_vec());
+        assert2::assert!(hb.key_bytes() == b"\x00\x07us-east\x00\x07eu-west".to_vec());
         // value = version(i16=0x0000) + timestamp(i64=100=0x0000_0000_0000_0064) = 10 bytes
-        assert_eq!(
-            hb.value_bytes(),
-            b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x64".to_vec()
-        );
+        assert2::assert!(hb.value_bytes() == b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x64".to_vec());
         let (k, v) = (hb.key_bytes(), hb.value_bytes());
-        assert_eq!(Heartbeat::from_bytes(&k, &v).unwrap(), hb);
+        assert2::assert!(Heartbeat::from_bytes(&k, &v).unwrap() == hb);
     }
 
     #[test]
@@ -143,25 +140,16 @@ mod tests {
             upstream: UpstreamOffset(1000),
             downstream: DownstreamOffset(742),
         };
-        assert_eq!(
-            OffsetSync::from_bytes(&os.key_bytes(), &os.value_bytes()).unwrap(),
-            os
-        );
+        assert2::assert!(OffsetSync::from_bytes(&os.key_bytes(), &os.value_bytes()).unwrap() == os);
         // Key is versionless (JVM MM2 serializeKey writes no version header).
-        assert_eq!(os.key_bytes(), b"\x00\x06orders\x00\x00\x00\x07".to_vec());
+        assert2::assert!(os.key_bytes() == b"\x00\x06orders\x00\x00\x00\x07".to_vec());
     }
 
     #[test]
     fn internal_topic_names_match_mm2() {
         // MM2-compatible internal topic naming, pinned exactly.
-        assert_eq!(
-            Checkpoint::topic_name("us-east"),
-            "us-east.checkpoints.internal"
-        );
-        assert_eq!(
-            OffsetSync::topic_name("us-east"),
-            "mm2-offset-syncs.us-east.internal"
-        );
+        assert2::assert!(Checkpoint::topic_name("us-east") == "us-east.checkpoints.internal");
+        assert2::assert!(OffsetSync::topic_name("us-east") == "mm2-offset-syncs.us-east.internal");
     }
 
     #[test]
@@ -174,9 +162,6 @@ mod tests {
             downstream: DownstreamOffset(742),
             metadata: String::new(),
         };
-        assert_eq!(
-            Checkpoint::from_bytes(&c.key_bytes(), &c.value_bytes()).unwrap(),
-            c
-        );
+        assert2::assert!(Checkpoint::from_bytes(&c.key_bytes(), &c.value_bytes()).unwrap() == c);
     }
 }

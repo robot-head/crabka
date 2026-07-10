@@ -302,7 +302,6 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::error::BrokerError;
@@ -324,15 +323,15 @@ mod tests {
                 133,
             ),
         ];
-        for (name, code, want) in cases {
-            assert!(code == want, "{name}");
+        for (_name, code, want) in cases {
+            assert2::assert!(code == want);
         }
     }
 
     #[test]
     fn unknown_server_error_is_negative_one() {
-        assert!(UNKNOWN_SERVER_ERROR == -1);
-        assert!(UNKNOWN_SERVER_ERROR < NONE);
+        assert2::assert!(UNKNOWN_SERVER_ERROR == -1);
+        assert2::assert!(UNKNOWN_SERVER_ERROR < NONE);
     }
 
     #[test]
@@ -394,17 +393,17 @@ mod tests {
             (BrokerError::Txn("test".into()), UNKNOWN_SERVER_ERROR), // -1
         ];
         for (err, want) in cases {
-            assert!(from_broker_error(&err) == want, "{err:?}");
+            assert2::assert!(from_broker_error(&err) == want);
         }
         // Pin the concrete wire value for the producer-fence path: the Rust
         // producer client maps 47 to `ProducerError::FencedProducer`.
-        assert!(INVALID_PRODUCER_EPOCH == 47);
+        assert2::assert!(INVALID_PRODUCER_EPOCH == 47);
     }
 
     #[test]
     fn not_enough_replicas_codes_have_expected_values() {
-        assert!(NOT_ENOUGH_REPLICAS == 19);
-        assert!(NOT_ENOUGH_REPLICAS_AFTER_APPEND == 20);
+        assert2::assert!(NOT_ENOUGH_REPLICAS == 19);
+        assert2::assert!(NOT_ENOUGH_REPLICAS_AFTER_APPEND == 20);
     }
 
     #[test]
@@ -417,8 +416,8 @@ mod tests {
             ("ELECTION_NOT_NEEDED", ELECTION_NOT_NEEDED, 84),
             ("DELEGATION_TOKEN_EXPIRED", DELEGATION_TOKEN_EXPIRED, 66),
         ];
-        for (name, code, want) in cases {
-            assert!(code == want, "{name}");
+        for (_name, code, want) in cases {
+            assert2::assert!(code == want);
         }
     }
 
@@ -433,14 +432,14 @@ mod tests {
                 106,
             ),
         ];
-        for (name, code, want) in cases {
-            assert!(code == want, "{name}");
+        for (_name, code, want) in cases {
+            assert2::assert!(code == want);
         }
     }
 
     #[test]
     fn ineligible_replica_code_does_not_collide_with_duplicate_resource() {
-        assert!(DUPLICATE_RESOURCE == 92);
-        assert!(INELIGIBLE_REPLICA == 107);
+        assert2::assert!(DUPLICATE_RESOURCE == 92);
+        assert2::assert!(INELIGIBLE_REPLICA == 107);
     }
 }

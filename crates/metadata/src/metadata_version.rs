@@ -188,7 +188,7 @@ pub fn is_supported_level(level: i16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -245,47 +245,45 @@ mod tests {
             (6, None),
             (26, None),
         ] {
-            assert!(from_feature_level(level) == want, "level {level}");
+            assert2::assert!(from_feature_level(level) == want);
         }
     }
 
     #[test]
     fn from_version_string_exact_ivn() {
-        for (case, s, want) in [
+        for (_case, s, want) in [
             ("known 3.5 IV", "3.5-IV2", Some(11)),
             ("known 4.0 IV", "4.0-IV3", Some(25)),
             ("unknown IV", "3.5-IV9", None),
         ] {
-            assert!(
-                from_version_string(s).map(super::MetadataVersion::feature_level) == want,
-                "case {case}"
+            assert2::assert!(
+                from_version_string(s).map(super::MetadataVersion::feature_level) == want
             );
         }
     }
 
     #[test]
     fn from_version_string_short_picks_highest_in_minor() {
-        for (case, s, want) in [
+        for (_case, s, want) in [
             ("known 3.7 minor", "3.7", Some(19)),
             ("known 4.0 minor", "4.0", Some(25)),
             ("unsupported minor", "2.8", None),
         ] {
-            assert!(
-                from_version_string(s).map(super::MetadataVersion::feature_level) == want,
-                "case {case}"
+            assert2::assert!(
+                from_version_string(s).map(super::MetadataVersion::feature_level) == want
             );
         }
     }
 
     #[test]
     fn in_supported_range_predicate() {
-        for (case, level, want) in [
+        for (_case, level, want) in [
             ("minimum", 7, true),
             ("maximum", 25, true),
             ("below minimum", 6, false),
             ("above maximum", 26, false),
         ] {
-            assert!(is_supported_level(level) == want, "case {case}");
+            assert2::assert!(is_supported_level(level) == want);
         }
     }
 

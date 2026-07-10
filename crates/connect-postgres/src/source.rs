@@ -618,7 +618,7 @@ mod sql_tests {
 
     #[test]
     fn validation_sql_cases() {
-        for (name, actual, expected) in [
+        for (_name, actual, expected) in [
             (
                 "publication_tables",
                 publication_tables_sql(),
@@ -640,7 +640,7 @@ mod sql_tests {
                 "SELECT pg_replication_slot_advance($1, $2::pg_lsn)",
             ),
         ] {
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 
@@ -992,14 +992,11 @@ mod tests {
             .0
             .insert("database".to_owned(), crabka_connect::OffsetValue::Long(7));
 
-        for (name, offset) in [("missing", missing), ("non_string", non_string)] {
-            assert!(
-                matches!(
-                    validate_database(&offset, "app"),
-                    Err(crabka_connect::ConnectError::Offset(_))
-                ),
-                "case {name}"
-            );
+        for (_name, offset) in [("missing", missing), ("non_string", non_string)] {
+            assert2::assert!(matches!(
+                validate_database(&offset, "app"),
+                Err(crabka_connect::ConnectError::Offset(_))
+            ));
         }
     }
 

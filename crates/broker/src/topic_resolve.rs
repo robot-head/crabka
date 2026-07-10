@@ -32,7 +32,7 @@ pub(crate) fn resolve<'a>(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_metadata::{MetadataRecord, TopicRecord};
 
     use super::*;
@@ -53,14 +53,14 @@ mod tests {
         let id = uuid::Uuid::from_u128(7);
         let img = image_with("t", id);
         let r = resolve(&img, "", WireUuid(id.into_bytes())).unwrap();
-        assert!(r.name == "t");
+        assert2::assert!(r.name == "t");
     }
 
     #[test]
     fn unknown_id_is_unknown_topic_id() {
         let img = image_with("t", uuid::Uuid::from_u128(7));
         let err = resolve(&img, "", WireUuid(uuid::Uuid::from_u128(99).into_bytes())).unwrap_err();
-        assert!(err == codes::UNKNOWN_TOPIC_ID);
+        assert2::assert!(err == codes::UNKNOWN_TOPIC_ID);
     }
 
     #[test]
@@ -69,20 +69,20 @@ mod tests {
         let img = image_with("t", id);
         // id resolves to "t" but the request also names "other".
         let err = resolve(&img, "other", WireUuid(id.into_bytes())).unwrap_err();
-        assert!(err == codes::INCONSISTENT_TOPIC_ID);
+        assert2::assert!(err == codes::INCONSISTENT_TOPIC_ID);
     }
 
     #[test]
     fn name_only_resolves() {
         let img = image_with("t", uuid::Uuid::from_u128(7));
         let r = resolve(&img, "t", WireUuid::ZERO).unwrap();
-        assert!(r.name == "t");
+        assert2::assert!(r.name == "t");
     }
 
     #[test]
     fn unknown_name_is_unknown_topic_or_partition() {
         let img = image_with("t", uuid::Uuid::from_u128(7));
         let err = resolve(&img, "missing", WireUuid::ZERO).unwrap_err();
-        assert!(err == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        assert2::assert!(err == codes::UNKNOWN_TOPIC_OR_PARTITION);
     }
 }

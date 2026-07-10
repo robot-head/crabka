@@ -29,7 +29,7 @@ pub fn frame(stream: TcpStream) -> Framed<TcpStream, LengthDelimitedCodec> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::{BufMut, Bytes, BytesMut};
     use futures_util::{SinkExt, StreamExt};
     use tokio::{
@@ -60,19 +60,19 @@ mod tests {
         framed.into_inner().shutdown().await.unwrap();
 
         let received = server.await.unwrap();
-        assert!(received.as_ref() == b"hello broker");
+        assert2::assert!(received.as_ref() == b"hello broker");
     }
 
     #[test]
     fn kafka_max_frame_size_is_one_hundred_mib() {
-        assert!(MAX_FRAME_BYTES == 100 * 1024 * 1024);
-        assert!(MAX_FRAME_BYTES == 104_857_600);
+        assert2::assert!(MAX_FRAME_BYTES == 100 * 1024 * 1024);
+        assert2::assert!(MAX_FRAME_BYTES == 104_857_600);
     }
 
     #[test]
     fn codec_decodes_frames_larger_than_tokio_default_but_within_kafka_max() {
         let payload_len = 9 * 1024 * 1024;
-        assert!(payload_len < MAX_FRAME_BYTES);
+        assert2::assert!(payload_len < MAX_FRAME_BYTES);
 
         let mut bytes = BytesMut::with_capacity(4 + payload_len);
         bytes.put_u32(u32::try_from(payload_len).expect("payload length fits u32"));
@@ -90,9 +90,6 @@ mod tests {
         bytes.put_u32(u32::try_from(MAX_FRAME_BYTES + 1).expect("max frame length fits u32"));
 
         let err = codec().decode(&mut bytes).expect_err("oversized frame");
-        assert!(
-            err.to_string().contains("frame size too big"),
-            "unexpected error: {err}"
-        );
+        assert2::assert!(err.to_string().contains("frame size too big"));
     }
 }

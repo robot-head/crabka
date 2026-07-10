@@ -238,7 +238,6 @@ pub(crate) async fn handle(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use bytes::BytesMut;
     use crabka_protocol::{
         Encode,
@@ -263,8 +262,8 @@ mod tests {
             ("MAX_TIMESTAMP", MAX_TIMESTAMP, -3),
             ("EARLIEST_LOCAL_TIMESTAMP", EARLIEST_LOCAL_TIMESTAMP, -4),
         ];
-        for (name, sentinel, want) in cases {
-            assert!(sentinel == want, "{name}");
+        for (_name, sentinel, want) in cases {
+            assert2::assert!(sentinel == want);
         }
     }
 
@@ -293,7 +292,7 @@ mod tests {
             sendfile_capable: false,
             connection_listener_name: "PLAINTEXT",
         };
-        assert!(crate::handlers::acl_denied(
+        assert2::assert!(crate::handlers::acl_denied(
             &authorizer,
             &image,
             &ctx,
@@ -325,7 +324,9 @@ mod tests {
         let mut cur: &[u8] = &buf;
         let decoded =
             ListOffsetsResponse::decode(&mut cur, list_offsets_response::MAX_VERSION).unwrap();
-        assert!(decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        assert2::assert!(
+            decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED
+        );
     }
 
     #[tokio::test]
@@ -384,7 +385,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

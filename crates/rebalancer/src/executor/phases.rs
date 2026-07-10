@@ -111,8 +111,6 @@ pub mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use assert2::assert;
-
     use super::*;
 
     /// Mock that records every call. Tests inspect the recorded log to
@@ -250,7 +248,7 @@ pub mod tests {
                 }
             })
             .collect();
-        assert!(submits == vec![2, 1]);
+        assert2::assert!(submits == vec![2, 1]);
     }
 
     #[tokio::test]
@@ -271,7 +269,7 @@ pub mod tests {
                 }
             })
             .collect();
-        assert!(ops == vec![ConfigOp::Set, ConfigOp::Delete]);
+        assert2::assert!(ops == vec![ConfigOp::Set, ConfigOp::Delete]);
     }
 
     #[test]
@@ -282,6 +280,6 @@ pub mod tests {
             mv("b", 1, vec![1], vec![3]),
         ];
         let keys = partition_keys(&ms);
-        assert!(keys == vec![("a".to_string(), 0), ("b".to_string(), 1)]);
+        assert2::assert!(keys == vec![("a".to_string(), 0), ("b".to_string(), 1)]);
     }
 }

@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 
-use assert2::assert;
 use serde_json::{Map, Value, json};
 
 const FLOAT_EPSILON: f64 = 1e-6;
@@ -141,15 +140,10 @@ pub fn normalize(response: &Value) -> Value {
     normalize_value(response)
 }
 
-pub fn assert_query_equal(name: &str, left: &Value, right: &Value) {
+pub fn assert_query_equal(_name: &str, left: &Value, right: &Value) {
     let left = normalize(left);
     let right = normalize(right);
-    assert!(
-        left == right,
-        "query `{name}` differed\nleft: {}\nright: {}",
-        pretty(&left),
-        pretty(&right)
-    );
+    assert2::assert!(left == right);
 }
 
 fn normalize_value(value: &Value) -> Value {

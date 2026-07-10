@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use assert2::assert;
 use crabka_blockstore::Labels;
 
 use crate::{
@@ -34,7 +33,7 @@ async fn instant_query_uses_hot_sample_newer_than_compacted_sample() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected instant vector");
     };
-    assert!(
+    assert2::assert!(
         samples
             == vec![InstantSample {
                 labels,
@@ -64,7 +63,7 @@ async fn label_names_merges_cold_and_hot_series_metadata() {
     let store = MergedMetricStore::new(cold, hot);
     let names = store.label_names("tenant-a", &[], 0, 30_000).await.unwrap();
 
-    assert!(names == vec!["__name__", "cluster", "instance", "job"]);
+    assert2::assert!(names == vec!["__name__", "cluster", "instance", "job"]);
 }
 
 #[tokio::test]
@@ -96,7 +95,7 @@ async fn label_values_merges_cold_and_hot_series_metadata() {
         .await
         .unwrap();
 
-    assert!(values == vec!["api", "worker"]);
+    assert2::assert!(values == vec!["api", "worker"]);
 }
 
 #[tokio::test]
@@ -122,7 +121,7 @@ async fn exemplars_merges_cold_and_hot_records() {
     let store = MergedMetricStore::new(cold, hot);
     let exemplars = store.exemplars("tenant-a", &[], 0, 30_000).await.unwrap();
 
-    assert!(
+    assert2::assert!(
         exemplars
             == vec![
                 ExemplarRecord {
@@ -182,7 +181,7 @@ async fn metadata_merges_cold_and_hot_records() {
         })
         .collect::<Vec<_>>();
 
-    assert!(
+    assert2::assert!(
         fields
             == vec![
                 ("latency_seconds", "histogram", "latency", "seconds"),
@@ -204,14 +203,14 @@ async fn cardinality_methods_merge_cold_and_hot_series() {
     let store = MergedMetricStore::new(cold, hot);
     let mut active_series = store.cardinality_active_series("tenant-a").await.unwrap();
     active_series.sort_by_key(|labels| labels.get("instance").unwrap_or("").to_string());
-    assert!(active_series == vec![api, worker]);
+    assert2::assert!(active_series == vec![api, worker]);
 
     let label_names = store.cardinality_label_names("tenant-a").await.unwrap();
     let name_counts = label_names
         .iter()
         .map(|stat| (stat.name.as_str(), stat.series_count))
         .collect::<Vec<_>>();
-    assert!(name_counts == vec![("__name__", 2), ("instance", 2), ("job", 2)]);
+    assert2::assert!(name_counts == vec![("__name__", 2), ("instance", 2), ("job", 2)]);
 
     let label_values = store.cardinality_label_values("tenant-a").await.unwrap();
     let value_counts = label_values
@@ -224,7 +223,7 @@ async fn cardinality_methods_merge_cold_and_hot_series() {
             )
         })
         .collect::<Vec<_>>();
-    assert!(
+    assert2::assert!(
         value_counts
             == vec![
                 ("__name__", "up", 2),
@@ -266,7 +265,7 @@ async fn tsdb_stats_merge_cold_and_hot_counts() {
         name: name.to_string(),
         value,
     };
-    assert!(
+    assert2::assert!(
         stats
             == TsdbStats {
                 head_stats: TsdbHeadStats {
@@ -303,7 +302,7 @@ async fn tsdb_stats_ignore_empty_side_min_time() {
     );
     let store = MergedMetricStore::new(InMemoryMetricStore::new(), hot_only);
     let stats = store.tsdb_stats("tenant-a").await.unwrap();
-    assert!(stats.head_stats.min_time == 40_000);
+    assert2::assert!(stats.head_stats.min_time == 40_000);
 
     let mut cold_only = InMemoryMetricStore::new();
     cold_only.push_float(
@@ -314,7 +313,7 @@ async fn tsdb_stats_ignore_empty_side_min_time() {
     );
     let store = MergedMetricStore::new(cold_only, InMemoryMetricStore::new());
     let stats = store.tsdb_stats("tenant-a").await.unwrap();
-    assert!(stats.head_stats.min_time == 50_000);
+    assert2::assert!(stats.head_stats.min_time == 50_000);
 }
 
 #[tokio::test]
@@ -332,7 +331,7 @@ async fn tsdb_blocks_merges_cold_and_hot_blocks() {
         .map(|block| block.id.as_str())
         .collect::<Vec<_>>();
 
-    assert!(ids == vec!["cold-a", "hot-a", "cold-b"]);
+    assert2::assert!(ids == vec!["cold-a", "hot-a", "cold-b"]);
 }
 
 #[test]
@@ -349,10 +348,7 @@ fn min_present_time_preserves_legitimate_zero_min_time() {
         (None, None, 0),
         (Some(20), Some(50), 20),
     ] {
-        assert!(
-            super::min_present_time(left, right) == want,
-            "case ({left:?}, {right:?})"
-        );
+        assert2::assert!(super::min_present_time(left, right) == want);
     }
 }
 
@@ -380,10 +376,10 @@ async fn range_query_counts_sample_present_in_both_stores_once() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected instant vector");
     };
-    assert!(samples.len() == 1);
+    assert2::assert!(samples.len() == 1);
     // Three distinct timestamps (10s, 20s, 30s); the duplicated 20s sample
     // must be counted once, not twice.
-    assert!(samples[0].value == SampleValue::Float(3.0));
+    assert2::assert!(samples[0].value == SampleValue::Float(3.0));
 
     // A windowed sum must likewise see each timestamp once.
     let result = engine
@@ -393,6 +389,6 @@ async fn range_query_counts_sample_present_in_both_stores_once() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected instant vector");
     };
-    assert!(samples.len() == 1);
-    assert!(samples[0].value == SampleValue::Float(3.0));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(samples[0].value == SampleValue::Float(3.0));
 }

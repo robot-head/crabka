@@ -6,7 +6,6 @@ use std::{
     },
 };
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_client_admin::{AclEntryFilter, AdminClient};
 use crabka_protocol::{
@@ -169,8 +168,8 @@ async fn describe_acls_reconnects_after_cached_connection_closes() {
         .await
         .unwrap();
 
-    assert!(acls.is_empty());
-    assert!(mock.describe_calls.load(Ordering::SeqCst) == 2);
+    assert2::assert!(acls.is_empty());
+    assert2::assert!(mock.describe_calls.load(Ordering::SeqCst) == 2);
 
     mock.stop();
 }

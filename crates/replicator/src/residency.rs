@@ -79,7 +79,6 @@ impl ResidencyGate {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::config::{PolicyConfig, Residency};
@@ -98,14 +97,14 @@ mod tests {
     #[test]
     fn allows_when_target_zone_in_allow_list() {
         let gate = ResidencyGate::compile(&policies()).unwrap();
-        assert!(gate.permits("customers", &["eu".into(), "gdpr".into()]));
+        assert2::assert!(gate.permits("customers", &["eu".into(), "gdpr".into()]));
     }
 
     #[test]
     fn blocks_when_target_lacks_allowed_zone() {
         let gate = ResidencyGate::compile(&policies()).unwrap();
-        assert!(!gate.permits("customers", &["us".into()]));
-        assert!(!gate.permits("kyc.eu", &["us".into()]));
+        assert2::assert!(!gate.permits("customers", &["us".into()]));
+        assert2::assert!(!gate.permits("kyc.eu", &["us".into()]));
     }
 
     #[test]
@@ -116,12 +115,12 @@ mod tests {
             deny_zones: vec!["gdpr".into()],
         });
         let gate = ResidencyGate::compile(&p).unwrap();
-        assert!(!gate.permits("customers", &["gdpr".into()]));
+        assert2::assert!(!gate.permits("customers", &["gdpr".into()]));
     }
 
     #[test]
     fn unmatched_topic_is_permitted() {
         let gate = ResidencyGate::compile(&policies()).unwrap();
-        assert!(gate.permits("orders", &["us".into()]));
+        assert2::assert!(gate.permits("orders", &["us".into()]));
     }
 }

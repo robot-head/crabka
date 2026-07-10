@@ -46,7 +46,7 @@
 
 use std::time::Duration;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_client_core::{Client, ClientError};
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 use testcontainers::runners::AsyncRunner;
@@ -176,10 +176,7 @@ async fn metadata_against_real_broker() {
         .refresh_metadata()
         .await
         .expect("refresh_metadata failed");
-    assert!(
-        !resp.brokers.is_empty(),
-        "expected at least one broker in metadata"
-    );
+    assert2::assert!(!resp.brokers.is_empty());
 
     client.close();
     drop(kafka);
@@ -209,10 +206,7 @@ async fn create_then_delete_topic() {
     };
     let create_resp = client.send(create).await.expect("CreateTopics failed");
     let topic_result = &create_resp.topics[0];
-    assert!(
-        topic_result.error_code == 0,
-        "CreateTopics error: {topic_result:?}"
-    );
+    assert2::assert!(topic_result.error_code == 0);
 
     // The schema's split between v0-5 (`topic_names: []string`) and v6+
     // (`topics: []DeleteTopicState`) is settled by the encoder per the
@@ -228,10 +222,7 @@ async fn create_then_delete_topic() {
     };
     let delete_resp = client.send(delete).await.expect("DeleteTopics failed");
     let del_result = &delete_resp.responses[0];
-    assert!(
-        del_result.error_code == 0,
-        "DeleteTopics error: {del_result:?}"
-    );
+    assert2::assert!(del_result.error_code == 0);
 
     client.close();
     drop(kafka);

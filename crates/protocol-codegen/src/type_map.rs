@@ -76,7 +76,7 @@ fn inner_borrowed(t: &str, struct_path: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -91,7 +91,7 @@ mod tests {
             ("uuid", false, "crate::primitives::uuid::Uuid"),
             ("records", false, "crate::records::RecordsPayload"),
         ] {
-            assert!(owned_type(t, nullable, None) == want);
+            assert2::assert!(owned_type(t, nullable, None) == want);
         }
     }
 
@@ -106,7 +106,7 @@ mod tests {
                 "crate::records::RecordsPayloadBorrowed<'a>",
             ),
         ] {
-            assert!(borrowed_type(t, nullable, None) == want);
+            assert2::assert!(borrowed_type(t, nullable, None) == want);
         }
     }
 

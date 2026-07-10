@@ -200,7 +200,7 @@ mod tests {
             .await
             .expect_err("null sender should reject peer sends");
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             RaftError::NotLeader {
                 current_leader: Some(NodeId(7))
@@ -840,7 +840,7 @@ pub mod wire {
                 last_offset: 42,
                 pre_vote: true,
             };
-            assert!(decode_vote(&req.encode()) == Some(req));
+            assert2::assert!(decode_vote(&req.encode()) == Some(req));
         }
 
         #[test]
@@ -853,7 +853,7 @@ pub mod wire {
                 last_offset: 42,
                 pre_vote: true,
             };
-            assert!(PeerRequest::decode(&req.encode()) == Some(req));
+            assert2::assert!(PeerRequest::decode(&req.encode()) == Some(req));
         }
 
         #[test]
@@ -890,12 +890,12 @@ pub mod wire {
                 leader_id: NodeId(5),
                 leader_epoch: 9,
             };
-            assert!(decode_begin(&begin.encode()) == Some(begin));
+            assert2::assert!(decode_begin(&begin.encode()) == Some(begin));
             let end = PeerRequest::EndQuorumEpoch {
                 leader_id: NodeId(1),
                 leader_epoch: 4,
             };
-            assert!(decode_end(&end.encode()) == Some(end));
+            assert2::assert!(decode_end(&end.encode()) == Some(end));
         }
 
         #[test]
@@ -910,10 +910,10 @@ pub mod wire {
             let raw_begin = BeginQuorumEpochRequest::decode(&mut begin_cur, QUORUM_EPOCH_VERSION)
                 .expect("decode begin request");
             let begin_partition = &raw_begin.topics[0].partitions[0];
-            assert_eq!(raw_begin.cluster_id.as_ref(), None);
-            assert_eq!(raw_begin.voter_id, -1);
-            assert_eq!(begin_partition.leader_id, 5);
-            assert_eq!(begin_partition.leader_epoch, 9);
+            assert2::assert!(raw_begin.cluster_id.as_ref() == None);
+            assert2::assert!(raw_begin.voter_id == -1);
+            assert2::assert!(begin_partition.leader_id == 5);
+            assert2::assert!(begin_partition.leader_epoch == 9);
 
             let end = PeerRequest::EndQuorumEpoch {
                 leader_id: NodeId(1),
@@ -923,9 +923,9 @@ pub mod wire {
             let raw_end = EndQuorumEpochRequest::decode(&mut end_cur, QUORUM_EPOCH_VERSION)
                 .expect("decode end request");
             let end_partition = &raw_end.topics[0].partitions[0];
-            assert_eq!(raw_end.cluster_id.as_ref(), None);
-            assert_eq!(end_partition.leader_id, 1);
-            assert_eq!(end_partition.leader_epoch, 4);
+            assert2::assert!(raw_end.cluster_id.as_ref() == None);
+            assert2::assert!(end_partition.leader_id == 1);
+            assert2::assert!(end_partition.leader_epoch == 4);
         }
 
         #[test]
@@ -935,7 +935,7 @@ pub mod wire {
                 fetch_epoch: 1,
                 fetch_offset: 11,
             };
-            assert!(decode_fetch(&req.encode()) == Some(req));
+            assert2::assert!(decode_fetch(&req.encode()) == Some(req));
         }
 
         #[test]
@@ -967,7 +967,7 @@ pub mod wire {
                 epoch: 3,
                 granted: true,
             };
-            assert!(PeerResponse::decode_vote(&resp.encode()) == Some(resp));
+            assert2::assert!(PeerResponse::decode_vote(&resp.encode()) == Some(resp));
         }
 
         #[test]
@@ -1017,7 +1017,7 @@ pub mod wire {
             };
             let bytes = encode_body(&resp, VOTE_VERSION);
             let decoded = PeerResponse::decode_vote(&bytes).unwrap();
-            assert!(
+            assert2::assert!(
                 decoded
                     == PeerResponse::Vote {
                         epoch: 7,
@@ -1029,7 +1029,7 @@ pub mod wire {
         #[test]
         fn ack_round_trips() {
             let resp = PeerResponse::Ack { epoch: 8 };
-            assert!(PeerResponse::decode_ack(&resp.encode()) == Some(resp));
+            assert2::assert!(PeerResponse::decode_ack(&resp.encode()) == Some(resp));
         }
 
         #[test]
@@ -1062,7 +1062,7 @@ pub mod wire {
                 hwm: 0,
                 records: Bytes::new(),
             };
-            assert!(PeerResponse::decode_fetch(&resp.encode()) == Some(resp));
+            assert2::assert!(PeerResponse::decode_fetch(&resp.encode()) == Some(resp));
         }
 
         #[test]
@@ -1073,7 +1073,7 @@ pub mod wire {
                 position: 128,
                 max_bytes: 4096,
             };
-            assert!(decode_fetch_snapshot(&req.encode()) == Some(req));
+            assert2::assert!(decode_fetch_snapshot(&req.encode()) == Some(req));
         }
 
         #[test]
@@ -1112,7 +1112,7 @@ pub mod wire {
                 bytes: Bytes::from_static(b"snapshotX"),
                 error_code: 0,
             };
-            assert!(PeerResponse::decode_fetch_snapshot(&resp.encode()) == Some(resp));
+            assert2::assert!(PeerResponse::decode_fetch_snapshot(&resp.encode()) == Some(resp));
         }
 
         #[test]
@@ -1125,7 +1125,9 @@ pub mod wire {
                 hwm: 7,
                 records: Bytes::from_static(b"\x01\x02\x03"),
             };
-            assert!(PeerResponse::decode_fetch(&with_records.encode()) == Some(with_records));
+            assert2::assert!(
+                PeerResponse::decode_fetch(&with_records.encode()) == Some(with_records)
+            );
 
             let diverged = PeerResponse::Fetch {
                 leader_id: NodeId(2),
@@ -1138,7 +1140,7 @@ pub mod wire {
                 hwm: 0,
                 records: Bytes::new(),
             };
-            assert!(PeerResponse::decode_fetch(&diverged.encode()) == Some(diverged));
+            assert2::assert!(PeerResponse::decode_fetch(&diverged.encode()) == Some(diverged));
         }
 
         #[test]
@@ -1181,7 +1183,7 @@ pub mod wire {
             };
             let mut c = &req.encode()[..];
             let dreq = FetchRequest::decode(&mut c, FETCH_VERSION).unwrap();
-            assert!(dreq.topics[0].topic_id == METADATA_TOPIC_ID);
+            assert2::assert!(dreq.topics[0].topic_id == METADATA_TOPIC_ID);
 
             let resp = PeerResponse::Fetch {
                 leader_id: NodeId(1),
@@ -1193,7 +1195,7 @@ pub mod wire {
             };
             let mut c2 = &resp.encode()[..];
             let dresp = FetchResponse::decode(&mut c2, FETCH_VERSION).unwrap();
-            assert!(dresp.responses[0].topic_id == METADATA_TOPIC_ID);
+            assert2::assert!(dresp.responses[0].topic_id == METADATA_TOPIC_ID);
         }
     }
 }

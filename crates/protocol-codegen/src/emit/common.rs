@@ -88,7 +88,6 @@ fn hex_to_signed(v: u64, suffix: &str) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -100,17 +99,17 @@ mod tests {
             ("2147483647", "2_147_483_647i32"),
             ("-2147483648", "-2_147_483_648i32"),
         ] {
-            assert!(format_int_literal(input, "i32") == want);
+            assert2::assert!(format_int_literal(input, "i32") == want);
         }
     }
 
     #[test]
     fn hex_positive_normalizes_to_decimal() {
-        for (case, input, want) in [
+        for (_case, input, want) in [
             ("lowercase", "0x7fffffff", "2_147_483_647i32"),
             ("uppercase", "0X10", "16i32"),
         ] {
-            assert!(format_int_literal(input, "i32") == want, "case {case}");
+            assert2::assert!(format_int_literal(input, "i32") == want);
         }
     }
 
@@ -123,7 +122,7 @@ mod tests {
             ("0x80000000", "i32", "-2_147_483_648i32"),
             ("0xffffffff", "i64", "4_294_967_295i64"),
         ] {
-            assert!(format_int_literal(input, suffix) == want);
+            assert2::assert!(format_int_literal(input, suffix) == want);
         }
     }
 }

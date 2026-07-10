@@ -306,7 +306,7 @@ impl ShareConsumer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::tagged_fields::UnknownTaggedFields;
 
     use super::*;
@@ -343,7 +343,7 @@ mod tests {
     fn join_heartbeat_request_preserves_group_member_epoch_and_subscription() {
         let req = build_join_heartbeat_request("group-a".into(), vec!["topic-a".into()]);
 
-        assert!(
+        assert2::assert!(
             req == ShareGroupHeartbeatRequest {
                 group_id: "group-a".into(),
                 member_id: String::new(),
@@ -390,8 +390,8 @@ mod tests {
 
         stage_implicit_accepts(&mut prev, &mut pending);
 
-        assert!(prev.is_empty());
-        assert!(
+        assert2::assert!(prev.is_empty());
+        assert2::assert!(
             pending
                 == vec![(
                     id(7),
@@ -420,8 +420,8 @@ mod tests {
     async fn close_cancels_shutdown_token_without_spawned_handle() {
         let mut consumer = test_consumer().await;
 
-        assert!(!consumer.shutdown.is_cancelled());
+        assert2::assert!(!consumer.shutdown.is_cancelled());
         consumer.close().await.unwrap();
-        assert!(consumer.shutdown.is_cancelled());
+        assert2::assert!(consumer.shutdown.is_cancelled());
     }
 }

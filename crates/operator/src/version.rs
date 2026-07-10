@@ -199,13 +199,12 @@ pub fn evaluate(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn parse_success_cases() {
-        for (name, input, expected) in [
+        for (_name, input, expected) in [
             (
                 "major minor patch",
                 "3.7.1",
@@ -243,20 +242,20 @@ mod tests {
                 },
             ),
         ] {
-            assert_eq!(KafkaVersion::parse(input).unwrap(), expected, "case {name}");
+            assert2::assert!(KafkaVersion::parse(input).unwrap() == expected);
         }
     }
 
     #[test]
     fn parse_rejects_junk() {
         for input in ["banana", "", "3.x", "1.2.3.4"] {
-            assert!(KafkaVersion::parse(input).is_err(), "case {input:?}");
+            assert2::assert!(KafkaVersion::parse(input).is_err());
         }
     }
 
     #[test]
     fn evaluate_cases() {
-        for (name, binary, pin, finalized, expected) in [
+        for (_name, binary, pin, finalized, expected) in [
             ("default tracks binary", "3.7.0", None, None, Ok("3.7")),
             (
                 "explicit pin below binary",
@@ -329,7 +328,7 @@ mod tests {
                 VersionOutcome::Valid { resolved_metadata } => Ok(resolved_metadata),
                 VersionOutcome::Invalid { reason, .. } => Err(reason),
             };
-            assert_eq!(actual, expected.map(str::to_string), "case {name}");
+            assert2::assert!(actual == expected.map(str::to_string));
         }
     }
 }

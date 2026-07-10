@@ -31,17 +31,16 @@ pub enum StateTopicError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn transient_topic_partition_codes_are_exact() {
         for code in [3, 5, 9] {
-            assert!(is_transient_topic_partition_code(code));
+            assert2::assert!(is_transient_topic_partition_code(code));
         }
         for code in [0, 1, 42] {
-            assert!(!is_transient_topic_partition_code(code));
+            assert2::assert!(!is_transient_topic_partition_code(code));
         }
     }
 }

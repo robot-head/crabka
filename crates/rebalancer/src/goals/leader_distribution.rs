@@ -89,7 +89,7 @@ impl Goal for LeaderDistribution {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::model::BrokerView;
@@ -152,7 +152,7 @@ mod tests {
             },
         ];
         let s = state_with(parts, vec![1, 2]);
-        assert!(LeaderDistribution.propose(&s, &ctx()).is_empty());
+        assert2::assert!(LeaderDistribution.propose(&s, &ctx()).is_empty());
     }
 
     #[test]
@@ -169,7 +169,7 @@ mod tests {
             .collect();
         let s = state_with(parts, vec![1, 2]);
         let mvs = LeaderDistribution.propose(&s, &ctx());
-        assert!(!mvs.is_empty());
+        assert2::assert!(!mvs.is_empty());
         for m in &mvs {
             check!(
                 (&m.old_replicas, &m.new_replicas, m.old_leader, m.new_leader,)
@@ -194,7 +194,7 @@ mod tests {
         let mvs = LeaderDistribution.propose(&s, &ctx());
         // No movement may target broker 3 as new_leader.
         for m in &mvs {
-            assert!(m.new_leader != 3, "broker 3 isn't in any replica set");
+            assert2::assert!(m.new_leader != 3);
         }
     }
 
@@ -210,13 +210,13 @@ mod tests {
 
         let counts = LeaderDistribution::leader_counts(&s);
 
-        assert!(counts == HashMap::from([(1, 2), (2, 0), (3, 1), (99, 1)]));
+        assert2::assert!(counts == HashMap::from([(1, 2), (2, 0), (3, 1), (99, 1)]));
     }
 
     #[test]
     fn imbalance_pct_uses_difference_times_100_over_total() {
         let counts = std::collections::HashMap::from([(1, 3), (2, 1)]);
-        assert!(LeaderDistribution::imbalance_pct(&counts) == 50);
+        assert2::assert!(LeaderDistribution::imbalance_pct(&counts) == 50);
     }
 
     #[test]
@@ -228,6 +228,6 @@ mod tests {
 
         let mvs = LeaderDistribution.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
+        assert2::assert!(mvs.len() == 1);
     }
 }

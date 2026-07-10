@@ -100,7 +100,7 @@ mod tests {
         let bytes = serialize(SCHEMA, br#"{"id":1,"name":"a"}"#).expect("serialize should succeed");
         // Non-empty proto bytes; field 1 (id=1) encodes as 0x08 0x01,
         // field 2 (name="a") encodes as 0x12 0x01 0x61.
-        assert!(!bytes.is_empty(), "proto bytes should be non-empty");
+        assert2::assert!(!bytes.is_empty());
     }
 
     #[test]
@@ -113,8 +113,8 @@ mod tests {
             serde_json::from_slice(&json_bytes).expect("output should be valid JSON");
 
         // proto3 JSON encodes int64 as a decimal string.
-        assert_eq!(json.get("id").and_then(|v| v.as_str()), Some("1"));
-        assert_eq!(json.get("name").and_then(|v| v.as_str()), Some("a"));
+        assert2::assert!(json.get("id").and_then(|v| v.as_str()) == Some("1"));
+        assert2::assert!(json.get("name").and_then(|v| v.as_str()) == Some("a"));
     }
 
     #[test]
@@ -125,7 +125,7 @@ mod tests {
             ("wrong_shape", b"[1,2,3]".as_slice(), false),
         ] {
             let result = validate(SCHEMA, payload);
-            assert_eq!(result.is_ok(), valid, "case {name}: {result:?}");
+            assert2::assert!(result.is_ok() == valid);
         }
     }
 }

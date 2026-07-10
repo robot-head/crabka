@@ -890,67 +890,67 @@ mod tests {
     fn decodes_jaeger_thrift_batch() {
         let spans = decode_jaeger_thrift(&encode_sample_batch()).unwrap();
 
-        assert_eq!(
-            spans,
-            vec![Span {
-                trace_id: [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2],
-                span_id: [0, 0, 0, 0, 0, 0, 0, 3],
-                parent_span_id: Some([0, 0, 0, 0, 0, 0, 0, 4]),
-                name: "GET /".into(),
-                kind: SpanKind::Server,
-                start_ns: 1_000_000,
-                duration_ns: 25_000,
-                status: StatusCode::Error,
-                status_message: String::new(),
-                resource_attrs: vec![
-                    KeyValue {
-                        key: "process.tag".into(),
-                        value: AttrValue::Str("present".into()),
-                    },
-                    KeyValue {
-                        key: "service.name".into(),
-                        value: AttrValue::Str("checkout".into()),
-                    },
-                ],
-                span_attrs: vec![
-                    KeyValue {
-                        key: "span.kind".into(),
-                        value: AttrValue::Str("server".into()),
-                    },
-                    KeyValue {
-                        key: "http.method".into(),
-                        value: AttrValue::Str("GET".into()),
-                    },
-                    KeyValue {
-                        key: "error".into(),
-                        value: AttrValue::Bool(true),
-                    },
-                ],
-                events: vec![EventRecord {
-                    time_unix_nano: 1_005_000,
-                    name: "cache.miss".into(),
-                    attrs: vec![
+        assert2::assert!(
+            spans
+                == vec![Span {
+                    trace_id: [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2],
+                    span_id: [0, 0, 0, 0, 0, 0, 0, 3],
+                    parent_span_id: Some([0, 0, 0, 0, 0, 0, 0, 4]),
+                    name: "GET /".into(),
+                    kind: SpanKind::Server,
+                    start_ns: 1_000_000,
+                    duration_ns: 25_000,
+                    status: StatusCode::Error,
+                    status_message: String::new(),
+                    resource_attrs: vec![
                         KeyValue {
-                            key: "event".into(),
-                            value: AttrValue::Str("cache.miss".into()),
+                            key: "process.tag".into(),
+                            value: AttrValue::Str("present".into()),
                         },
                         KeyValue {
-                            key: "cache.key".into(),
-                            value: AttrValue::Str("users".into()),
+                            key: "service.name".into(),
+                            value: AttrValue::Str("checkout".into()),
                         },
                     ],
-                }],
-                links: vec![LinkRecord {
-                    trace_id: [0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 5],
-                    span_id: [0, 0, 0, 0, 0, 0, 0, 7],
-                    attrs: vec![KeyValue {
-                        key: "ref.type".into(),
-                        value: AttrValue::Str("follows_from".into()),
+                    span_attrs: vec![
+                        KeyValue {
+                            key: "span.kind".into(),
+                            value: AttrValue::Str("server".into()),
+                        },
+                        KeyValue {
+                            key: "http.method".into(),
+                            value: AttrValue::Str("GET".into()),
+                        },
+                        KeyValue {
+                            key: "error".into(),
+                            value: AttrValue::Bool(true),
+                        },
+                    ],
+                    events: vec![EventRecord {
+                        time_unix_nano: 1_005_000,
+                        name: "cache.miss".into(),
+                        attrs: vec![
+                            KeyValue {
+                                key: "event".into(),
+                                value: AttrValue::Str("cache.miss".into()),
+                            },
+                            KeyValue {
+                                key: "cache.key".into(),
+                                value: AttrValue::Str("users".into()),
+                            },
+                        ],
                     }],
-                }],
-                instrumentation_scope: String::new(),
-                instrumentation_version: String::new(),
-            }]
+                    links: vec![LinkRecord {
+                        trace_id: [0, 0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0, 0, 5],
+                        span_id: [0, 0, 0, 0, 0, 0, 0, 7],
+                        attrs: vec![KeyValue {
+                            key: "ref.type".into(),
+                            value: AttrValue::Str("follows_from".into()),
+                        }],
+                    }],
+                    instrumentation_scope: String::new(),
+                    instrumentation_version: String::new(),
+                }]
         );
     }
 
@@ -958,47 +958,47 @@ mod tests {
     fn decodes_jaeger_binary_thrift_batch() {
         let spans = decode_jaeger_binary_thrift(&encode_binary_sample_batch()).unwrap();
 
-        assert_eq!(
-            spans,
-            vec![Span {
-                trace_id: [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2],
-                span_id: [0, 0, 0, 0, 0, 0, 0, 3],
-                parent_span_id: None,
-                name: "GET /binary".into(),
-                kind: SpanKind::Server,
-                start_ns: 1_000_000,
-                duration_ns: 25_000,
-                status: StatusCode::Error,
-                status_message: String::new(),
-                resource_attrs: vec![
-                    KeyValue {
-                        key: "process.tag".into(),
-                        value: AttrValue::Str("present".into()),
-                    },
-                    KeyValue {
-                        key: "service.name".into(),
-                        value: AttrValue::Str("checkout".into()),
-                    },
-                ],
-                span_attrs: vec![
-                    KeyValue {
-                        key: "span.kind".into(),
-                        value: AttrValue::Str("server".into()),
-                    },
-                    KeyValue {
-                        key: "http.method".into(),
-                        value: AttrValue::Str("GET".into()),
-                    },
-                    KeyValue {
-                        key: "error".into(),
-                        value: AttrValue::Bool(true),
-                    },
-                ],
-                events: Vec::new(),
-                links: Vec::new(),
-                instrumentation_scope: String::new(),
-                instrumentation_version: String::new(),
-            }]
+        assert2::assert!(
+            spans
+                == vec![Span {
+                    trace_id: [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2],
+                    span_id: [0, 0, 0, 0, 0, 0, 0, 3],
+                    parent_span_id: None,
+                    name: "GET /binary".into(),
+                    kind: SpanKind::Server,
+                    start_ns: 1_000_000,
+                    duration_ns: 25_000,
+                    status: StatusCode::Error,
+                    status_message: String::new(),
+                    resource_attrs: vec![
+                        KeyValue {
+                            key: "process.tag".into(),
+                            value: AttrValue::Str("present".into()),
+                        },
+                        KeyValue {
+                            key: "service.name".into(),
+                            value: AttrValue::Str("checkout".into()),
+                        },
+                    ],
+                    span_attrs: vec![
+                        KeyValue {
+                            key: "span.kind".into(),
+                            value: AttrValue::Str("server".into()),
+                        },
+                        KeyValue {
+                            key: "http.method".into(),
+                            value: AttrValue::Str("GET".into()),
+                        },
+                        KeyValue {
+                            key: "error".into(),
+                            value: AttrValue::Bool(true),
+                        },
+                    ],
+                    events: Vec::new(),
+                    links: Vec::new(),
+                    instrumentation_scope: String::new(),
+                    instrumentation_version: String::new(),
+                }]
         );
     }
 
@@ -1006,8 +1006,8 @@ mod tests {
     fn compact_thrift_skips_unknown_map_fields() {
         let spans = decode_jaeger_thrift(&encode_sample_batch_with_unknown_map()).unwrap();
 
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].name.as_str(), "GET /");
+        assert2::assert!(spans.len() == 1);
+        assert2::assert!(spans[0].name.as_str() == "GET /");
     }
 
     #[test]
@@ -1015,8 +1015,8 @@ mod tests {
         let spans =
             decode_jaeger_binary_thrift(&encode_binary_sample_batch_with_unknown_map()).unwrap();
 
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].name.as_str(), "GET /binary");
+        assert2::assert!(spans.len() == 1);
+        assert2::assert!(spans[0].name.as_str() == "GET /binary");
     }
 
     fn encode_binary_sample_batch() -> Vec<u8> {

@@ -17,11 +17,11 @@ categories = ["concurrency"]
 workspace = true
 
 [dependencies]
+assert2 = { workspace = true }
 creusot-std = "0.12.0"
 derive_more = { workspace = true }
 qubit-clock = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 proptest = { workspace = true }
 stateright = { workspace = true }

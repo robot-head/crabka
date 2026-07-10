@@ -2,7 +2,6 @@
 // min/max-version roundtrip. Relocated here from the hand-written wrappers as
 // part of making those wrappers uniformly generated.
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::{
     Decode, Encode, UnknownTaggedFields,
@@ -14,7 +13,7 @@ use crabka_protocol::{
 
 #[test]
 fn owned_api_versions_request_roundtrip_cases() {
-    for (case, version, req) in [
+    for (_case, version, req) in [
         ("v0 empty", 0, ApiVersionsRequest::default()),
         (
             "v3 populated",
@@ -28,14 +27,13 @@ fn owned_api_versions_request_roundtrip_cases() {
     ] {
         let mut buf = BytesMut::new();
         req.encode(&mut buf, version).unwrap();
-        assert!(req.encoded_len(version) == buf.len(), "case {case}");
+        assert2::assert!(req.encoded_len(version) == buf.len());
         let mut cur = &buf[..];
-        assert!(
+        assert2::assert!(
             (
                 ApiVersionsRequest::decode(&mut cur, version).unwrap(),
                 cur.is_empty()
-            ) == (req, true),
-            "case {case}"
+            ) == (req, true)
         );
     }
 }
@@ -64,18 +62,17 @@ fn sample_response(version: i16) -> ApiVersionsResponse {
 
 #[test]
 fn owned_api_versions_response_roundtrip_cases() {
-    for (case, version) in [("v0", 0), ("v1 throttle", 1), ("v3 flexible", 3)] {
+    for (_case, version) in [("v0", 0), ("v1 throttle", 1), ("v3 flexible", 3)] {
         let response = sample_response(version);
         let mut buf = BytesMut::new();
         response.encode(&mut buf, version).unwrap();
-        assert!(response.encoded_len(version) == buf.len(), "case {case}");
+        assert2::assert!(response.encoded_len(version) == buf.len());
         let mut cur = &buf[..];
-        assert!(
+        assert2::assert!(
             (
                 ApiVersionsResponse::decode(&mut cur, version).unwrap(),
                 cur.is_empty()
-            ) == (response, true),
-            "case {case}"
+            ) == (response, true)
         );
     }
 }

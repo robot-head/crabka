@@ -198,8 +198,8 @@ mod tests {
             pipeline: vec![Pipeline::Aggregate(Aggregate::Count)],
             hints: QueryHints::default(),
         };
-        assert!(matches!(q.root, SpansetExpr::Selector(_)));
-        assert_eq!(&q.pipeline, &vec![Pipeline::Aggregate(Aggregate::Count)]);
-        assert_eq!(&q.hints, &QueryHints::default());
+        assert2::assert!(matches!(q.root, SpansetExpr::Selector(_)));
+        assert2::assert!(&q.pipeline == &vec![Pipeline::Aggregate(Aggregate::Count)]);
+        assert2::assert!(&q.hints == &QueryHints::default());
     }
 }

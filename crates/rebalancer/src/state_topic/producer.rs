@@ -176,7 +176,7 @@ fn classify_send_result(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::{
         owned::{
             metadata_response::{MetadataResponse, MetadataResponseTopic},
@@ -262,7 +262,7 @@ mod tests {
         let req = metadata_request("state-topic");
 
         let topics = req.topics.expect("topics");
-        assert!(
+        assert2::assert!(
             topics
                 .iter()
                 .map(|topic| topic.name.as_deref())
@@ -295,7 +295,7 @@ mod tests {
             ("other-topic", Some(Uuid([9; 16]))),
             ("missing", None),
         ] {
-            assert!(topic_id_from_metadata(&resp, topic) == want);
+            assert2::assert!(topic_id_from_metadata(&resp, topic) == want);
         }
     }
 
@@ -310,7 +310,7 @@ mod tests {
             ..Default::default()
         };
 
-        assert!(topic_id_from_metadata(&resp, "state-topic").is_none());
+        assert2::assert!(topic_id_from_metadata(&resp, "state-topic").is_none());
     }
 
     #[test]
@@ -322,7 +322,7 @@ mod tests {
         );
         let err =
             classify_send_result(Err(StateTopicError::ProduceErrorCode { code: 42 })).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             StateTopicError::ProduceErrorCode { code: 42 }
         ));
@@ -330,14 +330,11 @@ mod tests {
 
     #[test]
     fn produce_response_error_scans_partition_responses() {
-        for (name, code, expected) in [
+        for (_name, code, expected) in [
             ("successful partition", 0, None),
             ("failed partition", 42, Some(42)),
         ] {
-            assert!(
-                produce_response_error(&response_with_error(code)) == expected,
-                "case {name}"
-            );
+            assert2::assert!(produce_response_error(&response_with_error(code)) == expected);
         }
     }
 
@@ -345,7 +342,7 @@ mod tests {
     async fn produce_state_propagates_initial_metadata_send_errors() {
         let client = unreachable_client("produce-state").await;
 
-        assert!(
+        assert2::assert!(
             produce_state(
                 &client,
                 "__crabka_state",
@@ -361,7 +358,7 @@ mod tests {
     async fn resolve_topic_id_propagates_metadata_send_errors() {
         let client = unreachable_client("resolve-topic-id").await;
 
-        assert!(resolve_topic_id(&client, "__crabka_state").await.is_err());
+        assert2::assert!(resolve_topic_id(&client, "__crabka_state").await.is_err());
     }
 
     #[tokio::test]
@@ -369,7 +366,7 @@ mod tests {
         let client = unreachable_client("send-once").await;
         let key = Bytes::from_static(b"in_flight");
 
-        assert!(
+        assert2::assert!(
             send_once(
                 &client,
                 "__crabka_state",

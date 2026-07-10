@@ -187,7 +187,7 @@ fn encode_resp(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
     use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
     use crabka_protocol::{
@@ -246,25 +246,19 @@ mod tests {
             {
                 return;
             }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "broker did not become controller leader"
-            );
+            assert2::assert!(std::time::Instant::now() <= deadline);
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     }
 
     #[test]
     fn leader_predicate_matches_current_node_only() {
-        for (case, leader, want) in [
+        for (_case, leader, want) in [
             ("local leader", Some(1), true),
             ("other leader", Some(2), false),
             ("no leader", None, false),
         ] {
-            assert!(
-                is_controller_leader(leader, 1) == want,
-                "case: {case}; leader {leader:?}"
-            );
+            assert2::assert!(is_controller_leader(leader, 1) == want);
         }
     }
 
@@ -275,7 +269,7 @@ mod tests {
             error_code: codes::NOT_CONTROLLER,
             ..Default::default()
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -320,7 +314,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(decoded == expected, "{decoded:?}");
+        assert2::assert!(decoded == expected);
     }
 
     #[tokio::test]
@@ -355,7 +349,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
 
         broker_handle.shutdown().await;
     }
@@ -414,10 +408,10 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
         let image = broker.controller.current_image();
         let partition = image.partition("t", 0).expect("partition");
-        assert!(partition.directories == vec![dir_uuid]);
+        assert2::assert!(partition.directories == vec![dir_uuid]);
         broker_handle.shutdown().await;
     }
 
@@ -454,7 +448,7 @@ mod tests {
             replica: crabka_audit::NodeId(2),
             directory: dir,
         };
-        assert!(*r == expected);
+        assert2::assert!(*r == expected);
     }
 
     #[test]
@@ -480,7 +474,7 @@ mod tests {
             directories: vec![uuid::Uuid::nil(), dir],
             partition_epoch: 0,
         }));
-        assert!(assignment_changes(&image, 2, topic_id, 0, dir).is_empty());
+        assert2::assert!(assignment_changes(&image, 2, topic_id, 0, dir).is_empty());
     }
 
     #[test]
@@ -505,7 +499,7 @@ mod tests {
             directories: vec![uuid::Uuid::nil(), uuid::Uuid::nil()],
             partition_epoch: 0,
         }));
-        assert!(
+        assert2::assert!(
             assignment_changes(&image, 99, topic_id, 0, uuid::Uuid::from_u128(0xAA)).is_empty()
         );
     }
@@ -563,11 +557,7 @@ mod tests {
         };
 
         let changes = collect_assignment_changes(&image, 2, &req);
-        assert!(
-            changes.len() == 1,
-            "expected one change, got {}",
-            changes.len()
-        );
+        assert2::assert!(changes.len() == 1);
         let MetadataRecord::V1PartitionDirAssignment(r) = &changes[0] else {
             panic!("expected V1PartitionDirAssignment");
         };
@@ -579,7 +569,7 @@ mod tests {
             replica: crabka_audit::NodeId(2),
             directory: dir_uuid,
         };
-        assert!(*r == expected);
+        assert2::assert!(*r == expected);
     }
 
     #[test]
@@ -607,10 +597,7 @@ mod tests {
         };
 
         let changes = collect_assignment_changes(&image, 2, &req);
-        assert!(
-            changes.is_empty(),
-            "unknown partition must yield no changes"
-        );
+        assert2::assert!(changes.is_empty());
     }
 
     // ── build_echo_response ───────────────────────────────────────────────────
@@ -673,6 +660,6 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
     }
 }

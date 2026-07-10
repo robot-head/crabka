@@ -491,7 +491,7 @@ mod tests {
             );
             let mut body = request_body(&$req, true);
             let decoded = SaslAuthenticateRequest::decode(&mut body, 2).unwrap();
-            assert!(body.is_empty());
+            assert2::assert!(body.is_empty());
             decoded
         }};
     }
@@ -518,8 +518,8 @@ mod tests {
             );
             let mut hs_body = request_body(&hs_req, false);
             let hs_decoded = SaslHandshakeRequest::decode(&mut hs_body, 1).unwrap();
-            assert_eq!(hs_decoded.mechanism, "PLAIN");
-            assert!(hs_body.is_empty());
+            assert2::assert!(hs_decoded.mechanism == "PLAIN");
+            assert2::assert!(hs_body.is_empty());
 
             // 2. SaslAuthenticate v2 → error_code 0 (flexible response header).
             let mut au = BytesMut::new();
@@ -531,7 +531,7 @@ mod tests {
             .unwrap();
             let au_req = reply_frame(&mut server, &au, true).await;
             let au_decoded = decode_sasl_authenticate_frame!(au_req, 2);
-            assert_eq!(au_decoded.auth_bytes.as_ref(), b"\0u\0p");
+            assert2::assert!(au_decoded.auth_bytes.as_ref() == b"\0u\0p");
         });
         let creds = SaslCredentials::Plain {
             username: "u".into(),
@@ -562,7 +562,7 @@ mod tests {
                 .unwrap();
                 let req = reply_frame(&mut server, &au, true).await;
                 let decoded = decode_sasl_authenticate_frame!(req, expected_corr);
-                assert_eq!(decoded.auth_bytes.as_ref(), expected_payload);
+                assert2::assert!(decoded.auth_bytes.as_ref() == expected_payload);
             }
         });
 
@@ -570,11 +570,11 @@ mod tests {
         send_sasl_authenticate(&mut client, b"first".to_vec(), &mut corr_id)
             .await
             .unwrap();
-        assert_eq!(corr_id, 8);
+        assert2::assert!(corr_id == 8);
         send_sasl_authenticate(&mut client, b"second".to_vec(), &mut corr_id)
             .await
             .unwrap();
-        assert_eq!(corr_id, 9);
+        assert2::assert!(corr_id == 9);
         timeout(Duration::from_secs(1), server_task)
             .await
             .expect("server observed both authenticate frames")
@@ -602,7 +602,7 @@ mod tests {
             );
             let mut hs_body = request_body(&hs_req, false);
             let hs_decoded = SaslHandshakeRequest::decode(&mut hs_body, 1).unwrap();
-            assert_eq!(hs_decoded.mechanism, "SCRAM-SHA-256");
+            assert2::assert!(hs_decoded.mechanism == "SCRAM-SHA-256");
 
             let mut au = BytesMut::new();
             SaslAuthenticateResponse {
@@ -624,7 +624,7 @@ mod tests {
         let err = outbound_sasl(&mut client, &creds, "localhost")
             .await
             .unwrap_err();
-        assert!(matches!(err, OutboundSaslError::Sasl(msg) if msg.contains("round 1")));
+        assert2::assert!(matches!(err, OutboundSaslError::Sasl(msg) if msg.contains("round 1")));
         timeout(Duration::from_secs(1), server_task)
             .await
             .expect("server observed SCRAM first round")
@@ -693,7 +693,7 @@ mod tests {
         let err = outbound_sasl(&mut client, &creds, "localhost")
             .await
             .unwrap_err();
-        assert!(matches!(err, OutboundSaslError::Sasl(msg) if msg.contains("round 2")));
+        assert2::assert!(matches!(err, OutboundSaslError::Sasl(msg) if msg.contains("round 2")));
         timeout(Duration::from_secs(1), server_task)
             .await
             .expect("server observed SCRAM second round")
@@ -722,7 +722,9 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, OutboundSaslError::Codec(msg) if msg == "response missing corr_id"));
+        assert2::assert!(
+            matches!(err, OutboundSaslError::Codec(msg) if msg == "response missing corr_id")
+        );
         server_task.await.unwrap();
     }
 
@@ -748,7 +750,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(
+        assert2::assert!(
             matches!(err, OutboundSaslError::Codec(msg) if msg == "flexible response missing tagged-fields byte")
         );
         server_task.await.unwrap();
@@ -769,13 +771,10 @@ mod tests {
             ) == (api_key, api_version, corr_id)
         );
         let client_len = i16::from_be_bytes([req[8], req[9]]);
-        assert_eq!(client_len, i16::try_from(OUTBOUND_CLIENT_ID.len()).unwrap());
-        assert_eq!(
-            &req[10..10 + OUTBOUND_CLIENT_ID.len()],
-            OUTBOUND_CLIENT_ID.as_bytes()
-        );
+        assert2::assert!(client_len == i16::try_from(OUTBOUND_CLIENT_ID.len()).unwrap());
+        assert2::assert!(&req[10..10 + OUTBOUND_CLIENT_ID.len()] == OUTBOUND_CLIENT_ID.as_bytes());
         if flexible {
-            assert_eq!(req[10 + OUTBOUND_CLIENT_ID.len()], 0);
+            assert2::assert!(req[10 + OUTBOUND_CLIENT_ID.len()] == 0);
         }
     }
 

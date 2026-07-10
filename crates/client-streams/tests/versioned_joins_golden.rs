@@ -131,15 +131,8 @@ fn asof_stream_table_join_matches_golden() {
         .map(|o| (Some(o.key.clone()), o.value))
         .collect();
 
-    assert_eq!(
-        expected,
-        vec![(Some("a".to_string()), 11), (Some("a".to_string()), 21)],
-        "golden sanity: as-of join expected outputs"
-    );
-    assert_eq!(
-        got, expected,
-        "as-of join output must match JVM golden (the @50 record must produce nothing)"
-    );
+    assert2::assert!(expected == vec![(Some("a".to_string()), 11), (Some("a".to_string()), 21)]);
+    assert2::assert!(got == expected);
 }
 
 /// As-of stream-table LEFT join (KIP-914), no grace.
@@ -202,12 +195,7 @@ fn asof_stream_table_left_join_emits_on_miss() {
         got.push(rec);
     }
 
-    assert_eq!(
-        got,
-        vec![(Some("a".to_string()), 11), (Some("b".to_string()), 0)],
-        "as-of LEFT join: hit forwards 1+10=11; the as-of MISS for `b` must still \
-         forward (emit_on_miss) with the joiner receiving None → 1+(-1)=0"
-    );
+    assert2::assert!(got == vec![(Some("a".to_string()), 11), (Some("b".to_string()), 0)]);
 }
 
 /// Grace stream-table LEFT join (KIP-923) with a table miss.
@@ -266,11 +254,7 @@ fn grace_stream_table_left_join_emits_on_miss() {
             150,
         );
     }
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        None,
-        "buffered records must not emit before the grace horizon is crossed"
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, I64Serde)) == None);
 
     // FLUSH record @1_000_000 advances stream-time → threshold 940_000, draining
     // both @150 records. The flush record (key `x`) itself stays buffered.
@@ -287,13 +271,7 @@ fn grace_stream_table_left_join_emits_on_miss() {
         got.push(rec);
     }
 
-    assert_eq!(
-        got,
-        vec![(Some("a".to_string()), 11), (Some("b".to_string()), 0)],
-        "grace LEFT join drain: (a,1)@150 hits as-of(150)=10 → 11; (b,1)@150 is an \
-         as-of MISS but the LEFT grace path still emits with None → 1+(-1)=0; the \
-         flush record (x) must NOT emit"
-    );
+    assert2::assert!(got == vec![(Some("a".to_string()), 11), (Some("b".to_string()), 0)]);
 }
 
 /// The grace-scenario golden envelope (adds the buffer-store changelog name +
@@ -389,11 +367,7 @@ fn grace_stream_table_join_matches_golden() {
     }
     // No output yet: every buffered record's grace horizon (ts + 60_000) is far
     // beyond the current stream-time (300).
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        None,
-        "buffered records must not emit before the grace horizon is crossed"
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, I64Serde)) == None);
     // 3. FLUSH record @1_000_000 advances stream-time → threshold = 940_000,
     //    draining @150/@250/@300 (ascending ts). The flush record itself stays
     //    buffered and must NOT emit.
@@ -418,20 +392,15 @@ fn grace_stream_table_join_matches_golden() {
         .collect();
 
     // Golden sanity: the three drained records in ascending-ts order.
-    assert_eq!(
-        expected,
-        vec![
-            (Some("a".to_string()), 11),
-            (Some("a".to_string()), 21),
-            (Some("a".to_string()), 21),
-        ],
-        "golden sanity: grace drain expected outputs"
+    assert2::assert!(
+        expected
+            == vec![
+                (Some("a".to_string()), 11),
+                (Some("a".to_string()), 21),
+                (Some("a".to_string()), 21),
+            ]
     );
-    assert_eq!(
-        got, expected,
-        "grace join output must match JVM golden: drain in ascending ts with as-of \
-         table reads, and the flush record (@1_000_000) must NOT emit a 4th record"
-    );
+    assert2::assert!(got == expected);
 }
 
 /// Grace buffer-store changelog wire assertion (KIP-923).
@@ -456,19 +425,18 @@ fn grace_buffer_changelog_matches_golden_wire() {
         .filter(|t| t.name.contains("Buffer"))
         .cloned()
         .collect();
-    assert_eq!(
-        buffer,
-        vec![WireTopicInfo {
-            name: golden.buffer_changelog_topic,
-            partitions: 0,
-            replication_factor: -1,
-            topic_configs: golden
-                .buffer_changelog_configs
-                .into_iter()
-                .map(|(key, value)| WireKeyValue { key, value })
-                .collect(),
-        }],
-        "buffer changelog must match the complete JVM-golden projection"
+    assert2::assert!(
+        buffer
+            == vec![WireTopicInfo {
+                name: golden.buffer_changelog_topic,
+                partitions: 0,
+                replication_factor: -1,
+                topic_configs: golden
+                    .buffer_changelog_configs
+                    .into_iter()
+                    .map(|(key, value)| WireKeyValue { key, value })
+                    .collect(),
+            }]
     );
 }
 
@@ -566,24 +534,15 @@ fn table_table_versioned_join_matches_golden() {
         .collect();
 
     // Golden sanity: the JVM output is exactly the two in-order joins.
-    assert_eq!(
-        expected,
-        vec![
-            (Some("k".to_string()), "1|2".to_string()),
-            (Some("k".to_string()), "3|2".to_string()),
-        ],
-        "golden sanity: table-table versioned expected outputs"
+    assert2::assert!(
+        expected
+            == vec![
+                (Some("k".to_string()), "1|2".to_string()),
+                (Some("k".to_string()), "3|2".to_string()),
+            ]
     );
-    assert_eq!(
-        got, expected,
-        "table-table versioned join output must match JVM golden: the out-of-order \
-         record (a:@150) must produce NO additional output (no 3rd record)"
-    );
-    assert_eq!(
-        got.len(),
-        2,
-        "exactly two outputs; the out-of-order @150 record must be suppressed"
-    );
+    assert2::assert!(got == expected);
+    assert2::assert!(got.len() == 2);
 }
 
 /// Table-table versioned wire assertion: the out-of-order gate must NOT introduce
@@ -620,9 +579,5 @@ fn table_table_versioned_no_extra_changelog_wire() {
     changelogs.sort_unstable();
 
     // Exactly the two versioned table-source changelogs (va/vb), nothing else.
-    assert_eq!(
-        changelogs,
-        vec!["app-va-changelog", "app-vb-changelog"],
-        "only the two versioned table-source changelogs are expected"
-    );
+    assert2::assert!(changelogs == vec!["app-va-changelog", "app-vb-changelog"]);
 }

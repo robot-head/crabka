@@ -131,16 +131,12 @@ mod tests {
 
     #[test]
     fn framed_round_trip_cases() {
-        for (name, id, format, payload) in [
+        for (_name, id, format, payload) in [
             ("avro", 42_i32, SchemaFormat::Avro, b"hi".as_slice()),
             ("json", 99_i32, SchemaFormat::Json, b"hi".as_slice()),
         ] {
             let framed = encode_frame(id, format, payload);
-            assert_eq!(
-                decode_frame(&framed).unwrap(),
-                (id, payload.to_vec()),
-                "case {name}"
-            );
+            assert2::assert!(decode_frame(&framed).unwrap() == (id, payload.to_vec()));
         }
     }
 
@@ -148,9 +144,8 @@ mod tests {
     fn protobuf_encode_layout() {
         // encode_frame(7, Protobuf, b"msg") must start with 00 00 00 00 07 00
         let framed = encode_frame(7, SchemaFormat::Protobuf, b"msg");
-        assert_eq!(
-            framed.as_ref(),
-            &[0x00, 0x00, 0x00, 0x00, 0x07, 0x00, b'm', b's', b'g']
+        assert2::assert!(
+            framed.as_ref() == &[0x00, 0x00, 0x00, 0x00, 0x07, 0x00, b'm', b's', b'g']
         );
     }
 
@@ -161,8 +156,8 @@ mod tests {
         let framed = encode_frame(id, SchemaFormat::Protobuf, payload);
         let (got_id, remainder) = decode_frame(&framed).unwrap();
         let stripped = strip_proto_index(&remainder).unwrap();
-        assert_eq!(got_id, id);
-        assert_eq!(stripped, payload.to_vec());
+        assert2::assert!(got_id == id);
+        assert2::assert!(stripped == payload.to_vec());
     }
 
     #[test]
@@ -170,8 +165,8 @@ mod tests {
         // [0x00] prefix + payload
         let with_index = prepend_proto_index(b"hello");
         let stripped = strip_proto_index(&with_index).unwrap();
-        assert_eq!(with_index[0], 0x00);
-        assert_eq!(stripped, b"hello".to_vec());
+        assert2::assert!(with_index[0] == 0x00);
+        assert2::assert!(stripped == b"hello".to_vec());
     }
 
     #[test]
@@ -181,20 +176,17 @@ mod tests {
         let mut buf = vec![2u8, 3u8, 5u8]; // count=2, index[0]=3, index[1]=5
         buf.extend_from_slice(b"data");
         let stripped = strip_proto_index(&buf).unwrap();
-        assert_eq!(stripped, b"data");
+        assert2::assert!(stripped == b"data");
     }
 
     #[test]
     fn decode_frame_rejection_cases() {
-        for (name, input) in [
+        for (_name, input) in [
             ("empty", &[][..]),
             ("bad_magic", &[0x01, 0x00, 0x00, 0x00, 0x01][..]),
             ("short", &[0x00, 0x00, 0x00, 0x01][..]),
         ] {
-            assert!(
-                matches!(decode_frame(input), Err(CodecError::Framing(_))),
-                "case {name}"
-            );
+            assert2::assert!(matches!(decode_frame(input), Err(CodecError::Framing(_))));
         }
     }
 }

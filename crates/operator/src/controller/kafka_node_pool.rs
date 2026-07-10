@@ -1613,7 +1613,7 @@ pub fn error_policy(_obj: Arc<KafkaNodePool>, err: &ReconcileError, _ctx: Arc<Co
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::crd::{
@@ -1673,7 +1673,7 @@ mod tests {
         let parent = parent_fixture("demo");
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
-        assert!(sts.metadata.name.as_deref() == Some("demo-brokers"));
+        assert2::assert!(sts.metadata.name.as_deref() == Some("demo-brokers"));
     }
 
     #[test]
@@ -1682,7 +1682,7 @@ mod tests {
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
         let spec = sts.spec.expect("sts spec");
-        assert!(spec.service_name.as_deref() == Some("demo-broker-headless"));
+        assert2::assert!(spec.service_name.as_deref() == Some("demo-broker-headless"));
     }
 
     #[test]
@@ -1697,16 +1697,13 @@ mod tests {
             .as_ref()
             .and_then(|m| m.labels.as_ref())
             .expect("pod template labels");
-        assert_eq!(
+        assert2::assert!(
             pod_labels
                 .get("app.kubernetes.io/instance")
-                .map(String::as_str),
-            Some("demo")
+                .map(String::as_str)
+                == Some("demo")
         );
-        assert_eq!(
-            pod_labels.get("crabka.io/pool").map(String::as_str),
-            Some("brokers")
-        );
+        assert2::assert!(pod_labels.get("crabka.io/pool").map(String::as_str) == Some("brokers"));
     }
 
     #[test]
@@ -1724,16 +1721,13 @@ mod tests {
             .iter()
             .find(|e| e.name == "NODE_ID_START")
             .expect("NODE_ID_START env");
-        assert!(node_id_start.value.as_deref() == Some("42"));
+        assert2::assert!(node_id_start.value.as_deref() == Some("42"));
 
         // The shell script should combine NODE_ID_START + the pod ordinal.
         let args = init.args.as_ref().expect("init args");
         let script = args.iter().find(|s| s.contains("NODE_ID_START"));
         let script = script.expect("init script references NODE_ID_START");
-        assert!(
-            script.contains("NODE_ID_START + ORDINAL"),
-            "expected the init script to compute NODE_ID = NODE_ID_START + ORDINAL, got: {script}"
-        );
+        assert2::assert!(script.contains("NODE_ID_START + ORDINAL"));
         // Regression: `crabka format` refuses to run when the log_dir
         // is non-empty. The init script must therefore write `.node-id`
         // *after* the format step, not before — otherwise the first
@@ -1745,13 +1739,7 @@ mod tests {
         let node_id_write_pos = script
             .find(".node-id")
             .expect("init script must write .node-id");
-        assert!(
-            node_id_write_pos > format_pos,
-            "init script must write .node-id AFTER crabka format. \
-             Otherwise `crabka format` refuses to overwrite a non-empty \
-             log_dir on the first boot of an empty PVC. \
-             format at byte {format_pos}, .node-id at byte {node_id_write_pos}",
-        );
+        assert2::assert!(node_id_write_pos > format_pos);
     }
 
     #[test]
@@ -1772,24 +1760,14 @@ mod tests {
         let startup = broker.startup_probe.as_ref().expect(
             "broker must have a startupProbe so a slow rejoin isn't crash-looped by liveness",
         );
-        assert!(
-            startup.tcp_socket.is_some(),
-            "startupProbe should gate on the data port being open"
-        );
+        assert2::assert!(startup.tcp_socket.is_some());
         // Generous failure budget so a legitimately slow rejoin completes.
-        assert!(
-            startup.failure_threshold.unwrap_or(0) >= 12,
-            "startupProbe needs a generous failureThreshold for a slow KRaft rejoin, got {:?}",
-            startup.failure_threshold
-        );
+        assert2::assert!(startup.failure_threshold.unwrap_or(0) >= 12);
     }
 
     #[test]
     fn init_script_passes_release_version() {
-        assert!(
-            INIT_SCRIPT.contains("--release-version \"$CRABKA_METADATA_VERSION\""),
-            "init script must pass the resolved metadata.version to crabka format"
-        );
+        assert2::assert!(INIT_SCRIPT.contains("--release-version \"$CRABKA_METADATA_VERSION\""));
     }
 
     #[test]
@@ -1800,7 +1778,7 @@ mod tests {
             .iter()
             .find(|e| e["name"] == "CRABKA_METADATA_VERSION")
             .expect("CRABKA_METADATA_VERSION env present");
-        assert!(mv["value"] == "4.0");
+        assert2::assert!(mv["value"] == "4.0");
     }
 
     #[test]
@@ -1819,10 +1797,7 @@ mod tests {
             .iter()
             .find(|e| e.name == "CRABKA_METADATA_VERSION")
             .expect("CRABKA_METADATA_VERSION env present");
-        assert!(
-            mv.value.as_deref() == Some("3.7"),
-            "init container must receive short major.minor form, not the 3-part kafka_version"
-        );
+        assert2::assert!(mv.value.as_deref() == Some("3.7"));
     }
 
     #[test]
@@ -1849,36 +1824,26 @@ mod tests {
         )
         .unwrap()
         .short();
-        assert!(
-            mv.value.as_deref() == Some(max_short),
-            "out-of-range kafka_version must clamp to MAX short form ({max_short}), \
-             not the unsupported \"4.1\""
-        );
+        assert2::assert!(mv.value.as_deref() == Some(max_short));
     }
 
     #[test]
     fn validate_rejects_replicas_two() {
         let pool = pool_fixture("brokers", "demo", 2);
         let err = validate(&pool).unwrap_err();
-        assert!(
-            matches!(err, PoolValidationError::ReplicasNotOne(2)),
-            "expected ReplicasNotOne(2), got {err:?}"
-        );
+        assert2::assert!(matches!(err, PoolValidationError::ReplicasNotOne(2)));
     }
 
     #[test]
     fn validate_rejects_single_role_cases() {
-        for (name, role) in [
+        for (_name, role) in [
             ("controller only", NodeRole::Controller),
             ("broker only", NodeRole::Broker),
         ] {
             let mut pool = pool_fixture("brokers", "demo", 1);
             pool.spec.roles = vec![role];
             let err = validate(&pool).unwrap_err();
-            assert!(
-                matches!(err, PoolValidationError::RolesNotMixed(_)),
-                "case {name}: expected RolesNotMixed, got {err:?}"
-            );
+            assert2::assert!(matches!(err, PoolValidationError::RolesNotMixed(_)));
         }
     }
 
@@ -1887,10 +1852,7 @@ mod tests {
         let mut pool = pool_fixture("brokers", "demo", 1);
         pool.spec.node_id_start = -1;
         let err = validate(&pool).unwrap_err();
-        assert!(
-            matches!(err, PoolValidationError::NodeIdOutOfRange(-1)),
-            "expected NodeIdOutOfRange(-1), got {err:?}"
-        );
+        assert2::assert!(matches!(err, PoolValidationError::NodeIdOutOfRange(-1)));
     }
 
     fn pool_with_template(template: PodTemplate) -> KafkaNodePool {
@@ -1914,10 +1876,9 @@ mod tests {
         });
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let pod_labels = sts.spec.unwrap().template.metadata.unwrap().labels.unwrap();
-        assert_eq!(pod_labels.get("team").map(String::as_str), Some("platform"));
-        assert_eq!(
-            pod_labels.get("app.kubernetes.io/name").map(String::as_str),
-            Some(APP_LABEL)
+        assert2::assert!(pod_labels.get("team").map(String::as_str) == Some("platform"));
+        assert2::assert!(
+            pod_labels.get("app.kubernetes.io/name").map(String::as_str) == Some(APP_LABEL)
         );
     }
 
@@ -1941,7 +1902,7 @@ mod tests {
             .unwrap()
             .annotations
             .unwrap();
-        assert!(anno.get("crabka.io/test-anno").map(String::as_str) == Some("yes"));
+        assert2::assert!(anno.get("crabka.io/test-anno").map(String::as_str) == Some("yes"));
     }
 
     #[test]
@@ -1962,7 +1923,7 @@ mod tests {
         });
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let rendered = sts.spec.unwrap().template.spec.unwrap().affinity;
-        assert!(rendered == Some(affinity));
+        assert2::assert!(rendered == Some(affinity));
     }
 
     #[test]
@@ -1987,7 +1948,7 @@ mod tests {
             .unwrap()
             .tolerations
             .unwrap();
-        assert!(tols == vec![tol]);
+        assert2::assert!(tols == vec![tol]);
     }
 
     #[test]
@@ -2007,7 +1968,7 @@ mod tests {
             .unwrap()
             .node_selector
             .unwrap();
-        assert!(rendered.get("disktype").map(String::as_str) == Some("ssd"));
+        assert2::assert!(rendered.get("disktype").map(String::as_str) == Some("ssd"));
     }
 
     #[test]
@@ -2015,9 +1976,9 @@ mod tests {
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let spec = sts.spec.unwrap().template.spec.unwrap();
-        assert_eq!(spec.affinity, None);
-        assert_eq!(spec.tolerations.unwrap_or_default(), vec![]);
-        assert_eq!(spec.node_selector.unwrap_or_default(), BTreeMap::new());
+        assert2::assert!(spec.affinity == None);
+        assert2::assert!(spec.tolerations.unwrap_or_default() == vec![]);
+        assert2::assert!(spec.node_selector.unwrap_or_default() == BTreeMap::new());
     }
 
     #[test]
@@ -2036,7 +1997,7 @@ mod tests {
             .unwrap()
             .annotations
             .unwrap();
-        assert!(anno.get("crabka.io/config-hash").map(String::as_str) == Some("abc123"));
+        assert2::assert!(anno.get("crabka.io/config-hash").map(String::as_str) == Some("abc123"));
     }
 
     #[test]
@@ -2045,13 +2006,13 @@ mod tests {
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         // Annotation map may be None or just lack our key — both fine.
         if let Some(anno) = sts.spec.unwrap().template.metadata.unwrap().annotations {
-            assert!(!anno.contains_key("crabka.io/config-hash"));
+            assert2::assert!(!anno.contains_key("crabka.io/config-hash"));
         }
     }
 
     #[test]
     fn render_statefulset_emptydir_storage_cases() {
-        for (name, storage) in [
+        for (_name, storage) in [
             ("storage omitted", None),
             ("explicit ephemeral storage", Some(Storage::Ephemeral)),
         ] {
@@ -2065,8 +2026,8 @@ mod tests {
                 .iter()
                 .find(|v| v.name == "data")
                 .expect("data volume present");
-            assert_eq!(claims, vec![], "case {name}");
-            assert!(data_vol.empty_dir.is_some(), "case {name}");
+            assert2::assert!(claims == vec![]);
+            assert2::assert!(data_vol.empty_dir.is_some());
         }
     }
 
@@ -2082,10 +2043,9 @@ mod tests {
         let spec = sts.spec.unwrap();
         let volumes = spec.template.spec.as_ref().unwrap().volumes.as_ref();
         if let Some(vols) = volumes {
-            assert!(
+            assert2::assert!(
                 vols.iter()
-                    .all(|v| v.name != "data" || v.empty_dir.is_none()),
-                "expected no emptyDir for data; got {vols:?}"
+                    .all(|v| v.name != "data" || v.empty_dir.is_none())
             );
         }
         let vct = spec.volume_claim_templates.unwrap();
@@ -2098,14 +2058,13 @@ mod tests {
             .requests
             .as_ref()
             .unwrap();
-        assert_eq!(vct.len(), 1);
-        assert_eq!(data_pvc.metadata.name.as_deref(), Some("data"));
-        assert_eq!(
-            pvc_spec.access_modes.as_deref(),
-            Some(["ReadWriteOnce".to_string()].as_slice())
+        assert2::assert!(vct.len() == 1);
+        assert2::assert!(data_pvc.metadata.name.as_deref() == Some("data"));
+        assert2::assert!(
+            pvc_spec.access_modes.as_deref() == Some(["ReadWriteOnce".to_string()].as_slice())
         );
-        assert_eq!(req.get("storage").map(|q| q.0.as_str()), Some("10Gi"));
-        assert_eq!(pvc_spec.storage_class_name.as_deref(), Some("fast-ssd"));
+        assert2::assert!(req.get("storage").map(|q| q.0.as_str()) == Some("10Gi"));
+        assert2::assert!(pvc_spec.storage_class_name.as_deref() == Some("fast-ssd"));
     }
 
     #[test]
@@ -2121,10 +2080,7 @@ mod tests {
             .spec
             .clone()
             .unwrap();
-        assert!(
-            pvc_spec.storage_class_name.is_none(),
-            "must omit storageClassName when class is None"
-        );
+        assert2::assert!(pvc_spec.storage_class_name.is_none());
     }
 
     #[test]
@@ -2141,19 +2097,15 @@ mod tests {
             .labels
             .clone()
             .expect("PVC has labels");
-        assert_eq!(
-            labels.get("app.kubernetes.io/instance").map(String::as_str),
-            Some("demo")
+        assert2::assert!(
+            labels.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo")
         );
-        assert_eq!(
-            labels.get("crabka.io/pool").map(String::as_str),
-            Some("brokers")
-        );
+        assert2::assert!(labels.get("crabka.io/pool").map(String::as_str) == Some("brokers"));
     }
 
     #[test]
     fn render_statefulset_retention_policy_cases() {
-        for (name, delete_claim, when_deleted) in [
+        for (_name, delete_claim, when_deleted) in [
             ("delete claim", true, "Delete"),
             ("retain claim", false, "Retain"),
         ] {
@@ -2169,14 +2121,10 @@ mod tests {
                 .unwrap()
                 .persistent_volume_claim_retention_policy
                 .unwrap();
-            assert_eq!(
-                policy,
-                k8s_openapi::api::apps::v1::StatefulSetPersistentVolumeClaimRetentionPolicy {
+            assert2::assert!(policy == k8s_openapi::api::apps::v1::StatefulSetPersistentVolumeClaimRetentionPolicy {
                     when_deleted: Some(when_deleted.to_string()),
                     when_scaled: Some("Retain".to_string()),
-                },
-                "case {name}"
-            );
+                });
         }
     }
 
@@ -2184,7 +2132,7 @@ mod tests {
     fn render_statefulset_no_retention_policy_when_ephemeral() {
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
-        assert!(
+        assert2::assert!(
             sts.spec
                 .unwrap()
                 .persistent_volume_claim_retention_policy
@@ -2228,15 +2176,12 @@ mod tests {
     fn validate_storage_change_first_reconcile_accepts_any() {
         let ephemeral = Storage::Ephemeral;
         let persistent = pc("10Gi", None);
-        for (case, desired) in [
+        for (_case, desired) in [
             ("none", None),
             ("ephemeral", Some(&ephemeral)),
             ("persistent-claim", Some(&persistent)),
         ] {
-            assert!(
-                validate_storage_change(desired, None).is_ok(),
-                "case {case}"
-            );
+            assert2::assert!(validate_storage_change(desired, None).is_ok());
         }
     }
 
@@ -2248,7 +2193,7 @@ mod tests {
             Some(std::slice::from_ref(&observed)),
         )
         .unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             PoolValidationError::StorageTypeChanged { .. }
         ));
@@ -2262,7 +2207,7 @@ mod tests {
             Some(std::slice::from_ref(&observed)),
         )
         .unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             PoolValidationError::StorageClassChanged { .. }
         ));
@@ -2276,7 +2221,7 @@ mod tests {
             Some(std::slice::from_ref(&observed)),
         )
         .unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             PoolValidationError::StorageShrinkNotAllowed { .. }
         ));
@@ -2285,7 +2230,7 @@ mod tests {
     #[test]
     fn validate_storage_change_allows_grow() {
         let observed = pvc_template("10Gi", None);
-        assert!(
+        assert2::assert!(
             validate_storage_change(
                 Some(&pc("20Gi", None)),
                 Some(std::slice::from_ref(&observed))
@@ -2301,7 +2246,7 @@ mod tests {
         if let Storage::PersistentClaim(ref mut p) = desired {
             p.delete_claim = true;
         }
-        assert!(
+        assert2::assert!(
             validate_storage_change(Some(&desired), Some(std::slice::from_ref(&observed))).is_ok()
         );
     }
@@ -2311,7 +2256,7 @@ mod tests {
         let mut pool = pool_fixture("brokers", "demo", 1);
         pool.spec.storage = Some(pc("banana", None));
         let err = validate(&pool).unwrap_err();
-        assert!(matches!(err, PoolValidationError::StorageSizeInvalid(_, _)));
+        assert2::assert!(matches!(err, PoolValidationError::StorageSizeInvalid(_, _)));
     }
 
     // --- JBOD -------------------------------------------------------------
@@ -2346,27 +2291,27 @@ mod tests {
     fn validate_rejects_jbod_single_volume() {
         let pool = jbod_pool(&[(0, "1Gi", None)], false);
         let err = validate(&pool).unwrap_err();
-        assert!(matches!(err, PoolValidationError::JbodNeedsTwoVolumes(1)));
+        assert2::assert!(matches!(err, PoolValidationError::JbodNeedsTwoVolumes(1)));
     }
 
     #[test]
     fn validate_rejects_jbod_duplicate_ids() {
         let pool = jbod_pool(&[(0, "1Gi", None), (0, "2Gi", None)], false);
         let err = validate(&pool).unwrap_err();
-        assert!(matches!(err, PoolValidationError::JbodDuplicateVolumeId(0)));
+        assert2::assert!(matches!(err, PoolValidationError::JbodDuplicateVolumeId(0)));
     }
 
     #[test]
     fn validate_rejects_jbod_bad_size() {
         let pool = jbod_pool(&[(0, "1Gi", None), (1, "banana", None)], false);
         let err = validate(&pool).unwrap_err();
-        assert!(matches!(err, PoolValidationError::StorageSizeInvalid(_, _)));
+        assert2::assert!(matches!(err, PoolValidationError::StorageSizeInvalid(_, _)));
     }
 
     #[test]
     fn validate_accepts_valid_jbod() {
         let pool = jbod_pool(&[(0, "1Gi", None), (1, "2Gi", Some("fast"))], true);
-        assert!(validate(&pool).is_ok());
+        assert2::assert!(validate(&pool).is_ok());
     }
 
     #[test]
@@ -2382,12 +2327,12 @@ mod tests {
             pvc["kind"] = serde_json::json!("PersistentVolumeClaim");
             pvc
         };
-        assert_eq!(
-            serde_json::to_value(vct).unwrap(),
-            serde_json::Value::Array(vec![
-                expected_pvc("data", "10Gi", None),
-                expected_pvc("data-1", "20Gi", Some("fast-ssd")),
-            ])
+        assert2::assert!(
+            serde_json::to_value(vct).unwrap()
+                == serde_json::Value::Array(vec![
+                    expected_pvc("data", "10Gi", None),
+                    expected_pvc("data-1", "20Gi", Some("fast-ssd")),
+                ])
         );
     }
 
@@ -2404,7 +2349,7 @@ mod tests {
             .iter()
             .map(|t| t.metadata.name.as_deref().unwrap())
             .collect();
-        assert!(names == vec!["data", "data-1", "data-2"]);
+        assert2::assert!(names == vec!["data", "data-1", "data-2"]);
     }
 
     #[test]
@@ -2423,7 +2368,9 @@ mod tests {
             .find(|e| e.name == "CRABKA_EXTRA_LOG_DIRS")
             .expect("CRABKA_EXTRA_LOG_DIRS env present for JBOD");
         // Primary (`/var/lib/crabka/data`) excluded; extras sorted by id.
-        assert!(extra.value.as_deref() == Some("/var/lib/crabka/data-1,/var/lib/crabka/data-2"));
+        assert2::assert!(
+            extra.value.as_deref() == Some("/var/lib/crabka/data-1,/var/lib/crabka/data-2")
+        );
     }
 
     #[test]
@@ -2439,12 +2386,12 @@ mod tests {
             .filter(|mount| mount.name == "data" || mount.name.starts_with("data-"))
             .map(|m| (m.name.as_str(), m.mount_path.as_str()))
             .collect();
-        assert_eq!(
-            by_name,
-            vec![
-                ("data", "/var/lib/crabka/data"),
-                ("data-1", "/var/lib/crabka/data-1"),
-            ]
+        assert2::assert!(
+            by_name
+                == vec![
+                    ("data", "/var/lib/crabka/data"),
+                    ("data-1", "/var/lib/crabka/data-1"),
+                ]
         );
     }
 
@@ -2459,7 +2406,7 @@ mod tests {
             .env
             .clone()
             .unwrap();
-        assert!(env.iter().all(|e| e.name != "CRABKA_EXTRA_LOG_DIRS"));
+        assert2::assert!(env.iter().all(|e| e.name != "CRABKA_EXTRA_LOG_DIRS"));
     }
 
     #[test]
@@ -2471,8 +2418,8 @@ mod tests {
             .unwrap()
             .persistent_volume_claim_retention_policy
             .unwrap();
-        assert_eq!(policy.when_deleted.as_deref(), Some("Delete"));
-        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+        assert2::assert!(policy.when_deleted.as_deref() == Some("Delete"));
+        assert2::assert!(policy.when_scaled.as_deref() == Some("Retain"));
     }
 
     #[test]
@@ -2482,9 +2429,8 @@ mod tests {
         let vct = sts.spec.unwrap().volume_claim_templates.unwrap();
         for t in &vct {
             let labels = t.metadata.labels.clone().expect("PVC labels");
-            assert!(
-                labels.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo"),
-                "every JBOD PVC inherits the GC instance label"
+            assert2::assert!(
+                labels.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo")
             );
         }
     }
@@ -2504,7 +2450,7 @@ mod tests {
         let observed = jbod_observed(&[("data", "10Gi", None)]);
         let desired = jbod(&[(0, "10Gi", None), (1, "10Gi", None)], false);
         let err = validate_storage_change(Some(&desired), Some(&observed)).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             PoolValidationError::StorageTypeChanged { .. }
         ));
@@ -2515,7 +2461,7 @@ mod tests {
         // observed = JBOD (2 templates); desired = PersistentClaim.
         let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", None)]);
         let err = validate_storage_change(Some(&pc("10Gi", None)), Some(&observed)).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             PoolValidationError::StorageTypeChanged { .. }
         ));
@@ -2523,7 +2469,7 @@ mod tests {
 
     #[test]
     fn validate_storage_change_jbod_success_cases() {
-        for (name, observed, desired) in [
+        for (_name, observed, desired) in [
             (
                 "grow volumes",
                 jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", None)]),
@@ -2536,7 +2482,7 @@ mod tests {
             ),
         ] {
             let result = validate_storage_change(Some(&desired), Some(&observed));
-            assert!(result.is_ok(), "case {name}: {result:?}");
+            assert2::assert!(result.is_ok());
         }
     }
 
@@ -2545,7 +2491,7 @@ mod tests {
         let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", None)]);
         let desired = jbod(&[(0, "10Gi", None), (1, "5Gi", None)], false);
         let err = validate_storage_change(Some(&desired), Some(&observed)).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             PoolValidationError::StorageShrinkNotAllowed { .. }
         ));
@@ -2556,7 +2502,7 @@ mod tests {
         let observed = jbod_observed(&[("data", "10Gi", None), ("data-1", "10Gi", Some("a"))]);
         let desired = jbod(&[(0, "10Gi", None), (1, "10Gi", Some("b"))], false);
         let err = validate_storage_change(Some(&desired), Some(&observed)).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             PoolValidationError::StorageClassChanged { .. }
         ));
@@ -2570,7 +2516,7 @@ mod tests {
             false,
         );
         let err = validate_storage_change(Some(&desired), Some(&observed)).unwrap_err();
-        assert!(matches!(err, PoolValidationError::JbodVolumesImmutable));
+        assert2::assert!(matches!(err, PoolValidationError::JbodVolumesImmutable));
     }
 
     #[test]
@@ -2582,7 +2528,7 @@ mod tests {
         ]);
         let desired = jbod(&[(0, "10Gi", None), (1, "10Gi", None)], false);
         let err = validate_storage_change(Some(&desired), Some(&observed)).unwrap_err();
-        assert!(matches!(err, PoolValidationError::JbodVolumesImmutable));
+        assert2::assert!(matches!(err, PoolValidationError::JbodVolumesImmutable));
     }
 
     #[test]
@@ -2596,11 +2542,11 @@ mod tests {
             "  --broker-id=\"${NODE_ID}\" \\\n",
             "  --metrics-listen-addr=0.0.0.0:9404\n",
         );
-        for (name, enabled, expected) in [
+        for (_name, enabled, expected) in [
             ("metrics disabled", false, MAIN_SCRIPT),
             ("metrics enabled", true, metrics_script),
         ] {
-            assert_eq!(build_main_script(enabled), expected, "case {name}");
+            assert2::assert!(build_main_script(enabled) == expected);
         }
     }
 
@@ -2622,7 +2568,7 @@ mod tests {
             "/etc/crabka/broker-tls",
             "/etc/crabka/clients-ca",
         ] {
-            assert!(mounts.contains(&path), "missing {path}; got {mounts:?}");
+            assert2::assert!(mounts.contains(&path));
         }
     }
 
@@ -2665,31 +2611,31 @@ mod tests {
             .iter()
             .find(|v| v.name == "gssapi-keytab")
             .expect("gssapi-keytab volume present");
-        assert_eq!(
-            mount,
-            &k8s_openapi::api::core::v1::VolumeMount {
-                mount_path: "/etc/crabka/gssapi-keytab".into(),
-                name: "gssapi-keytab".into(),
-                read_only: Some(true),
-                ..Default::default()
-            }
-        );
-        assert_eq!(
-            volume,
-            &k8s_openapi::api::core::v1::Volume {
-                name: "gssapi-keytab".into(),
-                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                    default_mode: Some(0o400),
-                    items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
-                        key: "krb5.keytab".into(),
-                        mode: None,
-                        path: "keytab".into(),
-                    }]),
-                    secret_name: Some("broker-keytab".into()),
+        assert2::assert!(
+            mount
+                == &k8s_openapi::api::core::v1::VolumeMount {
+                    mount_path: "/etc/crabka/gssapi-keytab".into(),
+                    name: "gssapi-keytab".into(),
+                    read_only: Some(true),
                     ..Default::default()
-                }),
-                ..Default::default()
-            }
+                }
+        );
+        assert2::assert!(
+            volume
+                == &k8s_openapi::api::core::v1::Volume {
+                    name: "gssapi-keytab".into(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        default_mode: Some(0o400),
+                        items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
+                            key: "krb5.keytab".into(),
+                            mode: None,
+                            path: "keytab".into(),
+                        }]),
+                        secret_name: Some("broker-keytab".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
         );
     }
 
@@ -2723,39 +2669,39 @@ mod tests {
             .iter()
             .find(|v| v.name == "krb5-conf")
             .expect("krb5-conf volume present");
-        assert_eq!(
-            mount,
-            &k8s_openapi::api::core::v1::VolumeMount {
-                mount_path: "/etc/crabka/krb5".into(),
-                name: "krb5-conf".into(),
-                read_only: Some(true),
-                ..Default::default()
-            }
-        );
-        assert_eq!(
-            krb5_config,
-            &k8s_openapi::api::core::v1::EnvVar {
-                name: "KRB5_CONFIG".into(),
-                value: Some("/etc/crabka/krb5/krb5.conf".into()),
-                value_from: None,
-            }
-        );
-        assert_eq!(
-            volume,
-            &k8s_openapi::api::core::v1::Volume {
-                name: "krb5-conf".into(),
-                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                    default_mode: Some(0o400),
-                    items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
-                        key: "config".into(),
-                        mode: None,
-                        path: "krb5.conf".into(),
-                    }]),
-                    secret_name: Some("krb5-conf".into()),
+        assert2::assert!(
+            mount
+                == &k8s_openapi::api::core::v1::VolumeMount {
+                    mount_path: "/etc/crabka/krb5".into(),
+                    name: "krb5-conf".into(),
+                    read_only: Some(true),
                     ..Default::default()
-                }),
-                ..Default::default()
-            }
+                }
+        );
+        assert2::assert!(
+            krb5_config
+                == &k8s_openapi::api::core::v1::EnvVar {
+                    name: "KRB5_CONFIG".into(),
+                    value: Some("/etc/crabka/krb5/krb5.conf".into()),
+                    value_from: None,
+                }
+        );
+        assert2::assert!(
+            volume
+                == &k8s_openapi::api::core::v1::Volume {
+                    name: "krb5-conf".into(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        default_mode: Some(0o400),
+                        items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
+                            key: "config".into(),
+                            mode: None,
+                            path: "krb5.conf".into(),
+                        }]),
+                        secret_name: Some("krb5-conf".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
         );
     }
 
@@ -2779,7 +2725,7 @@ mod tests {
             .collect();
         for suffix in ["cluster-ca-cert", "kafka-brokers", "clients-ca-cert"] {
             let want = format!("{cluster}-{suffix}");
-            assert!(names.contains(&want), "missing {want}; got {names:?}");
+            assert2::assert!(names.contains(&want));
         }
     }
 
@@ -2800,7 +2746,7 @@ mod tests {
             ..Default::default()
         };
 
-        for (name, config, expected) in [
+        for (_name, config, expected) in [
             ("metrics disabled", None, vec![broker_port.clone()]),
             (
                 "metrics enabled",
@@ -2819,7 +2765,7 @@ mod tests {
                 .ports
                 .clone()
                 .unwrap();
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 
@@ -2840,7 +2786,7 @@ mod tests {
             }),
         };
 
-        for (name, logging, expected) in [
+        for (_name, logging, expected) in [
             ("logging disabled", None, None),
             (
                 "logging enabled",
@@ -2857,7 +2803,7 @@ mod tests {
                 .clone()
                 .unwrap();
             let actual = env.into_iter().find(|entry| entry.name == "RUST_LOG");
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 
@@ -2879,7 +2825,7 @@ mod tests {
                 }),
             })
         };
-        for (name, configured_key, expected) in [
+        for (_name, configured_key, expected) in [
             ("delegation token unset", None, None),
             ("default key", Some(None), expected_env("secret-key")),
             ("explicit key", Some(Some("hmac")), expected_env("hmac")),
@@ -2900,7 +2846,7 @@ mod tests {
             let actual = env
                 .into_iter()
                 .find(|entry| entry.name == "CRABKA_DELEGATION_TOKEN_SECRET_KEY");
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 
@@ -2980,26 +2926,26 @@ mod tests {
             .iter()
             .find(|v| v.name == "oauth-jwks-trust")
             .expect("oauth-jwks-trust volume present");
-        assert_eq!(
-            mount,
-            &k8s_openapi::api::core::v1::VolumeMount {
-                mount_path: "/etc/crabka/oauth-jwks-trust".into(),
-                name: "oauth-jwks-trust".into(),
-                read_only: Some(true),
-                ..Default::default()
-            }
-        );
-        assert_eq!(
-            volume,
-            &k8s_openapi::api::core::v1::Volume {
-                name: "oauth-jwks-trust".into(),
-                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                    default_mode: Some(0o400),
-                    secret_name: Some("demo-oauth-jwks-trust".into()),
+        assert2::assert!(
+            mount
+                == &k8s_openapi::api::core::v1::VolumeMount {
+                    mount_path: "/etc/crabka/oauth-jwks-trust".into(),
+                    name: "oauth-jwks-trust".into(),
+                    read_only: Some(true),
                     ..Default::default()
-                }),
-                ..Default::default()
-            }
+                }
+        );
+        assert2::assert!(
+            volume
+                == &k8s_openapi::api::core::v1::Volume {
+                    name: "oauth-jwks-trust".into(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        default_mode: Some(0o400),
+                        secret_name: Some("demo-oauth-jwks-trust".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
         );
     }
 
@@ -3045,7 +2991,7 @@ mod tests {
             network_policy_peers: None,
         }];
 
-        for (name, parent, resource_name) in [
+        for (_name, parent, resource_name) in [
             ("no OAuth listener", no_listener, "oauth-jwks-trust"),
             (
                 "OAuth listener with empty certificates",
@@ -3073,8 +3019,8 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|volume| volume.name == resource_name);
-            assert!(!mount_present, "case {name}");
-            assert!(!volume_present, "case {name}");
+            assert2::assert!(!mount_present);
+            assert2::assert!(!volume_present);
         }
     }
 
@@ -3156,31 +3102,31 @@ mod tests {
             .iter()
             .find(|v| v.name == "oauth-introspection-secret")
             .expect("oauth-introspection-secret volume present");
-        assert_eq!(
-            mount,
-            &k8s_openapi::api::core::v1::VolumeMount {
-                mount_path: "/etc/crabka/oauth-introspection".into(),
-                name: "oauth-introspection-secret".into(),
-                read_only: Some(true),
-                ..Default::default()
-            }
-        );
-        assert_eq!(
-            volume,
-            &k8s_openapi::api::core::v1::Volume {
-                name: "oauth-introspection-secret".into(),
-                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                    default_mode: Some(0o400),
-                    items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
-                        key: "my-key".into(),
-                        mode: None,
-                        path: "client-secret".into(),
-                    }]),
-                    secret_name: Some("my-oauth-secret".into()),
+        assert2::assert!(
+            mount
+                == &k8s_openapi::api::core::v1::VolumeMount {
+                    mount_path: "/etc/crabka/oauth-introspection".into(),
+                    name: "oauth-introspection-secret".into(),
+                    read_only: Some(true),
                     ..Default::default()
-                }),
-                ..Default::default()
-            }
+                }
+        );
+        assert2::assert!(
+            volume
+                == &k8s_openapi::api::core::v1::Volume {
+                    name: "oauth-introspection-secret".into(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        default_mode: Some(0o400),
+                        items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
+                            key: "my-key".into(),
+                            mode: None,
+                            path: "client-secret".into(),
+                        }]),
+                        secret_name: Some("my-oauth-secret".into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }
         );
     }
 
@@ -3237,10 +3183,7 @@ mod tests {
             .iter()
             .find(|v| v.name == "tier-storage")
             .expect("tier-storage volume present");
-        assert!(
-            tier.empty_dir.is_some(),
-            "tier-storage must be an emptyDir, got: {tier:?}"
-        );
+        assert2::assert!(tier.empty_dir.is_some());
 
         // Broker container has the matching mount at the canonical path.
         let broker = pod_spec
@@ -3255,11 +3198,10 @@ mod tests {
             .iter()
             .find(|m| m.name == "tier-storage")
             .expect("tier-storage mount present");
-        assert_eq!(
-            mount.mount_path.as_str(),
-            crate::controller::listeners::TIER_STORAGE_PATH
+        assert2::assert!(
+            mount.mount_path.as_str() == crate::controller::listeners::TIER_STORAGE_PATH
         );
-        assert!(!mount.read_only.unwrap_or(false));
+        assert2::assert!(!mount.read_only.unwrap_or(false));
     }
 
     // ── S3 tiered storage env + volume gating ────────────────────────
@@ -3300,23 +3242,23 @@ mod tests {
             .as_ref()
             .and_then(|v| v.secret_key_ref.as_ref())
             .expect("secretKeyRef present");
-        assert_eq!(ak.value.as_deref(), None);
-        assert_eq!(sk.value.as_deref(), None);
-        assert_eq!(
-            ak_ref,
-            &k8s_openapi::api::core::v1::SecretKeySelector {
-                name: "crabka-s3-creds".to_string(),
-                key: "access-key-id".to_string(),
-                optional: None,
-            }
+        assert2::assert!(ak.value.as_deref() == None);
+        assert2::assert!(sk.value.as_deref() == None);
+        assert2::assert!(
+            ak_ref
+                == &k8s_openapi::api::core::v1::SecretKeySelector {
+                    name: "crabka-s3-creds".to_string(),
+                    key: "access-key-id".to_string(),
+                    optional: None,
+                }
         );
-        assert_eq!(
-            sk_ref,
-            &k8s_openapi::api::core::v1::SecretKeySelector {
-                name: "crabka-s3-creds".to_string(),
-                key: "secret-access-key".to_string(),
-                optional: None,
-            }
+        assert2::assert!(
+            sk_ref
+                == &k8s_openapi::api::core::v1::SecretKeySelector {
+                    name: "crabka-s3-creds".to_string(),
+                    key: "secret-access-key".to_string(),
+                    optional: None,
+                }
         );
     }
 
@@ -3337,10 +3279,9 @@ mod tests {
             .find(|c| c.name == "broker")
             .expect("broker container");
         let env = broker.env.as_ref().expect("env present");
-        assert!(
+        assert2::assert!(
             env.iter()
-                .all(|e| e.name != "AWS_ACCESS_KEY_ID" && e.name != "AWS_SECRET_ACCESS_KEY"),
-            "credentialless S3 must not inject AWS env, got: {env:?}",
+                .all(|e| e.name != "AWS_ACCESS_KEY_ID" && e.name != "AWS_SECRET_ACCESS_KEY")
         );
     }
 
@@ -3391,15 +3332,15 @@ mod tests {
             .as_ref()
             .expect("gcs-credentials is a Secret volume");
         let items = secret.items.as_ref().expect("projected items");
-        assert_eq!(secret.secret_name.as_deref(), Some("crabka-gcs-creds"));
-        assert_eq!(
-            items.as_slice(),
-            [k8s_openapi::api::core::v1::KeyToPath {
-                key: "key.json".into(),
-                mode: None,
-                path: "key.json".into(),
-            }]
-            .as_slice()
+        assert2::assert!(secret.secret_name.as_deref() == Some("crabka-gcs-creds"));
+        assert2::assert!(
+            items.as_slice()
+                == [k8s_openapi::api::core::v1::KeyToPath {
+                    key: "key.json".into(),
+                    mode: None,
+                    path: "key.json".into(),
+                }]
+                .as_slice()
         );
 
         // Read-only mount at the canonical credentials dir.
@@ -3415,39 +3356,31 @@ mod tests {
             .iter()
             .find(|m| m.name == "gcs-credentials")
             .expect("gcs-credentials mount present");
-        assert_eq!(
-            mount.mount_path.as_str(),
-            crate::controller::listeners::GCS_CREDENTIALS_DIR,
-            "must use the canonical read-only mount"
+        assert2::assert!(
+            mount.mount_path.as_str() == crate::controller::listeners::GCS_CREDENTIALS_DIR
         );
-        assert_eq!(
-            mount.read_only,
-            Some(true),
-            "must use the canonical read-only mount"
-        );
+        assert2::assert!(mount.read_only == Some(true));
 
         // GCS must NOT inject AWS-style env vars, and must NOT mount the
         // Local tier-storage scratch volume.
         let env = broker.env.as_ref().expect("env present");
-        assert!(
+        assert2::assert!(
             env.iter()
-                .all(|e| e.name != "AWS_ACCESS_KEY_ID" && e.name != "AWS_SECRET_ACCESS_KEY"),
-            "GCS must not inject AWS env, got: {env:?}",
+                .all(|e| e.name != "AWS_ACCESS_KEY_ID" && e.name != "AWS_SECRET_ACCESS_KEY")
         );
-        assert!(
+        assert2::assert!(
             pod_spec
                 .volumes
                 .as_ref()
                 .unwrap()
                 .iter()
-                .all(|v| v.name != "tier-storage"),
-            "GCS must not allocate the Local tier-storage emptyDir",
+                .all(|v| v.name != "tier-storage")
         );
     }
 
     #[test]
     fn pod_template_omits_inapplicable_storage_resources() {
-        for (name, parent, resource_name) in [
+        for (_name, parent, resource_name) in [
             (
                 "S3 omits local tier storage",
                 parent_with_s3_tiered_storage("demo", true),
@@ -3472,21 +3405,19 @@ mod tests {
                 .iter()
                 .find(|container| container.name == "broker")
                 .expect("broker container");
-            assert!(
+            assert2::assert!(
                 !pod_spec
                     .volumes
                     .as_ref()
                     .unwrap()
                     .iter()
-                    .any(|volume| volume.name == resource_name),
-                "case {name}"
+                    .any(|volume| volume.name == resource_name)
             );
-            assert!(
+            assert2::assert!(
                 !broker
                     .volume_mounts
                     .as_ref()
-                    .is_some_and(|mounts| mounts.iter().any(|mount| mount.name == resource_name)),
-                "case {name}"
+                    .is_some_and(|mounts| mounts.iter().any(|mount| mount.name == resource_name))
             );
         }
     }
@@ -3517,14 +3448,13 @@ mod tests {
         // Pod-level volume entry must NOT be added — the StatefulSet
         // controller mounts the bound PVC automatically.
         let pod_spec = sts.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
-        assert!(
+        assert2::assert!(
             pod_spec
                 .volumes
                 .as_ref()
                 .unwrap()
                 .iter()
-                .all(|v| v.name != "tier-storage"),
-            "explicit pod-volume `tier-storage` must not exist when PVC-backed"
+                .all(|v| v.name != "tier-storage")
         );
         // The volumeClaimTemplate is present with the configured size + class.
         let tmpls = sts
@@ -3544,8 +3474,8 @@ mod tests {
             .as_ref()
             .and_then(|r| r.requests.as_ref())
             .expect("resources.requests");
-        assert_eq!(req.get("storage").map(|q| q.0.as_str()), Some("50Gi"));
-        assert_eq!(spec.storage_class_name.as_deref(), Some("fast-ssd"));
+        assert2::assert!(req.get("storage").map(|q| q.0.as_str()) == Some("50Gi"));
+        assert2::assert!(spec.storage_class_name.as_deref() == Some("fast-ssd"));
         // Mount inside the broker container still lands at the canonical path.
         let broker = pod_spec
             .containers
@@ -3559,7 +3489,7 @@ mod tests {
             .iter()
             .find(|m| m.name == "tier-storage")
             .expect("tier-storage mount");
-        assert!(mount.mount_path == crate::controller::listeners::TIER_STORAGE_PATH);
+        assert2::assert!(mount.mount_path == crate::controller::listeners::TIER_STORAGE_PATH);
     }
 
     #[test]
@@ -3577,10 +3507,7 @@ mod tests {
             .iter()
             .find(|t| t.metadata.name.as_deref() == Some("tier-storage"))
             .expect("tier-storage volumeClaimTemplate");
-        assert!(
-            tier.spec.as_ref().unwrap().storage_class_name.is_none(),
-            "storageClassName must be omitted when class is None"
-        );
+        assert2::assert!(tier.spec.as_ref().unwrap().storage_class_name.is_none());
     }
 
     #[test]
@@ -3612,8 +3539,8 @@ mod tests {
         let err = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE)
             .expect_err("must reject deleteClaim mismatch");
         let msg = format!("{err:?}");
-        assert!(msg.contains("TieredStorageInvalid"), "got: {msg}");
-        assert!(msg.contains("deleteClaim"), "got: {msg}");
+        assert2::assert!(msg.contains("TieredStorageInvalid"));
+        assert2::assert!(msg.contains("deleteClaim"));
     }
 
     #[test]
@@ -3696,16 +3623,8 @@ mod tests {
             .persistent_volume_claim_retention_policy
             .as_ref()
             .expect("policy must exist when tier PVC is present");
-        assert_eq!(
-            policy.when_deleted.as_deref(),
-            Some("Delete"),
-            "delete_claim=true retention policy"
-        );
-        assert_eq!(
-            policy.when_scaled.as_deref(),
-            Some("Retain"),
-            "delete_claim=true retention policy"
-        );
+        assert2::assert!(policy.when_deleted.as_deref() == Some("Delete"));
+        assert2::assert!(policy.when_scaled.as_deref() == Some("Retain"));
     }
 
     #[test]
@@ -3713,13 +3632,12 @@ mod tests {
         let parent = parent_fixture("demo");
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
-        assert!(
+        assert2::assert!(
             sts.spec
                 .as_ref()
                 .unwrap()
                 .persistent_volume_claim_retention_policy
-                .is_none(),
-            "no PVCs => no retention policy"
+                .is_none()
         );
     }
 
@@ -3745,7 +3663,7 @@ mod tests {
             value: Some(value.into()),
             value_from: None,
         };
-        for (name, tracing, expected) in [
+        for (_name, tracing, expected) in [
             ("tracing disabled", None, vec![]),
             (
                 "required fields only",
@@ -3803,7 +3721,7 @@ mod tests {
                     entry.name.starts_with("CRABKA_OTLP_") || entry.name == "OTEL_SERVICE_NAME"
                 })
                 .collect::<Vec<_>>();
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 
@@ -3843,7 +3761,7 @@ mod tests {
     #[test]
     fn version_gate_blocked_cases() {
         let missing_status = parent_fixture("demo");
-        assert!(missing_status.status.is_none(), "fixture precondition");
+        assert2::assert!(missing_status.status.is_none());
         for (name, parent, expected, message_fragment) in [
             (
                 "invalid finalized version",
@@ -3861,9 +3779,9 @@ mod tests {
             match version_gate(&parent) {
                 VersionGate::Blocked(cond) => {
                     let (expected_type, expected_status, expected_reason) = expected;
-                    assert_eq!(cond.type_.as_str(), expected_type, "case {name}");
-                    assert_eq!(cond.status.as_str(), expected_status, "case {name}");
-                    assert_eq!(cond.reason.as_str(), expected_reason, "case {name}");
+                    assert2::assert!(cond.type_.as_str() == expected_type);
+                    assert2::assert!(cond.status.as_str() == expected_status);
+                    assert2::assert!(cond.reason.as_str() == expected_reason);
                     if let Some(fragment) = message_fragment {
                         check!(
                             cond.message.contains(fragment),
@@ -3881,14 +3799,11 @@ mod tests {
     fn version_gate_clears_when_kafkaversionvalid_true() {
         // Valid version: gate clears AND the StatefulSet renders as today.
         let parent = parent_with_version_status("demo", Some(true), Some("3.7"));
-        assert!(
-            matches!(version_gate(&parent), VersionGate::Cleared),
-            "a valid parent version must clear the gate"
-        );
+        assert2::assert!(matches!(version_gate(&parent), VersionGate::Cleared));
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE)
             .expect("pods are created as today when the version is valid");
-        assert!(sts.metadata.name.as_deref() == Some("demo-brokers"));
+        assert2::assert!(sts.metadata.name.as_deref() == Some("demo-brokers"));
     }
 
     #[test]
@@ -3898,9 +3813,6 @@ mod tests {
         // tear the cluster down — the finalized version means a prior reconcile
         // formatted the pods at a known-good version.
         let parent = parent_with_version_status("demo", Some(false), Some("3.7"));
-        assert!(
-            matches!(version_gate(&parent), VersionGate::Cleared),
-            "a finalized metadata version keeps a running cluster's pods"
-        );
+        assert2::assert!(matches!(version_gate(&parent), VersionGate::Cleared));
     }
 }

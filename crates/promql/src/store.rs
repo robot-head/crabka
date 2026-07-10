@@ -164,7 +164,6 @@ pub trait MetricStore: Send + Sync {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_blockstore::Labels;
     use datafusion::prelude::SessionContext;
 
@@ -283,7 +282,7 @@ mod tests {
     async fn trait_is_object_safe_and_default_returns_none_tables() {
         let store: Arc<dyn MetricStore> = Arc::new(Empty);
         let result = store.scan("t", &[], 0, 1).await.unwrap();
-        assert!(result.float_table.is_none());
-        assert!(result.histogram_table.is_none());
+        assert2::assert!(result.float_table.is_none());
+        assert2::assert!(result.histogram_table.is_none());
     }
 }

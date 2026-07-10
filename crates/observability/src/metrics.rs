@@ -260,7 +260,7 @@ async fn export(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -299,7 +299,7 @@ mod tests {
             "route=\"query\"",
             "tenant=\"demo\"",
         ] {
-            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
+            assert2::assert!(buf.contains(needle));
         }
     }
 
@@ -308,15 +308,15 @@ mod tests {
         let m = ServiceMetrics::new();
         m.record_ingest(true, 100, 3, 0.01);
         m.record_ingest(true, 50, 2, 0.01);
-        assert_eq!(m.ingest_bytes.get(), 150);
-        assert_eq!(m.ingest_items.get(), 5);
-        assert_eq!(
+        assert2::assert!(m.ingest_bytes.get() == 150);
+        assert2::assert!(m.ingest_items.get() == 5);
+        assert2::assert!(
             m.ingest_requests
                 .get_or_create(&StatusLabel {
                     status: "ok".into()
                 })
-                .get(),
-            2
+                .get()
+                == 2
         );
     }
 
@@ -325,10 +325,10 @@ mod tests {
         let m = ServiceMetrics::new();
         // A 4xx client error: error outcome, but NOT a WAL failure.
         m.record_ingest(false, 0, 0, 0.001);
-        assert!(m.wal_append_failures.get() == 0);
+        assert2::assert!(m.wal_append_failures.get() == 0);
         // A produce failure: bump explicitly at the WAL error site.
         m.record_wal_append_failure();
-        assert!(m.wal_append_failures.get() == 1);
+        assert2::assert!(m.wal_append_failures.get() == 1);
     }
 
     #[test]
@@ -343,7 +343,7 @@ mod tests {
             ("query", "error", 1),
             ("labels", "ok", 1),
         ] {
-            assert!(
+            assert2::assert!(
                 m.query_requests
                     .get_or_create(&RouteStatusLabel {
                         route: route.into(),
@@ -369,19 +369,19 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::OK);
+        assert2::assert!(resp.status() == StatusCode::OK);
         let ct = resp
             .headers()
             .get("content-type")
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(ct.starts_with("application/openmetrics-text"), "ct={ct}");
+        assert2::assert!(ct.starts_with("application/openmetrics-text"));
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
-        assert!(s.contains("crabka_logs_ingest_requests_total"), "{s}");
-        assert!(s.contains("# EOF"), "{s}");
+        assert2::assert!(s.contains("crabka_logs_ingest_requests_total"));
+        assert2::assert!(s.contains("# EOF"));
     }
 }

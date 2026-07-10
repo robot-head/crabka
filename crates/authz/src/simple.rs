@@ -135,7 +135,6 @@ fn implies(stored: AclOperation, requested: AclOperation) -> bool {
 mod tests {
     use std::net::SocketAddr;
 
-    use assert2::assert;
     use crabka_metadata::{MetadataImage, MetadataRecord, PatternType, ResourceType};
     use crabka_security::Principal;
     use uuid::Uuid;
@@ -212,7 +211,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read))
                 == AuthorizationResult::Deny
         );
@@ -233,7 +232,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(one_super("alice"));
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read))
                 == AuthorizationResult::Allow
         );
@@ -254,7 +253,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(one_super("admin"));
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read))
                 == AuthorizationResult::Deny
         );
@@ -274,13 +273,12 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        for (name, resource, expected) in [
+        for (_name, resource, expected) in [
             ("exact match", "foo", AuthorizationResult::Allow),
             ("literal mismatch", "foobar", AuthorizationResult::Deny),
         ] {
-            assert!(
-                auth.authorize(&img, &req(&a, &h, resource, AclOperation::Read)) == expected,
-                "case {name}"
+            assert2::assert!(
+                auth.authorize(&img, &req(&a, &h, resource, AclOperation::Read)) == expected
             );
         }
     }
@@ -299,13 +297,12 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        for (name, resource, expected) in [
+        for (_name, resource, expected) in [
             ("prefix match", "team-foo", AuthorizationResult::Allow),
             ("prefix mismatch", "other", AuthorizationResult::Deny),
         ] {
-            assert!(
-                auth.authorize(&img, &req(&a, &h, resource, AclOperation::Read)) == expected,
-                "case {name}"
+            assert2::assert!(
+                auth.authorize(&img, &req(&a, &h, resource, AclOperation::Read)) == expected
             );
         }
     }
@@ -332,7 +329,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read))
                 == AuthorizationResult::Deny
         );
@@ -352,7 +349,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read))
                 == AuthorizationResult::Allow
         );
@@ -373,13 +370,12 @@ mod tests {
         let h_match: SocketAddr = "127.0.0.1:5000".parse().unwrap();
         let h_nomatch: SocketAddr = "127.0.0.2:5000".parse().unwrap();
         let auth = SimpleAclAuthorizer::new(no_super());
-        for (name, host, expected) in [
+        for (_name, host, expected) in [
             ("host match", &h_match, AuthorizationResult::Allow),
             ("host mismatch", &h_nomatch, AuthorizationResult::Deny),
         ] {
-            assert!(
-                auth.authorize(&img, &req(&a, host, "foo", AclOperation::Read)) == expected,
-                "case {name}"
+            assert2::assert!(
+                auth.authorize(&img, &req(&a, host, "foo", AclOperation::Read)) == expected
             );
         }
     }
@@ -404,9 +400,8 @@ mod tests {
             AclOperation::Describe,
             AclOperation::Delete,
         ] {
-            assert!(
-                auth.authorize(&img, &req(&a, &h, "foo", op)) == AuthorizationResult::Allow,
-                "{op:?} should be allowed under operation::All"
+            assert2::assert!(
+                auth.authorize(&img, &req(&a, &h, "foo", op)) == AuthorizationResult::Allow
             );
         }
     }
@@ -437,7 +432,7 @@ mod tests {
         let actual = ["t1", "t2", "t3"].map(|topic| map.get(topic).copied());
         // t3: no matching ACL → Deny by default (default-deny; there is
         // no shim that allows in this case).
-        assert!(
+        assert2::assert!(
             actual
                 == [
                     Some(AuthorizationResult::Allow),
@@ -461,7 +456,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             [AclOperation::Read, AclOperation::Write]
                 .map(|operation| { auth.authorize(&img, &req(&a, &h, "foo", operation)) })
                 == [AuthorizationResult::Allow, AuthorizationResult::Deny]
@@ -491,7 +486,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Describe))
                 == AuthorizationResult::Allow
         );
@@ -508,7 +503,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Describe))
                 == AuthorizationResult::Allow
         );
@@ -525,7 +520,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Describe))
                 == AuthorizationResult::Allow
         );
@@ -542,7 +537,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Describe))
                 == AuthorizationResult::Allow
         );
@@ -559,7 +554,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::DescribeConfigs))
                 == AuthorizationResult::Allow
         );
@@ -576,7 +571,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(&img, &req(&a, &h, "foo", AclOperation::Read))
                 == AuthorizationResult::Deny
         );
@@ -627,7 +622,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(
                 &img,
                 &req_on(&a, &h, ResourceType::Group, "cg-1", AclOperation::Describe)
@@ -647,7 +642,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(
                 &img,
                 &req_on(
@@ -673,7 +668,7 @@ mod tests {
         let a = alice();
         let h = addr();
         let auth = SimpleAclAuthorizer::new(no_super());
-        assert!(
+        assert2::assert!(
             auth.authorize(
                 &img,
                 &req_on(
@@ -713,7 +708,7 @@ mod tests {
             .map(|principal| auth.authorize(&img, &req(principal, &h, "foo", AclOperation::Write)));
         // alice is not a super-user and the image has no matching ACL,
         // so default-deny applies (no compat shim).
-        assert!(
+        assert2::assert!(
             actual
                 == [
                     AuthorizationResult::Allow,

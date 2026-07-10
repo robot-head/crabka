@@ -784,7 +784,7 @@ impl PendingStreamsRecords {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -801,8 +801,8 @@ mod tests {
     fn group_metadata_round_trip() {
         let kb = encode_group_metadata_key("g1");
         let (ver, body) = peek_version(&kb);
-        assert!(ver == KEY_STREAMS_GROUP_METADATA);
-        assert!(
+        assert2::assert!(ver == KEY_STREAMS_GROUP_METADATA);
+        assert2::assert!(
             parse_streams_key(ver, body).unwrap()
                 == StreamsGroupKey::GroupMetadata {
                     group_id: "g1".into()
@@ -810,15 +810,15 @@ mod tests {
         );
 
         let v = StreamsGroupMetadataValue { epoch: 7 };
-        assert!(StreamsGroupMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(StreamsGroupMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
     fn member_metadata_round_trip() {
         let kb = encode_member_metadata_key("g1", "m1");
         let (ver, body) = peek_version(&kb);
-        assert!(ver == KEY_STREAMS_MEMBER_METADATA);
-        assert!(
+        assert2::assert!(ver == KEY_STREAMS_MEMBER_METADATA);
+        assert2::assert!(
             parse_streams_key(ver, body).unwrap()
                 == StreamsGroupKey::MemberMetadata {
                     group_id: "g1".into(),
@@ -840,7 +840,7 @@ mod tests {
             rebalance_timeout_ms: 60_000,
             topology_epoch: 3,
         };
-        assert!(StreamsGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(StreamsGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -856,15 +856,15 @@ mod tests {
             rebalance_timeout_ms: 45_000,
             topology_epoch: 0,
         };
-        assert!(StreamsGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(StreamsGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
     fn topology_round_trip() {
         let kb = encode_topology_key("g1");
         let (ver, body) = peek_version(&kb);
-        assert!(ver == KEY_STREAMS_TOPOLOGY);
-        assert!(
+        assert2::assert!(ver == KEY_STREAMS_TOPOLOGY);
+        assert2::assert!(
             parse_streams_key(ver, body).unwrap()
                 == StreamsGroupKey::Topology {
                     group_id: "g1".into()
@@ -908,21 +908,21 @@ mod tests {
                 },
             ],
         };
-        assert!(StreamsGroupTopologyValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(StreamsGroupTopologyValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
     fn topology_empty_round_trip() {
         let v = StreamsGroupTopologyValue::default();
-        assert!(StreamsGroupTopologyValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(StreamsGroupTopologyValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
     fn partition_metadata_round_trip() {
         let kb = encode_partition_metadata_key("g1");
         let (ver, body) = peek_version(&kb);
-        assert!(ver == KEY_STREAMS_PARTITION_METADATA);
-        assert!(
+        assert2::assert!(ver == KEY_STREAMS_PARTITION_METADATA);
+        assert2::assert!(
             parse_streams_key(ver, body).unwrap()
                 == StreamsGroupKey::PartitionMetadata {
                     group_id: "g1".into()
@@ -943,15 +943,15 @@ mod tests {
                 },
             ],
         };
-        assert!(StreamsGroupPartitionMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(StreamsGroupPartitionMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
     fn target_assignment_metadata_round_trip() {
         let kb = encode_target_assignment_metadata_key("g1");
         let (ver, body) = peek_version(&kb);
-        assert!(ver == KEY_STREAMS_TARGET_ASSIGNMENT_METADATA);
-        assert!(
+        assert2::assert!(ver == KEY_STREAMS_TARGET_ASSIGNMENT_METADATA);
+        assert2::assert!(
             parse_streams_key(ver, body).unwrap()
                 == StreamsGroupKey::TargetAssignmentMetadata {
                     group_id: "g1".into()
@@ -961,15 +961,17 @@ mod tests {
         let v = StreamsGroupTargetAssignmentMetadataValue {
             assignment_epoch: 12,
         };
-        assert!(StreamsGroupTargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(
+            StreamsGroupTargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v
+        );
     }
 
     #[test]
     fn target_assignment_member_round_trip() {
         let kb = encode_target_assignment_member_key("g1", "m1");
         let (ver, body) = peek_version(&kb);
-        assert!(ver == KEY_STREAMS_TARGET_ASSIGNMENT_MEMBER);
-        assert!(
+        assert2::assert!(ver == KEY_STREAMS_TARGET_ASSIGNMENT_MEMBER);
+        assert2::assert!(
             parse_streams_key(ver, body).unwrap()
                 == StreamsGroupKey::TargetAssignmentMember {
                     group_id: "g1".into(),
@@ -987,15 +989,17 @@ mod tests {
             standby,
             warmup: BTreeMap::new(),
         };
-        assert!(StreamsGroupTargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(
+            StreamsGroupTargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v
+        );
     }
 
     #[test]
     fn current_member_assignment_round_trip() {
         let kb = encode_current_member_assignment_key("g1", "m1");
         let (ver, body) = peek_version(&kb);
-        assert!(ver == KEY_STREAMS_CURRENT_MEMBER_ASSIGNMENT);
-        assert!(
+        assert2::assert!(ver == KEY_STREAMS_CURRENT_MEMBER_ASSIGNMENT);
+        assert2::assert!(
             parse_streams_key(ver, body).unwrap()
                 == StreamsGroupKey::CurrentMemberAssignment {
                     group_id: "g1".into(),
@@ -1016,7 +1020,9 @@ mod tests {
             warmup: BTreeMap::new(),
             active_pending_revocation: pending,
         };
-        assert!(StreamsGroupCurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(
+            StreamsGroupCurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v
+        );
     }
 
     #[test]
@@ -1033,12 +1039,12 @@ mod tests {
             warmup: BTreeMap::new(),
         };
         let decoded = StreamsGroupTargetAssignmentMemberValue::decode(&v.encode()).unwrap();
-        assert!(decoded == v);
+        assert2::assert!(decoded == v);
     }
 
     #[test]
     fn unknown_key_version_rejected() {
-        assert!(parse_streams_key(99, &[]).is_err());
+        assert2::assert!(parse_streams_key(99, &[]).is_err());
     }
 
     #[test]
@@ -1060,6 +1066,6 @@ mod tests {
         );
         // The tombstone record carries a null value.
         let tombstone = batch.records.iter().find(|r| r.value.is_none()).unwrap();
-        assert!(tombstone.key.is_some());
+        assert2::assert!(tombstone.key.is_some());
     }
 }

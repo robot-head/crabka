@@ -60,13 +60,7 @@ fn hex(bytes: &[u8]) -> String {
 /// Assert one encoded buffer matches its JVM golden vector byte-for-byte.
 fn assert_bytes(case: &str, got: &[u8]) {
     let want = golden(case);
-    assert_eq!(
-        got,
-        want.as_slice(),
-        "case `{case}`: Crabka encode != JVM golden\n  got : {}\n  want: {}",
-        hex(got),
-        hex(&want),
-    );
+    assert2::assert!(got == want.as_slice());
 }
 
 fn heartbeat() -> Heartbeat {
@@ -104,7 +98,7 @@ fn heartbeat_matches_jvm() {
     assert_bytes("heartbeat_value", &hb.value_bytes());
     let decoded = Heartbeat::from_bytes(&golden("heartbeat_key"), &golden("heartbeat_value"))
         .expect("decode JVM heartbeat bytes");
-    assert_eq!(decoded, hb, "Crabka decode(JVM heartbeat) != record");
+    assert2::assert!(decoded == hb);
 }
 
 #[test]
@@ -114,7 +108,7 @@ fn checkpoint_matches_jvm() {
     assert_bytes("checkpoint_value", &c.value_bytes());
     let decoded = Checkpoint::from_bytes(&golden("checkpoint_key"), &golden("checkpoint_value"))
         .expect("decode JVM checkpoint bytes");
-    assert_eq!(decoded, c, "Crabka decode(JVM checkpoint) != record");
+    assert2::assert!(decoded == c);
 }
 
 #[test]
@@ -124,5 +118,5 @@ fn offset_sync_matches_jvm() {
     assert_bytes("offset_sync_value", &os.value_bytes());
     let decoded = OffsetSync::from_bytes(&golden("offset_sync_key"), &golden("offset_sync_value"))
         .expect("decode JVM offset_sync bytes");
-    assert_eq!(decoded, os, "Crabka decode(JVM offset_sync) != record");
+    assert2::assert!(decoded == os);
 }

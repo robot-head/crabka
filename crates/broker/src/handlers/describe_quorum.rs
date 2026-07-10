@@ -235,7 +235,6 @@ fn build_nodes(quorum: &QuorumState) -> Vec<Node> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::assert;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::describe_quorum_request::{
@@ -323,7 +322,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         }];
-        assert!(out == expected);
+        assert2::assert!(out == expected);
     }
 
     #[test]
@@ -341,10 +340,7 @@ mod tests {
         let out = build_topic_responses(&req, &q);
         let pd = &out[0].partitions[0];
         for v in &pd.current_voters {
-            assert!(
-                v.log_end_offset == UNKNOWN_LOG_END_OFFSET,
-                "follower replication map empty → voter LEOs all -1"
-            );
+            assert2::assert!(v.log_end_offset == UNKNOWN_LOG_END_OFFSET);
         }
     }
 
@@ -369,7 +365,7 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        assert!(by_id == expected);
+        assert2::assert!(by_id == expected);
     }
 
     #[test]
@@ -390,7 +386,7 @@ mod tests {
             observers: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(*pd == expected);
+        assert2::assert!(*pd == expected);
     }
 
     #[test]
@@ -411,7 +407,7 @@ mod tests {
             observers: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(pd == &expected);
+        assert2::assert!(pd == &expected);
     }
 
     #[test]
@@ -434,14 +430,14 @@ mod tests {
             observers: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(pd == &expected);
+        assert2::assert!(pd == &expected);
     }
 
     #[test]
     fn empty_request_returns_no_topics() {
         let q = quorum_state(Some(1), 1, 0, &[1], &[]);
         let out = build_topic_responses(&[], &q);
-        assert!(out.is_empty());
+        assert2::assert!(out.is_empty());
     }
 
     #[test]
@@ -470,7 +466,7 @@ mod tests {
             .iter()
             .map(|t| (t.topic_name.as_str(), t.partitions[0].error_code))
             .collect();
-        assert!(
+        assert2::assert!(
             codes_by_topic
                 == vec![
                     (CLUSTER_METADATA_TOPIC, codes::NONE),
@@ -528,7 +524,7 @@ mod tests {
             .iter()
             .map(|v| (v.replica_id, v.replica_directory_id))
             .collect();
-        assert!(
+        assert2::assert!(
             dir_by_id == BTreeMap::from([(1, Uuid(*dir1.as_bytes())), (2, Uuid(*dir2.as_bytes()))])
         );
 
@@ -556,7 +552,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        assert!(nodes == expected_nodes);
+        assert2::assert!(nodes == expected_nodes);
     }
 
     #[test]
@@ -568,9 +564,9 @@ mod tests {
         let q = quorum_state(Some(1), 1, 0, &[1, 2], &[]);
         let topics = build_topic_responses(&req, &q);
         for v in &topics[0].partitions[0].current_voters {
-            assert!(v.replica_directory_id == Uuid::ZERO);
+            assert2::assert!(v.replica_directory_id == Uuid::ZERO);
         }
-        assert!(build_nodes(&q).is_empty());
+        assert2::assert!(build_nodes(&q).is_empty());
     }
 
     #[test]
@@ -582,10 +578,7 @@ mod tests {
         let huge = u64::from(u32::MAX) + 1; // > i32::MAX, try_from fails
         let q = quorum_state(Some(huge), 1, 0, &[1], &[]);
         let out = build_topic_responses(&req, &q);
-        assert!(
-            out[0].partitions[0].leader_id == -1,
-            "leader node id > i32::MAX must fall back to -1, not a positive id"
-        );
+        assert2::assert!(out[0].partitions[0].leader_id == -1);
     }
 
     #[test]
@@ -597,7 +590,7 @@ mod tests {
         let q = quorum_state(Some(1), 1, 0, &[huge], &[]);
         let out = build_topic_responses(&req, &q);
         let voters = &out[0].partitions[0].current_voters;
-        assert!(voters == &vec![expected_voter(-1, UNKNOWN_LOG_END_OFFSET)]);
+        assert2::assert!(voters == &vec![expected_voter(-1, UNKNOWN_LOG_END_OFFSET)]);
     }
 
     #[test]
@@ -608,6 +601,6 @@ mod tests {
         let req = req_for(CLUSTER_METADATA_TOPIC, 0);
         let q = quorum_state(Some(1), u64::MAX, 0, &[1], &[]);
         let out = build_topic_responses(&req, &q);
-        assert!(out[0].partitions[0].leader_epoch == i32::MAX);
+        assert2::assert!(out[0].partitions[0].leader_epoch == i32::MAX);
     }
 }

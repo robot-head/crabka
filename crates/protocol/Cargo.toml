@@ -40,6 +40,7 @@ lz4    = ["crabka-compression/lz4"]
 zstd   = ["crabka-compression/zstd"]
 
 [dependencies]
+assert2 = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 arbitrary = { workspace = true, optional = true }
@@ -49,8 +50,10 @@ crabka-compression = { version = "0.3.9", path = "../compression", default-featu
 serde_json = { workspace = true }
 strum = { workspace = true }
 
-[dev-dependencies]
+[build-dependencies]
 assert2 = { workspace = true }
+
+[dev-dependencies]
 proptest = { workspace = true }
 arbitrary = { workspace = true }
 datatest-stable = { workspace = true }

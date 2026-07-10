@@ -30,7 +30,7 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_client_admin::{AdminClient, CreatePartitionsOp, CreateTopicSpec, IncrementalAlterOp};
 
 #[path = "../../broker/tests/support/mod.rs"]
@@ -47,7 +47,7 @@ async fn admin_round_trip_create_alter_delete() {
     // 1. Topic doesn't exist initially.
     let md = admin.metadata(&["foo"]).await.unwrap();
     let foo = md.topics.iter().find(|t| t.name == "foo").unwrap();
-    assert!(foo.error.is_some(), "expected error for unknown topic");
+    assert2::assert!(foo.error.is_some());
 
     // 2. Create the topic with one config override.
     let configs = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
@@ -63,19 +63,15 @@ async fn admin_round_trip_create_alter_delete() {
         )
         .await
         .unwrap();
-    assert_eq!(outcomes.len(), 1);
-    assert!(
-        outcomes[0].error.is_none(),
-        "create failed: {:?}",
-        outcomes[0].error
-    );
+    assert2::assert!(outcomes.len() == 1);
+    assert2::assert!(outcomes[0].error.is_none());
 
     // 3. Metadata reflects the create.
     let md = admin.metadata(&["foo"]).await.unwrap();
     let foo = md.topics.iter().find(|t| t.name == "foo").unwrap();
     check!(foo.error.is_none());
-    assert_eq!(foo.partition_count, 3);
-    assert_eq!(foo.replication_factor, 1);
+    assert2::assert!(foo.partition_count == 3);
+    assert2::assert!(foo.replication_factor == 1);
 
     // 4. Increase partitions to 5.
     let outcomes = admin
@@ -88,7 +84,7 @@ async fn admin_round_trip_create_alter_delete() {
         )
         .await
         .unwrap();
-    assert!(outcomes[0].error.is_none());
+    assert2::assert!(outcomes[0].error.is_none());
     // Bounded poll until metadata reflects the partition increase to 5.
     let md = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -106,12 +102,12 @@ async fn admin_round_trip_create_alter_delete() {
     .await
     .expect("partition count reached 5 within 10s");
     let foo = md.topics.iter().find(|t| t.name == "foo").unwrap();
-    assert_eq!(foo.partition_count, 5);
+    assert2::assert!(foo.partition_count == 5);
 
     // 5. describe_configs reports retention.ms as a dynamic override.
     let overrides = admin.describe_configs(&["foo"]).await.unwrap();
-    assert_eq!(overrides.len(), 1);
-    assert!(
+    assert2::assert!(overrides.len() == 1);
+    assert2::assert!(
         overrides[0]
             .overrides
             .get("retention.ms")
@@ -128,9 +124,9 @@ async fn admin_round_trip_create_alter_delete() {
         }])
         .await
         .unwrap();
-    assert!(outcomes[0].error.is_none());
+    assert2::assert!(outcomes[0].error.is_none());
     let overrides = admin.describe_configs(&["foo"]).await.unwrap();
-    assert!(
+    assert2::assert!(
         overrides[0]
             .overrides
             .get("cleanup.policy")
@@ -146,7 +142,7 @@ async fn admin_round_trip_create_alter_delete() {
         }])
         .await
         .unwrap();
-    assert!(outcomes[0].error.is_none());
+    assert2::assert!(outcomes[0].error.is_none());
     // The broker may return either an empty Vec (no dynamic overrides remain
     // for the resource) or a Vec with one entry whose overrides map lacks
     // the deleted key. Both shapes indicate the DELETE landed. Iterate
@@ -155,14 +151,11 @@ async fn admin_round_trip_create_alter_delete() {
     let still_has_retention = overrides
         .iter()
         .any(|t| t.overrides.contains_key("retention.ms"));
-    assert!(
-        !still_has_retention,
-        "retention.ms should be absent after DELETE; got {overrides:?}",
-    );
+    assert2::assert!(!still_has_retention);
 
     // 8. Delete the topic.
     let outcomes = admin.delete_topics(&["foo"], 5_000).await.unwrap();
-    assert!(outcomes[0].error.is_none());
+    assert2::assert!(outcomes[0].error.is_none());
     // Bounded poll until metadata no longer reports `foo` as a live topic
     // (either absent entirely, or present but error-marked as unknown).
     let md = tokio::time::timeout(Duration::from_secs(10), async {
@@ -182,6 +175,6 @@ async fn admin_round_trip_create_alter_delete() {
     .expect("topic foo removed from metadata within 10s");
     let foo = md.topics.iter().find(|t| t.name == "foo");
     if let Some(t) = foo {
-        assert!(t.error.is_some(), "deleted topic should report unknown");
+        assert2::assert!(t.error.is_some());
     }
 }

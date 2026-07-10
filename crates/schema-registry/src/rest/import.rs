@@ -174,7 +174,7 @@ mod tests {
             file: vec![file("b.proto", &["a.proto"]), file("a.proto", &[])],
         })
         .unwrap();
-        assert_eq!(import.order, vec!["a.proto", "b.proto"]);
+        assert2::assert!(import.order == vec!["a.proto", "b.proto"]);
     }
 
     #[test]
@@ -183,6 +183,6 @@ mod tests {
             file: vec![file("a.proto", &[]), file("a.proto", &[])],
         })
         .unwrap_err();
-        assert!(err.to_string().contains("duplicate file"));
+        assert2::assert!(err.to_string().contains("duplicate file"));
     }
 }

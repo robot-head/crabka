@@ -971,10 +971,7 @@ fn split_brain_prevented() -> ScenarioTrace {
     sim.run_until_stable(10_000);
 
     let final_leaders = sim.leaders();
-    assert!(
-        final_leaders.len() == 1,
-        "split-brain scenario must end with exactly one leader, got {final_leaders:?}"
-    );
+    assert2::assert!(final_leaders.len() == 1);
     let outcome = format!(
         "The majority side elected N{new_leader} at a strictly higher epoch. The \
          isolated old leader N{old_leader} could not advance (no quorum), and on \
@@ -1056,10 +1053,7 @@ fn message_duplication() -> ScenarioTrace {
     sim.run_until_stable(10_000);
 
     let final_leaders = sim.leaders();
-    assert!(
-        final_leaders.len() <= 1,
-        "duplicate delivery must not create a second leader, got {final_leaders:?}"
-    );
+    assert2::assert!(final_leaders.len() <= 1);
     let outcome = format!(
         "A message was delivered twice ({}). The duplicate was handled idempotently — \
          a vote already counted is not counted again and an already-known epoch is \
@@ -1096,17 +1090,13 @@ mod tests {
     #[test]
     fn returns_three_traces() {
         let traces = scenarios();
-        assert!(traces.len() == 3);
+        assert2::assert!(traces.len() == 3);
     }
 
     #[test]
     fn every_trace_has_steps() {
         for trace in scenarios() {
-            assert!(
-                !trace.steps.is_empty(),
-                "scenario {} recorded no steps",
-                trace.id
-            );
+            assert2::assert!(!trace.steps.is_empty());
         }
     }
 
@@ -1119,10 +1109,7 @@ mod tests {
             .expect("split_brain_prevented trace present");
         let last = split.steps.last().expect("split-brain has steps");
         let leaders = last.roles.iter().filter(|r| r.role == "Leader").count();
-        assert!(
-            leaders == 1,
-            "final step must have exactly one Leader, got {leaders}"
-        );
+        assert2::assert!(leaders == 1);
     }
 
     // ---- interactive control surface (drives the browser playground) --------
@@ -1144,14 +1131,11 @@ mod tests {
     fn interactive_bootstrap_elects_one_leader() {
         let mut sim = Sim::new(&[NodeId(1), NodeId(2), NodeId(3)]);
         // Fresh cluster: no leader, election timers armed, bus empty.
-        assert!((sim.leaders().is_empty(), sim.snapshot().nodes.len()) == (true, 3));
+        assert2::assert!((sim.leaders().is_empty(), sim.snapshot().nodes.len()) == (true, 3));
 
         step_until(&mut sim, 10_000, |s| !s.leaders().is_empty());
         sim.run_until_stable(10_000);
-        assert!(
-            sim.leaders().len() == 1,
-            "exactly one leader after bootstrap"
-        );
+        assert2::assert!(sim.leaders().len() == 1);
 
         let snap = sim.snapshot();
         check!((snap.leaders.len(), snap.clock_ms > 0, snap.step_count > 0) == (1, true, true));
@@ -1170,11 +1154,7 @@ mod tests {
 
         sim.heal(old);
         sim.run_until_stable(10_000);
-        assert!(
-            sim.leaders().len() == 1,
-            "exactly one leader after partition+heal, got {:?}",
-            sim.leaders()
-        );
+        assert2::assert!(sim.leaders().len() == 1);
     }
 
     #[test]
@@ -1183,7 +1163,7 @@ mod tests {
         // Fire the first timer so there is election traffic on the bus.
         while sim.in_flight().is_empty() && sim.step_once() {}
         let before = sim.in_flight().len();
-        assert!(before > 0, "expected election messages on the bus");
+        assert2::assert!(before > 0);
 
         let steps_before = sim.steps().len();
         check!(sim.drop_next());
@@ -1191,27 +1171,29 @@ mod tests {
         // The drop is recorded on the timeline.
         check!(sim.steps().len() == steps_before + 1);
         let last = sim.steps().last().unwrap();
-        assert!(matches!(last.action, TraceAction::Drop { .. }));
+        assert2::assert!(matches!(last.action, TraceAction::Drop { .. }));
     }
 
     #[test]
     fn accessors_and_bus_faults_report_consistently() {
         let mut sim = Sim::new(&[NodeId(1), NodeId(2), NodeId(3)]);
-        assert!((sim.voter_ids(), sim.clock_ms()) == (vec![NodeId(1), NodeId(2), NodeId(3)], 0));
+        assert2::assert!(
+            (sim.voter_ids(), sim.clock_ms()) == (vec![NodeId(1), NodeId(2), NodeId(3)], 0)
+        );
 
         // Pump until there is election traffic, then exercise the bus-replay faults.
         while sim.in_flight().is_empty() && sim.step_once() {}
-        assert!(!sim.in_flight().is_empty());
-        assert!(sim.reorder() >= 1, "reorder delivers the queued round");
+        assert2::assert!(!sim.in_flight().is_empty());
+        assert2::assert!(sim.reorder() >= 1);
 
         // The logical clock advances as timers fire.
         sim.run_until_stable(10_000);
-        assert!(sim.clock_ms() > 0);
+        assert2::assert!(sim.clock_ms() > 0);
 
         // duplicate_next is a no-op-safe replay when the bus has a message.
         while sim.in_flight().is_empty() && sim.step_once() {}
         if !sim.in_flight().is_empty() {
-            assert!(sim.duplicate_next());
+            assert2::assert!(sim.duplicate_next());
         }
     }
 
@@ -1219,7 +1201,7 @@ mod tests {
     fn append_targets_the_current_leader() {
         let mut sim = Sim::new(&[NodeId(1), NodeId(2), NodeId(3)]);
         // No leader yet -> append is a no-op.
-        assert!(!sim.append(2));
+        assert2::assert!(!sim.append(2));
 
         step_until(&mut sim, 10_000, |s| !s.leaders().is_empty());
         sim.run_until_stable(10_000);
@@ -1231,13 +1213,13 @@ mod tests {
             .find(|n| n.id == leader.0)
             .map_or(0, |n| n.log_len);
 
-        assert!(sim.append(2));
+        assert2::assert!(sim.append(2));
         let after = sim
             .snapshot()
             .nodes
             .iter()
             .find(|n| n.id == leader.0)
             .map_or(0, |n| n.log_len);
-        assert!(after == before + 2, "append added 2 records to the leader");
+        assert2::assert!(after == before + 2);
     }
 }

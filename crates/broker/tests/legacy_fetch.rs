@@ -8,7 +8,6 @@
 
 #![allow(clippy::too_many_lines)]
 
-use assert2::assert;
 mod support;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -106,11 +105,7 @@ async fn create_topic(client: &crabka_client_core::Client, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        cr.topics[0].error_code == 0,
-        "CreateTopics error: {}",
-        cr.topics[0].error_code
-    );
+    assert2::assert!(cr.topics[0].error_code == 0);
 }
 
 /// Produce a single v2 batch to (topic, partition=0) via a modern flexible
@@ -168,11 +163,7 @@ async fn produce_batch(addr: std::net::SocketAddr, topic: &str, batch: RecordBat
     let produce_resp =
         ProduceResponse::decode(&mut cur, PRODUCE_VERSION).expect("decode ProduceResponse v9");
     let part_resp = &produce_resp.responses[0].partition_responses[0];
-    assert!(
-        part_resp.error_code == 0,
-        "produce error: {}",
-        part_resp.error_code
-    );
+    assert2::assert!(part_resp.error_code == 0);
 }
 
 /// Send a Fetch request at the given legacy `version` for (topic,
@@ -234,11 +225,7 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        cr.topics[0].error_code == 0,
-        "CreateTopics error: {}",
-        cr.topics[0].error_code
-    );
+    assert2::assert!(cr.topics[0].error_code == 0);
 
     // 2. Produce 2 records via modern path (ProduceRequest v9).
     let batch = RecordBatch {
@@ -270,16 +257,9 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
     let fetch_resp =
         LegacyFetchResponse::decode(&mut cur, 3).expect("decode LegacyFetchResponse v3");
 
-    assert!(
-        fetch_resp.responses.len() == 1,
-        "expected 1 topic in fetch response"
-    );
+    assert2::assert!(fetch_resp.responses.len() == 1);
     let part = &fetch_resp.responses[0].partitions[0];
-    assert!(
-        part.error_code == 0,
-        "fetch partition error: {}",
-        part.error_code
-    );
+    assert2::assert!(part.error_code == 0);
 
     // 5. The records field should be a Legacy MessageSet.
     let records_payload = part.records.as_ref().expect("records field should be Some");
@@ -298,7 +278,7 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
         .iter()
         .map(|record| (record.key.as_deref(), record.value.as_deref()))
         .collect();
-    assert!(
+    assert2::assert!(
         projection
             == vec![
                 (Some(b"key0".as_ref()), Some(b"val0".as_ref())),
@@ -328,11 +308,7 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        cr.topics[0].error_code == 0,
-        "CreateTopics error: {}",
-        cr.topics[0].error_code
-    );
+    assert2::assert!(cr.topics[0].error_code == 0);
 
     // 2. Produce 50 zstd-compressed records so compression is exercised.
     let records: Vec<Record> = (0i32..50)
@@ -364,11 +340,7 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
         LegacyFetchResponse::decode(&mut cur, 3).expect("decode LegacyFetchResponse v3");
 
     let part = &fetch_resp.responses[0].partitions[0];
-    assert!(
-        part.error_code == 0,
-        "fetch partition error: {}",
-        part.error_code
-    );
+    assert2::assert!(part.error_code == 0);
 
     // 5. Get the raw legacy bytes.
     let records_payload = part.records.as_ref().expect("records field should be Some");
@@ -382,22 +354,15 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
     // 6. The outer wrapper message's attributes byte should carry snappy (2).
     // MessageSet format: offset(8) + message_size(4) + crc(4) + magic(1) + attributes(1)
     // So attributes byte is at index 17.
-    assert!(
-        legacy_bytes.len() > 17,
-        "expected non-empty legacy bytes, got len={}",
-        legacy_bytes.len()
-    );
+    assert2::assert!(legacy_bytes.len() > 17);
     let codec = legacy_bytes[17] & 0x07;
-    assert!(
-        codec == 2,
-        "expected snappy codec id (2) in wrapper message attributes, got {codec}"
-    );
+    assert2::assert!(codec == 2);
 
     // 7. Verify the records decode correctly by round-tripping through decode_message_set.
     let mut ms_cur: &[u8] = &legacy_bytes;
     let recs = decode_message_set(&mut ms_cur, legacy_bytes.len())
         .expect("decode_message_set on snappy-recompressed payload");
-    assert!(
+    assert2::assert!(
         (recs.len(), recs[0].key.as_deref(), recs[49].key.as_deref())
             == (50, Some(b"key-0000".as_ref()), Some(b"key-0049".as_ref()))
     );
@@ -438,11 +403,7 @@ async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
         LegacyFetchResponse::decode(&mut cur, 0).expect("decode LegacyFetchResponse v0");
 
     let part = &fetch_resp.responses[0].partitions[0];
-    assert!(
-        part.error_code == 0,
-        "fetch partition error: {}",
-        part.error_code
-    );
+    assert2::assert!(part.error_code == 0);
 
     let legacy_bytes = match part.records.as_ref().expect("records field should be Some") {
         RecordsPayload::Legacy(b) => b.clone(),
@@ -453,12 +414,12 @@ async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
 
     // MessageSet layout: offset(8) + message_size(4) + crc(4) + magic(1).
     // The magic byte sits at index 16 and must be 0 for a v0 MessageSet.
-    assert!(legacy_bytes.len() > 16, "legacy bytes too short");
-    assert!(legacy_bytes[16] == 0, "expected v0 MessageSet magic byte 0");
+    assert2::assert!(legacy_bytes.len() > 16);
+    assert2::assert!(legacy_bytes[16] == 0);
 
     let mut ms_cur: &[u8] = &legacy_bytes;
     let recs = decode_message_set(&mut ms_cur, legacy_bytes.len()).expect("decode_message_set");
-    assert!(
+    assert2::assert!(
         (
             recs.len(),
             recs[0].timestamp,
@@ -503,10 +464,7 @@ async fn fetch_v3_drops_control_batch() {
         LegacyFetchResponse::decode(&mut cur, 3).expect("decode LegacyFetchResponse v3");
 
     let part = &fetch_resp.responses[0].partitions[0];
-    assert!(
-        (part.error_code, part.records.is_none()) == (0, true),
-        "control batch must be dropped, leaving no records on the wire"
-    );
+    assert2::assert!((part.error_code, part.records.is_none()) == (0, true));
 
     p.broker.shutdown().await;
 }

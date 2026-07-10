@@ -343,19 +343,18 @@ fn is_ident_continue(ch: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     fn toks(s: &str) -> Vec<Token> {
         let mut t = lex(s).unwrap();
-        assert!(t.pop() == Some(Token::Eof));
+        assert2::assert!(t.pop() == Some(Token::Eof));
         t
     }
 
     #[test]
     fn single_equals_no_double() {
-        assert!(
+        assert2::assert!(
             toks(".http.status = 200")
                 == vec![
                     Token::Dot,
@@ -364,7 +363,7 @@ mod tests {
                     Token::Int(200),
                 ]
         );
-        assert!(lex("a == b").is_err());
+        assert2::assert!(lex("a == b").is_err());
     }
 
     #[test]
@@ -376,9 +375,8 @@ mod tests {
             ("a !> b", Token::NegChild),
             ("a &~ b", Token::UnionSibling),
         ] {
-            assert!(
-                toks(input) == vec![Token::Ident("a".into()), mid, Token::Ident("b".into())],
-                "input: {input}"
+            assert2::assert!(
+                toks(input) == vec![Token::Ident("a".into()), mid, Token::Ident("b".into())]
             );
         }
     }
@@ -407,13 +405,13 @@ mod tests {
                 vec![Token::Ident("d".into()), Token::Lte, Token::Int(5)],
             ),
         ] {
-            assert!(toks(input) == want, "input: {input}");
+            assert2::assert!(toks(input) == want);
         }
     }
 
     #[test]
     fn colon_intrinsic_vs_dot_scope() {
-        assert!(
+        assert2::assert!(
             toks("span:duration")
                 == vec![
                     Token::Ident("span".into()),
@@ -421,7 +419,7 @@ mod tests {
                     Token::Ident("duration".into()),
                 ]
         );
-        assert!(
+        assert2::assert!(
             toks("span.foo")
                 == vec![
                     Token::Ident("span".into()),
@@ -439,33 +437,35 @@ mod tests {
             ("1.5", vec![Token::Float(1.5)]),
             ("100ms", vec![Token::Ident("100ms".into())]),
         ] {
-            assert!(toks(input) == want, "input: {input}");
+            assert2::assert!(toks(input) == want);
         }
     }
 
     #[test]
     fn identifier_character_helpers_match_traceql_grammar() {
         for (ch, want) in [('_', true), ('a', true), ('1', false), ('@', false)] {
-            assert!(is_ident_start(ch) == want, "ch: {ch:?}");
+            assert2::assert!(is_ident_start(ch) == want);
         }
 
         for (ch, want) in [('_', true), ('-', true), ('1', true), ('@', false)] {
-            assert!(is_ident_continue(ch) == want, "ch: {ch:?}");
+            assert2::assert!(is_ident_continue(ch) == want);
         }
     }
 
     #[test]
     fn leading_dot_fraction_is_single_float_preserving_zeros() {
         for (input, want) in [(".05", 0.05), (".99", 0.99), (".5", 0.5), (".009", 0.009)] {
-            assert!(toks(input) == vec![Token::Float(want)], "input: {input}");
+            assert2::assert!(toks(input) == vec![Token::Float(want)]);
         }
     }
 
     #[test]
     fn leading_dot_ident_remains_dot_scope() {
         // A dot followed by an identifier must stay `Dot` + `Ident`, never a float.
-        assert!(toks(".service") == vec![Token::Dot, Token::Ident("service".into())]);
-        assert!(toks(".http.status") == vec![Token::Dot, Token::Ident("http.status".into())]);
+        assert2::assert!(toks(".service") == vec![Token::Dot, Token::Ident("service".into())]);
+        assert2::assert!(
+            toks(".http.status") == vec![Token::Dot, Token::Ident("http.status".into())]
+        );
     }
 
     #[test]
@@ -473,8 +473,8 @@ mod tests {
         // A bare `&` (not part of a union/and operator) lexes to an Ident("&"),
         // not a parse error. Deleting the `'&'` arm in op_token would make the
         // lexer reject it as an unexpected character.
-        assert!(toks("&") == vec![Token::Ident("&".into())]);
-        assert!(lex("&").is_ok());
+        assert2::assert!(toks("&") == vec![Token::Ident("&".into())]);
+        assert2::assert!(lex("&").is_ok());
     }
 
     #[test]
@@ -485,17 +485,14 @@ mod tests {
         // digit (e.g. the `+` in `1+2`) get swallowed into the number, so the
         // whole run is parsed as one float and fails. Asserting `1+2` lexes as
         // three tokens kills both mutants; `1.5` guards the legit-float path.
-        assert!(toks("1+2") == vec![Token::Int(1), Token::Plus, Token::Int(2)]);
-        assert!(toks("1.5") == vec![Token::Float(1.5)]);
+        assert2::assert!(toks("1+2") == vec![Token::Int(1), Token::Plus, Token::Int(2)]);
+        assert2::assert!(toks("1.5") == vec![Token::Float(1.5)]);
     }
 
     #[test]
     fn advance_rejects_zero_or_out_of_bounds_progress() {
         for (pos, len, want) in [(0, 1, Some(1)), (1, 0, None), (2, 2, None)] {
-            assert!(
-                advance("abc", pos, len).ok() == want,
-                "pos: {pos}, len: {len}"
-            );
+            assert2::assert!(advance("abc", pos, len).ok() == want);
         }
     }
 }

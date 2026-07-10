@@ -356,16 +356,16 @@ mod tests {
     fn no_subscription_means_no_metrics() {
         let img = MetadataImage::new(Uuid::nil());
         let m = compute_subscription(&img, &attrs());
-        assert_eq!(m.metrics, Vec::<String>::new());
-        assert_eq!(m.push_interval_ms, 300_000);
+        assert2::assert!(m.metrics == Vec::<String>::new());
+        assert2::assert!(m.push_interval_ms == 300_000);
     }
 
     #[test]
     fn match_all_empty_match_applies() {
         let img = img_with("all", &[("metrics", "*"), ("interval.ms", "60000")]);
         let m = compute_subscription(&img, &attrs());
-        assert_eq!(m.metrics, vec!["*".to_string()]);
-        assert_eq!(m.push_interval_ms, 60_000);
+        assert2::assert!(m.metrics == vec!["*".to_string()]);
+        assert2::assert!(m.push_interval_ms == 60_000);
     }
 
     #[test]
@@ -378,7 +378,7 @@ mod tests {
             ],
         );
         let m = compute_subscription(&img, &attrs());
-        assert_eq!(m.metrics, vec!["a.".to_string()]);
+        assert2::assert!(m.metrics == vec!["a.".to_string()]);
 
         let img2 = img_with(
             "py-only",
@@ -388,10 +388,7 @@ mod tests {
             ],
         );
         let m2 = compute_subscription(&img2, &attrs());
-        assert!(
-            m2.metrics.is_empty(),
-            "java client must not match python selector"
-        );
+        assert2::assert!(m2.metrics.is_empty());
     }
 
     #[test]
@@ -411,8 +408,8 @@ mod tests {
         let m = compute_subscription(&img, &attrs());
         let mut got = m.metrics.clone();
         got.sort();
-        assert_eq!(got, vec!["a.".to_string(), "b.".to_string()]);
-        assert_eq!(m.push_interval_ms, 30_000);
+        assert2::assert!(got == vec!["a.".to_string(), "b.".to_string()]);
+        assert2::assert!(m.push_interval_ms == 30_000);
     }
 
     #[test]
@@ -429,7 +426,7 @@ mod tests {
             },
         ));
         let m = compute_subscription(&img, &attrs());
-        assert_eq!(m.metrics, vec!["*".to_string()]);
+        assert2::assert!(m.metrics == vec!["*".to_string()]);
     }
 
     #[test]
@@ -444,17 +441,17 @@ mod tests {
             metrics: vec!["b.".into(), "a.".into()],
             push_interval_ms: 60_000,
         };
-        assert_eq!(id1, subscription_id(&s1b, a.client_instance_id));
+        assert2::assert!(id1 == subscription_id(&s1b, a.client_instance_id));
         let s2 = ComputedSubscription {
             metrics: vec!["a.".into(), "b.".into()],
             push_interval_ms: 30_000,
         };
-        assert_ne!(id1, subscription_id(&s2, a.client_instance_id));
+        assert2::assert!(id1 != subscription_id(&s2, a.client_instance_id));
         let s3 = ComputedSubscription {
             metrics: vec!["a.".into()],
             push_interval_ms: 60_000,
         };
-        assert_ne!(id1, subscription_id(&s3, a.client_instance_id));
+        assert2::assert!(id1 != subscription_id(&s3, a.client_instance_id));
     }
 
     #[test]
@@ -472,42 +469,42 @@ mod tests {
         };
         let assigned = m.assign(&img, &attrs);
         // First push after assign is allowed (compression_supported=true).
-        assert!(matches!(
+        assert2::assert!(matches!(
             m.authorize_push(id, assigned.subscription_id, false, true, 10),
             PushDecision::Accept { .. }
         ));
         // Immediate second push (interval not elapsed, no new get) is throttled —
         // even if the payload would also be oversized; throttle wins per Kafka order.
-        assert!(matches!(
+        assert2::assert!(matches!(
             m.authorize_push(id, assigned.subscription_id, false, true, 10),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::THROTTLING_QUOTA_EXCEEDED
         ));
         // Ordering assertion: oversized payload that is ALSO interval-not-elapsed
         // must return THROTTLING_QUOTA_EXCEEDED (throttle before size in ladder).
-        assert!(matches!(
+        assert2::assert!(matches!(
             m.authorize_push(id, assigned.subscription_id, false, true, 2048),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::THROTTLING_QUOTA_EXCEEDED
         ));
         // Wrong subscription id → UNKNOWN_SUBSCRIPTION_ID.
-        assert!(matches!(
+        assert2::assert!(matches!(
             m.authorize_push(id, assigned.subscription_id ^ 0x5555, false, true, 10),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::UNKNOWN_SUBSCRIPTION_ID
         ));
         // Unknown instance → INVALID_REQUEST.
-        assert!(matches!(
+        assert2::assert!(matches!(
             m.authorize_push(Uuid::from_u128(999), 0, false, true, 10),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::INVALID_REQUEST
         ));
         // Re-assign to get a fresh get-timestamp (acts as a new allowance).
         let assigned2 = m.assign(&img, &attrs);
         // Oversized payload with fresh get → TELEMETRY_TOO_LARGE.
-        assert!(matches!(
+        assert2::assert!(matches!(
             m.authorize_push(id, assigned2.subscription_id, false, true, 2048),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::TELEMETRY_TOO_LARGE
         ));
         // Unsupported compression with fresh get + small payload → UNSUPPORTED_COMPRESSION_TYPE.
         let assigned3 = m.assign(&img, &attrs);
-        assert!(matches!(
+        assert2::assert!(matches!(
             m.authorize_push(id, assigned3.subscription_id, false, false, 10),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::UNSUPPORTED_COMPRESSION_TYPE
         ));

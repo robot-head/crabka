@@ -7,7 +7,6 @@
 
 use std::sync::Arc;
 
-use assert2::assert;
 use crabka_operator::{
     controller::kafka::reconcile,
     crd::{
@@ -201,33 +200,22 @@ async fn ingress_listener_renders_ingress_objects_and_advertises_443() {
         &Method::PATCH,
         &format!("/ingresses/{name}-ext-0"),
     );
-    assert_eq!(
-        &ing["metadata"]["annotations"]["nginx.ingress.kubernetes.io/ssl-passthrough"],
-        &serde_json::json!("true"),
-        "ingress = {ing}"
+    assert2::assert!(
+        &ing["metadata"]["annotations"]["nginx.ingress.kubernetes.io/ssl-passthrough"]
+            == &serde_json::json!("true")
     );
-    assert_eq!(
-        &ing["spec"]["ingressClassName"],
-        &serde_json::json!("nginx"),
-        "ingress = {ing}"
+    assert2::assert!(&ing["spec"]["ingressClassName"] == &serde_json::json!("nginx"));
+    assert2::assert!(
+        &ing["spec"]["rules"][0]["host"] == &serde_json::json!("broker-0.kafka.example.com")
     );
-    assert_eq!(
-        &ing["spec"]["rules"][0]["host"],
-        &serde_json::json!("broker-0.kafka.example.com"),
-        "ingress = {ing}"
-    );
-    assert_eq!(
-        &ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["name"],
-        &serde_json::json!(format!("{name}-ext-0")),
-        "ingress = {ing}"
+    assert2::assert!(
+        &ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["name"]
+            == &serde_json::json!(format!("{name}-ext-0"))
     );
 
     // ConfigMap advertises the ingress host on 443.
     let toml = broker0_toml(&observed, name);
-    assert!(
-        toml.contains("advertised = \"broker-0.kafka.example.com:443\""),
-        "expected ingress advertised on :443;\n{toml}"
-    );
+    assert2::assert!(toml.contains("advertised = \"broker-0.kafka.example.com:443\""));
 
     // Status: ListenersReady=True and the bootstrap address is on :443.
     let status = body_of(&observed, &Method::PATCH, &format!("/kafkas/{name}/status"));
@@ -236,16 +224,16 @@ async fn ingress_listener_renders_ingress_objects_and_advertises_443() {
         .iter()
         .find(|c| c["type"] == "ListenersReady")
         .unwrap();
-    assert!(ready["status"] == "True", "status = {status}");
+    assert2::assert!(ready["status"] == "True");
     let ext = status["status"]["listeners"]
         .as_array()
         .unwrap()
         .iter()
         .find(|l| l["name"] == "ext")
         .unwrap_or_else(|| panic!("ext listener status missing; status = {status}"));
-    assert!(ext["bootstrapServers"] == "bootstrap.kafka.example.com:443");
+    assert2::assert!(ext["bootstrapServers"] == "bootstrap.kafka.example.com:443");
 
-    assert!(state.remaining_rules() == 0, "all rules consumed");
+    assert2::assert!(state.remaining_rules() == 0);
 }
 
 // ── test 2: route ─────────────────────────────────────────────────────────────
@@ -301,34 +289,15 @@ async fn route_listener_renders_passthrough_route_objects() {
     let observed = state.take_observed();
 
     let route = body_of(&observed, &Method::PATCH, &format!("/routes/{name}-ext-0"));
-    assert_eq!(
-        &route["spec"]["tls"]["termination"],
-        &serde_json::json!("passthrough"),
-        "route = {route}"
-    );
-    assert_eq!(
-        &route["spec"]["host"],
-        &serde_json::json!("broker-0.kafka.example.com"),
-        "route = {route}"
-    );
-    assert_eq!(
-        &route["spec"]["port"]["targetPort"],
-        &serde_json::json!(9094),
-        "route = {route}"
-    );
-    assert_eq!(
-        &route["spec"]["to"]["name"],
-        &serde_json::json!(format!("{name}-ext-0")),
-        "route = {route}"
-    );
+    assert2::assert!(&route["spec"]["tls"]["termination"] == &serde_json::json!("passthrough"));
+    assert2::assert!(&route["spec"]["host"] == &serde_json::json!("broker-0.kafka.example.com"));
+    assert2::assert!(&route["spec"]["port"]["targetPort"] == &serde_json::json!(9094));
+    assert2::assert!(&route["spec"]["to"]["name"] == &serde_json::json!(format!("{name}-ext-0")));
 
     let toml = broker0_toml(&observed, name);
-    assert!(
-        toml.contains("advertised = \"broker-0.kafka.example.com:443\""),
-        "expected route advertised on :443;\n{toml}"
-    );
+    assert2::assert!(toml.contains("advertised = \"broker-0.kafka.example.com:443\""));
 
-    assert!(state.remaining_rules() == 0, "all rules consumed");
+    assert2::assert!(state.remaining_rules() == 0);
 }
 
 // ── test 3: validation failure ────────────────────────────────────────────────
@@ -356,15 +325,12 @@ async fn ingress_without_tls_surfaces_validation_error() {
     reconcile(Arc::new(kafka), ctx).await.unwrap();
 
     let observed = state.take_observed();
-    assert!(
-        !observed.iter().any(|r| {
-            r.method() == Method::PATCH
-                && r.uri()
-                    .to_string()
-                    .contains(&format!("/configmaps/{name}-broker-config"))
-        }),
-        "validation failure must not patch the broker-config ConfigMap"
-    );
+    assert2::assert!(!observed.iter().any(|r| {
+        r.method() == Method::PATCH
+            && r.uri()
+                .to_string()
+                .contains(&format!("/configmaps/{name}-broker-config"))
+    }));
 
     let status = body_of(&observed, &Method::PATCH, &format!("/kafkas/{name}/status"));
     let conds = status["status"]["conditions"].as_array().unwrap();
@@ -372,10 +338,6 @@ async fn ingress_without_tls_surfaces_validation_error() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap();
-    assert_eq!(valid["status"].as_str(), Some("False"), "status = {status}");
-    assert_eq!(
-        valid["reason"].as_str(),
-        Some("ListenerIngressRequiresTls"),
-        "status = {status}"
-    );
+    assert2::assert!(valid["status"].as_str() == Some("False"));
+    assert2::assert!(valid["reason"].as_str() == Some("ListenerIngressRequiresTls"));
 }

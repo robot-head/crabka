@@ -216,7 +216,7 @@ pub fn condition_for(outcome: &LoggingOutcome) -> KafkaCondition {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn compose_inline_filter_success_cases() {
-        for (name, input, expected) in [
+        for (_name, input, expected) in [
             ("root is a bare level", &[("root", "info")][..], "info"),
             (
                 "target includes its level",
@@ -261,17 +261,13 @@ mod tests {
                 "debug",
             ),
         ] {
-            assert_eq!(
-                compose_inline_filter(&loggers(input)),
-                Ok(expected.to_string()),
-                "case {name}"
-            );
+            assert2::assert!(compose_inline_filter(&loggers(input)) == Ok(expected.to_string()));
         }
     }
 
     #[test]
     fn compose_inline_filter_error_cases() {
-        for (name, input, expected, expected_reason) in [
+        for (_name, input, expected, expected_reason) in [
             (
                 "empty logger map",
                 &[][..],
@@ -296,8 +292,8 @@ mod tests {
         ] {
             let actual = compose_inline_filter(&loggers(input)).unwrap_err();
             let actual_reason = actual.reason();
-            assert_eq!(actual, expected, "case {name}");
-            assert_eq!(actual_reason, expected_reason, "case {name}");
+            assert2::assert!(actual == expected);
+            assert2::assert!(actual_reason == expected_reason);
         }
     }
 
@@ -308,7 +304,7 @@ mod tests {
             (LoggingOutcome::Disabled, None),
             (LoggingOutcome::Invalid(LoggingError::EmptyLoggers), None),
         ] {
-            assert!(outcome.filter() == want, "case {outcome:?}");
+            assert2::assert!(outcome.filter() == want);
         }
     }
 

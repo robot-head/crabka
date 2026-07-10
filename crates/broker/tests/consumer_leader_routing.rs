@@ -27,7 +27,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::assert;
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
@@ -156,7 +155,7 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
         })
         .await
         .unwrap();
-    assert!(cr.topics[0].error_code == 0, "create_topic: {cr:?}");
+    assert2::assert!(cr.topics[0].error_code == 0);
     let topic_id = cr.topics[0].topic_id;
 
     // Wait until node 1's controller image knows every partition AND its
@@ -186,11 +185,7 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
                 .is_some_and(|l| l != bootstrap_node)
         })
         .collect();
-    assert!(
-        !non_bootstrap_partitions.is_empty(),
-        "all {n_partitions} partitions are led by the bootstrap node — \
-         no cross-broker routing to exercise; test would be vacuous"
-    );
+    assert2::assert!(!non_bootstrap_partitions.is_empty());
     eprintln!(
         "partitions led by non-bootstrap brokers: {non_bootstrap_partitions:?} \
          (bootstrap = node {bootstrap_node})"
@@ -254,13 +249,7 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
             seen.insert(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
         }
     }
-    assert!(
-        seen == expected,
-        "consumer must deliver every partition's record (incl. those on non-bootstrap leaders);\n\
-         missing: {:?}\n\
-         non-bootstrap partitions: {non_bootstrap_partitions:?}",
-        expected.difference(&seen).collect::<Vec<_>>()
-    );
+    assert2::assert!(seen == expected);
 
     consumer.close().await.unwrap();
     for (h, _, _) in cluster {

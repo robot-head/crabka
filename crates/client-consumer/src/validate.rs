@@ -227,7 +227,7 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -244,14 +244,14 @@ mod tests {
     fn leader_epoch_update_marks_only_real_advances_with_consumed_epoch() {
         let mut p = pos(2, 2, false);
         update_leader_epoch(&mut p, LeaderEpoch(2));
-        assert!((p.leader_epoch, p.awaiting_validation) == (LeaderEpoch(2), false));
+        assert2::assert!((p.leader_epoch, p.awaiting_validation) == (LeaderEpoch(2), false));
 
         update_leader_epoch(&mut p, LeaderEpoch(3));
-        assert!((p.leader_epoch, p.awaiting_validation) == (LeaderEpoch(3), true));
+        assert2::assert!((p.leader_epoch, p.awaiting_validation) == (LeaderEpoch(3), true));
 
         let mut never_consumed = pos(-1, -1, false);
         update_leader_epoch(&mut never_consumed, LeaderEpoch(0));
-        assert!(
+        assert2::assert!(
             (
                 never_consumed.leader_epoch,
                 never_consumed.awaiting_validation
@@ -260,14 +260,14 @@ mod tests {
 
         let mut equal_but_consumed = pos(2, 3, false);
         update_leader_epoch(&mut equal_but_consumed, LeaderEpoch(3));
-        assert!(!equal_but_consumed.awaiting_validation);
+        assert2::assert!(!equal_but_consumed.awaiting_validation);
 
-        assert!(!should_await_validation(LeaderEpoch(2), LeaderEpoch(2)));
+        assert2::assert!(!should_await_validation(LeaderEpoch(2), LeaderEpoch(2)));
     }
 
     #[test]
     fn validation_eligibility_clears_never_consumed_partitions() {
-        for (name, offset, awaiting_validation, clear, expected) in [
+        for (_name, offset, awaiting_validation, clear, expected) in [
             ("never consumed", -1, true, true, (false, false)),
             ("consumed", 2, true, false, (true, true)),
             ("consumed at zero", 0, true, true, (true, true)),
@@ -277,12 +277,11 @@ mod tests {
             if clear {
                 clear_unvalidatable_position(&mut position);
             }
-            assert!(
+            assert2::assert!(
                 (
                     position.awaiting_validation,
                     should_validate_position(&position)
-                ) == expected,
-                "case {name}"
+                ) == expected
             );
         }
     }
@@ -294,11 +293,8 @@ mod tests {
             ("negative leader", -1, true, false),
             ("unknown broker", 3, false, false),
         ];
-        for (name, leader_id, knows_leader, expected) in cases {
-            assert!(
-                should_route_to_leader(leader_id, knows_leader) == expected,
-                "case {name}"
-            );
+        for (_name, leader_id, knows_leader, expected) in cases {
+            assert2::assert!(should_route_to_leader(leader_id, knows_leader) == expected);
         }
     }
 
@@ -321,8 +317,8 @@ mod tests {
 
     #[test]
     fn zero_error_code_is_success_and_nonzero_is_error() {
-        for (name, code, expected) in [("success", 0, false), ("error", 74, true)] {
-            assert!(response_has_error(code) == expected, "case {name}");
+        for (_name, code, expected) in [("success", 0, false), ("error", 74, true)] {
+            assert2::assert!(response_has_error(code) == expected);
         }
     }
 
@@ -330,6 +326,6 @@ mod tests {
     fn validation_error_resets_epoch_and_keeps_partition_flagged() {
         let mut p = pos(2, 7, false);
         mark_validation_error(&mut p);
-        assert!((p.leader_epoch, p.awaiting_validation) == (LeaderEpoch(-1), true));
+        assert2::assert!((p.leader_epoch, p.awaiting_validation) == (LeaderEpoch(-1), true));
     }
 }

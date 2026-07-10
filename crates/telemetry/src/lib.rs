@@ -439,7 +439,7 @@ mod tests {
         atomic::{AtomicUsize, Ordering::SeqCst},
     };
 
-    use assert2::{assert, check};
+    use assert2::check;
     use opentelemetry_sdk::error::OTelSdkResult;
 
     use super::*;
@@ -499,13 +499,13 @@ mod tests {
     #[test]
     fn disabled_when_no_env() {
         let cfg = OtlpConfig::from_env(env_from(&[]), "1", "0.1.1", "crabka-broker");
-        assert!(cfg.is_none());
+        assert2::assert!(cfg.is_none());
     }
 
     #[test]
     fn env_truthy_rejects_falsy_values() {
         for value in ["", "0", "false", "no", "off", " definitely "] {
-            assert!(!env_truthy(value), "expected {value:?} to be falsy");
+            assert2::assert!(!env_truthy(value));
         }
     }
 
@@ -517,7 +517,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         );
-        assert!(cfg.is_none());
+        assert2::assert!(cfg.is_none());
 
         let cfg = OtlpConfig::from_env(
             env_from(&[
@@ -528,7 +528,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         );
-        assert!(cfg.is_some());
+        assert2::assert!(cfg.is_some());
     }
 
     #[test]
@@ -540,12 +540,12 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(cfg.endpoint.as_str(), "http://collector:4317");
-        assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
-        assert!((cfg.sample_ratio - 1.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.service_name.as_str(), "crabka-broker");
-        assert_eq!(cfg.service_instance_id.as_str(), "7");
-        assert_eq!(cfg.service_version.as_str(), "0.1.1");
+        assert2::assert!(cfg.endpoint.as_str() == "http://collector:4317");
+        assert2::assert!(cfg.protocol == OtlpProtocol::Grpc);
+        assert2::assert!((cfg.sample_ratio - 1.0).abs() < f64::EPSILON);
+        assert2::assert!(cfg.service_name.as_str() == "crabka-broker");
+        assert2::assert!(cfg.service_instance_id.as_str() == "7");
+        assert2::assert!(cfg.service_version.as_str() == "0.1.1");
     }
 
     #[test]
@@ -560,8 +560,8 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(cfg.protocol, OtlpProtocol::HttpProtobuf);
-        assert_eq!(cfg.endpoint.as_str(), "http://localhost:4318");
+        assert2::assert!(cfg.protocol == OtlpProtocol::HttpProtobuf);
+        assert2::assert!(cfg.endpoint.as_str() == "http://localhost:4318");
     }
 
     #[test]
@@ -573,8 +573,8 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
-        assert_eq!(cfg.endpoint.as_str(), "http://localhost:4317");
+        assert2::assert!(cfg.protocol == OtlpProtocol::Grpc);
+        assert2::assert!(cfg.endpoint.as_str() == "http://localhost:4317");
     }
 
     #[test]
@@ -588,7 +588,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         );
-        assert!(cfg.is_none());
+        assert2::assert!(cfg.is_none());
     }
 
     #[test]
@@ -601,7 +601,7 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(cfg.endpoint, "http://otel:4317");
+        assert2::assert!(cfg.endpoint == "http://otel:4317");
 
         // Traces-specific endpoint wins over the generic one.
         let cfg = OtlpConfig::from_env(
@@ -614,7 +614,7 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(cfg.endpoint, "http://traces:4317");
+        assert2::assert!(cfg.endpoint == "http://traces:4317");
 
         // CRABKA override wins over everything.
         let cfg = OtlpConfig::from_env(
@@ -627,7 +627,7 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(cfg.endpoint, "http://crabka:4317");
+        assert2::assert!(cfg.endpoint == "http://crabka:4317");
     }
 
     #[test]
@@ -642,7 +642,7 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert!((cfg.sample_ratio - 0.25).abs() < f64::EPSILON);
+        assert2::assert!((cfg.sample_ratio - 0.25).abs() < f64::EPSILON);
 
         // Out-of-range clamps to [0,1].
         let cfg = OtlpConfig::from_env(
@@ -655,7 +655,7 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert!((cfg.sample_ratio - 1.0).abs() < f64::EPSILON);
+        assert2::assert!((cfg.sample_ratio - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -667,7 +667,7 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert!(cfg.heartbeat_interval.is_none());
+        assert2::assert!(cfg.heartbeat_interval.is_none());
 
         let cfg = OtlpConfig::from_env(
             env_from(&[
@@ -679,7 +679,7 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert!(cfg.heartbeat_interval.is_none());
+        assert2::assert!(cfg.heartbeat_interval.is_none());
     }
 
     #[test]
@@ -694,7 +694,7 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(cfg.heartbeat_interval, Some(Duration::from_secs(15)));
+        assert2::assert!(cfg.heartbeat_interval == Some(Duration::from_secs(15)));
     }
 
     #[test]
@@ -715,11 +715,11 @@ mod tests {
         provider.force_flush().expect("flush spans");
 
         let spans = exporter.spans();
-        assert_eq!(spans.len(), 1);
+        assert2::assert!(spans.len() == 1);
         let span = &spans[0];
-        assert_eq!(span.name, "crabka.telemetry.heartbeat");
+        assert2::assert!(span.name == "crabka.telemetry.heartbeat");
         check!(span.parent_span_is_remote);
-        assert_eq!(span.span_context.trace_flags(), TraceFlags::SAMPLED);
+        assert2::assert!(span.span_context.trace_flags() == TraceFlags::SAMPLED);
         check!(
             span.attributes
                 .iter()
@@ -741,8 +741,8 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(cfg.service_name.as_str(), "my-kafka");
-        assert_eq!(cfg.timeout, Duration::from_secs(3));
+        assert2::assert!(cfg.service_name.as_str() == "my-kafka");
+        assert2::assert!(cfg.timeout == Duration::from_secs(3));
     }
 
     #[test]
@@ -753,23 +753,23 @@ mod tests {
             ("HTTP", OtlpProtocol::HttpProtobuf),
             ("nonsense", OtlpProtocol::Grpc),
         ] {
-            assert_eq!(OtlpProtocol::parse(input), want, "case {input:?}");
+            assert2::assert!(OtlpProtocol::parse(input) == want);
         }
     }
 
     #[test]
     fn otel_filter_uses_override_or_default() {
         let filter = otel_filter("warn", env_from(&[]));
-        assert_eq!(filter.to_string(), "warn");
+        assert2::assert!(filter.to_string() == "warn");
 
         let filter = otel_filter(
             "warn",
             env_from(&[("CRABKA_OTLP_FILTER", "crabka_telemetry=debug")]),
         );
-        assert_eq!(filter.to_string(), "crabka_telemetry=debug");
+        assert2::assert!(filter.to_string() == "crabka_telemetry=debug");
 
         let filter = otel_filter("warn", env_from(&[("CRABKA_OTLP_FILTER", "[")]));
-        assert_eq!(filter.to_string(), "warn");
+        assert2::assert!(filter.to_string() == "warn");
     }
 
     #[test]
@@ -789,7 +789,7 @@ mod tests {
         }
         .shutdown();
 
-        assert_eq!(calls.load(SeqCst), 1);
+        assert2::assert!(calls.load(SeqCst) == 1);
         drop(held_clone);
     }
 }

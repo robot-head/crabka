@@ -33,8 +33,6 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use assert2::assert;
-
     use super::*;
 
     #[tokio::test]
@@ -58,22 +56,22 @@ mod tests {
         })
         .await;
 
-        assert!(results.len() == 20);
+        assert2::assert!(results.len() == 20);
         let sum: usize = results.iter().sum();
         let expected: usize = (0..20).map(|j| j * 2).sum();
-        assert!(sum == expected);
-        assert!(max_seen.load(Ordering::SeqCst) <= 4);
+        assert2::assert!(sum == expected);
+        assert2::assert!(max_seen.load(Ordering::SeqCst) <= 4);
     }
 
     #[tokio::test]
     async fn zero_concurrency_clamps_to_one() {
         let results = run_jobs(vec![1, 2, 3], 0, |j| async move { j }).await;
-        assert!(results.len() == 3);
+        assert2::assert!(results.len() == 3);
     }
 
     #[tokio::test]
     async fn empty_jobs_returns_empty() {
         let results: Vec<usize> = run_jobs(Vec::new(), 4, |j: usize| async move { j }).await;
-        assert!(results.is_empty());
+        assert2::assert!(results.is_empty());
     }
 }

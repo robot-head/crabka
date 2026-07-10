@@ -25,6 +25,7 @@ workspace = true
 scenarios = ["crabka-kraft-core/sim"]
 
 [dependencies]
+assert2 = { workspace = true }
 crabka-kraft-core = { version = "0.3.8", path = "../kraft-core" }
 crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
@@ -45,7 +46,6 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 mockall = { workspace = true }
 mutants = { workspace = true }
 stateright = { workspace = true }

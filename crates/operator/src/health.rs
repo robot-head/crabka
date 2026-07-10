@@ -80,7 +80,7 @@ async fn metrics(State(s): State<HealthState>) -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use axum::{body::Body, http::Request};
     use http::StatusCode as Code;
     use tokio::sync::Mutex;
@@ -104,7 +104,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == Code::OK);
+        assert2::assert!(resp.status() == Code::OK);
     }
 
     #[tokio::test]
@@ -121,7 +121,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == Code::SERVICE_UNAVAILABLE);
+        assert2::assert!(resp.status() == Code::SERVICE_UNAVAILABLE);
 
         state.mark_ready();
         let resp = app
@@ -133,7 +133,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == Code::OK);
+        assert2::assert!(resp.status() == Code::OK);
     }
 
     #[tokio::test]
@@ -148,14 +148,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == Code::OK);
+        assert2::assert!(resp.status() == Code::OK);
         let ct = resp
             .headers()
             .get("content-type")
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(ct.starts_with("application/openmetrics-text"));
+        assert2::assert!(ct.starts_with("application/openmetrics-text"));
 
         // Body should be valid OpenMetrics text: encoder always emits `# EOF`
         // as the terminator. Catches a future regression where the route is
@@ -164,6 +164,6 @@ mod tests {
             .await
             .unwrap();
         let body = std::str::from_utf8(&body_bytes).unwrap();
-        assert!(body.contains("# EOF"), "metrics body missing # EOF: {body}");
+        assert2::assert!(body.contains("# EOF"));
     }
 }

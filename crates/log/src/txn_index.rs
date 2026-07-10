@@ -37,7 +37,7 @@ struct AbortedTxnRaw {
     producer_id: I64<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<AbortedTxnRaw>() == ENTRY_BYTES);
+const _: [(); ENTRY_BYTES] = [(); std::mem::size_of::<AbortedTxnRaw>()];
 
 #[derive(Debug)]
 pub struct TxnIndex {
@@ -129,7 +129,7 @@ impl TxnIndex {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -139,7 +139,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("00.txnindex");
         let idx = TxnIndex::open(path).unwrap();
-        assert!(idx.entries() == &[]);
+        assert2::assert!(idx.entries() == &[]);
     }
 
     #[test]
@@ -161,7 +161,7 @@ mod tests {
         .unwrap();
 
         let idx2 = TxnIndex::open(path).unwrap();
-        assert!(
+        assert2::assert!(
             idx2.entries()
                 == &[
                     AbortedTxn {
@@ -204,21 +204,21 @@ mod tests {
             .aborted_in_range(Offset(5), Offset(9))
             .copied()
             .collect::<Vec<_>>();
-        assert_eq!(
-            in_3_to_12,
-            vec![
-                AbortedTxn {
-                    start_offset: Offset(0),
-                    last_offset: Offset(4),
-                    producer_id: ProducerId(1),
-                },
-                AbortedTxn {
-                    start_offset: Offset(10),
-                    last_offset: Offset(14),
-                    producer_id: ProducerId(2),
-                },
-            ]
+        assert2::assert!(
+            in_3_to_12
+                == vec![
+                    AbortedTxn {
+                        start_offset: Offset(0),
+                        last_offset: Offset(4),
+                        producer_id: ProducerId(1),
+                    },
+                    AbortedTxn {
+                        start_offset: Offset(10),
+                        last_offset: Offset(14),
+                        producer_id: ProducerId(2),
+                    },
+                ]
         );
-        assert_eq!(in_5_to_9, Vec::new());
+        assert2::assert!(in_5_to_9 == Vec::new());
     }
 }

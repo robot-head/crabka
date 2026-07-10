@@ -127,7 +127,7 @@ pub fn varlong_len(v: i64) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::BytesMut;
 
     use super::*;
@@ -147,7 +147,7 @@ mod tests {
         for (v, expected) in cases {
             let mut buf = BytesMut::new();
             put_uvarint(&mut buf, *v);
-            assert!(&buf[..] == *expected, "encoding {v}");
+            assert2::assert!(&buf[..] == *expected);
             let mut cur = *expected;
             check!(get_uvarint(&mut cur).unwrap() == *v);
             check!(cur.is_empty());
@@ -170,10 +170,10 @@ mod tests {
         for (v, expected) in cases {
             let mut buf = BytesMut::new();
             put_varint(&mut buf, *v);
-            assert!(&buf[..] == *expected, "encoding {v}");
+            assert2::assert!(&buf[..] == *expected);
             let mut cur = *expected;
-            assert!(get_varint(&mut cur).unwrap() == *v);
-            assert!(varint_len(*v) == expected.len());
+            assert2::assert!(get_varint(&mut cur).unwrap() == *v);
+            assert2::assert!(varint_len(*v) == expected.len());
         }
     }
 
@@ -181,7 +181,7 @@ mod tests {
     fn uvarint_rejects_overlong() {
         let too_long = [0x80u8, 0x80, 0x80, 0x80, 0x80, 0x01];
         let mut cur = &too_long[..];
-        assert!(matches!(
+        assert2::assert!(matches!(
             get_uvarint(&mut cur),
             Err(ProtocolError::VarintTooLong { .. })
         ));
@@ -191,7 +191,7 @@ mod tests {
     fn uvarint_eof() {
         let truncated = [0x80u8];
         let mut cur = &truncated[..];
-        assert!(matches!(
+        assert2::assert!(matches!(
             get_uvarint(&mut cur),
             Err(ProtocolError::UnexpectedEof { .. })
         ));
@@ -209,7 +209,7 @@ mod tests {
             (u64::MAX, 10),
         ];
         for (v, expected) in cases {
-            assert!(uvarlong_len(*v) == *expected, "uvarlong_len({v})");
+            assert2::assert!(uvarlong_len(*v) == *expected);
         }
     }
 
@@ -228,7 +228,7 @@ mod tests {
             (i64::MIN, 10),
         ];
         for (v, expected) in cases {
-            assert!(varlong_len(*v) == *expected, "varlong_len({v})");
+            assert2::assert!(varlong_len(*v) == *expected);
         }
     }
 }

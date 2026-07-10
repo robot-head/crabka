@@ -1949,7 +1949,6 @@ fn parse_error(line: Line<'_>, message: impl Into<String>) -> PromqlError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -1997,8 +1996,8 @@ clear
                 Statement::Clear,
             ],
         };
-        assert!(file == expected);
-        assert!(matches!(file.statements[2], Statement::Clear));
+        assert2::assert!(file == expected);
+        assert2::assert!(matches!(file.statements[2], Statement::Clear));
     }
 
     fn test_line(raw: &str) -> Line<'_> {
@@ -2022,7 +2021,7 @@ load 1m
         let Statement::Load { series, .. } = &file.statements[0] else {
             panic!("expected load statement");
         };
-        assert!(
+        assert2::assert!(
             series[0].values
                 == vec![
                     SampleSpec::Value(99.0),
@@ -2038,7 +2037,7 @@ load 1m
             r#"metric{label="hello world",brace="{",escaped="quoted \" space",rbrace="}" next="value"} 1 2"#,
         );
 
-        assert!(
+        assert2::assert!(
             split_metric_and_tail(line.trimmed, line).unwrap()
                 == (
                     r#"metric{label="hello world",brace="{",escaped="quoted \" space",rbrace="}" next="value"}"#,
@@ -2047,7 +2046,7 @@ load 1m
         );
 
         let line = test_line(r"metric\ 1 2");
-        assert!(split_metric_and_tail(line.trimmed, line).unwrap() == (r"metric\", "1 2"));
+        assert2::assert!(split_metric_and_tail(line.trimmed, line).unwrap() == (r"metric\", "1 2"));
     }
 
     #[test]
@@ -2071,10 +2070,7 @@ load 1m
             ),
         ] {
             let line = test_line(token);
-            assert!(
-                parse_sample_token(line.trimmed, line).unwrap() == want,
-                "case {token:?}"
-            );
+            assert2::assert!(parse_sample_token(line.trimmed, line).unwrap() == want);
         }
     }
 
@@ -2082,8 +2078,8 @@ load 1m
     fn parses_infinite_native_histogram_bucket_bounds() {
         for (input, want_positive) in [("+Inf", true), ("Inf", true), ("-Inf", false)] {
             let bound = parse_bucket_bound(input, test_line(input)).unwrap();
-            assert!(bound.is_infinite(), "case {input:?}");
-            assert!(bound.is_sign_positive() == want_positive, "case {input:?}");
+            assert2::assert!(bound.is_infinite());
+            assert2::assert!(bound.is_sign_positive() == want_positive);
         }
     }
 
@@ -2093,7 +2089,7 @@ load 1m
 
         let tokens = split_sample_tokens(line.raw, line).unwrap();
 
-        assert!(tokens == vec!["1", "2"]);
+        assert2::assert!(tokens == vec!["1", "2"]);
     }
 
     #[tokio::test]
@@ -2129,9 +2125,9 @@ eval instant at 0 up{job="api"}
         .unwrap();
 
         let err = testkit::run_test_file(&file).await.unwrap_err();
-        assert!(let PromqlError::Parse(_) = &err);
+        assert2::assert!(let PromqlError::Parse(_) = &err);
         if let PromqlError::Parse(message) = &err {
-            assert!(message.contains("duplicate expected series"));
+            assert2::assert!(message.contains("duplicate expected series"));
         }
     }
 
@@ -2217,7 +2213,7 @@ load 1m
             panic!("expected native histogram sample");
         };
 
-        assert!(
+        assert2::assert!(
             *histogram
                 == NativeHistogram {
                     schema: 1,
@@ -2274,7 +2270,7 @@ load 1m
             custom_values: None,
             start_timestamp_ms: None,
         };
-        assert!(
+        assert2::assert!(
             series[0].values
                 == vec![
                     SampleSpec::Histogram(expected.clone()),
@@ -2297,11 +2293,11 @@ load 1m
         let Statement::Load { series, .. } = &file.statements[0] else {
             panic!("expected load statement");
         };
-        assert!(series[0].values.len() == 2);
+        assert2::assert!(series[0].values.len() == 2);
         let SampleSpec::Histogram(histogram) = &series[0].values[1] else {
             panic!("expected native histogram sample");
         };
-        assert!(
+        assert2::assert!(
             *histogram
                 == NativeHistogram {
                     schema: 0,

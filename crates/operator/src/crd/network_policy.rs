@@ -31,7 +31,6 @@ pub struct NetworkPolicyPeer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -39,7 +38,7 @@ mod tests {
     fn network_policy_spec_empty_round_trips() {
         let cfg: NetworkPolicySpec = serde_json::from_str("{}").unwrap();
         let back = serde_json::to_string(&cfg).unwrap();
-        assert!(back == "{}");
+        assert2::assert!(back == "{}");
     }
 
     #[test]
@@ -49,7 +48,7 @@ mod tests {
             "namespaceSelector":{"matchLabels":{"team":"platform"}}
         }"#;
         let p: NetworkPolicyPeer = serde_json::from_str(json).unwrap();
-        assert!(
+        assert2::assert!(
             p == NetworkPolicyPeer {
                 pod_selector: Some(LabelSelector {
                     match_labels: Some([("role".into(), "frontend".into())].into()),
@@ -62,11 +61,11 @@ mod tests {
             }
         );
         let back = serde_json::to_string(&p).unwrap();
-        for (name, expected) in [
+        for (_name, expected) in [
             ("pod selector", "\"podSelector\""),
             ("namespace selector", "\"namespaceSelector\""),
         ] {
-            assert!(back.contains(expected), "case {name}; got: {back}");
+            assert2::assert!(back.contains(expected));
         }
     }
 
@@ -74,6 +73,6 @@ mod tests {
     fn peer_omits_unset_selectors() {
         let p = NetworkPolicyPeer::default();
         let json = serde_json::to_string(&p).unwrap();
-        assert!(json == "{}", "default peer must serialize to empty object");
+        assert2::assert!(json == "{}");
     }
 }

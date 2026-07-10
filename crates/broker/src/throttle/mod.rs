@@ -81,28 +81,24 @@ pub const FOLLOWER_THROTTLED_RATE_KEY: &str = "follower.replication.throttled.ra
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn empty_string_parses_as_none() {
-        assert!(ThrottledReplicas::parse("").unwrap() == ThrottledReplicas::None);
+        assert2::assert!(ThrottledReplicas::parse("").unwrap() == ThrottledReplicas::None);
     }
 
     #[test]
     fn wildcard_parses_as_all() {
-        assert!(ThrottledReplicas::parse("*").unwrap() == ThrottledReplicas::All);
+        assert2::assert!(ThrottledReplicas::parse("*").unwrap() == ThrottledReplicas::All);
     }
 
     #[test]
     fn single_pair_parses() {
         let r = ThrottledReplicas::parse("0:1").unwrap();
         for (partition, broker, want) in [(0, 1, true), (0, 2, false), (1, 1, false)] {
-            assert!(
-                r.contains(partition, NodeId(broker)) == want,
-                "{partition}:{broker}"
-            );
+            assert2::assert!(r.contains(partition, NodeId(broker)) == want);
         }
     }
 
@@ -110,24 +106,21 @@ mod tests {
     fn multiple_pairs_parse() {
         let r = ThrottledReplicas::parse("0:1,0:2,1:3").unwrap();
         for (partition, broker, want) in [(0, 1, true), (0, 2, true), (1, 3, true), (1, 1, false)] {
-            assert!(
-                r.contains(partition, NodeId(broker)) == want,
-                "{partition}:{broker}"
-            );
+            assert2::assert!(r.contains(partition, NodeId(broker)) == want);
         }
     }
 
     #[test]
     fn malformed_pair_rejected() {
         for input in ["not-a-pair", "0:x", "x:1"] {
-            assert!(ThrottledReplicas::parse(input).is_err(), "{input}");
+            assert2::assert!(ThrottledReplicas::parse(input).is_err());
         }
     }
 
     #[test]
     fn whitespace_tolerated() {
         let r = ThrottledReplicas::parse(" 0 : 1 , 2:3 ").unwrap();
-        assert!(r.contains(0, NodeId(1)));
-        assert!(r.contains(2, NodeId(3)));
+        assert2::assert!(r.contains(0, NodeId(1)));
+        assert2::assert!(r.contains(2, NodeId(3)));
     }
 }

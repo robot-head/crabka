@@ -39,10 +39,7 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert_eq!(
-        resp.error_code, 0,
-        "streams.version finalize failed: {resp:?}"
-    );
+    assert2::assert!(resp.error_code == 0);
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -59,10 +56,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        resp.topics[0].error_code, 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 // ─── DSL counting topology ────────────────────────────────────────────────────
@@ -271,12 +265,8 @@ async fn dsl_count_restart_restore_emit_on_update() {
         .filter(|(k, _)| k == "b")
         .map(|(_, v)| *v)
         .collect();
-    assert_eq!(
-        a_counts,
-        vec![1, 2],
-        "counts must match by key; got {got:?}"
-    );
-    assert_eq!(b_counts, vec![1], "counts must match by key; got {got:?}");
+    assert2::assert!(a_counts == vec![1, 2]);
+    assert2::assert!(b_counts == vec![1]);
 
     // ── 4. Close the first instance ───────────────────────────────────────────
     streams.close().await.unwrap();
@@ -309,12 +299,7 @@ async fn dsl_count_restart_restore_emit_on_update() {
         .map(|(_, v)| *v)
         .next();
 
-    assert_eq!(
-        a_restart,
-        Some(3),
-        "after restart-restore, 'a' count must be 3 (restore from changelog), \
-         not 1 (cold start); got {got2:?}",
-    );
+    assert2::assert!(a_restart == Some(3));
 
     streams2.close().await.unwrap();
     broker.shutdown().await;
@@ -404,10 +389,7 @@ async fn dsl_count_restart_restore_caching_on() {
         }
     })
     .await;
-    assert!(
-        buffered.is_ok(),
-        "counts store should buffer a→2, b→1 within 30s (cache read-through)"
-    );
+    assert2::assert!(buffered.is_ok());
 
     // ── 4. Close → ensures the cache is flushed (if the immediate commit tick
     //       hasn't already) → emits deduped a→2, b→1 + changelog. ──────────────
@@ -422,12 +404,7 @@ async fn dsl_count_restart_restore_caching_on() {
     .await
     .expect("cache-on streams emitted 2 deduped output records within 30s");
 
-    assert_eq!(
-        got.len(),
-        2,
-        "cache-on flush must emit EXACTLY 2 deduped records (a→2, b→1), not the \
-         3 per-record updates of the cache-off path; got {got:?}"
-    );
+    assert2::assert!(got.len() == 2);
     let a_counts: Vec<i64> = got
         .iter()
         .filter(|(k, _)| k == "a")
@@ -438,16 +415,8 @@ async fn dsl_count_restart_restore_caching_on() {
         .filter(|(k, _)| k == "b")
         .map(|(_, v)| *v)
         .collect();
-    assert_eq!(
-        a_counts,
-        vec![2],
-        "cache-on: deduped 'a' emit must be exactly [2]; got {got:?}"
-    );
-    assert_eq!(
-        b_counts,
-        vec![1],
-        "cache-on: deduped 'b' emit must be exactly [1]; got {got:?}"
-    );
+    assert2::assert!(a_counts == vec![2]);
+    assert2::assert!(b_counts == vec![1]);
 
     // ── 6. Restart with the SAME app_id (default cache) + one more "a" → a→3.
     //       Cold start would be a→1; a→3 proves restore from the changelog that
@@ -475,11 +444,7 @@ async fn dsl_count_restart_restore_caching_on() {
         }
     })
     .await;
-    assert!(
-        restored.is_ok(),
-        "after restart-restore, 'a' must reach 3 (restore from changelog), not 1 \
-         (cold start)"
-    );
+    assert2::assert!(restored.is_ok());
     streams2.close().await.unwrap();
 
     // And the close-flush emits the restored a→3 to dsl-out (offset 2 onward).
@@ -494,11 +459,7 @@ async fn dsl_count_restart_restore_caching_on() {
         .filter(|(k, _)| k == "a")
         .map(|(_, v)| *v)
         .next();
-    assert_eq!(
-        a_restart,
-        Some(3),
-        "after restart-restore, emitted 'a' count must be 3; got {got2:?}",
-    );
+    assert2::assert!(a_restart == Some(3));
 
     broker.shutdown().await;
 }

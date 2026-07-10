@@ -31,7 +31,7 @@ struct OffsetEntryRaw {
     position: U32<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<OffsetEntryRaw>() == OFFSET_ENTRY_SIZE);
+const _: [(); OFFSET_ENTRY_SIZE] = [(); std::mem::size_of::<OffsetEntryRaw>()];
 
 #[derive(Debug)]
 pub struct OffsetIndex {
@@ -177,8 +177,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("00000000000000000000.index");
         let idx = OffsetIndex::open(&path).unwrap();
-        for (name, offset) in [("zero", 0), ("positive", 1000)] {
-            assert_eq!(idx.lookup(offset), 0, "case {name}");
+        for (_name, offset) in [("zero", 0), ("positive", 1000)] {
+            assert2::assert!(idx.lookup(offset) == 0);
         }
     }
 
@@ -193,8 +193,8 @@ mod tests {
             idx.flush().unwrap();
         }
         let idx = OffsetIndex::open(&path).unwrap();
-        assert_eq!(idx.entry_count(), 2);
-        assert_eq!(idx.lookup(100), 4096);
+        assert2::assert!(idx.entry_count() == 2);
+        assert2::assert!(idx.lookup(100) == 4096);
     }
 
     #[test]
@@ -219,9 +219,9 @@ mod tests {
         drop(f);
 
         let idx = OffsetIndex::open(&path).unwrap();
-        assert_eq!(idx.entry_count(), 2);
-        assert_eq!(idx.last_entry(), Some((100, 4096)));
-        assert_eq!(idx.lookup(150), 4096);
+        assert2::assert!(idx.entry_count() == 2);
+        assert2::assert!(idx.last_entry() == Some((100, 4096)));
+        assert2::assert!(idx.lookup(150) == 4096);
     }
 
     #[test]
@@ -254,8 +254,8 @@ mod tests {
         idx.append(100, 4096).unwrap();
         idx.append(200, 8192).unwrap();
         idx.truncate_by_position(8192).unwrap();
-        assert_eq!(idx.entry_count(), 2);
-        assert_eq!(idx.last_entry(), Some((100, 4096)));
+        assert2::assert!(idx.entry_count() == 2);
+        assert2::assert!(idx.last_entry() == Some((100, 4096)));
     }
 }
 
@@ -272,7 +272,7 @@ struct TimeEntryRaw {
     relative_offset: U32<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<TimeEntryRaw>() == TIME_ENTRY_SIZE);
+const _: [(); TIME_ENTRY_SIZE] = [(); std::mem::size_of::<TimeEntryRaw>()];
 
 #[derive(Debug)]
 pub struct TimeIndex {
@@ -377,7 +377,7 @@ impl TimeIndex {
 
 #[cfg(test)]
 mod time_tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use tempfile::tempdir;
 
     use super::*;
@@ -412,7 +412,7 @@ mod time_tests {
             idx.flush().unwrap();
         }
         let idx = TimeIndex::open(&path).unwrap();
-        assert!(idx.entry_count() == 2);
+        assert2::assert!(idx.entry_count() == 2);
     }
 
     #[test]
@@ -432,8 +432,8 @@ mod time_tests {
         drop(f);
 
         let idx = TimeIndex::open(&path).unwrap();
-        assert_eq!(idx.entry_count(), 2);
-        assert_eq!(idx.last_entry(), Some((2_000, 100)));
-        assert_eq!(idx.lookup(2_500), 100);
+        assert2::assert!(idx.entry_count() == 2);
+        assert2::assert!(idx.last_entry() == Some((2_000, 100)));
+        assert2::assert!(idx.lookup(2_500) == 100);
     }
 }

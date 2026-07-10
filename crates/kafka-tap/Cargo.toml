@@ -15,4 +15,5 @@ name = "kafka-tap"
 path = "src/main.rs"
 
 [dependencies]
+assert2 = { workspace = true }
 crabka-ids = { version = "0.3.8", path = "../ids" }

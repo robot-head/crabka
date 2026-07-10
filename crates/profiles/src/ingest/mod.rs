@@ -237,7 +237,7 @@ fn remove_label(labels: &mut Labels, target: &str) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_blockstore::Labels;
 
     use super::*;
@@ -254,14 +254,14 @@ mod tests {
     fn require_service_name_injects_unknown() {
         let mut labels = labels(&[("__name__", "process_cpu")]);
         require_service_name(&mut labels);
-        assert!(labels.get("service_name") == Some("unknown_service"));
+        assert2::assert!(labels.get("service_name") == Some("unknown_service"));
     }
 
     #[test]
     fn require_service_name_keeps_existing() {
         let mut labels = labels(&[("__name__", "process_cpu"), ("service_name", "api")]);
         require_service_name(&mut labels);
-        assert!(labels.get("service_name") == Some("api"));
+        assert2::assert!(labels.get("service_name") == Some("api"));
     }
 
     #[test]
@@ -270,11 +270,11 @@ mod tests {
         cap_session_id(&mut a, 16);
         let value = a.get("__session_id__").unwrap();
         let bucket: u64 = value.parse().unwrap();
-        assert!(bucket < 16);
+        assert2::assert!(bucket < 16);
 
         let mut b = labels(&[("__session_id__", "deadbeefcafef00d")]);
         cap_session_id(&mut b, 16);
-        assert!(b.get("__session_id__") == a.get("__session_id__"));
+        assert2::assert!(b.get("__session_id__") == a.get("__session_id__"));
     }
 
     #[test]
@@ -284,7 +284,7 @@ mod tests {
             ..Default::default()
         };
         let labels = labels(&[("a", "1"), ("b", "2")]);
-        assert!(enforce_limits(&labels, &limits).is_err());
+        assert2::assert!(enforce_limits(&labels, &limits).is_err());
     }
 
     #[test]
@@ -294,7 +294,7 @@ mod tests {
             ..Default::default()
         };
         let labels = labels(&[("too_long", "1")]);
-        assert!(enforce_limits(&labels, &limits).is_err());
+        assert2::assert!(enforce_limits(&labels, &limits).is_err());
     }
 
     #[test]
@@ -309,8 +309,8 @@ mod tests {
             },
         );
 
-        assert_eq!(config.for_tenant("tenant-a").max_label_value_len, 5);
-        assert_eq!(config.for_tenant("tenant-b"), &TenantLimits::default());
+        assert2::assert!(config.for_tenant("tenant-a").max_label_value_len == 5);
+        assert2::assert!(config.for_tenant("tenant-b") == &TenantLimits::default());
     }
 
     #[test]
@@ -323,6 +323,6 @@ mod tests {
             replacement: String::new(),
             action: RelabelAction::Drop,
         };
-        assert!(!apply_relabel(&mut labels, &[config]));
+        assert2::assert!(!apply_relabel(&mut labels, &[config]));
     }
 }

@@ -77,14 +77,12 @@ mod tests {
             (0, 50, None),       // below first sync
             (9, 100, None),      // unknown partition
         ] {
-            assert_eq!(
+            assert2::assert!(
                 s.translate(
                     "orders",
                     PartitionIndex(partition),
                     CommittedOffset(upstream)
-                ),
-                want.map(DownstreamOffset),
-                "partition={partition} upstream={upstream}"
+                ) == want.map(DownstreamOffset)
             );
         }
     }

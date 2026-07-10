@@ -173,7 +173,6 @@ pub enum BrokerError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -183,7 +182,7 @@ mod tests {
             api_key: 7,
             version: 9,
         };
-        assert!(e.to_string().contains("api_key=7"));
-        assert!(e.to_string().contains("version=9"));
+        assert2::assert!(e.to_string().contains("api_key=7"));
+        assert2::assert!(e.to_string().contains("version=9"));
     }
 }

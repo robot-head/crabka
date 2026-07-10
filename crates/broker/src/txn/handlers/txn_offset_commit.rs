@@ -347,7 +347,6 @@ fn encode_err_all(
 mod tests {
     use std::{collections::HashSet, path::Path, sync::Arc};
 
-    use assert2::assert;
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::owned::{
         txn_offset_commit_request::{TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic},
@@ -431,7 +430,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(*resp == expected);
+        assert2::assert!(*resp == expected);
     }
 
     #[test]
@@ -458,7 +457,7 @@ mod tests {
         let resp = build_response(&req, codes::INVALID_TXN_STATE, &HashSet::new());
 
         let bytes = encode_resp(5, &resp).expect("encode response");
-        assert!(!bytes.is_empty());
+        assert2::assert!(!bytes.is_empty());
         let decoded = decode_response(&bytes, 5);
 
         assert_response_rows(&decoded, codes::INVALID_TXN_STATE);
@@ -470,7 +469,7 @@ mod tests {
 
         let bytes = encode_err_all(5, &req, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED)
             .expect("encode all-error response");
-        assert!(!bytes.is_empty());
+        assert2::assert!(!bytes.is_empty());
         let decoded = decode_response(&bytes, 5);
 
         assert_response_rows(&decoded, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
@@ -502,7 +501,7 @@ mod tests {
                 )
             })
             .collect();
-        assert!(
+        assert2::assert!(
             rows == vec![
                 ("orders", 2, 103, 7, "first", 12_345),
                 ("orders", 3, 107, 8, "second", 12_345),
@@ -516,9 +515,9 @@ mod tests {
         let read = log
             .read(crabka_log::Offset(0), 1024 * 1024)
             .expect("read offsets log");
-        assert!(read.batches.len() == 1);
+        assert2::assert!(read.batches.len() == 1);
         let batch = &read.batches[0];
-        assert!(
+        assert2::assert!(
             (
                 batch.base_offset,
                 batch.partition_leader_epoch,
@@ -553,7 +552,7 @@ mod tests {
                 )
             })
             .collect();
-        assert!(record_rows == vec![(0, 0, true, true), (1, 0, true, true)]);
+        assert2::assert!(record_rows == vec![(0, 0, true, true), (1, 0, true, true)]);
     }
 
     #[tokio::test]
@@ -568,7 +567,7 @@ mod tests {
             .await
             .expect("all denied succeeds");
 
-        assert!(entries.is_empty());
+        assert2::assert!(entries.is_empty());
         let part = registry
             .get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION))
             .expect("offsets partition");
@@ -576,7 +575,7 @@ mod tests {
         let read = log
             .read(crabka_log::Offset(0), 1024 * 1024)
             .expect("read offsets log");
-        assert!(read.batches.is_empty());
+        assert2::assert!(read.batches.is_empty());
     }
 
     #[tokio::test]
@@ -586,6 +585,6 @@ mod tests {
             .await
             .expect_err("missing offsets partition");
 
-        assert!(err == codes::NOT_COORDINATOR);
+        assert2::assert!(err == codes::NOT_COORDINATOR);
     }
 }

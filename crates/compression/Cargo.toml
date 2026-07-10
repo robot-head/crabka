@@ -35,6 +35,7 @@ lz4    = ["dep:lz4_flex"]
 zstd   = ["dep:zstd"]
 
 [dependencies]
+assert2 = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 flate2   = { workspace = true, optional = true }
@@ -43,7 +44,6 @@ lz4_flex = { workspace = true, optional = true }
 zstd     = { workspace = true, optional = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 proptest = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }

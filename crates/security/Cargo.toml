@@ -17,6 +17,7 @@ categories = ["authentication", "cryptography", "network-programming"]
 workspace = true
 
 [dependencies]
+assert2 = { workspace = true }
 thiserror.workspace = true
 # Slice: SASL/GSSAPI auth_to_local rules (Task 3) match principals with
 # RE2-compatible regexes; declared here so the gssapi::name module compiles.
@@ -54,7 +55,6 @@ tokio = { workspace = true, features = ["sync"] }
 sspi.workspace = true
 
 [dev-dependencies]
-assert2 = { workspace = true }
 hex.workspace = true
 mutants = { workspace = true }
 tempfile.workspace = true

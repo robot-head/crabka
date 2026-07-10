@@ -146,7 +146,6 @@ pub fn instant_delta(timestamps: &[i64], values: &[f64], kind: InstantKind) -> O
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -164,7 +163,7 @@ mod tests {
         // range_end = 300_000, range = 300_000 (5m) => range_start = 0.
         let got =
             extrapolated_rate(&timestamps, &values, 0, 300_000, 300_000, RangeKind::Rate).unwrap();
-        assert!(approx_eq(got, 5.0 / 300.0));
+        assert2::assert!(approx_eq(got, 5.0 / 300.0));
     }
 
     /// Pins `increase` reset correction to
@@ -184,7 +183,7 @@ mod tests {
             RangeKind::Increase,
         )
         .unwrap();
-        assert!(approx_eq(got, 2.0));
+        assert2::assert!(approx_eq(got, 2.0));
     }
 
     /// Pins `delta` gauge mode to
@@ -198,7 +197,7 @@ mod tests {
         // range_end = 60_000, range = 60_000 (1m) => range_start = 0.
         let got =
             extrapolated_rate(&timestamps, &values, 0, 60_000, 60_000, RangeKind::Delta).unwrap();
-        assert!(approx_eq(got, -2.0));
+        assert2::assert!(approx_eq(got, -2.0));
     }
 
     /// Durations just beyond 110% of the average sample interval are capped to
@@ -209,7 +208,7 @@ mod tests {
         let values = [2.0, 12.0];
         let got =
             extrapolated_rate(&timestamps, &values, 0, 21_050, 21_050, RangeKind::Delta).unwrap();
-        assert!(approx_eq(got, 15.0));
+        assert2::assert!(approx_eq(got, 15.0));
     }
 
     /// Counter extrapolation clamps the start duration to the extrapolated zero
@@ -220,7 +219,7 @@ mod tests {
         let values = [1.0, 4.0];
         let got = extrapolated_rate(&timestamps, &values, 0, 15_000, 15_000, RangeKind::Increase)
             .unwrap();
-        assert!(approx_eq(got, 4.0));
+        assert2::assert!(approx_eq(got, 4.0));
     }
 
     /// A single sample cannot form a rate: Prometheus yields no value.
@@ -228,10 +227,10 @@ mod tests {
     fn single_sample_yields_none() {
         let timestamps = [60_000_i64];
         let values = [1.0];
-        assert!(
+        assert2::assert!(
             extrapolated_rate(&timestamps, &values, 0, 60_000, 60_000, RangeKind::Rate).is_none()
         );
-        assert!(instant_delta(&timestamps, &values, InstantKind::Irate).is_none());
+        assert2::assert!(instant_delta(&timestamps, &values, InstantKind::Irate).is_none());
     }
 
     /// Timestamp/value range arrays must be paired 1:1 before any arithmetic.
@@ -239,7 +238,7 @@ mod tests {
     fn mismatched_range_lengths_yield_none() {
         let timestamps = [0_i64, 60_000];
         let values = [1.0];
-        assert!(
+        assert2::assert!(
             extrapolated_rate(&timestamps, &values, 0, 60_000, 60_000, RangeKind::Rate).is_none()
         );
     }
@@ -249,7 +248,7 @@ mod tests {
     fn zero_width_sampled_interval_yields_none() {
         let timestamps = [60_000_i64, 60_000];
         let values = [1.0, 2.0];
-        assert!(
+        assert2::assert!(
             extrapolated_rate(&timestamps, &values, 0, 60_000, 60_000, RangeKind::Rate).is_none()
         );
     }
@@ -261,7 +260,7 @@ mod tests {
         let timestamps = [0_i64, 60_000, 90_000];
         let values = [0.0, 1.0, 3.0];
         let got = instant_delta(&timestamps, &values, InstantKind::Irate).unwrap();
-        assert!(approx_eq(got, 2.0 / 30.0));
+        assert2::assert!(approx_eq(got, 2.0 / 30.0));
     }
 
     /// Pins `idelta` to
@@ -272,7 +271,7 @@ mod tests {
         let timestamps = [0_i64, 60_000, 90_000];
         let values = [0.0, 1.0, 3.0];
         let got = instant_delta(&timestamps, &values, InstantKind::Idelta).unwrap();
-        assert!(approx_eq(got, 2.0));
+        assert2::assert!(approx_eq(got, 2.0));
     }
 
     /// `irate` clamps a negative last-pair delta (a counter reset) to the last
@@ -283,10 +282,10 @@ mod tests {
         let timestamps = [0_i64, 1_000];
         let values = [5.0, 2.0];
         let got = instant_delta(&timestamps, &values, InstantKind::Irate).unwrap();
-        assert!(approx_eq(got, 2.0));
+        assert2::assert!(approx_eq(got, 2.0));
         // idelta preserves the negative delta (gauge): 2 - 5 = -3.
         let idelta = instant_delta(&timestamps, &values, InstantKind::Idelta).unwrap();
-        assert!(approx_eq(idelta, -3.0));
+        assert2::assert!(approx_eq(idelta, -3.0));
     }
 
     /// Equal adjacent counter samples are a zero rate, not a reset.
@@ -295,6 +294,6 @@ mod tests {
         let timestamps = [0_i64, 1_000];
         let values = [5.0, 5.0];
         let got = instant_delta(&timestamps, &values, InstantKind::Irate).unwrap();
-        assert!(approx_eq(got, 0.0));
+        assert2::assert!(approx_eq(got, 0.0));
     }
 }

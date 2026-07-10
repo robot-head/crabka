@@ -148,7 +148,7 @@ impl From<RecordsError> for LegacyRecordsError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::Bytes;
     use crabka_protocol::records::{Record, RecordBatch};
 
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn down_then_up_round_trips_complete_batches() {
-        for (name, magic, codec) in [
+        for (_name, magic, codec) in [
             ("v1 uncompressed", Magic::V1, CompressionType::None),
             ("v0 uncompressed", Magic::V0, CompressionType::None),
             ("v1 gzip", Magic::V1, CompressionType::Gzip),
@@ -216,7 +216,7 @@ mod tests {
                     record.timestamp_delta = 0;
                 }
             }
-            assert_eq!(round, expected, "case {name}");
+            assert2::assert!(round == expected);
         }
     }
 
@@ -225,10 +225,7 @@ mod tests {
         let mut v2 = v2_batch(CompressionType::None);
         v2.attributes = v2.attributes.with_control(true);
         let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
-        assert!(
-            legacy_bytes.is_empty(),
-            "control batch must produce empty MessageSet"
-        );
+        assert2::assert!(legacy_bytes.is_empty());
     }
 
     #[test]
@@ -237,7 +234,7 @@ mod tests {
         v2.records.clear();
         v2.last_offset_delta = 0;
         let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
-        assert!(legacy_bytes.is_empty());
+        assert2::assert!(legacy_bytes.is_empty());
     }
 
     #[test]
@@ -251,9 +248,8 @@ mod tests {
         let mut cur: &[u8] = &legacy_bytes;
         let recs = decode_message_set(&mut cur, legacy_bytes.len()).unwrap();
         // No structural representation of headers in v0/v1.
-        assert_eq!(
-            recs,
-            vec![
+        assert2::assert!(
+            recs == vec![
                 ParsedRecord {
                     offset: Offset(1000),
                     timestamp: Some(1_700_000_000),
@@ -293,15 +289,14 @@ mod tests {
         let _offset = cur.get_i64();
         let size = cur.get_i32() as usize;
         let msg = crate::message::Message::decode_from(&mut cur, size).unwrap();
-        assert!(msg.compression() == CompressionType::Gzip);
+        assert2::assert!(msg.compression() == CompressionType::Gzip);
     }
 
     #[test]
     fn up_convert_empty_set_returns_sentinels() {
         let rb = legacy_to_v2(&[]).unwrap();
-        assert_eq!(
-            rb,
-            RecordBatch {
+        assert2::assert!(
+            rb == RecordBatch {
                 base_offset: 0,
                 partition_leader_epoch: -1,
                 attributes: Attributes::default(),

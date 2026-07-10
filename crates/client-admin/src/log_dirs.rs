@@ -152,7 +152,6 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use assert2::assert;
     use bytes::{Buf, BytesMut};
     use crabka_client_core::MockBroker;
     use crabka_protocol::{
@@ -207,10 +206,10 @@ mod tests {
 
     fn request_body_after_header(mut body: &[u8], flexible_header: bool) -> &[u8] {
         let client_id_len = body.get_i16();
-        assert!(client_id_len >= 0);
+        assert2::assert!(client_id_len >= 0);
         body.advance(usize::try_from(client_id_len).expect("client id length is non-negative"));
         if flexible_header {
-            assert!(body.get_u8() == 0);
+            assert2::assert!(body.get_u8() == 0);
         }
         body
     }
@@ -233,7 +232,7 @@ mod tests {
                 );
                 let request = AlterReplicaLogDirsRequest::decode(&mut body, version)
                     .expect("alter log dirs request decodes");
-                assert!(body.is_empty());
+                assert2::assert!(body.is_empty());
                 *captured_request.lock().expect("request capture lock") = Some(request);
                 return Some(encode_at(
                     &AlterReplicaLogDirsResponse {
@@ -271,7 +270,7 @@ mod tests {
             .error
             .as_ref()
             .expect("broker error is surfaced");
-        assert!(
+        assert2::assert!(
             (
                 outcomes.len(),
                 &outcomes[0].topic,
@@ -285,7 +284,7 @@ mod tests {
             .expect("request capture lock")
             .take()
             .expect("alter log dirs request was captured");
-        assert!(
+        assert2::assert!(
             request
                 == AlterReplicaLogDirsRequest {
                     dirs: vec![AlterReplicaLogDir {
@@ -318,7 +317,7 @@ mod tests {
                 );
                 let request = DescribeLogDirsRequest::decode(&mut body, version)
                     .expect("describe log dirs request decodes");
-                assert!(body.is_empty());
+                assert2::assert!(body.is_empty());
                 *captured_request.lock().expect("request capture lock") = Some(request);
                 return Some(encode_at(
                     &DescribeLogDirsResponse {
@@ -356,7 +355,7 @@ mod tests {
             .expect("describe log dirs response maps");
 
         let partition = &dirs[0].topics[0].partitions[0];
-        assert!(
+        assert2::assert!(
             (
                 dirs.len(),
                 dirs[0].log_dir.as_str(),
@@ -374,7 +373,7 @@ mod tests {
             .expect("request capture lock")
             .take()
             .expect("describe log dirs request was captured");
-        assert!(
+        assert2::assert!(
             request
                 == DescribeLogDirsRequest {
                     topics: Some(vec![DescribableLogDirTopic {

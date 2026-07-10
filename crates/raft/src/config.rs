@@ -153,7 +153,7 @@ impl ControllerConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -183,10 +183,7 @@ mod tests {
             "handshake: false",
             "max_bytes_between_snapshots: 20971520",
         ] {
-            assert!(
-                rendered.contains(needle),
-                "missing {needle:?} in {rendered}"
-            );
+            assert2::assert!(rendered.contains(needle));
         }
     }
 }

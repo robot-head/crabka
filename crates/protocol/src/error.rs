@@ -31,13 +31,12 @@ pub enum ProtocolError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn display_is_useful() {
         let e = ProtocolError::UnexpectedEof { needed: 4 };
-        assert!(e.to_string() == "unexpected end of buffer: needed 4 more bytes");
+        assert2::assert!(e.to_string() == "unexpected end of buffer: needed 4 more bytes");
     }
 }

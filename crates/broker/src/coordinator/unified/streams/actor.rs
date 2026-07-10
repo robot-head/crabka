@@ -1075,7 +1075,7 @@ fn chrono_now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::coordinator::unified::{
@@ -1167,7 +1167,7 @@ mod tests {
             },
         )
         .await;
-        assert!(join.error_code == codes::NONE);
+        assert2::assert!(join.error_code == codes::NONE);
         let epoch = join.member_epoch;
         let resp = heartbeat(
             &handle,
@@ -1179,7 +1179,7 @@ mod tests {
             },
         )
         .await;
-        assert!((resp.error_code, resp.member_epoch) == (codes::NONE, epoch));
+        assert2::assert!((resp.error_code, resp.member_epoch) == (codes::NONE, epoch));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1196,7 +1196,7 @@ mod tests {
             },
         )
         .await;
-        assert!(join.member_epoch == 1);
+        assert2::assert!(join.member_epoch == 1);
         // member_epoch below the server's view → STALE_MEMBER_EPOCH (the member
         // is known at epoch 1, so re-sending epoch 0 is treated as a stale
         // existing member, not a first-join).
@@ -1213,7 +1213,7 @@ mod tests {
         // -2 < 1 → stale. (member_epoch 0 from a *known* member is the
         // first-join guard's `!contains_key` miss, so we use a clearly-stale
         // value here.)
-        assert!(resp.error_code == codes::STALE_MEMBER_EPOCH);
+        assert2::assert!(resp.error_code == codes::STALE_MEMBER_EPOCH);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1230,7 +1230,7 @@ mod tests {
             },
         )
         .await;
-        assert!(join.member_epoch == 1);
+        assert2::assert!(join.member_epoch == 1);
 
         let resp = heartbeat(
             &handle,
@@ -1243,7 +1243,7 @@ mod tests {
         )
         .await;
 
-        assert!(resp.error_code == codes::STALE_MEMBER_EPOCH);
+        assert2::assert!(resp.error_code == codes::STALE_MEMBER_EPOCH);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1260,7 +1260,7 @@ mod tests {
             },
         )
         .await;
-        assert!(join.member_epoch == 1);
+        assert2::assert!(join.member_epoch == 1);
         let resp = heartbeat(
             &handle,
             StreamsGroupHeartbeatRequest {
@@ -1271,7 +1271,7 @@ mod tests {
             },
         )
         .await;
-        assert!(resp.error_code == codes::FENCED_MEMBER_EPOCH);
+        assert2::assert!(resp.error_code == codes::FENCED_MEMBER_EPOCH);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1301,14 +1301,11 @@ mod tests {
             },
         )
         .await;
-        assert!((resp.error_code, resp.member_epoch) == (codes::NONE, -1));
+        assert2::assert!((resp.error_code, resp.member_epoch) == (codes::NONE, -1));
         let batches = log.batches().await;
-        assert!(batches.len() == pre_leave + 1);
+        assert2::assert!(batches.len() == pre_leave + 1);
         let leave_batch = &batches[batches.len() - 1];
-        assert!(
-            leave_batch.records.iter().any(|r| r.value.is_none()),
-            "leave batch must contain at least one tombstone"
-        );
+        assert2::assert!(leave_batch.records.iter().any(|r| r.value.is_none()));
     }
 
     #[test]

@@ -459,7 +459,6 @@ fn local_advertised_for_listener(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -495,9 +494,9 @@ mod tests {
             ),
         ];
 
-        for (case, key_type, key, expected) in cases {
+        for (_case, key_type, key, expected) in cases {
             let code = key_authz_failure(&authz, &image, &anon(), &peer, key_type, key);
-            assert!(code == Some(expected), "case: {case}");
+            assert2::assert!(code == Some(expected));
         }
     }
 
@@ -513,7 +512,7 @@ mod tests {
             error_message: Some("authorization failed".into()),
             ..Default::default()
         };
-        assert!(c == expected);
+        assert2::assert!(c == expected);
     }
 
     fn listener(name: &str, advertised: &str) -> crate::config::ListenerSpec {
@@ -540,8 +539,8 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(local_advertised_for_listener(&config, "tls") == "tls-host:9094");
-        assert!(local_advertised_for_listener(&config, "plain") == "plain-host:9092");
+        assert2::assert!(local_advertised_for_listener(&config, "tls") == "tls-host:9094");
+        assert2::assert!(local_advertised_for_listener(&config, "plain") == "plain-host:9092");
     }
 
     /// When the connection listener isn't configured, fall back to the legacy
@@ -553,6 +552,6 @@ mod tests {
             listeners: vec![listener("plain", "plain-host:9092")],
             ..Default::default()
         };
-        assert!(local_advertised_for_listener(&config, "external") == "legacy:1000");
+        assert2::assert!(local_advertised_for_listener(&config, "external") == "legacy:1000");
     }
 }

@@ -23,7 +23,7 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::*;
@@ -47,21 +47,18 @@ mod tests {
                 let decoded =
                     RemoteLogSegmentMetadataSnapshotRecord::decode_borrow(&mut cur, v).unwrap();
 
-                assert!(cur.is_empty(), "{case} at version {v}");
-                assert!(decoded == expected, "{case} at version {v}");
-                assert!(
-                    decoded.encoded_len(v) == msg_bytes.len(),
-                    "{case} at version {v}"
-                );
+                assert2::assert!(cur.is_empty());
+                assert2::assert!(decoded == expected);
+                assert2::assert!(decoded.encoded_len(v) == msg_bytes.len());
 
                 let mut reencoded = BytesMut::new();
                 decoded.encode(&mut reencoded, v).unwrap();
-                assert!(&reencoded[..] == &msg_bytes[..], "{case} at version {v}");
+                assert2::assert!(&reencoded[..] == &msg_bytes[..]);
 
                 let owned = decoded.to_owned();
                 let mut owned_buf = BytesMut::new();
                 owned.encode(&mut owned_buf, v).unwrap();
-                assert!(&owned_buf[..] == &msg_bytes[..], "{case} at version {v}");
+                assert2::assert!(&owned_buf[..] == &msg_bytes[..]);
             }
         }
     }

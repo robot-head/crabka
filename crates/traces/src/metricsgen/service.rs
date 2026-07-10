@@ -254,7 +254,7 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::metricsgen::{
@@ -303,11 +303,11 @@ mod tests {
         ]);
 
         let processed = svc.poll_once(100).await.unwrap();
-        assert!(processed == 2);
+        assert2::assert!(processed == 2);
 
         let flushed = svc.collect_once().await.unwrap();
-        assert!(flushed == 1);
-        assert!(svc.sink.writes().len() == 1);
+        assert2::assert!(flushed == 1);
+        assert2::assert!(svc.sink.writes().len() == 1);
         let payload = &svc.sink.writes()[0];
         check!(payload.tenant == "A");
         check!(
@@ -327,7 +327,7 @@ mod tests {
         svc.poll_once(100).await.unwrap();
         // A failed write leaves a payload pending (sink down).
         svc.sink.fail_next();
-        assert!(svc.collect_once().await.is_err());
+        assert2::assert!(svc.collect_once().await.is_err());
 
         // With a payload pending, polling MUST still consume spans. Previously
         // poll_once short-circuited to Ok(0) without awaiting, busy-spinning the
@@ -335,7 +335,7 @@ mod tests {
         svc.source
             .push_batch(vec![span("B", SpanKind::Server, [0xC; 8], [0; 8])]);
         let processed = svc.poll_once(100).await.unwrap();
-        assert!(processed == 1);
+        assert2::assert!(processed == 1);
     }
 
     #[tokio::test]
@@ -348,8 +348,8 @@ mod tests {
 
         let result = svc.collect_once().await;
 
-        assert!(result.is_err());
-        assert!(svc.source.commits() == 0);
+        assert2::assert!(result.is_err());
+        assert2::assert!(svc.source.commits() == 0);
     }
 
     #[tokio::test]
@@ -389,7 +389,7 @@ mod tests {
         let writes = svc.sink.writes();
 
         check!(retried == 1);
-        assert_eq!(writes.len(), 2);
+        assert2::assert!(writes.len() == 2);
         check!(writes[0].tenant != writes[1].tenant);
         check!(svc.source.commits() == 1);
     }
@@ -409,13 +409,13 @@ mod tests {
 
         svc.source
             .push_batch(vec![span("A", SpanKind::Client, [0xA; 8], [0; 8])]);
-        assert!(svc.poll_once(100).await.unwrap() == 1);
-        assert!(store.load_all("A").len() == 1);
+        assert2::assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert2::assert!(store.load_all("A").len() == 1);
 
         svc.source
             .push_batch(vec![span("A", SpanKind::Server, [0xB; 8], [0xA; 8])]);
-        assert!(svc.poll_once(100).await.unwrap() == 1);
-        assert!(store.load_all("A").is_empty());
+        assert2::assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert2::assert!(store.load_all("A").is_empty());
     }
 
     #[tokio::test]
@@ -433,13 +433,13 @@ mod tests {
         .with_checkpoint_store(store.clone());
 
         source.push_batch(vec![span("A", SpanKind::Client, [0xA; 8], [0; 8])]);
-        assert!(svc.poll_once(100).await.unwrap() == 1);
-        assert!(store.load_all("A").len() == 1);
+        assert2::assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert2::assert!(store.load_all("A").len() == 1);
 
         clock.set(11_000_000_000);
-        assert!(svc.collect_once().await.unwrap() == 1);
+        assert2::assert!(svc.collect_once().await.unwrap() == 1);
 
-        assert!(store.load_all("A").is_empty());
+        assert2::assert!(store.load_all("A").is_empty());
     }
 
     #[tokio::test]
@@ -457,8 +457,8 @@ mod tests {
         .with_checkpoint_store(store.clone());
 
         source.push_batch(vec![span("A", SpanKind::Client, [0xA; 8], [0; 8])]);
-        assert!(svc.poll_once(100).await.unwrap() == 1);
-        assert!(store.load_all("A").len() == 1);
+        assert2::assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert2::assert!(store.load_all("A").len() == 1);
 
         // Advance past the edge TTL so the collect expires it, but force the sink
         // write to fail. The unpaired-span accounting is carried in the (pending)
@@ -473,7 +473,7 @@ mod tests {
         // A subsequent successful collect still emits/accounts the unpaired count
         // and only then tombstones the checkpoint.
         let written = svc.collect_once().await.unwrap();
-        assert!(written == 1);
+        assert2::assert!(written == 1);
         let payload = svc.sink.writes().pop().unwrap();
         check!(
             payload
@@ -491,24 +491,24 @@ mod tests {
         let svc = service().with_checkpoint_store(store.clone());
         svc.source
             .push_batch(vec![span("A", SpanKind::Client, [0xA; 8], [0; 8])]);
-        assert!(svc.poll_once(100).await.unwrap() == 1);
+        assert2::assert!(svc.poll_once(100).await.unwrap() == 1);
 
         let store_for_restore: Arc<dyn EdgeCheckpointStore> = store.clone();
         let restarted = service().with_checkpoint_store_for_tenants(&store_for_restore, ["A"]);
         restarted
             .source
             .push_batch(vec![span("A", SpanKind::Server, [0xB; 8], [0xA; 8])]);
-        assert!(restarted.poll_once(100).await.unwrap() == 1);
-        assert!(restarted.collect_once().await.unwrap() == 1);
+        assert2::assert!(restarted.poll_once(100).await.unwrap() == 1);
+        assert2::assert!(restarted.collect_once().await.unwrap() == 1);
 
         let payload = restarted.sink.writes().pop().unwrap();
-        assert!(
+        assert2::assert!(
             payload
                 .series
                 .iter()
                 .any(|s| s.name == "traces_service_graph_request_total")
         );
-        assert!(store.load_all("A").is_empty());
+        assert2::assert!(store.load_all("A").is_empty());
     }
 
     #[tokio::test]
@@ -519,7 +519,7 @@ mod tests {
             span("A", SpanKind::Client, [0xA; 8], [0; 8]),
             span("B", SpanKind::Client, [0xC; 8], [0; 8]),
         ]);
-        assert!(svc.poll_once(100).await.unwrap() == 2);
+        assert2::assert!(svc.poll_once(100).await.unwrap() == 2);
 
         let store_for_restore: Arc<dyn EdgeCheckpointStore> = store.clone();
         let restarted = service().with_checkpoint_store_restoring_all_tenants(&store_for_restore);
@@ -527,8 +527,8 @@ mod tests {
             span("A", SpanKind::Server, [0xB; 8], [0xA; 8]),
             span("B", SpanKind::Server, [0xD; 8], [0xC; 8]),
         ]);
-        assert!(restarted.poll_once(100).await.unwrap() == 2);
-        assert!(restarted.collect_once().await.unwrap() == 2);
+        assert2::assert!(restarted.poll_once(100).await.unwrap() == 2);
+        assert2::assert!(restarted.collect_once().await.unwrap() == 2);
 
         let writes = restarted.sink.writes();
         check!(writes.len() == 2);

@@ -638,7 +638,7 @@ impl DelegationTokenAdmin for crate::context::AdminClientHandle {
 mod tests {
     use std::sync::Mutex as StdMutex;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
     use super::*;
@@ -675,7 +675,7 @@ mod tests {
 
     #[test]
     fn decide_cases() {
-        for (name, authentication, token, now_ms, expected) in [
+        for (_name, authentication, token, now_ms, expected) in [
             (
                 "no token creates",
                 auth(vec![], None),
@@ -712,11 +712,7 @@ mod tests {
                 ReconcileDecision::Renew,
             ),
         ] {
-            assert_eq!(
-                decide(&authentication, token.as_ref(), now_ms),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(decide(&authentication, token.as_ref(), now_ms) == expected);
         }
     }
 
@@ -940,7 +936,7 @@ mod tests {
 
         // Admin calls: Describe (empty result) → Create.
         let calls = admin.calls();
-        assert!(
+        assert2::assert!(
             calls
                 == vec![
                     MockCall::Describe {
@@ -951,45 +947,42 @@ mod tests {
                         renewers: vec!["User:bob".into()],
                         max_lifetime_ms: 86_400_000,
                     },
-                ],
-            "expected Describe+Create, got: {calls:?}",
+                ]
         );
 
         // Secret applied with the expected keys.
         let applied = secrets.applied.lock().unwrap();
         let data = applied[0].data.as_ref().expect("data set");
-        assert_eq!(applied.len(), 1);
-        assert_eq!(
-            data.keys().map(String::as_str).collect::<Vec<_>>(),
-            vec!["hmac", "password", "sasl.jaas.config", "token-id"]
+        assert2::assert!(applied.len() == 1);
+        assert2::assert!(
+            data.keys().map(String::as_str).collect::<Vec<_>>()
+                == vec!["hmac", "password", "sasl.jaas.config", "token-id"]
         );
         let jaas = std::str::from_utf8(&data["sasl.jaas.config"].0).unwrap();
-        assert!(jaas.contains("tokenauth=\"true\""), "jaas: {jaas}");
-        assert!(jaas.contains("ScramLoginModule"), "jaas: {jaas}");
+        assert2::assert!(jaas.contains("tokenauth=\"true\""));
+        assert2::assert!(jaas.contains("ScramLoginModule"));
 
         // Status patch carries delegationTokenId + TokenIssued condition.
         let patches = users.patches.lock().unwrap();
         let (name, body) = &patches[0];
         let status = body.get("status").unwrap();
-        assert_eq!(patches.len(), 1);
-        assert_eq!(name.as_str(), "alice");
-        assert!(status.get("delegationTokenId").is_some());
-        assert!(status.get("delegationTokenExpiryTimestampMs").is_some());
+        assert2::assert!(patches.len() == 1);
+        assert2::assert!(name.as_str() == "alice");
+        assert2::assert!(status.get("delegationTokenId").is_some());
+        assert2::assert!(status.get("delegationTokenExpiryTimestampMs").is_some());
         let conds = status.get("conditions").unwrap().as_array().unwrap();
-        assert!(
+        assert2::assert!(
             conds
                 .iter()
-                .any(|c| c["type"] == "TokenIssued" && c["status"] == "True"),
-            "missing TokenIssued=True: {conds:?}",
+                .any(|c| c["type"] == "TokenIssued" && c["status"] == "True")
         );
         // Ready=True is the spec §2.4 aggregator (TokenIssued AND Secret
         // exists) — required for the kind e2e's
         // `kubectl wait --for=condition=Ready` to ever return.
-        assert!(
+        assert2::assert!(
             conds.iter().any(|c| c["type"] == "Ready"
                 && c["status"] == "True"
-                && c["reason"] == "TokenReady"),
-            "missing Ready=True/TokenReady: {conds:?}",
+                && c["reason"] == "TokenReady")
         );
     }
 
@@ -1024,7 +1017,7 @@ mod tests {
             .unwrap();
 
         let calls = admin.calls();
-        assert!(
+        assert2::assert!(
             calls
                 == vec![
                     MockCall::Describe {
@@ -1033,8 +1026,7 @@ mod tests {
                     MockCall::Renew {
                         hmac: vec![0xEE; 32],
                     },
-                ],
-            "expected Describe+Renew on the existing hmac, got: {calls:?}",
+                ]
         );
 
         // Secret + status both patched.
@@ -1058,10 +1050,10 @@ mod tests {
             .unwrap();
 
         // No Secret was applied — failure path skips the write.
-        assert!(secrets.applied.lock().unwrap().is_empty());
+        assert2::assert!(secrets.applied.lock().unwrap().is_empty());
 
         let patches = users.patches.lock().unwrap();
-        assert!(patches.len() == 1);
+        assert2::assert!(patches.len() == 1);
         let conds = patches[0].1["status"]["conditions"].as_array().unwrap();
         let issued = conds
             .iter()
@@ -1073,10 +1065,10 @@ mod tests {
             .iter()
             .find(|c| c["type"] == "Ready")
             .expect("Ready present");
-        assert_eq!(issued["status"].as_str(), Some("False"));
-        assert_eq!(issued["reason"].as_str(), Some("OperatorNotSuperUser"));
-        assert_eq!(ready["status"].as_str(), Some("False"));
-        assert_eq!(ready["reason"].as_str(), Some("OperatorNotSuperUser"));
+        assert2::assert!(issued["status"].as_str() == Some("False"));
+        assert2::assert!(issued["reason"].as_str() == Some("OperatorNotSuperUser"));
+        assert2::assert!(ready["status"].as_str() == Some("False"));
+        assert2::assert!(ready["reason"].as_str() == Some("OperatorNotSuperUser"));
     }
 
     #[tokio::test]
@@ -1096,10 +1088,10 @@ mod tests {
         let conds = patches[0].1["status"]["conditions"].as_array().unwrap();
         let issued = conds.iter().find(|c| c["type"] == "TokenIssued").unwrap();
         let ready = conds.iter().find(|c| c["type"] == "Ready").unwrap();
-        assert_eq!(issued["status"].as_str(), Some("False"));
-        assert_eq!(issued["reason"].as_str(), Some("InvalidSpec"));
-        assert_eq!(ready["status"].as_str(), Some("False"));
-        assert_eq!(ready["reason"].as_str(), Some("InvalidSpec"));
+        assert2::assert!(issued["status"].as_str() == Some("False"));
+        assert2::assert!(issued["reason"].as_str() == Some("InvalidSpec"));
+        assert2::assert!(ready["status"].as_str() == Some("False"));
+        assert2::assert!(ready["reason"].as_str() == Some("InvalidSpec"));
     }
 
     // --- helpers ----------------------------------------------------------
@@ -1113,20 +1105,20 @@ mod tests {
              username=\"{}\" password=\"{}\" tokenauth=\"true\";",
             t.token_id, want_b64
         );
-        assert_eq!(
-            build_secret_data(&t),
-            BTreeMap::from([
-                ("hmac".to_string(), ByteString(t.hmac.clone())),
-                ("password".to_string(), ByteString(want_b64.into_bytes())),
-                (
-                    "sasl.jaas.config".to_string(),
-                    ByteString(jaas.into_bytes())
-                ),
-                (
-                    "token-id".to_string(),
-                    ByteString(t.token_id.as_bytes().to_vec()),
-                ),
-            ])
+        assert2::assert!(
+            build_secret_data(&t)
+                == BTreeMap::from([
+                    ("hmac".to_string(), ByteString(t.hmac.clone())),
+                    ("password".to_string(), ByteString(want_b64.into_bytes())),
+                    (
+                        "sasl.jaas.config".to_string(),
+                        ByteString(jaas.into_bytes())
+                    ),
+                    (
+                        "token-id".to_string(),
+                        ByteString(t.token_id.as_bytes().to_vec()),
+                    ),
+                ])
         );
     }
 
@@ -1136,7 +1128,7 @@ mod tests {
         // we'd compute Duration::ZERO and hot-loop the reconciler.
         let t = token_with(0, vec![]);
         let r = compute_requeue(&t, &auth(vec![], None), 0);
-        assert!(r >= Duration::from_mins(1));
+        assert2::assert!(r >= Duration::from_mins(1));
     }
 
     #[test]
@@ -1144,12 +1136,12 @@ mod tests {
         // Token expires in a year; without clamp we'd requeue weeks out.
         let t = token_with(365 * 24 * 60 * 60 * 1_000, vec![]);
         let r = compute_requeue(&t, &auth(vec![], None), 0);
-        assert!(r <= Duration::from_hours(24));
+        assert2::assert!(r <= Duration::from_hours(24));
     }
 
     #[test]
     fn compute_conditions_reports_expiry_horizon_and_ready_state() {
-        for (name, expiry_ms, expected_status, expected_reason) in [
+        for (_name, expiry_ms, expected_status, expected_reason) in [
             (
                 "within renewal horizon",
                 1500,
@@ -1162,10 +1154,10 @@ mod tests {
             let conds = compute_conditions(&t, &auth(vec![], Some(1000)), 0, true, None);
             let expiring = conds.iter().find(|c| c.type_ == "TokenExpiring").unwrap();
             let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
-            assert_eq!(expiring.status.as_str(), expected_status, "case {name}");
-            assert_eq!(expiring.reason.as_str(), expected_reason, "case {name}");
-            assert_eq!(ready.status.as_str(), "True", "case {name}");
-            assert_eq!(ready.reason.as_str(), "TokenReady", "case {name}");
+            assert2::assert!(expiring.status.as_str() == expected_status);
+            assert2::assert!(expiring.reason.as_str() == expected_reason);
+            assert2::assert!(ready.status.as_str() == "True");
+            assert2::assert!(ready.reason.as_str() == "TokenReady");
         }
     }
 }

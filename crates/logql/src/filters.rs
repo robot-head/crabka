@@ -556,15 +556,11 @@ mod tests {
     fn field_filter_matches_returns_candidate_result() {
         let filter = number_filter("status", ComparisonOp::GreaterEqual, 500.0);
 
-        for (name, status, expected) in [
+        for (_name, status, expected) in [
             ("boundary matches", "500", true),
             ("below boundary does not match", "499", false),
         ] {
-            assert_eq!(
-                filter.matches(&labels(&[("status", status)])),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(filter.matches(&labels(&[("status", status)])) == expected);
         }
     }
 
@@ -589,7 +585,7 @@ mod tests {
             ([("status", "200"), ("level", "warn")], true),
             ([("status", "200"), ("level", "info")], false),
         ] {
-            assert_eq!(expression.matches(&labels(&pairs)), expected, "{pairs:?}");
+            assert2::assert!(expression.matches(&labels(&pairs)) == expected);
         }
     }
 
@@ -601,17 +597,15 @@ mod tests {
             vec![(FieldFilterLogicOp::And, rest_filter.clone())],
         );
 
-        for (name, path, expected) in [
+        for (_name, path, expected) in [
             ("non-health path", "/checkout", true),
             ("excluded health path", "/health", false),
         ] {
-            assert_eq!(
-                chain.matches(&labels(&[("status", "500"), ("path", path)])),
-                expected,
-                "case {name}"
+            assert2::assert!(
+                chain.matches(&labels(&[("status", "500"), ("path", path)])) == expected
             );
         }
-        assert_eq!(chain.rest(), &[(FieldFilterLogicOp::And, rest_filter)]);
+        assert2::assert!(chain.rest() == &[(FieldFilterLogicOp::And, rest_filter)]);
     }
 
     #[test]
@@ -629,10 +623,7 @@ mod tests {
                 FieldValue::Ip(IpMatcher::parse("192.168.1.1").unwrap()),
             ),
         ] {
-            assert!(
-                FieldFilter::try_new(name, op, value.clone()).is_err(),
-                "{name} {op:?} {value:?}"
-            );
+            assert2::assert!(FieldFilter::try_new(name, op, value.clone()).is_err());
         }
     }
 
@@ -654,11 +645,7 @@ mod tests {
             (ComparisonOp::LessEqual, 500.0, 500.0, true),
             (ComparisonOp::LessEqual, 501.0, 500.0, false),
         ] {
-            assert_eq!(
-                op.compare_numbers(candidate, expected),
-                result,
-                "{candidate} {op:?} {expected}"
-            );
+            assert2::assert!(op.compare_numbers(candidate, expected) == result);
         }
     }
 
@@ -677,22 +664,18 @@ mod tests {
             (ComparisonOp::LessEqual, "m", "m", true),
             (ComparisonOp::LessEqual, "n", "m", false),
         ] {
-            assert_eq!(
-                op.compare_strings(candidate, expected),
-                result,
-                "{candidate} {op:?} {expected}"
-            );
+            assert2::assert!(op.compare_strings(candidate, expected) == result);
         }
     }
 
     #[test]
     fn line_filter_reports_ip_matcher_mode() {
-        assert!(
+        assert2::assert!(
             !LineFilter::new(LineFilterOp::Contains, "error")
                 .unwrap()
                 .is_ip_matcher()
         );
-        assert!(
+        assert2::assert!(
             LineFilter::ip(LineFilterOp::Contains, "192.168.1.0/24")
                 .unwrap()
                 .is_ip_matcher()
@@ -701,15 +684,15 @@ mod tests {
 
     #[test]
     fn line_filter_validation_rejects_invalid_regex_and_ip_ops() {
-        assert!(LineFilter::new(LineFilterOp::Regex, "[").is_err());
-        assert!(LineFilter::ip(LineFilterOp::Regex, "192.168.1.1").is_err());
+        assert2::assert!(LineFilter::new(LineFilterOp::Regex, "[").is_err());
+        assert2::assert!(LineFilter::ip(LineFilterOp::Regex, "192.168.1.1").is_err());
     }
 
     #[test]
     fn ip_matcher_returns_original_pattern() {
         let matcher = IpMatcher::parse("192.168.1.0/24").unwrap();
 
-        assert_eq!(matcher.pattern(), "192.168.1.0/24");
+        assert2::assert!(matcher.pattern() == "192.168.1.0/24");
     }
 
     #[test]
@@ -719,27 +702,27 @@ mod tests {
             "192.168.1.1-2001:db8::1",
             "192.168.1.1/33",
         ] {
-            assert!(IpMatcher::parse(pattern).is_err(), "{pattern}");
+            assert2::assert!(IpMatcher::parse(pattern).is_err());
         }
     }
 
     #[test]
     fn ip_matcher_accepts_single_address_ranges_and_host_prefixes() {
-        for (name, matcher) in [
+        for (_name, matcher) in [
             (
                 "single-address range",
                 IpMatcher::parse("192.168.1.1-192.168.1.1").unwrap(),
             ),
             ("host prefix", IpMatcher::parse("192.168.1.1/32").unwrap()),
         ] {
-            assert!(matcher.matches_ip_text("192.168.1.1"), "case {name}");
-            assert!(!matcher.matches_ip_text("192.168.1.2"), "case {name}");
+            assert2::assert!(matcher.matches_ip_text("192.168.1.1"));
+            assert2::assert!(!matcher.matches_ip_text("192.168.1.2"));
         }
     }
 
     #[test]
     fn line_pattern_matches_wildcard_only_pattern() {
-        assert!(line_matches_pattern("anything", "<_>"));
-        assert!(!line_matches_pattern("anything", ""));
+        assert2::assert!(line_matches_pattern("anything", "<_>"));
+        assert2::assert!(!line_matches_pattern("anything", ""));
     }
 }

@@ -166,7 +166,6 @@ fn collect_resources(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::UnknownTaggedFields;
     use uuid::Uuid;
@@ -248,22 +247,22 @@ mod tests {
     fn v0_returns_client_metrics_subscriptions() {
         let img = image_with_subs(&["sub-b", "sub-a"]);
         let out = collect_resources(&img, 0, &[]);
-        assert_eq!(out.len(), 2);
-        assert!(
+        assert2::assert!(out.len() == 2);
+        assert2::assert!(
             out.iter()
                 .all(|r| r.resource_type == RESOURCE_TYPE_CLIENT_METRICS)
         );
-        assert_eq!(out[0].resource_name, "sub-a"); // sorted
-        assert_eq!(out[1].resource_name, "sub-b");
+        assert2::assert!(out[0].resource_name == "sub-a"); // sorted
+        assert2::assert!(out[1].resource_name == "sub-b");
     }
 
     #[test]
     fn v1_client_metrics_filter_returns_subscriptions() {
         let img = image_with_subs(&["sub-a"]);
         let out = collect_resources(&img, 1, &[RESOURCE_TYPE_CLIENT_METRICS]);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].resource_type, RESOURCE_TYPE_CLIENT_METRICS);
-        assert_eq!(out[0].resource_name, "sub-a");
+        assert2::assert!(out.len() == 1);
+        assert2::assert!(out[0].resource_type == RESOURCE_TYPE_CLIENT_METRICS);
+        assert2::assert!(out[0].resource_name == "sub-a");
     }
 
     #[test]
@@ -294,7 +293,7 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
-        assert!(out == expected);
+        assert2::assert!(out == expected);
     }
 
     #[test]
@@ -306,7 +305,7 @@ mod tests {
             resource_type: RESOURCE_TYPE_TOPIC,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         }];
-        assert!(out == expected);
+        assert2::assert!(out == expected);
     }
 
     #[test]
@@ -325,7 +324,7 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
-        assert!(out == expected);
+        assert2::assert!(out == expected);
     }
 
     #[test]
@@ -333,10 +332,7 @@ mod tests {
         let img = image_with_topics_and_brokers(&["t-a"], &[1]);
         // type 8 = BROKER_LOGGER, type 32 = GROUP — neither supported.
         let out = collect_resources(&img, 1, &[8, 32]);
-        assert!(
-            out.is_empty(),
-            "unsupported resource types silently drop; got {out:?}"
-        );
+        assert2::assert!(out.is_empty());
     }
 
     #[test]
@@ -363,7 +359,7 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
-        assert!(out == expected);
+        assert2::assert!(out == expected);
     }
 
     #[test]
@@ -373,7 +369,7 @@ mod tests {
         // Topics sorted lexicographically, brokers sorted lexicographically
         // by id-as-string.
         let names: Vec<&str> = out.iter().map(|r| r.resource_name.as_str()).collect();
-        assert!(names == vec!["a-early", "z-late", "1", "10"]);
+        assert2::assert!(names == vec!["a-early", "z-late", "1", "10"]);
     }
 
     #[tokio::test]
@@ -399,7 +395,7 @@ mod tests {
             config_resources: vec![],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -439,7 +435,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

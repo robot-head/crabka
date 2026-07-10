@@ -16,7 +16,6 @@ mod produce;
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use crate::{
         UnknownTaggedFields, kafka_3_6_2,
@@ -42,7 +41,7 @@ mod tests {
             topic_data: vec![],
             unknown_tagged_fields: UnknownTaggedFields(vec![]),
         };
-        assert!(canonical == expected);
+        assert2::assert!(canonical == expected);
     }
 
     #[test]
@@ -53,7 +52,7 @@ mod tests {
             ..Default::default()
         };
         let legacy: kafka_3_6_2::owned::produce_response::ProduceResponse = canonical.into();
-        assert!(legacy.throttle_time_ms == 17);
+        assert2::assert!(legacy.throttle_time_ms == 17);
     }
 
     #[test]
@@ -83,7 +82,7 @@ mod tests {
             },
             unknown_tagged_fields: UnknownTaggedFields(vec![]),
         };
-        assert!(canonical == expected);
+        assert2::assert!(canonical == expected);
     }
 
     #[test]
@@ -96,6 +95,6 @@ mod tests {
             ..Default::default()
         };
         let legacy: kafka_3_6_2::owned::fetch_response::FetchResponse = canonical.into();
-        assert!(legacy.throttle_time_ms == 42);
+        assert2::assert!(legacy.throttle_time_ms == 42);
     }
 }

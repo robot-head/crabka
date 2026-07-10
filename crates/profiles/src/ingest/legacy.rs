@@ -1058,7 +1058,7 @@ fn urldecode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -1088,7 +1088,7 @@ mod tests {
     fn unknown_format_defaults_to_groups() {
         let q = parse_ingest_query("name=app").unwrap();
 
-        assert!(matches!(q.format, IngestFormat::Groups));
+        assert2::assert!(matches!(q.format, IngestFormat::Groups));
     }
 
     #[tokio::test]
@@ -1147,16 +1147,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            &raw.profile.sample_types()[0],
-            &("wall".to_string(), "nanoseconds".to_string())
+        assert2::assert!(
+            &raw.profile.sample_types()[0] == &("wall".to_string(), "nanoseconds".to_string())
         );
-        assert_eq!(
-            raw.profile.period_type_strings(),
-            ("wall".to_string(), "nanoseconds".to_string())
+        assert2::assert!(
+            raw.profile.period_type_strings() == ("wall".to_string(), "nanoseconds".to_string())
         );
         let split = crate::ingest::split_sample_types(&raw).unwrap();
-        assert!(split[0].profile_type == "myapp:wall:nanoseconds:wall:nanoseconds:delta");
+        assert2::assert!(split[0].profile_type == "myapp:wall:nanoseconds:wall:nanoseconds:delta");
     }
 
     #[tokio::test]
@@ -1214,7 +1212,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "bytes".to_string()));
+        assert2::assert!(
+            raw.profile.sample_types()[0] == ("samples".to_string(), "bytes".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1240,8 +1240,10 @@ mod tests {
             .collect::<Vec<_>>();
         values.sort_unstable();
 
-        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
-        assert!(values == vec![1, 3]);
+        assert2::assert!(
+            raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string())
+        );
+        assert2::assert!(values == vec![1, 3]);
     }
 
     #[tokio::test]
@@ -1285,8 +1287,10 @@ mod tests {
             .collect::<Vec<_>>();
         values.sort_unstable();
 
-        assert!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
-        assert!(values == vec![4, 5]);
+        assert2::assert!(
+            raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string())
+        );
+        assert2::assert!(values == vec![4, 5]);
     }
 
     #[tokio::test]
@@ -1393,7 +1397,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(raw.profile.inner().time_nanos == 1_700_000_000_000_000_000);
+        assert2::assert!(raw.profile.inner().time_nanos == 1_700_000_000_000_000_000);
     }
 
     #[tokio::test]
@@ -1465,11 +1469,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            &raw.profile.sample_types()[0],
-            &("wall".to_string(), "nanoseconds".to_string())
+        assert2::assert!(
+            &raw.profile.sample_types()[0] == &("wall".to_string(), "nanoseconds".to_string())
         );
-        assert!(!raw.profile.samples().is_empty());
+        assert2::assert!(!raw.profile.samples().is_empty());
         let functions = raw
             .profile
             .inner()
@@ -1477,7 +1480,7 @@ mod tests {
             .iter()
             .filter_map(|function| raw.profile.string(function.name))
             .collect::<Vec<_>>();
-        assert!(
+        assert2::assert!(
             functions
                 .iter()
                 .any(|function| function.contains("CompileBroker::compiler_thread_loop"))
@@ -1527,11 +1530,11 @@ mod tests {
         ));
 
         let err = tree_to_pprof("app", "samples", &body).unwrap_err();
-        assert!(matches!(err, ProfilesError::Decode(_)));
+        assert2::assert!(matches!(err, ProfilesError::Decode(_)));
 
         // Sanity: a normal small tree still decodes successfully.
         let ok = b"\x00\x00\x01\x01a\x00\x02\x01b\x01\x00\x01c\x02\x00";
-        assert!(tree_to_pprof("app", "samples", ok).is_ok());
+        assert2::assert!(tree_to_pprof("app", "samples", ok).is_ok());
     }
 
     #[test]
@@ -1555,7 +1558,7 @@ mod tests {
         put_tree_varint(&mut body, 0);
 
         let err = trie_to_pprof("app", "samples", &body).unwrap_err();
-        assert!(matches!(err, ProfilesError::Decode(_)));
+        assert2::assert!(matches!(err, ProfilesError::Decode(_)));
 
         // Sanity: a chain comfortably under the cap still decodes.
         let shallow_depth = 64_usize;
@@ -1570,10 +1573,10 @@ mod tests {
         shallow.push(b'a');
         put_tree_varint(&mut shallow, 1);
         put_tree_varint(&mut shallow, 0);
-        assert!(trie_to_pprof("app", "samples", &shallow).is_ok());
+        assert2::assert!(trie_to_pprof("app", "samples", &shallow).is_ok());
 
         // Sanity: the canonical small trie payload still decodes.
         let ok = b"\x00\x00\x01\x02a;\x00\x02\x01b\x01\x00\x01c\x02\x00";
-        assert!(trie_to_pprof("app", "samples", ok).is_ok());
+        assert2::assert!(trie_to_pprof("app", "samples", ok).is_ok());
     }
 }

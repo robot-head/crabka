@@ -113,7 +113,6 @@ fn path_of(data_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -123,7 +122,7 @@ mod tests {
         let mut f = InFlightFile::new("p".into(), Phase::Submit, 42, 50_000_000);
         f.write(dir.path()).unwrap();
         let loaded = InFlightFile::load(dir.path()).unwrap().unwrap();
-        assert!(
+        assert2::assert!(
             loaded
                 == InFlightFile {
                     version: 1,
@@ -140,7 +139,7 @@ mod tests {
         f.target_terminal_status = Some(ProposalStatus::Completed);
         f.write(dir.path()).unwrap();
         let loaded2 = InFlightFile::load(dir.path()).unwrap().unwrap();
-        assert!(
+        assert2::assert!(
             (loaded2.phase, loaded2.target_terminal_status)
                 == (Phase::ClearThrottle, Some(ProposalStatus::Completed))
         );
@@ -149,7 +148,7 @@ mod tests {
     #[test]
     fn load_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(InFlightFile::load(dir.path()).unwrap().is_none());
+        assert2::assert!(InFlightFile::load(dir.path()).unwrap().is_none());
     }
 
     #[test]
@@ -160,7 +159,7 @@ mod tests {
             .unwrap();
         InFlightFile::delete(dir.path()).unwrap();
         InFlightFile::delete(dir.path()).unwrap();
-        assert!(InFlightFile::load(dir.path()).unwrap().is_none());
+        assert2::assert!(InFlightFile::load(dir.path()).unwrap().is_none());
     }
 
     #[test]
@@ -169,7 +168,7 @@ mod tests {
         let bogus = r#"{"version":999,"proposal_id":"x","phase":"Submit","started_at_ms":0,"throttle_bytes_per_sec":0}"#;
         std::fs::write(dir.path().join(FILENAME), bogus).unwrap();
         let err = InFlightFile::load(dir.path()).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             StateError::UnsupportedVersion {
                 found: 999,
@@ -183,7 +182,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(FILENAME)).unwrap();
         let err = InFlightFile::load(dir.path()).unwrap_err();
-        assert!(matches!(err, StateError::Io(_)), "got {err:?}");
+        assert2::assert!(matches!(err, StateError::Io(_)));
     }
 
     #[test]
@@ -191,6 +190,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(FILENAME)).unwrap();
         let err = InFlightFile::delete(dir.path()).unwrap_err();
-        assert!(matches!(err, StateError::Io(_)), "got {err:?}");
+        assert2::assert!(matches!(err, StateError::Io(_)));
     }
 }

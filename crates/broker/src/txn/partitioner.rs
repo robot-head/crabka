@@ -15,7 +15,6 @@ pub fn partition_for_tid(transactional_id: &str, num_partitions: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -26,10 +25,7 @@ mod tests {
     fn matches_jvm_for_canonical_tids() {
         let cases: &[(&str, i32)] = &[("my-tid", 43), ("producer-1", 45), ("tx-orders-prod", 26)];
         for (tid, expected) in cases {
-            assert!(
-                partition_for_tid(tid, 50) == *expected,
-                "tid `{tid}` should hash to partition {expected}"
-            );
+            assert2::assert!(partition_for_tid(tid, 50) == *expected);
         }
     }
 
@@ -42,7 +38,7 @@ mod tests {
         ] {
             for n in [1, 50, 256] {
                 let p = partition_for_tid(s, n);
-                assert!((0..n).contains(&p));
+                assert2::assert!((0..n).contains(&p));
             }
         }
     }
@@ -67,10 +63,7 @@ mod tests {
         for s in inputs {
             for num_partitions in [1, 3, 50, 256] {
                 let p = partition_for_tid(s, num_partitions);
-                assert!(
-                    (0..num_partitions).contains(&p),
-                    "tid={s:?}, num_partitions={num_partitions} produced p={p} (out of bounds)"
-                );
+                assert2::assert!((0..num_partitions).contains(&p));
             }
         }
     }

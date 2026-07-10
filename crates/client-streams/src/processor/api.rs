@@ -265,10 +265,7 @@ where
     {
         use crate::processor::punctuation::PunctuationType;
         let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
-        assert!(
-            interval_ms >= 1,
-            "schedule interval must be positive (>= 1ms)"
-        );
+        assert2::assert!(interval_ms >= 1);
         let base = match ty {
             PunctuationType::StreamTime => self.dispatch.sched_stream_time,
             PunctuationType::WallClockTime => self.dispatch.sched_wall_clock,

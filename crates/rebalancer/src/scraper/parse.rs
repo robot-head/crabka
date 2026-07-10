@@ -82,13 +82,12 @@ fn parse_line(line: &str) -> Option<ParsedSample> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn empty_input_returns_empty() {
-        assert!(parse("").is_empty());
+        assert2::assert!(parse("").is_empty());
     }
 
     #[test]
@@ -99,7 +98,7 @@ mod tests {
 crabka_broker_partition_bytes_in_total{topic="kept",partition="1"} 7
 "#;
         let out = parse(txt);
-        assert!(
+        assert2::assert!(
             (
                 out.len(),
                 out.first()
@@ -121,7 +120,7 @@ crabka_broker_partition_bytes_in_total{topic="kept",partition="1"} 7
             ),
         ] {
             let out = parse(txt);
-            assert!(
+            assert2::assert!(
                 (
                     out.len(),
                     out.first()
@@ -136,7 +135,7 @@ crabka_broker_partition_bytes_in_total{topic="kept",partition="1"} 7
         let txt = r#"crabka_broker_partition_disk_bytes{topic="t",partition="5"} 1234567
 "#;
         let out = parse(txt);
-        assert!(
+        assert2::assert!(
             (
                 out.len(),
                 out.first()
@@ -156,7 +155,7 @@ crabka_broker_partition_bytes_out_total{topic="t",partition="0"} 2
 crabka_broker_partition_cpu_micros_total{topic="t",partition="0"} 42
 "#;
         let out = parse(txt);
-        assert!(
+        assert2::assert!(
             out.iter().map(|sample| sample.metric).collect::<Vec<_>>()
                 == vec![
                     MetricKind::BytesIn,
@@ -169,12 +168,12 @@ crabka_broker_partition_cpu_micros_total{topic="t",partition="0"} 42
     #[test]
     fn malformed_line_is_skipped() {
         let txt = "crabka_broker_partition_bytes_in_total{nope this is broken\n";
-        assert!(parse(txt).is_empty());
+        assert2::assert!(parse(txt).is_empty());
     }
 
     #[test]
     fn missing_partition_label_is_skipped() {
         let txt = "crabka_broker_partition_bytes_in_total{topic=\"t\"} 1024\n";
-        assert!(parse(txt).is_empty(), "missing partition label must skip");
+        assert2::assert!(parse(txt).is_empty());
     }
 }

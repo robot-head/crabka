@@ -8,7 +8,6 @@
 
 use std::collections::BTreeSet;
 
-use assert2::assert;
 use crabka_broker::{BootstrapMode, Broker, config::NodeRole};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -96,20 +95,14 @@ async fn broker_only_node_observes_and_forwards() {
         })
         .await
         .unwrap();
-    assert!(
-        resp.topics[0].error_code == 0,
-        "create via broker-only node forwards to the controller and succeeds"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 
     // Assertion 1: the topic propagates back to the broker-only node's image
     // via observer fetch (it is not a voter, so this cannot be a raft apply).
     broker_only.wait_until_partition_present(topic, 0).await;
 
     // Assertion 2: the controller itself committed the forwarded topic.
-    assert!(
-        controller.has_partition(topic, 0).await,
-        "controller committed the forwarded CreateTopics"
-    );
+    assert2::assert!(controller.has_partition(topic, 0).await);
 
     // Assertion 3: the broker-only node is NOT in the controller's voter set.
     let quorum_voters: BTreeSet<u64> = controller
@@ -117,11 +110,8 @@ async fn broker_only_node_observes_and_forwards() {
         .into_iter()
         .map(|n| n.0)
         .collect();
-    assert!(quorum_voters.contains(&1), "the controller is a voter");
-    assert!(
-        !quorum_voters.contains(&broker_only_id),
-        "the broker-only node must never join the voter quorum"
-    );
+    assert2::assert!(quorum_voters.contains(&1));
+    assert2::assert!(!quorum_voters.contains(&broker_only_id));
 
     broker_only.shutdown().await;
     controller.shutdown().await;

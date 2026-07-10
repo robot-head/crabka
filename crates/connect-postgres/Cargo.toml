@@ -18,6 +18,7 @@ categories = ["database", "asynchronous"]
 workspace = true
 
 [dependencies]
+assert2 = { workspace = true }
 crabka-connect = { path = "../connect", version = "0.3.9" }
 crabka-schema-serde = { path = "../schema-serde", version = "0.3.9", features = ["protobuf"] }
 async-trait = { workspace = true }
@@ -35,7 +36,6 @@ tokio-postgres = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 mockall = { workspace = true }
 mutants = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

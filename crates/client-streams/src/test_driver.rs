@@ -684,6 +684,6 @@ mod tests {
             )
             .await;
         let only = res.only_partition_result().unwrap();
-        assert_eq!(only.result(), Some(&Some(2)));
+        assert2::assert!(only.result() == Some(&Some(2)));
     }
 }

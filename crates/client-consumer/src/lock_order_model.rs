@@ -414,7 +414,6 @@ fn run_model(programs: Vec<(&'static str, Vec<Op>)>) -> stateright::CheckerBuild
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -438,11 +437,8 @@ mod tests {
         );
         // The bound must NOT have been hit, or "deadlock-free" would be a
         // statement about a truncated space, not the whole one.
-        assert!(
-            checker.state_count() < MAX_STATES,
-            "state space hit the cap — the proof would be incomplete; shrink the model"
-        );
-        assert!(checker.max_depth() < MAX_DEPTH, "depth cap hit");
+        assert2::assert!(checker.state_count() < MAX_STATES);
+        assert2::assert!(checker.max_depth() < MAX_DEPTH);
         checker.assert_properties();
     }
 
@@ -463,11 +459,8 @@ mod tests {
             checker.state_count(),
             checker.max_depth(),
         );
-        assert!(
-            checker.state_count() < MAX_STATES,
-            "state space hit the cap"
-        );
-        assert!(checker.max_depth() < MAX_DEPTH, "depth cap hit");
+        assert2::assert!(checker.state_count() < MAX_STATES);
+        assert2::assert!(checker.max_depth() < MAX_DEPTH);
         checker.assert_properties();
     }
 
@@ -489,11 +482,7 @@ mod tests {
         // The interleaving N-holds-N, P-holds-P, each then blocked on the other
         // is a genuine cycle; the checker must surface a `no_deadlock`
         // counterexample.
-        assert!(
-            checker.discoveries().contains_key("no_deadlock"),
-            "checker failed to detect the injected P->N inversion deadlock — \
-             the no_deadlock property is not actually falsifiable"
-        );
+        assert2::assert!(checker.discoveries().contains_key("no_deadlock"));
     }
 
     /// Unit-level sanity for the deadlock predicate itself.
@@ -512,7 +501,7 @@ mod tests {
         s.tasks[0].pc = 1; // next op = Acquire(P)
         s.holder[P as usize] = Some(1);
         s.tasks[1].pc = 1; // next op = Acquire(N)
-        assert!(is_deadlocked(&s));
+        assert2::assert!(is_deadlocked(&s));
 
         // Progress case: x's next op is a Release (it can step), so the system
         // is NOT deadlocked even though y is currently blocked.
@@ -527,7 +516,7 @@ mod tests {
         live.tasks[0].pc = 1; // x next op = Release(N): steppable
         live.holder[P as usize] = Some(1);
         live.tasks[1].pc = 1; // y next op = Acquire(N): blocked
-        assert!(!is_deadlocked(&live));
+        assert2::assert!(!is_deadlocked(&live));
 
         // Terminal-but-complete: all tasks done ⇒ not a deadlock (programs are
         // balanced, so a done task holds no locks).
@@ -537,6 +526,6 @@ mod tests {
         };
         let mut done = all_done;
         done.tasks[0].pc = 2; // done
-        assert!(!is_deadlocked(&done));
+        assert2::assert!(!is_deadlocked(&done));
     }
 }

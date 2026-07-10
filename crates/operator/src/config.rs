@@ -75,7 +75,7 @@ mod tests {
 
     #[test]
     fn cli_namespace_cases() {
-        for (name, args, expected) in [
+        for (_name, args, expected) in [
             (
                 "defaults compute cluster scope",
                 vec!["bin"],
@@ -94,20 +94,9 @@ mod tests {
             let parsed = Wrap::parse_from(args);
             let (expected_watch_namespaces, expected_watched, expected_operator_namespace) =
                 expected;
-            assert_eq!(
-                parsed.cfg.watched().map(<[String]>::to_vec),
-                expected_watched,
-                "case {name}"
-            );
-            assert_eq!(
-                parsed.cfg.operator_namespace.as_str(),
-                expected_operator_namespace,
-                "case {name}"
-            );
-            assert_eq!(
-                parsed.cfg.watch_namespaces, expected_watch_namespaces,
-                "case {name}"
-            );
+            assert2::assert!(parsed.cfg.watched().map(<[String]>::to_vec) == expected_watched);
+            assert2::assert!(parsed.cfg.operator_namespace.as_str() == expected_operator_namespace);
+            assert2::assert!(parsed.cfg.watch_namespaces == expected_watch_namespaces);
         }
     }
 }

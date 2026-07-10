@@ -447,8 +447,6 @@ fn span(
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use assert2::assert;
-
     use super::*;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -486,14 +484,14 @@ mod tests {
             "PASS ok (1/1)",
             "FAIL bad (1/2) mismatch",
         ] {
-            assert!(text.contains(needle), "missing: {needle}");
+            assert2::assert!(text.contains(needle));
         }
 
         let dir = temp_dir("report");
         let path = dir.join("nested").join("report.txt");
         report.write_to(&path).unwrap();
         let written = fs::read_to_string(&path).unwrap();
-        assert!(written == text);
+        assert2::assert!(written == text);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -521,21 +519,21 @@ query: { .svc = "x" }
 
         let report = run_corpus_dir(&dir);
 
-        assert_eq!(report.cases.len(), 1);
-        assert_eq!(report.cases[0].name.as_str(), "one.case:explicit");
+        assert2::assert!(report.cases.len() == 1);
+        assert2::assert!(report.cases[0].name.as_str() == "one.case:explicit");
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn file_name_uses_only_last_path_component() {
-        assert!(file_name(Path::new("nested/cases/selectors.case")) == "selectors.case");
+        assert2::assert!(file_name(Path::new("nested/cases/selectors.case")) == "selectors.case");
     }
 
     #[test]
     fn span_helper_offsets_start_time_by_span_id() {
         let span = span(9, 2, Some(1), "child", 123, vec![]);
 
-        assert!(
+        assert2::assert!(
             span == InputSpan {
                 trace_id: [9; 16],
                 span_id: [2; 8],
@@ -566,7 +564,7 @@ expect_span_ids: 1
 "#,
         );
 
-        assert!(
+        assert2::assert!(
             cases
                 == vec![Case {
                     name: "selectors.case#1".into(),
@@ -599,7 +597,7 @@ expect_series_count: 1
 "#,
         );
 
-        assert!(
+        assert2::assert!(
             cases
                 == vec![
                     Case {

@@ -62,10 +62,5 @@ fn main() {
         .output()
         .expect("run cargo check for renamed dependency test crate");
 
-    assert!(
-        output.status.success(),
-        "renamed dependency test crate failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert2::assert!(output.status.success());
 }

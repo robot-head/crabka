@@ -22,9 +22,9 @@ workspace = true
 # (which embeds a `VoterSet` in its `QuorumState`) can compile to WebAssembly
 # for the in-browser playground without dragging in the rest of the stack.
 [dependencies]
+assert2 = { workspace = true }
 crabka-ids = { version = "0.3.8", path = "../ids" }
 serde = { workspace = true, features = ["derive"] }
 uuid = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }

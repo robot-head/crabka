@@ -233,17 +233,16 @@ mod tests {
 
     #[test]
     fn f32_extraction_accepts_inclusive_boundaries() {
-        for (name, value, expected) in [
+        for (_name, value, expected) in [
             ("minimum", f64::from(f32::MIN), f32::MIN),
             ("maximum", f64::from(f32::MAX), f32::MAX),
         ] {
             let config = resolved_float(value);
-            assert_eq!(
+            assert2::assert!(
                 f32::from_resolved_value(&config, "ratio")
                     .unwrap()
-                    .to_bits(),
-                expected.to_bits(),
-                "case {name}"
+                    .to_bits()
+                    == expected.to_bits()
             );
         }
     }
@@ -253,17 +252,14 @@ mod tests {
         let below_min = resolved_float(f64::from(f32::MIN) * 2.0);
         let above_max = resolved_float(f64::from(f32::MAX) * 2.0);
 
-        for (name, config) in [("below_min", &below_min), ("above_max", &above_max)] {
-            assert!(
-                matches!(
-                    f32::from_resolved_value(config, "ratio"),
-                    Err(ConfigError::WrongType {
-                        key,
-                        expected: "float in range for f32",
-                    }) if key == "ratio"
-                ),
-                "case {name}"
-            );
+        for (_name, config) in [("below_min", &below_min), ("above_max", &above_max)] {
+            assert2::assert!(matches!(
+                f32::from_resolved_value(config, "ratio"),
+                Err(ConfigError::WrongType {
+                    key,
+                    expected: "float in range for f32",
+                }) if key == "ratio"
+            ));
         }
     }
 }

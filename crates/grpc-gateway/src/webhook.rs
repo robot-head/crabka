@@ -498,7 +498,7 @@ mod tests {
             .body(Body::from("body"))
             .unwrap();
         let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert2::assert!(resp.status() == StatusCode::NOT_FOUND);
     }
 
     // -----------------------------------------------------------------------
@@ -515,7 +515,7 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
         let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert2::assert!(resp.status() == StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     // -----------------------------------------------------------------------
@@ -524,7 +524,7 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_signature_cases_return_401() {
-        for (name, signature) in [("missing", None), ("invalid", Some("deadbeef"))] {
+        for (_name, signature) in [("missing", None), ("invalid", Some("deadbeef"))] {
             let state = state_with_webhooks(make_webhook("gh", signed_cfg("events"))).await;
             let app = webhook_router(state);
             let mut request = Request::post("/v1/webhooks/gh");
@@ -532,7 +532,7 @@ mod tests {
                 request = request.header("X-Sig", signature);
             }
             let response = oneshot(app, request.body(Body::from("hello")).unwrap()).await;
-            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "case {name}");
+            assert2::assert!(response.status() == StatusCode::UNAUTHORIZED);
         }
     }
 
@@ -569,7 +569,7 @@ mod tests {
             .body(Body::from(body.as_slice()))
             .unwrap();
         let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert2::assert!(resp.status() == StatusCode::UNAUTHORIZED);
     }
 
     // NOTE: The "fresh timestamp passes replay guard → reaches produce" test is
@@ -600,7 +600,7 @@ mod tests {
             .body(Body::from(r#"{"type":"push"}"#))
             .unwrap();
         let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert2::assert!(resp.status() == StatusCode::BAD_REQUEST);
     }
 
     // -----------------------------------------------------------------------
@@ -629,17 +629,16 @@ mod tests {
         });
 
         let actual = body_structured.expect("schema_subject ⇒ structured body");
-        assert_eq!(
-            actual,
-            (
-                body,
-                SchemaSelector {
-                    subject: Some("orders-value".to_string()),
-                    id: None,
-                    format: SchemaFormat::Avro,
-                },
-            ),
-            "structured body carries the raw request bytes and selector"
+        assert2::assert!(
+            actual
+                == (
+                    body,
+                    SchemaSelector {
+                        subject: Some("orders-value".to_string()),
+                        id: None,
+                        format: SchemaFormat::Avro,
+                    },
+                )
         );
     }
 
@@ -651,7 +650,7 @@ mod tests {
     /// Codec failures map to their complete HTTP response status table.
     #[tokio::test]
     async fn schema_encode_failure_status_cases() {
-        for (name, error, body, expected) in [
+        for (_name, error, body, expected) in [
             (
                 "schema validation",
                 CodecError::Validate as fn(String) -> CodecError,
@@ -676,7 +675,7 @@ mod tests {
                 .body(Body::from(body))
                 .unwrap();
             let resp = oneshot(app, req).await;
-            assert_eq!(resp.status(), expected, "schema encode case {name}");
+            assert2::assert!(resp.status() == expected);
         }
     }
 
@@ -718,11 +717,11 @@ mod tests {
             ),
         ];
 
-        for (name, idempotency_source, key_source, expected) in cases {
+        for (_name, idempotency_source, key_source, expected) in cases {
             let mut cfg = unsigned_cfg("t");
             cfg.idempotency_source = idempotency_source;
             cfg.key_source = key_source;
-            assert_eq!(needs_json(&cfg), expected, "needs_json case {name}");
+            assert2::assert!(needs_json(&cfg) == expected);
         }
     }
 }

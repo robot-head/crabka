@@ -427,13 +427,8 @@ impl Model for DpModel {
                     Offset(leader_log_len),
                     Offset(fetch_offset),
                 );
-                assert!(
-                    vw.limit_offset <= s.hwm,
-                    "consumer limit {} exceeds HWM {}",
-                    vw.limit_offset,
-                    s.hwm
-                );
-                assert!(vw.response_hw == s.hwm, "response_hw drift");
+                assert2::assert!(vw.limit_offset <= s.hwm);
+                assert2::assert!(vw.response_hw == s.hwm);
             }
             Act::Die(b) => {
                 s.live &= !(1 << b);
@@ -524,16 +519,9 @@ fn run(model: DpModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
-    assert!(
-        checker.state_count() < TARGET_STATE_COUNT,
-        "[{label}] truncated"
-    );
-    assert!(
-        checker.unique_state_count() < MAX_UNIQUE_STATES,
-        "[{label}] unique bound exceeded ({})",
-        checker.unique_state_count()
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < TARGET_STATE_COUNT);
+    assert2::assert!(checker.unique_state_count() < MAX_UNIQUE_STATES);
     checker.assert_properties();
 }
 

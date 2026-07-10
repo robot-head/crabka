@@ -11,6 +11,7 @@ publish = false
 workspace = true
 
 [dependencies]
+assert2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -36,4 +37,3 @@ name = "crabka-protocol-codegen"
 path = "src/main.rs"
 
 [dev-dependencies]
-assert2 = { workspace = true }

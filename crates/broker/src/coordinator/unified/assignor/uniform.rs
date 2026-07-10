@@ -108,7 +108,7 @@ fn eligible_subscribers_for_partition<'a>(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_protocol::primitives::uuid::Uuid;
 
     use super::*;
@@ -170,15 +170,12 @@ mod tests {
             ("empty members", vec![], 4, HashMap::new()),
         ];
 
-        for (case, members, partition_count, expected) in cases {
+        for (_case, members, partition_count, expected) in cases {
             let topics = TopicMetadata {
                 partitions_per_topic: [(t, partition_count)].into(),
                 ..Default::default()
             };
-            assert!(
-                UniformAssignor.assign(&members, &topics) == expected,
-                "case {case}"
-            );
+            assert2::assert!(UniformAssignor.assign(&members, &topics) == expected);
         }
     }
 
@@ -197,7 +194,7 @@ mod tests {
             &[member("m3", &[t]), member("m1", &[t]), member("m2", &[t])],
             &topics,
         );
-        assert!(a1 == a2);
+        assert2::assert!(a1 == a2);
     }
 
     // ── rack-aware ────────────────────────────────────────────────
@@ -234,7 +231,7 @@ mod tests {
             ],
             &topics,
         );
-        assert!(
+        assert2::assert!(
             a == HashMap::from([
                 ("m1".into(), HashMap::from([(t, vec![0])])),
                 ("m2".into(), HashMap::from([(t, vec![1])])),
@@ -257,8 +254,8 @@ mod tests {
             &topics,
         );
         // 4 partitions / 2 members → 2 each, distributed evenly.
-        assert!(a["m1"][&t].len() == 2);
-        assert!(a["m2"][&t].len() == 2);
+        assert2::assert!(a["m1"][&t].len() == 2);
+        assert2::assert!(a["m2"][&t].len() == 2);
         // Union covers all 4 partitions exactly once.
         let mut all: Vec<i32> = a["m1"][&t]
             .iter()
@@ -266,7 +263,7 @@ mod tests {
             .copied()
             .collect();
         all.sort_unstable();
-        assert!(all == vec![0, 1, 2, 3]);
+        assert2::assert!(all == vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -283,16 +280,8 @@ mod tests {
             ],
             &topics,
         );
-        assert!(
-            a["m1"][&t].len() + a["m2"][&t].len() == 3,
-            "all partitions assigned"
-        );
-        assert!(
-            a["m1"][&t].len().abs_diff(a["m2"][&t].len()) <= 1,
-            "balanced within ±1: {:?} vs {:?}",
-            a["m1"][&t],
-            a["m2"][&t],
-        );
+        assert2::assert!(a["m1"][&t].len() + a["m2"][&t].len() == 3);
+        assert2::assert!(a["m1"][&t].len().abs_diff(a["m2"][&t].len()) <= 1);
     }
 
     #[test]
@@ -314,7 +303,7 @@ mod tests {
             ],
             &topics,
         );
-        assert!(
+        assert2::assert!(
             a == HashMap::from([
                 ("m1".into(), HashMap::from([(t, vec![0])])),
                 ("m2".into(), HashMap::from([(t, vec![1])])),
@@ -339,7 +328,7 @@ mod tests {
             &topics,
         );
         // Same as `two_members_split_round_robin` above.
-        assert!(
+        assert2::assert!(
             a == HashMap::from([
                 ("m1".into(), HashMap::from([(t, vec![0, 2])])),
                 ("m2".into(), HashMap::from([(t, vec![1, 3])])),
@@ -354,7 +343,7 @@ mod tests {
         let t = tid(1);
         let topics = topics_with_racks(t, 4, vec![vec!["rack-a"]; 4]);
         let a = UniformAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
-        assert!(
+        assert2::assert!(
             a == HashMap::from([
                 ("m1".into(), HashMap::from([(t, vec![0, 2])])),
                 ("m2".into(), HashMap::from([(t, vec![1, 3])])),

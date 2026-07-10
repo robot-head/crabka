@@ -1434,7 +1434,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use assert2::{assert, check};
+    use assert2::check;
     use axum::{
         body::{Body, to_bytes},
         http::{Request, StatusCode},
@@ -1605,9 +1605,9 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(status_is_success);
-        assert_eq!(body["status"].as_str(), Some("success"));
-        assert_eq!(body["data"]["resultType"].as_str(), Some("vector"));
+        assert2::assert!(status_is_success);
+        assert2::assert!(body["status"].as_str() == Some("success"));
+        assert2::assert!(body["data"]["resultType"].as_str() == Some("vector"));
     }
 
     #[tokio::test]
@@ -1626,9 +1626,9 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(status_is_success);
-        assert_eq!(body["status"].as_str(), Some("success"));
-        assert_eq!(body["data"]["resultType"].as_str(), Some("vector"));
+        assert2::assert!(status_is_success);
+        assert2::assert!(body["status"].as_str() == Some("success"));
+        assert2::assert!(body["data"]["resultType"].as_str() == Some("vector"));
     }
 
     #[tokio::test]
@@ -1653,12 +1653,9 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(status_is_success);
-        assert_eq!(
-            body["data"]["result"][0]["metric"]["job"].as_str(),
-            Some("api")
-        );
-        assert_eq!(body["data"]["result"][0]["value"][1].as_str(), Some("1"));
+        assert2::assert!(status_is_success);
+        assert2::assert!(body["data"]["result"][0]["metric"]["job"].as_str() == Some("api"));
+        assert2::assert!(body["data"]["result"][0]["value"][1].as_str() == Some("1"));
     }
 
     #[tokio::test]
@@ -1691,14 +1688,14 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(status_is_success);
-        assert_eq!(body["data"]["resultType"].as_str(), Some("matrix"));
-        assert_eq!(
+        assert2::assert!(status_is_success);
+        assert2::assert!(body["data"]["resultType"].as_str() == Some("matrix"));
+        assert2::assert!(
             body["data"]["result"][0]["values"]
                 .as_array()
                 .unwrap()
-                .len(),
-            3
+                .len()
+                == 3
         );
     }
 
@@ -1772,7 +1769,7 @@ rules:
             )
             .await
             .unwrap();
-        assert!(response.status().is_success());
+        assert2::assert!(response.status().is_success());
 
         let wal_sink = RecordingRulerWalSink::default();
         let alert_sink = RecordingAlertmanagerSink;
@@ -1793,14 +1790,14 @@ rules:
         .await
         .unwrap();
 
-        assert!(evaluation.recording_records == 1);
+        assert2::assert!(evaluation.recording_records == 1);
         let records = wal_sink.records();
         let record_labels = records[0].labels();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].tenant.as_str(), "tenant-a");
-        assert_eq!(record_labels.get("__name__"), Some("job:up:sum"));
-        assert_eq!(record_labels.get("job"), Some("api"));
-        assert!(matches!(
+        assert2::assert!(records.len() == 1);
+        assert2::assert!(records[0].tenant.as_str() == "tenant-a");
+        assert2::assert!(record_labels.get("__name__") == Some("job:up:sum"));
+        assert2::assert!(record_labels.get("job") == Some("api"));
+        assert2::assert!(matches!(
             records[0].payload,
             crabka_metrics::SamplePayload::Float { value, .. } if (value - 1.0).abs() < f64::EPSILON
         ));
@@ -1850,7 +1847,7 @@ rules:
             )
             .await
             .unwrap();
-        assert!(response.status().is_success());
+        assert2::assert!(response.status().is_success());
 
         let wal_sink = RecordingRulerWalSink::default();
         let alert_sink = RecordingAlertmanagerSink;
@@ -1871,8 +1868,8 @@ rules:
         .await
         .unwrap_err();
 
-        assert!(format!("{error}").contains("query exceeds max_samples=1"));
-        assert!(wal_sink.records().is_empty());
+        assert2::assert!(format!("{error}").contains("query exceeds max_samples=1"));
+        assert2::assert!(wal_sink.records().is_empty());
     }
 
     #[tokio::test]
@@ -1916,7 +1913,7 @@ rules:
         .unwrap();
 
         let bodies = received.lock().expect("received alerts poisoned");
-        assert!(bodies.len() == 1);
+        assert2::assert!(bodies.len() == 1);
         let body: serde_json::Value = serde_json::from_slice(&bodies[0]).unwrap();
         let expected = serde_json::json!([{
             "labels": {
@@ -1930,7 +1927,7 @@ rules:
             "endsAt": null,
             "generatorURL": "http://crabka.example/graph",
         }]);
-        assert!(body == expected);
+        assert2::assert!(body == expected);
     }
 
     #[test]
@@ -1943,8 +1940,10 @@ rules:
         };
         let group_record = super::RulerStateWalRecord::Group(group.clone());
         let group_encoded = group_record.encode().unwrap();
-        assert!(super::RulerStateWalRecord::decode(&group_encoded).unwrap() == group_record);
-        assert!(
+        assert2::assert!(
+            super::RulerStateWalRecord::decode(&group_encoded).unwrap() == group_record
+        );
+        assert2::assert!(
             super::ruler_state_compaction_key(&group_record)
                 == bytes::Bytes::from_static(b"group\0tenant-a\0team-a\0recording")
         );
@@ -1960,8 +1959,10 @@ rules:
         };
         let alert_record = super::RulerStateWalRecord::Alert(alert);
         let alert_encoded = alert_record.encode().unwrap();
-        assert!(super::RulerStateWalRecord::decode(&alert_encoded).unwrap() == alert_record);
-        assert!(
+        assert2::assert!(
+            super::RulerStateWalRecord::decode(&alert_encoded).unwrap() == alert_record
+        );
+        assert2::assert!(
             super::ruler_state_compaction_key(&alert_record)
                 == bytes::Bytes::from_static(
                     b"alert\0tenant-a\0InstanceDown\nup == 0\0alertname=InstanceDown\0job=api"
@@ -1994,7 +1995,7 @@ rules:
             )
             .await
             .unwrap();
-        assert!(response.status() == StatusCode::ACCEPTED);
+        assert2::assert!(response.status() == StatusCode::ACCEPTED);
 
         let group_record =
             super::RulerStateWalRecord::Group(crabka_promql::RulerGroupStateRecord {
@@ -2045,7 +2046,7 @@ rules:
                 offset: super::Offset(22),
             }],
         };
-        assert!(result == expected);
+        assert2::assert!(result == expected);
         let response = router
             .oneshot(
                 Request::builder()
@@ -2056,10 +2057,10 @@ rules:
             )
             .await
             .unwrap();
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(body["data"]["groups"][0]["lastEvaluation"] == "1970-01-01T00:01:00Z");
+        assert2::assert!(body["data"]["groups"][0]["lastEvaluation"] == "1970-01-01T00:01:00Z");
     }
 
     #[tokio::test]
@@ -2100,8 +2101,8 @@ rules:
                 offset: super::Offset(8),
             }],
         };
-        assert!(result == expected);
-        assert!(consumer.commit_calls == 1);
+        assert2::assert!(result == expected);
+        assert2::assert!(consumer.commit_calls == 1);
     }
 
     #[tokio::test]
@@ -2161,14 +2162,11 @@ rules:
             .await
             .unwrap();
 
-        assert!(response.status().is_success());
+        assert2::assert!(response.status().is_success());
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            body["data"]["result"][0]["metric"]["job"].as_str(),
-            Some("api")
-        );
-        assert_eq!(body["data"]["result"][0]["value"][1].as_str(), Some("1"));
+        assert2::assert!(body["data"]["result"][0]["metric"]["job"].as_str() == Some("api"));
+        assert2::assert!(body["data"]["result"][0]["value"][1].as_str() == Some("1"));
     }
 
     #[tokio::test]
@@ -2231,14 +2229,11 @@ rules:
             .await
             .unwrap();
 
-        assert!(response.status().is_success());
+        assert2::assert!(response.status().is_success());
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            body["data"]["result"][0]["metric"]["job"].as_str(),
-            Some("api")
-        );
-        assert_eq!(body["data"]["result"][0]["value"][1].as_str(), Some("1"));
+        assert2::assert!(body["data"]["result"][0]["metric"]["job"].as_str() == Some("api"));
+        assert2::assert!(body["data"]["result"][0]["value"][1].as_str() == Some("1"));
     }
 
     #[tokio::test]
@@ -2305,10 +2300,10 @@ rules:
         );
 
         let cases = [("a", a), ("b", b), ("c", c), ("d", d)];
-        for (name, result) in cases {
-            assert!(result.unwrap().len() == 1, "concurrent load: {name}");
+        for (_name, result) in cases {
+            assert2::assert!(result.unwrap().len() == 1);
         }
-        assert!(list_calls.load(Ordering::SeqCst) == 1);
+        assert2::assert!(list_calls.load(Ordering::SeqCst) == 1);
     }
 
     #[tokio::test]
@@ -2404,15 +2399,15 @@ rules:
             .series("tenant-a", &matchers, 990_000, 1_010_000)
             .await
             .unwrap();
-        assert_eq!(recent.len(), 1);
-        assert_eq!(recent[0].get("job"), Some("new"));
+        assert2::assert!(recent.len() == 1);
+        assert2::assert!(recent[0].get("job") == Some("new"));
 
         let old = metric_store
             .series("tenant-a", &matchers, 0, 20_000)
             .await
             .unwrap();
-        assert_eq!(old.len(), 1);
-        assert_eq!(old[0].get("job"), Some("old"));
+        assert2::assert!(old.len() == 1);
+        assert2::assert!(old[0].get("job") == Some("old"));
     }
 
     #[tokio::test]
@@ -2613,14 +2608,11 @@ rules:
             .await
             .unwrap();
 
-        assert!(response.status().is_success());
+        assert2::assert!(response.status().is_success());
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            body["data"]["result"][0]["metric"]["job"].as_str(),
-            Some("api")
-        );
-        assert_eq!(body["data"]["result"][0]["value"][1].as_str(), Some("2"));
+        assert2::assert!(body["data"]["result"][0]["metric"]["job"].as_str() == Some("api"));
+        assert2::assert!(body["data"]["result"][0]["value"][1].as_str() == Some("2"));
     }
 
     async fn write_float_manifest(
@@ -2711,12 +2703,12 @@ rules:
                 offset: super::Offset(42),
             }],
         };
-        assert!(result == expected);
+        assert2::assert!(result == expected);
         let values = head
             .series("tenant-a", &[], 0, 20_000)
             .await
             .expect("series");
-        assert!(values.len() == 1);
+        assert2::assert!(values.len() == 1);
     }
 
     #[tokio::test]
@@ -2766,7 +2758,7 @@ rules:
             .await
             .expect("label values");
 
-        assert_eq!(jobs, vec!["new".to_string()]);
+        assert2::assert!(jobs == vec!["new".to_string()]);
     }
 
     #[test]
@@ -2784,7 +2776,7 @@ rules:
         )
         .unwrap_err();
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             error,
             super::WalHeadReplayError::MissingValue {
                 partition: super::PartitionIndex(1),
@@ -2833,8 +2825,8 @@ rules:
                 offset: super::Offset(5),
             }],
         };
-        assert!(result == expected);
-        assert!(consumer.commit_calls == 1);
+        assert2::assert!(result == expected);
+        assert2::assert!(consumer.commit_calls == 1);
     }
 
     #[tokio::test]
@@ -2854,8 +2846,8 @@ rules:
         .await
         .unwrap();
 
-        assert!(result.replayed_records == 0);
-        assert!(consumer.commit_calls == 0);
+        assert2::assert!(result.replayed_records == 0);
+        assert2::assert!(consumer.commit_calls == 0);
     }
 
     #[tokio::test]
@@ -2915,8 +2907,8 @@ rules:
                 },
             ],
         };
-        assert!(summary == expected);
-        assert!(consumer.commit_calls == 2);
+        assert2::assert!(summary == expected);
+        assert2::assert!(consumer.commit_calls == 2);
     }
 
     #[tokio::test]
@@ -2929,7 +2921,7 @@ rules:
         .unwrap();
         let _ = stop_tx.send(());
 
-        assert!(bound.port() != 0);
+        assert2::assert!(bound.port() != 0);
     }
 
     #[tokio::test]
@@ -2948,11 +2940,11 @@ rules:
         )
         .await
         .unwrap();
-        assert!(bound.port() != 0);
+        assert2::assert!(bound.port() != 0);
 
         let _ = stop_tx.send(());
         // Bounded so a regression (handle never resolving) fails instead of hanging.
         let joined = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
-        assert!(matches!(joined, Ok(Ok(()))));
+        assert2::assert!(matches!(joined, Ok(Ok(()))));
     }
 }

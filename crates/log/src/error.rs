@@ -85,9 +85,6 @@ mod tests {
             segment: Offset(0),
             file_offset: 1024,
         };
-        assert_eq!(
-            e.to_string(),
-            "partial batch at offset 1024 in segment 0: truncating"
-        );
+        assert2::assert!(e.to_string() == "partial batch at offset 1024 in segment 0: truncating");
     }
 }

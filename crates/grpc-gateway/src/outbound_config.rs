@@ -216,25 +216,25 @@ filter         = "json:$.type"
         let file: OutboundFile = toml::from_str(VALID_TOML).expect("parse TOML");
         let compiled = file.compile().expect("compile");
         let sub = &compiled[0];
-        assert_eq!(compiled.len(), 1);
-        assert_eq!(sub.name.as_str(), "my-sub");
-        assert_eq!(
+        assert2::assert!(compiled.len() == 1);
+        assert2::assert!(sub.name.as_str() == "my-sub");
+        assert2::assert!(
             sub.source_topics
                 .iter()
                 .map(String::as_str)
-                .collect::<Vec<_>>(),
-            vec!["events"]
+                .collect::<Vec<_>>()
+                == vec!["events"]
         );
-        assert_eq!(sub.target_url.as_str(), "https://hooks.example.com/deliver");
-        assert_eq!(sub.signing_secret.as_deref(), Some(b"s3cr3t".as_slice()));
-        assert!(sub.filter.is_some());
-        assert_eq!(sub.dead_letter_topic.as_deref(), None);
-        assert_eq!(sub.max_attempts, 5);
-        assert_eq!(sub.base_backoff_ms, 500);
-        assert_eq!(sub.max_backoff_ms, 30_000);
-        assert_eq!(sub.request_timeout_ms, 10_000);
-        assert!(sub.headers.is_empty());
-        assert!(!sub.decode_to_json);
+        assert2::assert!(sub.target_url.as_str() == "https://hooks.example.com/deliver");
+        assert2::assert!(sub.signing_secret.as_deref() == Some(b"s3cr3t".as_slice()));
+        assert2::assert!(sub.filter.is_some());
+        assert2::assert!(sub.dead_letter_topic.as_deref() == None);
+        assert2::assert!(sub.max_attempts == 5);
+        assert2::assert!(sub.base_backoff_ms == 500);
+        assert2::assert!(sub.max_backoff_ms == 30_000);
+        assert2::assert!(sub.request_timeout_ms == 10_000);
+        assert2::assert!(sub.headers.is_empty());
+        assert2::assert!(!sub.decode_to_json);
     }
 
     #[test]
@@ -276,7 +276,7 @@ name          = "bad-url"
 source_topics = ["t"]
 target_url    = "not a valid url %%"
 "#;
-        for (name, input, needle) in [
+        for (_name, input, needle) in [
             ("ssrf_mismatch", ssrf_mismatch, "SSRF guard"),
             ("ssrf_empty", ssrf_empty, "SSRF guard"),
             ("header_filter", header_filter, "records carry no headers"),
@@ -284,7 +284,7 @@ target_url    = "not a valid url %%"
         ] {
             let file: OutboundFile = toml::from_str(input).expect("parse TOML");
             let err = file.compile().expect_err("case must fail");
-            assert!(err.contains(needle), "case {name}: {err}");
+            assert2::assert!(err.contains(needle));
         }
     }
 
@@ -303,10 +303,7 @@ filter        = "json:$.type"
 "#;
         let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
         let compiled = file.compile().expect("compile");
-        assert!(
-            compiled[0].filter.is_some(),
-            "json:$.type filter must compile to Some(JpQuery)"
-        );
+        assert2::assert!(compiled[0].filter.is_some());
     }
 
     #[test]
@@ -324,10 +321,7 @@ max_attempts  = 0
 "#;
         let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
         let compiled = file.compile().expect("compile");
-        assert_eq!(
-            compiled[0].max_attempts, 1,
-            "max_attempts must be clamped to 1"
-        );
+        assert2::assert!(compiled[0].max_attempts == 1);
     }
 
     #[test]
@@ -346,16 +340,13 @@ max_backoff_ms    = 100
 "#;
         let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
         let compiled = file.compile().expect("compile");
-        assert_eq!(
-            compiled[0].max_backoff_ms, 1000,
-            "max_backoff_ms must be clamped to base_backoff_ms when smaller"
-        );
+        assert2::assert!(compiled[0].max_backoff_ms == 1000);
     }
 
     #[test]
     fn empty_file_compiles_to_empty_vec() {
         let file: OutboundFile = toml::from_str("").expect("parse empty TOML");
         let compiled = file.compile().expect("compile empty");
-        assert!(compiled.is_empty());
+        assert2::assert!(compiled.is_empty());
     }
 }

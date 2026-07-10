@@ -7,18 +7,10 @@ fn failover_gate_help_names_required_evidence() {
         .output()
         .expect("run crabka-bench-report --help");
 
-    assert!(
-        output.status.success(),
-        "help command failed: status={:?}, stderr={}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert2::assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).expect("help output is utf8");
 
-    assert!(
-        stdout.contains("rate, drop, latency-spike, and topology evidence"),
-        "help text does not describe full failover gate evidence:\n{stdout}"
-    );
+    assert2::assert!(stdout.contains("rate, drop, latency-spike, and topology evidence"));
 }
 
 #[test]
@@ -35,15 +27,7 @@ fn failover_gate_exits_nonzero_without_failover_evidence() {
         .output()
         .expect("run crabka-bench-report --failover-gate");
 
-    assert!(
-        !output.status.success(),
-        "failover gate unexpectedly passed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert2::assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("stderr is utf8");
-    assert!(
-        stderr.contains("failover gate: missing failover results"),
-        "missing failover-gate violation in stderr:\n{stderr}"
-    );
+    assert2::assert!(stderr.contains("failover gate: missing failover results"));
 }

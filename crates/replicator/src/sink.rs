@@ -319,7 +319,7 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_connect::Sink;
 
     use super::*;
@@ -381,17 +381,15 @@ mod tests {
         sink.put(vec![allowed, denied]).await.unwrap();
         sink.flush().await.unwrap();
 
-        assert_eq!(
-            crate::test_util::topic_record_count(&target, "us-east.orders").await,
-            1
+        assert2::assert!(
+            crate::test_util::topic_record_count(&target, "us-east.orders").await == 1
         );
-        assert_eq!(
-            crate::test_util::topic_record_count(&target, "us-east.secret").await,
-            0
+        assert2::assert!(
+            crate::test_util::topic_record_count(&target, "us-east.secret").await == 0
         );
 
         let syncs = sink.drain_offset_syncs();
-        assert!(
+        assert2::assert!(
             syncs
                 .iter()
                 .any(|s| s.topic == "orders" && s.partition == 0 && s.upstream == 5)
@@ -478,6 +476,6 @@ mod tests {
             .filter_map(|(k, _)| k.map(|b| b.to_vec()))
             .collect();
         keys.sort();
-        assert_eq!(keys, vec![b"b".to_vec(), b"c".to_vec()]);
+        assert2::assert!(keys == vec![b"b".to_vec(), b"c".to_vec()]);
     }
 }

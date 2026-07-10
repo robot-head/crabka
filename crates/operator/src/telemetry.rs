@@ -179,7 +179,6 @@ pub fn new_registry_with_metrics() -> (Registry, ControllerMetrics) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -190,7 +189,7 @@ mod tests {
         r.register("up", "operator liveness", g);
         let mut s = String::new();
         prometheus_client::encoding::text::encode(&mut s, &r).unwrap();
-        assert!(s.contains("crabka_operator_up"));
+        assert2::assert!(s.contains("crabka_operator_up"));
     }
 
     #[test]
@@ -212,7 +211,7 @@ mod tests {
         prometheus_client::encoding::text::encode(&mut s, &registry).unwrap();
 
         // Counter is registered without `_total`; the encoder appends it.
-        for (name, expected) in [
+        for (_name, expected) in [
             (
                 "reconciliation counter",
                 "crabka_operator_reconciliations_total",
@@ -231,14 +230,14 @@ mod tests {
             ("requeue label", "result=\"requeue\""),
             ("OpenMetrics terminator", "# EOF"),
         ] {
-            assert!(s.contains(expected), "case {name}");
+            assert2::assert!(s.contains(expected));
         }
 
         // Re-encoding still works and the gauge reflects the last set value.
         metrics.set_managed_resources("Kafka", 5);
         let mut s2 = String::new();
         prometheus_client::encoding::text::encode(&mut s2, &registry).unwrap();
-        assert!(s2.contains("crabka_operator_managed_resources"));
+        assert2::assert!(s2.contains("crabka_operator_managed_resources"));
     }
 
     #[test]
@@ -256,6 +255,6 @@ mod tests {
                 result: "ok".into(),
             })
             .get();
-        assert!(n == 2, "expected 2 ok reconciles, got {n}");
+        assert2::assert!(n == 2);
     }
 }

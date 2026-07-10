@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
@@ -108,15 +108,9 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         .send(join_request(group_id, "", KNOWN_METADATA))
         .await
         .expect("first JoinGroup must round-trip");
-    assert!(
-        r1.error_code == ERR_MEMBER_ID_REQUIRED,
-        "first JoinGroup (empty member_id) must return MEMBER_ID_REQUIRED (79), got {r1:?}"
-    );
+    assert2::assert!(r1.error_code == ERR_MEMBER_ID_REQUIRED);
     let member_id = r1.member_id;
-    assert!(
-        !member_id.is_empty(),
-        "broker must return a generated member_id"
-    );
+    assert2::assert!(!member_id.is_empty());
 
     // ── JoinGroup round 2: with the supplied id. Blocks for up to the
     // ~3 s initial-rebalance-delay before the broker completes the
@@ -155,10 +149,7 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         })
         .await
         .expect("SyncGroup must round-trip");
-    assert!(
-        (r3.error_code, r3.assignment.as_ref()) == (ERR_NONE, ASSIGN),
-        "SyncGroup must echo the assignment"
-    );
+    assert2::assert!((r3.error_code, r3.assignment.as_ref()) == (ERR_NONE, ASSIGN));
 
     // ── DescribeGroups: the populated fields are the contract. ──
     let resp = client
@@ -170,10 +161,7 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         .expect("DescribeGroups must round-trip");
     handle.shutdown().await;
 
-    assert!(
-        resp.groups.len() == 1,
-        "exactly one described group, got {resp:?}"
-    );
+    assert2::assert!(resp.groups.len() == 1);
     let g = &resp.groups[0];
     check!(
         (
@@ -185,7 +173,9 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         "described group projection mismatch: {g:?}"
     );
     let m = &g.members[0];
-    assert!((m.member_metadata.as_ref(), m.member_assignment.as_ref()) == (KNOWN_METADATA, ASSIGN));
+    assert2::assert!(
+        (m.member_metadata.as_ref(), m.member_assignment.as_ref()) == (KNOWN_METADATA, ASSIGN)
+    );
 }
 
 /// cp/JVM cross-validation: drive the SAME classic flow but with the EXACT
@@ -212,10 +202,7 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
         .send(join_request(group_id, "", REAL_KAFKA_SUBSCRIPTION))
         .await
         .expect("first JoinGroup must round-trip");
-    assert!(
-        r1.error_code == ERR_MEMBER_ID_REQUIRED,
-        "first JoinGroup must return MEMBER_ID_REQUIRED (79), got {r1:?}"
-    );
+    assert2::assert!(r1.error_code == ERR_MEMBER_ID_REQUIRED);
     let member_id = r1.member_id;
 
     let r2 = tokio::time::timeout(
@@ -225,10 +212,7 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
     .await
     .expect("second JoinGroup timed out")
     .expect("second JoinGroup must round-trip");
-    assert!(
-        (r2.error_code, r2.protocol_name.as_deref()) == (ERR_NONE, Some("range")),
-        "single member must land on 'range', got {r2:?}"
-    );
+    assert2::assert!((r2.error_code, r2.protocol_name.as_deref()) == (ERR_NONE, Some("range")));
     let generation_id = r2.generation_id;
 
     // SyncGroup: leader supplies the REAL captured assignment bytes.
@@ -248,10 +232,7 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
         })
         .await
         .expect("SyncGroup must round-trip");
-    assert!(
-        r3.error_code == ERR_NONE,
-        "SyncGroup must succeed, got {r3:?}"
-    );
+    assert2::assert!(r3.error_code == ERR_NONE);
 
     let resp = client
         .send(DescribeGroupsRequest {
@@ -273,7 +254,7 @@ async fn describe_groups_matches_real_kafka_range_subscription() {
         "DescribeGroups must match real Kafka's authority (selected assignor 'range'), got {g:?}"
     );
     let m = &g.members[0];
-    assert!(
+    assert2::assert!(
         (m.member_metadata.as_ref(), m.member_assignment.as_ref())
             == (REAL_KAFKA_SUBSCRIPTION, REAL_KAFKA_ASSIGNMENT)
     );

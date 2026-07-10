@@ -383,7 +383,7 @@ fn looks_like_v2(bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::*;
@@ -408,7 +408,7 @@ mod tests {
         rb.encode(&mut buf).unwrap();
         let p = RecordsPayload::from_bytes(buf.freeze()).unwrap();
         match p {
-            RecordsPayload::V2(batches) => assert!(batches == vec![rb]),
+            RecordsPayload::V2(batches) => assert2::assert!(batches == vec![rb]),
             _ => panic!("expected V2"),
         }
     }
@@ -425,7 +425,7 @@ mod tests {
         b1.encode(&mut buf).unwrap();
         let p = RecordsPayload::from_bytes(buf.freeze()).unwrap();
         let batches = p.as_v2().expect("v2");
-        assert!(batches == &[b0, b1][..]);
+        assert2::assert!(batches == &[b0, b1][..]);
     }
 
     #[test]
@@ -436,11 +436,11 @@ mod tests {
         b.encode(&mut wire).unwrap();
         let wire = wire.freeze();
         let p = RecordsPayload::Raw(wire.clone());
-        assert!(p.payload_len() == wire.len());
+        assert2::assert!(p.payload_len() == wire.len());
         let mut out = BytesMut::new();
         p.encode_to(&mut out).unwrap();
-        assert!(&out[..] == &wire[..]); // verbatim
-        assert!(p.as_v2().is_none()); // Raw is unparsed
+        assert2::assert!(&out[..] == &wire[..]); // verbatim
+        assert2::assert!(p.as_v2().is_none()); // Raw is unparsed
     }
 
     #[test]
@@ -451,7 +451,7 @@ mod tests {
         buf[16] = 1;
         let p = RecordsPayload::from_bytes(Bytes::from(buf.clone())).unwrap();
         match p {
-            RecordsPayload::Legacy(b) => assert!(&b[..] == &buf[..]),
+            RecordsPayload::Legacy(b) => assert2::assert!(&b[..] == &buf[..]),
             _ => panic!("expected Legacy"),
         }
     }
@@ -462,8 +462,8 @@ mod tests {
         let mut buf = BytesMut::new();
         p.encode_to(&mut buf).unwrap();
         let back = RecordsPayload::from_bytes(buf.freeze()).unwrap();
-        assert!(p == back);
-        assert!(p.payload_len() == back.payload_len());
+        assert2::assert!(p == back);
+        assert2::assert!(p.payload_len() == back.payload_len());
     }
 
     #[test]
@@ -473,7 +473,7 @@ mod tests {
         <RecordsPayload as crate::Encode>::encode(&p, &mut buf, 0).unwrap();
         let mut cur: &[u8] = &buf;
         let back = <RecordsPayload as crate::Decode>::decode(&mut cur, 0).unwrap();
-        assert!(p == back);
+        assert2::assert!(p == back);
     }
 
     #[test]
@@ -483,10 +483,10 @@ mod tests {
         rb.encode(&mut buf).unwrap();
         let frozen = buf.freeze();
         let p = RecordsPayloadBorrowed::from_slice(&frozen).unwrap();
-        assert!(matches!(p, RecordsPayloadBorrowed::V2(_)));
+        assert2::assert!(matches!(p, RecordsPayloadBorrowed::V2(_)));
         let owned = p.to_owned().unwrap();
         match owned {
-            RecordsPayload::V2(batches) => assert!(batches[0].base_offset == 42),
+            RecordsPayload::V2(batches) => assert2::assert!(batches[0].base_offset == 42),
             _ => panic!("expected V2"),
         }
     }
@@ -495,8 +495,8 @@ mod tests {
     fn from_record_batch() {
         let rb = sample_v2();
         let p: RecordsPayload = rb.clone().into();
-        assert!(p.as_v2() == Some(&[rb][..]));
-        assert!(p.as_legacy().is_none());
+        assert2::assert!(p.as_v2() == Some(&[rb][..]));
+        assert2::assert!(p.as_legacy().is_none());
     }
 
     fn legacy_bytes() -> Bytes {
@@ -512,12 +512,12 @@ mod tests {
     fn legacy_payload_len_and_encode_owned() {
         let bytes = legacy_bytes();
         let p = RecordsPayload::from_bytes(bytes.clone()).unwrap();
-        assert!(p == RecordsPayload::Legacy(bytes.clone()));
-        assert!(p.payload_len() == bytes.len());
+        assert2::assert!(p == RecordsPayload::Legacy(bytes.clone()));
+        assert2::assert!(p.payload_len() == bytes.len());
 
         let mut out = BytesMut::new();
         p.encode_to(&mut out).unwrap();
-        assert!(&out[..] == &bytes[..]);
+        assert2::assert!(&out[..] == &bytes[..]);
     }
 
     #[test]
@@ -526,17 +526,17 @@ mod tests {
         let p = RecordsPayload::from_bytes(bytes.clone()).unwrap();
         let mut buf = BytesMut::new();
         <RecordsPayload as crate::Encode>::encode(&p, &mut buf, 0).unwrap();
-        assert!(<RecordsPayload as crate::Encode>::encoded_len(&p, 0) == bytes.len());
+        assert2::assert!(<RecordsPayload as crate::Encode>::encoded_len(&p, 0) == bytes.len());
         let mut cur: &[u8] = &buf;
         let back = <RecordsPayload as crate::Decode>::decode(&mut cur, 0).unwrap();
-        assert!(matches!(back, RecordsPayload::Legacy(_)));
-        assert!(back.as_legacy().unwrap() == &bytes);
+        assert2::assert!(matches!(back, RecordsPayload::Legacy(_)));
+        assert2::assert!(back.as_legacy().unwrap() == &bytes);
     }
 
     #[test]
     fn owned_default_is_empty_v2() {
         let p = RecordsPayload::default();
-        assert!(matches!(p, RecordsPayload::V2(ref v) if v.is_empty()));
+        assert2::assert!(matches!(p, RecordsPayload::V2(ref v) if v.is_empty()));
     }
 
     #[test]
@@ -544,23 +544,23 @@ mod tests {
         // Too short to peek the magic byte at offset 16; must fall through to Legacy.
         let short = Bytes::from_static(&[0u8; 10]);
         let p = RecordsPayload::from_bytes(short.clone()).unwrap();
-        assert!(p.as_legacy() == Some(&short));
+        assert2::assert!(p.as_legacy() == Some(&short));
     }
 
     #[test]
     fn borrowed_legacy_roundtrip() {
         let bytes = legacy_bytes();
         let p = RecordsPayloadBorrowed::from_slice(&bytes).unwrap();
-        assert!(matches!(p, RecordsPayloadBorrowed::Legacy(_)));
-        assert!(p.payload_len() == bytes.len());
+        assert2::assert!(matches!(p, RecordsPayloadBorrowed::Legacy(_)));
+        assert2::assert!(p.payload_len() == bytes.len());
 
         let mut out = BytesMut::new();
         p.encode_to(&mut out).unwrap();
-        assert!(&out[..] == &bytes[..]);
+        assert2::assert!(&out[..] == &bytes[..]);
 
         let owned = p.to_owned().unwrap();
         match owned {
-            RecordsPayload::Legacy(b) => assert!(&b[..] == &bytes[..]),
+            RecordsPayload::Legacy(b) => assert2::assert!(&b[..] == &bytes[..]),
             _ => panic!("expected Legacy"),
         }
     }
@@ -572,11 +572,11 @@ mod tests {
         rb.encode(&mut buf).unwrap();
         let frozen = buf.freeze();
         let p = RecordsPayloadBorrowed::from_slice(&frozen).unwrap();
-        assert!(p.payload_len() == frozen.len());
+        assert2::assert!(p.payload_len() == frozen.len());
 
         let mut out = BytesMut::new();
         p.encode_to(&mut out).unwrap();
-        assert!(&out[..] == &frozen[..]);
+        assert2::assert!(&out[..] == &frozen[..]);
     }
 
     #[test]
@@ -589,18 +589,20 @@ mod tests {
         let p = RecordsPayloadBorrowed::from_slice(&frozen).unwrap();
         let mut out = BytesMut::new();
         <RecordsPayloadBorrowed as crate::Encode>::encode(&p, &mut out, 0).unwrap();
-        assert!(<RecordsPayloadBorrowed as crate::Encode>::encoded_len(&p, 0) == frozen.len());
+        assert2::assert!(
+            <RecordsPayloadBorrowed as crate::Encode>::encoded_len(&p, 0) == frozen.len()
+        );
 
         let mut cur: &[u8] = &out;
         let back =
             <RecordsPayloadBorrowed as crate::DecodeBorrow>::decode_borrow(&mut cur, 0).unwrap();
-        assert!(matches!(back, RecordsPayloadBorrowed::V2(_)));
+        assert2::assert!(matches!(back, RecordsPayloadBorrowed::V2(_)));
     }
 
     #[test]
     fn borrowed_default_is_empty_v2() {
         let p = RecordsPayloadBorrowed::default();
-        assert!(matches!(p, RecordsPayloadBorrowed::V2(ref v) if v.is_empty()));
+        assert2::assert!(matches!(p, RecordsPayloadBorrowed::V2(ref v) if v.is_empty()));
     }
 
     #[test]
@@ -619,7 +621,7 @@ mod tests {
         buf.extend_from_slice(&[0u8; 7]); // partial trailing batch header
         let p = RecordsPayload::from_fetch_bytes(buf.freeze()).unwrap();
         let batches = p.as_v2().expect("v2");
-        assert!(batches == &[b0, b1][..]);
+        assert2::assert!(batches == &[b0, b1][..]);
     }
 
     #[test]
@@ -633,14 +635,14 @@ mod tests {
         // Corrupt a body byte after the header (HEADER_LEN = 61) to break CRC.
         bytes[61] ^= 0xFF;
         let err = RecordsPayload::from_fetch_bytes(Bytes::from(bytes)).unwrap_err();
-        assert!(matches!(err, RecordsError::CrcMismatch { .. }));
+        assert2::assert!(matches!(err, RecordsError::CrcMismatch { .. }));
     }
 
     #[test]
     fn from_fetch_bytes_legacy_passes_through() {
         let bytes = legacy_bytes();
         let p = RecordsPayload::from_fetch_bytes(bytes.clone()).unwrap();
-        assert!(p.as_legacy() == Some(&bytes));
+        assert2::assert!(p.as_legacy() == Some(&bytes));
     }
 
     #[test]
@@ -648,6 +650,6 @@ mod tests {
         // Empty bytes do not carry a magic byte, so looks_like_v2 returns false
         // and from_fetch_bytes yields an empty Legacy payload (no panic, no error).
         let p = RecordsPayload::from_fetch_bytes(Bytes::new()).unwrap();
-        assert!(matches!(p, RecordsPayload::Legacy(ref b) if b.is_empty()));
+        assert2::assert!(matches!(p, RecordsPayload::Legacy(ref b) if b.is_empty()));
     }
 }

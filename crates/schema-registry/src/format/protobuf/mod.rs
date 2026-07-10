@@ -291,12 +291,12 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(a.canonical_form(), b.canonical_form());
+        assert2::assert!(a.canonical_form() == b.canonical_form());
     }
 
     #[test]
     fn rejects_invalid_proto() {
-        assert!(parse("this is not protobuf", &[]).is_err());
+        assert2::assert!(parse("this is not protobuf", &[]).is_err());
     }
 
     fn p(body: &str) -> String {
@@ -308,7 +308,7 @@ mod tests {
         let plain = "syntax = \"proto3\"; message U { int32 a = 1; int32 b = 2; }";
         let oneof = "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }";
         let small = "syntax = \"proto3\"; message U { int32 id = 1; }";
-        for (name, reader, writer, compatible) in [
+        for (_name, reader, writer, compatible) in [
             (
                 "field-added",
                 p("int32 id = 1; int32 x = 2;"),
@@ -364,11 +364,7 @@ mod tests {
                 true,
             ),
         ] {
-            assert_eq!(
-                check(&reader, &writer, &[], &[]).is_ok(),
-                compatible,
-                "case {name}"
-            );
+            assert2::assert!(check(&reader, &writer, &[], &[]).is_ok() == compatible);
         }
     }
 
@@ -377,7 +373,7 @@ mod tests {
         let small = "syntax = \"proto3\"; message U { int32 id = 1; }";
         let big = "syntax = \"proto3\"; message U { int32 id = 1; } message V { int32 a = 1; }";
 
-        for (name, reader, writer, compatible) in [
+        for (_name, reader, writer, compatible) in [
             (
                 "reserve-number",
                 "syntax = \"proto3\"; message U { reserved 2; int32 id = 1; }".to_string(),
@@ -435,11 +431,7 @@ mod tests {
                 false,
             ),
         ] {
-            assert_eq!(
-                check(&reader, &writer, &[], &[]).is_ok(),
-                compatible,
-                "case {name}"
-            );
+            assert2::assert!(check(&reader, &writer, &[], &[]).is_ok() == compatible);
         }
     }
 
@@ -452,7 +444,7 @@ mod tests {
         let candidate =
             "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
         // With the import provided as a reference (name = import path), it links.
-        for (name, refs, expected) in [
+        for (_name, refs, expected) in [
             (
                 "resolved_import",
                 vec![ResolvedReference {
@@ -464,7 +456,7 @@ mod tests {
             ),
             ("unresolved_import", vec![], false),
         ] {
-            assert_eq!(parse(candidate, &refs).is_ok(), expected, "case {name}");
+            assert2::assert!(parse(candidate, &refs).is_ok() == expected);
         }
     }
 
@@ -477,7 +469,7 @@ mod tests {
         // Importing schema: blank line, `import`, blank line, message (cp-exact).
         let order =
             "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
-        for (name, schema, refs, expected) in [
+        for (_name, schema, refs, expected) in [
             (
                 "package",
                 money,
@@ -495,11 +487,7 @@ mod tests {
                 "syntax = \"proto3\";\n\nimport \"money.proto\";\n\nmessage Order {\n  m.Money price = 1;\n}\n",
             ),
         ] {
-            assert_eq!(
-                parse(schema, &refs).unwrap().normalized_form(),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(parse(schema, &refs).unwrap().normalized_form() == expected);
         }
     }
 
@@ -543,19 +531,19 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            normalize(&fdp),
-            "syntax = \"proto3\";\n\nmessage Outer {\n  enum Kind {\n    KIND_UNSPECIFIED = 0;\n    KIND_READY = 1;\n  }\n  message Inner {\n    string id = 1;\n  }\n}\n"
+        assert2::assert!(
+            normalize(&fdp)
+                == "syntax = \"proto3\";\n\nmessage Outer {\n  enum Kind {\n    KIND_UNSPECIFIED = 0;\n    KIND_READY = 1;\n  }\n  message Inner {\n    string id = 1;\n  }\n}\n"
         );
     }
 
     #[test]
     fn proto_ref_name_does_not_treat_empty_package_as_local_prefix() {
-        for (name, reference, package, expected) in [
+        for (_name, reference, package, expected) in [
             ("empty_package", "...Money", "", "Money"),
             ("local_package", ".m.Money", "m", "Money"),
         ] {
-            assert_eq!(proto_ref_name(reference, package), expected, "case {name}");
+            assert2::assert!(proto_ref_name(reference, package) == expected);
         }
     }
 }

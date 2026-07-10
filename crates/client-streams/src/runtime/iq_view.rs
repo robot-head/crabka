@@ -312,9 +312,9 @@ mod tests {
             view.all().await.unwrap().len(),
             view.approximate_num_entries().await.unwrap(),
         );
-        assert_eq!(hits, (Some(2), None));
-        assert_eq!(r, vec![("a".to_string(), 1), ("b".to_string(), 2)]);
-        assert_eq!(counts, (3, 3));
+        assert2::assert!(hits == (Some(2), None));
+        assert2::assert!(r == vec![("a".to_string(), 1), ("b".to_string(), 2)]);
+        assert2::assert!(counts == (3, 3));
     }
 
     async fn window_registry() -> StoreRegistry {
@@ -342,13 +342,10 @@ mod tests {
             key_serde: Box::new(StringSerde),
             value_serde: Box::new(I64Serde),
         };
-        assert_eq!(
-            view.fetch_single(&"k".to_string(), 0).await.unwrap(),
-            Some(10)
-        );
-        assert_eq!(view.fetch_single(&"k".to_string(), 5).await.unwrap(), None);
+        assert2::assert!(view.fetch_single(&"k".to_string(), 0).await.unwrap() == Some(10));
+        assert2::assert!(view.fetch_single(&"k".to_string(), 5).await.unwrap() == None);
         let r = view.fetch(&"k".to_string(), 0, 1000).await.unwrap();
-        assert_eq!(r, vec![(0, 10), (1000, 20)]);
+        assert2::assert!(r == vec![(0, 10), (1000, 20)]);
     }
 
     async fn session_registry() -> StoreRegistry {
@@ -379,9 +376,8 @@ mod tests {
         let rows = view.fetch(&"k".to_string()).await.unwrap();
         let mut got: Vec<(Window, i64)> = rows.into_iter().map(|(w, v)| (w.window, v)).collect();
         got.sort_by_key(|(window, _)| window.start);
-        assert_eq!(
-            got,
-            vec![
+        assert2::assert!(
+            got == vec![
                 (Window { start: 0, end: 10 }, 1),
                 (Window { start: 20, end: 30 }, 2),
             ]

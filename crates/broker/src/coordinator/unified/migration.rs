@@ -442,7 +442,7 @@ pub(crate) fn build_hosted_classic_join_result(
 mod tests {
     use std::{collections::HashSet, time::Duration};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::{Buf, BufMut, Bytes, BytesMut};
     use crabka_protocol::{Encode, primitives::uuid::Uuid};
 
@@ -514,17 +514,17 @@ mod tests {
     fn empty_consumer_group_is_convertible() {
         let mut g = Group::new("g");
         g.protocol_type = Some("consumer".into());
-        assert!(classic_is_convertible(&g));
+        assert2::assert!(classic_is_convertible(&g));
     }
 
     #[test]
     fn non_consumer_protocol_type_is_not_convertible() {
         let mut g = Group::new("g");
         g.protocol_type = Some("connect".into());
-        assert!(!classic_is_convertible(&g));
+        assert2::assert!(!classic_is_convertible(&g));
         // None protocol_type (never joined) is also not convertible.
         let g2 = Group::new("g2");
-        assert!(!classic_is_convertible(&g2));
+        assert2::assert!(!classic_is_convertible(&g2));
     }
 
     #[test]
@@ -533,7 +533,7 @@ mod tests {
         g.protocol_type = Some("consumer".into());
         g.add_member(consumer_member("m1", subscription_blob(&["t1"])));
         g.add_member(consumer_member("m2", subscription_blob(&["t1", "t2"])));
-        assert!(classic_is_convertible(&g));
+        assert2::assert!(classic_is_convertible(&g));
     }
 
     #[test]
@@ -546,25 +546,25 @@ mod tests {
             "bad",
             Bytes::from_static(&[0xff, 0xff, 0x01]),
         ));
-        assert!(!classic_is_convertible(&g));
+        assert2::assert!(!classic_is_convertible(&g));
     }
 
     #[test]
     fn decode_rejects_short_and_bad_version() {
         // Too short to hold a version, or (version 99) out of the supported
         // 0..=3 range.
-        for (case, input) in [
+        for (_case, input) in [
             ("empty input", &[][..]),
             ("truncated version", &[0][..]),
             ("unsupported version", &[0, 99][..]),
         ] {
-            assert!(decode_consumer_subscription(input).is_none(), "case {case}");
+            assert2::assert!(decode_consumer_subscription(input).is_none());
         }
     }
 
     #[test]
     fn consumer_group_always_downgradable() {
-        assert!(consumer_is_convertible());
+        assert2::assert!(consumer_is_convertible());
     }
 
     #[test]
@@ -579,7 +579,7 @@ mod tests {
         let m1 = &state.members["m1"];
         let facade = m1.classic.as_ref().unwrap();
         let m2 = &state.members["m2"];
-        assert!(
+        assert2::assert!(
             ConversionProjection {
                 group_id: &state.group_id,
                 group_epoch: state.group_epoch,
@@ -623,9 +623,9 @@ mod tests {
         // Strip the version prefix and decode back.
         let mut cur = &blob[..];
         let version = cur.get_i16();
-        assert!(version == 0);
+        assert2::assert!(version == 0);
         let decoded = ConsumerProtocolAssignment::decode(&mut cur, version).unwrap();
-        assert!(
+        assert2::assert!(
             decoded.assigned_partitions
                 == vec![
                     crabka_protocol::owned::consumer_protocol_assignment::TopicPartition {
@@ -656,7 +656,7 @@ mod tests {
         let mut cur = &blob[..];
         let _ = cur.get_i16();
         let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
-        assert!(
+        assert2::assert!(
             decoded.assigned_partitions
                 == vec![
                     crabka_protocol::owned::consumer_protocol_assignment::TopicPartition {
@@ -728,7 +728,7 @@ mod tests {
         let asn = member.assignment.clone().expect("seed assignment");
         let mut cur = &asn[..];
         let version = cur.get_i16();
-        assert!(version == 0);
+        assert2::assert!(version == 0);
         let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
         let asn2 = member
             .assignment

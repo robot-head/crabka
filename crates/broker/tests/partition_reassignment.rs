@@ -24,7 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
@@ -130,11 +130,7 @@ async fn create_topic_plaintext(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(
-        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
-        "CreateTopics({name}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -184,11 +180,7 @@ async fn controller_leader_addr(handles: &[&BrokerHandle]) -> SocketAddr {
     // which equals (broker_index + 1). The handles slice is ordered
     // [broker1, broker2, broker3], so handle[i] has node_id = i+1.
     let idx = usize::try_from(leader_id.0).unwrap().saturating_sub(1);
-    assert!(
-        idx < handles.len(),
-        "raft leader id {leader_id:?} out of range for {} handles",
-        handles.len()
-    );
+    assert2::assert!(idx < handles.len());
     handles[idx].listen_addr()
 }
 
@@ -342,7 +334,7 @@ async fn alter_then_complete_via_isr_catchup() {
     // Find which brokers are in `replicas` initially — choose target accordingly.
     let pr = h1.partition_record_for_test("foo", 0).expect("partition");
     let initial_replicas = pr.replicas.clone();
-    assert!(initial_replicas.len() == 2);
+    assert2::assert!(initial_replicas.len() == 2);
     // Pick the third broker (not in initial_replicas) as the new replica.
     let new_replica: i32 = (1..=3)
         .find(|n| !initial_replicas.contains(&crabka_metadata::NodeId(*n as u64)))
@@ -354,11 +346,7 @@ async fn alter_then_complete_via_isr_catchup() {
     // Send alter to controller leader (whichever broker leads raft).
     let raft_addr = controller_leader_addr(&[&h1, &h2, &h3]).await;
     let resp = drive_alter_reassignments(raft_addr, vec![("foo", 0, Some(target.clone()))]).await;
-    assert!(
-        resp[0].1 == vec![(0, 0)],
-        "expected error_code=0; got {:?}",
-        resp
-    );
+    assert2::assert!(resp[0].1 == vec![(0, 0)]);
 
     // Wait for the image to reflect the in-flight reassignment.
     h1.wait_for_image(|img| {
@@ -367,7 +355,7 @@ async fn alter_then_complete_via_isr_catchup() {
     })
     .await;
     let pr_after_alter = h1.partition_record_for_test("foo", 0).expect("partition");
-    assert!(
+    assert2::assert!(
         (
             pr_after_alter
                 .adding_replicas
@@ -375,8 +363,7 @@ async fn alter_then_complete_via_isr_catchup() {
             pr_after_alter
                 .removing_replicas
                 .contains(&crabka_metadata::NodeId(removing as u64)),
-        ) == (true, true),
-        "removing_replicas should contain removing; pr={pr_after_alter:?}"
+        ) == (true, true)
     );
 
     // Inject ISR including the new replica so the background task completes the reassignment.
@@ -402,10 +389,7 @@ async fn alter_then_complete_via_isr_catchup() {
     let pr = h1.partition_record_for_test("foo", 0).expect("partition");
     let actual: std::collections::HashSet<u64> = pr.replicas.iter().map(|n| n.0).collect();
     let expected: std::collections::HashSet<u64> = target.iter().map(|n| *n as u64).collect();
-    assert!(
-        actual == expected,
-        "replicas after completion should match target; pr={pr:?}"
-    );
+    assert2::assert!(actual == expected);
     // Clean up.
     h1.shutdown().await;
     h2.shutdown().await;
@@ -596,11 +580,7 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(
-        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
-        "CreateTopics({topic}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Drive `AlterPartitionReassignments` over a SASL/PLAIN authenticated connection.
@@ -736,20 +716,14 @@ async fn non_super_user_denied() {
         {
             break r;
         }
-        assert!(
-            Instant::now() <= deadline_auth,
-            "ACL shim still active or wrong error after 5s; got {r:?}"
-        );
+        assert2::assert!(Instant::now() <= deadline_auth);
         // real-time wait (not a progress poll): retry/backoff cadence between attempts — each attempt opens a fresh TCP connection + full SASL handshake, so the 100ms backoff bounds connection churn while the raft ACL apply propagates.
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     handle.shutdown().await;
 
-    assert!(
-        resp[0].1 == vec![(0, 31)],
-        "expected CLUSTER_AUTHORIZATION_FAILED (31) for alice; got {resp:?}"
-    );
+    assert2::assert!(resp[0].1 == vec![(0, 31)]);
 }
 
 /// Test 3: Cancel an in-flight reassignment by sending target=None (null replicas).
@@ -785,11 +759,7 @@ async fn cancel_via_null_replicas_reverts() {
 
     // Cancel: replicas = None.
     let resp = drive_alter_reassignments(raft_addr, vec![("foo", 0, None)]).await;
-    assert!(
-        resp[0].1 == vec![(0, 0)],
-        "cancel should succeed; got {:?}",
-        resp
-    );
+    assert2::assert!(resp[0].1 == vec![(0, 0)]);
 
     // Wait for the image to reflect the cancellation.
     h1.wait_for_image(|img| {
@@ -798,10 +768,7 @@ async fn cancel_via_null_replicas_reverts() {
     })
     .await;
     let pr_after_cancel = h1.partition_record_for_test("foo", 0).expect("partition");
-    assert!(
-        pr_after_cancel.replicas == original_replicas,
-        "replicas should revert to original after cancel; pr={pr_after_cancel:?}"
-    );
+    assert2::assert!(pr_after_cancel.replicas == original_replicas);
     // Clean up.
     h1.shutdown().await;
     h2.shutdown().await;

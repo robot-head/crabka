@@ -496,7 +496,7 @@ fn remap_ref(reference: u32, table: &[u32]) -> u32 {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::Bytes;
     use crabka_client_consumer::ConsumerRecord;
     use crabka_pprof::SymbolDb;
@@ -552,7 +552,7 @@ mod tests {
 
         let rec = mapping_rec(&mapping, &strings);
 
-        assert!(
+        assert2::assert!(
             rec == MappingRec {
                 memory_start: 0x1000,
                 memory_limit: 0x2000,
@@ -575,7 +575,7 @@ mod tests {
             ..mapping
         };
         let rec = mapping_rec(&inverted, &strings);
-        assert!(
+        assert2::assert!(
             rec == MappingRec {
                 memory_start: 0x1000,
                 memory_limit: 0x2000,
@@ -596,8 +596,8 @@ mod tests {
         let b = object_key("t", 0, 10, 20, 100, 200);
         let c = object_key("t", 0, 10, 21, 100, 200);
 
-        assert!(a == b);
-        assert!(a != c);
+        assert2::assert!(a == b);
+        assert2::assert!(a != c);
     }
 
     #[test]
@@ -608,7 +608,7 @@ mod tests {
         let ids1 = intern_record(&mut symdb, &r).unwrap();
         let ids2 = intern_record(&mut symdb, &r).unwrap();
 
-        assert!(ids1 == ids2);
+        assert2::assert!(ids1 == ids2);
     }
 
     #[test]
@@ -626,8 +626,8 @@ mod tests {
         }])
         .unwrap();
 
-        assert_eq!(batch.schema(), crabka_blockstore::profile_samples_schema());
-        assert_eq!(batch.num_rows(), 1);
+        assert2::assert!(batch.schema() == crabka_blockstore::profile_samples_schema());
+        assert2::assert!(batch.num_rows() == 1);
     }
 
     #[tokio::test]
@@ -639,13 +639,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(metas.len(), 1);
-        assert_eq!(metas[0].tenant.as_str(), "t");
-        assert_eq!(metas[0].row_count, 2);
-        assert_eq!(metas[0].min_ts, 1_700_000_000_000);
-        assert_eq!(metas[0].max_ts, 1_700_000_000_000);
+        assert2::assert!(metas.len() == 1);
+        assert2::assert!(metas[0].tenant.as_str() == "t");
+        assert2::assert!(metas[0].row_count == 2);
+        assert2::assert!(metas[0].min_ts == 1_700_000_000_000);
+        assert2::assert!(metas[0].max_ts == 1_700_000_000_000);
         let symdb_key = format!("{}.symdb", metas[0].object_key);
-        assert!(
+        assert2::assert!(
             store
                 .head(&object_store::path::Path::from(symdb_key))
                 .await
@@ -669,17 +669,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(metas.len(), 2);
-        assert_eq!(
+        assert2::assert!(metas.len() == 2);
+        assert2::assert!(
             [("t", 2), ("u", 1)].map(|(tenant, row_count)| {
                 metas
                     .iter()
                     .any(|meta| meta.tenant == tenant && meta.row_count == row_count)
-            }),
-            [true, true]
+            }) == [true, true]
         );
         for meta in metas {
-            assert!(
+            assert2::assert!(
                 store
                     .head(&object_store::path::Path::from(meta.object_key))
                     .await
@@ -698,7 +697,7 @@ mod tests {
         let start = Instant::now();
 
         accumulator.push(vec![consumer_record(0, 10, rec("cpu", 5))], start);
-        assert!(!accumulator.should_flush(start));
+        assert2::assert!(!accumulator.should_flush(start));
 
         accumulator.push(
             vec![consumer_record(0, 11, rec("cpu", 7))],
@@ -715,8 +714,8 @@ mod tests {
         let start = Instant::now();
 
         accumulator.push(vec![consumer_record(0, 10, rec("cpu", 5))], start);
-        assert!(!accumulator.should_flush(start + Duration::from_secs(9)));
-        assert!(accumulator.should_flush(start + Duration::from_secs(10)));
+        assert2::assert!(!accumulator.should_flush(start + Duration::from_secs(9)));
+        assert2::assert!(accumulator.should_flush(start + Duration::from_secs(10)));
     }
 
     fn consumer_record(partition: i32, offset: i64, record: ProfileRecord) -> ConsumerRecord {

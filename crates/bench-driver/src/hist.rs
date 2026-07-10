@@ -49,7 +49,7 @@ mod tests {
         }
         let p = percentiles(&h);
         check!(p.p50_ms > 0.0);
-        assert_eq!(p.count, 5);
+        assert2::assert!(p.count == 5);
         check!(p.max_ms >= p.p99_ms);
     }
 
@@ -57,6 +57,6 @@ mod tests {
     fn clamps_above_max_into_range() {
         let mut h = new();
         record_us(&mut h, u64::MAX);
-        assert_eq!(h.len(), 1);
+        assert2::assert!(h.len() == 1);
     }
 }

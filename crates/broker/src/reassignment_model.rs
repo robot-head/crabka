@@ -142,76 +142,25 @@ fn pr_of(s: &ReassignState) -> PartitionRecord {
 /// Verify a `reassign_one` decision against the pre-state. These are the
 /// safety-critical invariants; they hold per-decision under any ordering.
 fn assert_step(pre: &ReassignState, next: &PartitionRecord) {
-    assert!(
-        next.leader_epoch >= pre.leader_epoch,
-        "leader_epoch regressed: {} -> {}",
-        pre.leader_epoch,
-        next.leader_epoch
-    );
-    assert!(
-        pre.adding.iter().all(|n| pre.isr.contains(n)),
-        "decision emitted before adding caught up: adding={:?} isr={:?}",
-        pre.adding,
-        pre.isr
-    );
+    assert2::assert!(next.leader_epoch >= pre.leader_epoch);
+    assert2::assert!(pre.adding.iter().all(|n| pre.isr.contains(n)));
     let target = target_of(pre);
     if next.leader != pre.leader {
         // Handoff.
-        assert!(
-            pre.isr.contains(&next.leader),
-            "handoff to non-ISR {}",
-            next.leader
-        );
-        assert!(
-            target.contains(&next.leader),
-            "handoff to non-target {}",
-            next.leader
-        );
-        assert!(
-            pre.alive.contains(&next.leader),
-            "handoff to dead {}",
-            next.leader
-        );
-        assert!(
-            !pre.removing.contains(&next.leader),
-            "handoff to a removing replica {}",
-            next.leader
-        );
-        assert!(
-            next.replicas == pre.replicas,
-            "handoff changed the replica set"
-        );
-        assert!(next.adding_replicas == pre.adding, "handoff changed adding");
-        assert!(
-            next.removing_replicas == pre.removing,
-            "handoff changed removing"
-        );
-        assert!(
-            next.leader_epoch == pre.leader_epoch + 1,
-            "handoff did not bump leader_epoch by exactly 1"
-        );
+        assert2::assert!(pre.isr.contains(&next.leader));
+        assert2::assert!(target.contains(&next.leader));
+        assert2::assert!(pre.alive.contains(&next.leader));
+        assert2::assert!(!pre.removing.contains(&next.leader));
+        assert2::assert!(next.replicas == pre.replicas);
+        assert2::assert!(next.adding_replicas == pre.adding);
+        assert2::assert!(next.removing_replicas == pre.removing);
+        assert2::assert!(next.leader_epoch == pre.leader_epoch + 1);
     } else if next.adding_replicas.is_empty() && next.removing_replicas.is_empty() {
         // Completion.
-        assert!(
-            next.replicas.contains(&next.leader),
-            "completion switched the replica set off the leader {}: replicas={:?}",
-            next.leader,
-            next.replicas
-        );
-        assert!(
-            next.replicas == target,
-            "completion replicas != target: {:?} vs {:?}",
-            next.replicas,
-            target
-        );
-        assert!(
-            next.isr.iter().all(|n| next.replicas.contains(n)),
-            "completion ISR not a subset of replicas"
-        );
-        assert!(
-            next.leader_epoch == pre.leader_epoch,
-            "completion bumped leader_epoch"
-        );
+        assert2::assert!(next.replicas.contains(&next.leader));
+        assert2::assert!(next.replicas == target);
+        assert2::assert!(next.isr.iter().all(|n| next.replicas.contains(n)));
+        assert2::assert!(next.leader_epoch == pre.leader_epoch);
     } else {
         panic!("unexpected reassign_one decision shape: {next:?} from {pre:?}");
     }
@@ -355,14 +304,8 @@ fn run(model: ReassignModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(
-        checker.max_depth() < MAX_DEPTH,
-        "[{label}] hit depth cap {MAX_DEPTH}: depth-truncated, not exhaustive"
-    );
-    assert!(
-        checker.state_count() < MAX_STATES,
-        "[{label}] hit state cap {MAX_STATES}: truncated, not exhaustive"
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < MAX_STATES);
     checker.assert_properties();
 }
 

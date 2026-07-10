@@ -277,20 +277,20 @@ mod tests {
 
     #[test]
     fn fmt_roundtrip_cases() {
-        for (name, format, wire_name) in [
+        for (_name, format, wire_name) in [
             ("avro", SchemaFormat::Avro, "AVRO"),
             ("json", SchemaFormat::Json, "JSON"),
             ("protobuf", SchemaFormat::Protobuf, "PROTOBUF"),
         ] {
-            assert_eq!(fmt_to_str(format), wire_name, "case {name}");
-            assert_eq!(str_to_fmt(Some(wire_name)), format, "case {name}");
+            assert2::assert!(fmt_to_str(format) == wire_name);
+            assert2::assert!(str_to_fmt(Some(wire_name)) == format);
         }
     }
 
     #[test]
     fn str_to_fmt_default_cases() {
-        for (name, input) in [("absent", None), ("empty", Some(""))] {
-            assert_eq!(str_to_fmt(input), SchemaFormat::Avro, "case {name}");
+        for (_name, input) in [("absent", None), ("empty", Some(""))] {
+            assert2::assert!(str_to_fmt(input) == SchemaFormat::Avro);
         }
     }
 
@@ -299,15 +299,15 @@ mod tests {
     #[test]
     fn new_valid_url_ok() {
         let client = SchemaRegistryClient::new("http://localhost:8081").unwrap();
-        assert_eq!(client.base.host_str(), Some("localhost"));
-        assert_eq!(client.base.port(), Some(8081));
+        assert2::assert!(client.base.host_str() == Some("localhost"));
+        assert2::assert!(client.base.port() == Some(8081));
     }
 
     #[test]
     fn new_invalid_url_err() {
         let err = SchemaRegistryClient::new("not-a-url").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("invalid schema registry URL"), "got: {msg}");
+        assert2::assert!(msg.contains("invalid schema registry URL"));
     }
 
     // ── by_id cache hit (no network) ────────────────────────────────────────
@@ -327,7 +327,7 @@ mod tests {
             .unwrap()
             .block_on(client.schema_by_id(42));
 
-        assert_eq!(result.unwrap(), ("{}".to_string(), SchemaFormat::Json));
+        assert2::assert!(result.unwrap() == ("{}".to_string(), SchemaFormat::Json));
     }
 
     // ── latest cache hit (no network) ───────────────────────────────────────
@@ -348,9 +348,8 @@ mod tests {
             .unwrap()
             .block_on(client.latest("test-value"));
 
-        assert_eq!(
-            result.unwrap(),
-            (7, "{\"type\":\"null\"}".to_string(), SchemaFormat::Avro)
+        assert2::assert!(
+            result.unwrap() == (7, "{\"type\":\"null\"}".to_string(), SchemaFormat::Avro)
         );
     }
 
@@ -429,9 +428,9 @@ mod tests {
                 .unwrap();
             // by_id should now have the entry.
             let cached = client.by_id.get(&1).unwrap();
-            assert_eq!(id, 1);
-            assert_eq!(cached.0.as_str(), schema);
-            assert_eq!(cached.1, SchemaFormat::Protobuf);
+            assert2::assert!(id == 1);
+            assert2::assert!(cached.0.as_str() == schema);
+            assert2::assert!(cached.1 == SchemaFormat::Protobuf);
         });
     }
 
@@ -444,12 +443,12 @@ mod tests {
             // First call — cache miss, goes to server.
             let first = client.schema_by_id(1).await.unwrap();
             // Confirm entry is in by_id.
-            assert_eq!(first.0.as_str(), "{\"type\":\"string\"}");
-            assert_eq!(first.1, SchemaFormat::Protobuf);
-            assert!(client.by_id.contains_key(&1));
+            assert2::assert!(first.0.as_str() == "{\"type\":\"string\"}");
+            assert2::assert!(first.1 == SchemaFormat::Protobuf);
+            assert2::assert!(client.by_id.contains_key(&1));
             // Second call — should be a cache hit.
             let second = client.schema_by_id(1).await.unwrap();
-            assert_eq!(second, first);
+            assert2::assert!(second == first);
         });
     }
 
@@ -460,11 +459,11 @@ mod tests {
         rt.block_on(async {
             let client = SchemaRegistryClient::new(&base_url).unwrap();
             let (id, schema, fmt) = client.latest("my-subject-value").await.unwrap();
-            assert_eq!(id, 2);
-            assert_eq!(schema.as_str(), "{\"type\":\"record\"}");
-            assert_eq!(fmt, SchemaFormat::Json);
-            assert!(client.by_id.contains_key(&2));
-            assert!(client.by_subject_latest.contains_key("my-subject-value"));
+            assert2::assert!(id == 2);
+            assert2::assert!(schema.as_str() == "{\"type\":\"record\"}");
+            assert2::assert!(fmt == SchemaFormat::Json);
+            assert2::assert!(client.by_id.contains_key(&2));
+            assert2::assert!(client.by_subject_latest.contains_key("my-subject-value"));
         });
     }
 }

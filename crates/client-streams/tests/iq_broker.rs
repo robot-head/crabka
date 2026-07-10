@@ -43,10 +43,7 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert_eq!(
-        resp.error_code, 0,
-        "streams.version finalize failed: {resp:?}"
-    );
+    assert2::assert!(resp.error_code == 0);
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -63,10 +60,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        resp.topics[0].error_code, 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 // ─── Counter processor (identical to state_store_integration) ──────────────────
@@ -159,29 +153,19 @@ async fn interactive_query_kv_store_over_broker() {
         {
             break view;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "counts store did not reach a→2 within 15s",
-        );
+        assert2::assert!(std::time::Instant::now() < deadline);
         tokio::task::yield_now().await;
     };
 
     // ── 4. Assert the materialized read semantics ─────────────────────────────
-    for (name, key, expected) in [
+    for (_name, key, expected) in [
         ("updated key", "a", Some(2)),
         ("single record key", "b", Some(1)),
         ("missing key", "missing", None),
     ] {
-        assert_eq!(
-            counts.get(&key.to_string()).await.unwrap(),
-            expected,
-            "case {name}"
-        );
+        assert2::assert!(counts.get(&key.to_string()).await.unwrap() == expected);
     }
-    assert!(
-        counts.approximate_num_entries().await.unwrap() >= 2,
-        "approximate_num_entries should count at least the two keys",
-    );
+    assert2::assert!(counts.approximate_num_entries().await.unwrap() >= 2);
 
     // ── 5. Error surfaces ─────────────────────────────────────────────────────
     // Unknown store name → StoreNotFound (the views don't impl Debug, so map to
@@ -190,30 +174,24 @@ async fn interactive_query_kv_store_over_broker() {
         .key_value_store::<String, i64>("does-not-exist", StringSerde, I64Serde)
         .await
         .err();
-    assert!(
-        matches!(
-            not_found,
-            Some(StreamsClientError::InteractiveQuery(
-                IqError::StoreNotFound(_)
-            ))
-        ),
-        "querying an absent store must be StoreNotFound, got {not_found:?}",
-    );
+    assert2::assert!(matches!(
+        not_found,
+        Some(StreamsClientError::InteractiveQuery(
+            IqError::StoreNotFound(_)
+        ))
+    ));
 
     // Wrong kind: `counts` is a KV store, queried as a window store.
     let wrong_kind = streams
         .window_store::<String, i64>("counts", StringSerde, I64Serde)
         .await
         .err();
-    assert!(
-        matches!(
-            wrong_kind,
-            Some(StreamsClientError::InteractiveQuery(
-                IqError::WrongStoreKind { .. }
-            ))
-        ),
-        "querying a KV store as a window store must be WrongStoreKind, got {wrong_kind:?}",
-    );
+    assert2::assert!(matches!(
+        wrong_kind,
+        Some(StreamsClientError::InteractiveQuery(
+            IqError::WrongStoreKind { .. }
+        ))
+    ));
 
     // ── 6. Clean shutdown ─────────────────────────────────────────────────────
     streams.close().await.unwrap();

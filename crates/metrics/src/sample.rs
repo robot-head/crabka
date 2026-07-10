@@ -67,7 +67,6 @@ pub fn decode_float_samples(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -78,6 +77,6 @@ mod tests {
         let batch = encode_float_samples(&rows).unwrap();
         let decoded = decode_float_samples(&batch).unwrap();
 
-        assert!(decoded == rows);
+        assert2::assert!(decoded == rows);
     }
 }

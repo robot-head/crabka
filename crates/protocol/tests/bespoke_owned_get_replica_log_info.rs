@@ -4,7 +4,6 @@
 // generated min/max wrapper tests only exercise default (empty) messages, which
 // skip the nested-element encode/decode loops and the nullable-string path.
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::{
     Decode, Encode,
@@ -75,10 +74,10 @@ fn owned_request_populated_roundtrip() {
         let req = populated_request();
         let mut buf = BytesMut::new();
         req.encode(&mut buf, v).unwrap();
-        assert!(req.encoded_len(v) == buf.len());
+        assert2::assert!(req.encoded_len(v) == buf.len());
         let mut cur = &buf[..];
-        assert!(GetReplicaLogInfoRequest::decode(&mut cur, v).unwrap() == req);
-        assert!(cur.is_empty(), "decoder left trailing bytes");
+        assert2::assert!(GetReplicaLogInfoRequest::decode(&mut cur, v).unwrap() == req);
+        assert2::assert!(cur.is_empty());
     }
 }
 
@@ -88,9 +87,9 @@ fn owned_response_populated_roundtrip() {
     let v = 0;
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, v).unwrap();
-    assert!(resp.encoded_len(v) == buf.len());
+    assert2::assert!(resp.encoded_len(v) == buf.len());
     let mut cur = &buf[..];
     let decoded = GetReplicaLogInfoResponse::decode(&mut cur, v).unwrap();
-    assert!(decoded == resp);
-    assert!(cur.is_empty(), "decoder left trailing bytes");
+    assert2::assert!(decoded == resp);
+    assert2::assert!(cur.is_empty());
 }

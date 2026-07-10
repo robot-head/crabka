@@ -17,7 +17,6 @@
 
 use std::sync::Arc;
 
-use assert2::assert;
 use base64::Engine as _;
 use crabka_operator::{
     controller::{
@@ -184,19 +183,12 @@ async fn oauth_introspection_validates_source_secret_and_mounts_it() {
     let observed = state.take_observed();
 
     // Source-Secret GET fired.
-    assert!(
-        observed.iter().any(|r| {
-            r.method() == Method::GET
-                && r.uri()
-                    .to_string()
-                    .contains(&format!("/secrets/{SOURCE_SECRET_NAME}"))
-        }),
-        "introspection source Secret GET must fire; observed: {:?}",
-        observed
-            .iter()
-            .map(|r| format!("{} {}", r.method(), r.uri()))
-            .collect::<Vec<_>>(),
-    );
+    assert2::assert!(observed.iter().any(|r| {
+        r.method() == Method::GET
+            && r.uri()
+                .to_string()
+                .contains(&format!("/secrets/{SOURCE_SECRET_NAME}"))
+    }));
 
     // Reconcile made it past validation to the per-broker ConfigMap.
     let _ = extract_broker0_toml(&observed, "c1");
@@ -226,11 +218,8 @@ async fn oauth_introspection_missing_source_secret_rejects_with_missing_oauth_in
     assert_ready_false_with_reason(&observed, "c2", "MissingOauthIntrospectionSecret");
 
     // No ConfigMap PATCH on a failure path.
-    assert!(
-        !observed.iter().any(|r| r.method() == Method::PATCH
-            && r.uri().to_string().contains("/configmaps/c2-broker-config")),
-        "broker-config ConfigMap must not be PATCHed on MissingOauthIntrospectionSecret",
-    );
+    assert2::assert!(!observed.iter().any(|r| r.method() == Method::PATCH
+        && r.uri().to_string().contains("/configmaps/c2-broker-config")));
 }
 
 // ── test 3: Secret present but key absent → MissingOauthIntrospectionKey ────
@@ -308,11 +297,10 @@ async fn oauth_introspection_jwt_mode_does_not_mount_anything() {
     let pod_spec = &body["spec"]["template"]["spec"];
 
     let volumes = pod_spec["volumes"].as_array().expect("volumes array");
-    assert!(
+    assert2::assert!(
         volumes
             .iter()
-            .all(|v| v["name"] != "oauth-introspection-secret"),
-        "JWT-mode OAuth listener must not produce an oauth-introspection-secret volume; body = {body}",
+            .all(|v| v["name"] != "oauth-introspection-secret")
     );
 
     let containers = pod_spec["containers"].as_array().expect("containers array");
@@ -321,11 +309,10 @@ async fn oauth_introspection_jwt_mode_does_not_mount_anything() {
         .find(|c| c["name"] == "broker")
         .unwrap_or_else(|| panic!("broker container present; body = {body}"));
     let mounts = broker["volumeMounts"].as_array().expect("volumeMounts");
-    assert!(
+    assert2::assert!(
         mounts
             .iter()
-            .all(|m| m["name"] != "oauth-introspection-secret"),
-        "JWT-mode OAuth listener must not produce an oauth-introspection-secret mount; body = {body}",
+            .all(|m| m["name"] != "oauth-introspection-secret")
     );
 }
 
@@ -367,14 +354,13 @@ async fn oauth_introspection_managed_pod_template_mounts_secret_with_projected_i
         .iter()
         .find(|v| v["name"] == "oauth-introspection-secret")
         .unwrap_or_else(|| panic!("oauth-introspection-secret volume present; body = {body}"));
-    assert_eq!(
-        intro_vol["secret"],
-        serde_json::json!({
-            "defaultMode": 256,
-            "secretName": SOURCE_SECRET_NAME,
-            "items": [{ "key": SOURCE_KEY, "path": "client-secret" }],
-        }),
-        "body = {body}"
+    assert2::assert!(
+        intro_vol["secret"]
+            == serde_json::json!({
+                "defaultMode": 256,
+                "secretName": SOURCE_SECRET_NAME,
+                "items": [{ "key": SOURCE_KEY, "path": "client-secret" }],
+            })
     );
 }
 
@@ -410,10 +396,7 @@ async fn oauth_introspection_with_userinfo_renders_userinfo_endpoint_in_toml() {
         format!("userinfo_endpoint_uri = \"{USERINFO_URI}\""),
         format!("introspection_endpoint_uri = \"{INTROSPECTION_URI}\""),
     ] {
-        assert!(
-            toml.contains(&needle),
-            "{needle} must be present in the rendered TOML; TOML: {toml}",
-        );
+        assert2::assert!(toml.contains(&needle));
     }
 }
 
@@ -454,14 +437,13 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
         .iter()
         .find(|v| v["name"] == "oauth-introspection-secret")
         .unwrap_or_else(|| panic!("oauth-introspection-secret volume present; body = {body}"));
-    assert_eq!(
-        intro_vol["secret"],
-        serde_json::json!({
-            "defaultMode": 256,
-            "secretName": SOURCE_SECRET_NAME,
-            "items": [{ "key": SOURCE_KEY, "path": "client-secret" }],
-        }),
-        "body = {body}"
+    assert2::assert!(
+        intro_vol["secret"]
+            == serde_json::json!({
+                "defaultMode": 256,
+                "secretName": SOURCE_SECRET_NAME,
+                "items": [{ "key": SOURCE_KEY, "path": "client-secret" }],
+            })
     );
 
     // VolumeMount on the broker container at the canonical path.
@@ -475,16 +457,8 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
         .iter()
         .find(|m| m["name"] == "oauth-introspection-secret")
         .unwrap_or_else(|| panic!("oauth-introspection-secret mount present; body = {body}"));
-    assert_eq!(
-        intro_mount["mountPath"].as_str(),
-        Some("/etc/crabka/oauth-introspection"),
-        "body = {body}"
-    );
-    assert_eq!(
-        intro_mount["readOnly"].as_bool(),
-        Some(true),
-        "body = {body}"
-    );
+    assert2::assert!(intro_mount["mountPath"].as_str() == Some("/etc/crabka/oauth-introspection"));
+    assert2::assert!(intro_mount["readOnly"].as_bool() == Some(true));
 }
 
 // ── test 9: StatefulSet omits introspection volume when JWT mode ───────────

@@ -28,7 +28,7 @@ pub use plan::FetchWriteOp;
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::*;
@@ -36,23 +36,14 @@ mod tests {
     fn roundtrip(case_name: &str, msg: &FetchResponse, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
-        assert!(
-            msg.encoded_len(v) == buf.len(),
-            "{case_name} encoded length differs at version {v}"
-        );
+        assert2::assert!(msg.encoded_len(v) == buf.len());
         let bytes = buf.freeze();
         let mut cur = &bytes[..];
         let decoded = FetchResponse::decode(&mut cur, v).unwrap();
-        assert!(
-            cur.is_empty(),
-            "{case_name} left trailing bytes at version {v}"
-        );
+        assert2::assert!(cur.is_empty());
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
-        assert!(
-            &reencoded[..] == &bytes[..],
-            "{case_name} re-encoding differs at version {v}"
-        );
+        assert2::assert!(&reencoded[..] == &bytes[..]);
         let _ = default_json(v);
     }
     #[test]

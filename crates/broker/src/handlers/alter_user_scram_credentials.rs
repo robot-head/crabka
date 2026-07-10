@@ -489,7 +489,6 @@ fn apply_submit_error(results: &mut [AlterUserScramCredentialsResult], msg: &str
 mod tests {
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-    use assert2::assert;
     use bytes::Bytes;
     use crabka_metadata::FeatureLevelRecord;
     use crabka_protocol::UnknownTaggedFields;
@@ -570,10 +569,7 @@ mod tests {
             {
                 return;
             }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "broker did not become controller leader"
-            );
+            assert2::assert!(std::time::Instant::now() <= deadline);
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
@@ -588,21 +584,23 @@ mod tests {
             ("unknown zero", 0, None),
             ("unknown high", 99, None),
         ];
-        for (case, wire, expected) in cases {
-            assert!(wire_to_mech(wire) == expected, "case: {case}; wire {wire}");
+        for (_case, wire, expected) in cases {
+            assert2::assert!(wire_to_mech(wire) == expected);
         }
     }
 
     #[test]
     fn err_result_carries_code_and_message() {
         let r = err_result("alice".into(), codes::UNACCEPTABLE_CREDENTIAL, "bad");
-        assert!(r == expected_result("alice", codes::UNACCEPTABLE_CREDENTIAL, Some("bad")));
+        assert2::assert!(
+            r == expected_result("alice", codes::UNACCEPTABLE_CREDENTIAL, Some("bad"))
+        );
     }
 
     #[test]
     fn ok_result_has_zero_error_code() {
         let r = ok_result("alice".into());
-        assert!(r == expected_result("alice", 0, None));
+        assert2::assert!(r == expected_result("alice", 0, None));
     }
 
     #[test]
@@ -613,14 +611,14 @@ mod tests {
 
         let r = process_upsertion(upsertion, true, &mut records);
 
-        assert!(
+        assert2::assert!(
             r == expected_result(
                 "alice",
                 KAFKA_UNSUPPORTED_SASL_MECHANISM,
                 Some("unknown mechanism"),
             )
         );
-        assert!(records.is_empty());
+        assert2::assert!(records.is_empty());
     }
 
     #[test]
@@ -631,14 +629,14 @@ mod tests {
 
         let r = process_upsertion(upsertion, true, &mut records);
 
-        assert!(
+        assert2::assert!(
             r == expected_result(
                 "alice",
                 KAFKA_UNACCEPTABLE_CREDENTIAL,
                 Some("iterations > 16384"),
             )
         );
-        assert!(records.is_empty());
+        assert2::assert!(records.is_empty());
     }
 
     #[test]
@@ -649,8 +647,8 @@ mod tests {
 
         let r = process_upsertion(upsertion, true, &mut records);
 
-        assert!(r == expected_result("alice", 0, None));
-        assert!(records.len() == 1);
+        assert2::assert!(r == expected_result("alice", 0, None));
+        assert2::assert!(records.len() == 1);
     }
 
     #[test]
@@ -674,7 +672,7 @@ mod tests {
             ),
             expected_result("bob", codes::DUPLICATE_RESOURCE, Some("duplicate resource")),
         ];
-        assert!(results == expected);
+        assert2::assert!(results == expected);
     }
 
     #[test]
@@ -707,8 +705,8 @@ mod tests {
             // At SCRAM_MIN_LEVEL — gate permits.
             ("at floor", Some(11), false),
         ];
-        for (case, level, want_err) in cases {
-            assert!(gate(level) == want_err, "case: {case}; level {level:?}");
+        for (_case, level, want_err) in cases {
+            assert2::assert!(gate(level) == want_err);
         }
     }
 
@@ -727,15 +725,14 @@ mod tests {
         for (upsertion, msg) in rejections {
             let user = upsertion.name.clone();
             let r = process_upsertion(upsertion, true, &mut records);
-            assert!(
-                r == expected_result(&user, codes::UNACCEPTABLE_CREDENTIAL, Some(msg)),
-                "case: {user}"
+            assert2::assert!(
+                r == expected_result(&user, codes::UNACCEPTABLE_CREDENTIAL, Some(msg))
             );
-            assert!(records.is_empty(), "case: {user}");
+            assert2::assert!(records.is_empty());
         }
 
         let r = process_upsertion(valid_upsertion("alice"), true, &mut records);
-        assert!(r == expected_result("alice", 0, None));
+        assert2::assert!(r == expected_result("alice", 0, None));
         let (stored_key, server_key) = crabka_security::derive_keys_from_salted(
             SaslMechanism::ScramSha256,
             &valid_upsertion("alice").salted_password,
@@ -748,7 +745,7 @@ mod tests {
             server_key,
             iterations: u32::try_from(MIN_ITERATIONS).expect("min fits"),
         })];
-        assert!(records == expected_records);
+        assert2::assert!(records == expected_records);
     }
 
     #[test]
@@ -759,12 +756,12 @@ mod tests {
 
         let r = process_upsertion(upsertion, true, &mut records);
 
-        assert!(r == expected_result("empty-salt", 0, None));
-        assert!(records.len() == 1);
+        assert2::assert!(r == expected_result("empty-salt", 0, None));
+        assert2::assert!(records.len() == 1);
         let MetadataRecord::V1ScramCredential(record) = &records[0] else {
             panic!("accepted upsertion must persist a SCRAM credential record");
         };
-        assert!(record.salt.is_empty());
+        assert2::assert!(record.salt.is_empty());
     }
 
     #[test]
@@ -776,8 +773,8 @@ mod tests {
 
         let r = process_upsertion(upsertion, true, &mut records);
 
-        assert!(r == expected_result("odd-bytes", 0, None));
-        assert!(records.len() == 1);
+        assert2::assert!(r == expected_result("odd-bytes", 0, None));
+        assert2::assert!(records.len() == 1);
         let MetadataRecord::V1ScramCredential(record) = &records[0] else {
             panic!("accepted upsertion must persist a SCRAM credential record");
         };
@@ -791,7 +788,7 @@ mod tests {
             server_key,
             iterations: u32::try_from(MIN_ITERATIONS).expect("positive iteration count"),
         };
-        assert!(record == &expected_record);
+        assert2::assert!(record == &expected_record);
     }
 
     #[test]
@@ -804,8 +801,8 @@ mod tests {
             codes::CLUSTER_AUTHORIZATION_FAILED,
             Some("not super-user"),
         );
-        assert!(r == expected);
-        assert!(records.is_empty());
+        assert2::assert!(r == expected);
+        assert2::assert!(records.is_empty());
     }
 
     #[tokio::test]
@@ -816,18 +813,14 @@ mod tests {
         let mut records = Vec::new();
 
         let r = process_deletion(&broker, deletion("alice"), true, &mut records);
-        assert!(
-            r.error_code == 91,
-            "missing SCRAM deletion target must use Kafka RESOURCE_NOT_FOUND (91), got {}",
-            r.error_code
-        );
+        assert2::assert!(r.error_code == 91);
         let expected = expected_result(
             "alice",
             codes::RESOURCE_NOT_FOUND,
             Some("credential not found"),
         );
-        assert!(r == expected);
-        assert!(records.is_empty());
+        assert2::assert!(r == expected);
+        assert2::assert!(records.is_empty());
         broker_handle.shutdown().await;
     }
 
@@ -844,8 +837,8 @@ mod tests {
             codes::CLUSTER_AUTHORIZATION_FAILED,
             Some("not super-user"),
         );
-        assert!(r == expected);
-        assert!(records.is_empty());
+        assert2::assert!(r == expected);
+        assert2::assert!(records.is_empty());
         broker_handle.shutdown().await;
     }
 
@@ -860,14 +853,14 @@ mod tests {
 
         let r = process_deletion(&broker, deletion, true, &mut records);
 
-        assert!(
+        assert2::assert!(
             r == expected_result(
                 "alice",
                 KAFKA_UNSUPPORTED_SASL_MECHANISM,
                 Some("unknown mechanism"),
             )
         );
-        assert!(records.is_empty());
+        assert2::assert!(records.is_empty());
         broker_handle.shutdown().await;
     }
 
@@ -903,14 +896,14 @@ mod tests {
             )],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         let image = broker.controller.current_image();
-        assert!(
+        assert2::assert!(
             image
                 .scram_credential("alice", SaslMechanism::ScramSha256)
                 .is_none()
         );
-        assert!(
+        assert2::assert!(
             image
                 .scram_credential("alice", SaslMechanism::ScramSha512)
                 .is_none()
@@ -977,14 +970,14 @@ mod tests {
             )],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         let image = broker.controller.current_image();
-        assert!(
+        assert2::assert!(
             image
                 .scram_credential("alice", SaslMechanism::ScramSha512)
                 .is_some()
         );
-        assert!(
+        assert2::assert!(
             image
                 .scram_credential("alice", SaslMechanism::ScramSha256)
                 .is_none()
@@ -1030,14 +1023,14 @@ mod tests {
             )],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         let image = broker.controller.current_image();
-        assert!(
+        assert2::assert!(
             image
                 .scram_credential("alice", SaslMechanism::ScramSha256)
                 .is_none()
         );
-        assert!(
+        assert2::assert!(
             image
                 .scram_credential("alice", SaslMechanism::ScramSha512)
                 .is_none()
@@ -1086,7 +1079,7 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -1119,8 +1112,8 @@ mod tests {
             )],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
-        assert!(
+        assert2::assert!(resp == expected);
+        assert2::assert!(
             broker
                 .controller
                 .current_image()
@@ -1159,8 +1152,8 @@ mod tests {
             )],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
-        assert!(
+        assert2::assert!(resp == expected);
+        assert2::assert!(
             broker
                 .controller
                 .current_image()
@@ -1195,9 +1188,9 @@ mod tests {
             results: vec![expected_result("alice", 0, None)],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         let image = broker.controller.current_image();
-        assert!(
+        assert2::assert!(
             image
                 .scram_credential("alice", SaslMechanism::ScramSha256)
                 .is_some()
@@ -1232,9 +1225,9 @@ mod tests {
             )],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         let image = broker.controller.current_image();
-        assert!(
+        assert2::assert!(
             image
                 .scram_credential("alice", SaslMechanism::ScramSha256)
                 .is_none()
@@ -1280,7 +1273,7 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -1334,7 +1327,7 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -1380,7 +1373,7 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

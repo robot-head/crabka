@@ -87,11 +87,7 @@ fn docker_pull(image: &str) {
         .args(["pull", image])
         .output()
         .expect("spawn docker pull");
-    assert!(
-        out.status.success(),
-        "docker pull {image} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert2::assert!(out.status.success());
 }
 
 fn docker_run_schema_registry() -> String {
@@ -113,13 +109,9 @@ fn docker_run_schema_registry() -> String {
         ])
         .output()
         .expect("spawn docker run schema-registry");
-    assert!(
-        out.status.success(),
-        "docker run schema-registry failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert2::assert!(out.status.success());
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert!(!id.is_empty(), "empty container id from docker run");
+    assert2::assert!(!id.is_empty());
     eprintln!("INTEROP container id={id}");
     id
 }
@@ -129,11 +121,7 @@ fn docker_mapped_port(id: &str) -> u16 {
         .args(["port", id, "8081"])
         .output()
         .expect("spawn docker port");
-    assert!(
-        out.status.success(),
-        "docker port {id} 8081 failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert2::assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     text.lines()
         .filter_map(|l| l.rsplit(':').next())
@@ -205,10 +193,7 @@ async fn register_via_cp(http: &reqwest::Client, base: &str, subject: &str, sche
         .unwrap_or_else(|e| panic!("POST {url}: {e}"));
     let status = resp.status();
     let text = resp.text().await.unwrap();
-    assert!(
-        status.is_success(),
-        "register {subject} returned {status}: {text}"
-    );
+    assert2::assert!(status.is_success());
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     v["id"]
         .as_i64()
@@ -262,7 +247,7 @@ async fn our_store_decodes_cp_schema_registry_records() {
     // Register one Avro schema via the REAL cp-schema-registry.
     let id = register_via_cp(&http, &base, "av-value", avro_schema).await;
     eprintln!("INTEROP cp registered id={id}");
-    assert_eq!(id, 1, "expected first registered schema to get id=1");
+    assert2::assert!(id == 1);
 
     // Brief pause so the `_schemas` topic record is durable before our
     // KafkaStore starts its reader.
@@ -293,10 +278,7 @@ async fn our_store_decodes_cp_schema_registry_records() {
             eprintln!("INTEROP store has av-value after replay");
             break;
         }
-        assert!(
-            Instant::now() < deadline,
-            "av-value never appeared in our store after 30s; store subjects: {subjects:?}"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
@@ -312,11 +294,8 @@ async fn our_store_decodes_cp_schema_registry_records() {
     let got_v: serde_json::Value = serde_json::from_str(schema_str)
         .unwrap_or_else(|e| panic!("schema is not valid JSON: {e}\n  raw: {schema_str}"));
     let expected_v: serde_json::Value = serde_json::from_str(avro_schema).unwrap();
-    assert!(
-        schema_type_omitted,
-        "complete GET /schemas/ids/1 projection"
-    );
-    assert_eq!(got_v, expected_v, "complete GET /schemas/ids/1 projection");
+    assert2::assert!(schema_type_omitted);
+    assert2::assert!(got_v == expected_v);
 
     // Assert GET /subjects lists "av-value".
     let subs = get_json(&app, "/subjects").await;
@@ -327,10 +306,7 @@ async fn our_store_decodes_cp_schema_registry_records() {
         .iter()
         .map(|v| v.as_str().expect("string").to_string())
         .collect();
-    assert!(
-        names.contains(&"av-value".to_string()),
-        "GET /subjects must contain 'av-value'; got: {names:?}"
-    );
+    assert2::assert!(names.contains(&"av-value".to_string()));
 
     eprintln!(
         "INTEROP PASS: our StoreReader successfully decoded cp-schema-registry's _schemas records"

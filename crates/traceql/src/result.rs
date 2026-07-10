@@ -136,7 +136,6 @@ pub struct TraceMetricsResponse {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -164,12 +163,12 @@ mod tests {
             events: Vec::new(),
             links: Vec::new(),
         };
-        assert_eq!(
-            s.attributes,
-            vec![
-                ("http.status_code".into(), AttrValue::Int(200)),
-                ("ok".into(), AttrValue::Bool(true)),
-            ]
+        assert2::assert!(
+            s.attributes
+                == vec![
+                    ("http.status_code".into(), AttrValue::Int(200)),
+                    ("ok".into(), AttrValue::Bool(true)),
+                ]
         );
     }
 
@@ -191,9 +190,8 @@ mod tests {
             inspected_traces: 1,
             inspected_bytes: 4096,
         };
-        assert_eq!(
-            resp,
-            SearchResponse {
+        assert2::assert!(
+            resp == SearchResponse {
                 traces: vec![TraceResult {
                     trace_id: [0xAB; 16],
                     root_service_name: "checkout".into(),
@@ -216,7 +214,7 @@ mod tests {
     fn tag_scope_is_copy() {
         let s = TagScope::Span;
         let c = s;
-        assert!(s == TagScope::Span);
-        assert!(c == TagScope::Span);
+        assert2::assert!(s == TagScope::Span);
+        assert2::assert!(c == TagScope::Span);
     }
 }

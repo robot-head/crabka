@@ -145,7 +145,7 @@ fn normalize_whitespace(input: &str) -> String {
 fn docker_log_tailing_is_scoped_to_the_demo_compose_project() {
     let config = alloy_config();
     let relabel = balanced_block_after_marker(&config, "discovery.relabel \"containers\" {");
-    for (needle, why) in [
+    for (needle, _why) in [
         (
             "__meta_docker_container_label_com_docker_compose_project",
             "Docker log discovery should inspect the Compose project label before forwarding targets",
@@ -159,7 +159,7 @@ fn docker_log_tailing_is_scoped_to_the_demo_compose_project() {
             "Docker log discovery should only tail Crabka observability Compose projects",
         ),
     ] {
-        assert!(relabel.contains(needle), "{why}");
+        assert2::assert!(relabel.contains(needle));
     }
 }
 
@@ -168,48 +168,29 @@ fn crabka_worker_targets_also_collect_memory_profiles() {
     let config = alloy_config();
     let scrape = scrape_block(&config, "crabka_workers");
     let process_cpu = normalize_whitespace(profile_process_cpu_block(scrape));
-    assert!(
-        process_cpu.contains("enabled = true"),
-        "worker roles should keep CPU profiling enabled"
-    );
+    assert2::assert!(process_cpu.contains("enabled = true"));
     let memory = profile_memory_block(scrape);
-    assert!(
-        memory.contains("enabled = true"),
-        "worker roles should collect memory profiles too"
-    );
-    assert!(
-        memory.contains("path    = \"/debug/pprof/heap\""),
-        "worker roles should scrape the jemalloc pprof heap endpoint"
-    );
+    assert2::assert!(memory.contains("enabled = true"));
+    assert2::assert!(memory.contains("path    = \"/debug/pprof/heap\""));
 }
 
 #[test]
 fn jemalloc_heap_profiling_uses_bounded_always_on_sampling() {
     let compose = docker_compose();
-    assert!(
-        compose.contains("MALLOC_CONF: \"prof:true,prof_active:true,lg_prof_sample:20,background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000\""),
-        "heap profiling should stay active so memory profiles include long-lived allocations"
-    );
-    assert!(
-        compose.contains("lg_prof_sample:20"),
-        "always-on heap profiling should sample small demo services without tracing every allocation"
-    );
+    assert2::assert!(compose.contains("MALLOC_CONF: \"prof:true,prof_active:true,lg_prof_sample:20,background_thread:true,dirty_decay_ms:1000,muzzy_decay_ms:1000\""));
+    assert2::assert!(compose.contains("lg_prof_sample:20"));
     for option in [
         "background_thread:true",
         "dirty_decay_ms:1000",
         "muzzy_decay_ms:1000",
     ] {
-        assert!(
-            compose.contains(option),
-            "jemalloc should promptly release heap-profile/query allocations: missing {option}"
-        );
+        assert2::assert!(compose.contains(option));
     }
-    assert!(
+    assert2::assert!(
         !compose
             .lines()
             .any(|line| line.trim_start().starts_with("MALLOC_CONF:")
-                && line.contains("lg_prof_sample:0")),
-        "lg_prof_sample:0 backtraces every allocation and is too expensive for the demo stack"
+                && line.contains("lg_prof_sample:0"))
     );
 }
 
@@ -217,26 +198,19 @@ fn jemalloc_heap_profiling_uses_bounded_always_on_sampling() {
 fn metrics_compactor_bounds_cold_block_retention_for_demo() {
     let compose = docker_compose();
     let block = compose_service_block(&compose, "metrics-compactor");
-    assert!(
+    assert2::assert!(
         block
-            .contains("--compactor-retention-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_MS:-3600000}"),
-        "metrics compactor should bound cold metric block/index growth by default"
+            .contains("--compactor-retention-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_MS:-3600000}")
     );
-    assert!(
-        block.contains(
-            "--compactor-retention-sweep-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_MS:-30000}"
-        ),
-        "metrics compactor should sweep retention often enough for the demo"
-    );
+    assert2::assert!(block.contains(
+        "--compactor-retention-sweep-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_MS:-30000}"
+    ));
 }
 
 #[test]
 fn otlp_heartbeat_traces_use_per_component_service_names() {
     let compose = docker_compose();
-    assert!(
-        compose.contains("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS: \"15\""),
-        "demo OTLP env should emit low-rate heartbeat spans so idle services are visible in Tempo"
-    );
+    assert2::assert!(compose.contains("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS: \"15\""));
     for service in [
         "broker",
         "schema-registry",
@@ -257,10 +231,7 @@ fn otlp_heartbeat_traces_use_per_component_service_names() {
         "demo-consume",
     ] {
         let block = compose_service_block(&compose, service);
-        assert!(
-            block.contains(&format!("OTEL_SERVICE_NAME: {service}")),
-            "{service} should set a role-specific OTEL_SERVICE_NAME for trace coverage"
-        );
+        assert2::assert!(block.contains(&format!("OTEL_SERVICE_NAME: {service}")));
     }
 }
 
@@ -269,37 +240,19 @@ fn demo_app_profiles_cover_all_roles_without_heap_scrape() {
     let config = alloy_config();
     let scrape = scrape_block(&config, "demo_apps");
     for role in ["demo-produce", "demo-stream"] {
-        assert!(
-            scrape.contains(&format!("service_name = \"{role}\"")),
-            "demo app profile scrape should include {role}"
-        );
+        assert2::assert!(scrape.contains(&format!("service_name = \"{role}\"")));
     }
     let process_cpu = normalize_whitespace(profile_process_cpu_block(scrape));
-    assert!(
-        process_cpu.contains("enabled = true"),
-        "demo app roles should keep CPU profiling enabled"
-    );
+    assert2::assert!(process_cpu.contains("enabled = true"));
     let memory = profile_memory_block(scrape);
-    assert!(
-        memory.contains("enabled = false"),
-        "demo app roles should not scrape /debug/pprof/heap until their allocator supports it"
-    );
+    assert2::assert!(memory.contains("enabled = false"));
 
     let consume_scrape = scrape_block(&config, "demo_consume_cpu");
-    assert!(
-        consume_scrape.contains("service_name = \"demo-consume\""),
-        "idle demo-consume should use a separate longer CPU scrape so fresh profiles are visible"
-    );
+    assert2::assert!(consume_scrape.contains("service_name = \"demo-consume\""));
     let consume_cpu = normalize_whitespace(profile_process_cpu_block(consume_scrape));
-    assert!(
-        consume_cpu.contains("enabled = true"),
-        "demo-consume should keep CPU profiling enabled"
-    );
+    assert2::assert!(consume_cpu.contains("enabled = true"));
     let consume_memory = profile_memory_block(consume_scrape);
-    assert!(
-        consume_memory.contains("enabled = false"),
-        "demo-consume should not scrape /debug/pprof/heap until its allocator supports it"
-    );
+    assert2::assert!(consume_memory.contains("enabled = false"));
 }
 
 #[test]
@@ -336,20 +289,11 @@ fn cpu_profiles_use_bounded_sampling_windows() {
 fn idle_profile_scrapes_are_lower_frequency() {
     let config = alloy_config();
     let consume_scrape = scrape_block(&config, "demo_consume_cpu");
-    assert!(
-        consume_scrape.contains("scrape_interval          = \"120s\""),
-        "idle demo-consume should use a lower-frequency scrape when the CPU window is longer"
-    );
-    assert!(
-        consume_scrape.contains("scrape_timeout           = \"30s\""),
-        "demo-consume scrape timeout should exceed its 20s CPU profile window"
-    );
+    assert2::assert!(consume_scrape.contains("scrape_interval          = \"120s\""));
+    assert2::assert!(consume_scrape.contains("scrape_timeout           = \"30s\""));
 
     let trace_scrape = scrape_block(&config, "trace_block_builder_cpu");
-    assert!(
-        trace_scrape.contains("scrape_interval          = \"60s\""),
-        "trace block-builder keeps a 60s cadence because it is a core service profile"
-    );
+    assert2::assert!(trace_scrape.contains("scrape_interval          = \"60s\""));
 }
 
 #[test]
@@ -377,14 +321,8 @@ fn demo_app_image_does_not_enable_conflicting_heap_allocator() {
 #[test]
 fn demo_runtime_image_does_not_ship_full_dwarf_debug_sections() {
     let melange = demo_melange_config();
-    assert!(
-        !melange.contains("CARGO_PROFILE_RELEASE_DEBUG=true"),
-        "full DWARF release debuginfo makes the runtime binaries multi-GiB and inflates querier RSS"
-    );
-    assert!(
-        melange.contains("strip --strip-debug"),
-        "runtime binaries should remove DWARF debug sections while keeping symbols for readable profiles"
-    );
+    assert2::assert!(!melange.contains("CARGO_PROFILE_RELEASE_DEBUG=true"));
+    assert2::assert!(melange.contains("strip --strip-debug"));
 }
 
 #[test]
@@ -394,14 +332,8 @@ fn demo_image_is_built_with_apko_and_melange() {
     let apko = demo_apko_config();
     let workflow = demo_publish_workflow();
 
-    assert!(
-        !repo_root().join("demo/observability/Dockerfile").exists(),
-        "the observability demo image should not keep a Dockerfile build path"
-    );
-    assert!(
-        melange.contains("package:\n  name: crabka-demo"),
-        "melange should produce a dedicated crabka-demo APK package"
-    );
+    assert2::assert!(!repo_root().join("demo/observability/Dockerfile").exists());
+    assert2::assert!(melange.contains("package:\n  name: crabka-demo"));
     for bin in [
         "crabka-broker",
         "crabka",
@@ -413,10 +345,7 @@ fn demo_image_is_built_with_apko_and_melange() {
         "crabka-schema-registry",
         "observability-demo-app",
     ] {
-        assert!(
-            melange.contains(bin),
-            "demo package should install binary {bin}"
-        );
+        assert2::assert!(melange.contains(bin));
     }
     check!(
         apko.contains("- crabka-demo"),
@@ -451,7 +380,7 @@ fn demo_image_is_built_with_apko_and_melange() {
 #[test]
 fn rustfs_bootstrap_verifies_obsolete_log_manifest_cleanup() {
     let bootstrap = rustfs_bootstrap_script();
-    for (needle, why) in [
+    for (needle, _why) in [
         (
             "obsolete_logs_manifest_key=\"logs/tenant=demo/index/logs/manifest.json\"",
             "RustFS bootstrap should target the obsolete full logs manifest left by older demo revisions",
@@ -477,71 +406,43 @@ fn rustfs_bootstrap_verifies_obsolete_log_manifest_cleanup() {
             "RustFS bootstrap should fail loudly when obsolete index cleanup fails",
         ),
     ] {
-        assert!(bootstrap.contains(needle), "{why}");
+        assert2::assert!(bootstrap.contains(needle));
     }
     for label in ["\"logs full manifest\"", "\"logs shard catalog\""] {
-        assert!(
-            bootstrap.contains(label),
-            "RustFS bootstrap should name each obsolete logs index cleanup target: missing {label}"
-        );
+        assert2::assert!(bootstrap.contains(label));
     }
-    assert!(
-        bootstrap.contains("exit 1"),
-        "RustFS bootstrap should fail the setup container when obsolete index cleanup fails"
-    );
-    assert!(
-        !bootstrap.contains("manifest.json >/dev/null 2>&1 || true"),
-        "obsolete manifest cleanup must not be silently ignored"
-    );
+    assert2::assert!(bootstrap.contains("exit 1"));
+    assert2::assert!(!bootstrap.contains("manifest.json >/dev/null 2>&1 || true"));
 }
 
 #[test]
 fn grafana_dashboard_provider_uses_stable_folder_uid() {
     let provider = dashboard_provider_config();
-    assert!(
-        provider.contains("folder: Crabka"),
-        "dashboard provisioning should keep the user-visible Crabka folder name"
-    );
-    assert!(
-        provider.contains("folderUid: crabka"),
-        "dashboard provisioning should pin a stable folder UID so folder URLs survive Grafana DB recreation"
-    );
+    assert2::assert!(provider.contains("folder: Crabka"));
+    assert2::assert!(provider.contains("folderUid: crabka"));
 }
 
 #[test]
 fn loki_datasource_does_not_enable_datasource_managed_alert_rules() {
     let config = grafana_datasource_config();
     let loki = datasource_block(&config, "uid: crabka-loki");
-    assert!(
-        loki.contains("type: loki"),
-        "the Crabka logs datasource should remain a Loki datasource"
-    );
-    assert!(
-        loki.contains("manageAlerts: false"),
-        "the demo provisions Grafana-managed alert rules, so Grafana should not probe Loki ruler APIs for datasource-managed rules"
-    );
+    assert2::assert!(loki.contains("type: loki"));
+    assert2::assert!(loki.contains("manageAlerts: false"));
 }
 
 #[test]
 fn recent_traces_dashboard_panel_renders_traceql_search_results() {
     let dashboard = dashboard("crabka-self.json");
-    assert!(
-        dashboard.contains("\"id\": 3, \"type\": \"table\", \"title\": \"Recent traces\""),
-        "TraceQL search results are table-shaped; the dashboard should use Grafana's table panel"
+    assert2::assert!(
+        dashboard.contains("\"id\": 3, \"type\": \"table\", \"title\": \"Recent traces\"")
     );
-    assert!(
-        dashboard.contains("\"queryType\": \"traceql\""),
-        "recent traces panel should keep querying Tempo with TraceQL"
-    );
+    assert2::assert!(dashboard.contains("\"queryType\": \"traceql\""));
 }
 
 #[test]
 fn self_dashboard_surfaces_service_heap_profiles() {
     let dashboard = dashboard("crabka-self.json");
-    assert!(
-        dashboard.contains("memory:inuse_space:bytes:space:bytes"),
-        "self-observability dashboard should expose jemalloc heap profiles"
-    );
+    assert2::assert!(dashboard.contains("memory:inuse_space:bytes:space:bytes"));
     for service in [
         "broker",
         "metrics-distributor",
@@ -549,10 +450,7 @@ fn self_dashboard_surfaces_service_heap_profiles() {
         "traces-distributor",
         "profiles-distributor",
     ] {
-        assert!(
-            dashboard.contains(service),
-            "self-observability dashboard should include a heap profile panel for {service}"
-        );
+        assert2::assert!(dashboard.contains(service));
     }
 }
 
@@ -582,22 +480,15 @@ fn compose_and_alloy_collect_container_resource_metrics() {
 
     let config = alloy_config();
     let scrape = balanced_block_after_marker(&config, "prometheus.scrape \"containers\" {");
-    assert!(
-        scrape.contains("__address__ = \"cadvisor:8080\""),
-        "Alloy should scrape cAdvisor inside the compose network"
-    );
+    assert2::assert!(scrape.contains("__address__ = \"cadvisor:8080\""));
     let scrape = normalize_whitespace(scrape);
-    assert!(
-        scrape.contains("forward_to = [prometheus.relabel.container_resources.receiver]"),
-        "container metrics should pass through the resource relabel stage"
+    assert2::assert!(
+        scrape.contains("forward_to = [prometheus.relabel.container_resources.receiver]")
     );
     let relabel =
         balanced_block_after_marker(&config, "prometheus.relabel \"container_resources\" {");
     let relabel = normalize_whitespace(relabel);
-    assert!(
-        relabel.contains("forward_to = [prometheus.remote_write.crabka.receiver]"),
-        "container metrics should be written into Crabka metrics"
-    );
+    assert2::assert!(relabel.contains("forward_to = [prometheus.remote_write.crabka.receiver]"));
     for metric in [
         "container_memory_rss",
         "container_memory_cache",
@@ -606,21 +497,15 @@ fn compose_and_alloy_collect_container_resource_metrics() {
         "container_fs_reads_bytes_total",
         "container_fs_writes_bytes_total",
     ] {
-        assert!(
-            relabel.contains(metric),
-            "container relabeling should keep {metric} for runtime I/O dashboards"
-        );
+        assert2::assert!(relabel.contains(metric));
     }
-    assert!(
-        relabel.contains("device") && relabel.contains("interface"),
-        "container relabeling should keep device/interface labels so cAdvisor I/O series remain distinct before dashboard aggregation"
-    );
+    assert2::assert!(relabel.contains("device") && relabel.contains("interface"));
 }
 
 #[test]
 fn runtime_resources_dashboard_surfaces_stack_cpu_and_memory() {
     let dashboard = dashboard("crabka-runtime.json");
-    for (needle, why) in [
+    for (needle, _why) in [
         (
             "\"uid\": \"crabka-runtime\"",
             "runtime resource dashboard should have a stable UID",
@@ -662,7 +547,7 @@ fn runtime_resources_dashboard_surfaces_stack_cpu_and_memory() {
             "runtime resource panels should exclude one-shot setup containers from steady-state resource rankings",
         ),
     ] {
-        assert!(dashboard.contains(needle), "{why}");
+        assert2::assert!(dashboard.contains(needle));
     }
     for service in [
         "rustfs",
@@ -673,10 +558,7 @@ fn runtime_resources_dashboard_surfaces_stack_cpu_and_memory() {
         "logs-querier",
         "profiles-querier",
     ] {
-        assert!(
-            dashboard.contains(service),
-            "runtime dashboard should make {service} visible"
-        );
+        assert2::assert!(dashboard.contains(service));
     }
 }
 
@@ -689,10 +571,7 @@ fn runtime_resources_dashboard_surfaces_stack_io_hotspots() {
         "Top network I/O users",
         "Object-store path I/O",
     ] {
-        assert!(
-            dashboard.contains(title),
-            "runtime dashboard should include panel {title}"
-        );
+        assert2::assert!(dashboard.contains(title));
     }
     for metric in [
         "container_network_receive_bytes_total",
@@ -700,28 +579,16 @@ fn runtime_resources_dashboard_surfaces_stack_io_hotspots() {
         "container_fs_reads_bytes_total",
         "container_fs_writes_bytes_total",
     ] {
-        assert!(
-            dashboard.contains(metric),
-            "runtime dashboard should query {metric}"
-        );
+        assert2::assert!(dashboard.contains(metric));
     }
-    assert!(
-        dashboard.contains("rustfs|.*-querier|.*-compactor|.*-block-builder"),
-        "runtime dashboard should isolate the object-store-facing services"
-    );
+    assert2::assert!(dashboard.contains("rustfs|.*-querier|.*-compactor|.*-block-builder"));
 }
 
 #[test]
 fn rustfs_dashboard_surfaces_object_store_health_and_io() {
     let dashboard = dashboard("crabka-rustfs.json");
-    assert!(
-        dashboard.contains("\"uid\": \"crabka-rustfs\""),
-        "RustFS dashboard should have a stable UID"
-    );
-    assert!(
-        dashboard.contains("\"title\": \"Crabka - RustFS Object Store\""),
-        "RustFS dashboard should have a clear object-store title"
-    );
+    assert2::assert!(dashboard.contains("\"uid\": \"crabka-rustfs\""));
+    assert2::assert!(dashboard.contains("\"title\": \"Crabka - RustFS Object Store\""));
     for title in [
         "Container memory working set",
         "Memory limit ratio",
@@ -740,10 +607,7 @@ fn rustfs_dashboard_surfaces_object_store_health_and_io() {
         "Recent RustFS warnings and errors",
         "Object-store client retry logs",
     ] {
-        assert!(
-            dashboard.contains(title),
-            "RustFS dashboard should include panel {title}"
-        );
+        assert2::assert!(dashboard.contains(title));
     }
     for metric in [
         "container_memory_working_set_bytes",
@@ -765,10 +629,7 @@ fn rustfs_dashboard_surfaces_object_store_health_and_io() {
         "rustfs_capacity_scan_disk_duration_seconds_count",
         "rustfs_lock_acquire_total",
     ] {
-        assert!(
-            dashboard.contains(metric),
-            "RustFS dashboard should query metric {metric}"
-        );
+        assert2::assert!(dashboard.contains(metric));
     }
     check!(
         dashboard.contains("container_label_com_docker_compose_service=\\\"rustfs\\\""),
@@ -797,7 +658,7 @@ fn rustfs_dashboard_surfaces_object_store_health_and_io() {
 #[test]
 fn runtime_resources_dashboard_surfaces_container_restarts() {
     let dashboard = dashboard("crabka-runtime.json");
-    for (needle, why) in [
+    for (needle, _why) in [
         (
             "Shortest container uptime",
             "runtime dashboard should make recently recreated containers obvious",
@@ -815,14 +676,14 @@ fn runtime_resources_dashboard_surfaces_container_restarts() {
             "runtime dashboard should count start-time changes by Compose service",
         ),
     ] {
-        assert!(dashboard.contains(needle), "{why}");
+        assert2::assert!(dashboard.contains(needle));
     }
 }
 
 #[test]
 fn alerts_surface_recent_observability_container_restarts() {
     let alerts = grafana_alerting_config();
-    for (needle, why) in [
+    for (needle, _why) in [
         (
             "uid: crabka-obs-container-restarted",
             "Grafana alerts should include a stable UID for observability container restarts",
@@ -840,7 +701,7 @@ fn alerts_surface_recent_observability_container_restarts() {
             "restart alert should detect recent start-time changes by Compose service",
         ),
     ] {
-        assert!(alerts.contains(needle), "{why}");
+        assert2::assert!(alerts.contains(needle));
     }
     for service in [
         "alloy",
@@ -851,9 +712,6 @@ fn alerts_surface_recent_observability_container_restarts() {
         "traces-querier",
         "profiles-querier",
     ] {
-        assert!(
-            alerts.contains(service),
-            "restart alert should watch {service}"
-        );
+        assert2::assert!(alerts.contains(service));
     }
 }

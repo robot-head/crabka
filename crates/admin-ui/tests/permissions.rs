@@ -53,12 +53,8 @@ fn host_deny(resource_type: ResourceType, operation: AclOperation, host: &str) -
 fn assert_capability_cases(
     cases: impl IntoIterator<Item = (&'static str, Vec<AclEntry>, Capabilities)>,
 ) {
-    for (name, entries, expected) in cases {
-        assert_eq!(
-            derive_capabilities("User:alice", &entries),
-            expected,
-            "case {name}"
-        );
+    for (_name, entries, expected) in cases {
+        assert2::assert!(derive_capabilities("User:alice", &entries) == expected);
     }
 }
 
@@ -274,20 +270,20 @@ fn derive_capabilities_for_host_matches_exact_or_wildcard_host() {
     let matching = derive_capabilities_for_host("User:alice", "10.0.0.1", &entries);
     let nonmatching = derive_capabilities_for_host("User:alice", "10.0.0.2", &entries);
 
-    assert_eq!(
-        matching,
-        Capabilities {
-            can_view_topics: true,
-            can_create_topics: true,
-            ..Capabilities::default()
-        }
+    assert2::assert!(
+        matching
+            == Capabilities {
+                can_view_topics: true,
+                can_create_topics: true,
+                ..Capabilities::default()
+            }
     );
-    assert_eq!(
-        nonmatching,
-        Capabilities {
-            can_create_topics: true,
-            ..Capabilities::default()
-        }
+    assert2::assert!(
+        nonmatching
+            == Capabilities {
+                can_create_topics: true,
+                ..Capabilities::default()
+            }
     );
 }
 
@@ -301,12 +297,12 @@ fn host_matching_controls_deny_precedence() {
     let matching_deny = derive_capabilities_for_host("User:alice", "10.0.0.2", &entries);
     let nonmatching_deny = derive_capabilities_for_host("User:alice", "10.0.0.1", &entries);
 
-    assert_eq!(matching_deny, Capabilities::default());
-    assert_eq!(
-        nonmatching_deny,
-        Capabilities {
-            can_view_topics: true,
-            ..Capabilities::default()
-        }
+    assert2::assert!(matching_deny == Capabilities::default());
+    assert2::assert!(
+        nonmatching_deny
+            == Capabilities {
+                can_view_topics: true,
+                ..Capabilities::default()
+            }
     );
 }

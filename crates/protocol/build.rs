@@ -15,11 +15,7 @@ fn main() {
 
     let one = fs::read_to_string(root.join("generated/ApiVersionsRequest.owned.rs"))
         .expect("generated/ApiVersionsRequest.owned.rs must exist; run tools/regenerate.sh");
-    assert!(
-        one.contains(sha),
-        "generated/ApiVersionsRequest.owned.rs was produced against a different schemas SHA \
-         ({sha}). Run tools/regenerate.sh and commit the updated files."
-    );
+    assert2::assert!(one.contains(sha));
 
     let ns_version = fs::read_to_string(root.join("schemas/versions/kafka_3_6_2/VERSION"))
         .expect("schemas/versions/kafka_3_6_2/VERSION must exist");
@@ -31,10 +27,6 @@ fn main() {
         .expect(
             "generated/kafka_3_6_2/ProduceRequest.owned.rs must exist; run tools/regenerate.sh",
         );
-    assert!(
-        ns_one.contains(ns_sha),
-        "generated/kafka_3_6_2/ProduceRequest.owned.rs was produced against a different SHA \
-         ({ns_sha}). Run tools/regenerate.sh and commit the updated files."
-    );
+    assert2::assert!(ns_one.contains(ns_sha));
     println!("cargo:rerun-if-changed=schemas/versions/kafka_3_6_2/VERSION");
 }

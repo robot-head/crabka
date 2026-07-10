@@ -4,7 +4,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use assert2::assert;
 use serde::Deserialize;
 
 include!(concat!(
@@ -56,29 +55,13 @@ fn corpus_covers_all_pairs() {
         }
         let meta = load_meta(&path.with_extension(""));
         let is_request = meta.direction == "request";
-        assert!(
-            have.insert((meta.api_key, meta.version, is_request)),
-            "duplicate corpus entry for {} v{} {}",
-            meta.api_key,
-            meta.version,
-            meta.direction
-        );
+        assert2::assert!(have.insert((meta.api_key, meta.version, is_request)));
     }
     let missing: Vec<_> = want.difference(&have).collect();
-    assert!(
-        missing.is_empty(),
-        "corpus missing {} pair(s): {:?}",
-        missing.len(),
-        missing
-    );
+    assert2::assert!(missing.is_empty());
     // Reverse: no stale entry for a pair that is no longer a valid CASES
     // request/response (e.g. an out-of-range version left behind after a
     // schema-pin bump).
     let stale: Vec<_> = have.difference(&want).collect();
-    assert!(
-        stale.is_empty(),
-        "corpus has {} stale pair(s) not in CASES: {:?}",
-        stale.len(),
-        stale
-    );
+    assert2::assert!(stale.is_empty());
 }

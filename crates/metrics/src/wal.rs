@@ -108,7 +108,6 @@ pub fn partition_key(tenant: &str, fp: u64) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::{BucketSpan, ResetHint};
@@ -153,7 +152,7 @@ mod tests {
         let bytes = rec.encode().unwrap();
         let back = WalRecord::decode(&bytes).unwrap();
 
-        assert!(back == rec);
+        assert2::assert!(back == rec);
     }
 
     #[test]
@@ -175,7 +174,7 @@ mod tests {
         let bytes = rec.encode().unwrap();
         let back = WalRecord::decode(&bytes).unwrap();
 
-        assert!(back == rec);
+        assert2::assert!(back == rec);
     }
 
     #[test]
@@ -194,7 +193,7 @@ mod tests {
         let bytes = rec.encode().unwrap();
         let back = WalRecord::decode(&bytes).unwrap();
 
-        assert!(back == rec);
+        assert2::assert!(back == rec);
     }
 
     #[test]
@@ -212,7 +211,7 @@ mod tests {
         let mut b = a.clone();
         b.labels = vec![("b".into(), "2".into()), ("a".into(), "1".into())];
 
-        assert!(a.series_fingerprint() == b.series_fingerprint());
+        assert2::assert!(a.series_fingerprint() == b.series_fingerprint());
     }
 
     #[test]
@@ -221,7 +220,7 @@ mod tests {
         let k2 = partition_key("t", 42);
         let k3 = partition_key("t", 43);
 
-        assert!(k1 == k2);
-        assert!(k1 != k3);
+        assert2::assert!(k1 == k2);
+        assert2::assert!(k1 != k3);
     }
 }

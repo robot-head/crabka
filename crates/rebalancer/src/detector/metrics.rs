@@ -234,7 +234,6 @@ impl DetectorMetrics {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::health::new_registry;
@@ -258,7 +257,7 @@ mod tests {
             "crabka_rebalancer_auto_trigger_skipped_executing_total",
             "crabka_rebalancer_anomalies_open_under_replicated",
         ] {
-            assert!(buf.contains(needle), "missing {needle}");
+            assert2::assert!(buf.contains(needle));
         }
     }
 
@@ -267,7 +266,7 @@ mod tests {
         let m = DetectorMetrics::default();
 
         m.record_detected(AnomalyKind::UnderReplicatedPartitions);
-        assert!(
+        assert2::assert!(
             (
                 m.anomalies_detected_broker_death.get(),
                 m.anomalies_detected_under_replicated.get()
@@ -275,7 +274,7 @@ mod tests {
         );
 
         m.record_resolved(AnomalyKind::DiskPressure);
-        assert!(
+        assert2::assert!(
             (
                 m.anomalies_resolved_disk_pressure.get(),
                 m.anomalies_resolved_slow_broker.get()
@@ -283,7 +282,7 @@ mod tests {
         );
 
         m.record_auto_trigger_fired(AnomalyKind::SlowBroker);
-        assert!(
+        assert2::assert!(
             (
                 m.auto_trigger_fired_slow_broker.get(),
                 m.auto_trigger_fired_broker_death.get()
@@ -291,7 +290,7 @@ mod tests {
         );
 
         m.set_open_count(AnomalyKind::BrokerDeath, 7);
-        assert!(
+        assert2::assert!(
             (
                 m.anomalies_open_broker_death.get(),
                 m.anomalies_open_under_replicated.get()

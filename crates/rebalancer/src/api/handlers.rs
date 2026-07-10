@@ -505,7 +505,7 @@ pub async fn get_anomalies(
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use async_trait::async_trait;
 
     use super::*;
@@ -641,7 +641,7 @@ mod tests {
         )
         .await
         .expect_err("expected FailedPrecondition");
-        assert!(err.code() == Code::FailedPrecondition);
+        assert2::assert!(err.code() == Code::FailedPrecondition);
     }
 
     #[tokio::test]
@@ -658,7 +658,7 @@ mod tests {
         )
         .await
         .expect_err("expected NotFound");
-        assert!(err.code() == Code::NotFound);
+        assert2::assert!(err.code() == Code::NotFound);
     }
 
     #[tokio::test]
@@ -687,7 +687,7 @@ mod tests {
         )
         .await
         .expect_err("expected FailedPrecondition");
-        assert!(err.code() == Code::FailedPrecondition);
+        assert2::assert!(err.code() == Code::FailedPrecondition);
     }
 
     #[tokio::test]
@@ -735,21 +735,21 @@ mod tests {
         )
         .await
         .expect_err("expected NotFound");
-        assert!(err.code() == Code::NotFound);
+        assert2::assert!(err.code() == Code::NotFound);
     }
 
     #[test]
     fn cancel_poll_deadline_and_expiry_are_strict_until_deadline() {
         let now = std::time::Instant::now();
         let deadline = cancel_poll_deadline(now, Duration::from_secs(5));
-        assert!(!cancel_poll_expired(now + Duration::from_secs(4), deadline));
-        assert!(cancel_poll_expired(now + Duration::from_secs(5), deadline));
+        assert2::assert!(!cancel_poll_expired(now + Duration::from_secs(4), deadline));
+        assert2::assert!(cancel_poll_expired(now + Duration::from_secs(5), deadline));
     }
 
     #[test]
     fn anomaly_kind_to_proto_covers_all_variants() {
         use crate::detector::AnomalyKind;
-        for (case, kind, want) in [
+        for (_case, kind, want) in [
             (
                 "broker death",
                 AnomalyKind::BrokerDeath,
@@ -771,14 +771,14 @@ mod tests {
                 pb::AnomalyKind::SlowBroker,
             ),
         ] {
-            assert!(anomaly_kind_to_proto(kind) == want, "case {case}");
+            assert2::assert!(anomaly_kind_to_proto(kind) == want);
         }
     }
 
     #[test]
     fn anomaly_severity_to_proto_covers_all_variants() {
         use crate::detector::AnomalySeverity;
-        for (name, severity, expected) in [
+        for (_name, severity, expected) in [
             (
                 "warning",
                 AnomalySeverity::Warning,
@@ -790,7 +790,7 @@ mod tests {
                 pb::AnomalySeverity::Critical,
             ),
         ] {
-            assert_eq!(anomaly_severity_to_proto(severity), expected, "case {name}");
+            assert2::assert!(anomaly_severity_to_proto(severity) == expected);
         }
     }
 
@@ -816,7 +816,7 @@ mod tests {
 
         let proto = anomaly_to_proto(&anomaly);
 
-        assert!(
+        assert2::assert!(
             proto
                 == pb::Anomaly {
                     id: "a1".into(),
@@ -845,13 +845,13 @@ mod tests {
     fn anomaly_key_to_proto_roundtrips_each_variant() {
         use crate::detector::AnomalyKey;
         let b = anomaly_key_to_proto(&AnomalyKey::Broker(7));
-        assert!(matches!(b.inner, Some(pb::anomaly_key::Inner::Broker(7))));
+        assert2::assert!(matches!(b.inner, Some(pb::anomaly_key::Inner::Broker(7))));
 
         let p = anomaly_key_to_proto(&AnomalyKey::Partition {
             topic: "t".into(),
             partition: 3,
         });
-        assert!(matches!(
+        assert2::assert!(matches!(
             p.inner,
             Some(pb::anomaly_key::Inner::Partition(_))
         ));
@@ -861,7 +861,7 @@ mod tests {
             topic: "t".into(),
             partition: 2,
         });
-        assert!(matches!(
+        assert2::assert!(matches!(
             bp.inner,
             Some(pb::anomaly_key::Inner::BrokerPartition(_))
         ));
@@ -880,7 +880,7 @@ mod tests {
         )
         .await
         .expect("handler should succeed");
-        assert!(resp.0.anomalies.is_empty());
+        assert2::assert!(resp.0.anomalies.is_empty());
     }
 
     #[tokio::test]
@@ -910,6 +910,6 @@ mod tests {
         )
         .await
         .expect_err("expected FailedPrecondition");
-        assert!(err.code() == Code::FailedPrecondition);
+        assert2::assert!(err.code() == Code::FailedPrecondition);
     }
 }

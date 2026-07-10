@@ -81,7 +81,7 @@ async fn handle_request(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -98,7 +98,7 @@ mod tests {
         let resp =
             DeleteShareGroupStateResponse::decode(&mut cur, super::super::test_support::VERSION)
                 .expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        assert2::assert!(cur.is_empty());
         resp
     }
 
@@ -138,6 +138,6 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 }

@@ -508,7 +508,7 @@ impl crate::Encode for RecordBatch<'_> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
     use crabka_compression::CompressionType;
 
@@ -523,7 +523,7 @@ mod tests {
 
     #[test]
     fn borrowed_roundtrip_cases() {
-        for (case, codec) in [
+        for (_case, codec) in [
             ("none", CompressionType::None),
             ("gzip", CompressionType::Gzip),
             ("snappy", CompressionType::Snappy),
@@ -541,8 +541,8 @@ mod tests {
             let encoded = encode_owned_then_borrow(&owned);
             let mut cur: &[u8] = &encoded[..];
             let borrowed = RecordBatch::decode_borrow(&mut cur, 0).unwrap();
-            assert!(cur.is_empty());
-            assert!(borrowed.attributes() == owned.attributes);
+            assert2::assert!(cur.is_empty());
+            assert2::assert!(borrowed.attributes() == owned.attributes);
 
             let records: Vec<_> = borrowed.iter().collect::<Result<_, _>>().unwrap();
             let expected_records = vec![Record {
@@ -553,10 +553,10 @@ mod tests {
                 value: Some(b"value".as_slice()),
                 headers: vec![],
             }];
-            assert!(records == expected_records, "case {case}");
+            assert2::assert!(records == expected_records);
 
             let back_owned = borrowed.to_owned().unwrap();
-            assert!(back_owned == owned, "case {case}");
+            assert2::assert!(back_owned == owned);
         }
     }
 
@@ -579,11 +579,7 @@ mod tests {
         let records: Vec<_> = borrowed.iter().collect::<Result<_, _>>().unwrap();
 
         let v_ptr = records[0].value.unwrap().as_ptr() as usize;
-        assert!(
-            v_ptr >= encoded_start && v_ptr < encoded_end,
-            "value slice does not point into the input buffer: \
-             input range [{encoded_start:#x}, {encoded_end:#x}), value ptr {v_ptr:#x}",
-        );
+        assert2::assert!(v_ptr >= encoded_start && v_ptr < encoded_end);
     }
 
     #[test]
@@ -605,7 +601,7 @@ mod tests {
         let encoded = encode_owned_then_borrow(&owned);
 
         let v = validate_one_v2_batch(&encoded).unwrap();
-        assert!(
+        assert2::assert!(
             (
                 v.total_len,
                 v.header.base_offset.get(),
@@ -632,7 +628,7 @@ mod tests {
         // Flip a body byte (after the 61-byte header) → CRC mismatch.
         encoded[HEADER_LEN] ^= 0xFF;
         let err = validate_one_v2_batch(&encoded).unwrap_err();
-        assert!(matches!(err, RecordsError::CrcMismatch { .. }));
+        assert2::assert!(matches!(err, RecordsError::CrcMismatch { .. }));
     }
 
     #[test]
@@ -646,7 +642,7 @@ mod tests {
         };
         let encoded = encode_owned_then_borrow(&owned);
         let err = validate_one_v2_batch(&encoded[..encoded.len() - 2]).unwrap_err();
-        assert!(matches!(err, RecordsError::BodyTooShort { .. }));
+        assert2::assert!(matches!(err, RecordsError::BodyTooShort { .. }));
     }
 
     #[test]
@@ -668,11 +664,8 @@ mod tests {
         both.extend_from_slice(&one);
         both.extend_from_slice(&three);
 
-        for (case, input, expected) in [("single", &one[..], 1), ("concatenated", &both[..], 4)] {
-            assert!(
-                count_records_in_v2_batches(input) == expected,
-                "case {case}"
-            );
+        for (_case, input, expected) in [("single", &one[..], 1), ("concatenated", &both[..], 4)] {
+            assert2::assert!(count_records_in_v2_batches(input) == expected);
         }
     }
 
@@ -685,15 +678,12 @@ mod tests {
         let mut with_truncated_tail = encoded.clone();
         with_truncated_tail.extend_from_slice(&encoded[..HEADER_LEN - 1]);
 
-        for (case, input, expected) in [
+        for (_case, input, expected) in [
             ("empty", &[][..], 0),
             ("non-v2", &[0u8; HEADER_LEN][..], 0),
             ("truncated tail", &with_truncated_tail[..], 1),
         ] {
-            assert!(
-                count_records_in_v2_batches(input) == expected,
-                "case {case}"
-            );
+            assert2::assert!(count_records_in_v2_batches(input) == expected);
         }
     }
 
@@ -717,8 +707,8 @@ mod tests {
         // `total_len < HEADER_LEN` lower bound: a `<`→`==`/`<=` mutation would
         // wrongly break here and report 0.
         let buf = v2_header_only(49, 7);
-        assert!(buf.len() == HEADER_LEN);
-        assert!(count_records_in_v2_batches(&buf) == 7);
+        assert2::assert!(buf.len() == HEADER_LEN);
+        assert2::assert!(count_records_in_v2_batches(&buf) == 7);
     }
 
     #[test]
@@ -728,7 +718,7 @@ mod tests {
         // `total_len > remaining.len()` arm: an `||`→`&&` mutation would skip
         // the break and index past the buffer.
         let buf = v2_header_only(100, 9);
-        assert!(count_records_in_v2_batches(&buf) == 0);
+        assert2::assert!(count_records_in_v2_batches(&buf) == 0);
     }
 
     #[test]
@@ -748,6 +738,6 @@ mod tests {
 
         let mut out = BytesMut::new();
         borrowed.encode(&mut out, 0).unwrap();
-        assert!(&out[..] == &bytes_in[..]);
+        assert2::assert!(&out[..] == &bytes_in[..]);
     }
 }

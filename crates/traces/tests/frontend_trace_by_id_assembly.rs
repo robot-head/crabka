@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use assert2::assert;
 use crabka_traces::frontend::{
     QueryFrontend,
     backend::{MockQuerier, TracePartial},
@@ -83,12 +82,12 @@ async fn trace_split_across_queriers_reassembles() {
 
     let (trace, metrics, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await.unwrap();
     // One by-id job per querier.
-    assert!(qf.backend_ref().trace_calls().len() == 2);
+    assert2::assert!(qf.backend_ref().trace_calls().len() == 2);
     let trace = trace.expect("assembled trace");
-    assert_eq!(trace.span_count(), 3);
-    assert_eq!(metrics.completed_jobs, 2);
-    assert_eq!(metrics.total_jobs, 2);
-    assert!(matches!(status, TraceStatus::Complete));
+    assert2::assert!(trace.span_count() == 3);
+    assert2::assert!(metrics.completed_jobs == 2);
+    assert2::assert!(metrics.total_jobs == 2);
+    assert2::assert!(matches!(status, TraceStatus::Complete));
 }
 
 #[tokio::test]
@@ -105,8 +104,8 @@ async fn oversized_trace_is_partial() {
     let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
 
     let (trace, _m, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await.unwrap();
-    assert!(trace.is_some());
-    assert!(matches!(status, TraceStatus::Partial));
+    assert2::assert!(trace.is_some());
+    assert2::assert!(matches!(status, TraceStatus::Partial));
 }
 
 #[tokio::test]
@@ -120,6 +119,6 @@ async fn missing_trace_is_none() {
     };
     let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
     let (trace, _m, status) = qf.trace_by_id("t1", [9; 16], 0, 300).await.unwrap();
-    assert!(trace.is_none());
-    assert!(matches!(status, TraceStatus::Complete));
+    assert2::assert!(trace.is_none());
+    assert2::assert!(matches!(status, TraceStatus::Complete));
 }

@@ -6,7 +6,6 @@
 
 use std::{sync::Arc, time::Duration};
 
-use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::AdminClient;
 use crabka_client_core::Client;
@@ -98,7 +97,7 @@ async fn write_load_round_trip_via_real_broker() {
 
     drive_loader_until_loaded(state.clone(), Duration::from_secs(10)).await;
     let loaded = state.current().expect("non-tombstone");
-    assert!((loaded.proposal_id.as_str(), loaded.phase) == ("p-1", Phase::Wait));
+    assert2::assert!((loaded.proposal_id.as_str(), loaded.phase) == ("p-1", Phase::Wait));
     shutdown.cancel();
     handle.await.unwrap();
 
@@ -117,7 +116,7 @@ async fn write_load_round_trip_via_real_broker() {
     let handle2 = tokio::spawn(loader2.run());
 
     drive_loader_until_loaded(state2.clone(), Duration::from_secs(10)).await;
-    assert!(state2.current().is_none(), "tombstone should clear state");
+    assert2::assert!(state2.current().is_none());
     shutdown2.cancel();
     handle2.await.unwrap();
 }

@@ -80,7 +80,7 @@ async fn register(app: &axum::Router, subject: &str, body: &str) -> serde_json::
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK, "register {subject}");
+    assert2::assert!(resp.status() == StatusCode::OK);
     body_json(resp).await
 }
 
@@ -99,7 +99,7 @@ async fn register_then_get_round_trips_all_three_formats() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     let app = rest::router(AppState { store });
 
-    for (name, subject, body, expected_id) in [
+    for (_name, subject, body, expected_id) in [
         (
             "avro",
             "av-value",
@@ -119,23 +119,19 @@ async fn register_then_get_round_trips_all_three_formats() {
             3,
         ),
     ] {
-        assert_eq!(
-            register(&app, subject, body).await["id"],
-            expected_id,
-            "case {name}"
-        );
+        assert2::assert!(register(&app, subject, body).await["id"] == expected_id);
     }
 
     // GET by id round-trips, with schemaType for pb/js and none for avro
     let got_av = get_json(&app, "/schemas/ids/1").await;
-    assert_eq!(got_av.get("schemaType"), None);
-    assert!(
+    assert2::assert!(got_av.get("schemaType") == None);
+    assert2::assert!(
         got_av["schema"]
             .as_str()
             .is_some_and(|schema| schema.contains("record"))
     );
     let got_pb = get_json(&app, "/schemas/ids/2").await;
-    assert_eq!(got_pb["schemaType"], "PROTOBUF");
+    assert2::assert!(got_pb["schemaType"] == "PROTOBUF");
 
     // GET /subjects
     let subs = get_json(&app, "/subjects").await;
@@ -146,12 +142,12 @@ async fn register_then_get_round_trips_all_three_formats() {
         .map(|v| v.as_str().unwrap().to_string())
         .collect();
     names.sort();
-    assert_eq!(names, vec!["av-value", "js-value", "pb-value"]);
+    assert2::assert!(names == vec!["av-value", "js-value", "pb-value"]);
 
     // GET subject version 1
     let v1 = get_json(&app, "/subjects/av-value/versions/1").await;
-    assert_eq!(&v1["version"], &serde_json::json!(1));
-    assert_eq!(&v1["id"], &serde_json::json!(1));
+    assert2::assert!(&v1["version"] == &serde_json::json!(1));
+    assert2::assert!(&v1["id"] == &serde_json::json!(1));
 
     // idempotent re-register returns same id
     let again = register(
@@ -160,11 +156,11 @@ async fn register_then_get_round_trips_all_three_formats() {
         r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"}"#,
     )
     .await;
-    assert_eq!(again["id"], 1);
+    assert2::assert!(again["id"] == 1);
 
     // versions list has exactly [1]
     let vers = get_json(&app, "/subjects/av-value/versions").await;
-    assert_eq!(vers, serde_json::json!([1]));
+    assert2::assert!(vers == serde_json::json!([1]));
 
     // subject-not-found error shape
     let nf = app
@@ -179,8 +175,8 @@ async fn register_then_get_round_trips_all_three_formats() {
         .unwrap();
     let nf_status = nf.status();
     let nf_body = body_json(nf).await;
-    assert_eq!(nf_status, StatusCode::NOT_FOUND);
-    assert_eq!(nf_body["error_code"].as_i64(), Some(40401));
+    assert2::assert!(nf_status == StatusCode::NOT_FOUND);
+    assert2::assert!(nf_body["error_code"].as_i64() == Some(40401));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -285,38 +281,38 @@ async fn config_endpoints() {
 
     // Default global compat is BACKWARD
     let (status, body) = get_status_json(&app, "/config").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body["compatibilityLevel"], &serde_json::json!("BACKWARD"));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["compatibilityLevel"] == &serde_json::json!("BACKWARD"));
 
     // PUT /config -> FULL
     let (status, body) = put_json(&app, "/config", r#"{"compatibility":"FULL"}"#).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body["compatibility"], &serde_json::json!("FULL"));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["compatibility"] == &serde_json::json!("FULL"));
 
     // GET /config reflects the change (read-your-writes)
     let (status, body) = get_status_json(&app, "/config").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body["compatibilityLevel"], &serde_json::json!("FULL"));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["compatibilityLevel"] == &serde_json::json!("FULL"));
 
     // PUT /config with invalid level -> 422 / error_code 42203
     let (status, body) = put_json(&app, "/config", r#"{"compatibility":"BOGUS"}"#).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42203));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42203));
 
     // PUT /config/{subject}
     let (status, body) = put_json(&app, "/config/av-value", r#"{"compatibility":"NONE"}"#).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body["compatibility"], &serde_json::json!("NONE"));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["compatibility"] == &serde_json::json!("NONE"));
 
     // GET /config/{subject} reflects it
     let (status, body) = get_status_json(&app, "/config/av-value").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body["compatibilityLevel"], &serde_json::json!("NONE"));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["compatibilityLevel"] == &serde_json::json!("NONE"));
 
     // GET /config/{subject} for a subject with no override -> 404 / 40401
     let (status, body) = get_status_json(&app, "/config/no-such-subject").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40401));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40401));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -341,8 +337,8 @@ async fn compatibility_endpoint() {
     .await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body, &serde_json::json!({"is_compatible": true}));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body == &serde_json::json!({"is_compatible": true}));
 
     // Unparseable schema -> 422 / error_code 42201
     let resp = post_raw(
@@ -353,8 +349,8 @@ async fn compatibility_endpoint() {
     .await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42201));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42201));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -369,17 +365,17 @@ async fn lookup_endpoint() {
 
     // Register a schema first
     let reg = register(&app, "av-value", AVRO_BODY).await;
-    assert_eq!(reg["id"], 1);
+    assert2::assert!(reg["id"] == 1);
 
     // Lookup the same schema -> 200 with {subject,id,version,schema}
     let resp = post_raw(&app, "/subjects/av-value", AVRO_BODY).await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body["subject"], &serde_json::json!("av-value"));
-    assert_eq!(&body["id"], &serde_json::json!(1));
-    assert_eq!(&body["version"], &serde_json::json!(1));
-    assert!(
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["subject"] == &serde_json::json!("av-value"));
+    assert2::assert!(&body["id"] == &serde_json::json!(1));
+    assert2::assert!(&body["version"] == &serde_json::json!(1));
+    assert2::assert!(
         body["schema"]
             .as_str()
             .is_some_and(|s| s.contains("record"))
@@ -390,15 +386,15 @@ async fn lookup_endpoint() {
     let resp = post_raw(&app, "/subjects/av-value", other).await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40403));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40403));
 
     // Lookup against a missing subject -> 404 / 40401
     let resp = post_raw(&app, "/subjects/no-such-subject", AVRO_BODY).await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40401));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40401));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -467,27 +463,24 @@ async fn import_file_descriptor_set_registers_dependencies_first() {
     let resp = post_bytes(&app, "/schemas/import", bytes).await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        body,
-        serde_json::json!([
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(
+        body == serde_json::json!([
             {"subject":"common/money.proto","id":1,"version":1},
             {"subject":"orders/order.proto","id":2,"version":1}
         ])
     );
 
     let imported = get_json(&app, "/subjects/orders%2Forder.proto/versions/1").await;
-    assert_eq!(&imported["schemaType"], &serde_json::json!("PROTOBUF"));
-    assert_eq!(
-        &imported["references"][0]["name"],
-        &serde_json::json!("common/money.proto")
+    assert2::assert!(&imported["schemaType"] == &serde_json::json!("PROTOBUF"));
+    assert2::assert!(
+        &imported["references"][0]["name"] == &serde_json::json!("common/money.proto")
     );
-    assert_eq!(
-        &imported["references"][0]["subject"],
-        &serde_json::json!("common/money.proto")
+    assert2::assert!(
+        &imported["references"][0]["subject"] == &serde_json::json!("common/money.proto")
     );
-    assert_eq!(&imported["references"][0]["version"], &serde_json::json!(1));
-    assert!(
+    assert2::assert!(&imported["references"][0]["version"] == &serde_json::json!(1));
+    assert2::assert!(
         imported["schema"]
             .as_str()
             .is_some_and(|schema| schema.contains("service OrderService"))
@@ -526,23 +519,23 @@ async fn version_and_error_paths() {
 
     // Register one schema
     let reg = register(&app, "av-value", AVRO_BODY).await;
-    assert_eq!(reg["id"], 1);
+    assert2::assert!(reg["id"] == 1);
 
     // GET / -> 200 {}
     let (status, body) = get_status_json(&app, "/").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, serde_json::json!({}));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(body == serde_json::json!({}));
 
     // GET /schemas/ids/9999 -> 404 / 40403
     let (status, body) = get_status_json(&app, "/schemas/ids/9999").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40403));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40403));
 
     // GET /subjects/{s}/versions/latest -> resolves to version object
     let (status, body) = get_status_json(&app, "/subjects/av-value/versions/latest").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body["version"], &serde_json::json!(1));
-    assert_eq!(&body["id"], &serde_json::json!(1));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["version"] == &serde_json::json!(1));
+    assert2::assert!(&body["id"] == &serde_json::json!(1));
 
     // GET /subjects/{s}/versions/{n}/schema -> raw schema text (not JSON-wrapped)
     let resp = app
@@ -555,31 +548,25 @@ async fn version_and_error_paths() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert2::assert!(resp.status() == StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .unwrap();
     // Body is the raw schema string, not JSON-wrapped
     let text = std::str::from_utf8(&bytes).unwrap();
-    assert!(
-        text.contains("record"),
-        "raw schema should contain 'record'"
-    );
+    assert2::assert!(text.contains("record"));
     // Must NOT be a JSON object wrapping it
-    assert!(
-        !text.starts_with('{') || text.contains("\"type\""),
-        "body looks like a JSON envelope rather than raw schema"
-    );
+    assert2::assert!(!text.starts_with('{') || text.contains("\"type\""));
 
     // GET /subjects/{s}/versions/0 -> 422 / 42202 (version 0 is invalid)
     let (status, body) = get_status_json(&app, "/subjects/av-value/versions/0").await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42202));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42202));
 
     // GET /subjects/{s}/versions/99 -> 404 / 40402 (valid number, absent version)
     let (status, body) = get_status_json(&app, "/subjects/av-value/versions/99").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40402));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40402));
 
     // POST /subjects/{s}/versions with an invalid schema -> 422 / 42201
     let resp = post_raw(
@@ -590,8 +577,8 @@ async fn version_and_error_paths() {
     .await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42201));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42201));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -618,13 +605,9 @@ async fn compatibility_endpoint_nonverbose_and_compatible() {
         .unwrap();
     let status = r.status();
     let b = body_json(r).await;
-    assert_eq!(status, StatusCode::OK, "non-verbose response");
-    assert_eq!(
-        &b["is_compatible"],
-        &serde_json::json!(true),
-        "non-verbose response"
-    );
-    assert_eq!(b.get("messages"), None, "non-verbose response");
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&b["is_compatible"] == &serde_json::json!(true));
+    assert2::assert!(b.get("messages") == None);
 
     cancel.cancel();
     broker.shutdown().await;
@@ -647,15 +630,11 @@ async fn compatibility_endpoint_error_paths() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "case missing_subject");
-    assert_eq!(
-        body["error_code"].as_i64(),
-        Some(40401),
-        "case missing_subject"
-    );
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40401));
 
     register(&app, "s", AVRO_BODY).await;
-    for (name, uri, expected) in [
+    for (_name, uri, expected) in [
         (
             "invalid_version",
             "/compatibility/subjects/s/versions/abc",
@@ -670,8 +649,8 @@ async fn compatibility_endpoint_error_paths() {
         let response = app.clone().oneshot(req_post(uri, AVRO_BODY)).await.unwrap();
         let status = response.status();
         let body = body_json(response).await;
-        assert_eq!(status, expected.0, "case {name}");
-        assert_eq!(body["error_code"].as_i64(), Some(expected.1), "case {name}");
+        assert2::assert!(status == expected.0);
+        assert2::assert!(body["error_code"].as_i64() == Some(expected.1));
     }
 
     cancel.cancel();
@@ -687,7 +666,7 @@ async fn forward_compat_enforced() {
 
     // Set subject-level FORWARD enforcement.
     let (status, _) = put_json(&app, "/config/s", r#"{"compatibility":"FORWARD"}"#).await;
-    assert_eq!(status, StatusCode::OK);
+    assert2::assert!(status == StatusCode::OK);
 
     // v1: {id:int, y:int} — both required, no defaults.
     let v1 = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"y\",\"type\":\"int\"}]}"}"#;
@@ -703,8 +682,8 @@ async fn forward_compat_enforced() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error_code"].as_i64(), Some(409));
+    assert2::assert!(status == StatusCode::CONFLICT);
+    assert2::assert!(body["error_code"].as_i64() == Some(409));
 
     // v2b: keep y, add z with default 0 — old reader ignores extra z → FORWARD compatible.
     let v2b = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"y\",\"type\":\"int\"},{\"name\":\"z\",\"type\":\"int\",\"default\":0}]}"}"#;
@@ -713,7 +692,7 @@ async fn forward_compat_enforced() {
         .oneshot(req_post("/subjects/s/versions", v2b))
         .await
         .unwrap();
-    assert_eq!(r.status(), StatusCode::OK);
+    assert2::assert!(r.status() == StatusCode::OK);
 
     cancel.cancel();
     broker.shutdown().await;
@@ -727,13 +706,13 @@ async fn compat_enforced_on_register() {
     let app = rest::router(AppState { store });
 
     let base = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"}"#;
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_post("/subjects/s/versions", base))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
 
     // Adding a required field (no default) breaks BACKWARD — expect 409.
@@ -745,18 +724,18 @@ async fn compat_enforced_on_register() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error_code"].as_i64(), Some(409));
+    assert2::assert!(status == StatusCode::CONFLICT);
+    assert2::assert!(body["error_code"].as_i64() == Some(409));
 
     // Adding a field with a default is compatible.
     let good = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\",\"default\":0}]}"}"#;
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_post("/subjects/s/versions", good))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
 
     cancel.cancel();
@@ -771,13 +750,13 @@ async fn protobuf_compat_enforced_on_register() {
     // v1: a single int32 field. Default global compat is BACKWARD.
     let v1 =
         r#"{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\"; message U { int32 id = 1; }"}"#;
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_post("/subjects/pb/versions", v1))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
 
     // Changing the field's wire kind across groups (int32 → string) breaks
@@ -791,18 +770,18 @@ async fn protobuf_compat_enforced_on_register() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error_code"].as_i64(), Some(409));
+    assert2::assert!(status == StatusCode::CONFLICT);
+    assert2::assert!(body["error_code"].as_i64() == Some(409));
 
     // Adding a new field is compatible.
     let good = r#"{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\"; message U { int32 id = 1; int32 x = 2; }"}"#;
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_post("/subjects/pb/versions", good))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
 
     cancel.cancel();
@@ -817,13 +796,13 @@ async fn json_schema_compat_enforced_on_register() {
     // v1: an object with one integer property bounded by maximum=100. Default
     // global compat is BACKWARD.
     let v1 = r#"{"schemaType":"JSON","schema":"{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}},\"maximum\":100}"}"#;
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_post("/subjects/js/versions", v1))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
 
     // Adding a required property breaks BACKWARD (cp-calibrated: `required_added`
@@ -836,19 +815,19 @@ async fn json_schema_compat_enforced_on_register() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error_code"].as_i64(), Some(409));
+    assert2::assert!(status == StatusCode::CONFLICT);
+    assert2::assert!(body["error_code"].as_i64() == Some(409));
 
     // Removing a numeric bound loosens the schema (cp-calibrated:
     // `maximum_removed` BACKWARD=true) — compatible, expect 200.
     let good = r#"{"schemaType":"JSON","schema":"{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}"}"#;
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_post("/subjects/js/versions", good))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
 
     cancel.cancel();
@@ -873,13 +852,13 @@ async fn none_level_bypasses_enforcement() {
 
     // Incompatible schema is accepted when level is NONE.
     let bad = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\"}]}"}"#;
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_post("/subjects/s/versions", bad))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
 
     cancel.cancel();
@@ -909,9 +888,9 @@ async fn compatibility_endpoint_real_verdict() {
         .unwrap();
     let status = r.status();
     let b = body_json(r).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&b["is_compatible"], &serde_json::json!(false));
-    assert!(
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&b["is_compatible"] == &serde_json::json!(false));
+    assert2::assert!(
         b["messages"]
             .as_array()
             .is_some_and(|messages| !messages.is_empty())
@@ -953,34 +932,31 @@ async fn facade_soft_then_permanent_delete_version() {
         })
         .await
         .unwrap();
-    assert_eq!(
+    assert2::assert!(
         store
             .soft_delete_version("av", SchemaVersion(1))
             .await
-            .unwrap(),
-        SchemaVersion(1)
+            .unwrap()
+            == SchemaVersion(1)
     );
-    assert_eq!(
-        store.store.read().versions("av", false).unwrap(),
-        vec![SchemaVersion(2)]
-    );
-    assert_eq!(
-        store.store.read().versions("av", true).unwrap(),
-        vec![SchemaVersion(1), SchemaVersion(2)]
+    assert2::assert!(store.store.read().versions("av", false).unwrap() == vec![SchemaVersion(2)]);
+    assert2::assert!(
+        store.store.read().versions("av", true).unwrap()
+            == vec![SchemaVersion(1), SchemaVersion(2)]
     );
     let err = store
         .permanent_delete_version("av", SchemaVersion(2))
         .await
         .unwrap_err();
-    assert_eq!(err.error_code(), 40407);
-    assert_eq!(
+    assert2::assert!(err.error_code() == 40407);
+    assert2::assert!(
         store
             .permanent_delete_version("av", SchemaVersion(1))
             .await
-            .unwrap(),
-        SchemaVersion(1)
+            .unwrap()
+            == SchemaVersion(1)
     );
-    assert!(
+    assert2::assert!(
         store
             .store
             .read()
@@ -1022,7 +998,7 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
         })
         .await
         .unwrap_err();
-    assert_eq!(err.error_code(), 42205);
+    assert2::assert!(err.error_code() == 42205);
     store
         .set_subject_mode("imp", "IMPORT".into())
         .await
@@ -1039,19 +1015,19 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
         })
         .await
         .unwrap();
-    assert_eq!(reg.id, SchemaId(42));
-    assert_eq!(reg.version, SchemaVersion(5));
-    assert_eq!(
+    assert2::assert!(reg.id == SchemaId(42));
+    assert2::assert!(reg.version == SchemaVersion(5));
+    assert2::assert!(
         store
             .store
             .read()
             .version("imp", Some(SchemaVersion(5)), false)
             .unwrap()
-            .id,
-        SchemaId(42)
+            .id
+            == SchemaId(42)
     );
     // IMPORT requires BOTH id and version: providing only one is rejected.
-    assert!(
+    assert2::assert!(
         store
             .register(RegisterSchema {
                 subject: "imp",
@@ -1063,8 +1039,7 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
                 import_version: None,
             })
             .await
-            .is_err(),
-        "IMPORT with id but no version must error"
+            .is_err()
     );
     cancel.cancel();
     broker.shutdown().await;
@@ -1089,13 +1064,13 @@ async fn rest_delete_version_lifecycle_and_deleted_query() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     let app = rest::router(AppState { store });
     // NONE compat so two distinct schemas register as v1+v2 (isolates delete lifecycle)
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_put("/config/av", r#"{"compatibility":"NONE"}"#))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
     let body = |n: &str| format!(r#"{{"schema":{:?}}}"#, av(n));
     register(&app, "av", &body("A")).await;
@@ -1107,15 +1082,11 @@ async fn rest_delete_version_lifecycle_and_deleted_query() {
         .await
         .unwrap();
     let status = r.status();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body_json(r).await, serde_json::json!(1));
-    assert_eq!(
-        get_json(&app, "/subjects/av/versions").await,
-        serde_json::json!([2])
-    );
-    assert_eq!(
-        get_json(&app, "/subjects/av/versions?deleted=true").await,
-        serde_json::json!([1, 2])
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(body_json(r).await == serde_json::json!(1));
+    assert2::assert!(get_json(&app, "/subjects/av/versions").await == serde_json::json!([2]));
+    assert2::assert!(
+        get_json(&app, "/subjects/av/versions?deleted=true").await == serde_json::json!([1, 2])
     );
     // GET v1 hidden, ?deleted shows it
     let hidden = app
@@ -1128,7 +1099,7 @@ async fn rest_delete_version_lifecycle_and_deleted_query() {
         )
         .await
         .unwrap();
-    assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+    assert2::assert!(hidden.status() == StatusCode::NOT_FOUND);
     let shown = app
         .clone()
         .oneshot(
@@ -1139,14 +1110,14 @@ async fn rest_delete_version_lifecycle_and_deleted_query() {
         )
         .await
         .unwrap();
-    assert_eq!(shown.status(), StatusCode::OK);
+    assert2::assert!(shown.status() == StatusCode::OK);
     // permanent
     let p = app
         .clone()
         .oneshot(req_delete("/subjects/av/versions/1?permanent=true"))
         .await
         .unwrap();
-    assert_eq!(p.status(), StatusCode::OK);
+    assert2::assert!(p.status() == StatusCode::OK);
     let gone = app
         .clone()
         .oneshot(
@@ -1157,7 +1128,7 @@ async fn rest_delete_version_lifecycle_and_deleted_query() {
         )
         .await
         .unwrap();
-    assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    assert2::assert!(gone.status() == StatusCode::NOT_FOUND);
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1168,17 +1139,14 @@ async fn rest_mode_and_lookup_endpoints() {
     let app = rest::router(AppState { store });
     register(&app, "a", &format!(r#"{{"schema":{:?}}}"#, av("A"))).await;
     // GET /mode default
-    assert_eq!(
-        get_json(&app, "/mode").await,
-        serde_json::json!({"mode": "READWRITE"})
-    );
+    assert2::assert!(get_json(&app, "/mode").await == serde_json::json!({"mode": "READWRITE"}));
     // PUT /mode/a READONLY then register → 422 / 42205
     let pm = app
         .clone()
         .oneshot(req_put("/mode/a", r#"{"mode":"READONLY"}"#))
         .await
         .unwrap();
-    assert_eq!(pm.status(), StatusCode::OK);
+    assert2::assert!(pm.status() == StatusCode::OK);
     let blocked = app
         .clone()
         .oneshot(req_post(
@@ -1189,22 +1157,19 @@ async fn rest_mode_and_lookup_endpoints() {
         .unwrap();
     let status = blocked.status();
     let body = body_json(blocked).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42205));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42205));
     // GET /mode/a → READONLY ; DELETE clears
-    assert_eq!(
-        get_json(&app, "/mode/a").await,
-        serde_json::json!({"mode": "READONLY"})
-    );
+    assert2::assert!(get_json(&app, "/mode/a").await == serde_json::json!({"mode": "READONLY"}));
     let dm = app.clone().oneshot(req_delete("/mode/a")).await.unwrap();
-    assert_eq!(dm.status(), StatusCode::OK);
+    assert2::assert!(dm.status() == StatusCode::OK);
     // lookups
     let ids = get_json(&app, "/schemas/ids/1/versions").await;
-    assert_eq!(ids, serde_json::json!([{"subject": "a", "version": 1}]));
+    assert2::assert!(ids == serde_json::json!([{"subject": "a", "version": 1}]));
     let all = get_json(&app, "/schemas").await;
-    assert_eq!(all.as_array().unwrap().len(), 1);
+    assert2::assert!(all.as_array().unwrap().len() == 1);
     let refby = get_json(&app, "/subjects/a/versions/1/referencedby").await;
-    assert_eq!(refby, serde_json::json!([]));
+    assert2::assert!(refby == serde_json::json!([]));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1214,13 +1179,13 @@ async fn rest_subject_soft_then_permanent_and_soft_before_hard() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     let app = rest::router(AppState { store });
     // NONE so two distinct schemas register as v1+v2 (isolates the delete lifecycle from compat)
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_put("/config/s", r#"{"compatibility":"NONE"}"#))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
     register(&app, "s", &format!(r#"{{"schema":{:?}}}"#, av("A"))).await;
     register(&app, "s", &format!(r#"{{"schema":{:?}}}"#, av("B"))).await;
@@ -1232,8 +1197,8 @@ async fn rest_subject_soft_then_permanent_and_soft_before_hard() {
         .unwrap();
     let status = early.status();
     let body = body_json(early).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40405));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40405));
     // soft delete → returns the version array, subject disappears from the live list
     let soft = app
         .clone()
@@ -1241,30 +1206,24 @@ async fn rest_subject_soft_then_permanent_and_soft_before_hard() {
         .await
         .unwrap();
     let status = soft.status();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body_json(soft).await, serde_json::json!([1, 2]));
-    assert!(
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(body_json(soft).await == serde_json::json!([1, 2]));
+    assert2::assert!(
         get_json(&app, "/subjects")
             .await
             .as_array()
             .unwrap()
             .is_empty()
     );
-    assert_eq!(
-        get_json(&app, "/subjects?deleted=true").await,
-        serde_json::json!(["s"])
-    );
+    assert2::assert!(get_json(&app, "/subjects?deleted=true").await == serde_json::json!(["s"]));
     // permanent delete → gone even with ?deleted
     let perm = app
         .clone()
         .oneshot(req_delete("/subjects/s?permanent=true"))
         .await
         .unwrap();
-    assert_eq!(perm.status(), StatusCode::OK);
-    assert_eq!(
-        get_json(&app, "/subjects?deleted=true").await,
-        serde_json::json!([])
-    );
+    assert2::assert!(perm.status() == StatusCode::OK);
+    assert2::assert!(get_json(&app, "/subjects?deleted=true").await == serde_json::json!([]));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1282,24 +1241,24 @@ async fn rest_version_permanent_before_soft_is_rejected() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40407));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40407));
     // soft then permanent succeeds
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_delete("/subjects/v/versions/1"))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_delete("/subjects/v/versions/1?permanent=true"))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
     cancel.cancel();
     broker.shutdown().await;
@@ -1309,13 +1268,13 @@ async fn rest_version_permanent_before_soft_is_rejected() {
 async fn rest_import_mode_registers_explicit_id() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     let app = rest::router(AppState { store });
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_put("/mode/imp", r#"{"mode":"IMPORT"}"#))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
     let body = format!(r#"{{"schema":{:?},"id":42,"version":5}}"#, av("C"));
     let r = app
@@ -1325,11 +1284,11 @@ async fn rest_import_mode_registers_explicit_id() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body["id"], &serde_json::json!(42));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["id"] == &serde_json::json!(42));
     let got = get_json(&app, "/subjects/imp/versions/5").await;
-    assert_eq!(&got["id"], &serde_json::json!(42));
-    assert_eq!(&got["version"], &serde_json::json!(5));
+    assert2::assert!(&got["id"] == &serde_json::json!(42));
+    assert2::assert!(&got["version"] == &serde_json::json!(5));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1342,13 +1301,13 @@ async fn rest_cp_calibrated_admin_error_codes() {
     let app = rest::router(AppState { store });
     register(&app, "d", &format!(r#"{{"schema":{:?}}}"#, av("A"))).await;
     // soft-delete, then soft-delete AGAIN -> cp 404 / 40404
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_delete("/subjects/d"))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
     let again = app
         .clone()
@@ -1357,8 +1316,8 @@ async fn rest_cp_calibrated_admin_error_codes() {
         .unwrap();
     let status = again.status();
     let body = body_json(again).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40404));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40404));
     // GET /mode/{subject} with no override -> cp 404 / 40409
     let nomode = app
         .clone()
@@ -1372,8 +1331,8 @@ async fn rest_cp_calibrated_admin_error_codes() {
         .unwrap();
     let status = nomode.status();
     let body = body_json(nomode).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40409));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40409));
     // GET /schemas/ids/{unknown}/versions -> cp 404 / 40403
     let noid = app
         .clone()
@@ -1387,8 +1346,8 @@ async fn rest_cp_calibrated_admin_error_codes() {
         .unwrap();
     let status = noid.status();
     let body = body_json(noid).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40403));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40403));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1399,22 +1358,19 @@ async fn rest_cp_calibrated_admin_error_codes() {
 #[allow(clippy::too_many_lines)]
 async fn rest_admin_edge_and_error_branches() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
-    assert_eq!(store.topic(), "_schemas");
+    assert2::assert!(store.topic() == "_schemas");
     let app = rest::router(AppState { store });
 
     // PUT /mode (global) -> 200, GET reflects it
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_put("/mode", r#"{"mode":"READONLY"}"#))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
-    assert_eq!(
-        get_json(&app, "/mode").await,
-        serde_json::json!({"mode": "READONLY"})
-    );
+    assert2::assert!(get_json(&app, "/mode").await == serde_json::json!({"mode": "READONLY"}));
     // global READONLY blocks PUT /config (set_compat gate) -> 422/42205
     let cfg = app
         .clone()
@@ -1423,16 +1379,16 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = cfg.status();
     let body = body_json(cfg).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42205));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42205));
     // back to READWRITE
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_put("/mode", r#"{"mode":"READWRITE"}"#))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
     // invalid mode (global + subject) -> 422/42204
     for uri in ["/mode", "/mode/x"] {
@@ -1443,8 +1399,8 @@ async fn rest_admin_edge_and_error_branches() {
             .unwrap();
         let status = bad.status();
         let body = body_json(bad).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "case {uri}");
-        assert_eq!(body["error_code"].as_i64(), Some(42204), "case {uri}");
+        assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+        assert2::assert!(body["error_code"].as_i64() == Some(42204));
     }
     // Every DELETE form on a missing subject has the same complete response.
     let missing_subject_delete_cases = [
@@ -1459,11 +1415,7 @@ async fn rest_admin_edge_and_error_branches() {
         }
         statuses
     };
-    assert_eq!(
-        actual,
-        vec![StatusCode::NOT_FOUND; missing_subject_delete_cases.len()],
-        "missing-subject DELETE cases"
-    );
+    assert2::assert!(actual == vec![StatusCode::NOT_FOUND; missing_subject_delete_cases.len()]);
     // register a real subject
     register(&app, "x", &format!(r#"{{"schema":{:?}}}"#, av("A"))).await;
     // permanent-delete an absent version (subject exists) -> 404/40402
@@ -1474,8 +1426,8 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = pv.status();
     let body = body_json(pv).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40402));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40402));
     // DELETE /versions/latest soft-deletes the latest live version
     let dl = app
         .clone()
@@ -1483,8 +1435,8 @@ async fn rest_admin_edge_and_error_branches() {
         .await
         .unwrap();
     let status = dl.status();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body_json(dl).await, serde_json::json!(1));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(body_json(dl).await == serde_json::json!(1));
     // non-numeric version -> 422/42202
     let dbad = app
         .clone()
@@ -1493,8 +1445,8 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = dbad.status();
     let body = body_json(dbad).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42202));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42202));
     // IMPORT requires an empty subject / empty registry -> 422/42205
     let import_subject = app
         .clone()
@@ -1503,8 +1455,8 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = import_subject.status();
     let body = body_json(import_subject).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42205));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42205));
     let import_global = app
         .clone()
         .oneshot(req_put("/mode", r#"{"mode":"IMPORT"}"#))
@@ -1512,16 +1464,16 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = import_global.status();
     let body = body_json(import_global).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42205));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42205));
     // READONLY blocks a delete (ensure_writable) -> 422/42205
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_put("/mode/x", r#"{"mode":"READONLY"}"#))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
     let rod = app
         .clone()
@@ -1530,8 +1482,8 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = rod.status();
     let body = body_json(rod).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42205));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42205));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -1569,16 +1521,16 @@ async fn rest_references_lifecycle_avro() {
         .unwrap();
     let status = r.status();
     let dep_id = body_json(r).await["id"].as_i64().unwrap();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(dep_id, 2);
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(dep_id == 2);
     // referencedby lists the referrer's id
     let refby = get_json(&app, "/subjects/base/versions/1/referencedby").await;
-    assert_eq!(refby, serde_json::json!([dep_id]));
+    assert2::assert!(refby == serde_json::json!([dep_id]));
     // GET the referrer includes references
     let got = get_json(&app, "/subjects/dep/versions/1").await;
-    assert_eq!(&got["references"][0]["name"], &serde_json::json!("Base"));
-    assert_eq!(&got["references"][0]["subject"], &serde_json::json!("base"));
-    assert_eq!(&got["references"][0]["version"], &serde_json::json!(1));
+    assert2::assert!(&got["references"][0]["name"] == &serde_json::json!("Base"));
+    assert2::assert!(&got["references"][0]["subject"] == &serde_json::json!("base"));
+    assert2::assert!(&got["references"][0]["version"] == &serde_json::json!(1));
     // delete-protection: deleting base v1 while referenced is rejected (422/42206)
     let blocked = app
         .clone()
@@ -1587,24 +1539,24 @@ async fn rest_references_lifecycle_avro() {
         .unwrap();
     let status = blocked.status();
     let body = body_json(blocked).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42206));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42206));
     // remove the referrer, then base deletes fine
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_delete("/subjects/dep/versions/1"))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
-    assert_eq!(
+    assert2::assert!(
         app.clone()
             .oneshot(req_delete("/subjects/base/versions/1"))
             .await
             .unwrap()
-            .status(),
-        StatusCode::OK
+            .status()
+            == StatusCode::OK
     );
     cancel.cancel();
     broker.shutdown().await;
@@ -1625,8 +1577,8 @@ async fn rest_reference_not_found_rejected() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42201));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42201));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1675,16 +1627,16 @@ async fn rest_avro_reference_resolves_end_to_end() {
             .status();
         actual.push((name, status, expected));
     }
-    assert_eq!(
-        actual,
-        vec![
-            ("avro reference", StatusCode::OK, StatusCode::OK),
-            (
-                "avro missing reference",
-                StatusCode::UNPROCESSABLE_ENTITY,
-                StatusCode::UNPROCESSABLE_ENTITY,
-            ),
-        ]
+    assert2::assert!(
+        actual
+            == vec![
+                ("avro reference", StatusCode::OK, StatusCode::OK),
+                (
+                    "avro missing reference",
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                ),
+            ]
     );
     cancel.cancel();
     broker.shutdown().await;
@@ -1734,16 +1686,16 @@ async fn rest_protobuf_reference_resolves_end_to_end() {
             .status();
         actual.push((name, status, expected));
     }
-    assert_eq!(
-        actual,
-        vec![
-            ("protobuf reference", StatusCode::OK, StatusCode::OK),
-            (
-                "protobuf missing reference",
-                StatusCode::UNPROCESSABLE_ENTITY,
-                StatusCode::UNPROCESSABLE_ENTITY,
-            ),
-        ]
+    assert2::assert!(
+        actual
+            == vec![
+                ("protobuf reference", StatusCode::OK, StatusCode::OK),
+                (
+                    "protobuf missing reference",
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                ),
+            ]
     );
     cancel.cancel();
     broker.shutdown().await;
@@ -1776,15 +1728,11 @@ async fn rest_json_reference_resolves_end_to_end() {
         .oneshot(req_post("/subjects/order/versions", &body))
         .await
         .unwrap();
-    assert_eq!(
-        r.status(),
-        StatusCode::OK,
-        "JSON $ref resolves via reference"
-    );
+    assert2::assert!(r.status() == StatusCode::OK);
     let order_id = body_json(r).await["id"].as_i64().unwrap();
     // referencedby lists the referrer's id.
     let refby = get_json(&app, "/subjects/amount/versions/1/referencedby").await;
-    assert_eq!(refby, serde_json::json!([order_id]));
+    assert2::assert!(refby == serde_json::json!([order_id]));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1816,11 +1764,8 @@ async fn rest_references_get_by_id_list_and_subject_delete_protection() {
         .unwrap();
     // GET /schemas/ids/{referrer_id} includes the references array.
     let by_id = get_json(&app, &format!("/schemas/ids/{dep_id}")).await;
-    assert_eq!(&by_id["references"][0]["name"], &serde_json::json!("Base"));
-    assert_eq!(
-        &by_id["references"][0]["subject"],
-        &serde_json::json!("base")
-    );
+    assert2::assert!(&by_id["references"][0]["name"] == &serde_json::json!("Base"));
+    assert2::assert!(&by_id["references"][0]["subject"] == &serde_json::json!("base"));
     // GET /schemas surfaces a non-Avro schema's schemaType.
     register(
         &app,
@@ -1829,12 +1774,11 @@ async fn rest_references_get_by_id_list_and_subject_delete_protection() {
     )
     .await;
     let all = get_json(&app, "/schemas").await;
-    assert!(
+    assert2::assert!(
         all.as_array()
             .unwrap()
             .iter()
-            .any(|r| r["schemaType"] == "PROTOBUF"),
-        "GET /schemas should carry schemaType for non-Avro rows"
+            .any(|r| r["schemaType"] == "PROTOBUF")
     );
     // Soft-deleting the WHOLE referenced subject is rejected (42206).
     let blocked = app
@@ -1844,8 +1788,8 @@ async fn rest_references_get_by_id_list_and_subject_delete_protection() {
         .unwrap();
     let status = blocked.status();
     let body = body_json(blocked).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42206));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42206));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1860,31 +1804,23 @@ async fn delete_subject_compat_reverts_to_global() {
     // Set a per-subject override to FULL
     let (status, body) =
         put_json(&app, "/config/test-subject", r#"{"compatibility":"FULL"}"#).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body["compatibility"], &serde_json::json!("FULL"));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["compatibility"] == &serde_json::json!("FULL"));
 
     // GET confirms the override is set
     let (status, body) = get_status_json(&app, "/config/test-subject").await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(&body["compatibilityLevel"], &serde_json::json!("FULL"));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["compatibilityLevel"] == &serde_json::json!("FULL"));
 
     // DELETE returns the deleted level
     let (status, body) = delete_req(&app, "/config/test-subject").await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "DELETE should return the deleted level"
-    );
-    assert_eq!(
-        &body["compatibility"],
-        &serde_json::json!("FULL"),
-        "DELETE should return the deleted level"
-    );
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(&body["compatibility"] == &serde_json::json!("FULL"));
 
     // GET now returns 404 (no per-subject override remains)
     let (status, body) = get_status_json(&app, "/config/test-subject").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40401));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40401));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -1897,8 +1833,8 @@ async fn delete_subject_compat_no_override_returns_404() {
 
     // No per-subject override was ever set
     let (status, body) = delete_req(&app, "/config/no-override-subject").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40401));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40401));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -1926,29 +1862,23 @@ async fn get_by_id_schema_returns_raw_string() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert2::assert!(resp.status() == StatusCode::OK);
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
         .await
         .unwrap();
     let text = std::str::from_utf8(&bytes).unwrap();
 
     // Body should contain the schema content
-    assert!(
-        text.contains("record"),
-        "raw schema body should contain the word 'record'"
-    );
+    assert2::assert!(text.contains("record"));
 
     // Body should be a JSON value representing the schema itself, NOT {"schema":"..."}
     let v: serde_json::Value = serde_json::from_str(text).expect("body should be valid JSON");
-    assert!(
-        v.get("schema").is_none(),
-        "body should be the raw schema, not a JSON envelope with a 'schema' key"
-    );
+    assert2::assert!(v.get("schema").is_none());
 
     // Non-existent id → 404 / 40403
     let (status, body) = get_status_json(&app, "/schemas/ids/9999/schema").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40403));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40403));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -1964,26 +1894,20 @@ async fn get_by_id_subjects_returns_all_subjects() {
     // Register the SAME schema under two subjects → they share one schema ID
     let reg1 = register(&app, "subject-alpha", AVRO_BODY).await;
     let reg2 = register(&app, "subject-beta", AVRO_BODY).await;
-    assert_eq!(reg1["id"], reg2["id"], "same schema must share one id");
+    assert2::assert!(reg1["id"] == reg2["id"]);
     let shared_id = reg1["id"].as_i64().unwrap();
 
     // GET /schemas/ids/{id}/subjects → both subjects present
     let body = get_json(&app, &format!("/schemas/ids/{shared_id}/subjects")).await;
     let subjects: Vec<String> =
         serde_json::from_value(body).expect("response should be a JSON array");
-    assert!(
-        subjects.contains(&"subject-alpha".to_string()),
-        "subject-alpha should be in the list"
-    );
-    assert!(
-        subjects.contains(&"subject-beta".to_string()),
-        "subject-beta should be in the list"
-    );
+    assert2::assert!(subjects.contains(&"subject-alpha".to_string()));
+    assert2::assert!(subjects.contains(&"subject-beta".to_string()));
 
     // Non-existent id → 404 / 40403
     let (status, body) = get_status_json(&app, "/schemas/ids/9999/subjects").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-    assert_eq!(body["error_code"].as_i64(), Some(40403));
+    assert2::assert!(status == StatusCode::NOT_FOUND);
+    assert2::assert!(body["error_code"].as_i64() == Some(40403));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2012,11 +1936,7 @@ async fn normalize_true_deduplicates_avro_schemas() {
         )
         .await
         .unwrap();
-    assert_eq!(
-        resp_a.status(),
-        StatusCode::OK,
-        "first normalize=true register should succeed"
-    );
+    assert2::assert!(resp_a.status() == StatusCode::OK);
     let reg_a = body_json(resp_a).await;
     let id_a = reg_a["id"].as_i64().unwrap();
 
@@ -2035,16 +1955,8 @@ async fn normalize_true_deduplicates_avro_schemas() {
         .unwrap();
     let status = resp_b.status();
     let reg_b = body_json(resp_b).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "second normalize=true registration of same schema must be idempotent (same id)"
-    );
-    assert_eq!(
-        reg_b["id"].as_i64(),
-        Some(id_a),
-        "second normalize=true registration of same schema must be idempotent (same id)"
-    );
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(reg_b["id"].as_i64() == Some(id_a));
 
     // normalize=true on an invalid Avro → 422 / 42201
     let resp_bad = app
@@ -2061,8 +1973,8 @@ async fn normalize_true_deduplicates_avro_schemas() {
         .unwrap();
     let status = resp_bad.status();
     let err_body = body_json(resp_bad).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(err_body["error_code"].as_i64(), Some(42201));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(err_body["error_code"].as_i64() == Some(42201));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2089,7 +2001,7 @@ async fn normalize_true_json_schema_deduplicates_and_errors() {
         )
         .await
         .unwrap();
-    assert_eq!(resp_a.status(), StatusCode::OK);
+    assert2::assert!(resp_a.status() == StatusCode::OK);
     let id_a = body_json(resp_a).await["id"].as_i64().unwrap();
 
     // Same schema again with normalize=true → idempotent (same id)
@@ -2107,8 +2019,8 @@ async fn normalize_true_json_schema_deduplicates_and_errors() {
         .unwrap();
     let status = resp_b.status();
     let actual_id = body_json(resp_b).await["id"].as_i64();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(actual_id, Some(id_a));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(actual_id == Some(id_a));
 
     // Invalid JSON with normalize=true → 422 / 42201 (exercises JSON error path in normalize_schema)
     let resp_bad = app
@@ -2127,8 +2039,8 @@ async fn normalize_true_json_schema_deduplicates_and_errors() {
         .unwrap();
     let status = resp_bad.status();
     let body = body_json(resp_bad).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body["error_code"].as_i64(), Some(42201));
+    assert2::assert!(status == StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(body["error_code"].as_i64() == Some(42201));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2155,7 +2067,7 @@ async fn normalize_true_protobuf_is_noop() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert2::assert!(resp.status() == StatusCode::OK);
     let id = body_json(resp).await["id"].as_i64().unwrap();
 
     // Re-register identical → same id (idempotent)
@@ -2173,8 +2085,8 @@ async fn normalize_true_protobuf_is_noop() {
         .unwrap();
     let status = resp2.status();
     let actual_id = body_json(resp2).await["id"].as_i64();
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(actual_id, Some(id));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(actual_id == Some(id));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2200,7 +2112,7 @@ async fn normalize_true_lookup_finds_normalized_schema() {
         )
         .await
         .unwrap();
-    assert_eq!(reg_resp.status(), StatusCode::OK);
+    assert2::assert!(reg_resp.status() == StatusCode::OK);
     let stored_id = body_json(reg_resp).await["id"].as_i64().unwrap();
 
     // POST /subjects/{s}?normalize=true → exercises the lookup handler's normalize path
@@ -2218,9 +2130,9 @@ async fn normalize_true_lookup_finds_normalized_schema() {
         .unwrap();
     let status = lookup_resp.status();
     let found = body_json(lookup_resp).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(found["id"].as_i64(), Some(stored_id));
-    assert_eq!(&found["subject"], &serde_json::json!("norm-lookup"));
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(found["id"].as_i64() == Some(stored_id));
+    assert2::assert!(&found["subject"] == &serde_json::json!("norm-lookup"));
 
     cancel.cancel();
     broker.shutdown().await;

@@ -106,7 +106,7 @@ pub struct KafkaRebalanceStatus {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -114,17 +114,17 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaRebalance::crd();
-        assert_eq!(crd.spec.group.as_str(), "crabka.io");
-        assert_eq!(crd.spec.names.kind.as_str(), "KafkaRebalance");
-        assert_eq!(crd.spec.names.plural.as_str(), "kafkarebalances");
-        assert_eq!(crd.spec.names.short_names, Some(vec!["kr".to_string()]));
-        assert_eq!(
+        assert2::assert!(crd.spec.group.as_str() == "crabka.io");
+        assert2::assert!(crd.spec.names.kind.as_str() == "KafkaRebalance");
+        assert2::assert!(crd.spec.names.plural.as_str() == "kafkarebalances");
+        assert2::assert!(crd.spec.names.short_names == Some(vec!["kr".to_string()]));
+        assert2::assert!(
             crd.spec
                 .versions
                 .iter()
                 .map(|v| v.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["v1alpha1"]
+                .collect::<Vec<_>>()
+                == vec!["v1alpha1"]
         );
     }
 
@@ -144,16 +144,16 @@ mod tests {
             "\"throttleBytesPerSec\":10000000",
             "\"endpoint\":\"http://r.kafka.svc:9300\"",
         ] {
-            assert!(json.contains(want), "case {want:?}; got: {json}");
+            assert2::assert!(json.contains(want));
         }
         let back: KafkaRebalance = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == kr.spec);
+        assert2::assert!(back.spec == kr.spec);
     }
 
     #[test]
     fn empty_spec_parses_and_omits_optionals() {
         let spec: KafkaRebalanceSpec = serde_json::from_str("{}").unwrap();
-        assert!(
+        assert2::assert!(
             spec == KafkaRebalanceSpec {
                 goals: None,
                 throttle_bytes_per_sec: None,
@@ -161,7 +161,7 @@ mod tests {
             }
         );
         let j = serde_json::to_string(&spec).unwrap();
-        assert!(j == "{}", "all-default spec must serialize to empty object");
+        assert2::assert!(j == "{}");
     }
 
     #[test]
@@ -173,15 +173,12 @@ mod tests {
             optimization_result: None,
         };
         let actual = serde_json::to_value(&status).unwrap();
-        assert_eq!(
-            actual,
-            serde_json::json!({"conditions": [], "observedGeneration": 3})
-        );
+        assert2::assert!(actual == serde_json::json!({"conditions": [], "observedGeneration": 3}));
     }
 
     #[test]
     fn optimization_result_defaults_to_zeroes() {
         let r: OptimizationResult = serde_json::from_str("{}").unwrap();
-        assert!(r == OptimizationResult::default());
+        assert2::assert!(r == OptimizationResult::default());
     }
 }

@@ -59,7 +59,6 @@ pub(crate) fn murmur2_partition(data: &[u8], num_partitions: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -74,8 +73,8 @@ mod tests {
             ("word plus remainder", b"abcde", 0x1b89_7edd),
         ];
 
-        for (case, input, expected) in cases {
-            assert!(murmur2(input) == *expected, "case {case}");
+        for (_case, input, expected) in cases {
+            assert2::assert!(murmur2(input) == *expected);
         }
     }
 
@@ -88,11 +87,8 @@ mod tests {
             ("seven partitions", b"abcde", 7, 4),
         ];
 
-        for (case, input, partitions, expected) in cases {
-            assert!(
-                murmur2_partition(input, *partitions) == *expected,
-                "case {case}"
-            );
+        for (_case, input, partitions, expected) in cases {
+            assert2::assert!(murmur2_partition(input, *partitions) == *expected);
         }
     }
 }

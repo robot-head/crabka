@@ -310,8 +310,6 @@ mod tests {
         net::SocketAddr,
     };
 
-    use assert2::assert;
-
     use super::*;
 
     const LOCK: Duration = Duration::from_secs(30);
@@ -479,11 +477,11 @@ mod tests {
 
         let cell = mgr.get_or_load("g1", tid, 0).await;
         let st = cell.lock().await;
-        assert!(*st == AcquisitionState::new(Offset(0)));
+        assert2::assert!(*st == AcquisitionState::new(Offset(0)));
         drop(st);
         // A second call returns the same cached cell.
         let cell2 = mgr.get_or_load("g1", tid, 0).await;
-        assert!(Arc::ptr_eq(&cell, &cell2));
+        assert2::assert!(Arc::ptr_eq(&cell, &cell2));
     }
 
     #[tokio::test]
@@ -493,10 +491,10 @@ mod tests {
 
         let cell = mgr.get_or_load("g1", tid, 0).await;
         let mut st = cell.lock().await;
-        assert!(!st.dirty);
+        assert2::assert!(!st.dirty);
         // Clean state: no-op, no panic, stays clean.
         mgr.persist_if_dirty("g1", tid, 0, &mut st).await;
-        assert!(!st.dirty);
+        assert2::assert!(!st.dirty);
     }
 
     #[tokio::test]
@@ -512,18 +510,18 @@ mod tests {
         // Make the state dirty with persistable content.
         st.materialize(Offset(4), 100);
         let _ = st.acquire("m1", 10, i32::MAX, std::time::Instant::now(), LOCK, 5);
-        assert!(st.dirty);
+        assert2::assert!(st.dirty);
 
         mgr.persist_if_dirty("g1", tid, 0, &mut st).await;
         // Write failed -> dirty stays set for retry.
-        assert!(st.dirty);
+        assert2::assert!(st.dirty);
     }
 
     #[tokio::test]
     async fn topic_leader_is_self_false_for_unknown_topic() {
         let mgr = manager();
         let tid = uuid::Uuid::from_bytes([23; 16]);
-        assert!(!mgr.topic_leader_is_self(tid, 0));
+        assert2::assert!(!mgr.topic_leader_is_self(tid, 0));
     }
 
     #[tokio::test]
@@ -536,7 +534,7 @@ mod tests {
         let cell = mgr.get_or_load("g1", tid, 0).await;
         mgr.invalidate("g1", tid, 0);
         let cell2 = mgr.get_or_load("g1", tid, 0).await;
-        assert!(!Arc::ptr_eq(&cell, &cell2));
+        assert2::assert!(!Arc::ptr_eq(&cell, &cell2));
     }
 
     #[tokio::test]
@@ -573,7 +571,7 @@ mod tests {
         ));
         let mgr = manager_with_image(image);
 
-        for (case, topic_id, partition, expected) in [
+        for (_case, topic_id, partition, expected) in [
             ("known partition", tid, 0, (2, 5)),
             ("unknown partition", tid, 9, (-1, -1)),
             (
@@ -583,10 +581,7 @@ mod tests {
                 (-1, -1),
             ),
         ] {
-            assert!(
-                mgr.current_leader_of(topic_id, partition) == expected,
-                "case {case}"
-            );
+            assert2::assert!(mgr.current_leader_of(topic_id, partition) == expected);
         }
     }
 }

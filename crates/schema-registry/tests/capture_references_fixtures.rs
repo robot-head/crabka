@@ -107,12 +107,7 @@ fn docker_pull(image: &str) {
         .args(["pull", image])
         .output()
         .expect("spawn docker pull");
-    assert!(
-        out.status.success(),
-        "docker pull {image} failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 fn docker_run_schema_registry() -> String {
@@ -134,14 +129,9 @@ fn docker_run_schema_registry() -> String {
         ])
         .output()
         .expect("spawn docker run schema-registry");
-    assert!(
-        out.status.success(),
-        "docker run schema-registry failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert!(!id.is_empty(), "empty container id from docker run");
+    assert2::assert!(!id.is_empty());
     eprintln!("CAPTURE schema-registry container id={id}");
     id
 }
@@ -151,11 +141,7 @@ fn docker_mapped_port(id: &str) -> u16 {
         .args(["port", id, "8081"])
         .output()
         .expect("spawn docker port");
-    assert!(
-        out.status.success(),
-        "docker port {id} 8081 failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     let port = text
         .lines()

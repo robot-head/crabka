@@ -35,7 +35,7 @@ mod tests {
         let resp = ok_json(&serde_json::json!({"id": 7})).into_response();
         let content_type = resp.headers()["content-type"].clone();
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
-        assert_eq!(content_type.to_str().unwrap(), crate::error::CONTENT_TYPE);
-        assert_eq!(body.as_ref(), br#"{"id":7}"#.as_slice());
+        assert2::assert!(content_type.to_str().unwrap() == crate::error::CONTENT_TYPE);
+        assert2::assert!(body.as_ref() == br#"{"id":7}"#.as_slice());
     }
 }

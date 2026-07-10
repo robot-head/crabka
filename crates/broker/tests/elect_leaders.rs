@@ -41,7 +41,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
@@ -164,11 +163,7 @@ async fn drive_elect_leaders(
     let resp = ElectLeadersResponse::decode(&mut cur, ELECT_LEADERS_VERSION)
         .expect("decode ElectLeadersResponse");
 
-    assert!(
-        resp.error_code == 0,
-        "top-level error_code must be 0, got {}",
-        resp.error_code
-    );
+    assert2::assert!(resp.error_code == 0);
 
     resp.replica_election_results
         .into_iter()
@@ -337,10 +332,7 @@ async fn preferred_election_via_wire_returns_success() {
     // Now send ElectLeaders Preferred (election_type=0). Broker 1 is the
     // preferred replica (replicas[0]) and is now back in ISR and alive.
     let result = drive_elect_leaders(elect_addr, "foo-preferred", vec![0], 0).await;
-    assert!(
-        result == vec![(0, 0)],
-        "expected error_code=0 for PREFERRED election; got {result:?}"
-    );
+    assert2::assert!(result == vec![(0, 0)]);
 
     // Poll until the image reflects broker 1 as leader again.
     wait_partition_leader(&cluster[0].0, "foo-preferred", 0, 1).await;
@@ -434,10 +426,7 @@ async fn unclean_election_via_wire_picks_alive_replica() {
     // The algorithm finds: ISR=[99] — all dead → unclean eligible.
     // First alive in replicas=[1,2] → broker 1 → new leader=1, isr=[1].
     let result = drive_elect_leaders(addr, "foo-unclean", vec![0], 1).await;
-    assert!(
-        result == vec![(0, 0)],
-        "expected error_code=0 for UNCLEAN election; got {result:?}"
-    );
+    assert2::assert!(result == vec![(0, 0)]);
 
     // Poll until the metadata image reflects the new leader. The unclean
     // election makes broker 1 the leader with ISR=[1]; we assert leadership and
@@ -489,11 +478,7 @@ async fn create_topic_plaintext(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(
-        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
-        "CreateTopics({name}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Poll until the partition record for `(topic, partition)` is visible in the
@@ -623,10 +608,7 @@ async fn non_super_user_without_acl_denied() {
         if r.iter().all(|(_, ec)| *ec == 31) {
             break r;
         }
-        assert!(
-            Instant::now() <= deadline_auth,
-            "ACL shim still active or wrong error after 5s; got {r:?}"
-        );
+        assert2::assert!(Instant::now() <= deadline_auth);
         // intentional: backoff between bounded RPC-response retries that
         // re-drive the SASL ElectLeaders wire path to observe the authorizer's
         // decision; the awaited state is on the request path, not in the
@@ -637,10 +619,7 @@ async fn non_super_user_without_acl_denied() {
     handle.shutdown().await;
 
     // Per-row error code must be 31 (CLUSTER_AUTHORIZATION_FAILED).
-    assert!(
-        resp == vec![(0, 31)],
-        "expected CLUSTER_AUTHORIZATION_FAILED (31) for alice; got {resp:?}"
-    );
+    assert2::assert!(resp == vec![(0, 31)]);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -831,11 +810,7 @@ async fn create_topic_sasl_plain(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(
-        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
-        "CreateTopics({name}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Drive `ElectLeaders` over a SASL/PLAIN authenticated connection.

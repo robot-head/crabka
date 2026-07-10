@@ -10,7 +10,7 @@
 //! Fetch auto-negotiate to v13 (KIP-516 topic-id), so every batch travels the
 //! v≥3 native-v2 path the verbatim dispatch covers.
 
-use assert2::{assert, check};
+use assert2::check;
 mod support;
 
 use std::time::{Duration, Instant};
@@ -88,10 +88,7 @@ async fn wait_for_compression(
         {
             return;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "compression_type={expected:?} never propagated to partition LogConfig within 10s"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -121,10 +118,7 @@ async fn create_topic_with_configs(
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "CreateTopics failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
     broker.wait_until_partition_present(name, 0).await;
 }
 
@@ -207,7 +201,7 @@ async fn fetch_first_batch(
         .await
         .expect("Fetch");
     let pd = &resp.responses[0].partitions[0];
-    assert!(pd.error_code == 0, "fetch error: {pd:?}");
+    assert2::assert!(pd.error_code == 0);
     let payload = pd.records.as_ref().expect("records present");
     let batches = payload.as_v2().expect("v2 payload");
     batches.first().cloned().expect("at least one batch")
@@ -246,17 +240,12 @@ async fn lz4_batch_passes_through_and_roundtrips() {
     let b = batch(CompressionType::Lz4, 200, &value);
     let wire = encode_batch(&b);
     let raw_uncompressed_size = 200 * 512;
-    assert!(
-        wire.len() < raw_uncompressed_size / 8,
-        "lz4 wire ({} B) must be far smaller than raw ({} B)",
-        wire.len(),
-        raw_uncompressed_size
-    );
+    assert2::assert!(wire.len() < raw_uncompressed_size / 8);
 
     let base = produce_one(&client, "lz4t", topic_id, b.clone())
         .await
         .expect("produce ok");
-    assert!(base == 0);
+    assert2::assert!(base == 0);
 
     // Fetch it back: the stored batch must still be Lz4-compressed (no
     // recompression to a different codec) and decode to the same records.
@@ -407,10 +396,7 @@ async fn control_batch_takes_owned_path() {
         .expect("produce ok");
 
     let fetched = fetch_first_batch(&broker, &client, "ctrl", topic_id, 1).await;
-    assert!(
-        fetched.attributes.is_control_batch(),
-        "control bit preserved"
-    );
+    assert2::assert!(fetched.attributes.is_control_batch());
 
     broker.shutdown().await;
 }
@@ -460,13 +446,13 @@ async fn idempotent_dedup_over_verbatim_path() {
     let base0 = produce_one(&client, "idem", topic_id, make(0, 3))
         .await
         .expect("first append ok");
-    assert!(base0 == 0);
+    assert2::assert!(base0 == 0);
 
     // seq 3..=4 (2 records) → base offset 3.
     let base1 = produce_one(&client, "idem", topic_id, make(3, 2))
         .await
         .expect("second append ok");
-    assert!(base1 == 3);
+    assert2::assert!(base1 == 3);
     broker.wait_until_local_log_end_offset("idem", 0, 5).await;
 
     // Retry the MOST RECENT batch (seq 3..=4) → DUPLICATE: the dedup tracker
@@ -476,7 +462,7 @@ async fn idempotent_dedup_over_verbatim_path() {
     let base_dup = produce_one(&client, "idem", topic_id, make(3, 2))
         .await
         .expect("duplicate must be NONE");
-    assert!(base_dup == 3, "duplicate returns the committed base offset");
+    assert2::assert!(base_dup == 3);
 
     // An out-of-order sequence (skip ahead past last+1) →
     // OUT_OF_ORDER_SEQUENCE_NUMBER (45). The last committed sequence is 4, so
@@ -484,7 +470,7 @@ async fn idempotent_dedup_over_verbatim_path() {
     let err = produce_one(&client, "idem", topic_id, make(99, 1))
         .await
         .expect_err("out-of-order must error");
-    assert!(err == 45, "out-of-order sequence must be 45; got {err}");
+    assert2::assert!(err == 45);
 
     broker.shutdown().await;
 }

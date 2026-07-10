@@ -36,20 +36,20 @@ async fn iq_kv_count_read_semantics() {
     }
 
     // get(present) → count, get(absent) → None.
-    assert_eq!(
+    assert2::assert!(
         d.iq_kv_get("counts", &"a".to_string(), &StringSerde, &I64Serde)
-            .await,
-        Some(2)
+            .await
+            == Some(2)
     );
-    assert_eq!(
+    assert2::assert!(
         d.iq_kv_get("counts", &"b".to_string(), &StringSerde, &I64Serde)
-            .await,
-        Some(1)
+            .await
+            == Some(1)
     );
-    assert_eq!(
+    assert2::assert!(
         d.iq_kv_get("counts", &"z".to_string(), &StringSerde, &I64Serde)
-            .await,
-        None
+            .await
+            == None
     );
 
     // range is inclusive [lo, hi]: ["a","b"] covers both keys.
@@ -62,11 +62,7 @@ async fn iq_kv_count_read_semantics() {
             &I64Serde,
         )
         .await;
-    assert_eq!(
-        range,
-        vec![("a".to_string(), 2), ("b".to_string(), 1)],
-        "inclusive [a,b] range, ascending"
-    );
+    assert2::assert!(range == vec![("a".to_string(), 2), ("b".to_string(), 1)]);
     // A range that excludes b.
     let range_a = d
         .iq_kv_range(
@@ -77,21 +73,21 @@ async fn iq_kv_count_read_semantics() {
             &I64Serde,
         )
         .await;
-    assert_eq!(range_a, vec![("a".to_string(), 2)]);
+    assert2::assert!(range_a == vec![("a".to_string(), 2)]);
 
     // all() returns every entry; count() the cardinality.
     let mut all = d.iq_kv_all("counts", &StringSerde, &I64Serde).await;
     all.sort();
-    assert_eq!(all, vec![("a".to_string(), 2), ("b".to_string(), 1)]);
-    assert_eq!(d.iq_kv_count("counts").await, 2);
+    assert2::assert!(all == vec![("a".to_string(), 2), ("b".to_string(), 1)]);
+    assert2::assert!(d.iq_kv_count("counts").await == 2);
 
     // An absent store name reads as empty / None.
-    assert_eq!(
+    assert2::assert!(
         d.iq_kv_get("nope", &"a".to_string(), &StringSerde, &I64Serde)
-            .await,
-        None
+            .await
+            == None
     );
-    assert_eq!(d.iq_kv_count("nope").await, 0);
+    assert2::assert!(d.iq_kv_count("nope").await == 0);
 }
 
 /// Window count store (tumbling, size 10): `fetch_single(key, start)` reads one
@@ -118,34 +114,34 @@ async fn iq_window_count_read_semantics() {
     }
 
     // Point reads on each window start.
-    assert_eq!(
+    assert2::assert!(
         d.iq_window_fetch_single("wc", &"k".to_string(), 0, &StringSerde, &I64Serde)
-            .await,
-        Some(2)
+            .await
+            == Some(2)
     );
-    assert_eq!(
+    assert2::assert!(
         d.iq_window_fetch_single("wc", &"k".to_string(), 10, &StringSerde, &I64Serde)
-            .await,
-        Some(1)
+            .await
+            == Some(1)
     );
     // A start with no window → None.
-    assert_eq!(
+    assert2::assert!(
         d.iq_window_fetch_single("wc", &"k".to_string(), 5, &StringSerde, &I64Serde)
-            .await,
-        None
+            .await
+            == None
     );
 
     // Range fetch over [0, 20] returns both windows ascending by start.
     let windows = d
         .iq_window_fetch("wc", &"k".to_string(), 0, 20, &StringSerde, &I64Serde)
         .await;
-    assert_eq!(windows, vec![(0, 2), (10, 1)]);
+    assert2::assert!(windows == vec![(0, 2), (10, 1)]);
 
     // A narrower span only sees the first window.
     let first = d
         .iq_window_fetch("wc", &"k".to_string(), 0, 5, &StringSerde, &I64Serde)
         .await;
-    assert_eq!(first, vec![(0, 2)]);
+    assert2::assert!(first == vec![(0, 2)]);
 }
 
 /// Session count store (inactivity gap 60): `fetch(key)` returns each session as
@@ -175,11 +171,11 @@ async fn iq_session_count_read_semantics() {
         .iq_session_fetch("sc", &"a".to_string(), &StringSerde, &I64Serde)
         .await;
     sessions.sort_by_key(|((s, e), _)| (*s, *e));
-    assert_eq!(sessions, vec![((0, 30), 2), ((200, 200), 1)]);
+    assert2::assert!(sessions == vec![((0, 30), 2), ((200, 200), 1)]);
 
     // A key with no sessions reads empty.
     let none = d
         .iq_session_fetch("sc", &"z".to_string(), &StringSerde, &I64Serde)
         .await;
-    assert!(none.is_empty());
+    assert2::assert!(none.is_empty());
 }

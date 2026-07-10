@@ -387,7 +387,7 @@ pub struct RemotePartitionDeleteMetadata {
 mod tests {
     use std::collections::HashSet;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -407,16 +407,16 @@ mod tests {
     fn topic_id_partition_identity_ignores_name() {
         let a = TopicIdPartition::new(Uuid::from_u128(7), "alpha", 3);
         let b = TopicIdPartition::new(Uuid::from_u128(7), "renamed", 3);
-        assert!(a == b);
+        assert2::assert!(a == b);
         let set: HashSet<_> = [a, b].into_iter().collect();
-        assert!(set.len() == 1, "same id+partition must collapse in a set");
+        assert2::assert!(set.len() == 1);
     }
 
     #[test]
     fn topic_id_partition_distinct_partitions_differ() {
         let a = TopicIdPartition::new(Uuid::from_u128(7), "alpha", 0);
         let b = TopicIdPartition::new(Uuid::from_u128(7), "alpha", 1);
-        assert!(a != b);
+        assert2::assert!(a != b);
     }
 
     #[test]
@@ -435,8 +435,8 @@ mod tests {
             epochs(),
         )
         .unwrap();
-        assert_eq!(md.max_timestamp_ms(), 777);
-        assert_eq!(md.segment_size_in_bytes(), 4096);
+        assert2::assert!(md.max_timestamp_ms() == 777);
+        assert2::assert!(md.segment_size_in_bytes() == 4096);
     }
 
     #[test]
@@ -520,7 +520,7 @@ mod tests {
             BTreeMap::new(),
         )
         .unwrap_err();
-        assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
+        assert2::assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
     }
 
     #[test]
@@ -537,7 +537,7 @@ mod tests {
             epochs(),
         )
         .unwrap_err();
-        assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
+        assert2::assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
     }
 
     #[test]
@@ -562,21 +562,21 @@ mod tests {
             broker_id: 2,
         };
         let finished = started.with_update(&update).unwrap();
-        assert_eq!(
-            finished,
-            RemoteLogSegmentMetadata::new(
-                seg_id(),
-                0,
-                10,
-                123,
-                2,
-                789,
-                1024,
-                RemoteLogSegmentState::CopySegmentFinished,
-                epochs(),
-            )
-            .unwrap()
-            .with_custom_metadata(CustomMetadata(vec![1, 2, 3]))
+        assert2::assert!(
+            finished
+                == RemoteLogSegmentMetadata::new(
+                    seg_id(),
+                    0,
+                    10,
+                    123,
+                    2,
+                    789,
+                    1024,
+                    RemoteLogSegmentState::CopySegmentFinished,
+                    epochs(),
+                )
+                .unwrap()
+                .with_custom_metadata(CustomMetadata(vec![1, 2, 3]))
         );
     }
 
@@ -603,21 +603,21 @@ mod tests {
             broker_id: 2,
         };
         let finished = started.with_update(&update).unwrap();
-        assert_eq!(
-            finished,
-            RemoteLogSegmentMetadata::new(
-                seg_id(),
-                0,
-                10,
-                123,
-                2,
-                789,
-                1024,
-                RemoteLogSegmentState::CopySegmentFinished,
-                epochs(),
-            )
-            .unwrap()
-            .with_custom_metadata(CustomMetadata(vec![9]))
+        assert2::assert!(
+            finished
+                == RemoteLogSegmentMetadata::new(
+                    seg_id(),
+                    0,
+                    10,
+                    123,
+                    2,
+                    789,
+                    1024,
+                    RemoteLogSegmentState::CopySegmentFinished,
+                    epochs(),
+                )
+                .unwrap()
+                .with_custom_metadata(CustomMetadata(vec![9]))
         );
     }
 
@@ -643,7 +643,7 @@ mod tests {
             broker_id: 2,
         };
         let err = started.with_update(&update).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             RemoteStorageError::InvalidSegmentTransition { .. }
         ));
@@ -672,7 +672,7 @@ mod tests {
             broker_id: 2,
         };
         let err = started.with_update(&update).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
+        assert2::assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
     }
 
     #[test]
@@ -692,9 +692,9 @@ mod tests {
             BTreeMap::from([(LeaderEpoch(0), 0)]),
         )
         .unwrap();
-        assert!(!md.txn_index_empty());
+        assert2::assert!(!md.txn_index_empty());
         let md = md.with_txn_index_empty(true);
-        assert!(md.txn_index_empty());
+        assert2::assert!(md.txn_index_empty());
     }
 
     #[test]

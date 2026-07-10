@@ -69,7 +69,6 @@ pub(crate) fn classify(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -163,10 +162,9 @@ mod tests {
                 Truncated { safe_offset: 0 },
             ),
         ];
-        for (case, offset, offset_epoch, leader_epoch, leader_end_offset, expected) in cases {
-            assert!(
-                classify(offset, offset_epoch, leader_epoch, leader_end_offset) == expected,
-                "case: {case}"
+        for (_case, offset, offset_epoch, leader_epoch, leader_end_offset, expected) in cases {
+            assert2::assert!(
+                classify(offset, offset_epoch, leader_epoch, leader_end_offset) == expected
             );
         }
     }

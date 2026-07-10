@@ -1350,14 +1350,14 @@ mod tests {
             crate::processor::serde::Consumed::with(StringSerde, I64Serde),
             Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
         );
-        assert_eq!(t.versioned_retention_ms, Some(600_000));
+        assert2::assert!(t.versioned_retention_ms == Some(600_000));
 
         let plain = b.table_explicit::<StringSerde, I64Serde>(
             "in2",
             crate::processor::serde::Consumed::with(StringSerde, I64Serde),
             Materialized::with(StringSerde, I64Serde).as_store("pt"),
         );
-        assert_eq!(plain.versioned_retention_ms, None);
+        assert2::assert!(plain.versioned_retention_ms == None);
     }
 }
 
@@ -1411,7 +1411,7 @@ mod fk_exec_tests {
                 .iter()
                 .map(|(k, v)| (Some((*k).to_string()), v.map(str::to_string)))
                 .collect();
-            assert_eq!(step_out, want_owned, "step {topic}:{key}={val}@{ts}");
+            assert2::assert!(step_out == want_owned);
         }
     }
 

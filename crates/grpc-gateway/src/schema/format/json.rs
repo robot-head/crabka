@@ -83,7 +83,7 @@ mod tests {
             ),
         ] {
             let result = validate(schema, payload);
-            assert_eq!(result.is_ok(), valid, "case {name}: {result:?}");
+            assert2::assert!(result.is_ok() == valid);
         }
     }
 
@@ -107,7 +107,7 @@ mod tests {
             ),
             ("deserialize_invalid", deserialize(SCHEMA, br"{}"), None),
         ] {
-            assert_eq!(result.as_deref().ok(), expected, "case {name}: {result:?}");
+            assert2::assert!(result.as_deref().ok() == expected);
         }
     }
 }

@@ -125,7 +125,7 @@ impl ClientSecurity {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_security::ListenerProtocol;
 
     use super::*;
@@ -138,7 +138,7 @@ mod tests {
             sasl: None,
             sasl_host: None,
         };
-        assert!((s.protocol.requires_tls(), s.protocol.requires_sasl()) == (false, false));
+        assert2::assert!((s.protocol.requires_tls(), s.protocol.requires_sasl()) == (false, false));
     }
 
     #[test]
@@ -152,7 +152,7 @@ mod tests {
             }),
             sasl_host: None,
         };
-        assert!(
+        assert2::assert!(
             (
                 s.protocol.requires_sasl(),
                 matches!(s.sasl, Some(SaslCredentials::Plain { .. }))
@@ -170,7 +170,7 @@ mod tests {
             sasl: None,
             sasl_host: Some("kdc-broker.example.com".into()),
         };
-        assert!(s.sasl_handshake_host(Some("10.0.0.5")) == "kdc-broker.example.com");
+        assert2::assert!(s.sasl_handshake_host(Some("10.0.0.5")) == "kdc-broker.example.com");
     }
 
     #[test]
@@ -181,7 +181,7 @@ mod tests {
             sasl: None,
             sasl_host: None,
         };
-        for (name, security, target, expected) in [
+        for (_name, security, target, expected) in [
             (
                 "TLS server name",
                 ClientSecurity {
@@ -200,10 +200,7 @@ mod tests {
             ("target host", no_tls.clone(), Some("10.0.0.5"), "10.0.0.5"),
             ("localhost fallback", no_tls, None, "localhost"),
         ] {
-            assert!(
-                security.sasl_handshake_host(target) == expected,
-                "case {name}"
-            );
+            assert2::assert!(security.sasl_handshake_host(target) == expected);
         }
     }
 
@@ -242,9 +239,6 @@ mod tests {
                 "/nonexistent/key.pem".into(),
             )),
         };
-        assert!(
-            bogus.build().is_err(),
-            "bogus client-identity path returns Err"
-        );
+        assert2::assert!(bogus.build().is_err());
     }
 }

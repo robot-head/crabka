@@ -159,7 +159,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -168,8 +167,8 @@ mod tests {
         let buf = [0x00u8];
         let mut cur = &buf[..];
         let unknown = read_tagged_fields(&mut cur, |_, _| Ok(false)).unwrap();
-        assert!(unknown.is_empty());
-        assert!(cur.is_empty());
+        assert2::assert!(unknown.is_empty());
+        assert2::assert!(cur.is_empty());
     }
 
     #[test]
@@ -188,7 +187,7 @@ mod tests {
                 bytes: Bytes::from_static(&[40]),
             },
         ]);
-        assert!(unknown == expected);
+        assert2::assert!(unknown == expected);
     }
 
     #[test]
@@ -198,7 +197,7 @@ mod tests {
         let mut cur = &buf[..];
         let err = read_tagged_fields(&mut cur, |_, _| Ok(false)).unwrap_err();
 
-        assert!(matches!(err, ProtocolError::UnexpectedEof { needed: 3 }));
+        assert2::assert!(matches!(err, ProtocolError::UnexpectedEof { needed: 3 }));
     }
 
     #[test]
@@ -220,7 +219,7 @@ mod tests {
         let mut out = BytesMut::new();
         w.write(&mut out, &unknown);
 
-        assert!(tagged_fields_len(&known, &unknown) == out.len());
+        assert2::assert!(tagged_fields_len(&known, &unknown) == out.len());
     }
 
     #[test]
@@ -236,7 +235,7 @@ mod tests {
         let mut out = BytesMut::new();
         WriteTaggedFields::new().write(&mut out, &unknown);
 
-        assert!(tagged_fields_len(&[], &unknown) == out.len());
+        assert2::assert!(tagged_fields_len(&[], &unknown) == out.len());
     }
 
     #[test]
@@ -244,7 +243,7 @@ mod tests {
         // count=2, tag=5..., tag=3...  — invalid (descending)
         let buf = [0x02, 0x05, 0x01, 0x00, 0x03, 0x01, 0x00];
         let mut cur = &buf[..];
-        assert!(read_tagged_fields(&mut cur, |_, _| Ok(false)).is_err());
+        assert2::assert!(read_tagged_fields(&mut cur, |_, _| Ok(false)).is_err());
     }
 
     #[test]
@@ -258,6 +257,6 @@ mod tests {
         let mut out = BytesMut::new();
         w.write(&mut out, &unknown);
         // Expect: count=2, tag=5,len=1,0xBB, tag=10,len=1,0xAA
-        assert!(&out[..] == &[0x02, 0x05, 0x01, 0xBB, 0x0A, 0x01, 0xAA]);
+        assert2::assert!(&out[..] == &[0x02, 0x05, 0x01, 0xBB, 0x0A, 0x01, 0xAA]);
     }
 }

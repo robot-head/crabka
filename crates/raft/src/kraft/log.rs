@@ -220,14 +220,14 @@ mod tests {
         let (mut log, _dir) = open_tmp();
         let off0 = log.append(&mut batch(0, 1, b"a")).unwrap();
         let off1 = log.append(&mut batch(0, 1, b"b")).unwrap();
-        assert!((off0, off1, log.log_end_offset()) == (Offset(0), Offset(1), Offset(2)));
+        assert2::assert!((off0, off1, log.log_end_offset()) == (Offset(0), Offset(1), Offset(2)));
         // read back decoded
         let out = log.read_decoded(Offset(0), 1 << 20).unwrap();
-        assert_eq!(
+        assert2::assert!(
             out.iter()
                 .map(|batch| batch.partition_leader_epoch)
-                .collect::<Vec<_>>(),
-            vec![1, 1]
+                .collect::<Vec<_>>()
+                == vec![1, 1]
         );
     }
 
@@ -260,7 +260,7 @@ mod tests {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         }
         log.advance_hwm(Offset(2));
-        assert!(log.hwm() == 2);
+        assert2::assert!(log.hwm() == 2);
 
         log.install_snapshot(Offset(9)).unwrap();
         check!(
@@ -277,10 +277,9 @@ mod tests {
         let (mut log, _dir) = open_tmp();
         // follower applies a leader-assigned batch at offset 0
         log.append_at(&mut batch(0, 2, b"x"), Offset(0)).unwrap();
-        assert_eq!(log.log_end_offset().0, 1);
-        assert_eq!(
-            log.read_decoded(Offset(0), 1 << 20).unwrap()[0].partition_leader_epoch,
-            2
+        assert2::assert!(log.log_end_offset().0 == 1);
+        assert2::assert!(
+            log.read_decoded(Offset(0), 1 << 20).unwrap()[0].partition_leader_epoch == 2
         );
     }
 
@@ -289,8 +288,8 @@ mod tests {
         let (mut log, _dir) = open_tmp();
         log.append(&mut batch(0, 1, b"a")).unwrap();
         log.append(&mut batch(0, 3, b"b")).unwrap(); // epoch jumps to 3
-        assert_eq!(LogView::end_offset(&log), 2);
-        assert_eq!(LogView::last_epoch(&log), 3);
+        assert2::assert!(LogView::end_offset(&log) == 2);
+        assert2::assert!(LogView::last_epoch(&log) == 3);
     }
 
     #[test]
@@ -300,22 +299,19 @@ mod tests {
         log.append(&mut batch(0, 2, b"b")).unwrap(); // epoch 2 @ [1,2)
         // epoch 1 ends where epoch 2 starts (offset 1); epoch 2 is current → end 2.
         // unknown future epoch → None
-        for (case, epoch, want) in [
+        for (_case, epoch, want) in [
             ("completed prior epoch", 1, Some(1)),
             ("current epoch", 2, Some(2)),
             ("unknown future epoch", 9, None),
         ] {
-            assert!(
-                LogView::end_offset_for_epoch(&log, epoch) == want,
-                "case {case}"
-            );
+            assert2::assert!(LogView::end_offset_for_epoch(&log, epoch) == want);
         }
     }
 
     #[test]
     fn empty_log_last_epoch_is_zero() {
         let (log, _dir) = open_tmp();
-        assert!(LogView::last_epoch(&log) == 0);
+        assert2::assert!(LogView::last_epoch(&log) == 0);
     }
 
     #[test]
@@ -339,9 +335,9 @@ mod tests {
         let (mut log, _dir) = open_tmp();
         log.append(&mut batch(0, 1, b"x")).unwrap(); // log_end = 1
         log.advance_hwm(Offset(5)); // clamp to log_end
-        assert!(log.hwm() == 1);
+        assert2::assert!(log.hwm() == 1);
         log.advance_hwm(Offset(0)); // never regress
-        assert!(log.hwm() == 1);
+        assert2::assert!(log.hwm() == 1);
     }
 
     #[test]
@@ -351,11 +347,11 @@ mod tests {
             log.append(&mut batch(0, 1, b"x")).unwrap();
         }
         log.advance_hwm(log.log_end_offset());
-        assert!(log.log_start_offset() == 0);
+        assert2::assert!(log.log_start_offset() == 0);
         log.prune_to(Offset(3)).unwrap();
-        assert!(log.log_start_offset() == 3);
+        assert2::assert!(log.log_start_offset() == 3);
         log.prune_to(Offset(2)).unwrap(); // <= current start: no-op
-        assert!(log.log_start_offset() == 3);
+        assert2::assert!(log.log_start_offset() == 3);
     }
 
     #[test]
@@ -373,7 +369,7 @@ mod tests {
             ) == (100, 100, 100)
         );
         let base = log.append(&mut batch(0, 1, b"x")).unwrap();
-        assert!(base == 100);
+        assert2::assert!(base == 100);
     }
 
     #[test]
@@ -384,7 +380,7 @@ mod tests {
         }
         log.advance_hwm(Offset(5));
         log.truncate_to(Offset(2)).unwrap();
-        assert_eq!(log.log_end_offset().0, 2);
-        assert_eq!(log.hwm().0, 2);
+        assert2::assert!(log.log_end_offset().0 == 2);
+        assert2::assert!(log.hwm().0 == 2);
     }
 }

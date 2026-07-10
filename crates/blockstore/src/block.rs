@@ -57,13 +57,12 @@ pub fn validate_against(schema: &Schema, decl: &crate::block_index::BlockSchema)
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn validates_required_block_schema_columns() {
-        for (name, schema, want_valid) in [
+        for (_name, schema, want_valid) in [
             (
                 "required columns",
                 Schema::new(vec![
@@ -103,10 +102,7 @@ mod tests {
                 false,
             ),
         ] {
-            assert!(
-                validate_block_schema(&schema).is_ok() == want_valid,
-                "case {name}"
-            );
+            assert2::assert!(validate_block_schema(&schema).is_ok() == want_valid);
         }
     }
 }

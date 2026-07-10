@@ -360,7 +360,6 @@ fn decode_topic_partitions(buf: &mut &[u8]) -> Result<Vec<(Uuid, Vec<i32>)>, Bro
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -380,11 +379,11 @@ mod tests {
         };
         let bytes = encode_share_key(&key);
         let (ver, body) = peek_version(&bytes);
-        assert!(ver == KEY_SHARE_GROUP_METADATA);
-        assert!(parse_share_key(ver, body).unwrap() == key);
+        assert2::assert!(ver == KEY_SHARE_GROUP_METADATA);
+        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupMetadataValue { epoch: 7 };
-        assert!(ShareGroupMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareGroupMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -395,8 +394,8 @@ mod tests {
         };
         let b = encode_share_key(&key);
         let (ver, body) = peek_version(&b);
-        assert!(ver == KEY_SHARE_MEMBER_METADATA);
-        assert!(parse_share_key(ver, body).unwrap() == key);
+        assert2::assert!(ver == KEY_SHARE_MEMBER_METADATA);
+        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupMemberMetadataValue {
             rack_id: Some("us-east-1a".into()),
@@ -404,7 +403,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: vec!["a".into(), "b".into()],
         };
-        assert!(ShareGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -415,7 +414,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: vec![],
         };
-        assert!(ShareGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareGroupMemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -425,13 +424,15 @@ mod tests {
         };
         let b = encode_share_key(&key);
         let (ver, body) = peek_version(&b);
-        assert!(ver == KEY_SHARE_TARGET_ASSIGNMENT_METADATA);
-        assert!(parse_share_key(ver, body).unwrap() == key);
+        assert2::assert!(ver == KEY_SHARE_TARGET_ASSIGNMENT_METADATA);
+        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupTargetAssignmentMetadataValue {
             assignment_epoch: 12,
         };
-        assert!(ShareGroupTargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(
+            ShareGroupTargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v
+        );
     }
 
     #[test]
@@ -442,13 +443,13 @@ mod tests {
         };
         let b = encode_share_key(&key);
         let (ver, body) = peek_version(&b);
-        assert!(ver == KEY_SHARE_TARGET_ASSIGNMENT_MEMBER);
-        assert!(parse_share_key(ver, body).unwrap() == key);
+        assert2::assert!(ver == KEY_SHARE_TARGET_ASSIGNMENT_MEMBER);
+        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupTargetAssignmentMemberValue {
             topic_partitions: vec![(Uuid([1; 16]), vec![0, 1, 2]), (Uuid([2; 16]), vec![])],
         };
-        assert!(ShareGroupTargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareGroupTargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -459,14 +460,14 @@ mod tests {
         };
         let b = encode_share_key(&key);
         let (ver, body) = peek_version(&b);
-        assert!(ver == KEY_SHARE_CURRENT_MEMBER_ASSIGNMENT);
-        assert!(parse_share_key(ver, body).unwrap() == key);
+        assert2::assert!(ver == KEY_SHARE_CURRENT_MEMBER_ASSIGNMENT);
+        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupCurrentMemberAssignmentValue {
             member_epoch: 5,
             assigned_partitions: vec![(Uuid([3; 16]), vec![0, 1])],
         };
-        assert!(ShareGroupCurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareGroupCurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -476,8 +477,8 @@ mod tests {
         };
         let b = encode_share_key(&key);
         let (ver, body) = peek_version(&b);
-        assert!(ver == KEY_SHARE_GROUP_STATE_PARTITION_METADATA);
-        assert!(parse_share_key(ver, body).unwrap() == key);
+        assert2::assert!(ver == KEY_SHARE_GROUP_STATE_PARTITION_METADATA);
+        assert2::assert!(parse_share_key(ver, body).unwrap() == key);
 
         let v = ShareGroupStatePartitionMetadataValue {
             initialized: vec![
@@ -486,17 +487,17 @@ mod tests {
             ],
             deleting: vec![uuid::Uuid::from_bytes([9; 16])],
         };
-        assert!(ShareGroupStatePartitionMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareGroupStatePartitionMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
     fn state_partition_metadata_empty_round_trip() {
         let v = ShareGroupStatePartitionMetadataValue::default();
-        assert!(ShareGroupStatePartitionMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareGroupStatePartitionMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
     fn unknown_key_version_rejected() {
-        assert!(parse_share_key(99, &[]).is_err());
+        assert2::assert!(parse_share_key(99, &[]).is_err());
     }
 }

@@ -14,7 +14,7 @@
 //!     `next_cursor` round-trip
 //!   * Stable sort order on fetch-all (alphabetical)
 
-use assert2::{assert, check};
+use assert2::check;
 mod support;
 
 use crabka_protocol::owned::{
@@ -57,7 +57,7 @@ async fn create_topic(p: &support::InProcess, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert!(resp.topics[0].error_code == 0, "{name} create: {resp:?}");
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 #[tokio::test]
@@ -143,7 +143,7 @@ async fn fetch_all_returns_topics_in_alphabetical_order() {
         .copied()
         .filter(|n| !n.starts_with("__"))
         .collect();
-    assert!(user_topics == vec!["alpha", "beta", "gamma"]);
+    assert2::assert!(user_topics == vec!["alpha", "beta", "gamma"]);
 
     p.broker.shutdown().await;
 }
@@ -218,10 +218,7 @@ async fn internal_topics_carry_is_internal_flag() {
             n,
             "__consumer_offsets" | "__transaction_state" | "__remote_log_metadata"
         );
-        assert!(
-            row.is_internal == expect_internal,
-            "is_internal mismatch for {n}: {row:?}"
-        );
+        assert2::assert!(row.is_internal == expect_internal);
     }
 
     p.broker.shutdown().await;
@@ -254,14 +251,13 @@ async fn elr_lists_are_empty_not_null_for_jvm_3_8_admin_compatibility() {
     let part = &resp.topics[0].partitions[0];
     // MUST be Some(_), not None. Both fields stay as empty vecs so the
     // JVM 3.8 admin client's unconditional `.stream()` call doesn't NPE.
-    assert!(
+    assert2::assert!(
         (
             resp.topics.len(),
             resp.topics[0].partitions.len(),
             part.eligible_leader_replicas.as_deref(),
             part.last_known_elr.as_deref()
-        ) == (1, 1, Some(&[][..]), Some(&[][..])),
-        "ELR fields must be empty lists, not null"
+        ) == (1, 1, Some(&[][..]), Some(&[][..]))
     );
 
     p.broker.shutdown().await;
@@ -286,13 +282,9 @@ async fn topic_authorized_operations_populated_for_super_user() {
         .await
         .expect("DescribeTopicPartitions");
 
-    assert!(resp.topics.len() == 1);
+    assert2::assert!(resp.topics.len() == 1);
     let row = &resp.topics[0];
-    assert!(
-        (row.error_code, row.topic_authorized_operations) == (0, TOPIC_FULL_MASK),
-        "expected full topic mask, got 0b{:b}",
-        row.topic_authorized_operations
-    );
+    assert2::assert!((row.error_code, row.topic_authorized_operations) == (0, TOPIC_FULL_MASK));
 
     p.broker.shutdown().await;
 }
@@ -347,18 +339,14 @@ async fn pagination_caps_response_at_partition_limit_and_returns_next_cursor() {
         })
         .await
         .expect("DescribeTopicPartitions (resume)");
-    assert!(resp2.topics.len() == 1);
+    assert2::assert!(resp2.topics.len() == 1);
     let parts: Vec<i32> = resp2.topics[0]
         .partitions
         .iter()
         .map(|p| p.partition_index)
         .collect();
-    assert!(parts == vec![3, 4]);
-    assert!(
-        resp2.next_cursor.is_none(),
-        "no more data should remain after the resume: {:?}",
-        resp2.next_cursor,
-    );
+    assert2::assert!(parts == vec![3, 4]);
+    assert2::assert!(resp2.next_cursor.is_none());
 
     p.broker.shutdown().await;
 }

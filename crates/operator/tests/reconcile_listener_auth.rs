@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_operator::{
     controller::kafka::reconcile,
     crd::{Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerType},
@@ -107,10 +107,7 @@ async fn internal_listener_auth_render_cases() {
         let observed = state.take_observed();
         let toml = extract_broker0_toml(&observed, cluster);
         for fragment in expected_fragments {
-            assert!(
-                toml.contains(fragment),
-                "{case}: expected {fragment:?};\n{toml}"
-            );
+            assert2::assert!(toml.contains(fragment));
         }
     }
 }
@@ -139,14 +136,8 @@ async fn scram_sha_256_renders_sasl_ssl_with_256_mechanism() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c3");
 
-    assert!(
-        toml.contains("protocol = \"SaslSsl\""),
-        "expected SaslSsl for SCRAM-SHA-256 with TLS;\n{toml}"
-    );
-    assert!(
-        toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-256\"] }"),
-        "expected SCRAM-SHA-256 mechanism;\n{toml}"
-    );
+    assert2::assert!(toml.contains("protocol = \"SaslSsl\""));
+    assert2::assert!(toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-256\"] }"));
 }
 
 // ── test 4 ────────────────────────────────────────────────────────────────────
@@ -207,13 +198,9 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
     let observed = state.take_observed();
 
     // ConfigMap PATCH must be absent.
-    assert!(
-        !observed.iter().any(|r| {
-            r.method() == Method::PATCH
-                && r.uri().to_string().contains("/configmaps/c5-broker-config")
-        }),
-        "validation failure must not patch the broker-config ConfigMap"
-    );
+    assert2::assert!(!observed.iter().any(|r| {
+        r.method() == Method::PATCH && r.uri().to_string().contains("/configmaps/c5-broker-config")
+    }));
 
     // Status must surface the validation error.
     let status_patch = observed
@@ -230,12 +217,8 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert_eq!(valid["status"].as_str(), Some("False"), "body = {body}");
-    assert_eq!(
-        valid["reason"].as_str(),
-        Some("ListenerMtlsRequiresTransportTls"),
-        "body = {body}"
-    );
+    assert2::assert!(valid["status"].as_str() == Some("False"));
+    assert2::assert!(valid["reason"].as_str() == Some("ListenerMtlsRequiresTransportTls"));
 
     check!(state.remaining_rules() == 0);
 }
@@ -304,21 +287,12 @@ async fn auth_change_bumps_config_hash() {
         .unwrap_or_else(|| panic!("config-hash label missing; body = {body2}"))
         .to_string();
 
-    assert!(
-        hash1 != hash2,
-        "config-hash must differ between SCRAM-SHA-512 and mTLS configs"
-    );
+    assert2::assert!(hash1 != hash2);
 
     // Both hashes must be valid 16-char hex strings.
-    for (hash, label) in [(&hash1, "scram"), (&hash2, "mtls")] {
-        assert!(
-            hash.len() == 16,
-            "{label} config-hash must be 16 hex chars, got {hash:?}"
-        );
-        assert!(
-            hash.chars().all(|c| c.is_ascii_hexdigit()),
-            "{label} config-hash must be hex, got {hash:?}"
-        );
+    for (hash, _label) in [(&hash1, "scram"), (&hash2, "mtls")] {
+        assert2::assert!(hash.len() == 16);
+        assert2::assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
 
@@ -660,8 +634,5 @@ async fn nodeport_listener_external_san_added_to_per_broker_cert() {
     // ExternalIP). This proves the SAN computation reached the keystore-write path, but does
     // not parse the cert PEM itself — issue_broker_cert is independently tested in
     // security/src/ca.rs and operator/src/controller/cluster_ca.rs::san_tests.
-    assert!(
-        stored_digest == expected_digest,
-        "keystore 0.sans-digest must include the NodePort external IP {ext_node_ip}"
-    );
+    assert2::assert!(stored_digest == expected_digest);
 }

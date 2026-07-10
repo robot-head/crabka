@@ -219,16 +219,12 @@ mod core_tests {
 
     #[test]
     fn compute_horizon_saturates_at_i64_bounds() {
-        for (name, timestamp, retention, expected) in [
+        for (_name, timestamp, retention, expected) in [
             ("ordinary sum", 100, 50, 150),
             ("saturates maximum", i64::MAX - 1, 50, i64::MAX),
             ("saturates minimum", i64::MIN + 1, -50, i64::MIN),
         ] {
-            assert_eq!(
-                compute_horizon(timestamp, retention),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(compute_horizon(timestamp, retention) == expected);
         }
     }
 
@@ -310,16 +306,16 @@ mod core_tests {
         // Reconstructed absolute timestamps (base + delta) must equal the
         // originals: 1000, 1005, 1020.
         let reconstructed: Vec<i64> = deltas.iter().map(|d| base + d).collect();
-        assert_eq!(base, 9999);
-        assert_eq!(reconstructed, vec![1000, 1005, 1020]);
+        assert2::assert!(base == 9999);
+        assert2::assert!(reconstructed == vec![1000, 1005, 1020]);
     }
 
     #[test]
     fn txn_data_fully_gone_checks_survivor_set() {
         let mut survivors = HashSet::new();
         survivors.insert(ProducerId(1000));
-        assert!(txn_data_fully_gone(ProducerId(2000), &survivors));
-        assert!(!txn_data_fully_gone(ProducerId(1000), &survivors));
+        assert2::assert!(txn_data_fully_gone(ProducerId(2000), &survivors));
+        assert2::assert!(!txn_data_fully_gone(ProducerId(1000), &survivors));
     }
 }
 
@@ -577,7 +573,7 @@ mod build_map_tests {
         let seg = write_sealed_batches(dir.path(), &[control_batch(0, 1000, 1 /* COMMIT */), data]);
         let segs: Vec<&Segment> = vec![&seg];
         let map = build_offset_map(&segs).unwrap();
-        assert_eq!(map, HashMap::from([(Bytes::from_static(b"k1"), Offset(1))]));
+        assert2::assert!(map == HashMap::from([(Bytes::from_static(b"k1"), Offset(1))]));
     }
 
     #[test]
@@ -594,9 +590,8 @@ mod build_map_tests {
         );
         let segs: Vec<&Segment> = vec![&seg0];
         let map = build_offset_map(&segs).unwrap();
-        assert_eq!(
-            map,
-            HashMap::from([
+        assert2::assert!(
+            map == HashMap::from([
                 (Bytes::from_static(b"k1"), Offset(2)),
                 (Bytes::from_static(b"k2"), Offset(1)),
             ])
@@ -617,7 +612,7 @@ mod build_map_tests {
         );
         let segs: Vec<&Segment> = vec![&seg0];
         let map = build_offset_map(&segs).unwrap();
-        assert_eq!(map, HashMap::from([(Bytes::from_static(b"k1"), Offset(1))]));
+        assert2::assert!(map == HashMap::from([(Bytes::from_static(b"k1"), Offset(1))]));
     }
 
     #[test]
@@ -635,10 +630,7 @@ mod build_map_tests {
         );
         let segs: Vec<&Segment> = vec![&seg0, &seg1];
         let map = build_offset_map(&segs).unwrap();
-        assert_eq!(
-            map,
-            HashMap::from([(Bytes::from_static(b"k1"), Offset(10))])
-        );
+        assert2::assert!(map == HashMap::from([(Bytes::from_static(b"k1"), Offset(10))]));
     }
 
     // Survivor detection compares each record's absolute offset
@@ -681,15 +673,12 @@ mod build_map_tests {
         let segs: Vec<&Segment> = vec![&seg];
         let map = build_offset_map(&segs).unwrap();
         // Sanity: the newest-for-key absolute offset is 15 (10 + 5).
-        assert_eq!(
-            map,
-            HashMap::from([(Bytes::from_static(b"k1"), Offset(15))])
-        );
+        assert2::assert!(map == HashMap::from([(Bytes::from_static(b"k1"), Offset(15))]));
 
         let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
         // Producer 2000's newest data survives; producer 1000's is superseded.
-        assert_eq!(txn.txn_state(ProducerId(2000)), TxnDataState::DataSurvives);
-        assert_eq!(txn.txn_state(ProducerId(1000)), TxnDataState::DataFullyGone);
+        assert2::assert!(txn.txn_state(ProducerId(2000)) == TxnDataState::DataSurvives);
+        assert2::assert!(txn.txn_state(ProducerId(1000)) == TxnDataState::DataFullyGone);
     }
 }
 
@@ -1014,19 +1003,19 @@ mod rewrite_tests {
         let out = rewrite_simple(dir.path(), &segs);
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
-        assert_eq!(out.new_base_offset, Offset(0));
-        assert_eq!(out.new_last_offset, Offset(2));
-        assert_eq!(
-            batches,
-            vec![RecordBatch {
-                base_offset: 0,
-                last_offset_delta: 2,
-                records: vec![
-                    make_record(1, Some(b"k2"), Some(b"v2")),
-                    make_record(2, Some(b"k1"), Some(b"v3")),
-                ],
-                ..RecordBatch::default()
-            }]
+        assert2::assert!(out.new_base_offset == Offset(0));
+        assert2::assert!(out.new_last_offset == Offset(2));
+        assert2::assert!(
+            batches
+                == vec![RecordBatch {
+                    base_offset: 0,
+                    last_offset_delta: 2,
+                    records: vec![
+                        make_record(1, Some(b"k2"), Some(b"v2")),
+                        make_record(2, Some(b"k1"), Some(b"v3")),
+                    ],
+                    ..RecordBatch::default()
+                }]
         );
     }
 
@@ -1048,18 +1037,18 @@ mod rewrite_tests {
         let batch = RecordBatch::decode(&mut cursor).unwrap();
         let mut record = make_record(1, Some(b"k1"), None);
         record.timestamp_delta = -1_000;
-        assert_eq!(out.new_base_offset, Offset(0));
-        assert_eq!(out.new_last_offset, Offset(1));
-        assert_eq!(
-            batch,
-            RecordBatch {
-                base_offset: 0,
-                last_offset_delta: 1,
-                base_timestamp: RET_MS,
-                attributes: Attributes::default().with_delete_horizon(true),
-                records: vec![record],
-                ..RecordBatch::default()
-            }
+        assert2::assert!(out.new_base_offset == Offset(0));
+        assert2::assert!(out.new_last_offset == Offset(1));
+        assert2::assert!(
+            batch
+                == RecordBatch {
+                    base_offset: 0,
+                    last_offset_delta: 1,
+                    base_timestamp: RET_MS,
+                    attributes: Attributes::default().with_delete_horizon(true),
+                    records: vec![record],
+                    ..RecordBatch::default()
+                }
         );
     }
 
@@ -1079,19 +1068,19 @@ mod rewrite_tests {
         let out = rewrite_simple(dir.path(), &segs);
         let bytes = std::fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
-        assert_eq!(out.new_base_offset, Offset(100));
-        assert_eq!(out.new_last_offset, Offset(102));
-        assert_eq!(
-            batches,
-            vec![RecordBatch {
-                base_offset: 100,
-                last_offset_delta: 2,
-                records: vec![
-                    make_record(1, Some(b"k2"), Some(b"v2")),
-                    make_record(2, Some(b"k1"), Some(b"v3")),
-                ],
-                ..RecordBatch::default()
-            }]
+        assert2::assert!(out.new_base_offset == Offset(100));
+        assert2::assert!(out.new_last_offset == Offset(102));
+        assert2::assert!(
+            batches
+                == vec![RecordBatch {
+                    base_offset: 100,
+                    last_offset_delta: 2,
+                    records: vec![
+                        make_record(1, Some(b"k2"), Some(b"v2")),
+                        make_record(2, Some(b"k1"), Some(b"v3")),
+                    ],
+                    ..RecordBatch::default()
+                }]
         );
     }
 
@@ -1142,17 +1131,9 @@ mod rewrite_tests {
 
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
-        assert_eq!(
-            out.new_base_offset,
-            Offset(0),
-            "both commit markers must survive"
-        );
-        assert_eq!(
-            out.new_last_offset,
-            Offset(3),
-            "both commit markers must survive"
-        );
-        assert_eq!(batches, expected, "both commit markers must survive");
+        assert2::assert!(out.new_base_offset == Offset(0));
+        assert2::assert!(out.new_last_offset == Offset(3));
+        assert2::assert!(batches == expected);
     }
 
     /// (b) A newest-for-key tombstone with no existing horizon gets bit 6 set
@@ -1185,18 +1166,18 @@ mod rewrite_tests {
         let batches = decode_all(&bytes);
         let mut record = make_record(0, Some(b"k1"), None);
         record.timestamp_delta = -(now + ret);
-        assert_eq!(out.new_base_offset, Offset(0));
-        assert_eq!(out.new_last_offset, Offset(0));
-        assert_eq!(
-            batches,
-            vec![RecordBatch {
-                base_offset: 0,
-                last_offset_delta: 0,
-                base_timestamp: now + ret,
-                attributes: Attributes::default().with_delete_horizon(true),
-                records: vec![record],
-                ..RecordBatch::default()
-            }]
+        assert2::assert!(out.new_base_offset == Offset(0));
+        assert2::assert!(out.new_last_offset == Offset(0));
+        assert2::assert!(
+            batches
+                == vec![RecordBatch {
+                    base_offset: 0,
+                    last_offset_delta: 0,
+                    base_timestamp: now + ret,
+                    attributes: Attributes::default().with_delete_horizon(true),
+                    records: vec![record],
+                    ..RecordBatch::default()
+                }]
         );
     }
 
@@ -1236,25 +1217,16 @@ mod rewrite_tests {
         .unwrap();
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
-        assert_eq!(
-            out.new_base_offset,
-            Offset(0),
-            "expired marker drops while the complete data batch survives"
-        );
-        assert_eq!(
-            out.new_last_offset,
-            Offset(1),
-            "expired marker drops while the complete data batch survives"
-        );
-        assert_eq!(
-            batches,
-            vec![RecordBatch {
-                base_offset: 1,
-                last_offset_delta: 0,
-                records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
-                ..RecordBatch::default()
-            }],
-            "expired marker drops while the complete data batch survives"
+        assert2::assert!(out.new_base_offset == Offset(0));
+        assert2::assert!(out.new_last_offset == Offset(1));
+        assert2::assert!(
+            batches
+                == vec![RecordBatch {
+                    base_offset: 1,
+                    last_offset_delta: 0,
+                    records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+                    ..RecordBatch::default()
+                }]
         );
     }
 
@@ -1293,27 +1265,27 @@ mod rewrite_tests {
             rewrite_segments(dir.path(), &segs, &map, &txn, 0, RET_MS, &active, 4096).unwrap();
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
-        assert_eq!(out.new_base_offset, Offset(0));
-        assert_eq!(out.new_last_offset, Offset(1));
-        assert_eq!(
-            batches,
-            vec![
-                RecordBatch {
-                    base_offset: 0,
-                    last_offset_delta: 0,
-                    producer_id: 1000,
-                    producer_epoch: 7,
-                    base_sequence: 3,
-                    ..RecordBatch::default()
-                },
-                RecordBatch {
-                    base_offset: 1,
-                    last_offset_delta: 0,
-                    producer_id: -1,
-                    records: vec![make_record(0, Some(b"k1"), Some(b"v2"))],
-                    ..RecordBatch::default()
-                },
-            ]
+        assert2::assert!(out.new_base_offset == Offset(0));
+        assert2::assert!(out.new_last_offset == Offset(1));
+        assert2::assert!(
+            batches
+                == vec![
+                    RecordBatch {
+                        base_offset: 0,
+                        last_offset_delta: 0,
+                        producer_id: 1000,
+                        producer_epoch: 7,
+                        base_sequence: 3,
+                        ..RecordBatch::default()
+                    },
+                    RecordBatch {
+                        base_offset: 1,
+                        last_offset_delta: 0,
+                        producer_id: -1,
+                        records: vec![make_record(0, Some(b"k1"), Some(b"v2"))],
+                        ..RecordBatch::default()
+                    },
+                ]
         );
     }
 
@@ -1354,25 +1326,25 @@ mod rewrite_tests {
         // The emptied batch is re-emitted as a bare header at base_offset 100.
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
-        assert_eq!(out.new_base_offset, Offset(0));
-        assert_eq!(out.new_last_offset, Offset(105));
-        assert_eq!(
-            batches,
-            vec![
-                RecordBatch {
-                    base_offset: 0,
-                    last_offset_delta: 0,
-                    producer_id: -1,
-                    records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
-                    ..RecordBatch::default()
-                },
-                RecordBatch {
-                    base_offset: 100,
-                    last_offset_delta: 5,
-                    producer_id: -1,
-                    ..RecordBatch::default()
-                },
-            ]
+        assert2::assert!(out.new_base_offset == Offset(0));
+        assert2::assert!(out.new_last_offset == Offset(105));
+        assert2::assert!(
+            batches
+                == vec![
+                    RecordBatch {
+                        base_offset: 0,
+                        last_offset_delta: 0,
+                        producer_id: -1,
+                        records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+                        ..RecordBatch::default()
+                    },
+                    RecordBatch {
+                        base_offset: 100,
+                        last_offset_delta: 5,
+                        producer_id: -1,
+                        ..RecordBatch::default()
+                    },
+                ]
         );
     }
 }
@@ -1648,7 +1620,7 @@ mod retention_fuzz {
                     // checked here at the exact point of assignment (where this
                     // specific entry's prior horizon is known unambiguously).
                     if let Some(existing) = e.horizon {
-                        assert!(existing == h, "horizon re-stamped {existing} -> {h}");
+                        assert2::assert!(existing == h);
                     }
                     let mut ne = e.clone();
                     ne.horizon = Some(h);
@@ -1698,12 +1670,7 @@ mod retention_fuzz {
                 prop_assert_eq_inner(&after, &twice);
 
                 // --- Monotone shrink. ---
-                assert!(
-                    after.len() <= before.len(),
-                    "compaction grew the log: {} -> {}",
-                    before.len(),
-                    after.len()
-                );
+                assert2::assert!(after.len() <= before.len());
 
                 // --- No-data-loss: every newest-for-key live data survives. ---
                 let map = offset_map(&before);
@@ -1712,11 +1679,8 @@ mod retention_fuzz {
                         && let Some(k) = e.key
                         && map.get(&k).copied() == Some(idx)
                     {
-                        assert!(
-                            after.iter().any(|x| x.key == Some(k)
-                                && matches!(x.kind, EntryKind::Data { value: Some(_) })),
-                            "no-data-loss: key {k} newest-live dropped"
-                        );
+                        assert2::assert!(after.iter().any(|x| x.key == Some(k)
+                            && matches!(x.kind, EntryKind::Data { value: Some(_) })));
                     }
                 }
 
@@ -1732,22 +1696,14 @@ mod retention_fuzz {
                             )
                         });
                         if survivors.contains(producer_id) {
-                            assert!(
-                                alive,
-                                "marker for pid {producer_id} dropped while data survives"
-                            );
+                            assert2::assert!(alive);
                         }
                         // If the marker had a horizon and clock < horizon, it
                         // must still be alive (not aged out prematurely).
                         if let (Some(h), false) = (e.horizon, survivors.contains(producer_id))
                             && *clock < h
                         {
-                            assert!(
-                                alive,
-                                "marker for pid {producer_id} aged out at \
-                                 clock {} < horizon {h}",
-                                *clock
-                            );
+                            assert2::assert!(alive);
                         }
                     }
                 }
@@ -1758,11 +1714,7 @@ mod retention_fuzz {
                     if matches!(x.kind, EntryKind::Data { value: None })
                         && let Some(h) = x.horizon
                     {
-                        assert!(
-                            *clock < h,
-                            "tombstone survived with elapsed horizon {h} at clock {}",
-                            *clock
-                        );
+                        assert2::assert!(*clock < h);
                     }
                 }
 
@@ -1778,10 +1730,7 @@ mod retention_fuzz {
     /// `prop_assert_eq` is macro-bound to a `proptest!` body; inside a plain fn
     /// we use a panicking equality so a mismatch surfaces as a case failure.
     fn prop_assert_eq_inner(a: &[Entry], b: &[Entry]) {
-        assert!(
-            a == b,
-            "compaction not idempotent at fixed clock:\n  once={a:?}\n  twice={b:?}"
-        );
+        assert2::assert!(a == b);
     }
 
     fn op_strategy() -> impl Strategy<Value = Op> {

@@ -79,14 +79,13 @@ pub struct CertificateAuthorityStatus {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn defaults_match_strimzi() {
         let d = CertificateAuthority::default();
-        assert!(
+        assert2::assert!(
             d == CertificateAuthority {
                 generate_certificate_authority: true,
                 validity_days: 365,
@@ -97,7 +96,7 @@ mod tests {
 
     #[test]
     fn certificate_authority_deserialization_cases() {
-        for (name, json, expected) in [
+        for (_name, json, expected) in [
             (
                 "empty object uses defaults",
                 serde_json::json!({}),
@@ -117,10 +116,8 @@ mod tests {
                 },
             ),
         ] {
-            assert_eq!(
-                serde_json::from_value::<CertificateAuthority>(json).expect("parse"),
-                expected,
-                "case {name}"
+            assert2::assert!(
+                serde_json::from_value::<CertificateAuthority>(json).expect("parse") == expected
             );
         }
     }

@@ -704,7 +704,7 @@ impl Consumer {
 mod offset_advance_tests {
     use std::collections::HashMap;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::{
         owned::fetch_request::ReplicaState,
         primitives::uuid::Uuid as WireUuid,
@@ -748,7 +748,7 @@ mod offset_advance_tests {
         let key = ("topic-a".to_string(), 2);
         let mut offsets = HashMap::new();
 
-        assert!(fetch_offset_or_unknown(&offsets, &key) == UNKNOWN_FETCH_OFFSET);
+        assert2::assert!(fetch_offset_or_unknown(&offsets, &key) == UNKNOWN_FETCH_OFFSET);
         offsets.insert(key.clone(), 42);
         check!(fetch_offset_or_unknown(&offsets, &key) == 42);
 
@@ -852,7 +852,7 @@ mod offset_advance_tests {
             vec![(2, 42, LeaderEpoch(5), LeaderEpoch(4))],
             128 * 1024,
         );
-        assert!(
+        assert2::assert!(
             topic
                 == FetchTopic {
                     topic: "topic-a".into(),
@@ -878,7 +878,7 @@ mod offset_advance_tests {
             2 * 1024 * 1024,
             vec![topic.clone()],
         );
-        assert!(
+        assert2::assert!(
             req == FetchRequest {
                 replica_id: -1,
                 max_wait_ms: 123,
@@ -907,7 +907,7 @@ mod offset_advance_tests {
         by_topic.insert("topic-a".to_string(), vec![3]);
         let req = build_latest_offsets_request(by_topic);
 
-        assert!(
+        assert2::assert!(
             req == ListOffsetsRequest {
                 replica_id: -1,
                 isolation_level: 0,
@@ -939,12 +939,12 @@ mod offset_advance_tests {
         };
         let payload = RecordsPayload::V2(vec![batch]);
         let batches = payload.as_v2().unwrap();
-        assert!(super::next_offset_after(batches) == Some(15));
+        assert2::assert!(super::next_offset_after(batches) == Some(15));
     }
 
     #[test]
     fn advance_target_none_for_empty() {
         let payload = RecordsPayload::V2(vec![]);
-        assert!(super::next_offset_after(payload.as_v2().unwrap()) == None);
+        assert2::assert!(super::next_offset_after(payload.as_v2().unwrap()) == None);
     }
 }

@@ -130,7 +130,7 @@ fn unescape_quoted(input: &str) -> Result<String, ProfileError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_blockstore::MatchOp;
 
     use super::*;
@@ -140,7 +140,7 @@ mod tests {
         let ms =
             parse_label_selector(r#"{service_name="checkout", env=~"prod|stage", region!="eu"}"#)
                 .unwrap();
-        assert!(
+        assert2::assert!(
             ms == vec![
                 LabelMatcher::new("service_name", MatchOp::Eq, "checkout"),
                 LabelMatcher::new("env", MatchOp::Re, "prod|stage"),
@@ -151,8 +151,8 @@ mod tests {
 
     #[test]
     fn empty_selector_is_empty() {
-        assert!(parse_label_selector("{}").unwrap().is_empty());
-        assert!(parse_label_selector("").unwrap().is_empty());
+        assert2::assert!(parse_label_selector("{}").unwrap().is_empty());
+        assert2::assert!(parse_label_selector("").unwrap().is_empty());
     }
 
     // Grafana's pyroscope drilldown app concatenates an often-empty base filter
@@ -167,26 +167,26 @@ mod tests {
             r#"{ , service_name="broker" , }"#,
         ] {
             let ms = parse_label_selector(sel).unwrap();
-            assert_eq!(ms.len(), 1, "{sel}");
-            assert_eq!(ms[0].name.as_str(), "service_name", "{sel}");
-            assert_eq!(ms[0].value.as_str(), "broker", "{sel}");
+            assert2::assert!(ms.len() == 1);
+            assert2::assert!(ms[0].name.as_str() == "service_name");
+            assert2::assert!(ms[0].value.as_str() == "broker");
         }
         // Real matchers on either side of a double comma are both kept.
-        assert!(
+        assert2::assert!(
             parse_label_selector(r#"{service_name="a",,instance="i"}"#)
                 .unwrap()
                 .len()
                 == 2
         );
         // A selector that is only commas/whitespace means match-all.
-        assert!(parse_label_selector("{,}").unwrap().is_empty());
+        assert2::assert!(parse_label_selector("{,}").unwrap().is_empty());
     }
 
     #[test]
     fn keeps_commas_inside_quoted_matcher_values() {
         let ms = parse_label_selector(r#"{service_name="api,primary",instance="pod-1"}"#).unwrap();
 
-        assert!(
+        assert2::assert!(
             ms == vec![
                 LabelMatcher::new("service_name", MatchOp::Eq, "api,primary"),
                 LabelMatcher::new("instance", MatchOp::Eq, "pod-1"),
@@ -198,7 +198,7 @@ mod tests {
     fn escaped_quotes_do_not_toggle_comma_splitting() {
         let ms = parse_label_selector(r#"{note="say \"hi, there\"",service_name="api"}"#).unwrap();
 
-        assert!(
+        assert2::assert!(
             ms == vec![
                 LabelMatcher::new("note", MatchOp::Eq, "say \"hi, there\""),
                 LabelMatcher::new("service_name", MatchOp::Eq, "api"),
@@ -208,14 +208,14 @@ mod tests {
 
     #[test]
     fn splitter_does_not_treat_backslash_outside_quotes_as_escape() {
-        assert!(
+        assert2::assert!(
             split_top_level_commas("left\\,right,tail").unwrap() == vec!["left\\", "right", "tail"]
         );
     }
 
     #[test]
     fn rejects_malformed() {
-        assert!(parse_label_selector(r"{service_name=}").is_err());
-        assert!(parse_label_selector(r#"{=~"x"}"#).is_err());
+        assert2::assert!(parse_label_selector(r"{service_name=}").is_err());
+        assert2::assert!(parse_label_selector(r#"{=~"x"}"#).is_err());
     }
 }

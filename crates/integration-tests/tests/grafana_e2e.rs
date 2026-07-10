@@ -15,7 +15,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use assert2::assert;
 use crabka_blockstore::BlockDescriptor;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
@@ -190,10 +189,7 @@ async fn create_topic(bootstrap: &str, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        response.topics[0].error_code == 0,
-        "create_topic failed: {response:?}"
-    );
+    assert2::assert!(response.topics[0].error_code == 0);
 }
 
 fn querier_service_config(bootstrap: &str, topic: &str, data_root: &TempDir) -> ServiceConfig {
@@ -219,7 +215,7 @@ fn querier_service_config(bootstrap: &str, topic: &str, data_root: &TempDir) -> 
     }
 }
 
-async fn wait_for_http_ok(http: &reqwest::Client, url: &str, what: &str) {
+async fn wait_for_http_ok(http: &reqwest::Client, url: &str, _what: &str) {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         if let Ok(resp) = http.get(url).send().await
@@ -227,10 +223,7 @@ async fn wait_for_http_ok(http: &reqwest::Client, url: &str, what: &str) {
         {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "{what} did not become ready ({url})"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
@@ -244,10 +237,7 @@ async fn wait_for_grafana_datasource(http: &reqwest::Client, base: &str, uid: &s
         {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "Grafana datasource {uid} was not provisioned ({url})"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
@@ -258,7 +248,7 @@ where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
 {
-    assert!(attempts > 0, "{what} retry attempts must be positive");
+    assert2::assert!(attempts > 0);
 
     let mut last_error = String::new();
     for attempt in 1..=attempts {
@@ -311,8 +301,8 @@ async fn container_start_retry_retries_transient_errors_without_docker() {
     })
     .await;
 
-    assert_eq!(value, "started");
-    assert_eq!(attempts.get(), 3);
+    assert2::assert!(value == "started");
+    assert2::assert!(attempts.get() == 3);
 }
 
 async fn push_to_loki(http: &reqwest::Client, base: &str, payload: &Value) {
@@ -323,11 +313,7 @@ async fn push_to_loki(http: &reqwest::Client, base: &str, payload: &Value) {
         .send()
         .await
         .expect("push to Loki");
-    assert!(
-        resp.status() == reqwest::StatusCode::NO_CONTENT,
-        "Loki push status {}",
-        resp.status()
-    );
+    assert2::assert!(resp.status() == reqwest::StatusCode::NO_CONTENT);
 }
 
 async fn boot_stack() -> Stack {
@@ -385,7 +371,7 @@ async fn boot_stack() -> Stack {
     )
     .await
     .unwrap();
-    assert!(!descriptors.is_empty(), "compactor wrote no blocks");
+    assert2::assert!(!descriptors.is_empty());
 
     // querier reading the compacted manifest from object storage
     let mut q_cfg = querier_service_config(&bootstrap, topic, &data_root);
@@ -492,11 +478,7 @@ async fn push_to_crabka(app: axum::Router, payload: &Value) {
         )
         .await
         .unwrap();
-    assert!(
-        resp.status() == axum::http::StatusCode::NO_CONTENT,
-        "crabka push status {}",
-        resp.status()
-    );
+    assert2::assert!(resp.status() == axum::http::StatusCode::NO_CONTENT);
 }
 
 impl Stack {
@@ -843,9 +825,9 @@ async fn grafana_e2e_log_queries_match_loki() {
     let stack = boot_stack().await;
     let mismatches = run_corpus(&stack, LOG_QUERIES).await;
     let ok = mismatches.is_empty();
-    let detail = report(&mismatches);
+    let _detail = report(&mismatches);
     stack.shutdown().await;
-    assert!(ok, "{detail}");
+    assert2::assert!(ok);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -853,9 +835,9 @@ async fn grafana_e2e_metric_queries_match_loki() {
     let stack = boot_stack().await;
     let mismatches = run_corpus(&stack, METRIC_QUERIES).await;
     let ok = mismatches.is_empty();
-    let detail = report(&mismatches);
+    let _detail = report(&mismatches);
     stack.shutdown().await;
-    assert!(ok, "{detail}");
+    assert2::assert!(ok);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -923,9 +905,6 @@ async fn grafana_e2e_metadata_endpoints_match_loki() {
     let values_match = cv == lv;
 
     stack.shutdown().await;
-    assert!(labels_match, "labels differ: crabka={c:?} loki={l:?}");
-    assert!(
-        values_match,
-        "label app values differ: crabka={cv:?} loki={lv:?}"
-    );
+    assert2::assert!(labels_match);
+    assert2::assert!(values_match);
 }

@@ -211,7 +211,7 @@ fn broker_err(api: &'static str, code: i16, message: Option<String>) -> AdminErr
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::Bytes;
     use crabka_protocol::{
         UnknownTaggedFields,
@@ -239,7 +239,7 @@ mod tests {
             &["User:bob".to_string(), "carol".to_string()],
             60_000,
         );
-        assert!(
+        assert2::assert!(
             req == CreateDelegationTokenRequest {
                 owner_principal_type: Some("User".to_string()),
                 owner_principal_name: Some("alice".to_string()),
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn build_renew_uses_minus_one_for_broker_default() {
         let req = build_renew_delegation_token(b"\x01\x02\x03");
-        assert!((req.hmac.as_ref(), req.renew_period_ms) == (&[0x01, 0x02, 0x03][..], -1));
+        assert2::assert!((req.hmac.as_ref(), req.renew_period_ms) == (&[0x01, 0x02, 0x03][..], -1));
     }
 
     /// Expire-immediately is signaled by `expiry_time_period_ms = -1`;
@@ -278,19 +278,19 @@ mod tests {
     #[test]
     fn build_expire_uses_minus_one_for_immediate_tombstone() {
         let req = build_expire_delegation_token(b"\xaa\xbb");
-        assert!((req.hmac.as_ref(), req.expiry_time_period_ms) == (&[0xaa, 0xbb][..], -1));
+        assert2::assert!((req.hmac.as_ref(), req.expiry_time_period_ms) == (&[0xaa, 0xbb][..], -1));
     }
 
     // ── build_describe_owner_filter ──────────────────────────────────
 
     #[test]
     fn build_describe_owner_filter_sets_single_entry() {
-        for (name, owner, principal_name) in [
+        for (_name, owner, principal_name) in [
             ("typed owner", "User:alice", "alice"),
             ("bare owner defaults to User", "solo", "solo"),
         ] {
             let req = build_describe_owner_filter(owner);
-            assert!(
+            assert2::assert!(
                 req == DescribeDelegationTokenRequest {
                     owners: Some(vec![DescribeDelegationTokenOwner {
                         principal_type: "User".to_string(),
@@ -298,8 +298,7 @@ mod tests {
                         unknown_tagged_fields: UnknownTaggedFields(vec![]),
                     }]),
                     unknown_tagged_fields: UnknownTaggedFields(vec![]),
-                },
-                "case {name}"
+                }
             );
         }
     }
@@ -332,7 +331,7 @@ mod tests {
             ..Default::default()
         };
         let out = parse_describe_delegation_tokens(resp).expect("ok response");
-        assert!(
+        assert2::assert!(
             out == vec![DelegationToken {
                 token_id: "tok-1".to_string(),
                 owner: KafkaPrincipal {
@@ -402,7 +401,7 @@ mod tests {
         let err = parse_describe_delegation_tokens(resp).unwrap_err();
         match err {
             AdminError::Broker { api, code, .. } => {
-                assert!((api, code) == ("DescribeDelegationToken", 61));
+                assert2::assert!((api, code) == ("DescribeDelegationToken", 61));
             }
             other => panic!("expected AdminError::Broker, got {other:?}"),
         }

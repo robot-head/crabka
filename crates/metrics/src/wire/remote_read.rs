@@ -115,7 +115,7 @@ pub fn series_to_timeseries(series: Vec<(Labels, Vec<(i64, f64)>)>) -> v1::Query
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_blockstore::{Labels, MatchOp};
     use prost::Message;
 
@@ -146,7 +146,7 @@ mod tests {
             decode_read_request(&snappy(&req.encode_to_vec()), DEFAULT_MAX_READ_DECOMPRESSED)
                 .unwrap();
 
-        assert!(back.queries.len() == 1);
+        assert2::assert!(back.queries.len() == 1);
         let (selectors, start, end) = matchers_to_selectors(&back.queries[0]).unwrap();
         check!(start == 1000);
         check!(end == 2000);
@@ -173,11 +173,11 @@ mod tests {
         frame.push(0x00);
         frame.push(0x42);
 
-        assert!(snap::raw::decompress_len(&frame).unwrap() as u64 == huge);
+        assert2::assert!(snap::raw::decompress_len(&frame).unwrap() as u64 == huge);
 
         let err = decode_read_request(&frame, 1 << 20).unwrap_err();
 
-        assert!(matches!(err, RemoteReadError::SnappyOutputTooLarge(_)));
+        assert2::assert!(matches!(err, RemoteReadError::SnappyOutputTooLarge(_)));
     }
 
     #[test]
@@ -188,19 +188,19 @@ mod tests {
         let result = series_to_timeseries(vec![(labels, vec![(2_i64, 2.0_f64), (1, 1.0)])]);
 
         let ts = &result.timeseries[0];
-        assert_eq!(
+        assert2::assert!(
             ts.labels
                 .iter()
                 .map(|label| label.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["__name__", "job"]
+                .collect::<Vec<_>>()
+                == vec!["__name__", "job"]
         );
-        assert_eq!(
+        assert2::assert!(
             ts.samples
                 .iter()
                 .map(|sample| sample.timestamp)
-                .collect::<Vec<_>>(),
-            vec![1, 2]
+                .collect::<Vec<_>>()
+                == vec![1, 2]
         );
     }
 
@@ -222,6 +222,6 @@ mod tests {
         let raw = snap::raw::Decoder::new().decompress_vec(&encoded).unwrap();
         let decoded = v1::ReadResponse::decode(raw.as_slice()).unwrap();
 
-        assert!(decoded.results[0].timeseries[0].samples[0].timestamp == 42);
+        assert2::assert!(decoded.results[0].timeseries[0].samples[0].timestamp == 42);
     }
 }

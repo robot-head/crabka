@@ -10,7 +10,7 @@ use std::{
 };
 
 use arrow::array::{FixedSizeBinaryArray, Int32Array};
-use assert2::{assert, check};
+use assert2::check;
 use crabka_blockstore::{
     AttrValue, BlockWriter, ShardedTraceBloom, SpanAttr, SpanKind, SpanNode, SpanRow, StatusCode,
     SummaryColumns, TraceBlockStats, TraceIndex, assign_nested_set, encode_span_rows, read_block,
@@ -182,7 +182,7 @@ async fn trace_block_built_indexed_and_located_by_id() {
     // INDEX-LESS by-id locate: the bloom (not a global map) finds each trace's
     // block, and only that block.
     let never = [0u8; 16];
-    for (name, trace_id, expected) in [
+    for (_name, trace_id, expected) in [
         (
             "first trace in shared block",
             trace_a,
@@ -200,10 +200,8 @@ async fn trace_block_built_indexed_and_located_by_id() {
         ),
         ("trace absent from blooms", never, Vec::new()),
     ] {
-        assert_eq!(
-            idx.candidate_blocks_for_trace("tenant", &trace_id, 0, 10_000),
-            expected,
-            "case {name}"
+        assert2::assert!(
+            idx.candidate_blocks_for_trace("tenant", &trace_id, 0, 10_000) == expected
         );
     }
     let cand_a = idx.candidate_blocks_for_trace("tenant", &trace_a, 0, 10_000);
@@ -214,7 +212,7 @@ async fn trace_block_built_indexed_and_located_by_id() {
         .iter()
         .map(arrow::record_batch::RecordBatch::num_rows)
         .sum();
-    assert!(total == 6);
+    assert2::assert!(total == 6);
 
     let b = &back[0];
     let trace_ids = b
@@ -238,8 +236,8 @@ async fn trace_block_built_indexed_and_located_by_id() {
 
     // Rows are grouped/sorted by trace_id: trace A occupies rows 0..3, the
     // grandchild (deepest) is row 2. The root interval must strictly contain it.
-    assert_eq!(trace_ids.value(0), trace_a.as_slice());
-    assert_eq!(trace_ids.value(2), trace_a.as_slice());
+    assert2::assert!(trace_ids.value(0) == trace_a.as_slice());
+    assert2::assert!(trace_ids.value(2) == trace_a.as_slice());
     check!(left.value(0) < left.value(2));
     check!(right.value(2) < right.value(0));
 

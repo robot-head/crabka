@@ -377,44 +377,39 @@ mod tests {
             string_field(unchanged_toast_column, "kind"),
         );
 
-        assert_eq!(key_frame, (KEY_SCHEMA_ID, vec![1], false));
-        assert_eq!(value_frame, (VALUE_SCHEMA_ID, vec![2], false));
-        assert_eq!(
-            key_projection,
-            (
-                "public.accounts".to_string(),
-                "id".to_string(),
-                "int".to_string(),
-                42,
-            )
+        assert2::assert!(key_frame == (KEY_SCHEMA_ID, vec![1], false));
+        assert2::assert!(value_frame == (VALUE_SCHEMA_ID, vec![2], false));
+        assert2::assert!(
+            key_projection
+                == (
+                    "public.accounts".to_string(),
+                    "id".to_string(),
+                    "int".to_string(),
+                    42,
+                )
         );
-        assert_eq!(
-            value_projection,
-            (
-                "public.accounts".to_string(),
-                "update".to_string(),
-                "0/2A".to_string(),
-            )
+        assert2::assert!(
+            value_projection
+                == (
+                    "public.accounts".to_string(),
+                    "update".to_string(),
+                    "0/2A".to_string(),
+                )
         );
-        assert_eq!(
-            name_projection,
-            ("name".to_string(), "text".to_string(), "new".to_string())
+        assert2::assert!(
+            name_projection == ("name".to_string(), "text".to_string(), "new".to_string())
         );
-        assert_eq!(
-            null_projection,
-            ("nickname".to_string(), "null".to_string(), true)
+        assert2::assert!(null_projection == ("nickname".to_string(), "null".to_string(), true));
+        assert2::assert!(
+            avatar_projection
+                == (
+                    "avatar".to_string(),
+                    "bytes".to_string(),
+                    Bytes::from_static(b"abc"),
+                )
         );
-        assert_eq!(
-            avatar_projection,
-            (
-                "avatar".to_string(),
-                "bytes".to_string(),
-                Bytes::from_static(b"abc"),
-            )
-        );
-        assert_eq!(
-            unchanged_projection,
-            ("details".to_string(), "unchanged_toast".to_string())
+        assert2::assert!(
+            unchanged_projection == ("details".to_string(), "unchanged_toast".to_string())
         );
     }
 
@@ -445,36 +440,36 @@ mod tests {
                 }],
             })
             .expect("decoded row should translate");
-        assert_eq!(
-            &difference,
-            &EntityDifference {
-                table: "public.orders".into(),
-                key: EntityKey {
+        assert2::assert!(
+            &difference
+                == &EntityDifference {
                     table: "public.orders".into(),
-                    columns: vec![ColumnValue {
+                    key: EntityKey {
+                        table: "public.orders".into(),
+                        columns: vec![ColumnValue {
+                            name: "id".into(),
+                            value: ScalarValue::Int(42),
+                        }],
+                    },
+                    op: Operation::Insert,
+                    before: vec![],
+                    after: vec![ColumnValue {
                         name: "id".into(),
                         value: ScalarValue::Int(42),
                     }],
-                },
-                op: Operation::Insert,
-                before: vec![],
-                after: vec![ColumnValue {
-                    name: "id".into(),
-                    value: ScalarValue::Int(42),
-                }],
-                lsn: PgLsn(0x2a),
-                txid: None,
-                commit_timestamp_ms: None,
-                schema: TableSchema {
-                    schema: "public".into(),
-                    table: "orders".into(),
-                    columns: vec![ColumnSchema {
-                        name: "id".into(),
-                        type_name: "int8".into(),
-                        key: true,
-                    }],
-                },
-            }
+                    lsn: PgLsn(0x2a),
+                    txid: None,
+                    commit_timestamp_ms: None,
+                    schema: TableSchema {
+                        schema: "public".into(),
+                        table: "orders".into(),
+                        columns: vec![ColumnSchema {
+                            name: "id".into(),
+                            type_name: "int8".into(),
+                            key: true,
+                        }],
+                    },
+                }
         );
 
         let encoder = PostgresProtoEncoder::new().expect("encoder builds descriptors");
@@ -490,8 +485,8 @@ mod tests {
         let key_columns = list_field(&key_message, "columns");
         let id_column = message_value(&key_columns[0]);
 
-        assert_eq!(string_field(id_column, "kind"), "int".to_string());
-        assert_eq!(i64_field(id_column, "int_value"), 42);
+        assert2::assert!(string_field(id_column, "kind") == "int".to_string());
+        assert2::assert!(i64_field(id_column, "int_value") == 42);
     }
 
     #[test]
@@ -514,7 +509,7 @@ mod tests {
             .find(|message| message.name.as_deref() == Some(ENTITY_DIFFERENCE))
             .expect("entity difference message");
 
-        assert_eq!(
+        assert2::assert!(
             [
                 column_value
                     .field
@@ -531,8 +526,7 @@ mod tests {
                     .iter()
                     .find(|field| field.name.as_deref() == Some("key"))
                     .and_then(|field| field.label),
-            ],
-            [
+            ] == [
                 Some(prost_reflect::prost_types::field_descriptor_proto::Label::Optional as i32),
                 Some(prost_reflect::prost_types::field_descriptor_proto::Label::Repeated as i32),
                 Some(prost_reflect::prost_types::field_descriptor_proto::Label::Optional as i32),

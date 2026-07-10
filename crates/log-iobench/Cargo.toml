@@ -22,6 +22,7 @@ bytes = { workspace = true }
 memmap2 = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 tempfile = { workspace = true }
 criterion = { version = "5.0.0", package = "codspeed-criterion-compat" }
 

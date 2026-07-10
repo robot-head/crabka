@@ -698,14 +698,8 @@ fn run_model() {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(
-        checker.max_depth() < MAX_DEPTH,
-        "client_server_failover depth cap hit"
-    );
-    assert!(
-        checker.state_count() < MAX_STATES,
-        "client_server_failover truncated"
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < MAX_STATES);
     checker.assert_properties();
 }
 

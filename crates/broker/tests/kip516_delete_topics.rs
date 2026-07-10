@@ -1,5 +1,4 @@
 //! KIP-516: `DeleteTopics` by `topic_id` error semantics.
-use assert2::assert;
 mod support;
 
 use crabka_protocol::{
@@ -27,5 +26,5 @@ async fn delete_topics_by_unknown_id_returns_unknown_topic_id() {
         .expect("delete topics");
 
     let r = resp.responses.first().expect("one response row");
-    assert!((r.error_code, r.topic_id) == (100, bogus)); // UNKNOWN_TOPIC_ID, requested id echoed
+    assert2::assert!((r.error_code, r.topic_id) == (100, bogus)); // UNKNOWN_TOPIC_ID, requested id echoed
 }

@@ -602,7 +602,7 @@ acl_wire_enum!(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::{Buf, BytesMut};
     use crabka_client_core::MockBroker;
     use crabka_protocol::{
@@ -656,10 +656,10 @@ mod tests {
 
     fn request_body_after_header(mut body: &[u8], flexible_header: bool) -> &[u8] {
         let client_id_len = body.get_i16();
-        assert!(client_id_len >= 0);
+        assert2::assert!(client_id_len >= 0);
         body.advance(usize::try_from(client_id_len).expect("client id length is non-negative"));
         if flexible_header {
-            assert!(body.get_u8() == 0);
+            assert2::assert!(body.get_u8() == 0);
         }
         body
     }
@@ -678,51 +678,41 @@ mod tests {
 
     #[test]
     fn resource_type_round_trips() {
-        for (name, rt) in [
+        for (_name, rt) in [
             ("topic", ResourceType::Topic),
             ("group", ResourceType::Group),
             ("cluster", ResourceType::Cluster),
             ("transactional id", ResourceType::TransactionalId),
         ] {
-            assert_eq!(
-                wire_to_resource_type(resource_type_to_wire(rt)).unwrap(),
-                rt,
-                "case {name}"
-            );
+            assert2::assert!(wire_to_resource_type(resource_type_to_wire(rt)).unwrap() == rt);
         }
     }
 
     #[test]
     fn pattern_type_round_trips() {
-        for (name, pt) in [
+        for (_name, pt) in [
             ("literal", PatternType::Literal),
             ("prefixed", PatternType::Prefixed),
         ] {
-            assert_eq!(
-                wire_to_pattern_type(pattern_type_to_wire(pt)).unwrap(),
-                pt,
-                "case {name}"
-            );
+            assert2::assert!(wire_to_pattern_type(pattern_type_to_wire(pt)).unwrap() == pt);
         }
     }
 
     #[test]
     fn permission_round_trips() {
-        for (name, permission) in [
+        for (_name, permission) in [
             ("allow", PermissionType::Allow),
             ("deny", PermissionType::Deny),
         ] {
-            assert_eq!(
-                wire_to_permission(permission_to_wire(permission)).unwrap(),
-                permission,
-                "case {name}"
+            assert2::assert!(
+                wire_to_permission(permission_to_wire(permission)).unwrap() == permission
             );
         }
     }
 
     #[test]
     fn operation_round_trips() {
-        for (name, operation) in [
+        for (_name, operation) in [
             ("all", AclOperation::All),
             ("read", AclOperation::Read),
             ("write", AclOperation::Write),
@@ -737,17 +727,13 @@ mod tests {
             // KIP-939: TWO_PHASE_COMMIT (wire byte 15).
             ("two phase commit", AclOperation::TwoPhaseCommit),
         ] {
-            assert_eq!(
-                wire_to_operation(operation_to_wire(operation)).unwrap(),
-                operation,
-                "case {name}"
-            );
+            assert2::assert!(wire_to_operation(operation_to_wire(operation)).unwrap() == operation);
         }
     }
 
     #[test]
     fn wire_to_unknown_resource_type_errors() {
-        assert!(matches!(
+        assert2::assert!(matches!(
             wire_to_resource_type(99),
             Err(AdminError::Protocol(_))
         ));
@@ -755,7 +741,7 @@ mod tests {
         // `DescribeAcls`/`DeleteAcls` responses can never silently
         // claim an "any-type" match — Kafka never returns this in real
         // responses.
-        assert!(matches!(
+        assert2::assert!(matches!(
             wire_to_resource_type(1),
             Err(AdminError::Protocol(_))
         ));
@@ -768,7 +754,7 @@ mod tests {
             ..sample_entry()
         };
         let c = acl_to_creation(&e);
-        assert!(
+        assert2::assert!(
             c == AclCreation {
                 resource_type: 2,
                 resource_name: "orders".to_string(),
@@ -795,7 +781,7 @@ mod tests {
                     request_body_after_header(body, version >= create_acls_request::FLEXIBLE_MIN);
                 let request = CreateAclsRequest::decode(&mut body, version)
                     .expect("create ACLs request decodes");
-                assert!(body.is_empty());
+                assert2::assert!(body.is_empty());
                 *captured_request.lock().expect("request capture lock") = Some(request);
                 return Some(encode_at(
                     &CreateAclsResponse {
@@ -829,7 +815,7 @@ mod tests {
             .error
             .as_ref()
             .expect("broker error is surfaced");
-        assert!(
+        assert2::assert!(
             (outcomes.len(), error.code, error.message.as_deref()) == (1, 36, Some("acl exists"))
         );
         let request = seen_request
@@ -837,7 +823,7 @@ mod tests {
             .expect("request capture lock")
             .take()
             .expect("create ACLs request was captured");
-        assert!(
+        assert2::assert!(
             request
                 == CreateAclsRequest {
                     creations: vec![AclCreation {
@@ -861,7 +847,7 @@ mod tests {
         let f = AclEntryFilter::default();
         let w = acl_filter_to_wire(&f);
         // 1 == Kafka's `AclBindingFilter.ANY` discriminant (`WIRE_ANY`).
-        assert!(
+        assert2::assert!(
             w == DeleteAclsFilter {
                 resource_type_filter: 1,
                 resource_name_filter: None,
@@ -887,7 +873,7 @@ mod tests {
             permission_type: Some(PermissionType::Allow),
         };
         let w = acl_filter_to_wire(&f);
-        assert!(
+        assert2::assert!(
             w == DeleteAclsFilter {
                 resource_type_filter: 2,
                 resource_name_filter: Some("orders".to_string()),
@@ -914,7 +900,7 @@ mod tests {
                     request_body_after_header(body, version >= delete_acls_request::FLEXIBLE_MIN);
                 let request = DeleteAclsRequest::decode(&mut body, version)
                     .expect("delete ACLs request decodes");
-                assert!(body.is_empty());
+                assert2::assert!(body.is_empty());
                 *captured_request.lock().expect("request capture lock") = Some(request);
                 return Some(encode_at(
                     &DeleteAclsResponse {
@@ -953,7 +939,7 @@ mod tests {
             .await
             .expect("delete ACL response maps");
 
-        assert!(
+        assert2::assert!(
             (
                 outcomes.len(),
                 outcomes[0].error.as_ref(),
@@ -965,7 +951,7 @@ mod tests {
             .expect("request capture lock")
             .take()
             .expect("delete ACLs request was captured");
-        assert!(
+        assert2::assert!(
             request
                 == DeleteAclsRequest {
                     filters: vec![DeleteAclsFilter {
@@ -997,7 +983,7 @@ mod tests {
         });
 
         let error = outcomes[0].error.as_ref().expect("error is preserved");
-        assert!(
+        assert2::assert!(
             (
                 outcomes.len(),
                 outcomes[0].username.as_str(),
@@ -1037,7 +1023,7 @@ mod tests {
             username: "alice".into(),
         }];
         let req = build_alter_scram_request_sha512(&[], &dels, &rng).unwrap();
-        assert!(
+        assert2::assert!(
             req == AlterUserScramCredentialsRequest {
                 deletions: vec![ScramCredentialDeletion {
                     name: "alice".to_string(),
@@ -1066,7 +1052,7 @@ mod tests {
             },
         ];
         let req = build_alter_scram_request_sha512(&upserts, &[], &rng).unwrap();
-        assert!(req.upsertions[0].salt != req.upsertions[1].salt);
+        assert2::assert!(req.upsertions[0].salt != req.upsertions[1].salt);
     }
 
     #[test]
@@ -1077,7 +1063,7 @@ mod tests {
         };
         let r = filter_to_describe_request(&f);
         // 1 == Kafka's `AclBindingFilter.ANY` discriminant (`WIRE_ANY`).
-        assert!(
+        assert2::assert!(
             r == DescribeAclsRequest {
                 resource_type_filter: 1,
                 resource_name_filter: None,
@@ -1298,7 +1284,7 @@ mod tests {
 
         let r = filter_to_describe_request(&f);
 
-        assert!(
+        assert2::assert!(
             r == DescribeAclsRequest {
                 resource_type_filter: 2,
                 resource_name_filter: Some("orders".to_string()),

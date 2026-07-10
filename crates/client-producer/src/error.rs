@@ -51,13 +51,12 @@ pub enum ProducerError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn display_messages() {
-        for (name, error, expected) in [
+        for (_name, error, expected) in [
             (
                 "fenced producer",
                 ProducerError::FencedProducer,
@@ -69,7 +68,7 @@ mod tests {
                 "invalid config: idempotence requires acks=all",
             ),
         ] {
-            assert!(error.to_string() == expected, "case {name}");
+            assert2::assert!(error.to_string() == expected);
         }
     }
 }

@@ -9,7 +9,7 @@ use std::{
     time::Duration,
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use axum::{Router, extract::State, routing::get};
 use crabka_traces::frontend::{
     backend::{QuerierBackend, SearchJobRequest, TagValuesJobRequest, TraceByIdJobRequest},
@@ -71,12 +71,12 @@ async fn http_querier_search_job_sends_scan_params_and_parses() {
         .await
         .unwrap();
 
-    assert_eq!(out.traces.len(), 1);
-    assert_eq!(out.metrics.inspected_bytes, 64);
-    assert_eq!(out.metrics.total_blocks, 1);
+    assert2::assert!(out.traces.len() == 1);
+    assert2::assert!(out.metrics.inspected_bytes == 64);
+    assert2::assert!(out.metrics.total_blocks == 1);
 
     let log = seen.lock().unwrap();
-    assert!(log.len() == 1);
+    assert2::assert!(log.len() == 1);
     let entry = &log[0];
     check!(entry.starts_with("tenant-x|"));
     // The real querier scan-job params.
@@ -119,8 +119,8 @@ async fn http_querier_live_shard_sends_no_scan_params() {
         .unwrap();
 
     let log = seen.lock().unwrap();
-    assert!(!log[0].contains("block="));
-    assert!(!log[0].contains("rowGroup"));
+    assert2::assert!(!log[0].contains("block="));
+    assert2::assert!(!log[0].contains("rowGroup"));
 }
 
 #[tokio::test]
@@ -143,7 +143,7 @@ async fn http_querier_by_id_404_is_empty_partial() {
         .await
         .unwrap();
 
-    assert!(out.trace.is_empty());
+    assert2::assert!(out.trace.is_empty());
 }
 
 #[tokio::test]
@@ -180,7 +180,7 @@ async fn http_querier_by_id_parses_v2_envelope() {
         .await
         .unwrap();
 
-    assert!((out.trace.span_count(), out.trace.status.as_str()) == (1, "COMPLETE"));
+    assert2::assert!((out.trace.span_count(), out.trace.status.as_str()) == (1, "COMPLETE"));
 }
 
 #[tokio::test]
@@ -217,7 +217,7 @@ async fn http_querier_tag_values_encodes_tag_path_segment() {
         .unwrap();
 
     let log = seen.lock().unwrap();
-    assert!(log.as_slice() == ["a#b"]);
+    assert2::assert!(log.as_slice() == ["a#b"]);
 }
 
 async fn spawn(app: Router) -> SocketAddr {

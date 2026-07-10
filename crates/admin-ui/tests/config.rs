@@ -6,9 +6,8 @@ use crabka_admin_ui::config::{AdminUiConfig, BrokerSecurityConfig, ConfigError};
 fn default_config_targets_local_server_and_requires_bootstrap() {
     let cfg = AdminUiConfig::default();
 
-    assert_eq!(
-        cfg,
-        AdminUiConfig {
+    assert2::assert!(
+        cfg == AdminUiConfig {
             listen_addr: "127.0.0.1:8088".parse::<SocketAddr>().unwrap(),
             cluster_name: "local".to_string(),
             bootstrap_addrs: Vec::new(),
@@ -18,7 +17,7 @@ fn default_config_targets_local_server_and_requires_bootstrap() {
     );
 
     let error = cfg.validate().expect_err("empty bootstrap is invalid");
-    assert!(matches!(error, ConfigError::MissingBootstrap));
+    assert2::assert!(matches!(error, ConfigError::MissingBootstrap));
 }
 
 #[test]
@@ -32,7 +31,7 @@ fn validates_single_cluster_sasl_plaintext_config() {
 
     let expected = cfg.clone();
     let validated = cfg.validate().expect("config is valid");
-    assert_eq!(validated, expected);
+    assert2::assert!(validated == expected);
 }
 
 #[test]
@@ -53,12 +52,7 @@ fn from_env_parses_sasl_ssl_tls_config() {
         .output()
         .expect("child test process runs");
 
-    assert!(
-        output.status.success(),
-        "child test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert2::assert!(output.status.success());
 }
 
 #[test]
@@ -68,9 +62,8 @@ fn sasl_ssl_tls_config_from_env_child() {
     }
 
     let cfg = AdminUiConfig::from_env().expect("env config is valid");
-    assert_eq!(
-        cfg,
-        AdminUiConfig {
+    assert2::assert!(
+        cfg == AdminUiConfig {
             listen_addr: "127.0.0.1:18088".parse::<SocketAddr>().unwrap(),
             cluster_name: "staging".to_string(),
             bootstrap_addrs: vec!["broker-1:9092".to_string(), "127.0.0.1:9093".to_string()],
@@ -97,12 +90,7 @@ fn from_env_rejects_blank_bootstrap_entry() {
         .output()
         .expect("child test process runs");
 
-    assert!(
-        output.status.success(),
-        "child test failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert2::assert!(output.status.success());
 }
 
 #[test]
@@ -112,7 +100,7 @@ fn blank_bootstrap_entry_from_env_child() {
     }
 
     let error = AdminUiConfig::from_env().expect_err("blank bootstrap entry is invalid");
-    assert!(matches!(error, ConfigError::InvalidBootstrapAddr(addr) if addr.is_empty()));
+    assert2::assert!(matches!(error, ConfigError::InvalidBootstrapAddr(addr) if addr.is_empty()));
 }
 
 #[test]
@@ -133,9 +121,8 @@ fn validate_rejects_malformed_bootstrap_entries() {
         let error = cfg
             .validate()
             .expect_err("malformed bootstrap entry is invalid");
-        assert!(
-            matches!(&error, ConfigError::InvalidBootstrapAddr(addr) if addr == invalid_addr),
-            "expected invalid bootstrap error for {invalid_addr:?}, got {error:?}"
+        assert2::assert!(
+            matches!(&error, ConfigError::InvalidBootstrapAddr(addr) if addr == invalid_addr)
         );
     }
 }
@@ -148,15 +135,12 @@ fn validates_multi_bootstrap_hostnames_and_ip_literals() {
     };
 
     let validated = cfg.validate().expect("multi-bootstrap config is valid");
-    assert_eq!(
-        validated.bootstrap_addrs,
-        ["broker-1:9092", "127.0.0.1:9093"]
-    );
+    assert2::assert!(validated.bootstrap_addrs == ["broker-1:9092", "127.0.0.1:9093"]);
 }
 
 #[test]
 fn from_env_rejects_blank_tls_server_name_cases() {
-    for (name, server_name) in [("empty", ""), ("whitespace", " \t ")] {
+    for (_name, server_name) in [("empty", ""), ("whitespace", " \t ")] {
         let output = Command::new(std::env::current_exe().expect("test binary path is available"))
             .arg("--exact")
             .arg("blank_tls_server_name_from_env_child")
@@ -168,12 +152,7 @@ fn from_env_rejects_blank_tls_server_name_cases() {
             .env_remove("CRABKA_ADMIN_UI_LISTEN_ADDR")
             .output()
             .expect("child test process runs");
-        assert!(
-            output.status.success(),
-            "case {name}: child test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert2::assert!(output.status.success());
     }
 }
 
@@ -184,12 +163,12 @@ fn blank_tls_server_name_from_env_child() {
     }
 
     let error = AdminUiConfig::from_env().expect_err("blank TLS server name is invalid");
-    assert!(matches!(error, ConfigError::MissingTlsServerName));
+    assert2::assert!(matches!(error, ConfigError::MissingTlsServerName));
 }
 
 #[test]
 fn from_env_rejects_incomplete_tls_client_identity() {
-    for (name, cert, key) in [
+    for (_name, cert, key) in [
         ("certificate without key", Some("client.crt"), None),
         ("key without certificate", None, Some("client.key")),
     ] {
@@ -214,12 +193,7 @@ fn from_env_rejects_incomplete_tls_client_identity() {
         };
 
         let output = command.output().expect("child test process runs");
-        assert!(
-            output.status.success(),
-            "case {name}: child test failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert2::assert!(output.status.success());
     }
 }
 
@@ -230,12 +204,12 @@ fn incomplete_tls_client_identity_from_env_child() {
     }
 
     let error = AdminUiConfig::from_env().expect_err("incomplete TLS identity is invalid");
-    assert!(matches!(error, ConfigError::IncompleteTlsClientIdentity));
+    assert2::assert!(matches!(error, ConfigError::IncompleteTlsClientIdentity));
 }
 
 #[test]
 fn validate_rejects_manual_sasl_ssl_blank_server_names() {
-    for (name, server_name) in [("empty", ""), ("whitespace", " \t ")] {
+    for (_name, server_name) in [("empty", ""), ("whitespace", " \t ")] {
         let cfg = AdminUiConfig {
             bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
             security: BrokerSecurityConfig::SaslSsl {
@@ -249,6 +223,6 @@ fn validate_rejects_manual_sasl_ssl_blank_server_names() {
         let error = cfg
             .validate()
             .expect_err("blank TLS server name is invalid");
-        assert_eq!(error, ConfigError::MissingTlsServerName, "case {name}");
+        assert2::assert!(error == ConfigError::MissingTlsServerName);
     }
 }

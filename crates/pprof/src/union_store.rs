@@ -254,7 +254,7 @@ fn max_option(left: Option<i64>, right: Option<i64>) -> Option<i64> {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::arrow::{array::AsArray, datatypes::UInt64Type};
 
     use crate::{
@@ -379,7 +379,7 @@ mod tests {
 
         let stats = union.stats("tenant-a", 0, 100).await.unwrap();
 
-        assert!(
+        assert2::assert!(
             stats
                 == ProfileStats {
                     data_ingested: true,
@@ -408,6 +408,6 @@ mod tests {
         let out = df.collect().await.unwrap();
         let partitions = out[0].column(0).as_primitive::<UInt64Type>();
 
-        assert!(partitions.value(0) == partition);
+        assert2::assert!(partitions.value(0) == partition);
     }
 }

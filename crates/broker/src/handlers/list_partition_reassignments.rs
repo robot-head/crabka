@@ -123,7 +123,6 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
     use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsTopics;
     use uuid::Uuid;
@@ -197,7 +196,7 @@ mod tests {
             topics: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -245,7 +244,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

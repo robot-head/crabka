@@ -251,7 +251,7 @@ fn max_leaders_per_broker(parts: &[PartitionView]) -> usize {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::{
@@ -326,15 +326,15 @@ mod tests {
         // Soft first in `goals` list — but optimizer must call hard first.
         let goals: Vec<&dyn Goal> = vec![&soft, &hard];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
-        assert_eq!(out.proposal.goals_applied, vec!["hard", "soft"]);
+        assert2::assert!(out.proposal.goals_applied == vec!["hard", "soft"]);
     }
 
     #[test]
     fn empty_goals_returns_no_movements() {
         let goals: Vec<&dyn Goal> = vec![];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
-        assert!(out.proposal.movements.is_empty());
-        assert_eq!(out.proposal.status, ProposalStatus::Computed);
+        assert2::assert!(out.proposal.movements.is_empty());
+        assert2::assert!(out.proposal.status == ProposalStatus::Computed);
     }
 
     #[test]
@@ -370,13 +370,13 @@ mod tests {
         };
         let goals: Vec<&dyn Goal> = vec![&g1, &g2];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
-        assert_eq!(
+        assert2::assert!(
             out.proposal
                 .movements
                 .iter()
                 .map(|movement| movement.new_leader)
-                .collect::<Vec<_>>(),
-            vec![2]
+                .collect::<Vec<_>>()
+                == vec![2]
         );
     }
 
@@ -396,7 +396,7 @@ mod tests {
         };
         let goals: Vec<&dyn Goal> = vec![&bad];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
-        assert!(out.proposal.movements.is_empty());
+        assert2::assert!(out.proposal.movements.is_empty());
     }
 
     #[test]
@@ -577,11 +577,7 @@ mod tests {
         let out = optimize(&state, &goals, &ctx).unwrap();
         // The bad_soft movement must be dropped because it would violate
         // RackAware's invariant.
-        assert!(
-            out.proposal.movements.is_empty(),
-            "soft movement that would re-create a rack collision must be dropped; got {:?}",
-            out.proposal.movements
-        );
+        assert2::assert!(out.proposal.movements.is_empty());
     }
 
     #[test]
@@ -707,11 +703,7 @@ mod tests {
 
         let goals: Vec<&dyn Goal> = vec![&DiskCapacity, &bad_soft];
         let out = optimize(&state, &goals, &ctx).unwrap();
-        assert!(
-            out.proposal.movements.is_empty(),
-            "soft move that pushes broker 3 over disk cap must be dropped; got {:?}",
-            out.proposal.movements
-        );
+        assert2::assert!(out.proposal.movements.is_empty());
     }
 
     #[test]
@@ -753,7 +745,7 @@ mod tests {
         };
         let goals: Vec<&dyn Goal> = vec![&bulk];
         let err = optimize(&s, &goals, &ctx).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             OptimizeError::HardGoalUnsatisfied {
                 extra: 2,
@@ -799,7 +791,7 @@ mod tests {
         };
         let goals: Vec<&dyn Goal> = vec![&bulk];
         let out = optimize(&s, &goals, &ctx).expect("hard movements exactly at cap fit");
-        assert!(out.proposal.movements.len() == 3);
+        assert2::assert!(out.proposal.movements.len() == 3);
     }
 
     #[test]
@@ -819,7 +811,7 @@ mod tests {
 
         apply_movement(&mut s, &m);
 
-        assert!(
+        assert2::assert!(
             s.partitions[0]
                 == PartitionView {
                     topic: "t".into(),
@@ -899,7 +891,7 @@ mod tests {
 
         let summary = compute_summary(&before, &after, &movements);
 
-        assert!(
+        assert2::assert!(
             summary
                 == ProposalSummary {
                     replica_movements: 1,

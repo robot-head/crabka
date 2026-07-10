@@ -142,7 +142,6 @@ fn encode_resp(version: i16, resp: &AddRaftVoterResponse) -> Result<Bytes, Broke
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::assert;
     use crabka_protocol::{
         owned::add_raft_voter_request::Listener, primitives::uuid::Uuid as ProtoUuid,
     };
@@ -220,8 +219,8 @@ mod tests {
             ),
         ];
 
-        for (case, outcome, expected) in cases {
-            assert!(outcome_to_code(outcome) == expected, "case: {case}");
+        for (_case, outcome, expected) in cases {
+            assert2::assert!(outcome_to_code(outcome) == expected);
         }
     }
 
@@ -243,8 +242,8 @@ mod tests {
             let bytes = encode_resp(version, &resp).expect("encode");
             let mut cur: &[u8] = &bytes;
             let decoded = AddRaftVoterResponse::decode(&mut cur, version).expect("decode");
-            assert!(decoded == resp, "response at v{version}");
-            assert!(cur.is_empty(), "all bytes consumed at v{version}");
+            assert2::assert!(decoded == resp);
+            assert2::assert!(cur.is_empty());
         }
     }
 
@@ -272,7 +271,7 @@ mod tests {
             error_message: Some("add-raft-voter denied".into()),
             ..Default::default()
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -296,8 +295,8 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        assert!(resp.error_code == codes::INVALID_REQUEST);
-        assert!(
+        assert2::assert!(resp.error_code == codes::INVALID_REQUEST);
+        assert2::assert!(
             resp.error_message.as_deref().is_some_and(|m| {
                 m.contains("voter_id must be non-negative") && m.contains("-7")
             })
@@ -325,8 +324,8 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        assert!(resp.error_code == codes::UNKNOWN_SERVER_ERROR);
-        assert!(
+        assert2::assert!(resp.error_code == codes::UNKNOWN_SERVER_ERROR);
+        assert2::assert!(
             resp.error_message
                 .as_deref()
                 .is_some_and(|m| m.contains("dynamic reconfig unsupported"))

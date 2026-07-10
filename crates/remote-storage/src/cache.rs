@@ -212,7 +212,7 @@ fn sort_by_start_offset(segments: &mut [RemoteLogSegmentMetadata]) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::metadata::{CustomMetadata, RemoteLogSegmentId, TopicIdPartition};
@@ -265,16 +265,9 @@ mod tests {
         let started = seg(10, &[(0, 0)], 0, 99);
         let finished = started.clone().with_update(&finish(10)).unwrap();
         c.add(started).unwrap();
-        assert!(
-            c.segment_for(LeaderEpoch(0), 50).is_none(),
-            "started not yet readable"
-        );
+        assert2::assert!(c.segment_for(LeaderEpoch(0), 50).is_none());
         c.update(&finish(10)).unwrap();
-        assert_eq!(
-            c.segment_for(LeaderEpoch(0), 50),
-            Some(finished),
-            "finished segment is readable"
-        );
+        assert2::assert!(c.segment_for(LeaderEpoch(0), 50) == Some(finished));
     }
 
     #[test]
@@ -309,8 +302,8 @@ mod tests {
         let finished = started.clone().with_update(&finish(10)).unwrap();
         c.add(started).unwrap();
         c.update(&finish(10)).unwrap();
-        assert_eq!(c.list_by_epoch(LeaderEpoch(0)), vec![finished]);
-        assert_eq!(c.list_by_epoch(LeaderEpoch(7)), Vec::new());
+        assert2::assert!(c.list_by_epoch(LeaderEpoch(0)) == vec![finished]);
+        assert2::assert!(c.list_by_epoch(LeaderEpoch(7)) == Vec::new());
     }
 
     #[test]
@@ -318,13 +311,13 @@ mod tests {
         let mut c = RemoteLogMetadataCache::default();
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
         c.update(&finish(10)).unwrap();
-        assert!(c.highest_offset_for_epoch(LeaderEpoch(0)) == Some(99));
+        assert2::assert!(c.highest_offset_for_epoch(LeaderEpoch(0)) == Some(99));
         // DeleteSegmentStarted deindexes the epoch slot (but the metadata is
         // still present until DeleteSegmentFinished). highest_offset_for_epoch
         // reads the epoch index directly, so it must now miss.
         c.update(&transition(10, RemoteLogSegmentState::DeleteSegmentStarted))
             .unwrap();
-        assert!(c.highest_offset_for_epoch(LeaderEpoch(0)).is_none());
+        assert2::assert!(c.highest_offset_for_epoch(LeaderEpoch(0)).is_none());
     }
 
     #[test]
@@ -379,8 +372,8 @@ mod tests {
         c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
         c.update(&finish(10)).unwrap();
         c.update(&finish(11)).unwrap();
-        assert_eq!(c.highest_offset_for_epoch(LeaderEpoch(0)), Some(199));
-        assert_eq!(c.highest_offset_for_epoch(LeaderEpoch(7)), None);
+        assert2::assert!(c.highest_offset_for_epoch(LeaderEpoch(0)) == Some(199));
+        assert2::assert!(c.highest_offset_for_epoch(LeaderEpoch(7)) == None);
     }
 
     #[test]
@@ -394,34 +387,26 @@ mod tests {
             .unwrap();
         c.add(started).unwrap();
         c.update(&finish(10)).unwrap();
-        assert_eq!(c.segment_for(LeaderEpoch(0), 50), Some(finished));
+        assert2::assert!(c.segment_for(LeaderEpoch(0), 50) == Some(finished));
 
         c.update(&transition(10, RemoteLogSegmentState::DeleteSegmentStarted))
             .unwrap();
-        assert_eq!(
-            c.segment_for(LeaderEpoch(0), 50),
-            None,
-            "delete-started segment is hidden but retained"
-        );
-        assert_eq!(
-            c.list(),
-            vec![delete_started],
-            "delete-started segment is hidden but retained"
-        );
+        assert2::assert!(c.segment_for(LeaderEpoch(0), 50) == None);
+        assert2::assert!(c.list() == vec![delete_started]);
 
         c.update(&transition(
             10,
             RemoteLogSegmentState::DeleteSegmentFinished,
         ))
         .unwrap();
-        assert!(c.list().is_empty(), "delete-finished drops it entirely");
+        assert2::assert!(c.list().is_empty());
     }
 
     #[test]
     fn update_unknown_segment_errors() {
         let mut c = RemoteLogMetadataCache::default();
         let err = c.update(&finish(404)).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
+        assert2::assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
     }
 
     #[test]
@@ -432,7 +417,7 @@ mod tests {
             .with_update(&finish(10))
             .expect("force to finished for the test");
         let err = c.add(s).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
+        assert2::assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
     }
 
     #[test]
@@ -440,7 +425,7 @@ mod tests {
         let mut c = RemoteLogMetadataCache::default();
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
         let err = c.add(seg(10, &[(0, 0)], 0, 99)).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
+        assert2::assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
     }
 
     #[test]
@@ -469,15 +454,11 @@ mod tests {
 
         // Finished seg 10 is queryable; delete-started seg 11 is hidden
         // but still listed; delete_state survives.
-        assert_eq!(
-            seeded.segment_for(LeaderEpoch(0), 50),
-            Some(finished_first.clone())
-        );
-        assert_eq!(seeded.segment_for(LeaderEpoch(0), 150), None);
-        assert_eq!(seeded.list(), vec![finished_first, delete_started_second]);
-        assert_eq!(
-            seeded.delete_state(),
-            Some(RemotePartitionDeleteState::DeletePartitionMarked)
+        assert2::assert!(seeded.segment_for(LeaderEpoch(0), 50) == Some(finished_first.clone()));
+        assert2::assert!(seeded.segment_for(LeaderEpoch(0), 150) == None);
+        assert2::assert!(seeded.list() == vec![finished_first, delete_started_second]);
+        assert2::assert!(
+            seeded.delete_state() == Some(RemotePartitionDeleteState::DeletePartitionMarked)
         );
     }
 
@@ -488,6 +469,6 @@ mod tests {
         let second = seg(11, &[(0, 100)], 100, 199);
         c.add(second.clone()).unwrap();
         c.add(first.clone()).unwrap();
-        assert_eq!(c.list(), vec![first, second]);
+        assert2::assert!(c.list() == vec![first, second]);
     }
 }

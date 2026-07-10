@@ -73,22 +73,21 @@ impl LimitError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn default_limits_are_generous_and_finite() {
-        assert_eq!(
-            Limits::default(),
-            Limits {
-                ingestion_rate_spans_per_sec: 100_000.0,
-                ingestion_burst_spans: 100_000,
-                max_traces_per_search: 1000,
-                max_spans_per_trace: 200_000,
-                max_attribute_bytes: 2048,
-                max_search_duration_secs: 0,
-            }
+        assert2::assert!(
+            Limits::default()
+                == Limits {
+                    ingestion_rate_spans_per_sec: 100_000.0,
+                    ingestion_burst_spans: 100_000,
+                    max_traces_per_search: 1000,
+                    max_spans_per_trace: 200_000,
+                    max_attribute_bytes: 2048,
+                    max_search_duration_secs: 0,
+                }
         );
     }
 
@@ -98,25 +97,25 @@ mod tests {
             rate: 100_000.0,
             observed: 120_000.0,
         };
-        assert!(rate.http_status() == 429);
+        assert2::assert!(rate.http_status() == 429);
 
         let big = LimitError::MaxSpansPerTrace {
             limit: 200_000,
             observed: 200_001,
         };
-        assert!(big.http_status() == 400);
+        assert2::assert!(big.http_status() == 400);
 
         let attr = LimitError::AttributeTooLong {
             limit: 2048,
             observed: 5000,
         };
-        assert!(attr.http_status() == 400);
+        assert2::assert!(attr.http_status() == 400);
 
         let dur = LimitError::SearchDurationExceeded {
             limit_secs: 3600,
             observed_secs: 7200,
         };
-        assert!(dur.http_status() == 400);
+        assert2::assert!(dur.http_status() == 400);
     }
 
     #[test]
@@ -126,6 +125,6 @@ mod tests {
             observed: 200_001,
         };
 
-        assert!(big.message().contains("200000"));
+        assert2::assert!(big.message().contains("200000"));
     }
 }

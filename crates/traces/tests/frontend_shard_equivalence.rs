@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_traces::frontend::{
     QueryFrontend,
     backend::{MockQuerier, SearchPartial},
@@ -135,7 +135,7 @@ async fn limit_and_spss_applied_after_merge() {
     let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
     // limit 2 (newest-first => 300, 200), spss 2.
     let resp = qf.search("t1", "{ }", 0, 300, 2, 2).await.unwrap();
-    assert!(
+    assert2::assert!(
         resp.traces
             .iter()
             .map(|trace| trace.start_time_unix_nano.as_str())
@@ -144,7 +144,7 @@ async fn limit_and_spss_applied_after_merge() {
     );
     for t in &resp.traces {
         for ss in &t.span_sets {
-            assert!(ss.spans.len() <= 2);
+            assert2::assert!(ss.spans.len() <= 2);
         }
     }
 }

@@ -997,9 +997,9 @@ mod tests {
                 producer_with_find_coordinator_version(version, Arc::clone(&seen)).await;
 
             let addr = find_coordinator(&producer, kind, key).await;
-            assert_eq!(addr, "127.0.0.1:19092");
+            assert2::assert!(addr == "127.0.0.1:19092");
             let requests = seen.lock().unwrap();
-            assert_eq!(*requests, vec![expected_request]);
+            assert2::assert!(*requests == vec![expected_request]);
             mock.stop();
         }
     }

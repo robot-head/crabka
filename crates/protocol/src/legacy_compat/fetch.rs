@@ -185,7 +185,7 @@ impl From<crate::owned::fetch_response::SnapshotId>
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::Bytes;
 
     use super::*;
@@ -255,7 +255,7 @@ mod tests {
             },
             unknown_tagged_fields: UnknownTaggedFields(vec![]),
         };
-        assert!(converted == expected);
+        assert2::assert!(converted == expected);
     }
 
     #[test]
@@ -341,6 +341,6 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(vec![]),
         };
-        assert!(converted == expected);
+        assert2::assert!(converted == expected);
     }
 }

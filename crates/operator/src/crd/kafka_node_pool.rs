@@ -215,7 +215,7 @@ pub struct KafkaNodePoolStatus {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -223,17 +223,17 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaNodePool::crd();
-        assert_eq!(crd.spec.group.as_str(), "crabka.io");
-        assert_eq!(crd.spec.names.kind.as_str(), "KafkaNodePool");
-        assert_eq!(crd.spec.names.plural.as_str(), "kafkanodepools");
-        assert_eq!(crd.spec.names.short_names, Some(vec!["knp".to_string()]));
-        assert_eq!(
+        assert2::assert!(crd.spec.group.as_str() == "crabka.io");
+        assert2::assert!(crd.spec.names.kind.as_str() == "KafkaNodePool");
+        assert2::assert!(crd.spec.names.plural.as_str() == "kafkanodepools");
+        assert2::assert!(crd.spec.names.short_names == Some(vec!["knp".to_string()]));
+        assert2::assert!(
             crd.spec
                 .versions
                 .iter()
                 .map(|v| v.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["v1alpha1"]
+                .collect::<Vec<_>>()
+                == vec!["v1alpha1"]
         );
     }
 
@@ -252,23 +252,17 @@ mod tests {
             },
         );
         let json = serde_json::to_string(&pool).unwrap();
-        assert!(
-            json.contains("\"nodeIdStart\""),
-            "expected camelCase wire shape, got: {json}"
-        );
-        assert!(
-            json.contains("\"Controller\""),
-            "roles serialized in UpperCamelCase, got: {json}"
-        );
+        assert2::assert!(json.contains("\"nodeIdStart\""));
+        assert2::assert!(json.contains("\"Controller\""));
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == pool.spec);
+        assert2::assert!(back.spec == pool.spec);
     }
 
     #[test]
     fn spec_defaults_replicas_to_one() {
         let json = r#"{"roles":["Controller","Broker"],"nodeIdStart":0}"#;
         let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
-        assert!(
+        assert2::assert!(
             spec == KafkaNodePoolSpec {
                 roles: vec![NodeRole::Controller, NodeRole::Broker],
                 replicas: 1,
@@ -331,15 +325,15 @@ mod tests {
 
         let json = serde_json::to_string(&pool).unwrap();
         for want in ["\"team\":\"platform\"", "\"dedicated\"", "\"nodeSelector\""] {
-            assert!(json.contains(want), "case {want:?}; got: {json}");
+            assert2::assert!(json.contains(want));
         }
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == pool.spec);
+        assert2::assert!(back.spec == pool.spec);
     }
 
     #[test]
     fn storage_json_round_trip_cases() {
-        for (name, storage, expected_fragments) in [
+        for (_name, storage, expected_fragments) in [
             (
                 "ephemeral",
                 Storage::Ephemeral,
@@ -400,13 +394,10 @@ mod tests {
             );
             let json = serde_json::to_string(&pool).unwrap();
             for fragment in expected_fragments {
-                assert!(
-                    json.contains(fragment),
-                    "case {name}: missing {fragment:?}; got: {json}"
-                );
+                assert2::assert!(json.contains(fragment));
             }
             let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-            assert_eq!(back.spec, pool.spec, "case {name}");
+            assert2::assert!(back.spec == pool.spec);
         }
     }
 
@@ -414,7 +405,7 @@ mod tests {
     fn spec_defaults_storage_to_none() {
         let json = r#"{"roles":["Controller","Broker"],"nodeIdStart":0}"#;
         let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.storage.is_none());
+        assert2::assert!(spec.storage.is_none());
     }
 
     #[test]
@@ -431,7 +422,7 @@ mod tests {
         match spec.storage {
             Some(Storage::Jbod(j)) => {
                 // deleteClaim defaults to false.
-                assert!(
+                assert2::assert!(
                     j == JbodSpec {
                         volumes: vec![
                             JbodVolume {

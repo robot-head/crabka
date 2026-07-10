@@ -157,7 +157,7 @@ fn approx_record_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Heade
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -219,7 +219,7 @@ mod tests {
         let mut a = Accumulator::new(1024);
         let _ = a.try_append(None, Some(Bytes::from_static(b"x")), vec![], 0);
         a.seal_current();
-        assert!((a.current.is_none(), a.ready.len()) == (true, 1));
+        assert2::assert!((a.current.is_none(), a.ready.len()) == (true, 1));
     }
 
     #[test]
@@ -227,10 +227,10 @@ mod tests {
         let mut a = Accumulator::new(1024);
         a.current = Some(InProgressBatch::new());
 
-        assert!(a.current.as_ref().unwrap().is_empty());
+        assert2::assert!(a.current.as_ref().unwrap().is_empty());
         a.seal_current();
 
-        assert!((a.current.is_none(), a.ready.is_empty()) == (true, true));
+        assert2::assert!((a.current.is_none(), a.ready.is_empty()) == (true, true));
     }
 
     #[test]
@@ -247,7 +247,7 @@ mod tests {
         ];
 
         let populated_size: usize = [8, 3, 4, 5, 4, 2, 3, 8, 5, 0, 8].into_iter().sum();
-        for (name, key, value, case_headers, expected) in [
+        for (_name, key, value, case_headers, expected) in [
             (
                 "populated",
                 Some(&b"key"[..]),
@@ -257,10 +257,7 @@ mod tests {
             ),
             ("empty", None, None, &[][..], 8 + 4 + 4),
         ] {
-            assert!(
-                approx_record_size(key, value, case_headers) == expected,
-                "case {name}"
-            );
+            assert2::assert!(approx_record_size(key, value, case_headers) == expected);
         }
     }
 }

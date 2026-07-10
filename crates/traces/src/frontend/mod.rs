@@ -344,7 +344,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
 mod orch_tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::frontend::{
@@ -419,16 +419,16 @@ mod orch_tests {
         let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
 
         let resp = qf.search("t1", "{ }", 0, 300, 20, 3).await.unwrap();
-        assert_eq!(qf.backend_ref().search_calls().len(), 3);
-        assert_eq!(
+        assert2::assert!(qf.backend_ref().search_calls().len() == 3);
+        assert2::assert!(
             qf.backend_ref()
                 .search_calls()
                 .iter()
                 .map(|call| call.tenant.as_str())
-                .collect::<Vec<_>>(),
-            vec!["t1", "t1", "t1"]
+                .collect::<Vec<_>>()
+                == vec!["t1", "t1", "t1"]
         );
-        assert_eq!(resp.traces.len(), 3);
+        assert2::assert!(resp.traces.len() == 3);
         // A successful multi-job search folds real per-job accounting:
         // completedJobs == totalJobs, and non-zero inspected traces/spans (not
         // the all-zero block that the querier used to emit).
@@ -466,8 +466,8 @@ mod orch_tests {
         };
         let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
         let resp = qf.search("t1", "{ }", 0, 300, 1, 3).await.unwrap();
-        assert_eq!(resp.traces.len(), 1);
-        assert_eq!(resp.traces[0].start_time_unix_nano.as_str(), "300");
+        assert2::assert!(resp.traces.len() == 1);
+        assert2::assert!(resp.traces[0].start_time_unix_nano.as_str() == "300");
     }
 
     #[tokio::test]
@@ -483,7 +483,7 @@ mod orch_tests {
         // One job per querier (3), none returned the trace => Complete + None.
         check!(qf.backend_ref().trace_calls().len() == 3);
         check!(metrics.total_jobs == 3);
-        assert!(matches!(status, TraceStatus::Complete));
+        assert2::assert!(matches!(status, TraceStatus::Complete));
     }
 
     /// A catalog whose enumeration always fails (a partition is unreachable).
@@ -514,9 +514,9 @@ mod orch_tests {
             FrontendConfig::default(),
         );
         let err = qf.search("t1", "{ }", 0, 300, 20, 3).await.unwrap_err();
-        assert!(matches!(err, BackendError::Transport(_)));
+        assert2::assert!(matches!(err, BackendError::Transport(_)));
         // The backend was never fanned out — the catalog error short-circuits.
-        assert!(qf.backend_ref().search_calls().is_empty());
+        assert2::assert!(qf.backend_ref().search_calls().is_empty());
     }
 
     #[tokio::test]
@@ -528,7 +528,7 @@ mod orch_tests {
             FrontendConfig::default(),
         );
         let err = qf.tag_names("t1", None, 0, 300).await.unwrap_err();
-        assert!(matches!(err, BackendError::Transport(_)));
+        assert2::assert!(matches!(err, BackendError::Transport(_)));
     }
 
     #[tokio::test]
@@ -540,6 +540,6 @@ mod orch_tests {
             FrontendConfig::default(),
         );
         let err = qf.tag_values("t1", "span.name", 0, 300).await.unwrap_err();
-        assert!(matches!(err, BackendError::Transport(_)));
+        assert2::assert!(matches!(err, BackendError::Transport(_)));
     }
 }

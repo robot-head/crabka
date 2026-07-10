@@ -120,7 +120,7 @@ reach the two-vote majority, so it cannot elect itself.
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -142,7 +142,7 @@ mod tests {
             "**Invariant:**",
             "**Outcome:**",
         ] {
-            assert!(md.contains(needle), "missing {needle:?}");
+            assert2::assert!(md.contains(needle));
         }
     }
 

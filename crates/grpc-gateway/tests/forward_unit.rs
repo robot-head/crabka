@@ -105,7 +105,7 @@ async fn forward_transport_error_is_unavailable() {
         .forward("127.0.0.1:1", &rec("ok"), &anon())
         .await
         .unwrap_err();
-    assert!(matches!(err, GatewayError::Unavailable));
+    assert2::assert!(matches!(err, GatewayError::Unavailable));
 }
 
 #[tokio::test]
@@ -115,9 +115,9 @@ async fn forward_maps_owner_responses() {
 
     // Happy path: error: None => Ok with the forwarded outcome.
     let ok = fwd.forward(&addr, &rec("ok"), &anon()).await.unwrap();
-    assert_eq!(ok.partition, PartitionIndex(7));
-    assert_eq!(ok.offset, Offset(11));
-    assert!(ok.deduplicated);
+    assert2::assert!(ok.partition == PartitionIndex(7));
+    assert2::assert!(ok.offset == Offset(11));
+    assert2::assert!(ok.deduplicated);
 
     for (name, key, expected) in [
         ("retriable_owner_error", "retriable", "unavailable"),
@@ -132,7 +132,7 @@ async fn forward_maps_owner_responses() {
             GatewayError::Forward(_) => "forward",
             other => panic!("unexpected error for {name}: {other:?}"),
         };
-        assert_eq!(actual, expected, "case {name}");
+        assert2::assert!(actual == expected);
     }
 }
 
@@ -227,19 +227,11 @@ async fn forward_handler_error_arm_returns_retriable() {
 
     // produce_local => dedup_produce => DedupStore owns nothing => Unavailable
     // => forward_handler wraps it with retriable: true.
-    assert_eq!(status, StatusCode::OK, "complete forward error result");
-    assert_eq!(
-        result.partition,
-        PartitionIndex(-1),
-        "complete forward error result"
-    );
-    assert_eq!(result.offset, Offset(-1), "complete forward error result");
-    assert!(!result.deduplicated, "complete forward error result");
-    assert_eq!(
-        result.error.map(|error| error.retriable),
-        Some(true),
-        "complete forward error result"
-    );
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(result.partition == PartitionIndex(-1));
+    assert2::assert!(result.offset == Offset(-1));
+    assert2::assert!(!result.deduplicated);
+    assert2::assert!(result.error.map(|error| error.retriable) == Some(true));
 
     broker.shutdown().await;
 }
@@ -346,27 +338,11 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
     let result: ForwardResult = serde_json::from_slice(&bytes).unwrap();
 
     // The gate returns an error with retriable: false — no broker round-trip.
-    assert_eq!(
-        status,
-        StatusCode::FORBIDDEN,
-        "complete anonymous-rejection result"
-    );
-    assert_eq!(
-        result.partition,
-        PartitionIndex(-1),
-        "complete anonymous-rejection result"
-    );
-    assert_eq!(
-        result.offset,
-        Offset(-1),
-        "complete anonymous-rejection result"
-    );
-    assert!(!result.deduplicated, "complete anonymous-rejection result");
-    assert_eq!(
-        result.error.map(|error| error.retriable),
-        Some(false),
-        "complete anonymous-rejection result"
-    );
+    assert2::assert!(status == StatusCode::FORBIDDEN);
+    assert2::assert!(result.partition == PartitionIndex(-1));
+    assert2::assert!(result.offset == Offset(-1));
+    assert2::assert!(!result.deduplicated);
+    assert2::assert!(result.error.map(|error| error.retriable) == Some(false));
 
     broker.shutdown().await;
 }

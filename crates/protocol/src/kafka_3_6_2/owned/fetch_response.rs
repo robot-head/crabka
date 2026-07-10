@@ -23,7 +23,7 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::*;
@@ -31,14 +31,14 @@ mod tests {
     fn roundtrip(case: &str, msg: &FetchResponse, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
-        assert!(msg.encoded_len(v) == buf.len(), "case {case}, version {v}");
+        assert2::assert!(msg.encoded_len(v) == buf.len());
         let bytes = buf.freeze();
         let mut cur = &bytes[..];
         let decoded = FetchResponse::decode(&mut cur, v).unwrap();
-        assert!(cur.is_empty(), "case {case}, version {v}");
+        assert2::assert!(cur.is_empty());
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
-        assert!(&reencoded[..] == &bytes[..], "case {case}, version {v}");
+        assert2::assert!(&reencoded[..] == &bytes[..]);
         let _ = default_json(v);
     }
     #[test]

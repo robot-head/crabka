@@ -30,22 +30,16 @@ fn dsl_count_executes() {
         );
     }
     // count forwards the running count per key
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("a".into()), 1))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("a".into()), 1))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("a".into()), 2))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("a".into()), 2))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("b".into()), 1))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("b".into()), 1))
     );
-    assert_eq!(
-        d.store_get::<String, i64>("counts", &"a".to_string()),
-        Some(2)
-    );
+    assert2::assert!(d.store_get::<String, i64>("counts", &"a".to_string()) == Some(2));
 }
 
 /// `group_by` is key-changing, so `count` must insert a repartition
@@ -76,22 +70,16 @@ fn dsl_count_with_repartition_executes() {
             0,
         );
     }
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("x".into()), 1))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("x".into()), 1))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("x".into()), 2))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("x".into()), 2))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("y".into()), 1))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("y".into()), 1))
     );
-    assert_eq!(
-        d.store_get::<String, i64>("counts", &"x".to_string()),
-        Some(2)
-    );
+    assert2::assert!(d.store_get::<String, i64>("counts", &"x".to_string()) == Some(2));
 }
 
 /// `reduce`: first value per key seeds the accumulator; later values fold via
@@ -116,21 +104,20 @@ fn dsl_reduce_executes() {
         );
     }
     // first value for "a" seeds "1", second folds to "12"
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("a".into()), "1".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("a".into()), "1".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("a".into()), "12".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("a".into()), "12".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("b".into()), "9".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("b".into()), "9".into()))
     );
-    assert_eq!(
-        d.store_get::<String, String>("reduced", &"a".to_string()),
-        Some("12".to_string())
+    assert2::assert!(
+        d.store_get::<String, String>("reduced", &"a".to_string()) == Some("12".to_string())
     );
 }
 
@@ -165,22 +152,19 @@ fn dsl_branch_executes() {
         );
     }
     // All three records reach the output (each exactly once via its branch).
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("a".into()), "a".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("a".into()), "a".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("b".into()), "b".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("b".into()), "b".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("a".into()), "a".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("a".into()), "a".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// `repartition()` must not panic — records must flow through the internal
@@ -208,18 +192,15 @@ fn dsl_repartition_executes() {
             0,
         );
     }
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("hello".into()), "HELLO".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("hello".into()), "HELLO".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("world".into()), "WORLD".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("world".into()), "WORLD".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 // ── New execution tests for previously untested operators ────────────────────
@@ -244,14 +225,11 @@ fn dsl_map_executes() {
         "world".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(I64Serde, StringSerde)),
-        Some((Some(5_i64), "WORLD".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(I64Serde, StringSerde))
+            == Some((Some(5_i64), "WORLD".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(I64Serde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(I64Serde, StringSerde)) == None);
 }
 
 /// `select_key`: rewrite only the key, value unchanged.
@@ -273,14 +251,11 @@ fn dsl_select_key_executes() {
         "new-key".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("new-key".to_string()), "new-key".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("new-key".to_string()), "new-key".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// `filter_not`: the complement of `filter` — records where the predicate is
@@ -306,18 +281,15 @@ fn dsl_filter_not_executes() {
             0,
         );
     }
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".into()), "keep".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".into()), "keep".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".into()), "also-keep".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".into()), "also-keep".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// `flat_map`: one input record expands to multiple `(K2, V2)` output records.
@@ -345,22 +317,19 @@ fn dsl_flat_map_executes() {
         "a-b-c".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("0".into()), "a".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("0".into()), "a".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("1".into()), "b".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("1".into()), "b".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("2".into()), "c".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("2".into()), "c".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// `flat_map_values`: one value expands to multiple values, key unchanged.
@@ -383,18 +352,15 @@ fn dsl_flat_map_values_executes() {
         "hi".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".into()), "h".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".into()), "h".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".into()), "i".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".into()), "i".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// `peek`: side-effect is executed for each record; records pass through
@@ -428,23 +394,19 @@ fn dsl_peek_executes() {
         );
     }
     // Records pass through unchanged.
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k1".into()), "v1".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k1".into()), "v1".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k2".into()), "v2".into()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k2".into()), "v2".into()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
     // Side-effect fired for each record.
     let got = seen.lock().unwrap().clone();
-    assert_eq!(
-        got,
-        vec![
+    assert2::assert!(
+        got == vec![
             ("k1".to_string(), "v1".to_string()),
             ("k2".to_string(), "v2".to_string()),
         ]
@@ -478,9 +440,8 @@ fn dsl_foreach_executes() {
         );
     }
     let got = collected.lock().unwrap().clone();
-    assert_eq!(
-        got,
-        vec![
+    assert2::assert!(
+        got == vec![
             ("a".to_string(), "1".to_string()),
             ("b".to_string(), "2".to_string()),
             ("a".to_string(), "3".to_string()),
@@ -519,26 +480,20 @@ fn dsl_aggregate_executes() {
             0,
         );
     }
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("a".into()), 2_i64))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde))
+            == Some((Some("a".into()), 2_i64))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("b".into()), 1_i64))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde))
+            == Some((Some("b".into()), 1_i64))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("a".into()), 7_i64))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde))
+            == Some((Some("a".into()), 7_i64))
     );
-    assert_eq!(
-        d.store_get::<String, i64>("agg-store", &"a".to_string()),
-        Some(7)
-    );
-    assert_eq!(
-        d.store_get::<String, i64>("agg-store", &"b".to_string()),
-        Some(1)
-    );
+    assert2::assert!(d.store_get::<String, i64>("agg-store", &"a".to_string()) == Some(7));
+    assert2::assert!(d.store_get::<String, i64>("agg-store", &"b".to_string()) == Some(1));
 }
 
 /// `KTable::filter`: matching rows are forwarded and materialized; non-matching
@@ -574,20 +529,14 @@ fn dsl_ktable_filter_executes() {
         0,
     );
     // Only the matching record is forwarded.
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("a".into()), 42_i64))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde))
+            == Some((Some("a".into()), 42_i64))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, I64Serde)) == None);
     // Matching key is in the filtered store; non-matching key is absent.
-    assert_eq!(
-        d.store_get::<String, i64>("filtered-tbl", &"a".to_string()),
-        Some(42)
-    );
-    assert!(
+    assert2::assert!(d.store_get::<String, i64>("filtered-tbl", &"a".to_string()) == Some(42));
+    assert2::assert!(
         d.store_get::<String, i64>("filtered-tbl", &"b".to_string())
             .is_none()
     );
@@ -615,16 +564,13 @@ fn dsl_ktable_map_values_view_executes() {
         7_i64,
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("k".into()), 14_i64))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde))
+            == Some((Some("k".into()), 14_i64))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, I64Serde)) == None);
     // The source table store is present; no separate store for the view step.
-    assert!(
+    assert2::assert!(
         d.get_key_value_store::<String, i64>("src-tbl").is_some(),
         "source table store must exist"
     );
@@ -652,7 +598,7 @@ fn dsl_count_no_logging_omits_changelog() {
         .subtopologies
         .iter()
         .any(|s| !s.state_changelog_topics.is_empty());
-    assert!(
+    assert2::assert!(
         !any_changelog,
         "expected no changelog topics but found some"
     );
@@ -667,10 +613,7 @@ fn dsl_count_no_logging_omits_changelog() {
             0,
         );
     }
-    assert_eq!(
-        d.store_get::<String, i64>("counts", &"a".to_string()),
-        Some(2)
-    );
+    assert2::assert!(d.store_get::<String, i64>("counts", &"a".to_string()) == Some(2));
 }
 
 /// `KTable::filter` tombstone propagates to a downstream materialized store.
@@ -702,9 +645,8 @@ fn dsl_ktable_filter_tombstone_propagates_downstream() {
         "keep".to_string(),
         0,
     );
-    assert_eq!(
-        d.store_get::<String, String>("view", &"k".to_string()),
-        Some("keep".to_string())
+    assert2::assert!(
+        d.store_get::<String, String>("view", &"k".to_string()) == Some("keep".to_string())
     );
 
     // 2. update "k" to a value that FAILS the filter → tombstone must DELETE "k"
@@ -716,14 +658,12 @@ fn dsl_ktable_filter_tombstone_propagates_downstream() {
         "drop".to_string(),
         1,
     );
-    assert_eq!(
-        d.store_get::<String, String>("filt", &"k".to_string()),
-        None,
+    assert2::assert!(
+        d.store_get::<String, String>("filt", &"k".to_string()) == None,
         "filter store must not hold the key after tombstone"
     );
-    assert_eq!(
-        d.store_get::<String, String>("view", &"k".to_string()),
-        None,
+    assert2::assert!(
+        d.store_get::<String, String>("view", &"k".to_string()) == None,
         "downstream view store must delete the key when tombstone propagates"
     );
 }
@@ -750,15 +690,11 @@ fn dsl_table_map_values_executes() {
         4_i64,
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("k".into()), 40))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("k".into()), 40))
     );
-    assert_eq!(d.store_get::<String, i64>("tbl", &"k".to_string()), Some(4));
-    assert_eq!(
-        d.store_get::<String, i64>("tbl-x10", &"k".to_string()),
-        Some(40)
-    );
+    assert2::assert!(d.store_get::<String, i64>("tbl", &"k".to_string()) == Some(4));
+    assert2::assert!(d.store_get::<String, i64>("tbl-x10", &"k".to_string()) == Some(40));
 }
 
 /// `to_table`: materialize a stream into a `KTable`, then back to a stream.
@@ -791,18 +727,17 @@ fn dsl_to_table_executes() {
         1,
     );
     // The table forwards each new value; to_stream extracts it to the sink.
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "a".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "a".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "b".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "b".to_string()))
     );
     // The store holds the latest value for the key.
-    assert_eq!(
-        d.store_get::<String, String>("store", &"k".to_string()),
-        Some("b".to_string())
+    assert2::assert!(
+        d.store_get::<String, String>("store", &"k".to_string()) == Some("b".to_string())
     );
 }
 
@@ -835,18 +770,15 @@ fn dsl_to_table_unnamed_store_executes() {
         1,
     );
     // The table forwards each new value through to_stream to the sink.
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "a".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "a".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "b".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "b".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// `KStream::join` (inner stream-table join): a stream record is joined against
@@ -880,9 +812,9 @@ fn dsl_stream_table_inner_join_executes() {
         "S".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "ST".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "ST".to_string()))
     );
     // 3. Stream record with a key ABSENT from the table → inner join drops it.
     d.pipe_input(
@@ -892,10 +824,7 @@ fn dsl_stream_table_inner_join_executes() {
         "S2".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// `KStream::left_join` (left stream-table join): every stream record is
@@ -930,9 +859,9 @@ fn dsl_stream_table_left_join_executes() {
         "S".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "ST".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "ST".to_string()))
     );
     // Miss: ("x", "S2") → joiner gets None → "S2".
     d.pipe_input(
@@ -942,9 +871,9 @@ fn dsl_stream_table_left_join_executes() {
         "S2".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("x".to_string()), "S2".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("x".to_string()), "S2".to_string()))
     );
 }
 
@@ -972,10 +901,7 @@ fn dsl_ktable_ktable_inner_join_executes() {
         "A".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
     // Right side now present → join emits "AB".
     d.pipe_input(
         "b",
@@ -984,9 +910,9 @@ fn dsl_ktable_ktable_inner_join_executes() {
         "B".to_string(),
         1,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "AB".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "AB".to_string()))
     );
 }
 
@@ -1016,9 +942,9 @@ fn dsl_ktable_ktable_left_join_executes() {
         "A".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "A".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "A".to_string()))
     );
 }
 
@@ -1051,9 +977,9 @@ fn dsl_ktable_ktable_outer_join_executes() {
         "B".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "B".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "B".to_string()))
     );
 }
 
@@ -1079,7 +1005,7 @@ fn dsl_to_table_no_logging_omits_changelog() {
         .subtopologies
         .iter()
         .any(|sub| !sub.state_changelog_topics.is_empty());
-    assert!(
+    assert2::assert!(
         !any_changelog,
         "expected no changelog topics when with_logging(false) but found some: {wire:?}"
     );
@@ -1100,18 +1026,15 @@ fn dsl_to_table_no_logging_omits_changelog() {
         "b".to_string(),
         1,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "a".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "a".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "b".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "b".to_string()))
     );
-    assert_eq!(
-        d.store_get::<String, String>("s", &"k".to_string()),
-        Some("b".to_string())
-    );
+    assert2::assert!(d.store_get::<String, String>("s", &"k".to_string()) == Some("b".to_string()));
 }
 
 // ── Windowed aggregations (windowedBy) ──────────────────────────────────────
@@ -1158,35 +1081,35 @@ fn dsl_windowed_count_tumbling_executes() {
         12,
     );
     let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 0, end: 10 }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 0, end: 10 }
+                }),
+                1
+            ))
     );
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 0, end: 10 }
-            }),
-            2
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 0, end: 10 }
+                }),
+                2
+            ))
     );
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 10, end: 20 }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 10, end: 20 }
+                }),
+                1
+            ))
     );
 }
 
@@ -1220,25 +1143,25 @@ fn dsl_windowed_count_hopping_executes() {
     );
     let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
     // windows_for(12) for size=10 advance=5 = [5, 10] → two emissions
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 5, end: 15 }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 5, end: 15 }
+                }),
+                1
+            ))
     );
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 10, end: 20 }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 10, end: 20 }
+                }),
+                1
+            ))
     );
 }
 
@@ -1284,35 +1207,35 @@ fn dsl_windowed_reduce_executes() {
         12,
     );
     let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde);
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 0, end: 10 }
-            }),
-            "1".to_string()
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 0, end: 10 }
+                }),
+                "1".to_string()
+            ))
     );
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 0, end: 10 }
-            }),
-            "12".to_string()
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 0, end: 10 }
+                }),
+                "12".to_string()
+            ))
     );
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 10, end: 20 }
-            }),
-            "9".to_string()
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 10, end: 20 }
+                }),
+                "9".to_string()
+            ))
     );
 }
 
@@ -1358,35 +1281,35 @@ fn dsl_windowed_aggregate_executes() {
         12,
     );
     let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 0, end: 10 }
-            }),
-            5
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 0, end: 10 }
+                }),
+                5
+            ))
     );
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 0, end: 10 }
-            }),
-            12
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 0, end: 10 }
+                }),
+                12
+            ))
     );
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 10, end: 20 }
-            }),
-            2
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 10, end: 20 }
+                }),
+                2
+            ))
     );
 }
 
@@ -1426,10 +1349,7 @@ fn dsl_stream_stream_inner_join_executes() {
         "a".to_string(),
         5,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
     // Right record ("k", "b") at t=8: 8 ∈ [5-10, 5+10] → joins with the left "a".
     d.pipe_input(
         "right",
@@ -1438,9 +1358,9 @@ fn dsl_stream_stream_inner_join_executes() {
         "b".to_string(),
         8,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "ab".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "ab".to_string()))
     );
     // Right record ("k", "c") at t=20: 20 ∉ [5-10, 5+10] → no join with "a".
     d.pipe_input(
@@ -1450,10 +1370,7 @@ fn dsl_stream_stream_inner_join_executes() {
         "c".to_string(),
         20,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// Asymmetric `JoinWindows::of(10).before(0).after(20)` proves the OTHER-side
@@ -1490,10 +1407,7 @@ fn dsl_stream_stream_join_swap_asymmetric() {
         "a".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
     d.pipe_input(
         "right",
         Consumed::with(StringSerde, StringSerde),
@@ -1501,9 +1415,9 @@ fn dsl_stream_stream_join_swap_asymmetric() {
         "b".to_string(),
         15,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k1".to_string()), "ab".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k1".to_string()), "ab".to_string()))
     );
 
     // Key "k2": B first at t=0, then A at t=15. When A@15 drives, the THIS (A)
@@ -1517,10 +1431,7 @@ fn dsl_stream_stream_join_swap_asymmetric() {
         "b2".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
     d.pipe_input(
         "left",
         Consumed::with(StringSerde, StringSerde),
@@ -1528,10 +1439,7 @@ fn dsl_stream_stream_join_swap_asymmetric() {
         "a2".to_string(),
         15,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// Windowed join emits one output per matching record on the other side: two left
@@ -1571,10 +1479,7 @@ fn dsl_stream_stream_join_duplicates() {
         "a2".to_string(),
         5,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
     // One right record at t=8 ∈ [5-10, 5+10]: matches BOTH left records → two outputs.
     d.pipe_input(
         "right",
@@ -1583,18 +1488,15 @@ fn dsl_stream_stream_join_duplicates() {
         "b".to_string(),
         8,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "a1b".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "a1b".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "a2b".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "a2b".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 // ---------------------------------------------------------------------------
@@ -1634,10 +1536,7 @@ fn dsl_stream_stream_left_join_executes() {
         5,
     );
     // No B yet, window still open → buffered, no output.
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
     d.pipe_input(
         "right",
         Consumed::with(StringSerde, StringSerde),
@@ -1646,14 +1545,11 @@ fn dsl_stream_stream_left_join_executes() {
         8,
     );
     // The match fires AND deletes k1@5 from the outer buffer → no later null.
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k1".to_string()), "ab".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k1".to_string()), "ab".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 
     // Unmatched left: A("k2","x")@5 with no B → buffered (window 5+10 open at st=5).
     d.pipe_input(
@@ -1663,10 +1559,7 @@ fn dsl_stream_stream_left_join_executes() {
         "x".to_string(),
         5,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
     // Later left A("k2","z")@100 advances stream-time past 5+after(10) → close-scan
     // emits the buffered (x, None) = "x" at ts=5. (The k1@5 match was already
     // removed, so it does NOT re-emit a null.)
@@ -1677,14 +1570,11 @@ fn dsl_stream_stream_left_join_executes() {
         "z".to_string(),
         100,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k2".to_string()), "x".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k2".to_string()), "x".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// `KStream::outer_join` (windowed outer stream-stream join): an unmatched RIGHT
@@ -1724,10 +1614,7 @@ fn dsl_stream_stream_outer_join_executes() {
         "b".to_string(),
         5,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
     // Later right B("k","z")@100 advances stream-time past 5+before(10) → close-scan
     // emits the buffered (None, b) = "b" at ts=5.
     d.pipe_input(
@@ -1737,14 +1624,11 @@ fn dsl_stream_stream_outer_join_executes() {
         "z".to_string(),
         100,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "b".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "b".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// Session window count: two records within the inactivity gap merge into one
@@ -1777,43 +1661,43 @@ fn dsl_session_count_merges_within_gap() {
     }
     let out = Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde);
     // @0 → new session [0,0] count 1.
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 0 }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 0 }
+                }),
+                1
+            ))
     );
     // @30 (within gap) → merged session [0,30] count 2 (the [0,0] tombstone is
     // dropped by to_stream).
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 30 }
-            }),
-            2
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 30 }
+                }),
+                2
+            ))
     );
     // @200 (beyond gap) → new session [200,200] count 1.
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window {
-                    start: 200,
-                    end: 200
-                }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window {
+                        start: 200,
+                        end: 200
+                    }
+                }),
+                1
+            ))
     );
-    assert_eq!(d.read_output("out", out), None);
+    assert2::assert!(d.read_output("out", out) == None);
 }
 
 /// Two records separated by more than the inactivity gap form two independent
@@ -1843,30 +1727,30 @@ fn dsl_session_count_separate_beyond_gap() {
         );
     }
     let out = Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde);
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 0 }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 0 }
+                }),
+                1
+            ))
     );
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window {
-                    start: 500,
-                    end: 500
-                }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window {
+                        start: 500,
+                        end: 500
+                    }
+                }),
+                1
+            ))
     );
-    assert_eq!(d.read_output("out", out), None);
+    assert2::assert!(d.read_output("out", out) == None);
 }
 
 /// Session window `reduce`: values per session fold via the reducer; two records
@@ -1901,27 +1785,27 @@ fn dsl_session_reduce_executes() {
     let out = Produced::with(SessionWindowedSerde::new(StringSerde), StringSerde);
     // @0 → [0,0]="x"; @30 (within gap) → merged [0,30]="xy" (the [0,0] tombstone is
     // dropped by to_stream).
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 0 }
-            }),
-            "x".to_string()
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 0 }
+                }),
+                "x".to_string()
+            ))
     );
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 30 }
-            }),
-            "xy".to_string()
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 30 }
+                }),
+                "xy".to_string()
+            ))
     );
-    assert_eq!(d.read_output("out", out), None);
+    assert2::assert!(d.read_output("out", out) == None);
 }
 
 /// Session window `aggregate` (with an explicit init/aggregator/merger): a
@@ -1957,28 +1841,28 @@ fn dsl_session_aggregate_executes() {
         );
     }
     let out = Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde);
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 0 }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 0 }
+                }),
+                1
+            ))
     );
     // merged [0,30] aggregate = 2 (merger(0,1)=1 over the buffered session, + agg=2).
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window { start: 0, end: 30 }
-            }),
-            2
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 30 }
+                }),
+                2
+            ))
     );
-    assert_eq!(d.read_output("out", out), None);
+    assert2::assert!(d.read_output("out", out) == None);
 }
 
 /// Suppress(untilWindowCloses): a window's count is buffered and emitted exactly
@@ -2013,7 +1897,7 @@ fn dsl_suppress_until_window_closes_emits_final_only() {
         );
     }
     let out = Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde);
-    assert_eq!(d.read_output("out", out), None); // buffered, window not yet closed
+    assert2::assert!(d.read_output("out", out) == None); // buffered, window not yet closed
     // A record in window [60000,120000) advances stream-time to 65000 >= 60000 ->
     // window [0,60000) closes, emitting its final count (2) exactly once.
     d.pipe_input(
@@ -2023,21 +1907,21 @@ fn dsl_suppress_until_window_closes_emits_final_only() {
         "x".to_string(),
         65_000,
     );
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window {
-                    start: 0,
-                    end: 60_000
-                }
-            }),
-            2
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window {
+                        start: 0,
+                        end: 60_000
+                    }
+                }),
+                2
+            ))
     );
     // The [60000,120000) window is still buffered -> no further output.
-    assert_eq!(d.read_output("out", out), None);
+    assert2::assert!(d.read_output("out", out) == None);
 }
 
 /// Suppress closing multiple buffered windows at once: two keys buffered in window
@@ -2077,7 +1961,7 @@ fn dsl_suppress_closes_multiple_windows_in_order() {
         "x".to_string(),
         2_000,
     );
-    assert_eq!(d.read_output("out", out), None);
+    assert2::assert!(d.read_output("out", out) == None);
     // "a" in window [60000,120000) advances stream-time to 70000 ≥ 60000 → both
     // [0,60000) entries close, emitted in buffer (insertion) order: a then b.
     d.pipe_input(
@@ -2087,34 +1971,34 @@ fn dsl_suppress_closes_multiple_windows_in_order() {
         "x".to_string(),
         70_000,
     );
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "a".into(),
-                window: Window {
-                    start: 0,
-                    end: 60_000
-                }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window {
+                        start: 0,
+                        end: 60_000
+                    }
+                }),
+                1
+            ))
     );
-    assert_eq!(
-        d.read_output("out", out),
-        Some((
-            Some(Windowed {
-                key: "b".into(),
-                window: Window {
-                    start: 0,
-                    end: 60_000
-                }
-            }),
-            1
-        ))
+    assert2::assert!(
+        d.read_output("out", out)
+            == Some((
+                Some(Windowed {
+                    key: "b".into(),
+                    window: Window {
+                        start: 0,
+                        end: 60_000
+                    }
+                }),
+                1
+            ))
     );
     // The [60000,120000) "a" entry stays buffered → no further output.
-    assert_eq!(d.read_output("out", out), None);
+    assert2::assert!(d.read_output("out", out) == None);
 }
 
 /// Suppress with a record cap: exceeding `maxRecords` shuts the task down
@@ -2220,10 +2104,7 @@ fn dsl_suppress_max_bytes_emit_early() {
         "x".to_string(),
         1,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, I64Serde)) == None);
     // "b"@2 pushes the buffer to 18 > 10 → evict + emit the oldest ("a", count 1).
     d.pipe_input(
         "in",
@@ -2232,9 +2113,8 @@ fn dsl_suppress_max_bytes_emit_early() {
         "x".to_string(),
         2,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("a".into()), 1))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("a".into()), 1))
     );
 }
 
@@ -2260,10 +2140,7 @@ fn dsl_suppress_until_time_limit_rate_limits() {
         "x".to_string(),
         10,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, I64Serde)) == None);
     // "b"@100 advances stream-time to 100 ≥ 60 → "a" emits its final count (1).
     d.pipe_input(
         "in",
@@ -2272,9 +2149,8 @@ fn dsl_suppress_until_time_limit_rate_limits() {
         "x".to_string(),
         100,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("a".into()), 1))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("a".into()), 1))
     );
 }
 
@@ -2311,9 +2187,8 @@ fn dsl_suppress_emit_early_when_full_evicts_oldest() {
         "x".to_string(),
         2,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("a".into()), 1))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("a".into()), 1))
     );
 }
 
@@ -2363,14 +2238,11 @@ fn dsl_global_join_inner_hit_executes() {
         "v1".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "v1G1".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "v1G1".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// Inner join miss: a stream value with no matching global key is dropped.
@@ -2399,10 +2271,7 @@ fn dsl_global_join_inner_miss_drops() {
         "absent".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// Left join miss: a global miss still forwards, the joiner receiving `None`.
@@ -2433,9 +2302,9 @@ fn dsl_global_left_join_miss_emits_none() {
         "v2".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "v2-none".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "v2-none".to_string()))
     );
 }
 
@@ -2466,9 +2335,9 @@ fn dsl_global_join_sees_midstream_update() {
         "v1".to_string(),
         0,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "v1G1".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "v1G1".to_string()))
     );
     // Update the same global key, then re-drive → sees the NEW value "G2".
     d.pipe_global("global-store", "v1".to_string(), "G2".to_string());
@@ -2479,9 +2348,9 @@ fn dsl_global_join_sees_midstream_update() {
         "v1".to_string(),
         1,
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "v1G2".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "v1G2".to_string()))
     );
 }
 
@@ -2513,9 +2382,9 @@ fn dsl_global_join_key_mapper_derives_compound_key() {
         0,
     );
     // Output key is the stream key "k1", value is joiner(sv="v1", gv="G").
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k1".to_string()), "v1G".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k1".to_string()), "v1G".to_string()))
     );
 }
 
@@ -2565,26 +2434,17 @@ fn dsl_process_stateful_counter_executes() {
             0,
         );
     }
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("a".into()), 1))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("a".into()), 1))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("a".into()), 2))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("a".into()), 2))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("b".into()), 1))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)) == Some((Some("b".into()), 1))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        None
-    );
-    assert_eq!(
-        d.store_get::<String, i64>("counts", &"a".to_string()),
-        Some(2)
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, I64Serde)) == None);
+    assert2::assert!(d.store_get::<String, i64>("counts", &"a".to_string()) == Some(2));
 }
 
 /// `KStream::process` is **key-changing**: a downstream aggregation must insert a
@@ -2624,7 +2484,7 @@ fn dsl_process_is_key_changing_forces_repartition() {
         .subtopologies
         .iter()
         .any(|s| !s.repartition_source_topics.is_empty());
-    assert!(
+    assert2::assert!(
         has_sink && has_source,
         "expected a repartition topic from the key-changing process; wire = {wire:?}"
     );
@@ -2671,14 +2531,11 @@ fn dsl_process_values_preserves_key_executes() {
         0,
     );
     // SAME key "k", value uppercased to "HI".
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "HI".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "HI".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        None
-    );
+    assert2::assert!(d.read_output("out", Produced::with(StringSerde, StringSerde)) == None);
 }
 
 /// `KStream::process_values` is **non-key-changing** (KIP-820 preserves the key):
@@ -2721,7 +2578,7 @@ fn dsl_process_values_is_not_key_changing_no_repartition() {
         .subtopologies
         .iter()
         .any(|s| !s.repartition_source_topics.is_empty());
-    assert!(
+    assert2::assert!(
         !any_sink && !any_source,
         "expected NO repartition topic from non-key-changing process_values; wire = {wire:?}"
     );
@@ -2744,7 +2601,7 @@ fn dsl_process_values_reads_store_and_record_context() {
             r: FixedKeyRecord<String, String>,
         ) {
             // Source metadata is available on every record.
-            assert!(!ctx.record_context().topic.is_empty());
+            assert2::assert!(!ctx.record_context().topic.is_empty());
             let n = {
                 let store = ctx.get_state_store::<String, i64>("seen").unwrap();
                 let n = store.get(&r.key).await.unwrap_or(0) + 1;
@@ -2771,13 +2628,13 @@ fn dsl_process_values_reads_store_and_record_context() {
             0,
         );
     }
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "a#1".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "a#1".to_string()))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, StringSerde)),
-        Some((Some("k".to_string()), "b#2".to_string()))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde))
+            == Some((Some("k".to_string()), "b#2".to_string()))
     );
 }
 
@@ -2887,8 +2744,8 @@ fn sliding_window_count_matches_jvm_behavior() {
         &std::fs::read_to_string("tests/testdata/sliding_window/behavior.json").unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        got, golden,
+    assert2::assert!(
+        got == golden,
         "sliding-window output sequence != JVM behavioral golden"
     );
 }
@@ -2952,7 +2809,10 @@ fn emit_final_time_window_matches_jvm_behavior() {
         &std::fs::read_to_string("tests/testdata/emit_final/time.json").unwrap(),
     )
     .unwrap();
-    assert_eq!(got, golden, "emit-final time-window sequence != JVM golden");
+    assert2::assert!(
+        got == golden,
+        "emit-final time-window sequence != JVM golden"
+    );
 }
 
 /// Emit-final SLIDING-window count must match `testdata/emit_final/sliding.json`.
@@ -3001,8 +2861,8 @@ fn emit_final_sliding_window_matches_jvm_behavior() {
         &std::fs::read_to_string("tests/testdata/emit_final/sliding.json").unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        got, golden,
+    assert2::assert!(
+        got == golden,
         "emit-final sliding-window sequence != JVM golden"
     );
 }
@@ -3056,8 +2916,8 @@ fn emit_final_session_window_matches_jvm_behavior() {
         &std::fs::read_to_string("tests/testdata/emit_final/session.json").unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        got, golden,
+    assert2::assert!(
+        got == golden,
         "emit-final session-window sequence != JVM golden"
     );
 }
@@ -3142,8 +3002,8 @@ fn sliding_window_reduce_matches_jvm_behavior() {
         &std::fs::read_to_string("tests/testdata/sliding_window/behavior_reduce.json").unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        got, golden,
+    assert2::assert!(
+        got == golden,
         "sliding-window reduce output sequence != JVM behavioral golden"
     );
 }
@@ -3187,15 +3047,15 @@ fn sliding_window_aggregate_executes() {
     );
     let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
     // First emission: left window [10,20] with count=1.
-    assert_eq!(
-        d.read_output("out", p()),
-        Some((
-            Some(Windowed {
-                key: "k".into(),
-                window: Window { start: 10, end: 20 }
-            }),
-            1i64
-        ))
+    assert2::assert!(
+        d.read_output("out", p())
+            == Some((
+                Some(Windowed {
+                    key: "k".into(),
+                    window: Window { start: 10, end: 20 }
+                }),
+                1i64
+            ))
     );
 }
 
@@ -3230,9 +3090,8 @@ fn sliding_window_emit_final_emits_only_on_close() {
     d.pipe_input("in", consume(), Some("k".to_string()), "x".to_string(), 20);
     d.pipe_input("in", consume(), Some("k".to_string()), "x".to_string(), 25);
     // Emit-final: nothing forwarded while windows are open.
-    assert_eq!(
-        d.read_output("out", p()),
-        None,
+    assert2::assert!(
+        d.read_output("out", p()) == None,
         "emit-final must not emit while windows are open"
     );
     // Far-future record advances stream-time → close_time 900 closes the
@@ -3244,7 +3103,7 @@ fn sliding_window_emit_final_emits_only_on_close() {
         "x".to_string(),
         1000,
     );
-    assert!(
+    assert2::assert!(
         d.read_output("out", p()).is_some(),
         "closed windows must flush their finals once stream-time passes their close"
     );
@@ -3279,12 +3138,11 @@ fn sliding_window_count_nonexplicit_builds_and_runs() {
         "x".to_string(),
         15,
     );
-    assert_eq!(
+    assert2::assert!(
         d.read_output(
             "out",
             Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde)
-        ),
-        Some((
+        ) == Some((
             Some(Windowed {
                 key: "k".into(),
                 window: Window { start: 5, end: 15 }
@@ -3323,12 +3181,11 @@ fn sliding_window_reduce_nonexplicit() {
         "hello".to_string(),
         15,
     );
-    assert_eq!(
+    assert2::assert!(
         d.read_output(
             "out",
             Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde)
-        ),
-        Some((
+        ) == Some((
             Some(Windowed {
                 key: "k".into(),
                 window: Window { start: 5, end: 15 }
@@ -3371,19 +3228,16 @@ fn versioned_table_keeps_latest_on_out_of_order() {
         100,
     );
     // to_stream extracts Change.new; two records were piped so two outputs.
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("k".into()), 20_i64))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde))
+            == Some((Some("k".into()), 20_i64))
     );
-    assert_eq!(
-        d.read_output("out", Produced::with(StringSerde, I64Serde)),
-        Some((Some("k".into()), 10_i64))
+    assert2::assert!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde))
+            == Some((Some("k".into()), 10_i64))
     );
     // The versioned store's latest (highest-timestamp) value must be 20.
-    assert_eq!(
-        d.store_get_versioned::<String, i64>("vt", &"k".to_string()),
-        Some(20)
-    );
+    assert2::assert!(d.store_get_versioned::<String, i64>("vt", &"k".to_string()) == Some(20));
 }
 
 /// The bytes the versioned table's changelog produces must match the JVM 4.1
@@ -3446,7 +3300,7 @@ fn versioned_table_changelog_matches_jvm() {
         .filter(|(topic, _, _, _)| topic == "app-vt-changelog")
         .map(|(_, k, v, ts)| (hex(&k), v.as_ref().map(|b| hex(b)), ts.expect("version ts")))
         .collect();
-    assert_eq!(actual, expected);
+    assert2::assert!(actual == expected);
 }
 
 /// Replaying the JVM behavioral battery through the Rust versioned table must
@@ -3499,5 +3353,5 @@ fn versioned_table_behavioral_matches_jvm() {
     while let Some((k, v)) = d.read_output("out", Produced::with(StringSerde, I64Serde)) {
         actual.push((k, v));
     }
-    assert_eq!(actual, expected);
+    assert2::assert!(actual == expected);
 }

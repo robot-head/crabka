@@ -51,7 +51,7 @@
 
 use std::{io, net::SocketAddr};
 
-use assert2::{assert, check};
+use assert2::check;
 use base64::Engine;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle, config::ListenerSpec};
@@ -539,11 +539,7 @@ async fn delegation_token_lifecycle_end_to_end() {
         // but never push it past `create_resp.max_timestamp_ms`.
         let initial_expiry_ms = create_resp.expiry_timestamp_ms;
         let max_timestamp_ms = create_resp.max_timestamp_ms;
-        assert!(
-            initial_expiry_ms < max_timestamp_ms,
-            "KIP-48 separation invariant: initial expiry ({initial_expiry_ms}) must be strictly \
-             less than max ({max_timestamp_ms}) when default_renew_period < max_lifetime",
-        );
+        assert2::assert!(initial_expiry_ms < max_timestamp_ms);
 
         // Wait briefly for the V1DelegationToken record to apply on this
         // node's image — every subsequent step reads it back via the same
@@ -589,12 +585,7 @@ async fn delegation_token_lifecycle_end_to_end() {
         )
         .await
         .map_err(|e| format!("CreateDelegationToken(token-auth): {e}"))?;
-        assert!(
-            create_via_token.error_code == DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
-            "token-authed Create must return DELEGATION_TOKEN_REQUEST_NOT_ALLOWED (64); \
-             got {} — principal override may have regressed",
-            create_via_token.error_code
-        );
+        assert2::assert!(create_via_token.error_code == DELEGATION_TOKEN_REQUEST_NOT_ALLOWED);
 
         // ── (e) Third connection: bob (a listed renewer) calls Renew.
         //         Renew authorization (owner OR renewer) is what's load-bearing
@@ -666,11 +657,7 @@ async fn delegation_token_lifecycle_end_to_end() {
         )
         .await
         .map_err(|e| format!("ExpireDelegationToken(alice): {e}"))?;
-        assert!(
-            expire_resp.error_code == 0,
-            "Expire must succeed; got {}",
-            expire_resp.error_code
-        );
+        assert2::assert!(expire_resp.error_code == 0);
 
         // Drop the still-open connections we used for the wire dance —
         // they'd otherwise sit around until the test ends.
@@ -688,10 +675,7 @@ async fn delegation_token_lifecycle_end_to_end() {
         //         round 1 (the credential lookup misses → "unknown user")
         //         or as an EOF / connection close.
         let fresh_attempt = sasl_scram_sha256_authenticate(addr, &token_id, &token_password).await;
-        assert!(
-            fresh_attempt.is_err(),
-            "SCRAM with the expired token's creds must fail; got Ok"
-        );
+        assert2::assert!(fresh_attempt.is_err());
 
         Ok(())
     }
@@ -803,7 +787,7 @@ async fn act_as_super_user_mints_token_owned_by_target() {
         // image. Belt-and-suspenders — the SCRAM token-fallback lookup in
         // step (3) reads from the same image.
         let img_token = wait_for_token(&handle, &token_id).await;
-        assert!(
+        assert2::assert!(
             (
                 img_token.owner.principal_type.as_str(),
                 img_token.owner.name.as_str()
@@ -834,12 +818,7 @@ async fn act_as_super_user_mints_token_owned_by_target() {
         )
         .await
         .map_err(|e| format!("CreateDelegationToken(token-auth): {e}"))?;
-        assert!(
-            create_via_token.error_code == DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
-            "token-authed Create must return DELEGATION_TOKEN_REQUEST_NOT_ALLOWED (64); \
-             got {}",
-            create_via_token.error_code
-        );
+        assert2::assert!(create_via_token.error_code == DELEGATION_TOKEN_REQUEST_NOT_ALLOWED);
 
         drop(admin);
         drop(tokenuser);
@@ -878,12 +857,7 @@ async fn act_as_non_super_user_rejected_with_authorization_failed() {
         let resp = send_create_delegation_token(&mut alice, 100, &create_req)
             .await
             .map_err(|e| format!("CreateDelegationToken(alice act-as bob): {e}"))?;
-        assert!(
-            resp.error_code == DELEGATION_TOKEN_AUTHORIZATION_FAILED,
-            "non-super-user act-as must be rejected with \
-             DELEGATION_TOKEN_AUTHORIZATION_FAILED (65); got {}",
-            resp.error_code
-        );
+        assert2::assert!(resp.error_code == DELEGATION_TOKEN_AUTHORIZATION_FAILED);
 
         drop(alice);
         Ok(())
@@ -949,22 +923,18 @@ async fn super_user_can_renew_other_owners_token() {
                 create_resp.error_code,
             ));
         }
-        assert!(create_resp.principal_name == "alice");
+        assert2::assert!(create_resp.principal_name == "alice");
 
         let token_id = create_resp.token_id.clone();
         let hmac_bytes = create_resp.hmac.clone();
         let initial_expiry_ms = create_resp.expiry_timestamp_ms;
         let max_timestamp_ms = create_resp.max_timestamp_ms;
-        assert!(
-            initial_expiry_ms < max_timestamp_ms,
-            "KIP-48 separation invariant must hold so Renew has room to extend"
-        );
+        assert2::assert!(initial_expiry_ms < max_timestamp_ms);
 
         // Wait for the V1DelegationToken record to apply on this node's image.
         let img_token = wait_for_token(&handle, &token_id).await;
-        assert!(
-            (img_token.owner.name.as_str(), img_token.renewers.is_empty()) == ("alice", true),
-            "no renewers were specified, so admin is neither owner NOR renewer"
+        assert2::assert!(
+            (img_token.owner.name.as_str(), img_token.renewers.is_empty()) == ("alice", true)
         );
 
         // (3) admin Renews — this is the operator's renewal
@@ -1004,12 +974,7 @@ async fn super_user_can_renew_other_owners_token() {
         )
         .await
         .map_err(|e| format!("ExpireDelegationToken(admin super-user): {e}"))?;
-        assert!(
-            expire_resp.error_code == 0,
-            "super-user Expire of another owner's token must succeed; got {} \
-             (super-user bypass regressed)",
-            expire_resp.error_code
-        );
+        assert2::assert!(expire_resp.error_code == 0);
 
         // Tombstone should propagate.
         drop(admin);

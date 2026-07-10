@@ -262,7 +262,7 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -299,12 +299,12 @@ mod tests {
 
     #[test]
     fn first_commit_error_returns_first_non_zero_partition_error() {
-        for (name, errors, want) in [
+        for (_name, errors, want) in [
             ("all successful", &[0, 0][..], 0),
             ("later first error", &[0, 27, 42][..], 27),
             ("first partition errors", &[16, 27][..], 16),
         ] {
-            assert!(first_commit_error(&response(errors)) == want, "case {name}");
+            assert2::assert!(first_commit_error(&response(errors)) == want);
         }
     }
 
@@ -324,7 +324,7 @@ mod tests {
         );
 
         let offsets = commit_offsets(raw, &positions);
-        assert!(
+        assert2::assert!(
             offsets
                 == HashMap::from([
                     (("known".into(), 0), (11, 7)),
@@ -341,7 +341,7 @@ mod tests {
 
         let snapshot = snapshot_commit_topics(&offsets, &positions, &topic_ids).await;
 
-        assert!(snapshot.is_none());
+        assert2::assert!(snapshot.is_none());
     }
 
     #[tokio::test]
@@ -366,7 +366,7 @@ mod tests {
         let mut topics = topics;
         topics[0].partitions.sort_by_key(|p| p.partition_index);
 
-        assert!(
+        assert2::assert!(
             (partition_count, topics)
                 == (
                     2,
@@ -420,7 +420,7 @@ mod tests {
             topics.clone(),
         );
 
-        assert!(
+        assert2::assert!(
             req == OffsetCommitRequest {
                 group_id: "group-a".into(),
                 generation_id_or_member_epoch: 42,

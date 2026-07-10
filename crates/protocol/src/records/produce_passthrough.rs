@@ -285,7 +285,7 @@ fn skip(buf: &mut Bytes, n: usize) -> Result<(), ProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::*;
@@ -309,7 +309,7 @@ mod tests {
     /// Encode a produce request, then assert the captured slices match the
     /// records the full decoder produces — byte-for-byte — for every
     /// (topic, partition).
-    fn check_roundtrip(case: &str, req: &ProduceRequest, version: i16) {
+    fn check_roundtrip(_case: &str, req: &ProduceRequest, version: i16) {
         let mut buf = BytesMut::new();
         req.encode(&mut buf, version).unwrap();
         let body = buf.freeze();
@@ -328,16 +328,11 @@ mod tests {
                 expected.push(enc);
             }
         }
-        assert!(
-            slices.len() == expected.len(),
-            "case {case}: slice count mismatch: got {}, want {}",
-            slices.len(),
-            expected.len()
-        );
+        assert2::assert!(slices.len() == expected.len());
         for (got, want) in slices.iter().zip(expected.iter()) {
             match (&got.records, want) {
                 (Some(g), Some(w)) => {
-                    assert!(&g[..] == &w[..], "case {case}: records bytes differ");
+                    assert2::assert!(&g[..] == &w[..]);
                 }
                 (None, None) => {}
                 _ => panic!("nullability mismatch"),
@@ -408,8 +403,8 @@ mod tests {
         let mut buf = BytesMut::new();
         req.encode(&mut buf, version).unwrap();
         let slices = produce_record_slices(buf.freeze(), version).unwrap();
-        assert!(slices.len() == 1);
-        assert!(slices[0].records.is_none());
+        assert2::assert!(slices.len() == 1);
+        assert2::assert!(slices[0].records.is_none());
     }
 
     #[test]
@@ -425,10 +420,7 @@ mod tests {
         let slices = produce_record_slices(body.clone(), version).unwrap();
         let first = slices[0].records.as_ref().unwrap();
         let ptr = first.as_ptr() as usize;
-        assert!(
-            ptr >= body_start && ptr < body_end,
-            "captured slice must point into the request frame (zero-copy)"
-        );
+        assert2::assert!(ptr >= body_start && ptr < body_end);
     }
 
     /// `produce_framing` must reproduce the request-level + per-topic +
@@ -471,7 +463,7 @@ mod tests {
                 })
                 .collect(),
         };
-        assert!(framing == expected);
+        assert2::assert!(framing == expected);
     }
 
     #[test]
@@ -517,7 +509,7 @@ mod tests {
                 }],
             }],
         };
-        assert!(framing == expected);
+        assert2::assert!(framing == expected);
     }
 
     #[test]
@@ -532,6 +524,6 @@ mod tests {
         let mut buf = BytesMut::new();
         req.encode(&mut buf, version).unwrap();
         let slices = produce_record_slices(buf.freeze(), version).unwrap();
-        assert!(slices.is_empty());
+        assert2::assert!(slices.is_empty());
     }
 }

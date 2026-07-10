@@ -687,31 +687,28 @@ mod tests {
             .expect("should succeed")
             .expect("should be Some");
         let tls = sec.tls.expect("tls should be set");
-        assert_eq!(sec.protocol, ListenerProtocol::Ssl);
-        assert_eq!(tls.server_name, "broker.example.com".to_string());
-        assert_eq!(tls.client_identity, Some((cert, key)));
-        assert_eq!(tls.trust_roots_pem, Some(ca));
+        assert2::assert!(sec.protocol == ListenerProtocol::Ssl);
+        assert2::assert!(tls.server_name == "broker.example.com".to_string());
+        assert2::assert!(tls.client_identity == Some((cert, key)));
+        assert2::assert!(tls.trust_roots_pem == Some(ca));
     }
 
     #[test]
     fn build_broker_security_none_when_all_absent() {
         let sec = build_broker_security(None, None, None, None).expect("should succeed");
-        assert!(sec.is_none(), "all absent should return None");
+        assert2::assert!(sec.is_none());
     }
 
     #[test]
     fn build_broker_security_rejects_incomplete_tls_configuration() {
         let cert = PathBuf::from("/tmp/cert.pem");
         let key = PathBuf::from("/tmp/key.pem");
-        for (name, cert, key) in [
+        for (_name, cert, key) in [
             ("certificate_without_key", Some(&cert), None),
             ("key_without_certificate", None, Some(&key)),
             ("certificate_and_key_without_sni", Some(&cert), Some(&key)),
         ] {
-            assert!(
-                build_broker_security(cert, key, None, None).is_err(),
-                "case {name}"
-            );
+            assert2::assert!(build_broker_security(cert, key, None, None).is_err());
         }
     }
 }

@@ -135,31 +135,18 @@ impl Model for EpochModel {
                 let latest = last.leader.iter().map(|e| e.epoch).max();
 
                 // Contract: always a valid truncation target.
-                assert!(
-                    trunc >= 0,
-                    "truncation target {trunc} < 0 (requested={requested})"
-                );
+                assert2::assert!(trunc >= 0);
                 // The resolved epoch never exceeds the requested epoch.
-                assert!(
-                    found <= requested,
-                    "found_epoch {found} > requested {requested}"
-                );
+                assert2::assert!(found <= requested);
 
                 let recorded = last.leader.iter().find(|e| e.epoch == requested);
                 if let Some(entry) = recorded {
                     // Committed-prefix-preserved: never truncate below the start
                     // of an epoch the follower and leader agree on.
-                    assert!(
-                        trunc >= entry.start_offset,
-                        "truncation {trunc} dropped agreed epoch {requested} (starts at {})",
-                        entry.start_offset
-                    );
+                    assert2::assert!(trunc >= entry.start_offset);
                     if latest == Some(requested) {
                         // Current epoch → keep up to the follower's log end.
-                        assert!(
-                            found == requested && trunc == leo,
-                            "latest-epoch probe must return (requested, leo): got ({found},{trunc})"
-                        );
+                        assert2::assert!(found == requested && trunc == leo);
                     } else {
                         // Older agreed epoch → truncate to the next leader
                         // epoch's start, dropping the divergent higher-epoch
@@ -171,15 +158,8 @@ impl Model for EpochModel {
                             .map(|e| e.start_offset)
                             .min()
                             .expect("a non-latest recorded epoch has a higher epoch");
-                        assert!(
-                            found == requested && trunc == next_start,
-                            "older-epoch probe must return (requested, next_start): \
-                             got ({found},{trunc}) want ({requested},{next_start})"
-                        );
-                        assert!(
-                            trunc <= leo,
-                            "truncation {trunc} above follower log end {leo}"
-                        );
+                        assert2::assert!(found == requested && trunc == next_start);
+                        assert2::assert!(trunc <= leo);
                     }
                 }
 
@@ -247,11 +227,8 @@ fn run(model: EpochModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
-    assert!(
-        checker.state_count() < MAX_STATES,
-        "[{label}] state cap hit"
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < MAX_STATES);
     checker.assert_properties();
 }
 

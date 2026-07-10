@@ -18,7 +18,6 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<InFlightFile, StateTopicError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::executor::state::Phase;
@@ -28,12 +27,12 @@ mod tests {
         let f = InFlightFile::new("p-abc".into(), Phase::Wait, 1234, 50_000_000);
         let bytes = encode(&f).unwrap();
         let back = decode(&bytes).unwrap();
-        assert!(back == f);
+        assert2::assert!(back == f);
     }
 
     #[test]
     fn decode_rejects_malformed_json() {
         let err = decode(b"{not json").unwrap_err();
-        assert!(matches!(err, StateTopicError::MalformedJson(_)));
+        assert2::assert!(matches!(err, StateTopicError::MalformedJson(_)));
     }
 }

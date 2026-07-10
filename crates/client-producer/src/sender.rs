@@ -141,10 +141,7 @@ const MAX_IN_FLIGHT_PER_PARTITION: usize = 1;
 // partition could have several outstanding sequences needing an ordered drain —
 // and the recovery path must be redesigned. Enforce the dependency at compile
 // time so the assumption can't silently drift.
-const _: () = assert!(
-    MAX_IN_FLIGHT_PER_PARTITION == 1,
-    "the one-slot retry model requires exactly one in-flight request per partition",
-);
+const _: [(); 1] = [(); MAX_IN_FLIGHT_PER_PARTITION];
 
 /// All the bits of state the sender task needs. The builder constructs
 /// one of these, hands it to [`run`], and drops it.
@@ -1093,7 +1090,7 @@ fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use tokio::sync::oneshot;
 
     use super::*;
@@ -1145,7 +1142,7 @@ mod tests {
 
     #[test]
     fn classify_verdict_maps_codes() {
-        for (name, code, base_offset, want) in [
+        for (_name, code, base_offset, want) in [
             (
                 "success",
                 codes::NONE,
@@ -1192,7 +1189,7 @@ mod tests {
                 Classification::Verdict(BatchVerdict::Terminal(10)),
             ),
         ] {
-            assert!(classify_verdict(code, base_offset) == want, "case {name}");
+            assert2::assert!(classify_verdict(code, base_offset) == want);
         }
     }
 
@@ -1253,11 +1250,11 @@ mod tests {
             pb.backoff_until = Some(now + backoff);
             retry.insert(("t".to_string(), 0), pb);
             let (to_send, expired) = collect_retries(&mut retry, now + elapsed);
-            assert!(expired.is_empty());
+            assert2::assert!(expired.is_empty());
             (to_send.len(), retry.len())
         };
 
-        for (name, elapsed, want) in [
+        for (_name, elapsed, want) in [
             // Before the backoff instant: parked in its slot, nothing sent.
             ("before deadline", Duration::from_millis(40), (0, 1)),
             // Exactly at the backoff instant: eligible — `now < t` is false
@@ -1266,7 +1263,7 @@ mod tests {
             // After the backoff instant: eligible and drained out to send.
             ("after deadline", Duration::from_millis(160), (1, 0)),
         ] {
-            assert!(collect_after(elapsed) == want, "case {name}");
+            assert2::assert!(collect_after(elapsed) == want);
         }
     }
 
@@ -1277,18 +1274,18 @@ mod tests {
         // and re-admit the connection-refused hot loop.
         let now = Instant::now();
         let d = Duration::from_millis(100);
-        assert!(backoff_deadline(now, d) == now + d);
+        assert2::assert!(backoff_deadline(now, d) == now + d);
     }
 
     #[test]
     fn positive_partition_count_filters_boundary_values() {
-        for (name, input, want) in [
+        for (_name, input, want) in [
             ("negative", -1, None),
             ("zero", 0, None),
             ("one", 1, Some(1)),
             ("positive", 2, Some(2)),
         ] {
-            assert!(positive_partition_count(input) == want, "case {name}");
+            assert2::assert!(positive_partition_count(input) == want);
         }
     }
 }
@@ -1303,7 +1300,7 @@ mod tests {
 mod harness {
     use std::sync::{Mutex as StdMutex, atomic::AtomicI64};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_client_core::ClientError;
     use crabka_protocol::{
         owned::{
@@ -1894,21 +1891,17 @@ mod harness {
                 .unwrap_or_else(|_| panic!("record {i} ack-oneshot never resolved (HANG)"))
                 .expect("oneshot sender dropped")
                 .expect("record must be acked Ok, not failed");
-            assert!(md.partition == 0);
+            assert2::assert!(md.partition == 0);
             offsets.push(md.offset);
         }
 
         // Offsets must be the clean increasing sequence 0..N — proof the broker
         // saw each base_sequence exactly once, in order.
         let expected: Vec<i64> = (0..i64::try_from(N).unwrap()).collect();
-        assert!(offsets == expected);
+        assert2::assert!(offsets == expected);
         // Zero churn: with one in-flight per partition there is never an
         // out-of-order arrival, so the broker applies each batch exactly once.
-        assert!(
-            h.transport.applied_count() == N,
-            "expected exactly {N} applies (no resend churn), got {}",
-            h.transport.applied_count()
-        );
+        assert2::assert!(h.transport.applied_count() == N);
 
         shutdown(h).await;
     }
@@ -1935,11 +1928,11 @@ mod harness {
                     .unwrap_or_else(|_| panic!("part {p} record {i} never resolved (HANG)"))
                     .expect("oneshot dropped")
                     .expect("must be acked Ok");
-                assert!(md.partition == p);
+                assert2::assert!(md.partition == p);
                 offsets.push(md.offset);
             }
             let expected: Vec<i64> = (0..i64::try_from(PER).unwrap()).collect();
-            assert!(offsets == expected, "partition {p} offsets out of order");
+            assert2::assert!(offsets == expected);
         }
 
         shutdown(h).await;
@@ -1957,7 +1950,7 @@ mod harness {
             },
         );
 
-        assert!(h.partitioner.pick("t", None, 3) == 0);
+        assert2::assert!(h.partitioner.pick("t", None, 3) == 0);
 
         let mut rxs = produce_single_batch(&h, "t", 0, 1).await;
         tokio::time::timeout(Duration::from_secs(5), rxs.remove(0))
@@ -1966,10 +1959,7 @@ mod harness {
             .expect("oneshot sender should stay alive")
             .expect("record should ack");
 
-        assert!(
-            h.partitioner.pick("t", None, 3) == 1,
-            "sender should rotate the shared sticky partition after sealing partition 0"
-        );
+        assert2::assert!(h.partitioner.pick("t", None, 3) == 1);
 
         shutdown(h).await;
     }
@@ -1997,7 +1987,7 @@ mod harness {
             offsets.push(md.offset);
         }
         let expected: Vec<i64> = (0..i64::try_from(N).unwrap()).collect();
-        assert!(offsets == expected);
+        assert2::assert!(offsets == expected);
 
         // in_flight must fully drain back to zero (it lags the last ack-oneshot
         // by the `finish_in_flight` decrement, so poll via `flush_notify`).
@@ -2008,13 +1998,10 @@ mod harness {
             }
         })
         .await;
-        assert!(drained.is_ok(), "in_flight never settled to zero");
+        assert2::assert!(drained.is_ok());
         // A transport failure forces a metadata refresh so the resend re-resolves
         // the leader; the sender must have refreshed at least once.
-        assert!(
-            h.transport.refresh_count() >= 1,
-            "transport failure must trigger a metadata refresh"
-        );
+        assert2::assert!(h.transport.refresh_count() >= 1);
         shutdown(h).await;
     }
 
@@ -2098,24 +2085,18 @@ mod harness {
             .expect("live partition ack should not wait for a slow dead leader")
             .expect("oneshot sender should stay alive")
             .expect("live partition should ack Ok");
-        assert!((live_md.partition, live_md.offset) == (1, 0));
+        assert2::assert!((live_md.partition, live_md.offset) == (1, 0));
 
         let dead_md = tokio::time::timeout(Duration::from_secs(5), dead_rx.remove(0))
             .await
             .expect("dead leader partition should resolve after reroute")
             .expect("oneshot sender should stay alive")
             .expect("dead leader partition should ack after reroute");
-        assert!((dead_md.partition, dead_md.offset) == (0, 0));
+        assert2::assert!((dead_md.partition, dead_md.offset) == (0, 0));
 
         let sent = h.transport.sent_leaders();
-        assert!(
-            sent.len() == 3 && sent[2] == Some(1),
-            "sender should reroute the stale leader after the first two sends, got {sent:?}"
-        );
-        assert!(
-            sent[..2].contains(&Some(0)) && sent[..2].contains(&Some(6)),
-            "first cycle should include stale leader and live leader sends, got {sent:?}"
-        );
+        assert2::assert!(sent.len() == 3 && sent[2] == Some(1));
+        assert2::assert!(sent[..2].contains(&Some(0)) && sent[..2].contains(&Some(6)));
 
         shutdown(h).await;
     }
@@ -2143,9 +2124,9 @@ mod harness {
             }
         })
         .await;
-        assert!(drained.is_ok(), "in_flight never settled to zero");
+        assert2::assert!(drained.is_ok());
         // And the broker applied each batch exactly once (no churn).
-        assert!(h.transport.applied_count() == 20);
+        assert2::assert!(h.transport.applied_count() == 20);
         let _ = &h.next_seq;
         shutdown(h).await;
     }
@@ -2205,9 +2186,9 @@ mod harness {
             .into_iter()
             .map(|r| r.expect("no transport error").responses[0].partition_responses[0].error_code)
             .collect();
-        assert!(codes[0] == codes::NONE);
+        assert2::assert!(codes[0] == codes::NONE);
         for c in &codes[1..] {
-            assert!(*c == codes::OUT_OF_ORDER_SEQUENCE_NUMBER);
+            assert2::assert!(*c == codes::OUT_OF_ORDER_SEQUENCE_NUMBER);
         }
 
         // Arrivals were applied highest-first (the reorder), confirming the race.
@@ -2218,7 +2199,7 @@ mod harness {
             .iter()
             .map(|(_, _, s)| *s)
             .collect();
-        assert!(arrivals == vec![4, 3, 2, 1, 0]);
+        assert2::assert!(arrivals == vec![4, 3, 2, 1, 0]);
     }
 
     /// A partition with a batch pending resend must NOT also send its next batch
@@ -2249,15 +2230,11 @@ mod harness {
             offsets.push(md.offset);
         }
         let expected: Vec<i64> = (0..i64::try_from(N).unwrap()).collect();
-        assert!(offsets == expected);
+        assert2::assert!(offsets == expected);
         // The failed send errored at the transport before the broker applied it,
         // so each of the N batches is applied exactly once: a new batch never
         // raced (and reordered ahead of) the pending resend.
-        assert!(
-            h.transport.applied_count() == N,
-            "expected exactly {N} applies (no churn), got {}",
-            h.transport.applied_count()
-        );
+        assert2::assert!(h.transport.applied_count() == N);
 
         shutdown(h).await;
     }
@@ -2317,10 +2294,7 @@ mod harness {
             .expect("record never resolved (HANG)")
             .expect("oneshot dropped");
         let err = res.expect_err("terminal error must fail the record, not ack it");
-        assert!(
-            matches!(err, ProducerError::Server(MESSAGE_TOO_LARGE)),
-            "expected Server(10), got {err:?}"
-        );
+        assert2::assert!(matches!(err, ProducerError::Server(MESSAGE_TOO_LARGE)));
 
         // The slot is released: in_flight drains back to zero.
         let drained = tokio::time::timeout(Duration::from_secs(5), async {
@@ -2330,7 +2304,7 @@ mod harness {
             }
         })
         .await;
-        assert!(drained.is_ok(), "in_flight never settled to zero");
+        assert2::assert!(drained.is_ok());
 
         shutdown(h).await;
     }
@@ -2352,13 +2326,13 @@ mod harness {
                 .unwrap_or_else(|_| panic!("record {i} never resolved"))
                 .expect("oneshot dropped")
                 .expect("acked Ok");
-            assert!(md.partition == 0);
+            assert2::assert!(md.partition == 0);
             offsets.push(md.offset);
         }
         // One batch at base_offset 0, records at deltas 0..N-1 → offsets 0,1,2,3.
         // Under `base_offset - offset_delta` these would be 0,-1,-2,-3.
         let expected: Vec<i64> = (0..i64::try_from(N).unwrap()).collect();
-        assert!(offsets == expected, "got {offsets:?}");
+        assert2::assert!(offsets == expected);
 
         shutdown(h).await;
     }
@@ -2378,14 +2352,8 @@ mod harness {
             .expect("record never resolved (HANG)")
             .expect("oneshot dropped")
             .expect_err("a fatal epoch error must fail the record, not ack it");
-        assert!(
-            matches!(err, ProducerError::FencedProducer),
-            "expected FencedProducer, got {err:?}"
-        );
-        assert!(
-            h.state.load(Ordering::Acquire) == STATE_FENCED,
-            "the producer must be fenced after a fatal idempotence error"
-        );
+        assert2::assert!(matches!(err, ProducerError::FencedProducer));
+        assert2::assert!(h.state.load(Ordering::Acquire) == STATE_FENCED);
 
         shutdown(h).await;
     }
@@ -2407,11 +2375,7 @@ mod harness {
             .expect("oneshot dropped")
             .expect("acked Ok after recovery");
 
-        assert!(
-            h.transport.evicted().contains(&5),
-            "a transport error to known leader 5 must evict it, got {:?}",
-            h.transport.evicted()
-        );
+        assert2::assert!(h.transport.evicted().contains(&5));
 
         shutdown(h).await;
     }
@@ -2492,11 +2456,7 @@ mod harness {
             .expect("acked Ok via topic_id correlation");
         // The injected response's base_offset (42) proves the sender matched by
         // topic_id; failing to correlate would resend and ack at the broker's 0.
-        assert!(
-            md.offset == 42,
-            "expected offset 42 from the topic_id-correlated response, got {}",
-            md.offset
-        );
+        assert2::assert!(md.offset == 42);
 
         shutdown(h).await;
     }
@@ -2528,11 +2488,7 @@ mod harness {
             .expect("acked Ok after resend");
         // Correct code ignores the mismatched response and resends, acking at the
         // broker's real offset 0 — never the bogus 99 the wrong response carried.
-        assert!(
-            md.offset == 0,
-            "a name-mismatched, zero-topic_id response must not be correlated; got {}",
-            md.offset
-        );
+        assert2::assert!(md.offset == 0);
 
         shutdown(h).await;
     }
@@ -2568,12 +2524,11 @@ mod harness {
             .expect("oneshot dropped")
             .expect("acked Ok after refresh + resend");
 
-        assert!(
+        assert2::assert!(
             h.partition_leaders
                 .get(&("t".to_string(), 0))
                 .map(|e| *e.value())
-                == Some(9),
-            "a healthy topic's advertised leader (9) must be adopted from the refresh"
+                == Some(9)
         );
 
         shutdown(h).await;
@@ -2593,11 +2548,7 @@ mod harness {
             .expect("oneshot dropped")
             .expect("acked Ok");
 
-        assert!(
-            h.transport.last_timeout_ms() == 5000,
-            "produce request must carry the configured 5000ms timeout, got {}",
-            h.transport.last_timeout_ms()
-        );
+        assert2::assert!(h.transport.last_timeout_ms() == 5000);
 
         shutdown(h).await;
     }
@@ -2629,10 +2580,7 @@ mod harness {
 
         let rx = produce_burst(&h, "t", 0, 1).await.pop().expect("one rx");
         let fired = tokio::time::timeout(Duration::from_secs(3), watcher).await;
-        assert!(
-            fired.is_ok(),
-            "finish_in_flight must notify flush waiters when in_flight reaches zero"
-        );
+        assert2::assert!(fired.is_ok());
 
         let _ = tokio::time::timeout(Duration::from_secs(2), rx).await;
         shutdown(h).await;

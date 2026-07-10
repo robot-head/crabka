@@ -133,7 +133,7 @@ pub struct RecordBatchHeader {
 pub const HEADER_LEN: usize = 61;
 
 // Compile-time assertion that the layout is exactly 61 bytes.
-const _: () = assert!(size_of::<RecordBatchHeader>() == HEADER_LEN);
+const _: [(); HEADER_LEN] = [(); size_of::<RecordBatchHeader>()];
 
 /// Byte offset of the `base_offset` field (i64 BE, 8 bytes) within a v2
 /// record-batch header.
@@ -161,17 +161,14 @@ pub const CRC_COVERAGE_START: usize = 21;
 /// Panics if `buf` is shorter than [`HEADER_LEN`]; callers must validate
 /// the batch header (e.g. via borrowed decode) first.
 pub fn patch_base_offset_and_leader_epoch(buf: &mut [u8], base_offset: i64, leader_epoch: i32) {
-    assert!(
-        buf.len() >= HEADER_LEN,
-        "patch target shorter than v2 header"
-    );
+    assert2::assert!(buf.len() >= HEADER_LEN);
     buf[BASE_OFFSET_RANGE].copy_from_slice(&base_offset.to_be_bytes());
     buf[LEADER_EPOCH_RANGE].copy_from_slice(&leader_epoch.to_be_bytes());
 }
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_compression::CompressionType;
 
     use super::*;
@@ -188,36 +185,11 @@ mod tests {
 
     fn assert_attribute_case(case: &AttributeCase) {
         let attributes = Attributes(case.bits);
-        assert_eq!(
-            attributes.compression(),
-            case.compression,
-            "case {}",
-            case.name
-        );
-        assert_eq!(
-            attributes.timestamp_type(),
-            case.timestamp_type,
-            "case {}",
-            case.name
-        );
-        assert_eq!(
-            attributes.is_transactional(),
-            case.transactional,
-            "case {}",
-            case.name
-        );
-        assert_eq!(
-            attributes.is_control_batch(),
-            case.control_batch,
-            "case {}",
-            case.name
-        );
-        assert_eq!(
-            attributes.has_delete_horizon(),
-            case.delete_horizon,
-            "case {}",
-            case.name
-        );
+        assert2::assert!(attributes.compression() == case.compression);
+        assert2::assert!(attributes.timestamp_type() == case.timestamp_type);
+        assert2::assert!(attributes.is_transactional() == case.transactional);
+        assert2::assert!(attributes.is_control_batch() == case.control_batch);
+        assert2::assert!(attributes.has_delete_horizon() == case.delete_horizon);
     }
 
     #[test]
@@ -335,7 +307,7 @@ mod tests {
             .with_control(false);
 
         // Snappy = bits 0-2 = 010, LogAppendTime = bit 3, transactional = bit 4.
-        assert!(a == Attributes(0b0000_0000_0001_1010));
+        assert2::assert!(a == Attributes(0b0000_0000_0001_1010));
     }
 
     #[test]
@@ -344,20 +316,20 @@ mod tests {
         // must clear bit 1, not OR over it.
         let a = Attributes::default().with_compression(CompressionType::Lz4);
         let b = a.with_compression(CompressionType::Gzip);
-        assert!(b.compression() == CompressionType::Gzip);
-        assert!(b.0 & 0x07 == 1);
+        assert2::assert!(b.compression() == CompressionType::Gzip);
+        assert2::assert!(b.0 & 0x07 == 1);
     }
 
     #[test]
     fn delete_horizon_bit_round_trips() {
         // Default has no delete horizon.
         let base = Attributes::default();
-        assert!(!base.has_delete_horizon());
+        assert2::assert!(!base.has_delete_horizon());
 
         // Setting it flips exactly bit 6 (mask 0x40).
         let set = base.with_delete_horizon(true);
-        assert!(set.has_delete_horizon());
-        assert!(set.0 & Attributes::DELETE_HORIZON_BIT == 0x40);
+        assert2::assert!(set.has_delete_horizon());
+        assert2::assert!(set.0 & Attributes::DELETE_HORIZON_BIT == 0x40);
 
         // Orthogonal to control / transactional: setting those does not touch
         // bit 6, and bit 6 does not touch them.
@@ -366,11 +338,11 @@ mod tests {
             .with_transactional(true)
             .with_delete_horizon(true);
         // control = bit 5, transactional = bit 4, delete horizon = bit 6.
-        assert!(combo == Attributes(0b0000_0000_0111_0000));
+        assert2::assert!(combo == Attributes(0b0000_0000_0111_0000));
 
         // Clearing bit 6 leaves the others intact.
         let cleared = combo.with_delete_horizon(false);
-        assert!(cleared == Attributes(0b0000_0000_0011_0000));
+        assert2::assert!(cleared == Attributes(0b0000_0000_0011_0000));
     }
 
     /// Build a sample 61-byte header with known values. Reused across the
@@ -444,18 +416,18 @@ mod tests {
             base_sequence: -1,
             records_count: 4,
         };
-        assert!(actual == expected);
+        assert2::assert!(actual == expected);
     }
 
     #[test]
     fn header_is_exactly_61_bytes() {
-        assert!(std::mem::size_of::<RecordBatchHeader>() == HEADER_LEN);
+        assert2::assert!(std::mem::size_of::<RecordBatchHeader>() == HEADER_LEN);
     }
 
     #[test]
     fn too_short_buffer_errors() {
         let buf = [0u8; HEADER_LEN - 1];
-        assert!(RecordBatchHeader::ref_from_bytes(&buf[..]).is_err());
+        assert2::assert!(RecordBatchHeader::ref_from_bytes(&buf[..]).is_err());
     }
 
     #[test]

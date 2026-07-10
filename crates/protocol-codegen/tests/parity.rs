@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use assert2::assert;
 use crabka_protocol_codegen::{emit, ir};
 
 fn schemas_dir() -> PathBuf {
@@ -27,10 +26,5 @@ fn every_vendored_schema_emits_clean() {
             failures.push(format!("borrowed::{}: {e}", spec.name));
         }
     }
-    assert!(
-        failures.is_empty(),
-        "emitter rejected {} schema(s):\n  {}",
-        failures.len(),
-        failures.join("\n  ")
-    );
+    assert2::assert!(failures.is_empty());
 }

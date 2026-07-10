@@ -333,11 +333,7 @@ async fn server_tls_handshake_and_health() {
             Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
-    assert_eq!(
-        status,
-        Some(reqwest::StatusCode::OK),
-        "TLS /healthz should return 200 (handshake + server-cert verification ok)"
-    );
+    assert2::assert!(status == Some(reqwest::StatusCode::OK));
 
     gw.token.cancel();
     broker.shutdown().await;
@@ -379,10 +375,7 @@ async fn mtls_required_rejects_no_client_cert() {
     // real-time wait (not a progress poll): waits on a real mTLS handshake to reject a certless client; settle-then-assert-failure over a network round-trip.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let result = client.get(&url).send().await;
-    assert!(
-        result.is_err(),
-        "mTLS Required must reject a client presenting no certificate, got {result:?}"
-    );
+    assert2::assert!(result.is_err());
 
     gw.token.cancel();
     broker.shutdown().await;
@@ -452,10 +445,7 @@ async fn tls_forward_between_two_gateways() {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    assert!(
-        ready,
-        "replicas did not reach a stable split + converged routing"
-    );
+    assert2::assert!(ready);
 
     // Pick a key owned by B (so submitting through A must forward to B).
     let key = (0..1000)
@@ -463,11 +453,8 @@ async fn tls_forward_between_two_gateways() {
         .find(|k| gw_b.store.owns(partition_for(k, N)))
         .expect("a key owned by B");
     let p = partition_for(&key, N);
-    assert!(gw_b.store.owns(p) && !gw_a.store.owns(p));
-    assert_eq!(
-        gw_a.membership.owner_of(p).as_deref(),
-        Some(gw_b.addr.as_str())
-    );
+    assert2::assert!(gw_b.store.owns(p) && !gw_a.store.owns(p));
+    assert2::assert!(gw_a.membership.owner_of(p).as_deref() == Some(gw_b.addr.as_str()));
 
     let mk = || GatewayRecord {
         topic: USER_TOPIC.into(),
@@ -492,25 +479,13 @@ async fn tls_forward_between_two_gateways() {
     let first = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
     // Same key through A again → forwarded to B → B's map hit → deduplicated.
     let second = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
-    assert!(
-        !first.deduplicated,
-        "first mTLS forward should produce and the second should deduplicate"
-    );
-    assert!(
-        second.deduplicated,
-        "first mTLS forward should produce and the second should deduplicate"
-    );
-    assert_eq!(
-        first.offset, first.offset,
-        "first mTLS forward should produce and the second should deduplicate"
-    );
-    assert_eq!(
-        second.offset, first.offset,
-        "first mTLS forward should produce and the second should deduplicate"
-    );
+    assert2::assert!(!first.deduplicated);
+    assert2::assert!(second.deduplicated);
+    assert2::assert!(first.offset == first.offset);
+    assert2::assert!(second.offset == first.offset);
 
     // Exactly one record with that value landed in the user topic.
-    assert_eq!(count_in_user_topic(&bootstrap, &key).await, 1);
+    assert2::assert!(count_in_user_topic(&bootstrap, &key).await == 1);
 
     gw_a.token.cancel();
     gw_b.token.cancel();

@@ -1387,7 +1387,7 @@ pub(crate) async fn emit_event(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_security::ca::{generate_clients_ca, generate_cluster_ca, issue_user_cert};
 
     use super::*;
@@ -1409,15 +1409,12 @@ mod tests {
             .expect("valid timestamp");
         let now = OffsetDateTime::now_utc();
         let days_remaining = (not_after - now).whole_days();
-        assert!(
-            (29..=31).contains(&days_remaining),
-            "expected ~30 days remaining, got {days_remaining}"
-        );
+        assert2::assert!((29..=31).contains(&days_remaining));
     }
 
     #[test]
     fn renewal_window_cases() {
-        for (name, validity_days, now_offset_days, expected) in [
+        for (_name, validity_days, now_offset_days, expected) in [
             ("within renewal window", 5, 0, true),
             ("comfortably in future", 365, 0, false),
             ("already expired", 1, 10, true),
@@ -1426,10 +1423,8 @@ mod tests {
             let user =
                 issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", validity_days).expect("leaf");
             let now = OffsetDateTime::now_utc() + time::Duration::days(now_offset_days);
-            assert_eq!(
-                renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"),
-                expected,
-                "case {name}"
+            assert2::assert!(
+                renew_if_expiring(&user.cert_pem, 30, now).expect("predicate") == expected
             );
         }
     }
@@ -1437,7 +1432,7 @@ mod tests {
 
 #[cfg(test)]
 mod reissue_tests {
-    use assert2::assert;
+
     use crabka_security::ca::SubjectAltName;
 
     use super::compute_san_digest;
@@ -1448,7 +1443,7 @@ mod reissue_tests {
         let no_extras = compute_san_digest(&base, &[]);
         let with_extras =
             compute_san_digest(&base, &[SubjectAltName::Dns("broker-0.example.com".into())]);
-        assert!(no_extras != with_extras);
+        assert2::assert!(no_extras != with_extras);
     }
 
     #[test]
@@ -1461,7 +1456,7 @@ mod reissue_tests {
             SubjectAltName::Dns("b.example.com".into()),
             SubjectAltName::Dns("a.example.com".into()),
         ];
-        assert!(compute_san_digest(&a, &[]) == compute_san_digest(&b, &[]));
+        assert2::assert!(compute_san_digest(&a, &[]) == compute_san_digest(&b, &[]));
     }
 
     #[test]
@@ -1470,16 +1465,13 @@ mod reissue_tests {
         let extras = vec![SubjectAltName::Dns("internal.svc".into())];
         let single = compute_san_digest(&base, &[]);
         let with_dup_extra = compute_san_digest(&base, &extras);
-        assert!(
-            single == with_dup_extra,
-            "duplicate extras should not change digest"
-        );
+        assert2::assert!(single == with_dup_extra);
     }
 }
 
 #[cfg(test)]
 mod san_tests {
-    use assert2::assert;
+
     use crabka_security::ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert};
     use rustls::pki_types::{CertificateDer, pem::PemObject};
     use x509_parser::{
@@ -1546,7 +1538,7 @@ mod san_tests {
             "DNS:broker-0.example.com",
             "IP:203.0.113.10",
         ] {
-            assert!(parsed_sans.iter().any(|s| s == want), "missing {want:?}");
+            assert2::assert!(parsed_sans.iter().any(|s| s == want));
         }
     }
 
@@ -1564,7 +1556,7 @@ mod san_tests {
         )
         .unwrap();
         let parsed = parse_cert_sans(&leaf.cert_pem);
-        assert_eq!(parsed, ["DNS:internal.svc"]);
+        assert2::assert!(parsed == ["DNS:internal.svc"]);
     }
 
     // Round-trip: issue a leaf with a known CN and mixed DNS/IP SANs, then pull
@@ -1592,20 +1584,20 @@ mod san_tests {
         .unwrap();
 
         let (cn, sans) = read_existing_cn_and_sans(&leaf.cert_pem).expect("parse leaf");
-        assert!(cn == "broker-0");
+        assert2::assert!(cn == "broker-0");
         for want in [
             SubjectAltName::Dns("internal.svc".into()),
             SubjectAltName::Dns("broker-0.example.com".into()),
             SubjectAltName::Ip("203.0.113.10".parse().unwrap()),
         ] {
-            assert!(sans.contains(&want), "missing {want:?} in {sans:?}");
+            assert2::assert!(sans.contains(&want));
         }
     }
 }
 
 #[cfg(test)]
 mod rotation_tests {
-    use assert2::assert;
+
     use crabka_security::ca::{generate_cluster_ca, renew_cluster_ca};
 
     use super::*;
@@ -1647,10 +1639,10 @@ mod rotation_tests {
         let b = ca_cert("b", 365);
         let bundle = format!("{a}{b}");
         let blocks = split_pem_certs(&bundle);
-        assert_eq!(blocks, vec![normalize_block(&a), normalize_block(&b)]);
+        assert2::assert!(blocks == vec![normalize_block(&a), normalize_block(&b)]);
         // join is the concatenation of normalized blocks; re-splitting is stable.
         let rejoined = join_bundle(&blocks);
-        assert_eq!(split_pem_certs(&rejoined), blocks);
+        assert2::assert!(split_pem_certs(&rejoined) == blocks);
     }
 
     #[test]
@@ -1658,7 +1650,7 @@ mod rotation_tests {
         let a = normalize_block(&ca_cert("a", 365));
         let b = normalize_block(&ca_cert("b", 365));
         let out = dedup_blocks(&[a.clone(), b.clone(), a.clone()]);
-        assert!(out == vec![a, b]);
+        assert2::assert!(out == vec![a, b]);
     }
 
     #[test]
@@ -1669,7 +1661,7 @@ mod rotation_tests {
         // 0) is never dropped.
         let now = OffsetDateTime::now_utc() + time::Duration::days(100);
         let out = prune_expired(&[signing.clone(), trust], now);
-        assert!(out == vec![signing]);
+        assert2::assert!(out == vec![signing]);
     }
 
     #[test]
@@ -1679,7 +1671,7 @@ mod rotation_tests {
         let stale = normalize_block(&ca_cert("stale", 20));
         let now = OffsetDateTime::now_utc() + time::Duration::days(100);
         let out = prune_expired(&[signing.clone(), fresh.clone(), stale], now);
-        assert!(out == vec![signing, fresh]);
+        assert2::assert!(out == vec![signing, fresh]);
     }
 
     // --- planner: BYO -------------------------------------------------------
@@ -1706,7 +1698,7 @@ mod rotation_tests {
         let mut prune = inputs(true, WhichCa::Cluster);
         prune.now = OffsetDateTime::now_utc() + time::Duration::days(100);
 
-        for (name, state, input, expected) in [
+        for (_name, state, input, expected) in [
             (
                 "BYO without force",
                 idle_cluster(365),
@@ -1773,7 +1765,7 @@ mod rotation_tests {
                 CaRotationPlan::PruneOldTrust,
             ),
         ] {
-            assert_eq!(plan_ca_rotation(&state, &input), expected, "case {name}");
+            assert2::assert!(plan_ca_rotation(&state, &input) == expected);
         }
     }
 
@@ -1781,7 +1773,7 @@ mod rotation_tests {
 
     #[test]
     fn staged_phase_convergence_cases() {
-        for (name, phase, expected_converged) in [
+        for (_name, phase, expected_converged) in [
             (
                 "trust phase",
                 CaPhase::KeyReplaceTrust,
@@ -1799,17 +1791,9 @@ mod rotation_tests {
                 phase,
             );
             let mut input = inputs(true, WhichCa::Cluster);
-            assert_eq!(
-                plan_ca_rotation(&state, &input),
-                CaRotationPlan::NoOp,
-                "case {name}: unconverged"
-            );
+            assert2::assert!(plan_ca_rotation(&state, &input) == CaRotationPlan::NoOp);
             input.rollout_converged = true;
-            assert_eq!(
-                plan_ca_rotation(&state, &input),
-                expected_converged,
-                "case {name}: converged"
-            );
+            assert2::assert!(plan_ca_rotation(&state, &input) == expected_converged);
         }
     }
 
@@ -1824,7 +1808,7 @@ mod rotation_tests {
         let mut inp = inputs(true, WhichCa::Cluster);
         inp.force_replace_key = true;
         inp.rollout_converged = false;
-        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
+        assert2::assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
     }
 
     // --- same-key renewal preserves leaf chaining ---------------------------

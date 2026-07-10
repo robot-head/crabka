@@ -9,7 +9,6 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::AdminClient;
 
@@ -45,13 +44,13 @@ async fn admin_log_dirs_alter_then_describe_converges() {
 
     // Initial DescribeLogDirs reports both dirs, no future logs.
     let initial = admin.describe_log_dirs(None).await.expect("describe");
-    assert_eq!(initial.len(), 2, "one result per configured log dir");
+    assert2::assert!(initial.len() == 2);
     for d in &initial {
-        assert!(d.error.is_none(), "log dir error: {:?}", d.error);
+        assert2::assert!(d.error.is_none());
         for t in &d.topics {
             for p in &t.partitions {
-                assert!(!p.is_future_key, "no future logs before alter");
-                assert!(p.partition_size >= 0);
+                assert2::assert!(!p.is_future_key);
+                assert2::assert!(p.partition_size >= 0);
             }
         }
     }
@@ -68,15 +67,9 @@ async fn admin_log_dirs_alter_then_describe_converges() {
         .alter_replica_log_dirs(&assignments)
         .await
         .expect("alter");
-    assert_eq!(outcomes.len(), 2, "one outcome per partition");
+    assert2::assert!(outcomes.len() == 2);
     for o in &outcomes {
-        assert!(
-            o.error.is_none(),
-            "alter error for {}-{}: {:?}",
-            o.topic,
-            o.partition,
-            o.error
-        );
+        assert2::assert!(o.error.is_none());
     }
 
     // Poll DescribeLogDirs through the admin client until both
@@ -139,7 +132,7 @@ async fn admin_log_dirs_alter_then_describe_converges() {
         }
     }
     filtered_in_target.sort_unstable();
-    assert_eq!(filtered_in_target, vec![0, 1]);
+    assert2::assert!(filtered_in_target == vec![0, 1]);
 
     handle.shutdown().await;
 }

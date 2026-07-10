@@ -390,7 +390,7 @@ fn compute_revoke_split(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -420,7 +420,7 @@ mod tests {
     fn add_member_marks_dirty_first_time() {
         let mut g = GroupState::new("g");
         g.add_or_update_member(member("m1"));
-        assert!(g.dirty);
+        assert2::assert!(g.dirty);
     }
 
     #[test]
@@ -429,7 +429,7 @@ mod tests {
         g.add_or_update_member(member("m1"));
         g.dirty = false;
         g.add_or_update_member(member("m1"));
-        assert!(!g.dirty);
+        assert2::assert!(!g.dirty);
     }
 
     #[test]
@@ -440,7 +440,7 @@ mod tests {
         let mut m = member("m1");
         m.subscribed_topic_names.insert("t".into());
         g.add_or_update_member(m);
-        assert!(g.dirty);
+        assert2::assert!(g.dirty);
     }
 
     #[test]
@@ -449,7 +449,7 @@ mod tests {
         g.add_or_update_member(member("m1"));
         g.dirty = false;
         g.remove_member("m1");
-        assert!(g.dirty);
+        assert2::assert!(g.dirty);
     }
 
     #[test]
@@ -460,7 +460,7 @@ mod tests {
         g.add_or_update_member(m);
         g.add_or_update_member(member("m2"));
         let evicted = g.evict_expired(Instant::now(), Duration::from_mins(1));
-        assert!((evicted, g.members.contains_key("m2")) == (vec!["m1".to_string()], true));
+        assert2::assert!((evicted, g.members.contains_key("m2")) == (vec!["m1".to_string()], true));
     }
 
     #[test]
@@ -493,7 +493,7 @@ mod tests {
         let mut m = member("m1");
         m.instance_id = Some("inst1".into());
         g.add_or_update_member(m);
-        assert!(g.current_member_for_instance("inst1") == Some("m1"));
+        assert2::assert!(g.current_member_for_instance("inst1") == Some("m1"));
     }
 
     #[test]
@@ -501,7 +501,7 @@ mod tests {
         let mut g = GroupState::new("g");
         g.dirty = false;
         g.bump_epoch();
-        assert!((g.group_epoch, g.dirty) == (1, true));
+        assert2::assert!((g.group_epoch, g.dirty) == (1, true));
     }
 
     #[test]
@@ -509,7 +509,7 @@ mod tests {
         let mut m = member("m1");
         m.set_regex(Some("^orders-.*".into()));
         let re = m.compiled_regex().expect("valid regex must compile");
-        assert!(
+        assert2::assert!(
             (
                 m.subscribed_topic_regex.as_deref(),
                 re.is_match("orders-eu"),
@@ -524,7 +524,7 @@ mod tests {
         m.set_regex(Some("*invalid".into()));
         // Pattern string is retained, but no compiled regex is exposed —
         // the reconciler treats this as names-only, not match-everything.
-        assert!(
+        assert2::assert!(
             (
                 m.subscribed_topic_regex.as_deref(),
                 m.compiled_regex().is_none(),
@@ -536,9 +536,9 @@ mod tests {
     fn set_regex_none_clears_cache() {
         let mut m = member("m1");
         m.set_regex(Some("^a".into()));
-        assert!(m.compiled_regex().is_some());
+        assert2::assert!(m.compiled_regex().is_some());
         m.set_regex(None);
-        assert!(
+        assert2::assert!(
             (
                 m.subscribed_topic_regex.is_none(),
                 m.compiled_regex().is_none()
@@ -553,7 +553,7 @@ mod tests {
         m.subscribed_topic_regex = Some("^a".into());
         m.compiled_regex = None;
         m.sync_regex_cache();
-        assert!(
+        assert2::assert!(
             (
                 m.subscribed_topic_regex.as_deref(),
                 m.compiled_regex().expect("synced").is_match("apple"),
@@ -568,6 +568,6 @@ mod tests {
         g.group_epoch = 5;
         g.advance_member_epoch("m1");
         let m = &g.members["m1"];
-        assert!((m.member_epoch, m.previous_member_epoch) == (5, 0));
+        assert2::assert!((m.member_epoch, m.previous_member_epoch) == (5, 0));
     }
 }

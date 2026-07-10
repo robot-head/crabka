@@ -268,7 +268,7 @@ pub(crate) fn decode_key(bytes: &[u8]) -> Result<String, BrokerError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -349,12 +349,7 @@ mod tests {
     #[test]
     fn sample_bytes_encode_byte_identical() {
         let encoded = encode_value(&sample_entry(), true);
-        assert!(
-            encoded == SAMPLE,
-            "encode_value did not byte-match SAMPLE\n  expected: {:02x?}\n  actual:   {:02x?}",
-            SAMPLE,
-            encoded
-        );
+        assert2::assert!(encoded == SAMPLE);
     }
 
     #[test]
@@ -392,7 +387,7 @@ mod tests {
 
         // Re-encode is byte-identical (determinism).
         let second = encode_value(&decoded, true);
-        assert!(first == second);
+        assert2::assert!(first == second);
     }
 
     #[test]
@@ -419,7 +414,7 @@ mod tests {
 
         let encoded = encode_value(&entry, false);
         // version header is `00 00`.
-        assert!(encoded[0] == 0x00 && encoded[1] == 0x00);
+        assert2::assert!(encoded[0] == 0x00 && encoded[1] == 0x00);
 
         let decoded = decode_value(&encoded, "tid".into()).unwrap();
         let mut expected = entry.clone();
@@ -431,9 +426,9 @@ mod tests {
     #[test]
     fn key_round_trip() {
         let encoded = encode_key("abc");
-        assert!(decode_key(&encoded).unwrap() == "abc");
+        assert2::assert!(decode_key(&encoded).unwrap() == "abc");
         // `00 00` version + int16 length (3) + bytes.
-        assert!(encoded == &[0x00, 0x00, 0x00, 0x03, b'a', b'b', b'c']);
+        assert2::assert!(encoded == &[0x00, 0x00, 0x00, 0x03, b'a', b'b', b'c']);
     }
 
     #[test]
@@ -462,15 +457,15 @@ mod tests {
 
         let a = make(&[("b", 2), ("a", 1), ("b", 0), ("a", 3)]);
         let b = make(&[("a", 3), ("b", 0), ("a", 1), ("b", 2)]);
-        assert!(encode_value(&a, true) == encode_value(&b, true));
-        assert!(encode_value(&a, false) == encode_value(&b, false));
+        assert2::assert!(encode_value(&a, true) == encode_value(&b, true));
+        assert2::assert!(encode_value(&a, false) == encode_value(&b, false));
     }
 
     #[test]
     fn decode_value_rejects_truncated_input() {
         // A prefix of the valid SAMPLE must error, not panic.
         for input in [&SAMPLE[..10], &SAMPLE[..1], &[][..]] {
-            assert!(decode_value(input, "t".into()).is_err());
+            assert2::assert!(decode_value(input, "t".into()).is_err());
         }
     }
 
@@ -480,14 +475,14 @@ mod tests {
         let mut bad = SAMPLE.to_vec();
         bad[0] = 0x00;
         bad[1] = 0x02; // version = 2
-        assert!(decode_value(&bad, "t".into()).is_err());
+        assert2::assert!(decode_value(&bad, "t".into()).is_err());
     }
 
     #[test]
     fn decode_value_rejects_trailing_bytes() {
         let mut extra = SAMPLE.to_vec();
         extra.push(0xff); // one trailing byte
-        assert!(decode_value(&extra, "t".into()).is_err());
+        assert2::assert!(decode_value(&extra, "t".into()).is_err());
     }
 
     #[test]
@@ -496,9 +491,9 @@ mod tests {
         // unknown version
         let mut bad = key.clone();
         bad[1] = 0x09;
-        assert!(decode_key(&bad).is_err());
+        assert2::assert!(decode_key(&bad).is_err());
         // truncated
-        assert!(decode_key(&key[..1]).is_err());
+        assert2::assert!(decode_key(&key[..1]).is_err());
     }
 
     #[test]
@@ -509,7 +504,7 @@ mod tests {
         for flexible in [false, true] {
             let bytes = encode_value(&e, flexible);
             let decoded = decode_value(&bytes, "tid".into()).expect("decode");
-            assert!(entry_projection(&decoded) == entry_projection(&e));
+            assert2::assert!(entry_projection(&decoded) == entry_projection(&e));
         }
     }
 }

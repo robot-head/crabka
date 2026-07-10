@@ -69,7 +69,6 @@ pub struct Proposal {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -82,7 +81,7 @@ mod tests {
             (ProposalStatus::Failed, true),
             (ProposalStatus::Cancelled, true),
         ] {
-            assert!(status.is_terminal() == want, "status {status:?}");
+            assert2::assert!(status.is_terminal() == want);
         }
     }
 }

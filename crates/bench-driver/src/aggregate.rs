@@ -393,30 +393,30 @@ mod tests {
     #[test]
     fn stat_computes_mean_and_sample_stddev() {
         let s = stat(&[2.0, 4.0, 6.0]);
-        assert_eq!(s.n, 3);
-        assert!((s.mean - 4.0).abs() < f64::EPSILON);
+        assert2::assert!(s.n == 3);
+        assert2::assert!((s.mean - 4.0).abs() < f64::EPSILON);
         // sample variance = ((−2)²+0²+2²)/(3−1) = 8/2 = 4 → stddev 2.
-        assert!((s.stddev - 2.0).abs() < f64::EPSILON);
+        assert2::assert!((s.stddev - 2.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn stat_single_and_empty() {
-        assert_eq!(
-            stat(&[5.0]),
-            Stat {
-                mean: 5.0,
-                stddev: 0.0,
-                n: 1
-            }
+        assert2::assert!(
+            stat(&[5.0])
+                == Stat {
+                    mean: 5.0,
+                    stddev: 0.0,
+                    n: 1
+                }
         );
-        assert_eq!(stat(&[]), Stat::default());
+        assert2::assert!(stat(&[]) == Stat::default());
     }
 
     #[test]
     fn cv_percent_is_zero_when_mean_zero() {
-        assert!(stat(&[0.0, 0.0]).cv_percent().abs() < f64::EPSILON);
+        assert2::assert!(stat(&[0.0, 0.0]).cv_percent().abs() < f64::EPSILON);
         let s = stat(&[100.0, 200.0, 300.0]); // mean 200, stddev 100 → cv 50%
-        assert!((s.cv_percent() - 50.0).abs() < f64::EPSILON);
+        assert2::assert!((s.cv_percent() - 50.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -429,20 +429,20 @@ mod tests {
             run(Stack::Kafka, "sat", 6, 50.0, vec![], vec![]),
         ];
         let cells = aggregate_cells(&runs);
-        assert_eq!(cells.len(), 1);
+        assert2::assert!(cells.len() == 1);
         let c = &cells[0];
-        assert_eq!(c.scenario.as_str(), "sat");
-        assert_eq!(c.broker_count, 6);
-        assert_eq!(c.partitions, 100);
-        assert_eq!(c.crabka.n_runs, 3);
-        assert_eq!(c.kafka.n_runs, 2);
+        assert2::assert!(c.scenario.as_str() == "sat");
+        assert2::assert!(c.broker_count == 6);
+        assert2::assert!(c.partitions == 100);
+        assert2::assert!(c.crabka.n_runs == 3);
+        assert2::assert!(c.kafka.n_runs == 2);
         let cm = c.crabka.metrics["producer_msgs_per_sec"];
-        assert!((cm.mean - 200.0).abs() < f64::EPSILON);
-        assert!((cm.stddev - 100.0).abs() < f64::EPSILON);
+        assert2::assert!((cm.mean - 200.0).abs() < f64::EPSILON);
+        assert2::assert!((cm.stddev - 100.0).abs() < f64::EPSILON);
         let km = c.kafka.metrics["producer_msgs_per_sec"];
-        assert!((km.mean - 50.0).abs() < f64::EPSILON);
-        assert!(km.stddev.abs() < f64::EPSILON);
-        assert_eq!(km.n, 2);
+        assert2::assert!((km.mean - 50.0).abs() < f64::EPSILON);
+        assert2::assert!(km.stddev.abs() < f64::EPSILON);
+        assert2::assert!(km.n == 2);
     }
 
     #[test]
@@ -452,9 +452,9 @@ mod tests {
             run(Stack::Crabka, "sat", 6, 20.0, vec![], vec![]),
         ];
         let cells = aggregate_cells(&runs);
-        assert_eq!(cells.len(), 2);
-        assert_eq!(cells[0].broker_count, 3);
-        assert_eq!(cells[1].broker_count, 6);
+        assert2::assert!(cells.len() == 2);
+        assert2::assert!(cells[0].broker_count == 3);
+        assert2::assert!(cells[1].broker_count == 6);
     }
 
     #[test]
@@ -490,39 +490,39 @@ mod tests {
             .iter()
             .find(|s| s.metric == "producer_msgs_per_sec" && s.stack == Stack::Crabka)
             .expect("producer series present");
-        assert_eq!(
-            prod.points,
-            vec![
-                TsPoint {
-                    t_offset_ms: TimeOffsetMs(0),
-                    mean: 2000.0,
-                    n: 2
-                },
-                TsPoint {
-                    t_offset_ms: TimeOffsetMs(2000),
-                    mean: 3000.0,
-                    n: 2
-                },
-            ]
+        assert2::assert!(
+            prod.points
+                == vec![
+                    TsPoint {
+                        t_offset_ms: TimeOffsetMs(0),
+                        mean: 2000.0,
+                        n: 2
+                    },
+                    TsPoint {
+                        t_offset_ms: TimeOffsetMs(2000),
+                        mean: 3000.0,
+                        n: 2
+                    },
+                ]
         );
         let cpu = series
             .iter()
             .find(|s| s.metric == "broker_cpu_cores")
             .expect("broker cpu series present");
-        assert_eq!(
-            cpu.points[0],
-            TsPoint {
-                t_offset_ms: TimeOffsetMs(0),
-                mean: 3.0,
-                n: 2
-            }
+        assert2::assert!(
+            cpu.points[0]
+                == TsPoint {
+                    t_offset_ms: TimeOffsetMs(0),
+                    mean: 3.0,
+                    n: 2
+                }
         );
         // mem in MiB: (1 + 3) / 2 = 2.0
         let mem = series
             .iter()
             .find(|s| s.metric == "broker_mem_working_set_mb")
             .expect("broker mem series present");
-        assert!((mem.points[0].mean - 2.0).abs() < f64::EPSILON);
+        assert2::assert!((mem.points[0].mean - 2.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -543,22 +543,22 @@ mod tests {
             .iter()
             .find(|s| s.metric == "producer_msgs_per_sec" && s.stack == Stack::Kafka)
             .expect("series");
-        assert_eq!(
-            prod.points[0],
-            TsPoint {
-                t_offset_ms: TimeOffsetMs(0),
-                mean: 20.0,
-                n: 2
-            }
+        assert2::assert!(
+            prod.points[0]
+                == TsPoint {
+                    t_offset_ms: TimeOffsetMs(0),
+                    mean: 20.0,
+                    n: 2
+                }
         );
         // Only one run reached t=2000.
-        assert_eq!(
-            prod.points[1],
-            TsPoint {
-                t_offset_ms: TimeOffsetMs(2000),
-                mean: 20.0,
-                n: 1
-            }
+        assert2::assert!(
+            prod.points[1]
+                == TsPoint {
+                    t_offset_ms: TimeOffsetMs(2000),
+                    mean: 20.0,
+                    n: 1
+                }
         );
     }
 }

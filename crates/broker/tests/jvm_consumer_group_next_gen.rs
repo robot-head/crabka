@@ -6,7 +6,6 @@
 
 use std::process::{Command, Stdio};
 
-use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_log::LogConfig;
 
@@ -68,12 +67,7 @@ fn create_topic(name: &str, partitions: i32) {
             "1",
         ],
     );
-    assert!(
-        out.status.success(),
-        "create topic {name} failed: stdout={:?} stderr={:?}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 /// Spawn a console-consumer container on a blocking thread and return a handle
@@ -158,7 +152,7 @@ async fn jvm_kip848_single_consumer_round_trip() {
             ),
         ],
     );
-    assert!(produced.status.success(), "producer failed: {produced:?}");
+    assert2::assert!(produced.status.success());
 
     let consumed = docker_run(
         KAFKA_IMAGE_NEXT_GEN,
@@ -171,10 +165,7 @@ async fn jvm_kip848_single_consumer_round_trip() {
         ],
     );
     let stdout = String::from_utf8_lossy(&consumed.stdout);
-    assert!(
-        stdout.contains('a') && stdout.contains('b') && stdout.contains('c'),
-        "expected a/b/c, got {stdout}"
-    );
+    assert2::assert!(stdout.contains('a') && stdout.contains('b') && stdout.contains('c'));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -213,10 +204,7 @@ async fn jvm_kip848_describe_group() {
         ],
     );
     let stdout = String::from_utf8_lossy(&described.stdout);
-    assert!(
-        stdout.contains("g-d"),
-        "expected group g-d in describe output, got {stdout}"
-    );
+    assert2::assert!(stdout.contains("g-d"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -254,7 +242,7 @@ async fn jvm_kip848_delete_group() {
             ),
         ],
     );
-    assert!(deleted.status.success(), "delete failed: {deleted:?}");
+    assert2::assert!(deleted.status.success());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -283,7 +271,7 @@ async fn jvm_kip848_coexists_with_classic() {
         ],
     );
     let cs = String::from_utf8_lossy(&classic.stdout);
-    assert!(cs.contains('p') && cs.contains('q'));
+    assert2::assert!(cs.contains('p') && cs.contains('q'));
 
     let next_gen = docker_run(
         KAFKA_IMAGE_NEXT_GEN,
@@ -296,7 +284,7 @@ async fn jvm_kip848_coexists_with_classic() {
         ],
     );
     let ns = String::from_utf8_lossy(&next_gen.stdout);
-    assert!(ns.contains('p') && ns.contains('q'));
+    assert2::assert!(ns.contains('p') && ns.contains('q'));
 }
 
 /// Migration interop within a *single* consumer group, deterministically.
@@ -330,7 +318,7 @@ async fn jvm_kip848_classic_and_consumer_in_one_group_migrate() {
     // Produce one deterministic batch of 8 records (2 per partition). Kafka's
     // default partitioner is murmur2(key) % numPartitions, so keyed records land
     // on a fixed partition: "0"->0, "4"->1, "5"->2, "1"->3.
-    let produce = |label: &str| {
+    let produce = |_label: &str| {
         let out = docker_run(
             KAFKA_IMAGE_CLASSIC,
             &[
@@ -344,7 +332,7 @@ async fn jvm_kip848_classic_and_consumer_in_one_group_migrate() {
                 ),
             ],
         );
-        assert!(out.status.success(), "{label} producer failed: {out:?}");
+        assert2::assert!(out.status.success());
     };
 
     // Phase 1 — classic consumer drains batch 1 from all four partitions.
@@ -360,10 +348,7 @@ async fn jvm_kip848_classic_and_consumer_in_one_group_migrate() {
     .unwrap();
     eprintln!("CRABKA[test] classic stdout:\n{classic_out}");
     let cp = parse_partitions(&classic_out);
-    assert!(
-        cp == all,
-        "classic consumer must cover all partitions: {cp:?}\nstdout: {classic_out}"
-    );
+    assert2::assert!(cp == all);
 
     // Phase 2 — a next-gen consumer joins the SAME group (in-place migration to
     // the consumer protocol) and drains batch 2 from the classic-committed
@@ -381,10 +366,7 @@ async fn jvm_kip848_classic_and_consumer_in_one_group_migrate() {
     .unwrap();
     eprintln!("CRABKA[test] nextgen stdout:\n{nextgen_out}");
     let np = parse_partitions(&nextgen_out);
-    assert!(
-        np == all,
-        "next-gen consumer must cover all partitions after the migration: {np:?}\nstdout: {nextgen_out}"
-    );
+    assert2::assert!(np == all);
 
     // The migrated group must describe coherently to the JVM admin tooling.
     let describe = docker_run(
@@ -397,11 +379,7 @@ async fn jvm_kip848_classic_and_consumer_in_one_group_migrate() {
             ),
         ],
     );
-    assert!(
-        String::from_utf8_lossy(&describe.stdout).contains("mig"),
-        "describe mentions topic mig: {}",
-        String::from_utf8_lossy(&describe.stdout),
-    );
+    assert2::assert!(String::from_utf8_lossy(&describe.stdout).contains("mig"));
 
     drop(broker);
 }

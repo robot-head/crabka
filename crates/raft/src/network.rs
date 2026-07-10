@@ -171,7 +171,7 @@ impl PeerSender for RealPeerSender {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BufMut;
     use crabka_protocol::{
         Encode,
@@ -251,12 +251,12 @@ mod tests {
     }
 
     fn parse_request_header(frame: &[u8]) -> (ApiKey, ApiVersion, i32, String, &[u8]) {
-        assert!(frame.len() >= 10);
+        assert2::assert!(frame.len() >= 10);
         let api_key = ApiKey(i16::from_be_bytes([frame[0], frame[1]]));
         let version = ApiVersion(i16::from_be_bytes([frame[2], frame[3]]));
         let correlation_id = i32::from_be_bytes([frame[4], frame[5], frame[6], frame[7]]);
         let client_len = i16::from_be_bytes([frame[8], frame[9]]);
-        assert!(client_len >= 0);
+        assert2::assert!(client_len >= 0);
         let client_start = 10;
         let client_end = client_start + usize::try_from(client_len).unwrap();
         let client_id = std::str::from_utf8(&frame[client_start..client_end])
@@ -296,11 +296,10 @@ mod tests {
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
 
-        assert_eq!(
-            controller_addr(&voters, NodeId(7)),
-            Some("controller-host:9093".to_string())
+        assert2::assert!(
+            controller_addr(&voters, NodeId(7)) == Some("controller-host:9093".to_string())
         );
-        assert_eq!(controller_addr(&voters, NodeId(8)), None);
+        assert2::assert!(controller_addr(&voters, NodeId(8)) == None);
     }
 
     #[test]
@@ -316,12 +315,12 @@ mod tests {
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
 
-        assert!(controller_addr(&voters, NodeId(7)) == Some("only-host:9094".to_string()));
+        assert2::assert!(controller_addr(&voters, NodeId(7)) == Some("only-host:9094".to_string()));
     }
 
     #[test]
     fn api_version_for_matches_kip595_codecs() {
-        for (case, key, want) in [
+        for (_case, key, want) in [
             ("vote", api_key::VOTE, 2),
             ("begin quorum epoch", api_key::BEGIN_QUORUM_EPOCH, 1),
             ("end quorum epoch", api_key::END_QUORUM_EPOCH, 1),
@@ -329,7 +328,7 @@ mod tests {
             ("fetch", api_key::FETCH, 17),
             ("unknown API", -123, 0),
         ] {
-            assert!(api_version_for(ApiKey(key)) == want, "case {case}");
+            assert2::assert!(api_version_for(ApiKey(key)) == want);
         }
     }
 
@@ -344,7 +343,7 @@ mod tests {
 
             let api_versions = read_frame(&mut stream).await;
             let (key, _version, corr, client_id, _body) = parse_request_header(&api_versions);
-            assert!((key, client_id.as_str()) == (ApiKey(18), "raft-client"));
+            assert2::assert!((key, client_id.as_str()) == (ApiKey(18), "raft-client"));
             write_response_frame(&mut stream, corr, false, &api_versions_response_v0()).await;
 
             let request = read_frame(&mut stream).await;
@@ -363,12 +362,12 @@ mod tests {
             .await
             .expect("send");
 
-        assert!(response == Bytes::from_static(b"raft-response"));
+        assert2::assert!(response == Bytes::from_static(b"raft-response"));
         let observed = tokio::time::timeout(std::time::Duration::from_secs(5), observed_rx.recv())
             .await
             .expect("server observed request")
             .expect("server sent request details");
-        assert!(
+        assert2::assert!(
             observed
                 == (
                     ApiKey(api_key::VOTE),

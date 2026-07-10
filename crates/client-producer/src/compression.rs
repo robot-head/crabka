@@ -49,7 +49,6 @@ impl Compression {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -57,19 +56,19 @@ mod tests {
     fn none_round_trip_is_identity() {
         let raw = b"hello producer";
         let out = Compression::None.compress(raw).unwrap();
-        assert!(out.as_ref() == raw);
+        assert2::assert!(out.as_ref() == raw);
     }
 
     #[test]
     fn attribute_bits_match_kafka_table() {
-        for (name, compression, want) in [
+        for (_name, compression, want) in [
             ("none", Compression::None, 0),
             ("gzip", Compression::Gzip, 1),
             ("snappy", Compression::Snappy, 2),
             ("lz4", Compression::Lz4, 3),
             ("zstd", Compression::Zstd, 4),
         ] {
-            assert!(compression.attribute_bits() == want, "case {name}");
+            assert2::assert!(compression.attribute_bits() == want);
         }
     }
 
@@ -80,6 +79,6 @@ mod tests {
         let compressed = Compression::Gzip.compress(raw).unwrap();
         let decoded =
             crabka_compression::decompress(CompressionType::Gzip, &compressed, usize::MAX).unwrap();
-        assert!(decoded.as_ref() == raw);
+        assert2::assert!(decoded.as_ref() == raw);
     }
 }

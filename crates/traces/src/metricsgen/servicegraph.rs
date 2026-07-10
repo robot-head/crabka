@@ -621,7 +621,7 @@ fn ns_to_seconds(ns: i64) -> f64 {
 mod tests {
     use std::time::Duration;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::metricsgen::{
@@ -722,24 +722,24 @@ mod tests {
             8_000_000,
         );
 
-        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
-        assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
+        assert2::assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
 
         let out = store.drain(1_000);
-        assert!((counter(&out, "traces_service_graph_request_total") - 1.0).abs() < 1e-9);
-        assert!(counter(&out, "traces_service_graph_request_failed_total").abs() < 1e-9);
+        assert2::assert!((counter(&out, "traces_service_graph_request_total") - 1.0).abs() < 1e-9);
+        assert2::assert!(counter(&out, "traces_service_graph_request_failed_total").abs() < 1e-9);
 
         let req = out
             .iter()
             .find(|s| s.name == "traces_service_graph_request_total")
             .unwrap();
-        assert_eq!(
-            req.labels,
-            [
-                ("client".to_string(), "frontend".to_string()),
-                ("connection_type".to_string(), "unset".to_string()),
-                ("server".to_string(), "backend".to_string()),
-            ]
+        assert2::assert!(
+            req.labels
+                == [
+                    ("client".to_string(), "frontend".to_string()),
+                    ("connection_type".to_string(), "unset".to_string()),
+                    ("server".to_string(), "backend".to_string()),
+                ]
         );
         check!(
             (histogram_sum(&out, "traces_service_graph_request_client_seconds") - 0.010).abs()
@@ -771,8 +771,8 @@ mod tests {
             8_000_000,
         );
 
-        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
-        assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
+        assert2::assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
 
         let out = store.drain(1_000);
         for (name, le, want) in [
@@ -807,12 +807,12 @@ mod tests {
             1,
         );
 
-        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
-        assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
+        assert2::assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
 
         let out = store.drain(1_000);
         let labels = labels_for(&out, "traces_service_graph_request_total");
-        assert!(
+        assert2::assert!(
             labels
                 .iter()
                 .any(|(k, v)| k == "connection_type" && v == "unset")
@@ -839,11 +839,13 @@ mod tests {
             1,
         );
 
-        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
-        assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
+        assert2::assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
 
         let out = store.drain(1_000);
-        assert!((counter(&out, "traces_service_graph_request_failed_total") - 1.0).abs() < 1e-9);
+        assert2::assert!(
+            (counter(&out, "traces_service_graph_request_failed_total") - 1.0).abs() < 1e-9
+        );
     }
 
     #[test]
@@ -867,7 +869,9 @@ mod tests {
         check!(store.expire(10_000_000_000) == 1);
 
         let out = store.drain(1_000);
-        assert!((counter(&out, "traces_service_graph_unpaired_spans_total") - 1.0).abs() < 1e-9);
+        assert2::assert!(
+            (counter(&out, "traces_service_graph_unpaired_spans_total") - 1.0).abs() < 1e-9
+        );
     }
 
     #[test]
@@ -885,12 +889,12 @@ mod tests {
             StatusCode::Ok,
             1,
         );
-        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
-        assert!(store.expire(10_000_000_000) == 1);
+        assert2::assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.expire(10_000_000_000) == 1);
 
         let out = store.drain(1_000);
         let labels = labels_for(&out, "traces_service_graph_unpaired_spans_total");
-        assert!(
+        assert2::assert!(
             labels
                 == [
                     ("client".to_string(), "frontend".to_string()),
@@ -910,11 +914,13 @@ mod tests {
         let a = span("s1", [0x1; 8], [0; 8], SpanKind::Client, StatusCode::Ok, 1);
         let b = span("s2", [0x2; 8], [0; 8], SpanKind::Client, StatusCode::Ok, 1);
 
-        assert!(store.record_span(&a, 0) == RecordOutcome::Recorded);
-        assert!(store.record_span(&b, 1) == RecordOutcome::Dropped);
+        assert2::assert!(store.record_span(&a, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.record_span(&b, 1) == RecordOutcome::Dropped);
 
         let out = store.drain(1_000);
-        assert!((counter(&out, "traces_service_graph_dropped_spans_total") - 1.0).abs() < 1e-9);
+        assert2::assert!(
+            (counter(&out, "traces_service_graph_dropped_spans_total") - 1.0).abs() < 1e-9
+        );
     }
 
     #[test]
@@ -942,12 +948,14 @@ mod tests {
             1,
         );
 
-        assert!(store.record_span(&stale, 0) == RecordOutcome::Recorded);
-        assert!(store.record_span(&fresh, 10_000_000_000) == RecordOutcome::Recorded);
+        assert2::assert!(store.record_span(&stale, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.record_span(&fresh, 10_000_000_000) == RecordOutcome::Recorded);
 
         let out = store.drain(1_000);
-        assert!((counter(&out, "traces_service_graph_unpaired_spans_total") - 1.0).abs() < 1e-9);
-        assert!(counter(&out, "traces_service_graph_dropped_spans_total").abs() < 1e-9);
+        assert2::assert!(
+            (counter(&out, "traces_service_graph_unpaired_spans_total") - 1.0).abs() < 1e-9
+        );
+        assert2::assert!(counter(&out, "traces_service_graph_dropped_spans_total").abs() < 1e-9);
     }
 
     #[test]
@@ -968,12 +976,12 @@ mod tests {
         );
         b.attributes.push(("db.system".into(), "postgresql".into()));
 
-        assert!(store.record_span(&a, 0) == RecordOutcome::Recorded);
-        assert!(store.record_span(&b, 1) == RecordOutcome::Dropped);
+        assert2::assert!(store.record_span(&a, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.record_span(&b, 1) == RecordOutcome::Dropped);
 
         let out = store.drain(1_000);
         let labels = labels_for(&out, "traces_service_graph_dropped_spans_total");
-        assert!(
+        assert2::assert!(
             labels
                 == [
                     ("client".to_string(), "database".to_string()),
@@ -988,7 +996,7 @@ mod tests {
         let mut store = EdgeStore::new(&MetricsGenConfig::default());
         let internal = span("s", [0x1; 8], [0; 8], SpanKind::Internal, StatusCode::Ok, 1);
 
-        assert!(store.record_span(&internal, 0) == RecordOutcome::Ignored);
+        assert2::assert!(store.record_span(&internal, 0) == RecordOutcome::Ignored);
     }
 
     #[test]
@@ -1006,15 +1014,15 @@ mod tests {
             .attributes
             .push(("db.system".into(), "postgresql".into()));
 
-        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
-        assert!(store.expire(20_000_000_000) == 1);
+        assert2::assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.expire(20_000_000_000) == 1);
 
         let out = store.drain(1_000);
         let unpaired = out
             .iter()
             .find(|s| s.name == "traces_service_graph_unpaired_spans_total")
             .unwrap();
-        assert!(
+        assert2::assert!(
             unpaired
                 .labels
                 .iter()
@@ -1037,12 +1045,12 @@ mod tests {
             .attributes
             .push(("peer.service".into(), "db-proxy".into()));
 
-        assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
-        assert!(store.expire(20_000_000_000) == 1);
+        assert2::assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.expire(20_000_000_000) == 1);
 
         let out = store.drain(1_000);
         let labels = labels_for(&out, "traces_service_graph_unpaired_spans_total");
-        assert!(
+        assert2::assert!(
             labels
                 == [
                     ("client".to_string(), "frontend".to_string()),
@@ -1080,21 +1088,21 @@ mod tests {
             .push(("peer.service".into(), "db-proxy".into()));
 
         // Server arrives first and creates the edge with no virtual-node signal.
-        assert!(store.record_span(&server, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.record_span(&server, 0) == RecordOutcome::Recorded);
         // Client update carries the virtual-node / peer.service signal.
-        assert!(store.record_span(&client, 1) == RecordOutcome::Completed);
+        assert2::assert!(store.record_span(&client, 1) == RecordOutcome::Completed);
 
         let out = store.drain(1_000);
         let labels = labels_for(&out, "traces_service_graph_request_total");
         // peer.service ("db-proxy") backfilled into the server label even though
         // the real server span ("backend") already set it on the create path.
-        assert_eq!(
-            labels,
-            [
-                ("client".to_string(), "frontend".to_string()),
-                ("connection_type".to_string(), "virtual_node".to_string()),
-                ("server".to_string(), "db-proxy".to_string()),
-            ]
+        assert2::assert!(
+            labels
+                == [
+                    ("client".to_string(), "frontend".to_string()),
+                    ("connection_type".to_string(), "virtual_node".to_string()),
+                    ("server".to_string(), "db-proxy".to_string()),
+                ]
         );
     }
 
@@ -1128,21 +1136,21 @@ mod tests {
             .attributes
             .push(("messaging.system".into(), "kafka".into()));
 
-        assert!(store.record_span(&producer, 0) == RecordOutcome::Recorded);
-        assert!(store.record_span(&consumer, 1) == RecordOutcome::Completed);
+        assert2::assert!(store.record_span(&producer, 0) == RecordOutcome::Recorded);
+        assert2::assert!(store.record_span(&consumer, 1) == RecordOutcome::Completed);
 
         let out = store.drain(1_000);
         let labels = labels_for(&out, "traces_service_graph_request_total");
-        assert_eq!(
-            labels,
-            [
-                ("client".to_string(), "publisher".to_string()),
-                (
-                    "connection_type".to_string(),
-                    "messaging_system".to_string(),
-                ),
-                ("server".to_string(), "worker".to_string()),
-            ]
+        assert2::assert!(
+            labels
+                == [
+                    ("client".to_string(), "publisher".to_string()),
+                    (
+                        "connection_type".to_string(),
+                        "messaging_system".to_string(),
+                    ),
+                    ("server".to_string(), "worker".to_string()),
+                ]
         );
         check!(
             (histogram_sum(

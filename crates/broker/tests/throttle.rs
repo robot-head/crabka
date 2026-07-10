@@ -29,7 +29,6 @@
 
 use std::{io, net::SocketAddr};
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
 use crabka_protocol::{
@@ -242,11 +241,7 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(
-        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
-        "CreateTopics({topic}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Create a topic via PLAINTEXT (no SASL, compat shim = allow-all).
@@ -274,11 +269,7 @@ async fn create_topic_plaintext(addr: SocketAddr, topic: &str, partitions: i32, 
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(
-        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
-        "CreateTopics({topic}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Await until `handle` sees `(topic, partition)` present in its image.
@@ -516,11 +507,7 @@ async fn produce_plaintext(addr: SocketAddr, topic: &str, record_bytes: usize, c
     let mut cur: &[u8] = &resp_bytes;
     let resp = ProduceResponse::decode(&mut cur, VERSION).expect("decode ProduceResponse");
     let part = &resp.responses[0].partition_responses[0];
-    assert!(
-        part.error_code == 0,
-        "Produce must succeed: error_code={}",
-        part.error_code
-    );
+    assert2::assert!(part.error_code == 0);
 }
 
 /// Issue a single Fetch request with `replica_id` (>= 0 = inter-broker
@@ -615,7 +602,7 @@ async fn broker_scoped_alter_persists_in_image() {
         )],
     )
     .await;
-    assert!(err == 0, "alter should succeed; got error_code={err}");
+    assert2::assert!(err == 0);
 
     // Await until the config is visible (absorb raft commit latency).
     handle
@@ -655,7 +642,7 @@ async fn topic_throttle_config_propagates() {
         )],
     )
     .await;
-    assert!(err == 0, "topic alter should succeed; got error_code={err}");
+    assert2::assert!(err == 0);
 
     // Allow raft commit to propagate.
     handle
@@ -698,7 +685,7 @@ async fn throttle_rate_caps_fetch_response_size() {
         )],
     )
     .await;
-    assert!(err == 0, "broker throttle alter failed: error_code={err}");
+    assert2::assert!(err == 0);
 
     // Mark partition 0 as throttled for follower replica_id=2.
     let err = drive_incremental_alter_configs_plaintext(
@@ -714,7 +701,7 @@ async fn throttle_rate_caps_fetch_response_size() {
         )],
     )
     .await;
-    assert!(err == 0, "topic throttle alter failed: error_code={err}");
+    assert2::assert!(err == 0);
 
     // Wait for the configs to appear in the image before producing (so the
     // throttle enforcement is armed when the Fetch arrives).
@@ -738,10 +725,7 @@ async fn throttle_rate_caps_fetch_response_size() {
     // The throttled response must be much smaller than the 8 KB we produced.
     // We allow up to 2 KB as the upper bound to give headroom for framing
     // overhead (batch headers, response wrapper).
-    assert!(
-        resp_bytes <= 2048,
-        "expected throttled fetch response <= 2048 bytes, got {resp_bytes} bytes"
-    );
+    assert2::assert!(resp_bytes <= 2048);
 
     handle.shutdown().await;
 }
@@ -763,10 +747,7 @@ async fn unthrottled_partition_unaffected() {
     let resp_bytes = fetch_plaintext_replica(addr, "baz", 2).await;
 
     // Full 8 KB data plus framing. The response should be well over 4 KB.
-    assert!(
-        resp_bytes >= 4096,
-        "expected unthrottled fetch response >= 4096 bytes, got {resp_bytes} bytes"
-    );
+    assert2::assert!(resp_bytes >= 4096);
 
     handle.shutdown().await;
 }

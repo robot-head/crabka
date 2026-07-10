@@ -31,9 +31,8 @@ mod tests {
             .map(|key| (key.name.as_str(), key.kind, key.required))
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            keys,
-            vec![
+        assert2::assert!(
+            keys == vec![
                 ("database_url", ConfigKind::Secret, true),
                 ("max_messages_per_poll", ConfigKind::UnsignedInteger, false),
                 ("publication_name", ConfigKind::String, false),
@@ -64,17 +63,14 @@ mod tests {
             .unwrap();
         let config = PostgresSourceConfig::from_resolved(&resolved).unwrap();
 
-        assert_eq!(
-            config.database_url.expose_secret(),
-            "postgres://localhost/app"
+        assert2::assert!(config.database_url.expose_secret() == "postgres://localhost/app");
+        assert2::assert!(config.slot_name.as_str() == "crabka_slot");
+        assert2::assert!(config.publication_name.as_str() == "crabka_connect");
+        assert2::assert!(config.schema.as_str() == "public");
+        assert2::assert!(
+            config.table_names.as_slice()
+                == ["accounts".to_string(), "transactions".to_string()].as_slice()
         );
-        assert_eq!(config.slot_name.as_str(), "crabka_slot");
-        assert_eq!(config.publication_name.as_str(), "crabka_connect");
-        assert_eq!(config.schema.as_str(), "public");
-        assert_eq!(
-            config.table_names.as_slice(),
-            ["accounts".to_string(), "transactions".to_string()].as_slice()
-        );
-        assert_eq!(config.max_messages_per_poll, 1000);
+        assert2::assert!(config.max_messages_per_poll == 1000);
     }
 }

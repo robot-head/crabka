@@ -159,7 +159,6 @@ pub fn diff_user_quotas(current: &UserQuotaConfig, desired: &UserQuotaConfig) ->
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use assert2::assert;
     use bytes::{Buf, BytesMut};
     use crabka_client_core::MockBroker;
     use crabka_protocol::{
@@ -207,10 +206,10 @@ mod tests {
 
     fn request_body_after_header(mut body: &[u8], flexible_header: bool) -> &[u8] {
         let client_id_len = body.get_i16();
-        assert!(client_id_len >= 0);
+        assert2::assert!(client_id_len >= 0);
         body.advance(usize::try_from(client_id_len).expect("client id length is non-negative"));
         if flexible_header {
-            assert!(body.get_u8() == 0);
+            assert2::assert!(body.get_u8() == 0);
         }
         body
     }
@@ -220,7 +219,7 @@ mod tests {
         let mut c = UserQuotaConfig::new();
         c.insert("producer_byte_rate".into(), 1_048_576.0);
         let d = c.clone();
-        assert!(diff_user_quotas(&c, &d).is_empty());
+        assert2::assert!(diff_user_quotas(&c, &d).is_empty());
     }
 
     #[test]
@@ -231,7 +230,7 @@ mod tests {
         d.insert("request_percentage".into(), 25.0);
         let ops = diff_user_quotas(&c, &d);
         // `desired` is a BTreeMap, so `Set` ops come out in key order.
-        assert!(
+        assert2::assert!(
             ops == vec![
                 QuotaOp::Set {
                     key: "producer_byte_rate".to_string(),
@@ -253,7 +252,7 @@ mod tests {
         let mut d = UserQuotaConfig::new();
         d.insert("producer_byte_rate".into(), 1.0);
         let ops = diff_user_quotas(&c, &d);
-        assert!(
+        assert2::assert!(
             ops == vec![QuotaOp::Remove {
                 key: "consumer_byte_rate".into()
             }]
@@ -267,7 +266,7 @@ mod tests {
         let mut d = UserQuotaConfig::new();
         d.insert("producer_byte_rate".into(), 2.0);
         let ops = diff_user_quotas(&c, &d);
-        assert!(
+        assert2::assert!(
             ops == vec![QuotaOp::Set {
                 key: "producer_byte_rate".into(),
                 value: 2.0,
@@ -287,7 +286,7 @@ mod tests {
         let ops = diff_user_quotas(&c, &d);
         // Sets come first (in `desired` key order), then removes (in
         // `current` key order) — both maps are BTreeMaps.
-        assert!(
+        assert2::assert!(
             ops == vec![
                 QuotaOp::Set {
                     key: "producer_byte_rate".to_string(),
@@ -311,7 +310,7 @@ mod tests {
             value: 1.0,
         };
         let w = op_to_wire(&op);
-        assert!(
+        assert2::assert!(
             w == AlterOp {
                 key: "producer_byte_rate".to_string(),
                 value: 1.0,
@@ -327,7 +326,7 @@ mod tests {
             key: "producer_byte_rate".into(),
         };
         let w = op_to_wire(&op);
-        assert!(
+        assert2::assert!(
             w == AlterOp {
                 key: "producer_byte_rate".to_string(),
                 value: 0.0,
@@ -355,7 +354,7 @@ mod tests {
                 );
                 let request = DescribeClientQuotasRequest::decode(&mut body, version)
                     .expect("describe quotas request decodes");
-                assert!(body.is_empty());
+                assert2::assert!(body.is_empty());
                 *captured_request.lock().expect("request capture lock") = Some(request);
                 return Some(encode_v0(&DescribeClientQuotasResponse {
                     entries: Some(vec![DescribeEntryData {
@@ -386,13 +385,13 @@ mod tests {
             .await
             .expect("describe quotas response maps");
 
-        assert!(quotas.get("producer_byte_rate") == Some(&1024.0));
+        assert2::assert!(quotas.get("producer_byte_rate") == Some(&1024.0));
         let request = seen_request
             .lock()
             .expect("request capture lock")
             .take()
             .expect("describe quotas request was captured");
-        assert!(
+        assert2::assert!(
             request
                 == DescribeClientQuotasRequest {
                     components: vec![ComponentData {
@@ -426,7 +425,7 @@ mod tests {
                 );
                 let request = AlterClientQuotasRequest::decode(&mut body, version)
                     .expect("alter quotas request decodes");
-                assert!(body.is_empty());
+                assert2::assert!(body.is_empty());
                 *captured_request.lock().expect("request capture lock") = Some(request);
                 return Some(encode_v0(&AlterClientQuotasResponse {
                     entries: vec![EntryData {
@@ -467,13 +466,13 @@ mod tests {
             .expect("alter quotas maps broker entry")
             .expect("non-zero broker error is returned");
 
-        assert!((error.code, error.message.as_deref()) == (40, Some("invalid quota")));
+        assert2::assert!((error.code, error.message.as_deref()) == (40, Some("invalid quota")));
         let request = seen_request
             .lock()
             .expect("request capture lock")
             .take()
             .expect("alter quotas request was captured");
-        assert!(
+        assert2::assert!(
             request
                 == AlterClientQuotasRequest {
                     entries: vec![AlterEntry {

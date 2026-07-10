@@ -18,7 +18,7 @@ use crabka_client_admin::{
 
 #[test]
 fn resource_outcome_reports_error_state() {
-    for (name, outcome, expected) in [
+    for (_name, outcome, expected) in [
         ("successful resource", ResourceOutcome::ok("orders"), false),
         (
             "failed resource",
@@ -33,7 +33,7 @@ fn resource_outcome_reports_error_state() {
             true,
         ),
     ] {
-        assert_eq!(outcome.has_error(), expected, "case {name}");
+        assert2::assert!(outcome.has_error() == expected);
     }
 }
 
@@ -49,12 +49,12 @@ fn create_topic_request_accepts_valid_topic_shape() {
         }],
     };
 
-    assert!(request.validate().is_ok());
+    assert2::assert!(request.validate().is_ok());
 }
 
 #[test]
 fn create_topic_request_rejects_invalid_counts_and_blank_names() {
-    for (name, request) in [
+    for (_name, request) in [
         (
             "zero partitions",
             CreateTopicRequestDto {
@@ -86,13 +86,13 @@ fn create_topic_request_rejects_invalid_counts_and_blank_names() {
             },
         ),
     ] {
-        assert!(request.validate().is_err(), "case {name}");
+        assert2::assert!(request.validate().is_err());
     }
 }
 
 #[test]
 fn scram_upsert_request_rejects_empty_password_and_bad_iterations() {
-    for (name, request) in [
+    for (_name, request) in [
         (
             "empty password",
             ScramUserUpsertDto {
@@ -110,7 +110,7 @@ fn scram_upsert_request_rejects_empty_password_and_bad_iterations() {
             },
         ),
     ] {
-        assert!(request.validate().is_err(), "case {name}");
+        assert2::assert!(request.validate().is_err());
     }
 }
 
@@ -125,11 +125,8 @@ fn scram_upsert_debug_redacts_password() {
 
     let debug = format!("{request:?}");
 
-    assert!(
-        !debug.contains(password_sentinel),
-        "debug output leaked password"
-    );
-    assert!(debug.contains("<redacted>"));
+    assert2::assert!(!debug.contains(password_sentinel));
+    assert2::assert!(debug.contains("<redacted>"));
 }
 
 #[test]
@@ -140,7 +137,7 @@ fn log_dir_move_request_rejects_nonsensical_fields() {
         destination_log_dir: " ".to_string(),
     };
 
-    assert!(request.validate().is_err());
+    assert2::assert!(request.validate().is_err());
 }
 
 #[test]
@@ -153,9 +150,8 @@ fn kafka_error_dto_from_kafka_error_preserves_fields() {
 
     let dto = KafkaErrorDto::from(&error);
 
-    assert_eq!(
-        dto,
-        KafkaErrorDto {
+    assert2::assert!(
+        dto == KafkaErrorDto {
             code: 36,
             name: "TOPIC_ALREADY_EXISTS".to_string(),
             message: Some("topic exists".to_string()),
@@ -174,14 +170,14 @@ fn ui_error_from_broker_admin_error_preserves_structured_fields() {
 
     let ui_error = UiError::from(error);
 
-    assert_eq!(
-        ui_error,
-        UiError::Broker {
-            api: "CreateTopics",
-            code: 36,
-            name: "TOPIC_ALREADY_EXISTS".to_string(),
-            message: Some("topic exists".to_string()),
-        }
+    assert2::assert!(
+        ui_error
+            == UiError::Broker {
+                api: "CreateTopics",
+                code: 36,
+                name: "TOPIC_ALREADY_EXISTS".to_string(),
+                message: Some("topic exists".to_string()),
+            }
     );
 }
 
@@ -215,9 +211,8 @@ fn maps_topic_metadata_to_rows_with_errors() {
 
     let rows = topic_rows(metadata);
 
-    assert_eq!(
-        rows,
-        [
+    assert2::assert!(
+        rows == [
             TopicRow {
                 name: "orders".to_string(),
                 topic_id: Some(topic_id.to_string()),
@@ -244,9 +239,8 @@ fn maps_topic_metadata_to_rows_with_errors() {
 fn maps_group_ids_to_group_rows() {
     let rows = group_rows(vec!["payments".to_string(), "shipping".to_string()]);
 
-    assert_eq!(
-        rows,
-        [
+    assert2::assert!(
+        rows == [
             GroupRow {
                 group_id: "payments".to_string(),
             },
@@ -269,9 +263,8 @@ fn maps_acl_entries_to_visible_rows() {
         permission_type: PermissionType::Allow,
     }]);
 
-    assert_eq!(
-        rows,
-        [AclRow {
+    assert2::assert!(
+        rows == [AclRow {
             resource: "Topic:orders (Literal)".to_string(),
             principal: "User:alice".to_string(),
             operation: "Read".to_string(),
@@ -289,9 +282,8 @@ fn maps_user_quota_config_to_visible_rows() {
 
     let rows = quota_rows("alice", quotas);
 
-    assert_eq!(
-        rows,
-        [
+    assert2::assert!(
+        rows == [
             QuotaRow {
                 entity: "alice".to_string(),
                 quota_type: "consumer_byte_rate".to_string(),
@@ -317,9 +309,8 @@ fn maps_scram_credentials_to_user_rows() {
         error: None,
     }]);
 
-    assert_eq!(
-        rows,
-        [UserRow {
+    assert2::assert!(
+        rows == [UserRow {
             username: "alice".to_string(),
             principal: "SCRAM-SHA-512".to_string(),
         }]
@@ -361,28 +352,28 @@ fn maps_mutation_outcomes_preserving_kafka_errors() {
         name: "UNKNOWN_TOPIC_OR_PARTITION".to_string(),
         message: Some("missing".to_string()),
     });
-    assert_eq!(
-        delete_topic_rows,
-        vec![ResourceOutcome {
-            resource: "orders".to_string(),
-            error: expected_error.clone(),
-        }]
+    assert2::assert!(
+        delete_topic_rows
+            == vec![ResourceOutcome {
+                resource: "orders".to_string(),
+                error: expected_error.clone(),
+            }]
     );
-    assert_eq!(partition_rows, vec![ResourceOutcome::ok("payments")]);
-    assert_eq!(
-        scram_rows,
-        vec![ResourceOutcome {
-            resource: "alice".to_string(),
-            error: expected_error.clone(),
-        }]
+    assert2::assert!(partition_rows == vec![ResourceOutcome::ok("payments")]);
+    assert2::assert!(
+        scram_rows
+            == vec![ResourceOutcome {
+                resource: "alice".to_string(),
+                error: expected_error.clone(),
+            }]
     );
-    assert_eq!(log_dir_rows, vec![ResourceOutcome::ok("orders-1")]);
-    assert_eq!(
-        delete_acl_rows,
-        vec![ResourceOutcome {
-            resource: "acl-filter".to_string(),
-            error: expected_error,
-        }]
+    assert2::assert!(log_dir_rows == vec![ResourceOutcome::ok("orders-1")]);
+    assert2::assert!(
+        delete_acl_rows
+            == vec![ResourceOutcome {
+                resource: "acl-filter".to_string(),
+                error: expected_error,
+            }]
     );
 }
 
@@ -421,9 +412,8 @@ fn maps_log_dir_info_to_partition_rows_with_directory_errors() {
         name: "KAFKA_STORAGE_ERROR".to_string(),
         message: Some("disk offline".to_string()),
     });
-    assert_eq!(
-        rows,
-        [
+    assert2::assert!(
+        rows == [
             LogDirRow {
                 log_dir: "/var/lib/crabka-0".to_string(),
                 topic: "orders".to_string(),
@@ -460,9 +450,8 @@ fn maps_errored_empty_log_dir_to_sentinel_row() {
 
     let rows = log_dir_rows(log_dirs);
 
-    assert_eq!(
-        rows,
-        [LogDirRow {
+    assert2::assert!(
+        rows == [LogDirRow {
             log_dir: "/var/lib/crabka-offline".to_string(),
             topic: String::new(),
             partition: -1,

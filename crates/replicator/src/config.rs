@@ -153,7 +153,6 @@ impl ReplicatorConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -177,13 +176,12 @@ policies:
     #[test]
     fn parses_and_validates() {
         let cfg = ReplicatorConfig::from_yaml(YAML).unwrap();
-        assert_eq!(cfg.clusters.len(), 2);
-        assert_eq!(
-            cfg.clusters["eu-west"].zones.clone(),
-            vec!["eu".to_string(), "gdpr".to_string()]
+        assert2::assert!(cfg.clusters.len() == 2);
+        assert2::assert!(
+            cfg.clusters["eu-west"].zones.clone() == vec!["eu".to_string(), "gdpr".to_string()]
         );
-        assert_eq!(cfg.flows[0].naming, NamingPolicy::Default);
-        assert_eq!(cfg.flows[0].delivery, Delivery::AtLeastOnce);
+        assert2::assert!(cfg.flows[0].naming == NamingPolicy::Default);
+        assert2::assert!(cfg.flows[0].delivery == Delivery::AtLeastOnce);
         cfg.validate().unwrap();
     }
 
@@ -192,13 +190,13 @@ policies:
         let y = YAML.replace("delivery: at-least-once", "delivery: exactly-once");
         let cfg = ReplicatorConfig::from_yaml(&y).unwrap();
         let err = cfg.validate().unwrap_err();
-        assert!(format!("{err}").contains("exactly-once"), "got: {err}");
+        assert2::assert!(format!("{err}").contains("exactly-once"));
     }
 
     #[test]
     fn rejects_unknown_cluster_ref() {
         let y = YAML.replace("to: eu-west", "to: nowhere");
         let cfg = ReplicatorConfig::from_yaml(&y).unwrap();
-        assert!(cfg.validate().is_err());
+        assert2::assert!(cfg.validate().is_err());
     }
 }

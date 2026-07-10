@@ -73,13 +73,12 @@ impl Default for StreamsGroupConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn defaults_are_kafka_ga() {
-        assert!(
+        assert2::assert!(
             StreamsGroupConfig::default()
                 == StreamsGroupConfig {
                     enable: true,

@@ -28,7 +28,7 @@ pub struct EmittedMessage {
 mod tests {
     use std::path::PathBuf;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::{ir, name_conv, validate};
@@ -56,15 +56,17 @@ mod tests {
             .iter()
             .filter(|s| !s.valid_versions.is_empty())
             .collect();
-        assert!(!active.is_empty(), "no active specs in {dir:?}");
+        assert2::assert!(!active.is_empty());
 
         for s in &active {
             let owned = owned_quote::emit(s, sha).unwrap();
-            assert!(owned.primary.contains("MIN_VERSION") || owned.primary.contains("struct"));
+            assert2::assert!(
+                owned.primary.contains("MIN_VERSION") || owned.primary.contains("struct")
+            );
             let borrowed = borrowed_quote::emit(s, sha, namespace).unwrap();
-            assert!(!borrowed.primary.is_empty());
+            assert2::assert!(!borrowed.primary.is_empty());
             for (_, body) in owned.commons.iter().chain(borrowed.commons.iter()) {
-                assert!(!body.is_empty());
+                assert2::assert!(!body.is_empty());
             }
             if wrappers::should_emit_wrapper(s) {
                 let w_owned = wrappers::emit(s, wrappers::Flavor::Owned, sha, namespace);
@@ -82,15 +84,15 @@ mod tests {
         for flavor in [wrappers::Flavor::Owned, wrappers::Flavor::Borrowed] {
             for has_common in [false, true] {
                 let m = mod_rs::emit(&active, flavor, sha, has_common);
-                assert!(m.contains("pub mod"));
+                assert2::assert!(m.contains("pub mod"));
             }
         }
 
         if namespace.is_none() {
-            assert!(api_key_enum_quote::emit(&specs, sha).contains("ApiKey"));
-            assert!(!differential_table::emit(&specs, sha).is_empty());
+            assert2::assert!(api_key_enum_quote::emit(&specs, sha).contains("ApiKey"));
+            assert2::assert!(!differential_table::emit(&specs, sha).is_empty());
         }
-        assert!(common::banner(sha).contains(sha));
+        assert2::assert!(common::banner(sha).contains(sha));
     }
 
     #[test]

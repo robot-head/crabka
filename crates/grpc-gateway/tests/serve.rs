@@ -38,7 +38,7 @@ async fn plaintext_serve_serves_healthz() {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(ok, "plaintext serve should answer /healthz with 200");
+    assert2::assert!(ok);
     token.cancel();
     let _ = h.await;
 }
@@ -91,10 +91,7 @@ async fn tls_listener_rejects_plaintext_connection() {
         .get(format!("http://{addr}/healthz"))
         .send()
         .await;
-    assert!(
-        res.is_err(),
-        "plaintext request to a TLS listener must fail, got {res:?}"
-    );
+    assert2::assert!(res.is_err());
     token.cancel();
     let _ = h.await;
 }

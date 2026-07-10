@@ -180,7 +180,7 @@ mod tests {
         s.put("x".into(), 7).await;
         let q = s.as_iq().unwrap();
 
-        for (name, stores, kind, op, store_name, active, expected) in [
+        for (_name, stores, kind, op, store_name, active, expected) in [
             (
                 "validate",
                 vec![q],
@@ -233,11 +233,7 @@ mod tests {
                 Err(IqError::RebalanceInProgress),
             ),
         ] {
-            assert_eq!(
-                answer_iq(stores, kind, &op, store_name, active).await,
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(answer_iq(stores, kind, &op, store_name, active).await == expected);
         }
     }
 }

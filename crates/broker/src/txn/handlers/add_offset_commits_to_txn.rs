@@ -141,14 +141,13 @@ fn encode_response(version: i16, error_code: i16) -> Result<Bytes, BrokerError> 
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     fn decode(bytes: &Bytes, version: i16) -> AddOffsetsToTxnResponse {
         let mut cur: &[u8] = bytes.as_ref();
         let resp = AddOffsetsToTxnResponse::decode(&mut cur, version).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        assert2::assert!(cur.is_empty());
         resp
     }
 
@@ -166,13 +165,13 @@ mod tests {
 
         for (case, encode, expected_code) in cases {
             let bytes = encode(4).unwrap_or_else(|error| panic!("{case}: {error}"));
-            assert!(!bytes.is_empty(), "case: {case}");
+            assert2::assert!(!bytes.is_empty());
             let resp = decode(&bytes, 4);
             let expected = AddOffsetsToTxnResponse {
                 error_code: expected_code,
                 ..Default::default()
             };
-            assert!(resp == expected, "case: {case}");
+            assert2::assert!(resp == expected);
         }
     }
 }

@@ -138,7 +138,7 @@ pub fn filter_trace_spans_by_time(mut trace: TraceSpans, start_ns: i64, end_ns: 
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use datafusion::prelude::SessionContext;
 
     use super::*;
@@ -194,7 +194,7 @@ mod tests {
     async fn trait_is_object_safe() {
         let s: std::sync::Arc<dyn SpanStore> = std::sync::Arc::new(Empty);
         let r = s.scan("t", &[], 0, 1).await.unwrap();
-        assert!(r.span_table == "spans");
-        assert!(s.trace_by_id("t", &[0; 16]).await.unwrap().is_none());
+        assert2::assert!(r.span_table == "spans");
+        assert2::assert!(s.trace_by_id("t", &[0; 16]).await.unwrap().is_none());
     }
 }

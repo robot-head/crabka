@@ -158,14 +158,11 @@ fn codec_for(port: u16) -> SchemaRegistryCodec {
 
 /// Assert the 5-byte Confluent frame header at the start of `framed`.
 fn assert_confluent_header(framed: &Bytes, expected_id: i32) {
-    assert!(framed.len() >= 5, "framed payload too short: {framed:?}");
+    assert2::assert!(framed.len() >= 5);
     let id_bytes = [framed[1], framed[2], framed[3], framed[4]];
     let actual_id = i32::from_be_bytes(id_bytes);
-    assert_eq!(framed[0], 0x00, "complete Confluent header projection");
-    assert_eq!(
-        actual_id, expected_id,
-        "complete Confluent header projection"
-    );
+    assert2::assert!(framed[0] == 0x00);
+    assert2::assert!(actual_id == expected_id);
 }
 
 // ── Round-trip tests ────────────────────────────────────────────────────────
@@ -217,17 +214,16 @@ async fn assert_avro_round_trip_via_mock_registry() {
         .expect("Avro decode must produce a JSON view");
     let expected: Value = serde_json::from_slice(json_in).unwrap();
     let actual: Value = serde_json::from_slice(json_out).unwrap();
-    assert_eq!(decoded.value, expected_value, "Avro decoded value");
-    assert_eq!(
-        decoded.schema,
-        Some(SchemaMeta {
-            subject: "orders-avro-value".to_owned(),
-            id: 1,
-            format: SchemaFormat::Avro,
-        }),
-        "Avro decoded value"
+    assert2::assert!(decoded.value == expected_value);
+    assert2::assert!(
+        decoded.schema
+            == Some(SchemaMeta {
+                subject: "orders-avro-value".to_owned(),
+                id: 1,
+                format: SchemaFormat::Avro,
+            })
     );
-    assert_eq!(actual, expected, "Avro decoded value");
+    assert2::assert!(actual == expected);
 }
 
 /// JSON Schema encode→frame→decode round-trip against the mock registry (schema id 2).
@@ -273,17 +269,16 @@ async fn assert_json_schema_round_trip_via_mock_registry() {
         .expect("JSON Schema decode must produce a JSON view");
     let expected: Value = serde_json::from_slice(json_in).unwrap();
     let actual: Value = serde_json::from_slice(json_out).unwrap();
-    assert_eq!(decoded.value, expected_value, "JSON Schema decoded value");
-    assert_eq!(
-        decoded.schema,
-        Some(SchemaMeta {
-            subject: "orders-json-value".to_owned(),
-            id: 2,
-            format: SchemaFormat::Json,
-        }),
-        "JSON Schema decoded value"
+    assert2::assert!(decoded.value == expected_value);
+    assert2::assert!(
+        decoded.schema
+            == Some(SchemaMeta {
+                subject: "orders-json-value".to_owned(),
+                id: 2,
+                format: SchemaFormat::Json,
+            })
     );
-    assert_eq!(actual, expected, "JSON Schema decoded value");
+    assert2::assert!(actual == expected);
 }
 
 /// Protobuf encode→frame→decode round-trip against the mock registry (schema id 3).
@@ -322,14 +317,8 @@ async fn assert_protobuf_round_trip_via_mock_registry() {
     // Bytes 1–4: schema id 3 in big-endian.
     // Byte 5: message-index prefix 0x00 (first-message optimization).
     assert_confluent_header(&framed, 3);
-    assert_eq!(
-        framed[5], 0x00,
-        "Protobuf frame must carry message-index prefix 0x00 at byte 5"
-    );
-    assert!(
-        framed.len() > 6,
-        "Protobuf frame must contain proto bytes after the message-index prefix"
-    );
+    assert2::assert!(framed[5] == 0x00);
+    assert2::assert!(framed.len() > 6);
 
     // ── Decode ──────────────────────────────────────────────────────────────
     let expected_value = framed.slice(6..);
@@ -346,21 +335,16 @@ async fn assert_protobuf_round_trip_via_mock_registry() {
 
     // proto3 JSON: int64 fields are encoded as decimal STRINGS (not numbers),
     // per https://protobuf.dev/programming-guides/proto3/#json.
-    assert_eq!(decoded.value, expected_value, "Protobuf decoded value");
-    assert_eq!(
-        decoded.schema,
-        Some(SchemaMeta {
-            subject: "orders-proto-value".to_owned(),
-            id: 3,
-            format: SchemaFormat::Protobuf,
-        }),
-        "Protobuf decoded value"
+    assert2::assert!(decoded.value == expected_value);
+    assert2::assert!(
+        decoded.schema
+            == Some(SchemaMeta {
+                subject: "orders-proto-value".to_owned(),
+                id: 3,
+                format: SchemaFormat::Protobuf,
+            })
     );
-    assert_eq!(
-        actual,
-        json!({"id": "1", "k": "a"}),
-        "Protobuf decoded value"
-    );
+    assert2::assert!(actual == json!({"id": "1", "k": "a"}));
 }
 
 #[tokio::test]

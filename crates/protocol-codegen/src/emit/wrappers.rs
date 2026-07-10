@@ -121,14 +121,14 @@ fn owned_tests_tokens(type_name: &str) -> TokenStream {
             fn roundtrip(case: &str, msg: &#ty, v: i16) {
                 let mut buf = BytesMut::new();
                 msg.encode(&mut buf, v).unwrap();
-                assert!(msg.encoded_len(v) == buf.len(), "case {case}, version {v}");
+                assert2::assert!(msg.encoded_len(v) == buf.len());
                 let bytes = buf.freeze();
                 let mut cur = &bytes[..];
                 let decoded = #ty::decode(&mut cur, v).unwrap();
-                assert!(cur.is_empty(), "case {case}, version {v}");
+                assert2::assert!(cur.is_empty());
                 let mut reencoded = BytesMut::new();
                 decoded.encode(&mut reencoded, v).unwrap();
-                assert!(&reencoded[..] == &bytes[..], "case {case}, version {v}");
+                assert2::assert!(&reencoded[..] == &bytes[..]);
                 let _ = default_json(v);
             }
 
@@ -164,18 +164,15 @@ fn borrowed_tests_tokens(type_name: &str) -> TokenStream {
             fn check(case: &str, msg_bytes: &bytes::Bytes, v: i16) {
                 let mut cur: &[u8] = msg_bytes;
                 let decoded = #ty::decode_borrow(&mut cur, v).unwrap();
-                assert!(cur.is_empty(), "case {case}, version {v}");
-                assert!(
-                    decoded.encoded_len(v) == msg_bytes.len(),
-                    "case {case}, version {v}"
-                );
+                assert2::assert!(cur.is_empty());
+                assert2::assert!(decoded.encoded_len(v) == msg_bytes.len());
                 let mut reencoded = BytesMut::new();
                 decoded.encode(&mut reencoded, v).unwrap();
-                assert!(&reencoded[..] == &msg_bytes[..], "case {case}, version {v}");
+                assert2::assert!(&reencoded[..] == &msg_bytes[..]);
                 let owned = decoded.to_owned();
                 let mut owned_buf = BytesMut::new();
                 owned.encode(&mut owned_buf, v).unwrap();
-                assert!(&owned_buf[..] == &msg_bytes[..], "case {case}, version {v}");
+                assert2::assert!(&owned_buf[..] == &msg_bytes[..]);
             }
 
             #[test]

@@ -104,7 +104,7 @@ async fn try_create_topic<A: TopicAdminClient + ?Sized>(
 mod tests {
     use std::collections::VecDeque;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_client_admin::{AdminError, CreateTopicOutcome, KafkaError};
 
     use super::*;
@@ -161,7 +161,7 @@ mod tests {
             ("min.cleanable.dirty.ratio".to_string(), "0.01".to_string()),
             ("segment.ms".to_string(), "60000".to_string()),
         ]);
-        assert!(
+        assert2::assert!(
             admin.calls.first().map(|(specs, timeout_ms)| {
                 (
                     *timeout_ms,
@@ -189,7 +189,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             StateTopicError::ProduceErrorCode { code: 42 }
         ));
@@ -207,7 +207,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(effective == 3);
+        assert2::assert!(effective == 3);
     }
 
     #[tokio::test]
@@ -252,10 +252,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             StateTopicError::ProduceErrorCode { code: 38 }
         ));
-        assert!(admin.calls.len() == 1);
+        assert2::assert!(admin.calls.len() == 1);
     }
 }

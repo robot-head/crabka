@@ -577,11 +577,11 @@ mod tests {
             .as_any()
             .downcast_ref::<Int32Array>()
             .unwrap();
-        assert_eq!(batch.schema(), span_block_schema());
-        assert_eq!(batch.num_rows(), 2);
-        assert_eq!(tids.value(0), [1_u8; 16].as_slice());
-        assert_eq!(kinds.value(0), SpanKind::Client.as_i32());
-        assert_eq!(lefts.value(1), 2);
+        assert2::assert!(batch.schema() == span_block_schema());
+        assert2::assert!(batch.num_rows() == 2);
+        assert2::assert!(tids.value(0) == [1_u8; 16].as_slice());
+        assert2::assert!(kinds.value(0) == SpanKind::Client.as_i32());
+        assert2::assert!(lefts.value(1) == 2);
     }
 
     fn row_with_attrs(attrs: Vec<SpanAttr>) -> SpanRow {
@@ -610,8 +610,8 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert!(!col.is_null(0));
-        assert!((col.value(0) - 1.5).abs() < f64::EPSILON);
+        assert2::assert!(!col.is_null(0));
+        assert2::assert!((col.value(0) - 1.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -630,8 +630,8 @@ mod tests {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
-        assert!(!col.is_null(0));
-        assert!(col.value(0));
+        assert2::assert!(!col.is_null(0));
+        assert2::assert!(col.value(0));
     }
 
     #[test]
@@ -669,8 +669,8 @@ mod tests {
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        assert_eq!(svc_values.value(key), "checkout");
-        assert_eq!(code.value(0), 42);
+        assert2::assert!(svc_values.value(key) == "checkout");
+        assert2::assert!(code.value(0) == 42);
     }
 
     #[test]
@@ -704,10 +704,10 @@ mod tests {
         let row0_values = row0_values.as_any().downcast_ref::<ListArray>().unwrap();
         let first_attr = row0_values.value(0);
         let first_attr = first_attr.as_any().downcast_ref::<StringArray>().unwrap();
-        assert_eq!(row0_keys.len(), 1);
-        assert_eq!(row0_keys.value(0), "http.method");
-        assert_eq!(first_attr.len(), 2);
-        assert_eq!(first_attr.value(0), "GET");
-        assert_eq!(first_attr.value(1), "POST");
+        assert2::assert!(row0_keys.len() == 1);
+        assert2::assert!(row0_keys.value(0) == "http.method");
+        assert2::assert!(first_attr.len() == 2);
+        assert2::assert!(first_attr.value(0) == "GET");
+        assert2::assert!(first_attr.value(1) == "POST");
     }
 }

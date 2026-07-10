@@ -2531,7 +2531,7 @@ mod tests {
         },
         datatypes::{Field as ArrowField, Int32Type, Schema},
     };
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::{catalog::MemTable, prelude::SessionContext};
 
     use super::*;
@@ -2707,11 +2707,11 @@ mod tests {
             .search("t", "{ .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].root_service_name.as_str(), "a");
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].root_service_name.as_str() == "a");
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2723,10 +2723,10 @@ mod tests {
         let e = engine();
         for q in ["{}", "{ true }", "{true}"] {
             let r = e.search("t", q, 0, 100_000, 20).await.unwrap();
-            assert!(r.traces.len() == 2, "query {q:?} should match both traces");
+            assert2::assert!(r.traces.len() == 2);
         }
         let none = e.search("t", "{ false }", 0, 100_000, 20).await.unwrap();
-        assert!(none.traces.is_empty(), "{{ false }} should match no traces");
+        assert2::assert!(none.traces.is_empty());
     }
 
     #[tokio::test]
@@ -2738,7 +2738,7 @@ mod tests {
             .search("t", "{ .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.inspected_bytes > 0);
+        assert2::assert!(r.inspected_bytes > 0);
     }
 
     #[tokio::test]
@@ -2753,15 +2753,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(
             r.traces[0].span_sets[0]
                 .spans
                 .iter()
                 .map(|span| span.span_id)
-                .collect::<Vec<_>>(),
-            vec![[1; 8]]
+                .collect::<Vec<_>>()
+                == vec![[1; 8]]
         );
     }
 
@@ -2783,8 +2783,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [2; 16]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [2; 16]);
     }
 
     #[tokio::test]
@@ -2801,10 +2801,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2814,9 +2814,9 @@ mod tests {
             .search("t", "{ .svc = \"a\" } && { .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 2);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 2);
     }
 
     #[tokio::test]
@@ -2845,16 +2845,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 2);
-        assert_eq!(
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 2);
+        assert2::assert!(
             r.traces[0].span_sets[0]
                 .spans
                 .iter()
                 .map(|span| span.span_id)
-                .collect::<Vec<_>>(),
-            vec![[1; 8], [2; 8]]
+                .collect::<Vec<_>>()
+                == vec![[1; 8], [2; 8]]
         );
     }
 
@@ -2865,9 +2865,9 @@ mod tests {
             .search("t", "{ .svc = \"a\" } >> { .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2877,10 +2877,10 @@ mod tests {
             .search("t", "{ span:childCount = 1 }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -2903,11 +2903,8 @@ mod tests {
         let mut scoped_ids: Vec<_> = scoped.traces.iter().map(|t| t.trace_id).collect();
         scopeless_ids.sort_unstable();
         scoped_ids.sort_unstable();
-        assert!(
-            !scopeless_ids.is_empty(),
-            "roots (nestedSetParent < 0) must exist"
-        );
-        assert!(scopeless_ids == scoped_ids);
+        assert2::assert!(!scopeless_ids.is_empty());
+        assert2::assert!(scopeless_ids == scoped_ids);
     }
 
     #[tokio::test]
@@ -2917,7 +2914,7 @@ mod tests {
             .search("t", "{ instrumentation:name = \"tracer\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 2);
+        assert2::assert!(r.traces.len() == 2);
         let first = r
             .traces
             .iter()
@@ -2928,8 +2925,8 @@ mod tests {
             .iter()
             .find(|trace| trace.trace_id == [8; 16])
             .unwrap();
-        assert_eq!(first.span_sets[0].matched, 2);
-        assert_eq!(second.span_sets[0].matched, 1);
+        assert2::assert!(first.span_sets[0].matched == 2);
+        assert2::assert!(second.span_sets[0].matched == 1);
     }
 
     #[tokio::test]
@@ -2940,8 +2937,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].root_service_name.as_str(), "a");
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].root_service_name.as_str() == "a");
     }
 
     #[tokio::test]
@@ -2958,9 +2955,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 2);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 2);
     }
 
     #[tokio::test]
@@ -2971,10 +2968,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -2991,10 +2988,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3014,10 +3011,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3038,9 +3035,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3061,9 +3058,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3084,9 +3081,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3119,9 +3116,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [3; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [3; 8]);
     }
 
     #[tokio::test]
@@ -3159,15 +3156,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 2);
-        assert_eq!(
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 2);
+        assert2::assert!(
             r.traces[0].span_sets[0]
                 .spans
                 .iter()
                 .map(|span| span.span_id)
-                .collect::<Vec<_>>(),
-            vec![[2; 8], [3; 8]]
+                .collect::<Vec<_>>()
+                == vec![[2; 8], [3; 8]]
         );
     }
 
@@ -3207,9 +3204,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3237,15 +3234,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 2);
-        assert_eq!(
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 2);
+        assert2::assert!(
             r.traces[0].span_sets[0]
                 .spans
                 .iter()
                 .map(|span| span.span_id)
-                .collect::<Vec<_>>(),
-            vec![[1; 8], [2; 8]]
+                .collect::<Vec<_>>()
+                == vec![[1; 8], [2; 8]]
         );
     }
 
@@ -3276,17 +3273,17 @@ mod tests {
             .search("t", "{ span.http.method = \"POST\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
 
         let r = e
             .search("t", "{ span.http.method != \"POST\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3306,10 +3303,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3320,10 +3317,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3347,10 +3344,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3374,10 +3371,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [1; 8]);
     }
 
     #[tokio::test]
@@ -3388,8 +3385,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].root_service_name.as_str(), "a");
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].root_service_name.as_str() == "a");
     }
 
     #[tokio::test]
@@ -3400,9 +3397,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3419,9 +3416,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3454,10 +3451,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(r.traces.len(), 1);
-        assert_eq!(r.traces[0].trace_id, [9; 16]);
-        assert_eq!(r.traces[0].span_sets[0].matched, 1);
-        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
+        assert2::assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces[0].trace_id == [9; 16]);
+        assert2::assert!(r.traces[0].span_sets[0].matched == 1);
+        assert2::assert!(r.traces[0].span_sets[0].spans[0].span_id == [2; 8]);
     }
 
     #[tokio::test]
@@ -3467,15 +3464,15 @@ mod tests {
             .search("t", "{ .svc != nil }", 0, 100_000, 1)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces.len() == 1);
     }
 
     #[tokio::test]
     async fn trace_by_id_path() {
         let e = engine();
         let got = e.trace_by_id("t", &[9; 16]).await.unwrap().unwrap();
-        assert!(got.spans.len() == 2);
-        assert!(e.trace_by_id("t", &[1; 16]).await.unwrap().is_none());
+        assert2::assert!(got.spans.len() == 2);
+        assert2::assert!(e.trace_by_id("t", &[1; 16]).await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -3487,14 +3484,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(got.spans.len() == 2);
+        assert2::assert!(got.spans.len() == 2);
         // A window after the trace retains no spans (but still returns the trace).
         let out = e
             .trace_by_id_within("t", &[9; 16], 100_000, 200_000)
             .await
             .unwrap()
             .unwrap();
-        assert!(out.spans.is_empty());
+        assert2::assert!(out.spans.is_empty());
     }
 
     #[tokio::test]
@@ -3502,14 +3499,14 @@ mod tests {
         // Both must surface the store's non-empty results, not Ok(vec![]).
         let e = engine();
         let names = e.tag_names("t", None, 0, 100_000).await.unwrap();
-        assert!(
+        assert2::assert!(
             names
                 .iter()
                 .any(|scoped| scoped.tags.iter().any(|t| t == "svc"))
         );
 
         let values = e.tag_values("t", ".svc", 0, 100_000).await.unwrap();
-        assert!(
+        assert2::assert!(
             values
                 == vec![
                     TypedValue {
@@ -3553,9 +3550,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            got,
-            TraceMetricsResponse {
+        assert2::assert!(
+            got == TraceMetricsResponse {
                 series: vec![TraceMetricSeries {
                     labels: vec![],
                     points: vec![(0, 2.0), (60_000, 1.0), (120_000, 0.0)],
@@ -3589,9 +3585,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(
-            got,
-            TraceMetricsResponse {
+        assert2::assert!(
+            got == TraceMetricsResponse {
                 series: vec![TraceMetricSeries {
                     labels: vec![],
                     points: vec![(0, 0.3), (10_000_000_000, 0.0)],
@@ -3628,7 +3623,7 @@ mod tests {
             .unwrap()
             .series;
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("span.svc".into(), "api".into())],
@@ -3671,7 +3666,7 @@ mod tests {
             .unwrap()
             .series;
 
-        assert!(
+        assert2::assert!(
             got == vec![TraceMetricSeries {
                 labels: vec![("span.svc".into(), "api".into())],
                 points: vec![(0, 2.0)],
@@ -3704,7 +3699,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("resource.service.name".into(), "billing".into())],
@@ -3739,7 +3734,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("span.http.method".into(), "GET".into())],
@@ -3785,7 +3780,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("name".into(), "cache.hit".into())],
@@ -3832,7 +3827,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("name".into(), "cache.hit".into())],
@@ -3879,7 +3874,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("event.cache.key".into(), "orders".into())],
@@ -3918,7 +3913,7 @@ mod tests {
             .unwrap()
             .series;
 
-        assert!(
+        assert2::assert!(
             got == vec![TraceMetricSeries {
                 labels: vec![("traceID".into(), "09090909090909090909090909090909".into())],
                 points: vec![(0, 1.0), (60_000, 0.0)],
@@ -3958,7 +3953,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("spanID".into(), "0606060606060606".into())],
@@ -4001,7 +3996,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("span.svc".into(), "api".into())],
@@ -4056,7 +4051,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("kind".into(), "2".into()), ("status".into(), "0".into())],
@@ -4113,7 +4108,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("statusMessage".into(), "cancelled".into())],
@@ -4148,7 +4143,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("id".into(), "11111111111111111111111111111111".into())],
@@ -4190,7 +4185,7 @@ mod tests {
             .series;
 
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("childCount".into(), "0".into())],
@@ -4223,7 +4218,7 @@ mod tests {
             .unwrap()
             .series;
 
-        assert!(
+        assert2::assert!(
             got == vec![TraceMetricSeries {
                 labels: vec![("name".into(), "tracer".into())],
                 points: vec![(0, 1.0), (60_000, 0.0)],
@@ -4260,7 +4255,7 @@ mod tests {
         got.sort_by(|a, b| a.labels.cmp(&b.labels));
         // Root span groups under nestedSetParent = -1 (Tempo root sentinel);
         // "-1" sorts before "1".
-        assert!(
+        assert2::assert!(
             got == vec![
                 TraceMetricSeries {
                     labels: vec![("nestedSetParent".into(), "-1".into())],
@@ -4310,7 +4305,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(avg.series[0].points == vec![(0, 200.0), (60_000, 50.0), (120_000, 0.0)]);
+        assert2::assert!(avg.series[0].points == vec![(0, 200.0), (60_000, 50.0), (120_000, 0.0)]);
 
         let sum = e
             .query_range(
@@ -4322,7 +4317,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(sum.series[0].points == vec![(0, 400.0), (60_000, 50.0), (120_000, 0.0)]);
+        assert2::assert!(sum.series[0].points == vec![(0, 400.0), (60_000, 50.0), (120_000, 0.0)]);
 
         let min = e
             .query_range(
@@ -4334,7 +4329,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(min.series[0].points == vec![(0, 100.0), (60_000, 50.0), (120_000, 0.0)]);
+        assert2::assert!(min.series[0].points == vec![(0, 100.0), (60_000, 50.0), (120_000, 0.0)]);
 
         let max = e
             .query_range(
@@ -4346,7 +4341,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(max.series[0].points == vec![(0, 300.0), (60_000, 50.0), (120_000, 0.0)]);
+        assert2::assert!(max.series[0].points == vec![(0, 300.0), (60_000, 50.0), (120_000, 0.0)]);
     }
 
     #[tokio::test]
@@ -4380,7 +4375,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(got.series[0].points == vec![(0, 700.0), (60_000, 0.0)]);
+        assert2::assert!(got.series[0].points == vec![(0, 700.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
@@ -4426,7 +4421,7 @@ mod tests {
             .unwrap()
             .series;
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             series
                 == vec![
                     TraceMetricSeries {
@@ -4535,7 +4530,7 @@ mod tests {
             .unwrap()
             .series;
 
-        assert!(series.iter().any(|s| {
+        assert2::assert!(series.iter().any(|s| {
             s.labels
                 == vec![
                     ("le".into(), "2000000".into()),
@@ -4575,7 +4570,7 @@ mod tests {
             .unwrap()
             .series;
         top.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             top == vec![
                 TraceMetricSeries {
                     labels: vec![("span.svc".into(), "api".into())],
@@ -4600,7 +4595,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             bottom.series
                 == vec![TraceMetricSeries {
                     labels: vec![("span.svc".into(), "db".into())],
@@ -4640,7 +4635,7 @@ mod tests {
             .unwrap()
             .series;
         top.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(
+        assert2::assert!(
             top == vec![
                 TraceMetricSeries {
                     labels: vec![("span.svc".into(), "api".into())],
@@ -4684,7 +4679,7 @@ mod tests {
             .series;
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
 
-        assert!(
+        assert2::assert!(
             series
                 == vec![
                     TraceMetricSeries {
@@ -4732,7 +4727,7 @@ mod tests {
             .series;
         top.sort_by(|a, b| a.labels.cmp(&b.labels));
 
-        assert!(
+        assert2::assert!(
             top == vec![
                 TraceMetricSeries {
                     labels: vec![("span.svc".into(), "api".into())],
@@ -4867,8 +4862,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(got.series.len(), 1);
-        assert!(got.series[0].exemplars.is_empty());
+        assert2::assert!(got.series.len() == 1);
+        assert2::assert!(got.series[0].exemplars.is_empty());
     }
 
     #[tokio::test]
@@ -4894,8 +4889,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(got.series.len(), 1);
-        assert!(got.series[0].exemplars.is_empty());
+        assert2::assert!(got.series.len() == 1);
+        assert2::assert!(got.series[0].exemplars.is_empty());
     }
 
     #[test]
@@ -4914,7 +4909,7 @@ mod tests {
         ] {
             let direct = f64_from_i64(value);
             let via_string: f64 = value.to_string().parse().unwrap();
-            assert!(direct.to_bits() == via_string.to_bits());
+            assert2::assert!(direct.to_bits() == via_string.to_bits());
         }
     }
 
@@ -4957,7 +4952,7 @@ mod tests {
             .await
             .unwrap();
         // min over the present values {10, 30} = 10, not dragged to 0.
-        assert!(min.series[0].points == vec![(0, 10.0), (60_000, 0.0)]);
+        assert2::assert!(min.series[0].points == vec![(0, 10.0), (60_000, 0.0)]);
 
         let avg = e
             .query_range(
@@ -4970,7 +4965,7 @@ mod tests {
             .await
             .unwrap();
         // avg over {10, 30} = 20, not (10+30+0)/3 = 13.33.
-        assert!(avg.series[0].points == vec![(0, 20.0), (60_000, 0.0)]);
+        assert2::assert!(avg.series[0].points == vec![(0, 20.0), (60_000, 0.0)]);
 
         let max = e
             .query_range(
@@ -4982,7 +4977,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(max.series[0].points == vec![(0, 30.0), (60_000, 0.0)]);
+        assert2::assert!(max.series[0].points == vec![(0, 30.0), (60_000, 0.0)]);
     }
 
     #[tokio::test]
@@ -5022,7 +5017,7 @@ mod tests {
             .search("t", "{ span:kind != nil }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.traces.len() == 1);
+        assert2::assert!(r.traces.len() == 1);
         let trace = &r.traces[0];
         // trace_duration = 5_000_000 ns -> 5 ms (kills `/ -> *` and `/ -> %`).
         let spans = &trace.span_sets[0].spans;
@@ -5151,7 +5146,7 @@ mod tests {
         let batch = block_attr_batch();
         let mut attrs = block_row_attrs(&batch, 0).unwrap();
         attrs.sort_by(|a, b| a.0.cmp(&b.0));
-        assert!(
+        assert2::assert!(
             attrs
                 == vec![
                     ("b".to_string(), AttrValue::Bool(true)),
@@ -5245,13 +5240,13 @@ mod tests {
         let batch = block_attr_batch();
         let str_values = optional_list_column(&batch, BLOCK_ATTR_VALUE).unwrap();
         // In range (idx 0) returns Some.
-        assert!(
+        assert2::assert!(
             row_attr_values(str_values, 0, 0, BLOCK_ATTR_VALUE)
                 .unwrap()
                 .is_some()
         );
         // Out of range (only 4 inner lists exist) returns None without panicking.
-        assert!(
+        assert2::assert!(
             row_attr_values(str_values, 0, 99, BLOCK_ATTR_VALUE)
                 .unwrap()
                 .is_none()
@@ -5265,7 +5260,7 @@ mod tests {
         let by = vec![field(Scope::Span, "svc")];
 
         // A single aggregate is accepted.
-        assert!(
+        assert2::assert!(
             metric_pipeline_parts(&[Pipeline::Aggregate(Aggregate::CountOverTime)])
                 .unwrap()
                 .is_some()
@@ -5340,7 +5335,7 @@ mod tests {
         // The accessor must return the configured cap (default 1000), not a
         // trivial 0 or 1.
         let e = engine();
-        assert!(e.max_traces() == 1000);
+        assert2::assert!(e.max_traces() == 1000);
         let custom = TraceqlEngine::new(
             Arc::new(InMemorySpanStore::new()),
             EngineOpts {
@@ -5348,7 +5343,7 @@ mod tests {
                 ..EngineOpts::default()
             },
         );
-        assert!(custom.max_traces() == 7);
+        assert2::assert!(custom.max_traces() == 7);
     }
 
     fn field(scope: Scope, key: &str) -> Field {
@@ -5366,13 +5361,13 @@ mod tests {
         // "missing column attr.http.method"). Projection-only, so it must not
         // filter. Parent/instrumentation/intrinsic stay None.
         let span = nested_metric_projection_matcher(&field(Scope::Span, "http.method")).unwrap();
-        assert!(span.scope == MatchScope::Span && span.key == "http.method");
+        assert2::assert!(span.scope == MatchScope::Span && span.key == "http.method");
         let res =
             nested_metric_projection_matcher(&field(Scope::Resource, "service.version")).unwrap();
-        assert!(res.scope == MatchScope::Resource && res.key == "service.version");
+        assert2::assert!(res.scope == MatchScope::Resource && res.key == "service.version");
         let both = nested_metric_projection_matcher(&field(Scope::Both, "team")).unwrap();
-        assert!(both.scope == MatchScope::Both && both.key == "team");
-        assert!(nested_metric_projection_matcher(&field(Scope::Parent, "x")).is_none());
+        assert2::assert!(both.scope == MatchScope::Both && both.key == "team");
+        assert2::assert!(nested_metric_projection_matcher(&field(Scope::Parent, "x")).is_none());
     }
 
     #[test]
@@ -5555,9 +5550,8 @@ mod tests {
             UnixNano(0),
         )
         .unwrap();
-        assert_eq!(
-            resp,
-            TraceMetricsResponse {
+        assert2::assert!(
+            resp == TraceMetricsResponse {
                 series: vec![TraceMetricSeries {
                     labels: vec![],
                     points: vec![(0, 1.0)],
@@ -5568,7 +5562,7 @@ mod tests {
 
         // end_ns < start_ns is rejected.
         let batch = metric_start_batch(&[0]);
-        assert!(
+        assert2::assert!(
             assemble_metrics_response(
                 &[batch],
                 UnixNano(10),
@@ -5603,9 +5597,8 @@ mod tests {
         .unwrap();
         // bucket 0 (ts 0) -> 1, bucket 1 (ts 60_000) -> 1. The out-of-range rows
         // (-10 below start, 120_001 above end) are excluded.
-        assert_eq!(
-            resp,
-            TraceMetricsResponse {
+        assert2::assert!(
+            resp == TraceMetricsResponse {
                 series: vec![TraceMetricSeries {
                     labels: vec![],
                     points: vec![(0, 1.0), (60_000, 1.0)],
@@ -5631,9 +5624,8 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            resp,
-            TraceMetricsResponse {
+        assert2::assert!(
+            resp == TraceMetricsResponse {
                 series: vec![TraceMetricSeries {
                     labels: vec![],
                     points: vec![(10, 1.0), (12, 1.0), (14, 1.0)],
@@ -5669,7 +5661,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(count.series[0].points == vec![(0, 3.0), (60_000, 0.0)]);
+        assert2::assert!(count.series[0].points == vec![(0, 3.0), (60_000, 0.0)]);
     }
 
     // ---------------------------------------------------------------------
@@ -5796,13 +5788,9 @@ mod tests {
         for series in &resp.series {
             let meta = series_label(series, "__meta_type").unwrap();
             if meta.ends_with("_total") {
-                assert!(series.labels.len() == 1);
+                assert2::assert!(series.labels.len() == 1);
             } else {
-                assert!(
-                    series.labels.len() == 2,
-                    "value series labels: {:?}",
-                    series.labels
-                );
+                assert2::assert!(series.labels.len() == 2);
             }
         }
     }
@@ -5849,9 +5837,9 @@ mod tests {
             })
             .filter_map(|series| series_label(series, "span.path"))
             .collect();
-        assert!(kept == ["a", "b"].into_iter().collect());
+        assert2::assert!(kept == ["a", "b"].into_iter().collect());
         // All five error spans are still counted in the selection total.
-        assert!(meta_total(&resp, "selection_total") == 10);
+        assert2::assert!(meta_total(&resp, "selection_total") == 10);
     }
 
     #[tokio::test]
@@ -5936,7 +5924,7 @@ mod tests {
                 60_000,
             )
             .await;
-        assert!(matches!(err, Err(TraceqlError::Unsupported(_))));
+        assert2::assert!(matches!(err, Err(TraceqlError::Unsupported(_))));
     }
 
     #[tokio::test]
@@ -5948,10 +5936,7 @@ mod tests {
             "{} | compare({ parent.name != nil }, 10)",
         ] {
             let err = e.query_range("t", query, 0, 60_000, 60_000).await;
-            assert!(
-                matches!(err, Err(TraceqlError::Unsupported(_))),
-                "query should reject unsupported compare selection scope: {query}"
-            );
+            assert2::assert!(matches!(err, Err(TraceqlError::Unsupported(_))));
         }
     }
 
@@ -6093,9 +6078,9 @@ mod tests {
             .filter(|(k, _)| k == "resource.service.name")
             .map(|(_, v)| v)
             .collect();
-        assert!(service == vec![&"root-svc".to_string()]);
+        assert2::assert!(service == vec![&"root-svc".to_string()]);
         // The per-span resource service value never leaks in.
-        assert!(!row.attrs.iter().any(|(_, v)| v == "span-svc"));
+        assert2::assert!(!row.attrs.iter().any(|(_, v)| v == "span-svc"));
     }
 
     #[test]
@@ -6131,7 +6116,7 @@ mod tests {
             .iter()
             .filter_map(|series| series_label(series, "resource.service.name"))
             .collect();
-        assert!(svc_values == ["root-svc"].into_iter().collect());
+        assert2::assert!(svc_values == ["root-svc"].into_iter().collect());
     }
 
     #[test]
@@ -6151,7 +6136,7 @@ mod tests {
         };
         let resp =
             assemble_compare_response(&[compare_block_batch()], &compare, equal_range).unwrap();
-        assert!(meta_total(&resp, "baseline_total") == 1);
+        assert2::assert!(meta_total(&resp, "baseline_total") == 1);
 
         let reversed_range = MetricsRange {
             scan_start: UnixNano(60_000),
@@ -6159,7 +6144,7 @@ mod tests {
             output_start: UnixNano(60_000),
             step: DurationNanos(60_000),
         };
-        assert!(
+        assert2::assert!(
             assemble_compare_response(&[compare_block_batch()], &compare, reversed_range).is_err()
         );
     }
@@ -6190,7 +6175,7 @@ mod tests {
             .find(|series| series_label(series, "__meta_type") == Some("baseline_total"))
             .unwrap();
 
-        assert!(baseline_total.points == vec![(10, 1.0), (12, 1.0), (14, 1.0)]);
+        assert2::assert!(baseline_total.points == vec![(10, 1.0), (12, 1.0), (14, 1.0)]);
     }
 
     // ---- MAJOR 3: != / !~ on an absent attribute stays Baseline ----
@@ -6222,7 +6207,7 @@ mod tests {
             end: None,
         };
         let regexes = CompareRegexCache::new();
-        assert!(compare_group_for_row(&row, &neq, &regexes) == CompareGroup::Baseline);
+        assert2::assert!(compare_group_for_row(&row, &neq, &regexes) == CompareGroup::Baseline);
 
         // `= nil` on the same absent attr DOES match (the only matching op).
         let eq_nil = CompareSpec {
@@ -6233,7 +6218,7 @@ mod tests {
             }),
             ..neq.clone()
         };
-        assert!(compare_group_for_row(&row, &eq_nil, &regexes) == CompareGroup::Selection);
+        assert2::assert!(compare_group_for_row(&row, &eq_nil, &regexes) == CompareGroup::Selection);
     }
 
     #[test]
@@ -6264,8 +6249,8 @@ mod tests {
         };
         let regexes = CompareRegexCache::new();
 
-        assert!(compare_field_present(&field(Scope::Span, "present"), &row));
-        assert!(!compare_field_present(&field(Scope::Span, "missing"), &row));
+        assert2::assert!(compare_field_present(&field(Scope::Span, "present"), &row));
+        assert2::assert!(!compare_field_present(&field(Scope::Span, "missing"), &row));
         let resource_values = compare_row_attr_values(&row, &Scope::Resource, "region");
         check!(resource_values == vec![&AttrValue::Str("eu".into())]);
         check!(!field_expr_matches_row(
@@ -6305,13 +6290,13 @@ mod tests {
         let values = vec![&get, &post];
         let regexes = CompareRegexCache::new();
 
-        assert!(!compare_attr_values_match(
+        assert2::assert!(!compare_attr_values_match(
             &values,
             ComparisonOp::Neq,
             &Value::Str("GET".into()),
             &regexes,
         ));
-        assert!(compare_attr_values_match(
+        assert2::assert!(compare_attr_values_match(
             &values,
             ComparisonOp::Neq,
             &Value::Str("PUT".into()),
@@ -6357,7 +6342,7 @@ mod tests {
             Intrinsic::Kind,
             Intrinsic::Duration,
         ] {
-            assert!(compare_intrinsic_present(&populated, &intrinsic));
+            assert2::assert!(compare_intrinsic_present(&populated, &intrinsic));
         }
 
         let empty = CompareRow {
@@ -6375,7 +6360,7 @@ mod tests {
             Intrinsic::Kind,
             Intrinsic::Duration,
         ] {
-            assert!(!compare_intrinsic_present(&empty, &intrinsic));
+            assert2::assert!(!compare_intrinsic_present(&empty, &intrinsic));
         }
     }
 
@@ -6479,11 +6464,11 @@ mod tests {
         ];
 
         for (name, code) in cases {
-            assert!(kind_enum_value(name) == Some(code));
-            assert!(kind_enum_name(code) == name);
+            assert2::assert!(kind_enum_value(name) == Some(code));
+            assert2::assert!(kind_enum_name(code) == name);
         }
-        assert!(kind_enum_value("unknown") == None);
-        assert!(kind_enum_name(-1) == "unspecified");
+        assert2::assert!(kind_enum_value("unknown") == None);
+        assert2::assert!(kind_enum_name(-1) == "unspecified");
     }
 
     #[test]
@@ -6513,10 +6498,9 @@ mod tests {
 
         let row = compare_row(&batch, 0, UnixNano(0)).unwrap();
 
-        assert_eq!(&row.attrs, &vec![("span.http.method".into(), "GET".into())]);
-        assert_eq!(
-            &row.raw_span_attrs,
-            &vec![("http.method".into(), AttrValue::Str("GET".into()))]
+        assert2::assert!(&row.attrs == &vec![("span.http.method".into(), "GET".into())]);
+        assert2::assert!(
+            &row.raw_span_attrs == &vec![("http.method".into(), AttrValue::Str("GET".into()))]
         );
     }
 
@@ -6623,13 +6607,10 @@ mod tests {
             .keys()
             .filter(|(group, attr, _)| *group == CompareGroup::Selection && attr == "span.path")
             .count();
-        assert!(
-            distinct_paths == COMPARE_MAX_VALUES_PER_ATTR,
-            "tracked {distinct_paths} distinct values, expected cap {COMPARE_MAX_VALUES_PER_ATTR}"
-        );
+        assert2::assert!(distinct_paths == COMPARE_MAX_VALUES_PER_ATTR);
         // All 1000 spans are still counted in the per-group total (the cap only
         // limits tracked distinct VALUES, never the per-group span totals).
-        assert!(totals[&CompareGroup::Selection].iter().sum::<u64>() == 1000);
+        assert2::assert!(totals[&CompareGroup::Selection].iter().sum::<u64>() == 1000);
 
         // Post-truncation: the emitted span.path series obey top_n.
         let resp = assemble_compare_response(&[unique_path_batch(1000)], &compare, range).unwrap();
@@ -6641,7 +6622,7 @@ mod tests {
                     && series.labels.iter().any(|(k, _)| k == "span.path")
             })
             .count();
-        assert!(path_series <= compare.top_n);
+        assert2::assert!(path_series <= compare.top_n);
     }
 
     // ---- MINOR 5: event/link attrs do not leak as span.__event.* ----
@@ -6679,10 +6660,7 @@ mod tests {
                 .iter()
                 .any(|(k, _)| k.starts_with("span.__event.") || k.starts_with("span.__link."))
         });
-        assert!(
-            !leaked,
-            "event/link attrs leaked into the span distribution"
-        );
+        assert2::assert!(!leaked);
     }
 
     // ---- MINOR 6: selection regex is compiled once and reused ----
@@ -6718,7 +6696,7 @@ mod tests {
             .unwrap();
 
         // op-1 and op-2 match the regex (selection=2); op-3 does not (baseline=1).
-        assert!(meta_total(&resp, "selection_total") == 2);
-        assert!(meta_total(&resp, "baseline_total") == 1);
+        assert2::assert!(meta_total(&resp, "selection_total") == 2);
+        assert2::assert!(meta_total(&resp, "baseline_total") == 1);
     }
 }

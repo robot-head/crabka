@@ -389,31 +389,30 @@ mod tests {
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(
-            *key,
-            Windowed {
+        assert2::assert!(
+            *key == Windowed {
                 key: "a".into(),
                 window: Window { start: 0, end: 10 },
             }
         );
-        assert_eq!(
-            *change,
-            Change {
-                old: None,
-                new: Some(1)
-            }
+        assert2::assert!(
+            *change
+                == Change {
+                    old: None,
+                    new: Some(1)
+                }
         );
 
         // record at ts=7 → same window [0,10), count 2
         drive!(7);
         let (_, rec2) = buffer.pop_front().unwrap();
         let change2 = rec2.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(
-            *change2,
-            Change {
-                old: Some(1),
-                new: Some(2)
-            }
+        assert2::assert!(
+            *change2
+                == Change {
+                    old: Some(1),
+                    new: Some(2)
+                }
         );
 
         // record at ts=12 → window [10,20), count 1
@@ -426,8 +425,8 @@ mod tests {
             .unwrap()
             .window;
         let change = rec3.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(window, Window { start: 10, end: 20 });
-        assert_eq!(change.new, Some(1));
+        assert2::assert!(window == Window { start: 10, end: 20 });
+        assert2::assert!(change.new == Some(1));
     }
 
     #[tokio::test]
@@ -489,34 +488,30 @@ mod tests {
 
         // ts=3 and ts=7 both in window [0,10) — emit-final does not emit while open.
         drive!(3);
-        assert!(buffer.is_empty(), "no emit while window [0,10) is open");
+        assert2::assert!(buffer.is_empty());
         drive!(7);
-        assert!(
-            buffer.is_empty(),
-            "still no emit while window [0,10) is open"
-        );
+        assert2::assert!(buffer.is_empty());
 
         // ts=15 → window [10,20) opens, stream_time=15, window [0,10) closes
         // (end 10 <= close_time 15). Exactly one final record forwarded.
         drive!(15);
 
-        assert_eq!(buffer.len(), 1, "exactly one final emit on close");
+        assert2::assert!(buffer.len() == 1);
         let (_, rec) = buffer.pop_front().unwrap();
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(
-            *key,
-            Windowed {
+        assert2::assert!(
+            *key == Windowed {
                 key: "a".into(),
                 window: Window { start: 0, end: 10 },
             }
         );
-        assert_eq!(
-            *change,
-            Change {
-                old: None,
-                new: Some(2)
-            }
+        assert2::assert!(
+            *change
+                == Change {
+                    old: None,
+                    new: Some(2)
+                }
         );
     }
 
@@ -579,31 +574,26 @@ mod tests {
         // 4@ts=3 and 6@ts=7 both in window [0,10) → reduced value 10. Emit-final
         // does not emit while the window is open.
         drive!(4i64, 3);
-        assert!(buffer.is_empty(), "no emit while window [0,10) is open");
+        assert2::assert!(buffer.is_empty());
         drive!(6i64, 7);
-        assert!(
-            buffer.is_empty(),
-            "still no emit while window [0,10) is open"
-        );
+        assert2::assert!(buffer.is_empty());
 
         // ts=15 → window [10,20) opens, stream_time=15, window [0,10) closes
         // (end 10 <= close_time 15). Exactly one final, carrying the reduced 10.
         drive!(99i64, 15);
 
-        assert_eq!(buffer.len(), 1, "exactly one final emit on close");
+        assert2::assert!(buffer.len() == 1);
         let (_, rec) = buffer.pop_front().unwrap();
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(
-            *key,
-            Windowed {
+        assert2::assert!(
+            *key == Windowed {
                 key: "a".into(),
                 window: Window { start: 0, end: 10 },
             }
         );
-        assert_eq!(
-            *ch,
-            Change {
+        assert2::assert!(
+            *ch == Change {
                 old: None,
                 new: Some(10)
             }
@@ -687,7 +677,7 @@ mod tests {
     #[tokio::test]
     async fn uncached_windowed_aggregate_forwards_each_record() {
         let mut stores = window_registry(false);
-        assert_eq!(run_two_same_window(&mut stores).await, 2);
+        assert2::assert!(run_two_same_window(&mut stores).await == 2);
     }
 
     /// Cached → the immediate forwards are suppressed; the cache flush forwards
@@ -696,11 +686,7 @@ mod tests {
     #[tokio::test]
     async fn cached_windowed_aggregate_suppresses_then_flushes_one() {
         let mut stores = window_registry(true);
-        assert_eq!(
-            run_two_same_window(&mut stores).await,
-            0,
-            "cached window store must suppress both immediate forwards"
-        );
+        assert2::assert!(run_two_same_window(&mut stores).await == 0);
         // Flush the cache: exactly one deduped record, keyed by Windowed [0,10).
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         stores
@@ -708,25 +694,21 @@ mod tests {
             .unwrap()
             .flush_cache_into(&mut buffer, &[0])
             .await;
-        assert_eq!(buffer.len(), 1, "flush emits exactly one deduped change");
+        assert2::assert!(buffer.len() == 1);
         let (_, rec) = buffer.pop_front().unwrap();
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(
-            *key,
-            Windowed {
+        assert2::assert!(
+            *key == Windowed {
                 key: "a".into(),
                 window: Window { start: 0, end: 10 },
-            },
-            "deduped to the latest window count"
+            }
         );
-        assert_eq!(
-            *ch,
-            Change {
+        assert2::assert!(
+            *ch == Change {
                 old: None,
                 new: Some(2)
-            },
-            "deduped to the latest window count"
+            }
         );
     }
 }

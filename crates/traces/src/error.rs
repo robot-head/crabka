@@ -67,7 +67,6 @@ pub fn tempo_limit_error_response(err: &LimitError) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -84,7 +83,7 @@ mod tests {
             (TracesError::Produce("x".into()), 500),
             (TracesError::Block("x".into()), 500),
         ] {
-            assert!(err.status_code() == want, "case {err:?}");
+            assert2::assert!(err.status_code() == want);
         }
     }
 }

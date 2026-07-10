@@ -66,8 +66,6 @@ pub fn decode_push(
 mod tests {
     use std::io::Write;
 
-    use assert2::assert;
-
     use super::*;
     use crate::wire::pb;
 
@@ -81,8 +79,8 @@ mod tests {
     fn gunzip_round_trips_and_caps() {
         let raw = b"the quick brown fox";
         let gz = gzip(raw);
-        assert!(gunzip(&gz, 1 << 20).unwrap() == raw);
-        assert!(gunzip(&gz, 4).is_err());
+        assert2::assert!(gunzip(&gz, 1 << 20).unwrap() == raw);
+        assert2::assert!(gunzip(&gz, 4).is_err());
     }
 
     #[test]
@@ -110,8 +108,8 @@ mod tests {
 
         let out = decode_push(&req, 1 << 20).unwrap();
 
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].labels.get("__name__"), Some("process_cpu"));
+        assert2::assert!(out.len() == 1);
+        assert2::assert!(out[0].labels.get("__name__") == Some("process_cpu"));
     }
 
     #[test]
@@ -139,7 +137,7 @@ mod tests {
 
         let out = decode_push(&req, 1 << 20).unwrap();
 
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].labels.get("__profile_id__"), Some("profile-a"));
+        assert2::assert!(out.len() == 1);
+        assert2::assert!(out[0].labels.get("__profile_id__") == Some("profile-a"));
     }
 }

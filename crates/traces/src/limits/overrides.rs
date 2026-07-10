@@ -92,7 +92,6 @@ fn merge_limits(defaults: &Limits, partial: &PartialLimits) -> Limits {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::limits::Limits;
@@ -112,16 +111,16 @@ overrides:
         let tenant_a = provider.for_tenant("tenant-a");
 
         // Overridden fields take the yaml values; the rest keep the defaults.
-        assert_eq!(
-            *tenant_a,
-            Limits {
-                ingestion_rate_spans_per_sec: 500.0,
-                ingestion_burst_spans: 100_000,
-                max_traces_per_search: 1000,
-                max_spans_per_trace: 1000,
-                max_attribute_bytes: 2048,
-                max_search_duration_secs: 0,
-            }
+        assert2::assert!(
+            *tenant_a
+                == Limits {
+                    ingestion_rate_spans_per_sec: 500.0,
+                    ingestion_burst_spans: 100_000,
+                    max_traces_per_search: 1000,
+                    max_spans_per_trace: 1000,
+                    max_attribute_bytes: 2048,
+                    max_search_duration_secs: 0,
+                }
         );
     }
 
@@ -130,8 +129,8 @@ overrides:
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
         let tenant_b = provider.for_tenant("tenant-b");
 
-        assert_eq!(tenant_b.max_attribute_bytes, 64);
-        assert!(
+        assert2::assert!(tenant_b.max_attribute_bytes == 64);
+        assert2::assert!(
             (tenant_b.ingestion_rate_spans_per_sec
                 - Limits::default().ingestion_rate_spans_per_sec)
                 .abs()
@@ -143,6 +142,6 @@ overrides:
     fn unlisted_tenant_gets_defaults() {
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
 
-        assert!(*provider.for_tenant("tenant-z") == Limits::default());
+        assert2::assert!(*provider.for_tenant("tenant-z") == Limits::default());
     }
 }

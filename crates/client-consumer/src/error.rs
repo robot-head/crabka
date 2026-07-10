@@ -49,13 +49,12 @@ pub enum ConsumerError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn display_messages() {
-        for (name, error, expected) in [
+        for (_name, error, expected) in [
             (
                 "not subscribed",
                 ConsumerError::NotSubscribed,
@@ -73,7 +72,7 @@ mod tests {
                 "log truncation detected on t-3: fetch offset 100 is past the leader's log; safe offset 42",
             ),
         ] {
-            assert!(error.to_string() == expected, "case {name}");
+            assert2::assert!(error.to_string() == expected);
         }
     }
 }

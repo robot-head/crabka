@@ -85,7 +85,6 @@ pub fn parse_query_shard_selector(value: &str) -> Result<QueryShardSelector, Str
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -93,23 +92,20 @@ mod tests {
     fn parse_query_shard_selector_accepts_inclusive_upper_bound() {
         let selector = parse_query_shard_selector("1_of_1").unwrap();
 
-        assert_eq!(selector, QueryShardSelector { index: 1, total: 1 });
-        assert!(selector.matches(42));
+        assert2::assert!(selector == QueryShardSelector { index: 1, total: 1 });
+        assert2::assert!(selector.matches(42));
     }
 
     #[test]
     fn parse_query_shard_selector_rejects_zero_and_out_of_range_bounds() {
-        for (name, value) in [
+        for (_name, value) in [
             ("zero index", "0_of_1"),
             ("zero total", "1_of_0"),
             ("index exceeds total", "2_of_1"),
             ("larger index exceeds total", "3_of_2"),
             ("malformed selector", "not-a-shard"),
         ] {
-            assert!(
-                parse_query_shard_selector(value).is_err(),
-                "case {name}: expected {value} to be rejected"
-            );
+            assert2::assert!(parse_query_shard_selector(value).is_err());
         }
     }
 }

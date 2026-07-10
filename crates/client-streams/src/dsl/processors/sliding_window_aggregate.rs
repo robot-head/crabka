@@ -1176,10 +1176,7 @@ mod tests {
         let mut stores = store();
         let mut p = count_proc();
         let out = run(&mut p, &mut stores, "a", 20).await;
-        assert!(
-            out.contains(&(Window { start: 10, end: 20 }, None, Some(1))),
-            "expected left window [10,20]=1, got {out:?}"
-        );
+        assert2::assert!(out.contains(&(Window { start: 10, end: 20 }, None, Some(1))));
     }
 
     /// Second record at t=25 creates left window `[15,25]`. The prior record at
@@ -1191,10 +1188,7 @@ mod tests {
         let mut p = count_proc();
         let _ = run(&mut p, &mut stores, "a", 20).await;
         let out = run(&mut p, &mut stores, "a", 25).await;
-        assert!(
-            out.contains(&(Window { start: 15, end: 25 }, None, Some(2))),
-            "expected left window [15,25]=2, got {out:?}"
-        );
+        assert2::assert!(out.contains(&(Window { start: 15, end: 25 }, None, Some(2))));
     }
 
     /// Record at `t=3` with `W=10` (so `t < W`): exercises `process_early`.
@@ -1205,15 +1199,9 @@ mod tests {
         let mut p = count_proc();
         let out = run(&mut p, &mut stores, "a", 3).await;
         // process_early: combined window [0, W=10] is created/updated.
-        assert!(
-            out.contains(&(Window { start: 0, end: 10 }, None, Some(1))),
-            "expected combined window [0,10]=1 for early t=3, got {out:?}"
-        );
+        assert2::assert!(out.contains(&(Window { start: 0, end: 10 }, None, Some(1))));
         // No left window for early records (ws = t-W = -7 < 0, not created).
-        assert!(
-            !out.iter().any(|(w, _, _)| w.start < 0),
-            "unexpected negative-start window in early path: {out:?}"
-        );
+        assert2::assert!(!out.iter().any(|(w, _, _)| w.start < 0));
     }
 
     /// A second EARLY record (`t=6 < W=10`) after a first early record (`t=3`)
@@ -1229,15 +1217,9 @@ mod tests {
         let out = run(&mut p, &mut stores, "a", 6).await;
 
         // Combined window [0,10] now counts both records.
-        assert!(
-            out.contains(&(Window { start: 0, end: 10 }, Some(1), Some(2))),
-            "expected combined [0,10] old=1 new=2, got {out:?}"
-        );
+        assert2::assert!(out.contains(&(Window { start: 0, end: 10 }, Some(1), Some(2))));
         // Previous record (t=3) right window [4, 14] created with count=1.
-        assert!(
-            out.contains(&(Window { start: 4, end: 14 }, None, Some(1))),
-            "expected previous-record right window [4,14]=1, got {out:?}"
-        );
+        assert2::assert!(out.contains(&(Window { start: 4, end: 14 }, None, Some(1))));
     }
 
     /// Build a count processor in emit-on-close mode with a generous grace so
@@ -1271,15 +1253,9 @@ mod tests {
         // window open (close_time = stream_time - 100 is far below any window
         // end), so emit-on-close must forward NOTHING here.
         let out1 = run(&mut p, &mut stores, "a", 10).await;
-        assert!(
-            out1.is_empty(),
-            "emit-on-close must not forward on update (ts=10), got {out1:?}"
-        );
+        assert2::assert!(out1.is_empty());
         let out2 = run(&mut p, &mut stores, "a", 12).await;
-        assert!(
-            out2.is_empty(),
-            "emit-on-close must not forward on update (ts=12), got {out2:?}"
-        );
+        assert2::assert!(out2.is_empty());
 
         // Snapshot which windows are present in the store and have closed by the
         // time stream-time jumps to 1000 (close_time = 1000 - grace(100) = 900,
@@ -1295,10 +1271,7 @@ mod tests {
                 .map(|(_, ws, _, v)| (ws, v))
                 .collect()
         };
-        assert!(
-            !expected.is_empty(),
-            "test setup: expected some closed windows in the store"
-        );
+        assert2::assert!(!expected.is_empty());
 
         // Far-future record closes all the earlier windows.
         let out3 = run(&mut p, &mut stores, "a", 1000).await;
@@ -1309,38 +1282,20 @@ mod tests {
         // assert about the windows we snapshotted as closed pre-jump.
         let mut emitted: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
         for (win, old, new) in &out3 {
-            assert_eq!(
-                *old, None,
-                "final emission must have old=None, got {out3:?}"
-            );
-            assert_eq!(
-                win.end,
-                win.start + w,
-                "sliding window end must be start + W, got {out3:?}"
-            );
+            assert2::assert!(*old == None);
+            assert2::assert!(win.end == win.start + w);
             if win.end <= close_time {
                 let prev = emitted.insert(win.start, new.expect("final has Some value"));
-                assert!(
-                    prev.is_none(),
-                    "window start={} emitted twice as final, got {out3:?}",
-                    win.start
-                );
+                assert2::assert!(prev.is_none());
             }
         }
 
         // Every snapshotted closed window must have been emitted with its stored
         // aggregate value.
         for (ws, v) in &expected {
-            assert_eq!(
-                emitted.get(ws),
-                Some(v),
-                "window start={ws} expected final value {v}, emitted map {emitted:?}, raw {out3:?}"
-            );
+            assert2::assert!(emitted.get(ws) == Some(v));
         }
-        assert!(
-            !emitted.is_empty(),
-            "expected at least one final emission after close, got {out3:?}"
-        );
+        assert2::assert!(!emitted.is_empty());
     }
 
     // ── Reduce processor unit tests ─────────────────────────────────────────
@@ -1433,10 +1388,7 @@ mod tests {
         let mut stores = str_store();
         let mut p = reduce_proc();
         let out = run_reduce(&mut p, &mut stores, "a", "v", 20).await;
-        assert!(
-            out.contains(&(Window { start: 10, end: 20 }, None, Some("v".into()))),
-            "expected left window [10,20]=\"v\", got {out:?}"
-        );
+        assert2::assert!(out.contains(&(Window { start: 10, end: 20 }, None, Some("v".into()))));
     }
 
     /// Second record at t=25 reduces the left window `[15,25]`. The prior
@@ -1448,10 +1400,7 @@ mod tests {
         let mut p = reduce_proc();
         let _ = run_reduce(&mut p, &mut stores, "a", "v", 20).await;
         let out = run_reduce(&mut p, &mut stores, "a", "v", 25).await;
-        assert!(
-            out.contains(&(Window { start: 15, end: 25 }, None, Some("v|v".into()))),
-            "expected left window [15,25]=\"v|v\", got {out:?}"
-        );
+        assert2::assert!(out.contains(&(Window { start: 15, end: 25 }, None, Some("v|v".into()))));
     }
 
     /// First reduce record at `t=3` (`t < W=10`) drives the reduce
@@ -1462,14 +1411,8 @@ mod tests {
         let mut stores = str_store();
         let mut p = reduce_proc();
         let out = run_reduce(&mut p, &mut stores, "a", "v", 3).await;
-        assert!(
-            out.contains(&(Window { start: 0, end: 10 }, None, Some("v".into()))),
-            "expected combined [0,10]=\"v\" for early t=3, got {out:?}"
-        );
-        assert!(
-            !out.iter().any(|(w, _, _)| w.start < 0),
-            "no negative-start window in the early path: {out:?}"
-        );
+        assert2::assert!(out.contains(&(Window { start: 0, end: 10 }, None, Some("v".into()))));
+        assert2::assert!(!out.iter().any(|(w, _, _)| w.start < 0));
     }
 
     /// A second EARLY reduce record (`t=6`) folds into the combined window
@@ -1482,19 +1425,13 @@ mod tests {
         let _ = run_reduce(&mut p, &mut stores, "a", "v", 3).await;
         let out = run_reduce(&mut p, &mut stores, "a", "v", 6).await;
 
-        assert!(
-            out.contains(&(
-                Window { start: 0, end: 10 },
-                Some("v".into()),
-                Some("v|v".into())
-            )),
-            "expected combined [0,10] old=\"v\" new=\"v|v\", got {out:?}"
-        );
+        assert2::assert!(out.contains(&(
+            Window { start: 0, end: 10 },
+            Some("v".into()),
+            Some("v|v".into())
+        )));
         // Previous record (t=3) right window [4,14] seeded with the current value.
-        assert!(
-            out.contains(&(Window { start: 4, end: 14 }, None, Some("v".into()))),
-            "expected previous-record right window [4,14]=\"v\", got {out:?}"
-        );
+        assert2::assert!(out.contains(&(Window { start: 4, end: 14 }, None, Some("v".into()))));
     }
 
     /// Emit-on-close reduce variant of `sliding_count_emit_final_emits_only_on_close`:
@@ -1518,15 +1455,9 @@ mod tests {
         // grace=100 keeps every window open (close_time = stream_time - 100 is far
         // below any window end), so emit-on-close must forward NOTHING here.
         let out1 = run_reduce(&mut p, &mut stores, "a", "p", 10).await;
-        assert!(
-            out1.is_empty(),
-            "emit-on-close must not forward on update (ts=10), got {out1:?}"
-        );
+        assert2::assert!(out1.is_empty());
         let out2 = run_reduce(&mut p, &mut stores, "a", "q", 12).await;
-        assert!(
-            out2.is_empty(),
-            "emit-on-close must not forward on update (ts=12), got {out2:?}"
-        );
+        assert2::assert!(out2.is_empty());
 
         // Snapshot the windows that will have closed once stream-time jumps to
         // 1000 (close_time = 1000 - grace(100) = 900; windows with end <= 900).
@@ -1541,47 +1472,26 @@ mod tests {
                 .map(|(_, ws, _, v)| (ws, v))
                 .collect()
         };
-        assert!(
-            !expected.is_empty(),
-            "test setup: expected some closed windows in the store"
-        );
+        assert2::assert!(!expected.is_empty());
 
         // Far-future record closes all the earlier windows.
         let out3 = run_reduce(&mut p, &mut stores, "a", "r", 1000).await;
 
         let mut emitted: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
         for (win, old, new) in &out3 {
-            assert_eq!(
-                *old, None,
-                "final emission must have old=None, got {out3:?}"
-            );
-            assert_eq!(
-                win.end,
-                win.start + w,
-                "sliding window end must be start + W, got {out3:?}"
-            );
+            assert2::assert!(*old == None);
+            assert2::assert!(win.end == win.start + w);
             if win.end <= close_time {
                 let prev = emitted.insert(win.start, new.clone().expect("final has Some value"));
-                assert!(
-                    prev.is_none(),
-                    "window start={} emitted twice as final, got {out3:?}",
-                    win.start
-                );
+                assert2::assert!(prev.is_none());
             }
         }
 
         // Every snapshotted closed window must have been emitted with its stored
         // reduced value.
         for (ws, v) in &expected {
-            assert_eq!(
-                emitted.get(ws),
-                Some(v),
-                "window start={ws} expected final value {v:?}, emitted map {emitted:?}, raw {out3:?}"
-            );
+            assert2::assert!(emitted.get(ws) == Some(v));
         }
-        assert!(
-            !emitted.is_empty(),
-            "expected at least one final emission after close, got {out3:?}"
-        );
+        assert2::assert!(!emitted.is_empty());
     }
 }

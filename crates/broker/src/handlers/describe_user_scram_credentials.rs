@@ -205,7 +205,6 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_metadata::{AclOperation, MetadataRecord, ScramCredentialRecord};
     use crabka_protocol::UnknownTaggedFields;
 
@@ -294,9 +293,9 @@ mod tests {
                 ("bob", SaslMechanism::ScramSha512, 8192),
             ],
         );
-        assert!(resp.results.len() == 2);
+        assert2::assert!(resp.results.len() == 2);
         let users: Vec<&str> = resp.results.iter().map(|r| r.user.as_str()).collect();
-        assert!(users.contains(&"alice") && users.contains(&"bob"));
+        assert2::assert!(users.contains(&"alice") && users.contains(&"bob"));
     }
 
     #[test]
@@ -319,7 +318,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         }];
-        assert!(resp.results == expected);
+        assert2::assert!(resp.results == expected);
     }
 
     #[test]
@@ -335,7 +334,7 @@ mod tests {
             credential_infos: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         }];
-        assert!(resp.results == expected);
+        assert2::assert!(resp.results == expected);
     }
 
     #[test]
@@ -370,7 +369,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -394,7 +393,7 @@ mod tests {
             .map(|info| info.mechanism)
             .collect();
 
-        assert!(mechanisms == vec![1, 2]);
+        assert2::assert!(mechanisms == vec![1, 2]);
     }
 
     #[test]
@@ -404,7 +403,7 @@ mod tests {
             (SaslMechanism::ScramSha512, 2),
             (SaslMechanism::Plain, 0),
         ] {
-            assert!(sasl_mechanism_to_byte(mechanism) == want, "{mechanism:?}");
+            assert2::assert!(sasl_mechanism_to_byte(mechanism) == want);
         }
     }
 
@@ -428,7 +427,7 @@ mod tests {
         let resp: DescribeUserScramCredentialsResponse =
             crate::test_support::decode_response(&bytes, 0);
 
-        assert!(resp == DescribeUserScramCredentialsResponse::default());
+        assert2::assert!(resp == DescribeUserScramCredentialsResponse::default());
         broker_handle.shutdown().await;
     }
 
@@ -459,7 +458,7 @@ mod tests {
             error_message: Some("describe-user-scram-credentials denied".into()),
             ..Default::default()
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

@@ -1302,7 +1302,6 @@ mod retry_tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use assert2::assert;
     use crabka_protocol::UnknownTaggedFields;
 
     use super::*;
@@ -1322,7 +1321,7 @@ mod retry_tests {
     fn find_coordinator_request_populates_legacy_and_batched_group_keys() {
         let req = build_find_coordinator_request("group-a".into());
 
-        assert!(
+        assert2::assert!(
             req == FindCoordinatorRequest {
                 key: "group-a".into(),
                 key_type: 0,
@@ -1338,7 +1337,7 @@ mod retry_tests {
         let one: HashMap<String, i32> = [("logs".to_string(), 1)].into_iter().collect();
         let three: HashMap<String, i32> = [("logs".to_string(), 3)].into_iter().collect();
 
-        for (name, known, current, expected) in [
+        for (_name, known, current, expected) in [
             // Cold-start race: topic absent at join, created later -> growth -> rejoin.
             ("topic appears", &empty, &one, true),
             // Topic gained partitions -> rejoin to (re)distribute them.
@@ -1349,10 +1348,7 @@ mod retry_tests {
             ("partition count shrinks", &three, &one, false),
             ("topic disappears", &one, &empty, false),
         ] {
-            assert!(
-                subscribed_topics_grew(known, current) == expected,
-                "case {name}"
-            );
+            assert2::assert!(subscribed_topics_grew(known, current) == expected);
         }
     }
 
@@ -1365,42 +1361,46 @@ mod retry_tests {
         // Empty baseline + a topic appears -> baseline records it.
         let mut known: HashMap<String, i32> = HashMap::new();
         merge_counts(&mut known, &one);
-        assert!(known.get("logs") == Some(&1));
+        assert2::assert!(known.get("logs") == Some(&1));
 
         // Growth advances the baseline; after merging the new count the SAME
         // count is no longer seen as growth (so the rejoin doesn't re-fire).
         merge_counts(&mut known, &three);
-        assert!((known.get("logs"), subscribed_topics_grew(&known, &three)) == (Some(&3), false));
+        assert2::assert!(
+            (known.get("logs"), subscribed_topics_grew(&known, &three)) == (Some(&3), false)
+        );
 
         // A transient metadata under-report (controller failover / partial
         // response) must NOT lower the baseline: Kafka partition counts are
         // monotonic, so dropping to 1 then recovering to 3 would otherwise churn
         // a spurious rejoin. max-merge pins it at 3.
         merge_counts(&mut known, &one);
-        assert!((known.get("logs"), subscribed_topics_grew(&known, &three)) == (Some(&3), false));
+        assert2::assert!(
+            (known.get("logs"), subscribed_topics_grew(&known, &three)) == (Some(&3), false)
+        );
 
         // A non-leader rejoin's snapshot is empty -> max-merge is a no-op, so the
         // baseline survives (the next tick sees no phantom growth).
         merge_counts(&mut known, &HashMap::new());
-        assert!(known.get("logs") == Some(&3));
+        assert2::assert!(known.get("logs") == Some(&3));
 
         // A genuinely larger count still advances.
         merge_counts(&mut known, &five);
-        assert!(known.get("logs") == Some(&5));
+        assert2::assert!(known.get("logs") == Some(&5));
     }
 
     #[tokio::test(start_paused = true)]
     async fn retry_deadline_elapsed_uses_elapsed_timeout_boundary() {
         let start = tokio::time::Instant::now();
 
-        assert!(!retry_deadline_elapsed(start, Duration::from_millis(1)));
+        assert2::assert!(!retry_deadline_elapsed(start, Duration::from_millis(1)));
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(retry_deadline_elapsed(start, Duration::from_millis(1)));
+        assert2::assert!(retry_deadline_elapsed(start, Duration::from_millis(1)));
     }
 
     #[test]
     fn next_backoff_doubles_until_cap() {
-        for (name, backoff, max_backoff, expected) in [
+        for (_name, backoff, max_backoff, expected) in [
             (
                 "doubling below cap",
                 Duration::from_millis(100),
@@ -1420,10 +1420,7 @@ mod retry_tests {
                 Duration::from_secs(1),
             ),
         ] {
-            assert!(
-                next_backoff(backoff, max_backoff) == expected,
-                "case {name}"
-            );
+            assert2::assert!(next_backoff(backoff, max_backoff) == expected);
         }
     }
 
@@ -1435,7 +1432,7 @@ mod retry_tests {
             Some("instance-a".into()),
         );
 
-        assert!(
+        assert2::assert!(
             req == LeaveGroupRequest {
                 group_id: "group-a".into(),
                 member_id: "member-a".into(),
@@ -1452,17 +1449,14 @@ mod retry_tests {
 
     #[test]
     fn revoked_commit_helpers_preserve_filter_boundaries_and_request_fields() {
-        for (name, is_revoked, next_offset, expected) in [
+        for (_name, is_revoked, next_offset, expected) in [
             ("revoked positive", true, 1, true),
             ("not revoked", false, 1, false),
             ("zero offset", true, 0, false),
             ("negative offset", true, -1, false),
             ("latest sentinel", true, i64::MAX, false),
         ] {
-            assert!(
-                should_commit_revoked_offset(is_revoked, next_offset) == expected,
-                "case {name}: is_revoked: {is_revoked}, next_offset: {next_offset}"
-            );
+            assert2::assert!(should_commit_revoked_offset(is_revoked, next_offset) == expected);
         }
 
         let topics = build_commit_topics(
@@ -1477,7 +1471,7 @@ mod retry_tests {
             topics.clone(),
         );
 
-        assert!(
+        assert2::assert!(
             req == OffsetCommitRequest {
                 group_id: "group-a".into(),
                 generation_id_or_member_epoch: 3,
@@ -1488,7 +1482,7 @@ mod retry_tests {
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
             }
         );
-        assert!(UNKNOWN_EPOCH == -1);
+        assert2::assert!(UNKNOWN_EPOCH == -1);
     }
 
     #[test]
@@ -1503,7 +1497,7 @@ mod retry_tests {
             vec![1, 2, 3].into(),
         );
 
-        assert!(
+        assert2::assert!(
             req == JoinGroupRequest {
                 group_id: "group-a".into(),
                 session_timeout_ms: 10_000,
@@ -1528,7 +1522,7 @@ mod retry_tests {
             "member-a".into(),
             &[("topic-a".to_string(), 0), ("topic-a".to_string(), 1)],
         );
-        assert!(
+        assert2::assert!(
             (
                 assignment.member_id.as_str(),
                 decode_assignment(&assignment.assignment),
@@ -1547,7 +1541,7 @@ mod retry_tests {
             vec![assignment.clone()],
         );
 
-        assert!(
+        assert2::assert!(
             req == SyncGroupRequest {
                 group_id: "group-a".into(),
                 generation_id: 7,
@@ -1570,7 +1564,7 @@ mod retry_tests {
             Some("instance-a".into()),
         );
 
-        assert!(
+        assert2::assert!(
             req == HeartbeatRequest {
                 group_id: "group-a".into(),
                 generation_id: 42,
@@ -1583,44 +1577,35 @@ mod retry_tests {
 
     #[test]
     fn prime_offset_helpers_preserve_committed_and_reset_boundaries() {
-        for (name, committed, reset, expected) in [
+        for (_name, committed, reset, expected) in [
             ("committed positive", 12, AutoOffsetReset::Earliest, 12),
             ("committed zero", 0, AutoOffsetReset::Latest, 0),
             ("missing earliest", -1, AutoOffsetReset::Earliest, 0),
             ("missing latest", -1, AutoOffsetReset::Latest, i64::MAX),
             ("missing none", -1, AutoOffsetReset::None, i64::MAX),
         ] {
-            assert!(
-                starting_offset(committed, reset) == expected,
-                "case {name}: committed: {committed}, reset: {reset:?}"
-            );
+            assert2::assert!(starting_offset(committed, reset) == expected);
         }
 
-        for (name, reset, expected) in [
+        for (_name, reset, expected) in [
             ("earliest", AutoOffsetReset::Earliest, 0),
             ("latest", AutoOffsetReset::Latest, i64::MAX),
             ("none", AutoOffsetReset::None, i64::MAX),
         ] {
-            assert!(
-                reset_starting_offset(reset) == expected,
-                "case {name}: reset: {reset:?}"
-            );
+            assert2::assert!(reset_starting_offset(reset) == expected);
         }
 
-        for (name, has_position, expected) in [
+        for (_name, has_position, expected) in [
             ("missing position", false, true),
             ("existing position", true, false),
         ] {
-            assert!(
-                should_prime_missing_partition(has_position) == expected,
-                "case {name}"
-            );
+            assert2::assert!(should_prime_missing_partition(has_position) == expected);
         }
     }
 
     #[test]
     fn heartbeat_outcome_classifies_success_rejoin_and_transient_errors() {
-        for (name, error_code, expected) in [
+        for (_name, error_code, expected) in [
             ("success", 0, HeartbeatOutcome::Ok),
             ("rebalance in progress", 27, HeartbeatOutcome::NeedRejoin),
             ("illegal generation", 22, HeartbeatOutcome::NeedRejoin),
@@ -1628,10 +1613,7 @@ mod retry_tests {
             ("loading coordinator", 14, HeartbeatOutcome::Transient),
             ("unknown transient", 99, HeartbeatOutcome::Transient),
         ] {
-            assert!(
-                heartbeat_outcome(error_code) == expected,
-                "case {name}: error_code: {error_code}"
-            );
+            assert2::assert!(heartbeat_outcome(error_code) == expected);
         }
     }
 
@@ -1653,8 +1635,8 @@ mod retry_tests {
         )
         .await
         .unwrap();
-        assert!(r.error_code == 0);
-        assert!(calls.load(Ordering::SeqCst) == 4);
+        assert2::assert!(r.error_code == 0);
+        assert2::assert!(calls.load(Ordering::SeqCst) == 4);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1668,7 +1650,7 @@ mod retry_tests {
         .unwrap();
         // Deadline hit while still retriable: return the last response so the
         // caller's `error_code != 0` handling surfaces it.
-        assert!(r.error_code == 15);
+        assert2::assert!(r.error_code == 15);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1684,8 +1666,8 @@ mod retry_tests {
         )
         .await
         .unwrap();
-        assert!(r.error_code == 25);
-        assert!(calls.load(Ordering::SeqCst) == 1);
+        assert2::assert!(r.error_code == 25);
+        assert2::assert!(calls.load(Ordering::SeqCst) == 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1700,7 +1682,7 @@ mod retry_tests {
             },
         )
         .await;
-        assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
+        assert2::assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1716,21 +1698,21 @@ mod retry_tests {
         )
         .await;
 
-        assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
-        assert!(calls.load(Ordering::SeqCst) > 1);
+        assert2::assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
+        assert2::assert!(calls.load(Ordering::SeqCst) > 1);
     }
 }
 
 #[cfg(test)]
 mod find_coordinator_parse_tests {
-    use assert2::assert;
+
     use crabka_protocol::owned::find_coordinator_response::Coordinator;
 
     use super::*;
 
     #[test]
     fn parses_legacy_and_batched_coordinator_shapes() {
-        for (name, resp, expected) in [
+        for (_name, resp, expected) in [
             (
                 "batched success",
                 FindCoordinatorResponse {
@@ -1775,13 +1757,12 @@ mod find_coordinator_parse_tests {
             ),
         ] {
             let code = coordinator_error_code(&resp);
-            assert!(
+            assert2::assert!(
                 (
                     coordinator_node_id(&resp),
                     code,
                     is_retriable_coordinator_code(code)
-                ) == expected,
-                "case {name}"
+                ) == expected
             );
         }
     }
@@ -1791,7 +1772,7 @@ mod find_coordinator_parse_tests {
 mod refind_tests {
     use std::sync::atomic::AtomicUsize;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -1897,7 +1878,7 @@ mod refind_tests {
         )
         .await;
 
-        assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
-        assert!(calls.load(Ordering::SeqCst) > 1);
+        assert2::assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
+        assert2::assert!(calls.load(Ordering::SeqCst) > 1);
     }
 }

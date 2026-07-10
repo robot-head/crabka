@@ -757,7 +757,6 @@ mod tests {
         net::SocketAddr,
     };
 
-    use assert2::assert;
     use crabka_metadata::{
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
@@ -948,7 +947,7 @@ mod tests {
 
     #[test]
     fn fetch_max_bytes_is_one_mebibyte() {
-        assert!(FETCH_MAX_BYTES == 1_048_576);
+        assert2::assert!(FETCH_MAX_BYTES == 1_048_576);
     }
 
     #[test]
@@ -992,7 +991,7 @@ mod tests {
             },
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(req == expected);
+        assert2::assert!(req == expected);
     }
 
     #[test]
@@ -1002,14 +1001,14 @@ mod tests {
 
         let req = build_fetch_request(&cfg, Offset(0), FETCH_MAX_BYTES);
 
-        assert!((req.replica_id, req.replica_state.replica_id) == (-1, -1));
+        assert2::assert!((req.replica_id, req.replica_state.replica_id) == (-1, -1));
     }
 
     #[test]
     fn offset_epoch_request_and_connection_options_preserve_identity_fields() {
         let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
         let opts = connection_options(&cfg.client_id);
-        assert!(opts.client_id == "replica-test");
+        assert2::assert!(opts.client_id == "replica-test");
 
         let req = build_offset_for_leader_epoch_request(&cfg, 7);
         let expected = OffsetForLeaderEpochRequest {
@@ -1026,7 +1025,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(req == expected);
+        assert2::assert!(req == expected);
     }
 
     #[test]
@@ -1036,7 +1035,7 @@ mod tests {
 
         let req = build_offset_for_leader_epoch_request(&cfg, 7);
 
-        assert!(req.replica_id == -1);
+        assert2::assert!(req.replica_id == -1);
     }
 
     #[test]
@@ -1056,10 +1055,7 @@ mod tests {
             ),
         ];
         for (current, cap, want) in cases {
-            assert!(
-                next_reconnect_delay(current, cap) == want,
-                "current {current:?} cap {cap:?}"
-            );
+            assert2::assert!(next_reconnect_delay(current, cap) == want);
         }
     }
 
@@ -1068,10 +1064,7 @@ mod tests {
         let cases = [(NODE_ID, true), (LEADER_ID, false)];
         for (leader, want) in cases {
             let (cfg, _log_dir) = test_config(image_with_leader(leader));
-            assert!(
-                became_partition_leader(&cfg) == want,
-                "metadata leader {leader}"
-            );
+            assert2::assert!(became_partition_leader(&cfg) == want);
         }
     }
 
@@ -1080,7 +1073,7 @@ mod tests {
         let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
         cfg.throttle_state.follower_in.set_rate_with_burst(1234, 0);
 
-        assert!(
+        assert2::assert!(
             follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(FETCH_MAX_BYTES)
         );
     }
@@ -1089,7 +1082,7 @@ mod tests {
     fn follower_partition_fetch_cap_ignores_zero_rate_throttle() {
         let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
 
-        assert!(
+        assert2::assert!(
             follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(FETCH_MAX_BYTES)
         );
     }
@@ -1099,7 +1092,7 @@ mod tests {
         let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
         cfg.throttle_state.follower_in.set_rate_with_burst(1024, 0);
 
-        assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Sleep);
+        assert2::assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Sleep);
     }
 
     #[test]
@@ -1109,7 +1102,7 @@ mod tests {
             .follower_in
             .set_rate_with_burst(1234, 1234);
 
-        assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(1234));
+        assert2::assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(1234));
     }
 
     #[tokio::test]
@@ -1121,7 +1114,7 @@ mod tests {
             partition_response(PARTITION, codes::NOT_LEADER_OR_FOLLOWER),
         );
 
-        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+        assert2::assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
     }
 
     #[tokio::test]
@@ -1133,7 +1126,7 @@ mod tests {
             partition_response(PARTITION, codes::NOT_LEADER_OR_FOLLOWER),
         );
 
-        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+        assert2::assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
     }
 
     #[tokio::test]
@@ -1145,7 +1138,7 @@ mod tests {
             partition_response(PARTITION + 1, codes::NOT_LEADER_OR_FOLLOWER),
         );
 
-        assert!(handle_response(resp, &cfg).await == LoopAction::Continue);
+        assert2::assert!(handle_response(resp, &cfg).await == LoopAction::Continue);
     }
 
     #[tokio::test]
@@ -1166,7 +1159,7 @@ mod tests {
             },
         );
 
-        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+        assert2::assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
     }
 
     #[tokio::test]
@@ -1178,7 +1171,7 @@ mod tests {
             partition_response(PARTITION, codes::OFFSET_OUT_OF_RANGE),
         );
 
-        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+        assert2::assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
     }
 
     #[tokio::test]
@@ -1189,7 +1182,7 @@ mod tests {
 
         run(cfg).await;
 
-        assert!(partitions.contains(TOPIC, PartitionIndex(PARTITION)));
+        assert2::assert!(partitions.contains(TOPIC, PartitionIndex(PARTITION)));
     }
 
     #[tokio::test]
@@ -1199,7 +1192,7 @@ mod tests {
 
         let err = run_inner(&cfg).await.unwrap_err();
 
-        assert!(err == "cancelled");
+        assert2::assert!(err == "cancelled");
     }
 
     #[tokio::test]
@@ -1212,9 +1205,6 @@ mod tests {
 
         let err = handle_epoch_fence(&cfg).await.unwrap_err();
 
-        assert!(
-            err.contains("handle_epoch_fence: connect"),
-            "unexpected error: {err}"
-        );
+        assert2::assert!(err.contains("handle_epoch_fence: connect"));
     }
 }

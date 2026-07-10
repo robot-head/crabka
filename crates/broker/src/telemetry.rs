@@ -76,7 +76,7 @@ pub fn api_name(api_key: i16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -90,7 +90,7 @@ mod tests {
             (30, "CreateAcls"),
             (9999, "Unknown"),
         ] {
-            assert!(api_name(api_key) == want, "api key {api_key}");
+            assert2::assert!(api_name(api_key) == want);
         }
     }
 

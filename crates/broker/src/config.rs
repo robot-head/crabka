@@ -1136,7 +1136,6 @@ impl Default for BrokerConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::BrokerError as BrokerStartError;
@@ -1144,19 +1143,19 @@ mod tests {
     #[test]
     fn production_default_selects_topic_backed_rlmm() {
         let c = BrokerConfig::default();
-        assert!(matches!(c.remote_log_metadata, RlmmKind::TopicBacked(_)));
+        assert2::assert!(matches!(c.remote_log_metadata, RlmmKind::TopicBacked(_)));
     }
 
     #[test]
     fn test_default_selects_in_memory_rlmm() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert!(matches!(c.remote_log_metadata, RlmmKind::InMemory));
+        assert2::assert!(matches!(c.remote_log_metadata, RlmmKind::InMemory));
     }
 
     #[test]
     fn kafka_rlmm_config_default_has_sane_topic_settings() {
         let c = KafkaRlmmConfig::default();
-        assert!(
+        assert2::assert!(
             (
                 c.num_partitions,
                 c.replication,
@@ -1171,7 +1170,7 @@ mod tests {
                 DEFAULT_RLMM_SNAPSHOT_INTERVAL,
             )
         );
-        assert!(c.security.is_none());
+        assert2::assert!(c.security.is_none());
     }
 
     #[test]
@@ -1184,7 +1183,7 @@ mod tests {
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
             security: None,
         };
-        assert!(
+        assert2::assert!(
             (c.snapshot_interval, c.snapshot_dir)
                 == (
                     std::time::Duration::from_mins(1),
@@ -1203,7 +1202,7 @@ mod tests {
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
             security: None,
         };
-        assert!(c.security.is_none());
+        assert2::assert!(c.security.is_none());
     }
 
     /// A well-formed two-listener config used as the base for validation
@@ -1237,14 +1236,14 @@ mod tests {
     #[test]
     fn accepts_distinct_listener_bind_addresses() {
         let c = base();
-        assert!(c.validate().is_ok());
+        assert2::assert!(c.validate().is_ok());
     }
 
     #[test]
     fn rejects_bind_collision() {
         let mut c = base();
         c.listeners[1].bind_addr = c.listeners[0].bind_addr;
-        assert!(matches!(
+        assert2::assert!(matches!(
             c.validate(),
             Err(BrokerStartError::ListenerConflict { .. })
         ));
@@ -1254,7 +1253,7 @@ mod tests {
     fn rejects_missing_inter_broker_listener() {
         let mut c = base();
         c.inter_broker_listener_name = "NONESUCH".to_string();
-        assert!(matches!(
+        assert2::assert!(matches!(
             c.validate(),
             Err(BrokerStartError::InvalidInterBrokerListener { .. })
         ));
@@ -1264,7 +1263,7 @@ mod tests {
     fn rejects_sasl_listener_without_mechanisms() {
         let mut c = base();
         c.enabled_sasl_mechanisms.clear();
-        assert!(c.validate().is_err());
+        assert2::assert!(c.validate().is_err());
     }
 
     #[test]
@@ -1276,19 +1275,19 @@ mod tests {
     #[test]
     fn defaults_listen_on_localhost_9092() {
         let c = BrokerConfig::default();
-        assert!((c.listen_addr.port(), c.broker_id) == (9092, 1));
+        assert2::assert!((c.listen_addr.port(), c.broker_id) == (9092, 1));
     }
 
     #[test]
     fn for_tests_uses_port_0() {
         let c = BrokerConfig::for_tests(PathBuf::from("/tmp"));
-        assert!(c.listen_addr.port() == 0);
+        assert2::assert!(c.listen_addr.port() == 0);
     }
 
     #[test]
     fn defaults_use_conservative_raft_timings() {
         let c = BrokerConfig::default();
-        assert!(
+        assert2::assert!(
             (
                 c.controller_election_timeout,
                 c.controller_heartbeat_interval,
@@ -1302,15 +1301,15 @@ mod tests {
     #[test]
     fn default_metadata_snapshot_interval() {
         let cfg = BrokerConfig::default();
-        assert!(cfg.metadata_snapshot_interval_records == 10_000);
+        assert2::assert!(cfg.metadata_snapshot_interval_records == 10_000);
     }
 
     #[test]
     fn for_tests_uses_20_mib_metadata_snapshot_threshold() {
         let cfg = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
         let mib = 1024 * 1024;
-        assert!(cfg.metadata_max_bytes_between_snapshots == 20 * mib);
-        assert!(cfg.metadata_max_bytes_between_snapshots / mib == 20);
+        assert2::assert!(cfg.metadata_max_bytes_between_snapshots == 20 * mib);
+        assert2::assert!(cfg.metadata_max_bytes_between_snapshots / mib == 20);
     }
 
     #[test]
@@ -1319,20 +1318,20 @@ mod tests {
         // Short enough that a 3-broker test can detect a dead leader and
         // re-elect within a few hundred ms — the failover tests
         // need failover well under their 10s producer timeout.
-        assert!(c.controller_election_timeout <= std::time::Duration::from_millis(750));
-        assert!(c.controller_heartbeat_interval <= std::time::Duration::from_millis(200));
+        assert2::assert!(c.controller_election_timeout <= std::time::Duration::from_millis(750));
+        assert2::assert!(c.controller_heartbeat_interval <= std::time::Duration::from_millis(200));
     }
 
     #[test]
     fn defaults_use_bootstrap_mode() {
         let c = BrokerConfig::default();
-        assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
+        assert2::assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
     }
 
     #[test]
     fn for_tests_uses_bootstrap_mode() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
+        assert2::assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
     }
 
     #[test]
@@ -1342,20 +1341,19 @@ mod tests {
         let mut c = BrokerConfig::for_tests(primary.clone());
         c.extra_log_dirs = vec![extra.clone(), primary.clone(), extra.clone()];
 
-        assert!(c.all_log_dirs() == vec![primary, extra]);
+        assert2::assert!(c.all_log_dirs() == vec![primary, extra]);
     }
 
     #[test]
     fn defaults_to_combined_roles() {
         let d = BrokerConfig::default();
-        assert!(
+        assert2::assert!(
             (d.is_controller(), d.is_broker(), d.roles)
-                == (true, true, vec![NodeRole::Controller, NodeRole::Broker]),
-            "default node is a combined controller+broker with the combined role set"
+                == (true, true, vec![NodeRole::Controller, NodeRole::Broker])
         );
 
         let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert!(t.is_controller() && t.is_broker());
+        assert2::assert!(t.is_controller() && t.is_broker());
     }
 
     #[test]
@@ -1364,7 +1362,7 @@ mod tests {
             roles: vec![NodeRole::Controller],
             ..BrokerConfig::default()
         };
-        assert!((c.is_controller(), c.is_broker()) == (true, false));
+        assert2::assert!((c.is_controller(), c.is_broker()) == (true, false));
     }
 
     #[test]
@@ -1373,7 +1371,7 @@ mod tests {
             roles: vec![NodeRole::Broker],
             ..BrokerConfig::default()
         };
-        assert!((c.is_broker(), c.is_controller()) == (true, false));
+        assert2::assert!((c.is_broker(), c.is_controller()) == (true, false));
     }
 
     #[test]
@@ -1382,7 +1380,7 @@ mod tests {
             roles: vec![],
             ..BrokerConfig::default()
         };
-        assert!(matches!(c.validate(), Err(BrokerError::EmptyRoles)));
+        assert2::assert!(matches!(c.validate(), Err(BrokerError::EmptyRoles)));
     }
 
     #[test]
@@ -1395,7 +1393,7 @@ mod tests {
             controller_quorum_voters: vec![(NodeId(1), "127.0.0.1:9093".to_string())],
             ..BrokerConfig::default()
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             c.validate(),
             Err(BrokerError::NonControllerIsVoter {
                 node_id: crabka_raft::NodeId(1)
@@ -1417,7 +1415,7 @@ mod tests {
             ..BrokerConfig::default()
         };
         // Registration is gated on is_broker(); a controller-only node skips it.
-        assert!(!c.is_broker());
+        assert2::assert!(!c.is_broker());
     }
 
     #[test]
@@ -1427,7 +1425,7 @@ mod tests {
             ..BrokerConfig::default()
         };
         // Partition scan/recovery is gated on is_broker().
-        assert!(!c.is_broker());
+        assert2::assert!(!c.is_broker());
     }
 
     #[test]
@@ -1437,7 +1435,7 @@ mod tests {
             tls_config: None,
             ..BrokerConfig::default()
         };
-        assert!(matches!(c.validate(), Err(BrokerError::Tls(_))));
+        assert2::assert!(matches!(c.validate(), Err(BrokerError::Tls(_))));
     }
 
     #[test]
@@ -1447,7 +1445,7 @@ mod tests {
             enabled_sasl_mechanisms: vec![],
             ..BrokerConfig::default()
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             c.validate(),
             Err(BrokerError::SaslListenerNoMechanisms { .. })
         ));
@@ -1497,7 +1495,7 @@ mod tests {
             gssapi: None,
             ..BrokerConfig::default()
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             c.validate(),
             Err(BrokerError::GssapiConfigMissing)
         ));
@@ -1506,7 +1504,7 @@ mod tests {
     #[test]
     fn auto_leader_rebalance_defaults_to_true_in_default() {
         let c = BrokerConfig::default();
-        assert!(
+        assert2::assert!(
             (
                 c.auto_leader_rebalance_enable,
                 c.leader_imbalance_check_interval_secs,
@@ -1518,7 +1516,7 @@ mod tests {
     #[test]
     fn auto_leader_rebalance_defaults_to_false_in_for_tests() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert!(!c.auto_leader_rebalance_enable);
+        assert2::assert!(!c.auto_leader_rebalance_enable);
     }
 
     #[test]
@@ -1527,7 +1525,7 @@ mod tests {
             leader_imbalance_check_interval_secs: 0,
             ..BrokerConfig::default()
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             c.validate(),
             Err(BrokerError::InvalidLeaderRebalanceInterval { value: 0 })
         ));
@@ -1539,7 +1537,7 @@ mod tests {
             leader_imbalance_per_broker_percentage: 101,
             ..BrokerConfig::default()
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             c.validate(),
             Err(BrokerError::InvalidLeaderRebalanceThreshold { value: 101 })
         ));
@@ -1561,7 +1559,7 @@ mod tests {
         let c = BrokerConfig::default();
         let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
         let expected = (None, crate::replica_selector::ReplicaSelectorKind::Leader);
-        assert!((c.rack, c.replica_selector) == expected);
-        assert!((t.rack, t.replica_selector) == expected);
+        assert2::assert!((c.rack, c.replica_selector) == expected);
+        assert2::assert!((t.rack, t.replica_selector) == expected);
     }
 }

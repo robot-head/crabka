@@ -503,7 +503,7 @@ pub async fn ensure_internal_topics(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -595,7 +595,7 @@ mod tests {
         };
 
         let stored = to_stored_topology(&wire_topology);
-        assert!(
+        assert2::assert!(
             stored
                 == StreamsGroupTopologyValue {
                     epoch: 9,
@@ -640,7 +640,7 @@ mod tests {
         };
 
         let derived = derive_tasks(&topology, &image);
-        assert!(
+        assert2::assert!(
             derived
                 == DerivedTasks {
                     num_tasks: BTreeMap::from([("0".to_string(), 6)]),
@@ -681,7 +681,7 @@ mod tests {
 
         let derived = derive_tasks(&topology, &image);
         // Only the external source topic appears in the partition snapshot.
-        assert!(
+        assert2::assert!(
             derived
                 == DerivedTasks {
                     num_tasks: BTreeMap::from([("0".to_string(), 3), ("1".to_string(), 3)]),
@@ -707,7 +707,7 @@ mod tests {
             subtopologies: vec![s0],
         };
         let derived = derive_tasks(&topology, &image);
-        assert!(
+        assert2::assert!(
             derived
                 == DerivedTasks {
                     num_tasks: BTreeMap::new(),
@@ -722,7 +722,7 @@ mod tests {
         num_tasks.insert("0".to_string(), 3);
         num_tasks.insert("1".to_string(), 0);
         let set = task_set(&num_tasks);
-        assert!(
+        assert2::assert!(
             set == BTreeMap::from([("0".to_string(), vec![0, 1, 2]), ("1".to_string(), vec![]),])
         );
     }
@@ -736,7 +736,7 @@ mod tests {
             epoch: 1,
             subtopologies: vec![s0],
         };
-        assert!(validate_topology(&topology, &image).is_empty());
+        assert2::assert!(validate_topology(&topology, &image).is_empty());
     }
 
     #[test]
@@ -772,7 +772,7 @@ mod tests {
             subtopologies: vec![s0],
         };
         let issues = validate_topology(&topology, &image);
-        assert!(
+        assert2::assert!(
             issues
                 .iter()
                 .any(|(c, _)| *c == status::INCORRECTLY_PARTITIONED_TOPICS)
@@ -793,7 +793,7 @@ mod tests {
             epoch: 1,
             subtopologies: vec![s0],
         };
-        assert!(validate_topology(&topology, &image).is_empty());
+        assert2::assert!(validate_topology(&topology, &image).is_empty());
     }
 
     #[test]
@@ -822,7 +822,7 @@ mod tests {
             .into_iter()
             .map(|spec| (spec.name.clone(), spec))
             .collect();
-        assert!(
+        assert2::assert!(
             specs
                 == BTreeMap::from([
                     (
@@ -868,6 +868,6 @@ mod tests {
         };
         // No entry for subtopology "0" -> unresolved -> no specs.
         let specs = required_internal_topics(&topology, &BTreeMap::new());
-        assert!(specs.is_empty());
+        assert2::assert!(specs.is_empty());
     }
 }

@@ -164,7 +164,7 @@ mod tests {
 
     #[tokio::test]
     async fn bearer_resolution_cases() {
-        for (name, token, expected) in [
+        for (_name, token, expected) in [
             ("absent", None, b"none".as_slice()),
             ("valid", Some(TOKEN_ALICE), b"alice".as_slice()),
             ("expired", Some(TOKEN_BOB_EXPIRED), b"none".as_slice()),
@@ -179,8 +179,8 @@ mod tests {
                 .unwrap();
             let status = resp.status();
             let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
-            assert_eq!(status, StatusCode::OK, "case {name}");
-            assert_eq!(body.as_ref(), expected, "case {name}");
+            assert2::assert!(status == StatusCode::OK);
+            assert2::assert!(body.as_ref() == expected);
         }
     }
 
@@ -224,6 +224,6 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         // bearer-user should override mtls-user
-        assert_eq!(&body[..], b"bearer-user");
+        assert2::assert!(&body[..] == b"bearer-user");
     }
 }

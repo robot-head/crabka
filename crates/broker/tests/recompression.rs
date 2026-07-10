@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_compression::CompressionType;
@@ -117,11 +117,7 @@ async fn create_topic_with_compression(addr: SocketAddr, topic: &str, codec: &st
         .unwrap();
     let mut cur: &[u8] = &resp;
     let r = CreateTopicsResponse::decode(&mut cur, VERSION).unwrap();
-    assert!(
-        r.topics[0].error_code == 0,
-        "CreateTopics must succeed for compression.type={codec}: {:?}",
-        r.topics[0]
-    );
+    assert2::assert!(r.topics[0].error_code == 0);
 }
 
 async fn get_topic_id(addr: SocketAddr, topic: &str) -> Uuid {
@@ -183,7 +179,7 @@ async fn produce_gzip(addr: SocketAddr, topic: &str, topic_id: Uuid, value: &[u8
     let mut cur: &[u8] = &resp;
     let r = ProduceResponse::decode(&mut cur, VERSION).unwrap();
     let part = &r.responses[0].partition_responses[0];
-    assert!(part.error_code == 0, "Produce must succeed: {part:?}");
+    assert2::assert!(part.error_code == 0);
 }
 
 async fn fetch_first_batch(addr: SocketAddr, topic: &str, topic_id: Uuid) -> RecordBatch {
@@ -215,7 +211,7 @@ async fn fetch_first_batch(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Rec
     let mut cur: &[u8] = &resp;
     let r = FetchResponse::decode(&mut cur, VERSION).unwrap();
     let part = &r.responses[0].partitions[0];
-    assert!(part.error_code == 0, "Fetch error: {}", part.error_code);
+    assert2::assert!(part.error_code == 0);
     part.records
         .as_ref()
         .and_then(|p| p.as_v2())
@@ -235,10 +231,7 @@ async fn wait_for_compression(
         {
             return;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "compression_type={expected:?} never propagated to partition LogConfig within 10s"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // intentional: this polls the partition writer's applied LogConfig
         // (partition_log_config_for_test), not the metadata image. No awaiter
         // captures "the reconcile loop has pushed the compression override into
@@ -296,7 +289,7 @@ async fn topic_compression_producer_preserves_producer_gzip() {
     produce_gzip(addr, TOPIC, topic_id, payload).await;
 
     let served = fetch_first_batch(addr, TOPIC, topic_id).await;
-    assert!(
+    assert2::assert!(
         (
             served.attributes.compression(),
             served.records[0].value.as_deref()

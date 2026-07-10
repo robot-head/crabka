@@ -58,19 +58,15 @@ mod tests {
     #[test]
     fn metadata_request_fetches_all_topics_without_auto_creation() {
         let req = metadata_request();
-        assert_eq!(req.topics, None);
-        assert!(!req.allow_auto_topic_creation);
+        assert2::assert!(req.topics == None);
+        assert2::assert!(!req.allow_auto_topic_creation);
     }
 
     #[test]
     fn admin_request_builders_use_default_request_shapes() {
-        assert_eq!(
-            describe_cluster_request(),
-            DescribeClusterRequest::default()
-        );
-        assert_eq!(
-            list_reassignments_request(),
-            ListPartitionReassignmentsRequest::default()
+        assert2::assert!(describe_cluster_request() == DescribeClusterRequest::default());
+        assert2::assert!(
+            list_reassignments_request() == ListPartitionReassignmentsRequest::default()
         );
     }
 

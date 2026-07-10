@@ -22,6 +22,7 @@ name = "crabka-grpc-gateway"
 path = "src/bin/gateway.rs"
 
 [dependencies]
+assert2 = { workspace = true }
 crabka-authz = { version = "0.3.8", path = "../authz" }
 crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
@@ -80,7 +81,6 @@ connectrpc-axum-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
 # Raw Fetch + v2 RecordBatch decode in tests/outbound.rs to read the DLQ
 # record's `x-crabka-dlq-source` header (the group Consumer drops headers).

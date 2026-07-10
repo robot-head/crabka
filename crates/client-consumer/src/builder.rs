@@ -193,60 +193,58 @@ pub(crate) fn decode_assignment(bytes: &[u8]) -> Vec<(String, i32)> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn isolation_level_wire_values_match_fetch_request_encoding() {
-        for (name, isolation, expected) in [
+        for (_name, isolation, expected) in [
             ("read uncommitted", IsolationLevel::ReadUncommitted, 0),
             ("read committed", IsolationLevel::ReadCommitted, 1),
         ] {
-            assert!(isolation.wire() == expected, "case {name}");
+            assert2::assert!(isolation.wire() == expected);
         }
     }
 
     #[test]
     fn peek_version_requires_two_bytes() {
-        for (name, bytes, want) in [
+        for (_name, bytes, want) in [
             ("empty", &[][..], 0),
             ("truncated", &[0x7f][..], 0),
             ("two byte version", &[0, 3][..], 3),
         ] {
-            assert!(peek_version(bytes) == want, "case {name}");
+            assert2::assert!(peek_version(bytes) == want);
         }
     }
 
     #[test]
     fn decode_subscription_short_or_malformed_payload_uses_empty_fallback() {
-        for (name, payload) in [
+        for (_name, payload) in [
             ("empty", &[][..]),
             ("truncated version", &[0x7f][..]),
             ("version only", &[0, 3][..]),
         ] {
             let decoded = decode_subscription(payload);
-            assert!(
+            assert2::assert!(
                 decoded
                     == DecodedSubscription {
                         topics: Vec::new(),
                         owned: Vec::new(),
                         generation_id: -1,
                         rack_id: None,
-                    },
-                "case {name}"
+                    }
             );
         }
     }
 
     #[test]
     fn decode_assignment_short_or_malformed_payload_uses_empty_fallback() {
-        for (name, payload) in [
+        for (_name, payload) in [
             ("empty", &[][..]),
             ("truncated version", &[0x7f][..]),
             ("version only", &[0, 3][..]),
         ] {
-            assert!(decode_assignment(payload).is_empty(), "case {name}");
+            assert2::assert!(decode_assignment(payload).is_empty());
         }
     }
 
@@ -254,14 +252,14 @@ mod tests {
     fn subscription_round_trip() {
         let s = encode_subscription(&["t1".into(), "t2".into()], &[], -1, None);
         let decoded = decode_subscription(&s);
-        assert!(decoded.topics == vec!["t1", "t2"]);
+        assert2::assert!(decoded.topics == vec!["t1", "t2"]);
     }
 
     #[test]
     fn subscription_empty_round_trip() {
         let s = encode_subscription(&[], &[], -1, None);
         let decoded = decode_subscription(&s);
-        assert!(
+        assert2::assert!(
             decoded
                 == DecodedSubscription {
                     topics: Vec::new(),
@@ -281,14 +279,14 @@ mod tests {
         got.sort();
         let mut want = owned.clone();
         want.sort();
-        assert!(got == want);
+        assert2::assert!(got == want);
     }
 
     #[test]
     fn subscription_v3_generation_and_rack_round_trip() {
         let s = encode_subscription(&["t".into()], &[], 42, Some("rack-a"));
         let decoded = decode_subscription(&s);
-        assert!(
+        assert2::assert!(
             decoded
                 == DecodedSubscription {
                     topics: vec!["t".into()],
@@ -312,7 +310,7 @@ mod tests {
         buf.put_i32(0); // owned_partitions empty (v1)
         let payload = buf.freeze();
         let decoded = decode_subscription(&payload);
-        assert!(
+        assert2::assert!(
             decoded
                 == DecodedSubscription {
                     topics: vec!["t1".to_string()],
@@ -328,7 +326,7 @@ mod tests {
         let s = encode_assignment(&[("t".into(), 0), ("t".into(), 1), ("u".into(), 0)]);
         let mut decoded = decode_assignment(&s);
         decoded.sort();
-        assert!(
+        assert2::assert!(
             decoded
                 == vec![
                     ("t".to_string(), 0),
@@ -342,6 +340,6 @@ mod tests {
     fn assignment_empty_round_trip() {
         let s = encode_assignment(&[]);
         let decoded = decode_assignment(&s);
-        assert!(decoded.is_empty());
+        assert2::assert!(decoded.is_empty());
     }
 }

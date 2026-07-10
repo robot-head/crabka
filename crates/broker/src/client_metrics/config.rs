@@ -135,16 +135,13 @@ mod tests {
             ("3600001", false),
             ("not-a-number", false),
         ] {
-            assert!(
-                validate("interval.ms", value).is_ok() == ok,
-                "interval.ms={value}"
-            );
+            assert2::assert!(validate("interval.ms", value).is_ok() == ok);
         }
     }
 
     #[test]
     fn unknown_key_rejected() {
-        assert!(validate("bogus.key", "x").is_err());
+        assert2::assert!(validate("bogus.key", "x").is_err());
     }
 
     #[test]
@@ -159,7 +156,7 @@ mod tests {
             ("client_id", false),
             ("client_id=[unclosed", false),
         ] {
-            assert!(validate("match", value).is_ok() == ok, "match={value}");
+            assert2::assert!(validate("match", value).is_ok() == ok);
         }
     }
 
@@ -170,13 +167,13 @@ mod tests {
             "org.apache.kafka.consumer.,org.apache.kafka.producer.",
             "",
         ] {
-            assert!(validate("metrics", value).is_ok(), "metrics={value}");
+            assert2::assert!(validate("metrics", value).is_ok());
         }
     }
 
     #[test]
     fn effective_interval_defaults_and_clamps() {
-        for (case, interval, expected) in [
+        for (_case, interval, expected) in [
             ("default", None, DEFAULT_INTERVAL_MS),
             ("configured", Some("60000"), 60_000),
         ] {
@@ -184,7 +181,7 @@ mod tests {
             if let Some(interval) = interval {
                 configs.insert("interval.ms".to_string(), interval.to_string());
             }
-            assert_eq!(effective_interval_ms(&configs), expected, "case {case}");
+            assert2::assert!(effective_interval_ms(&configs) == expected);
         }
     }
 
@@ -195,18 +192,18 @@ mod tests {
             .iter()
             .map(|rule| (rule.selector, rule.pattern.as_str()))
             .collect();
-        assert_eq!(
-            parsed,
-            vec![
-                (MatchSelector::ClientId, "svc-.*"),
-                (MatchSelector::ClientSoftwareName, "java"),
-            ]
+        assert2::assert!(
+            parsed
+                == vec![
+                    (MatchSelector::ClientId, "svc-.*"),
+                    (MatchSelector::ClientSoftwareName, "java"),
+                ]
         );
     }
 
     #[test]
     fn parse_metrics_collapses_star() {
-        for (case, input, expected) in [
+        for (_case, input, expected) in [
             ("all metrics", "*", vec!["*".to_string()]),
             ("empty", "", Vec::new()),
             (
@@ -215,7 +212,7 @@ mod tests {
                 vec!["a.".to_string(), "b.".to_string()],
             ),
         ] {
-            assert_eq!(parse_metrics(input), expected, "case {case}");
+            assert2::assert!(parse_metrics(input) == expected);
         }
     }
 }

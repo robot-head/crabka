@@ -1,4 +1,3 @@
-use assert2::assert;
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, ArrayValue, InstrumentationScope, KeyValue, any_value::Value},
     resource::v1::Resource,
@@ -309,13 +308,10 @@ pub fn normalize_trace(resp: &JsonValue) -> JsonValue {
     out
 }
 
-pub fn assert_trace_query_equal(name: &str, a: &JsonValue, b: &JsonValue) {
+pub fn assert_trace_query_equal(_name: &str, a: &JsonValue, b: &JsonValue) {
     let normalized_a = normalize_response(a);
     let normalized_b = normalize_response(b);
-    assert!(
-        normalized_a == normalized_b,
-        "{name} differed after normalization\nleft: {normalized_a}\nright: {normalized_b}"
-    );
+    assert2::assert!(normalized_a == normalized_b);
 }
 
 fn normalize_response(value: &JsonValue) -> JsonValue {

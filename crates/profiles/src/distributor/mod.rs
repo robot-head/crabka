@@ -852,7 +852,7 @@ fn u32_from_i64(value: i64, field: &str) -> Result<u32, ProfilesError> {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use prost::Message;
 
     use super::*;
@@ -864,14 +864,14 @@ mod tests {
     fn ingest_span_tenant_reads_scope_orgid_header() {
         let mut present = HeaderMap::new();
         present.insert("x-scope-orgid", "acme".parse().unwrap());
-        assert!(ingest_span_tenant(&present) == "acme");
+        assert2::assert!(ingest_span_tenant(&present) == "acme");
 
         let missing = HeaderMap::new();
-        assert!(ingest_span_tenant(&missing) == "unknown");
+        assert2::assert!(ingest_span_tenant(&missing) == "unknown");
 
         let mut empty = HeaderMap::new();
         empty.insert("x-scope-orgid", "".parse().unwrap());
-        assert!(ingest_span_tenant(&empty) == "unknown");
+        assert2::assert!(ingest_span_tenant(&empty) == "unknown");
     }
 
     use crate::{
@@ -1004,9 +1004,9 @@ mod tests {
         process_raw(&state, "tenant-a", raws).await.unwrap();
 
         let recs = sink.0.lock().unwrap();
-        assert_eq!(recs.len(), 2);
-        assert!(recs.iter().all(|rec| rec.tenant == "tenant-a"));
-        assert!(
+        assert2::assert!(recs.len() == 2);
+        assert2::assert!(recs.iter().all(|rec| rec.tenant == "tenant-a"));
+        assert2::assert!(
             recs.iter()
                 .all(|rec| rec.labels.iter().any(|(name, _)| name == "service_name"))
         );
@@ -1090,11 +1090,8 @@ mod tests {
         .unwrap();
 
         let recs = sink.0.lock().unwrap();
-        assert_eq!(
-            recs[0].samples[0].stacktrace_location_refs.as_slice(),
-            &[1][..]
-        );
-        assert_eq!(recs[0].symbols.locations[1].lines[0].0, 1);
+        assert2::assert!(recs[0].samples[0].stacktrace_location_refs.as_slice() == &[1][..]);
+        assert2::assert!(recs[0].symbols.locations[1].lines[0].0 == 1);
     }
 
     #[tokio::test]
@@ -1120,7 +1117,7 @@ mod tests {
 
         process_raw(&state, "t", raws).await.unwrap();
 
-        assert!(sink.0.lock().unwrap().is_empty());
+        assert2::assert!(sink.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1158,7 +1155,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(err.to_string().contains("value exceeds"));
+        assert2::assert!(err.to_string().contains("value exceeds"));
     }
 
     #[tokio::test]
@@ -1189,8 +1186,8 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert!(err.to_string().contains("too many label names"));
-        assert!(sink.0.lock().unwrap().is_empty());
+        assert2::assert!(err.to_string().contains("too many label names"));
+        assert2::assert!(sink.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1229,7 +1226,7 @@ overrides:
         .await
         .unwrap();
 
-        assert!(err.to_string().contains("value exceeds"));
+        assert2::assert!(err.to_string().contains("value exceeds"));
     }
 
     #[tokio::test]
@@ -1261,8 +1258,8 @@ overrides:
         .await
         .unwrap_err();
 
-        assert!(err.to_string().contains("max series exceeded"), "{err}");
-        assert!(sink.0.lock().unwrap().is_empty());
+        assert2::assert!(err.to_string().contains("max series exceeded"));
+        assert2::assert!(sink.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1295,8 +1292,8 @@ overrides:
         .await
         .unwrap_err();
 
-        assert!(err.to_string().contains("ingestion rate exceeded"), "{err}");
-        assert!(sink.0.lock().unwrap().is_empty());
+        assert2::assert!(err.to_string().contains("ingestion rate exceeded"));
+        assert2::assert!(sink.0.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1343,8 +1340,8 @@ overrides:
         .await
         .unwrap();
 
-        assert!(err.to_string().contains("ingestion rate exceeded"), "{err}");
-        assert!(sink.0.lock().unwrap().len() == 2);
+        assert2::assert!(err.to_string().contains("ingestion rate exceeded"));
+        assert2::assert!(sink.0.lock().unwrap().len() == 2);
     }
 
     #[test]
@@ -1357,8 +1354,8 @@ overrides:
             .into(),
         );
 
-        assert_eq!(err.code(), Code::ResourceExhausted);
-        assert!(
+        assert2::assert!(err.code() == Code::ResourceExhausted);
+        assert2::assert!(
             err.message()
                 .is_some_and(|message| message.contains("max series exceeded"))
         );
@@ -1481,11 +1478,11 @@ overrides:
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK, "{response:?}");
+        assert2::assert!(response.status() == StatusCode::OK);
         let recs = sink.0.lock().unwrap();
-        assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].tenant.as_str(), "tenant-a");
-        assert!(recs[0].labels.iter().any(|(name, value)| {
+        assert2::assert!(recs.len() == 1);
+        assert2::assert!(recs[0].tenant.as_str() == "tenant-a");
+        assert2::assert!(recs[0].labels.iter().any(|(name, value)| {
             name == "__profile_type__" && value == "samples:samples:count:samples:count"
         }));
     }
@@ -1512,11 +1509,11 @@ overrides:
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK, "{response:?}");
+        assert2::assert!(response.status() == StatusCode::OK);
         let recs = sink.0.lock().unwrap();
-        assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].tenant.as_str(), "tenant-a");
-        assert_eq!(
+        assert2::assert!(recs.len() == 1);
+        assert2::assert!(recs[0].tenant.as_str() == "tenant-a");
+        assert2::assert!(
             [
                 ("__profile_type__", "myapp:samples:samples:samples:samples"),
                 ("service_name", "api"),
@@ -1524,12 +1521,12 @@ overrides:
             .map(|(name, value)| recs[0]
                 .labels
                 .iter()
-                .any(|(label_name, label_value)| { label_name == name && label_value == value })),
-            [true, true]
+                .any(|(label_name, label_value)| { label_name == name && label_value == value }))
+                == [true, true]
         );
-        assert_eq!(recs[0].samples.len(), 1);
-        assert_eq!(recs[0].samples[0].value, 3);
-        assert_eq!(recs[0].samples[0].timestamp_ns, 1_700_000_000_000_000_000);
+        assert2::assert!(recs[0].samples.len() == 1);
+        assert2::assert!(recs[0].samples[0].value == 3);
+        assert2::assert!(recs[0].samples[0].timestamp_ns == 1_700_000_000_000_000_000);
     }
 
     #[tokio::test]
@@ -1579,9 +1576,9 @@ overrides:
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::BAD_REQUEST, "{response:?}");
+        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
         // A rejected tenant must not produce any WAL records.
-        assert!(sink.0.lock().unwrap().is_empty());
+        assert2::assert!(sink.0.lock().unwrap().is_empty());
     }
 
     // C1: an absent header still defaults to the anonymous tenant.
@@ -1606,10 +1603,10 @@ overrides:
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK, "{response:?}");
+        assert2::assert!(response.status() == StatusCode::OK);
         let recs = sink.0.lock().unwrap();
-        assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].tenant.as_str(), "anonymous");
+        assert2::assert!(recs.len() == 1);
+        assert2::assert!(recs[0].tenant.as_str() == "anonymous");
     }
 
     #[test]
@@ -1617,13 +1614,13 @@ overrides:
         use axum::http::HeaderValue;
 
         let mut headers = HeaderMap::new();
-        assert!(tenant_from_headers(&headers).unwrap() == "anonymous");
+        assert2::assert!(tenant_from_headers(&headers).unwrap() == "anonymous");
 
         headers.insert("x-scope-orgid", HeaderValue::from_static("tenant-a"));
-        assert!(tenant_from_headers(&headers).unwrap() == "tenant-a");
+        assert2::assert!(tenant_from_headers(&headers).unwrap() == "tenant-a");
 
         headers.insert("x-scope-orgid", HeaderValue::from_static("a/b"));
-        assert!(tenant_from_headers(&headers).is_err());
+        assert2::assert!(tenant_from_headers(&headers).is_err());
     }
 
     // #3: when the WAL append fails, the max-series reservation is rolled back
@@ -1655,11 +1652,11 @@ overrides:
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, ProfilesError::Produce(_)), "{err}");
+        assert2::assert!(matches!(err, ProfilesError::Produce(_)));
 
         // The reservation must have been rolled back: no leftover fingerprints.
         let active = state.active_series.lock().unwrap();
-        assert!(
+        assert2::assert!(
             active
                 .get("tenant-a")
                 .map_or(0, std::collections::BTreeSet::len)
@@ -1698,7 +1695,7 @@ overrides:
         )
         .await
         .unwrap_err();
-        assert!(err.to_string().contains("max series exceeded"), "{err}");
+        assert2::assert!(err.to_string().contains("max series exceeded"));
 
         // Nothing was reserved, so a single-series write afterwards succeeds.
         process_raw(
@@ -1708,7 +1705,7 @@ overrides:
         )
         .await
         .unwrap();
-        assert!(sink.0.lock().unwrap().len() == 1);
+        assert2::assert!(sink.0.lock().unwrap().len() == 1);
     }
 
     // #4: the per-tenant maps are bounded; admitting tenant N+1 past the cap
@@ -1719,7 +1716,7 @@ overrides:
         for idx in 0..MAX_TENANTS {
             map.insert(format!("tenant-{idx}"), idx);
         }
-        assert!(map.len() == MAX_TENANTS);
+        assert2::assert!(map.len() == MAX_TENANTS);
 
         // Simulate the admission guard: evict before inserting a new tenant.
         if !map.contains_key("tenant-new") && map.len() >= MAX_TENANTS {
@@ -1727,8 +1724,8 @@ overrides:
         }
         map.insert("tenant-new".to_string(), 0);
 
-        assert_eq!(map.len(), MAX_TENANTS);
-        assert!(map.contains_key("tenant-new"));
+        assert2::assert!(map.len() == MAX_TENANTS);
+        assert2::assert!(map.contains_key("tenant-new"));
     }
 
     #[tokio::test]
@@ -1759,7 +1756,7 @@ overrides:
         }
 
         let buckets = state.ingestion_buckets.lock().unwrap();
-        assert!(buckets.len() <= MAX_TENANTS, "{}", buckets.len());
+        assert2::assert!(buckets.len() <= MAX_TENANTS);
     }
 
     // #7: a 5xx/internal error returns a GENERIC body, not the detailed text.
@@ -1783,18 +1780,18 @@ overrides:
     #[test]
     fn client_input_error_keeps_specific_message() {
         let message = client_facing_message(&ProfilesError::Invalid("bad query param".to_string()));
-        assert!(message.contains("bad query param"), "{message}");
+        assert2::assert!(message.contains("bad query param"));
     }
 
     // #7: a poisoned lock is now an Internal/500 with a generic message, not a 400.
     #[test]
     fn poisoned_lock_maps_to_internal_500() {
         let err = ProfilesError::Internal("active series lock poisoned".to_string());
-        assert!(err.status_code() == 500);
+        assert2::assert!(err.status_code() == 500);
 
         let connect = connect_error(ProfilesError::Internal("secret detail".to_string()));
-        assert_eq!(connect.code(), Code::Internal);
-        assert!(
+        assert2::assert!(connect.code() == Code::Internal);
+        assert2::assert!(
             connect
                 .message()
                 .is_some_and(|message| message == INTERNAL_ERROR_MESSAGE)
@@ -1877,9 +1874,9 @@ overrides:
 
         let recs = sink.0.lock().unwrap();
         let mapping = &recs[0].symbols.mappings[0];
-        assert!(mapping.has_functions);
-        assert!(!mapping.has_filenames);
-        assert!(mapping.has_line_numbers);
-        assert!(!mapping.has_inline_frames);
+        assert2::assert!(mapping.has_functions);
+        assert2::assert!(!mapping.has_filenames);
+        assert2::assert!(mapping.has_line_numbers);
+        assert2::assert!(!mapping.has_inline_frames);
     }
 }

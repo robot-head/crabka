@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_client_admin::{
     AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, QuotaOp, ResourceType,
     UserQuotaConfig,
@@ -295,19 +295,13 @@ async fn first_reconcile_provisions_scram_and_acls() {
     reconcile(Arc::new(ku), ctx).await.unwrap();
     let calls = fake_for_assert.lock().await.calls();
     // Expected sequence: AlterUserScramCredentials (upsert) -> DescribeAcls -> CreateAcls.
-    assert!(
-        calls.iter().any(
-            |c| matches!(c, RecordedCall::AlterUserScramCredentials { upsertions, deletions }
+    assert2::assert!(calls.iter().any(
+        |c| matches!(c, RecordedCall::AlterUserScramCredentials { upsertions, deletions }
                 if upsertions.len() == 1 && deletions.is_empty()
                 && upsertions[0].username == USER)
-        ),
-        "expected an AlterUserScramCredentials upsert for {USER}, got {calls:?}",
-    );
-    assert!(
-        calls.iter().any(|c| matches!(c,
-            RecordedCall::DescribeAcls(f) if f.principal.as_deref() == Some("User:alice"))),
-        "expected a DescribeAcls filtered by principal, got {calls:?}",
-    );
+    ));
+    assert2::assert!(calls.iter().any(|c| matches!(c,
+            RecordedCall::DescribeAcls(f) if f.principal.as_deref() == Some("User:alice"))));
     let create = calls
         .iter()
         .find_map(|c| match c {
@@ -317,11 +311,7 @@ async fn first_reconcile_provisions_scram_and_acls() {
         .expect("CreateAcls must have been issued");
     // Two ops fan out into two ACL entries; the BTreeSet diff hands
     // them to CreateAcls in Ord order (Read before Describe).
-    assert_eq!(
-        create,
-        expected_orders_acls(),
-        "two ops fan out into two ACL entries"
-    );
+    assert2::assert!(create == expected_orders_acls());
     // Status patch lands Ready=True.
     let observed = state.take_observed();
     let status = observed
@@ -332,17 +322,11 @@ async fn first_reconcile_provisions_scram_and_acls() {
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    assert_eq!(
-        body["status"]["conditions"][0]["status"].as_str(),
-        Some("True")
-    );
-    assert_eq!(
-        body["status"]["conditions"][0]["reason"].as_str(),
-        Some("Ready")
-    );
-    assert_eq!(body["status"]["username"].as_str(), Some(USER));
-    assert_eq!(body["status"]["secret"].as_str(), Some(USER));
-    assert_eq!(body["status"]["scramSha512"].as_bool(), Some(true));
+    assert2::assert!(body["status"]["conditions"][0]["status"].as_str() == Some("True"));
+    assert2::assert!(body["status"]["conditions"][0]["reason"].as_str() == Some("Ready"));
+    assert2::assert!(body["status"]["username"].as_str() == Some(USER));
+    assert2::assert!(body["status"]["secret"].as_str() == Some(USER));
+    assert2::assert!(body["status"]["scramSha512"].as_bool() == Some(true));
 }
 
 /// Reconcile with existing matching ACLs → no `CreateAcls` /
@@ -393,17 +377,15 @@ async fn noop_when_acls_already_match() {
     reconcile(Arc::new(ku), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    assert!(
+    assert2::assert!(
         !calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::CreateAcls(_))),
-        "no CreateAcls expected when ACLs already match: {calls:?}",
+            .any(|c| matches!(c, RecordedCall::CreateAcls(_)))
     );
-    assert!(
+    assert2::assert!(
         !calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::DeleteAcls(_))),
-        "no DeleteAcls expected when ACLs already match: {calls:?}",
+            .any(|c| matches!(c, RecordedCall::DeleteAcls(_)))
     );
 }
 
@@ -463,7 +445,7 @@ async fn deletes_orphan_acls() {
         .expect("DeleteAcls must have been issued");
     // The reconciler scoped the delete by every axis (no broad filter
     // collapsing into "delete everything for this principal").
-    assert!(
+    assert2::assert!(
         delete
             == vec![AclEntryFilter {
                 resource_type: Some(ResourceType::Topic),
@@ -473,16 +455,12 @@ async fn deletes_orphan_acls() {
                 host: Some("*".into()),
                 operation: Some(AclOperation::Read),
                 permission_type: Some(PermissionType::Allow),
-            }],
-        "delete must be one filter scoped by every axis of the orphan entry",
+            }]
     );
 
     // Verify the store is empty after the reconcile completed.
     let store = fake_for_assert.lock().await.acls.lock().unwrap().clone();
-    assert!(
-        store.is_empty(),
-        "delete should have removed every ACL, got: {store:?}",
-    );
+    assert2::assert!(store.is_empty());
 }
 
 fn quota_rules() -> Vec<MockRule> {
@@ -521,17 +499,15 @@ async fn omitted_quotas_skips_broker_call() {
     reconcile(Arc::new(ku), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    assert!(
+    assert2::assert!(
         !calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::DescribeUserQuotas(_))),
-        "no DescribeClientQuotas expected when spec.quotas is None: {calls:?}",
+            .any(|c| matches!(c, RecordedCall::DescribeUserQuotas(_)))
     );
-    assert!(
+    assert2::assert!(
         !calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::AlterUserQuotas { .. })),
-        "no AlterClientQuotas expected when spec.quotas is None: {calls:?}",
+            .any(|c| matches!(c, RecordedCall::AlterUserQuotas { .. }))
     );
 
     let observed = state.take_observed();
@@ -543,7 +519,7 @@ async fn omitted_quotas_skips_broker_call() {
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    assert!(body["status"]["quotasInSync"] == false);
+    assert2::assert!(body["status"]["quotasInSync"] == false);
 }
 
 /// spec.quotas declares per-user limits, broker has nothing →
@@ -584,11 +560,10 @@ async fn first_reconcile_sets_declared_quotas() {
         })
         .expect("AlterUserQuotas must have been issued");
     let (ops, validate_only) = alter;
-    assert!(described);
-    assert!(!validate_only);
-    assert_eq!(
-        ops,
-        vec![
+    assert2::assert!(described);
+    assert2::assert!(!validate_only);
+    assert2::assert!(
+        ops == vec![
             QuotaOp::Set {
                 key: "consumer_byte_rate".into(),
                 value: 2_097_152.0,
@@ -618,7 +593,7 @@ async fn first_reconcile_sets_declared_quotas() {
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    assert!(body["status"]["quotasInSync"] == true);
+    assert2::assert!(body["status"]["quotasInSync"] == true);
 }
 
 /// broker matches spec exactly → no `AlterClientQuotas` is
@@ -650,11 +625,10 @@ async fn noop_when_quotas_already_match() {
     reconcile(Arc::new(ku), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    assert!(
+    assert2::assert!(
         !calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::AlterUserQuotas { .. })),
-        "no AlterClientQuotas expected when quotas already match: {calls:?}",
+            .any(|c| matches!(c, RecordedCall::AlterUserQuotas { .. }))
     );
 }
 
@@ -693,9 +667,8 @@ async fn drift_remove_path_emits_remove_op() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert!(
-        matches!(ops.as_slice(), [QuotaOp::Remove { key }] if key == "consumer_byte_rate"),
-        "ops: {ops:?}"
+    assert2::assert!(
+        matches!(ops.as_slice(), [QuotaOp::Remove { key }] if key == "consumer_byte_rate")
     );
 }
 
@@ -730,14 +703,14 @@ async fn empty_quotas_object_tombstones_everything() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert_eq!(
+    assert2::assert!(
         ops.iter()
             .map(|op| match op {
                 QuotaOp::Remove { key } => key.as_str(),
                 QuotaOp::Set { .. } => panic!("expected remove op, got {op:?}"),
             })
-            .collect::<std::collections::BTreeSet<_>>(),
-        std::collections::BTreeSet::from(["consumer_byte_rate", "producer_byte_rate"])
+            .collect::<std::collections::BTreeSet<_>>()
+            == std::collections::BTreeSet::from(["consumer_byte_rate", "producer_byte_rate"])
     );
 }
 
@@ -836,18 +809,14 @@ async fn first_reconcile_tls_provisions_certs_and_acls() {
 
     let calls = fake_for_assert.lock().await.calls();
     // TLS path must NOT make SCRAM calls.
-    assert!(
+    assert2::assert!(
         !calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { .. })),
-        "TLS auth must skip SCRAM credentials: {calls:?}",
+            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { .. }))
     );
     // ACL describe must use the CN= principal.
-    assert!(
-        calls.iter().any(|c| matches!(c,
-            RecordedCall::DescribeAcls(f) if f.principal.as_deref() == Some("User:CN=alice"))),
-        "expected DescribeAcls filtered by User:CN=alice, got {calls:?}",
-    );
+    assert2::assert!(calls.iter().any(|c| matches!(c,
+            RecordedCall::DescribeAcls(f) if f.principal.as_deref() == Some("User:CN=alice"))));
     // ACL create must use the CN= principal.
     let create = calls
         .iter()
@@ -856,7 +825,7 @@ async fn first_reconcile_tls_provisions_certs_and_acls() {
             _ => None,
         })
         .expect("CreateAcls must have been issued");
-    assert!(
+    assert2::assert!(
         create
             == vec![AclEntry {
                 resource_type: ResourceType::Topic,
@@ -959,18 +928,14 @@ async fn tls_reconcile_reuses_existing_cert_when_not_near_expiry() {
         })
         .map(|r| r.uri().to_string())
         .collect();
-    assert!(
-        secret_patches.is_empty(),
-        "cert should be reused — no PATCH on per-user Secret expected, got: {secret_patches:?}",
-    );
+    assert2::assert!(secret_patches.is_empty());
     // Status patch should still fire.
-    assert!(
-        observed.iter().any(|r| r.method() == Method::PATCH
+    assert2::assert!(observed.iter().any(|r| {
+        r.method() == Method::PATCH
             && r.uri()
                 .to_string()
-                .contains(&format!("/kafkausers/{USER}/status"))),
-        "status PATCH must still fire",
-    );
+                .contains(&format!("/kafkausers/{USER}/status"))
+    }));
 }
 
 /// TLS reconcile with an existing cert inside the renewal
@@ -1035,10 +1000,7 @@ async fn tls_reconcile_reissues_cert_near_expiry() {
         })
         .map(|r| r.uri().to_string())
         .collect();
-    assert!(
-        secret_patches.len() == 1,
-        "near-expiry cert must be reissued exactly once: {secret_patches:?}"
-    );
+    assert2::assert!(secret_patches.len() == 1);
 }
 
 /// TLS user finalizer cleanup filters ACL deletes by the
@@ -1072,11 +1034,10 @@ async fn tls_finalizer_filters_acls_by_dn() {
 
     let calls = fake_for_assert.lock().await.calls();
     // TLS finalizer must NOT issue a SCRAM delete (gated on auth type).
-    assert!(
+    assert2::assert!(
         !calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { .. })),
-        "TLS finalizer must not call SCRAM delete: {calls:?}",
+            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { .. }))
     );
     // ACL delete filter must use `User:CN=alice`.
     let filters = calls
@@ -1086,12 +1047,11 @@ async fn tls_finalizer_filters_acls_by_dn() {
             _ => None,
         })
         .expect("DeleteAcls must have been issued");
-    assert_eq!(
+    assert2::assert!(
         filters
             .first()
-            .and_then(|filter| filter.principal.as_deref()),
-        Some("User:CN=alice"),
-        "filters: {filters:?}"
+            .and_then(|filter| filter.principal.as_deref())
+            == Some("User:CN=alice")
     );
 }
 
@@ -1170,11 +1130,10 @@ async fn tls_user_with_quotas_alters_quotas_by_dn() {
 
     let calls = fake_for_assert.lock().await.calls();
     // DescribeUserQuotas must be keyed by `CN=alice`, not `alice`.
-    assert!(
+    assert2::assert!(
         calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::DescribeUserQuotas(u) if u == "CN=alice")),
-        "expected DescribeUserQuotas keyed by CN=alice, got {calls:?}",
+            .any(|c| matches!(c, RecordedCall::DescribeUserQuotas(u) if u == "CN=alice"))
     );
     // AlterUserQuotas must be keyed by `CN=alice` and carry the Set op.
     let (username, ops) = calls
@@ -1186,10 +1145,9 @@ async fn tls_user_with_quotas_alters_quotas_by_dn() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert_eq!(username, "CN=alice".to_string());
-    assert_eq!(
-        ops,
-        vec![QuotaOp::Set {
+    assert2::assert!(username == "CN=alice".to_string());
+    assert2::assert!(
+        ops == vec![QuotaOp::Set {
             key: "producer_byte_rate".to_string(),
             value: 1_048_576.0,
         }]

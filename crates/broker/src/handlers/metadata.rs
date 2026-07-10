@@ -360,18 +360,17 @@ fn parse_host_port(addr: &str) -> (String, i32) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn parse_host_port_ok() {
-        assert!(parse_host_port("foo:1234") == ("foo".into(), 1234));
+        assert2::assert!(parse_host_port("foo:1234") == ("foo".into(), 1234));
     }
 
     #[test]
     fn parse_host_port_falls_back() {
-        assert!(parse_host_port("not-an-addr") == ("localhost".into(), 9092));
+        assert2::assert!(parse_host_port("not-an-addr") == ("localhost".into(), 9092));
     }
 
     fn endpoint(name: &str, host: &str, port: u16) -> crabka_metadata::BrokerEndpoint {
@@ -424,7 +423,7 @@ mod tests {
             rack: Some("rack-a".to_string()),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(out == expected);
+        assert2::assert!(out == expected);
     }
 
     /// A plaintext client on the `"plain"` listener gets the plain endpoint
@@ -436,7 +435,7 @@ mod tests {
             endpoint("tls", "tls-host", 9094),
         ]);
         let out = project_broker(&rec, "plain", "plain");
-        assert!(out == expected_broker("plain-host", 9092));
+        assert2::assert!(out == expected_broker("plain-host", 9092));
     }
 
     /// When the connection listener isn't registered on the broker, fall back
@@ -448,7 +447,7 @@ mod tests {
             endpoint("tls", "tls-host", 9094),
         ]);
         let out = project_broker(&rec, "external", "plain");
-        assert!(out == expected_broker("plain-host", 9092));
+        assert2::assert!(out == expected_broker("plain-host", 9092));
     }
 
     /// When neither the connection listener nor the inter-broker listener are
@@ -460,7 +459,7 @@ mod tests {
             endpoint("other-b", "host-b", 5001),
         ]);
         let out = project_broker(&rec, "tls", "plain");
-        assert!(out == expected_broker("host-a", 5000));
+        assert2::assert!(out == expected_broker("host-a", 5000));
     }
 
     /// With no endpoints at all, fall back to the legacy top-level host/port.
@@ -468,6 +467,6 @@ mod tests {
     fn project_broker_falls_back_to_legacy_host_port() {
         let rec = record(vec![]);
         let out = project_broker(&rec, "tls", "plain");
-        assert!(out == expected_broker("legacy-host", 1000));
+        assert2::assert!(out == expected_broker("legacy-host", 1000));
     }
 }

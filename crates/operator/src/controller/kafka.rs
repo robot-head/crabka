@@ -1844,7 +1844,6 @@ fn cm_name(kafka: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::crd::{KafkaNodePoolSpec, KafkaNodePoolStatus, NodeRole};
@@ -1872,7 +1871,7 @@ mod tests {
 
     #[test]
     fn aggregate_status_rollup_cases() {
-        for (name, pools, expected) in [
+        for (_name, pools, expected) in [
             ("no node pools", vec![], (false, "NoNodePools")),
             (
                 "partially ready pool",
@@ -1893,14 +1892,14 @@ mod tests {
             let r = aggregate_pool_status(pools.iter());
             let (ready, reason, _) = rollup_condition(&r);
             let (expected_ready, expected_reason) = expected;
-            assert_eq!(ready, expected_ready, "case {name}");
-            assert_eq!(reason, expected_reason, "case {name}");
+            assert2::assert!(ready == expected_ready);
+            assert2::assert!(reason == expected_reason);
         }
     }
 
     #[test]
     fn rolling_condition_cases() {
-        for (name, replicas, ready_replicas, pool_count, expected) in [
+        for (_name, replicas, ready_replicas, pool_count, expected) in [
             ("partial pool", 3, 1, 1, (true, "RollingUpdate")),
             ("stable pool", 1, 1, 1, (false, "Stable")),
             ("zero pools boundary", 3, 1, 0, (false, "Stable")),
@@ -1912,8 +1911,8 @@ mod tests {
             };
             let (rolling, reason, _) = rolling_condition_from_rollup(&r);
             let (expected_rolling, expected_reason) = expected;
-            assert_eq!(rolling, expected_rolling, "case {name}");
-            assert_eq!(reason, expected_reason, "case {name}");
+            assert2::assert!(rolling == expected_rolling);
+            assert2::assert!(reason == expected_reason);
         }
     }
 
@@ -2028,7 +2027,7 @@ mod tests {
     #[test]
     fn canonical_oauth_config_cases() {
         let oauth = sample_oauth_cfg(vec![]);
-        for (name, listeners, expected) in [
+        for (_name, listeners, expected) in [
             (
                 "no OAuth listener",
                 vec![
@@ -2054,7 +2053,7 @@ mod tests {
                 Some(oauth.clone()),
             ),
         ] {
-            assert_eq!(canonical_oauth_config(&listeners), expected, "case {name}");
+            assert2::assert!(canonical_oauth_config(&listeners) == expected);
         }
     }
 
@@ -2080,7 +2079,7 @@ mod tests {
             "oauth",
             Some(ListenerAuthentication::OAuth(cfg)),
         )]);
-        for (name, kafka) in [
+        for (_name, kafka) in [
             ("no OAuth listener", no_oauth),
             ("JWT mode", jwt_mode),
             (
@@ -2088,11 +2087,7 @@ mod tests {
                 introspection_without_secret,
             ),
         ] {
-            assert_eq!(
-                oauth_introspection_secret_mount(&kafka),
-                None,
-                "case {name}"
-            );
+            assert2::assert!(oauth_introspection_secret_mount(&kafka) == None);
         }
     }
 
@@ -2103,12 +2098,12 @@ mod tests {
             "oauth",
             Some(ListenerAuthentication::OAuth(cfg)),
         )]);
-        assert_eq!(
-            oauth_introspection_secret_mount(&kafka),
-            Some(OauthIntrospectionMount {
-                secret_name: "oauth-cs".to_string(),
-                key: "client-secret".to_string(),
-            })
+        assert2::assert!(
+            oauth_introspection_secret_mount(&kafka)
+                == Some(OauthIntrospectionMount {
+                    secret_name: "oauth-cs".to_string(),
+                    key: "client-secret".to_string(),
+                })
         );
     }
 
@@ -2128,32 +2123,31 @@ mod tests {
             "gss",
             Some(ListenerAuthentication::Gssapi(g)),
         )]);
-        assert_eq!(
-            gssapi_keytab_mount(&k),
-            Some(GssapiKeytabMount {
-                secret_name: "kt".to_string(),
-                key: "krb5.keytab".to_string(),
-            })
+        assert2::assert!(
+            gssapi_keytab_mount(&k)
+                == Some(GssapiKeytabMount {
+                    secret_name: "kt".to_string(),
+                    key: "krb5.keytab".to_string(),
+                })
         );
     }
 
     #[test]
     fn no_keytab_mount_without_gssapi_listener() {
         let k = kafka_with_listeners(vec![listener_with_auth("plain", None)]);
-        assert!(gssapi_keytab_mount(&k).is_none());
+        assert2::assert!(gssapi_keytab_mount(&k).is_none());
     }
 
     #[test]
     fn krb5_conf_mount_extracted_from_spec() {
         let mut k = kafka_with_listeners(vec![listener_with_auth("plain", None)]);
-        assert!(krb5_conf_mount(&k).is_none());
+        assert2::assert!(krb5_conf_mount(&k).is_none());
         k.spec.krb5_conf_secret_ref = Some(crate::crd::Krb5ConfSecretRef {
             secret_name: "krb5".into(),
             key: "krb5.conf".into(),
         });
-        assert_eq!(
-            krb5_conf_mount(&k),
-            Some(("krb5".to_string(), "krb5.conf".to_string()))
+        assert2::assert!(
+            krb5_conf_mount(&k) == Some(("krb5".to_string(), "krb5.conf".to_string()))
         );
     }
 }

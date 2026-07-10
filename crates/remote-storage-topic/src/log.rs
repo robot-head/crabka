@@ -179,7 +179,7 @@ impl InProcessMetadataEventLog {
     /// Panics when `partition_count <= 0`.
     #[must_use]
     pub fn new(partition_count: i32) -> Arc<Self> {
-        assert!(partition_count > 0, "partition_count must be positive");
+        assert2::assert!(partition_count > 0);
         let cap = usize::try_from(partition_count).expect("partition_count fits in usize");
         let (tx, _rx) = broadcast::channel(1024);
         Arc::new(Self {
@@ -477,7 +477,7 @@ fn filtered_broadcast(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use futures_util::StreamExt;
 
     use super::*;
@@ -491,8 +491,8 @@ mod tests {
             log.publish(1, Bytes::from_static(b"c")).await.unwrap(),
         );
         let hwms = log.high_water_marks().await.unwrap();
-        assert_eq!(offsets, (0, 1, 0));
-        assert_eq!(hwms, vec![2, 1]);
+        assert2::assert!(offsets == (0, 1, 0));
+        assert2::assert!(hwms == vec![2, 1]);
     }
 
     #[tokio::test]
@@ -506,13 +506,13 @@ mod tests {
         }]);
         let a = stream.next().await.unwrap();
         let b = stream.next().await.unwrap();
-        assert_eq!(a.payload.as_ref(), b"a".as_slice());
-        assert_eq!(b.payload.as_ref(), b"b".as_slice());
+        assert2::assert!(a.payload.as_ref() == b"a".as_slice());
+        assert2::assert!(b.payload.as_ref() == b"b".as_slice());
         log.publish(0, Bytes::from_static(b"c")).await.unwrap();
         let c = stream.next().await.unwrap();
-        assert_eq!(c.payload.as_ref(), b"c".as_slice());
-        assert_eq!(c.partition, 0);
-        assert_eq!(c.offset, 2);
+        assert2::assert!(c.payload.as_ref() == b"c".as_slice());
+        assert2::assert!(c.partition == 0);
+        assert2::assert!(c.offset == 2);
     }
 
     #[tokio::test]
@@ -527,8 +527,8 @@ mod tests {
         }]);
         for i in 0..5 {
             let r = stream.next().await.unwrap();
-            assert_eq!(r.payload.as_ref(), &[i][..], "case byte {i}");
-            assert_eq!(r.offset, i64::from(i), "case byte {i}");
+            assert2::assert!(r.payload.as_ref() == &[i][..]);
+            assert2::assert!(r.offset == i64::from(i));
         }
     }
 
@@ -536,7 +536,7 @@ mod tests {
     async fn publish_out_of_range_is_rejected() {
         let log = InProcessMetadataEventLog::new(2);
         let err = log.publish(5, Bytes::from_static(b"x")).await.unwrap_err();
-        assert!(matches!(err, MetadataLogError::PartitionOutOfRange { .. }));
+        assert2::assert!(matches!(err, MetadataLogError::PartitionOutOfRange { .. }));
     }
 
     #[tokio::test]
@@ -552,20 +552,12 @@ mod tests {
             start_offset: 0,
         }]);
         log.publish(0, Bytes::from_static(b"b")).await.unwrap();
-        for (name, subscriber) in [
+        for (_name, subscriber) in [
             ("first subscriber", &mut s1),
             ("second subscriber", &mut s2),
         ] {
-            assert_eq!(
-                subscriber.next().await.unwrap().payload,
-                Bytes::from_static(b"a"),
-                "case {name}"
-            );
-            assert_eq!(
-                subscriber.next().await.unwrap().payload,
-                Bytes::from_static(b"b"),
-                "case {name}"
-            );
+            assert2::assert!(subscriber.next().await.unwrap().payload == Bytes::from_static(b"a"));
+            assert2::assert!(subscriber.next().await.unwrap().payload == Bytes::from_static(b"b"));
         }
     }
 
@@ -600,7 +592,7 @@ mod tests {
             got.push((r.partition, r.offset, r.payload.to_vec()));
         }
         got.sort();
-        assert!(
+        assert2::assert!(
             got == vec![
                 (0, 1, b"b".to_vec()),
                 (0, 2, b"c".to_vec()),
@@ -609,9 +601,9 @@ mod tests {
         );
         // partition 1 offset 1 ("y") is the only remaining assigned record.
         let r = stream.next().await.unwrap();
-        assert_eq!(r.partition, 1);
-        assert_eq!(r.offset, 1);
-        assert_eq!(r.payload.as_ref(), b"y".as_slice());
+        assert2::assert!(r.partition == 1);
+        assert2::assert!(r.offset == 1);
+        assert2::assert!(r.payload.as_ref() == b"y".as_slice());
     }
 
     #[tokio::test]
@@ -625,8 +617,8 @@ mod tests {
         log.publish(1, Bytes::from_static(b"skip")).await.unwrap();
         log.publish(0, Bytes::from_static(b"keep")).await.unwrap();
         let r = stream.next().await.unwrap();
-        assert_eq!(r.partition, 0);
-        assert_eq!(r.payload.as_ref(), b"keep".as_slice());
+        assert2::assert!(r.partition == 0);
+        assert2::assert!(r.payload.as_ref() == b"keep".as_slice());
     }
 
     #[tokio::test]
@@ -664,21 +656,15 @@ mod tests {
             let r = stream.next().await.unwrap();
             got.push((r.partition, r.offset, r.payload.to_vec()));
         }
-        assert_eq!(
-            got,
-            vec![
+        assert2::assert!(
+            got == vec![
                 (1, 0, b"old0".to_vec()),
                 (1, 1, b"old1".to_vec()),
                 (1, 2, b"old2".to_vec()),
                 (1, 3, b"new".to_vec()),
-            ],
-            "backlog drains in order while both partitions remain assigned"
+            ]
         );
-        assert_eq!(
-            handle.assigned(),
-            vec![0, 1],
-            "backlog drains in order while both partitions remain assigned"
-        );
+        assert2::assert!(handle.assigned() == vec![0, 1]);
     }
 
     #[tokio::test]
@@ -688,12 +674,9 @@ mod tests {
             partition: 0,
             start_offset: 0,
         }]);
-        assert!(log.inner.subscriptions.lock().unwrap().len() == 1);
+        assert2::assert!(log.inner.subscriptions.lock().unwrap().len() == 1);
         drop(handle);
-        assert!(
-            log.inner.subscriptions.lock().unwrap().len() == 0,
-            "subscription state must be evicted when the handle drops"
-        );
+        assert2::assert!(log.inner.subscriptions.lock().unwrap().len() == 0);
     }
 
     #[tokio::test]
@@ -710,11 +693,11 @@ mod tests {
             },
         ]);
         handle.remove(1);
-        assert!(handle.assigned() == vec![0]);
+        assert2::assert!(handle.assigned() == vec![0]);
         log.publish(1, Bytes::from_static(b"gone")).await.unwrap();
         log.publish(0, Bytes::from_static(b"here")).await.unwrap();
         let r = stream.next().await.unwrap();
-        assert_eq!(r.partition, 0);
-        assert_eq!(r.payload.as_ref(), b"here".as_slice());
+        assert2::assert!(r.partition == 0);
+        assert2::assert!(r.payload.as_ref() == b"here".as_slice());
     }
 }

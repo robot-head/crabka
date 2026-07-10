@@ -148,7 +148,7 @@ impl LimitError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -156,7 +156,7 @@ mod tests {
     fn default_limits_are_generous_and_finite() {
         let limits = Limits::default();
 
-        assert!(
+        assert2::assert!(
             limits
                 == Limits {
                     ingestion_rate_profiles_per_sec: 10_000.0,
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn limit_errors_carry_pyroscope_code_and_status() {
-        for (name, error, expected) in [
+        for (_name, error, expected) in [
             (
                 "ingestion rate",
                 LimitError::IngestionRateExceeded {
@@ -202,18 +202,18 @@ mod tests {
             ),
         ] {
             let (expected_status, expected_code) = expected;
-            assert_eq!(error.http_status(), expected_status, "case {name}");
-            assert_eq!(error.connect_code(), expected_code, "case {name}");
+            assert2::assert!(error.http_status() == expected_status);
+            assert2::assert!(error.connect_code() == expected_code);
         }
 
         let duration = LimitError::QueryLengthExceeded {
             limit_secs: 3600,
             observed_secs: 7200,
         };
-        assert!(duration.http_status() == 400);
+        assert2::assert!(duration.http_status() == 400);
 
         let cardinality = LimitError::SessionCardinalityExceeded { limit: 1000 };
-        assert!(cardinality.http_status() == 429);
+        assert2::assert!(cardinality.http_status() == 429);
     }
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
             observed: 5000,
         };
 
-        assert!(value.message().contains("2048"));
+        assert2::assert!(value.message().contains("2048"));
     }
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
             ..Limits::default()
         };
 
-        assert!(
+        assert2::assert!(
             limits
                 .validate_query_range_ms(StartMs(0), EndMs(60_000))
                 .is_ok()
@@ -254,7 +254,7 @@ mod tests {
         let err = limits
             .validate_query_range_ms(StartMs(0), EndMs(120_000))
             .unwrap_err();
-        assert!(
+        assert2::assert!(
             err == LimitError::QueryLengthExceeded {
                 limit_secs: 60,
                 observed_secs: 120,
@@ -273,7 +273,7 @@ mod tests {
             ..Limits::default()
         };
 
-        assert!(
+        assert2::assert!(
             limits
                 .validate_query_range_ms(StartMs(0), EndMs(120_000))
                 .is_ok()
@@ -291,7 +291,7 @@ mod tests {
             .validate_query_range_ms(StartMs(0), EndMs(i64::MAX))
             .unwrap_err();
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             LimitError::QueryLengthExceeded {
                 limit_secs: 60,

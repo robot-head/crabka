@@ -76,11 +76,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         entry.kvno,
         entry.key.len()
     );
-    assert_eq!(
-        entry.enctype, 18,
-        "expected aes256-cts-hmac-sha1-96 (enctype 18)"
-    );
-    assert_eq!(entry.key.len(), 32, "aes256 key must be 32 bytes");
+    assert2::assert!(entry.enctype == 18);
+    assert2::assert!(entry.key.len() == 32);
     println!(
         "    OK: extracted {}-byte aes256 service key",
         entry.key.len()
@@ -153,7 +150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         init_result.status,
         ap_req.len()
     );
-    assert!(!ap_req.is_empty(), "client produced no AP-REQ token");
+    assert2::assert!(!ap_req.is_empty());
     println!("    OK: client produced AP-REQ");
 
     // ---- Operation 3: server accept (consume AP-REQ) ----------------------
@@ -188,11 +185,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     // sspi lowercases the realm in client_upn(); compare case-insensitively.
     let expected = format!("alice@{}", REALM.to_ascii_lowercase());
-    assert_eq!(
-        recovered.inner().to_ascii_lowercase(),
-        expected,
-        "recovered principal mismatch"
-    );
+    assert2::assert!(recovered.inner().to_ascii_lowercase() == expected);
     println!("    OK: source principal recovered and matches alice@{REALM}");
 
     // Finish mutual-auth: feed the AP-REP back to the client so the client
@@ -250,10 +243,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         recovered_payload.len(),
         recovered_payload
     );
-    assert_eq!(
-        recovered_payload, plaintext,
-        "wrap/unwrap round-trip mismatch"
-    );
+    assert2::assert!(recovered_payload == plaintext);
     println!("    OK: wrap/unwrap round-trip succeeded with confidentiality disabled");
 
     println!("\n== ALL FOUR OPERATIONS SUCCEEDED -> GO ==");

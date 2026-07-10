@@ -9,7 +9,7 @@ fn assert_matches_fixture(wire: &crabka_client_streams::topology::WireTopology, 
     )
     .unwrap();
     let actual = serde_json::to_value(wire).unwrap();
-    assert_eq!(actual, expected, "wire topology != JVM fixture {fixture}");
+    assert2::assert!(actual == expected);
 }
 
 #[test]

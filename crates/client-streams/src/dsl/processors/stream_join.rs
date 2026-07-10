@@ -319,9 +319,9 @@ mod tests {
 
         // exactly one forward: "ab1" at max(5,3)=5
         let (_, rec) = buffer.pop_front().unwrap();
-        assert_eq!(buffer.len(), 0);
-        assert_eq!(*rec.value.downcast::<String>().unwrap(), "ab1".to_string());
-        assert_eq!(rec.timestamp, 5);
+        assert2::assert!(buffer.len() == 0);
+        assert2::assert!(*rec.value.downcast::<String>().unwrap() == "ab1".to_string());
+        assert2::assert!(rec.timestamp == 5);
     }
 
     #[tokio::test]
@@ -371,11 +371,11 @@ mod tests {
         // Two forwards: "ax" and "ay", both at max(5,4)=5
         let (_, rec1) = buffer.pop_front().unwrap();
         let (_, rec2) = buffer.pop_front().unwrap();
-        assert_eq!(buffer.len(), 0);
-        assert_eq!(*rec1.value.downcast::<String>().unwrap(), "ax".to_string());
-        assert_eq!(rec1.timestamp, 5);
-        assert_eq!(*rec2.value.downcast::<String>().unwrap(), "ay".to_string());
-        assert_eq!(rec2.timestamp, 5);
+        assert2::assert!(buffer.len() == 0);
+        assert2::assert!(*rec1.value.downcast::<String>().unwrap() == "ax".to_string());
+        assert2::assert!(rec1.timestamp == 5);
+        assert2::assert!(*rec2.value.downcast::<String>().unwrap() == "ay".to_string());
+        assert2::assert!(rec2.timestamp == 5);
     }
 
     /// A left-side processor with no matching right record buffers the record into
@@ -447,7 +447,7 @@ mod tests {
                 .await;
         }
         // Nothing emitted yet (buffered, window not closed at stream_time=5).
-        assert!(buffer.is_empty(), "expected buffered, got {}", buffer.len());
+        assert2::assert!(buffer.is_empty());
 
         // Second A at t=100 advances stream_time past 5+after(10) → close-scan emits
         // the buffered left record (joiner(a, None) = "a") at its own ts=5. The
@@ -475,12 +475,8 @@ mod tests {
         // The close-scan emitted the buffered ts=5 record as a null-padded left
         // result ("a") at ts=5.
         let (_, rec) = buffer.pop_front().unwrap();
-        assert_eq!(buffer.len(), 0, "expected one close-emitted record");
-        assert_eq!(
-            *rec.value.downcast::<String>().unwrap(),
-            "a".to_string(),
-            "expected one close-emitted record"
-        );
-        assert_eq!(rec.timestamp, 5, "expected one close-emitted record");
+        assert2::assert!(buffer.len() == 0);
+        assert2::assert!(*rec.value.downcast::<String>().unwrap() == "a".to_string());
+        assert2::assert!(rec.timestamp == 5);
     }
 }

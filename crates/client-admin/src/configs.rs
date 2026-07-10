@@ -184,7 +184,7 @@ impl AdminClient {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -192,12 +192,12 @@ mod tests {
     fn dynamic_topic_config_source_is_one() {
         // Guard so a future protocol change can't silently flip the
         // filter we use to distinguish overrides from broker defaults.
-        assert!(DYNAMIC_TOPIC_CONFIG_SOURCE == 1);
+        assert2::assert!(DYNAMIC_TOPIC_CONFIG_SOURCE == 1);
     }
 
     #[test]
     fn resource_type_topic_is_two() {
-        assert!(RESOURCE_TYPE_TOPIC == 2);
+        assert2::assert!(RESOURCE_TYPE_TOPIC == 2);
     }
 
     /// Spec test name: `describe_configs_filters_to_dynamic_topic`.
@@ -243,7 +243,7 @@ mod tests {
             },
         ];
         let r = filter_dynamic_overrides("foo".into(), entries);
-        assert!(
+        assert2::assert!(
             r == TopicConfigOverrides {
                 topic: "foo".to_string(),
                 overrides: BTreeMap::from([
@@ -279,7 +279,7 @@ mod tests {
             ..Default::default()
         };
         let parsed = parse_describe_configs_resource(r).expect("Ok branch");
-        assert!(
+        assert2::assert!(
             parsed
                 == TopicConfigOverrides {
                     topic: "foo".to_string(),
@@ -339,7 +339,7 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_incremental_alter_outcomes(resp);
-        assert!(
+        assert2::assert!(
             outs == vec![AlterConfigsOutcome {
                 topic: "foo".to_string(),
                 error: None,
@@ -372,7 +372,7 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_incremental_alter_outcomes(resp);
-        assert!(
+        assert2::assert!(
             outs == vec![
                 AlterConfigsOutcome {
                     topic: "ok".to_string(),

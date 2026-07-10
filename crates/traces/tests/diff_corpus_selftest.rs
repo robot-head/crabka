@@ -1,7 +1,7 @@
 #[path = "support/diff_corpus.rs"]
 mod diff_corpus;
 
-use assert2::{assert, check};
+use assert2::check;
 use diff_corpus::*;
 use serde_json::json;
 
@@ -40,8 +40,8 @@ fn corpus_is_nonempty_and_covers_key_operators() {
     check!(queries.iter().any(|case| case.traceql.contains(">>")));
     check!(queries.iter().any(|case| case.traceql.contains('~')));
     check!(queries.iter().any(|case| case.traceql.contains("count(")));
-    assert!(!seed_dataset().is_empty());
-    assert!(!by_id_corpus().is_empty());
+    assert2::assert!(!seed_dataset().is_empty());
+    assert2::assert!(!by_id_corpus().is_empty());
 }
 
 #[test]
@@ -82,9 +82,6 @@ fn otlp_payload_uses_seed_dataset() {
     let seed = seed_dataset();
     let payload = to_otlp(&seed);
 
-    assert_eq!(payload.resource_spans.len(), seed.len());
-    assert_eq!(
-        payload.resource_spans[0].scope_spans[0].spans.len(),
-        seed[0].spans.len()
-    );
+    assert2::assert!(payload.resource_spans.len() == seed.len());
+    assert2::assert!(payload.resource_spans[0].scope_spans[0].spans.len() == seed[0].spans.len());
 }

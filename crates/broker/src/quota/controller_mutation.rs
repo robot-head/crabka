@@ -48,7 +48,6 @@ pub fn consume_controller_mutation_quota(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::quota::test_support::image_with_quota as quota_image;
@@ -62,7 +61,7 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
         let buckets = QuotaBuckets::new();
         let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 0);
-        assert!(delay == Duration::ZERO);
+        assert2::assert!(delay == Duration::ZERO);
     }
 
     #[test]
@@ -72,7 +71,7 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 10.0);
         let buckets = QuotaBuckets::new();
         let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 5);
-        assert!(delay == Duration::ZERO);
+        assert2::assert!(delay == Duration::ZERO);
     }
 
     #[test]
@@ -82,6 +81,6 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
         let buckets = QuotaBuckets::new();
         let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 100);
-        assert!(delay == Duration::from_secs(1));
+        assert2::assert!(delay == Duration::from_secs(1));
     }
 }

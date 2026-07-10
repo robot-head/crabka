@@ -191,20 +191,19 @@ fn user_owner_ref(obj: &KafkaUser) -> Result<OwnerReference, ReconcileError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn tls_principal_format() {
-        assert!(tls_principal("alice") == "User:CN=alice");
+        assert2::assert!(tls_principal("alice") == "User:CN=alice");
     }
 
     #[test]
     fn is_cert_expiring_soon_boundary_cases() {
         let now = OffsetDateTime::now_utc();
 
-        for (days_from_now, want, why) in [
+        for (days_from_now, want, _why) in [
             (60, false, "60d > 30d window: not expiring"),
             (
                 30,
@@ -215,7 +214,7 @@ mod tests {
             (-1, true, "already past notAfter: expiring"),
         ] {
             let not_after = now + time::Duration::days(days_from_now);
-            assert!(is_cert_expiring_soon(&not_after, 30, now) == want, "{why}");
+            assert2::assert!(is_cert_expiring_soon(&not_after, 30, now) == want);
         }
     }
 
@@ -229,17 +228,14 @@ mod tests {
         let expected = before + time::Duration::days(365);
 
         let delta = (parsed - expected).whole_seconds().abs();
-        assert!(
-            delta <= 5,
-            "notAfter delta {delta}s exceeds ±5s tolerance (parsed={parsed}, expected={expected})"
-        );
+        assert2::assert!(delta <= 5);
     }
 
     #[test]
     fn cert_not_after_from_pem_returns_none_on_malformed_input() {
         // The last case is valid PEM framing with a garbage body —
         // exercises the parse_x509 failure branch.
-        for (name, input) in [
+        for (_name, input) in [
             ("not PEM framing", "not a pem"),
             ("empty input", ""),
             (
@@ -247,13 +243,13 @@ mod tests {
                 "-----BEGIN CERTIFICATE-----\nQUFB\n-----END CERTIFICATE-----",
             ),
         ] {
-            assert!(cert_not_after_from_pem(input).is_none(), "case {name}");
+            assert2::assert!(cert_not_after_from_pem(input).is_none());
         }
     }
 
     #[test]
     fn read_pem_key_cases() {
-        for (name, data, expected) in [
+        for (_name, data, expected) in [
             (
                 "key present",
                 Some(BTreeMap::from([(
@@ -284,11 +280,7 @@ mod tests {
                 data,
                 ..Default::default()
             };
-            assert_eq!(
-                read_pem_key(&secret, "ca.key").as_deref(),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(read_pem_key(&secret, "ca.key").as_deref() == expected);
         }
     }
 
@@ -300,14 +292,14 @@ mod tests {
             data: Some(data),
             ..Default::default()
         };
-        assert!(read_user_cert_not_after(&s).is_none());
+        assert2::assert!(read_user_cert_not_after(&s).is_none());
     }
 
     #[test]
     fn format_rfc3339_round_trips() {
         let t = OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("unix ts");
         let s = format_rfc3339(t).expect("formats");
-        assert!(s == "2023-11-14T22:13:20Z");
+        assert2::assert!(s == "2023-11-14T22:13:20Z");
     }
 
     fn dummy_ku() -> KafkaUser {
@@ -329,7 +321,7 @@ mod tests {
 
     #[test]
     fn render_user_cert_secret_cases() {
-        for (name, cluster, cert_pem, key_pem, ca_pem) in [
+        for (_name, cluster, cert_pem, key_pem, ca_pem) in [
             (
                 "cluster label populated",
                 Some("demo"),
@@ -394,7 +386,7 @@ mod tests {
                 ])),
                 ..Default::default()
             };
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 
@@ -402,7 +394,7 @@ mod tests {
     fn user_owner_ref_errors_on_missing_uid() {
         let mut ku = dummy_ku();
         ku.metadata.uid = None;
-        assert!(matches!(
+        assert2::assert!(matches!(
             user_owner_ref(&ku),
             Err(ReconcileError::MissingUid)
         ));
@@ -412,7 +404,7 @@ mod tests {
     fn user_owner_ref_carries_block_owner_deletion() {
         let ku = dummy_ku();
         let owner = user_owner_ref(&ku).expect("owner ref");
-        assert!(
+        assert2::assert!(
             owner
                 == OwnerReference {
                     api_version: "crabka.io/v1alpha1".into(),

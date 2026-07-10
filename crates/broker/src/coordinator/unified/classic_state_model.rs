@@ -285,15 +285,12 @@ impl Model for ClassicModel {
                 s.clock += 1;
                 let dropped = s.g.expire_dead_members(at(s.clock));
                 for id in &dropped {
-                    assert!(
-                        !last.g.members.get(id).is_some_and(Member::is_static),
-                        "static member {id} was expired"
-                    );
+                    assert2::assert!(!last.g.members.get(id).is_some_and(Member::is_static));
                 }
             }
         }
-        assert!(index_coherent(&s.g), "index coherence violated: {:?}", s.g);
-        assert!(single_owner(&s.g), "single-owner violated: {:?}", s.g);
+        assert2::assert!(index_coherent(&s.g));
+        assert2::assert!(single_owner(&s.g));
         Some(s)
     }
 
@@ -343,16 +340,9 @@ fn run(model: ClassicModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
-    assert!(
-        checker.state_count() < TARGET_STATE_COUNT,
-        "[{label}] truncated at the state-count target — not exhaustive"
-    );
-    assert!(
-        checker.unique_state_count() < MAX_UNIQUE_STATES,
-        "[{label}] unique-state bound exceeded ({})",
-        checker.unique_state_count()
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < TARGET_STATE_COUNT);
+    assert2::assert!(checker.unique_state_count() < MAX_UNIQUE_STATES);
     checker.assert_properties();
 }
 

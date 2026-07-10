@@ -24,7 +24,6 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/api_key.rs"));
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -32,17 +31,17 @@ mod tests {
     fn all_keys_unique() {
         let mut seen = std::collections::HashSet::new();
         for k in ApiKey::ALL {
-            assert!(seen.insert(*k as i16), "duplicate: {k:?}");
+            assert2::assert!(seen.insert(*k as i16));
         }
     }
 
     #[test]
     fn from_i16_round_trip() {
         for k in ApiKey::ALL {
-            assert!(ApiKey::from_i16(*k as i16) == Some(*k));
+            assert2::assert!(ApiKey::from_i16(*k as i16) == Some(*k));
         }
-        for (case, raw) in [("negative", -1), ("unknown positive", 9999)] {
-            assert!(ApiKey::from_i16(raw) == None, "case {case}");
+        for (_case, raw) in [("negative", -1), ("unknown positive", 9999)] {
+            assert2::assert!(ApiKey::from_i16(raw) == None);
         }
     }
 }

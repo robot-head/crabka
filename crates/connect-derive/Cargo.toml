@@ -17,13 +17,13 @@ proc-macro = true
 workspace = true
 
 [dependencies]
+assert2 = { workspace = true }
 proc-macro2 = { workspace = true }
 proc-macro-crate = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 # Dev-only path dependency. Keep the crates.io requirement on the released
 # minor line so `cargo publish` can package this crate before crabka-connect is
 # published at the same workspace version.

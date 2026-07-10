@@ -360,7 +360,7 @@ pub(crate) async fn handle(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_metadata::TopicRecord;
     use crabka_protocol::owned::create_partitions_request::{
         CreatePartitionsAssignment, CreatePartitionsTopic,
@@ -491,11 +491,11 @@ mod tests {
         ];
         let out = resolve_new_partition_assignments(None, &brokers, 0, 3, 2)
             .expect("round-robin should succeed");
-        assert!(out.len() == 3);
+        assert2::assert!(out.len() == 3);
         for r in &out {
-            assert!(r.len() == 2, "each replica list must be rf=2");
+            assert2::assert!(r.len() == 2);
             for b in r {
-                assert!(brokers.contains(b));
+                assert2::assert!(brokers.contains(b));
             }
         }
     }
@@ -513,7 +513,7 @@ mod tests {
         let new_tail = resolve_new_partition_assignments(None, &brokers, 2, 2, 2)
             .expect("round-robin tail should succeed");
         let full = crate::handlers::create_topics::round_robin_replicas(&brokers, 4, 2);
-        assert!(new_tail == full[2..]);
+        assert2::assert!(new_tail == full[2..]);
     }
 
     #[test]
@@ -521,7 +521,7 @@ mod tests {
         let brokers: Vec<NodeId> = vec![crabka_audit::NodeId(0), crabka_audit::NodeId(1)];
         let err = resolve_new_partition_assignments(None, &brokers, 0, 1, 3)
             .expect_err("rf=3 against 2 brokers must fail");
-        assert!(err.0 == codes::INVALID_REPLICATION_FACTOR);
+        assert2::assert!(err.0 == codes::INVALID_REPLICATION_FACTOR);
     }
 
     #[test]
@@ -535,7 +535,7 @@ mod tests {
         let provided = vec![assn(&[3, 1]), assn(&[2, 0]), assn(&[1, 3])];
         let out = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
             .expect("explicit assignments should pass validation");
-        assert!(
+        assert2::assert!(
             out == vec![
                 vec![NodeId(3), NodeId(1)],
                 vec![NodeId(2), NodeId(0)],
@@ -604,7 +604,7 @@ mod tests {
         ];
 
         for (
-            case,
+            _case,
             broker_ids,
             provided,
             new_partition_count,
@@ -627,10 +627,7 @@ mod tests {
             } else {
                 err.1.contains(expected_message)
             };
-            assert!(
-                (err.0, message_matches) == (codes::INVALID_REPLICA_ASSIGNMENT, true),
-                "case: {case}; error: {err:?}"
-            );
+            assert2::assert!((err.0, message_matches) == (codes::INVALID_REPLICA_ASSIGNMENT, true));
         }
     }
 
@@ -661,7 +658,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -713,7 +710,7 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -752,8 +749,8 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(
+        assert2::assert!(resp == expected);
+        assert2::assert!(
             broker_handle
                 .controller_image_for_test()
                 .partitions_of("stable")
@@ -785,8 +782,8 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(
+        assert2::assert!(resp == expected);
+        assert2::assert!(
             broker_handle
                 .controller_image_for_test()
                 .partitions_of("dry-run")
@@ -821,8 +818,8 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(
+        assert2::assert!(resp == expected);
+        assert2::assert!(
             broker_handle
                 .controller_image_for_test()
                 .partitions_of("grow")
@@ -857,7 +854,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         check!(
             elapsed >= std::time::Duration::from_millis(450),
             "handler must wait for the advertised throttle, elapsed={elapsed:?}"

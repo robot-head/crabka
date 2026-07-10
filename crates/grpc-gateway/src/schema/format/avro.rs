@@ -95,13 +95,13 @@ mod tests {
         let json_input = br#"{"id": 1, "name": "a"}"#;
 
         let bytes = serialize(SCHEMA, json_input).expect("serialize should succeed");
-        assert!(!bytes.is_empty(), "encoded bytes should not be empty");
+        assert2::assert!(!bytes.is_empty());
 
         let json_out = deserialize(SCHEMA, &bytes).expect("deserialize should succeed");
 
         let expected: serde_json::Value = serde_json::from_slice(json_input).unwrap();
         let actual: serde_json::Value = serde_json::from_slice(&json_out).unwrap();
-        assert_eq!(expected, actual, "round-tripped JSON should match input");
+        assert2::assert!(expected == actual);
     }
 
     #[test]
@@ -115,7 +115,7 @@ mod tests {
             ),
             ("missing_field", br#"{"id": 1}"#.as_slice(), false),
         ] {
-            assert_eq!(validate(SCHEMA, json).is_ok(), valid, "case {name}");
+            assert2::assert!(validate(SCHEMA, json).is_ok() == valid);
         }
     }
 
@@ -128,7 +128,7 @@ mod tests {
                 serialize("not-a-valid-schema", br#"{"id":1,"name":"a"}"#),
             ),
         ] {
-            assert!(result.is_err(), "case {name}");
+            assert2::assert!(result.is_err());
         }
     }
 }

@@ -169,7 +169,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use assert2::{assert, check};
+    use assert2::check;
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
@@ -202,7 +202,7 @@ mod tests {
         tracing::subscriber::with_default(subscriber, emit);
         let out = String::from_utf8(buf.lock().unwrap().clone()).expect("utf8 log output");
         // The crux of the fix: captured logs carry no ANSI escape sequences.
-        assert!(!out.contains('\u{1b}'));
+        assert2::assert!(!out.contains('\u{1b}'));
         let line = out.lines().next().expect("a log line");
         serde_json::from_str(line).expect("each log line is valid JSON")
     }
@@ -225,7 +225,7 @@ mod tests {
             ("sasl", serde_json::json!(false)),
             ("port", serde_json::json!(9092)),
         ] {
-            assert!(v[field] == want, "field {field:?} in {v}");
+            assert2::assert!(v[field] == want);
         }
         check!(v["target"].is_string());
         check!(v["timestamp"].as_str().is_some_and(|t| t.ends_with('Z')));
@@ -236,14 +236,14 @@ mod tests {
     #[test]
     fn maps_warn_to_warning_severity() {
         let v = capture(|| tracing::warn!("disk almost full"));
-        assert_eq!(&v["severity"], &serde_json::json!("WARNING"));
-        assert_eq!(&v["message"], &serde_json::json!("disk almost full"));
+        assert2::assert!(&v["severity"] == &serde_json::json!("WARNING"));
+        assert2::assert!(&v["message"] == &serde_json::json!("disk almost full"));
     }
 
     #[test]
     fn maps_trace_to_debug_severity() {
         let v = capture(|| tracing::trace!("fine-grained detail"));
-        assert!(v["severity"] == "DEBUG");
+        assert2::assert!(v["severity"] == "DEBUG");
     }
 
     #[test]
@@ -254,7 +254,7 @@ mod tests {
         let v = capture(|| {
             tracing::info!(offset = 42_u64, ratio = 0.5_f64, "metrics");
         });
-        assert_eq!(&v["offset"], &serde_json::json!(42_u64));
-        assert_eq!(&v["ratio"], &serde_json::json!(0.5));
+        assert2::assert!(&v["offset"] == &serde_json::json!(42_u64));
+        assert2::assert!(&v["ratio"] == &serde_json::json!(0.5));
     }
 }

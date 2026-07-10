@@ -156,21 +156,12 @@ fn own_sentinels(tenant: &str) -> &'static [&'static str] {
 
 /// Assert a successful read for `tenant` contains its own data and none of the
 /// foreign tenant's sentinel values.
-fn assert_isolated(tenant: &str, surface: &str, status: reqwest::StatusCode, body: &str) {
-    assert!(
-        status.is_success(),
-        "{surface}: expected success for {tenant}, got {status}: {body}"
-    );
+fn assert_isolated(tenant: &str, _surface: &str, status: reqwest::StatusCode, body: &str) {
+    assert2::assert!(status.is_success());
     let parsed: Value = serde_json::from_str(body).expect("json body");
-    assert_eq!(
-        parsed["status"], "success",
-        "{surface}: status field for {tenant}: {body}"
-    );
+    assert2::assert!(parsed["status"] == "success");
     for foreign in foreign_sentinels(tenant) {
-        assert!(
-            !body.contains(foreign),
-            "{surface}: {tenant} response leaked foreign value `{foreign}`: {body}"
-        );
+        assert2::assert!(!body.contains(foreign));
     }
 }
 
@@ -179,21 +170,15 @@ fn assert_isolated(tenant: &str, surface: &str, status: reqwest::StatusCode, bod
 /// envelope. Verifies HTTP success and that no foreign sentinel leaks through.
 fn assert_cardinality_isolated(
     tenant: &str,
-    surface: &str,
+    _surface: &str,
     status: reqwest::StatusCode,
     body: &str,
 ) {
-    assert!(
-        status.is_success(),
-        "{surface}: expected success for {tenant}, got {status}: {body}"
-    );
+    assert2::assert!(status.is_success());
     // Must be valid JSON, but Mimir cardinality responses have no status field.
     let _: Value = serde_json::from_str(body).expect("json body");
     for foreign in foreign_sentinels(tenant) {
-        assert!(
-            !body.contains(foreign),
-            "{surface}: {tenant} response leaked foreign value `{foreign}`: {body}"
-        );
+        assert2::assert!(!body.contains(foreign));
     }
 }
 
@@ -205,17 +190,11 @@ async fn instant_query_is_tenant_isolated() {
 
     let (status, body) = get_with_tenant(&client, addr, path, ORG_A).await;
     assert_isolated(ORG_A, "query", status, &body);
-    assert!(
-        own_sentinels(ORG_A).iter().any(|own| body.contains(own)),
-        "query: org-a should see its own data: {body}"
-    );
+    assert2::assert!(own_sentinels(ORG_A).iter().any(|own| body.contains(own)));
 
     let (status, body) = get_with_tenant(&client, addr, path, ORG_B).await;
     assert_isolated(ORG_B, "query", status, &body);
-    assert!(
-        own_sentinels(ORG_B).iter().any(|own| body.contains(own)),
-        "query: org-b should see its own data: {body}"
-    );
+    assert2::assert!(own_sentinels(ORG_B).iter().any(|own| body.contains(own)));
 }
 
 #[tokio::test]
@@ -239,17 +218,11 @@ async fn series_is_tenant_isolated() {
 
     let (status, body) = get_with_tenant(&client, addr, path, ORG_A).await;
     assert_isolated(ORG_A, "series", status, &body);
-    assert!(
-        body.contains(A_JOB),
-        "series: org-a should see its own series: {body}"
-    );
+    assert2::assert!(body.contains(A_JOB));
 
     let (status, body) = get_with_tenant(&client, addr, path, ORG_B).await;
     assert_isolated(ORG_B, "series", status, &body);
-    assert!(
-        body.contains(B_JOB),
-        "series: org-b should see its own series: {body}"
-    );
+    assert2::assert!(body.contains(B_JOB));
 }
 
 #[tokio::test]
@@ -274,16 +247,10 @@ async fn label_values_is_tenant_isolated() {
     let path = "/api/v1/label/job/values?start=10&end=20";
     let (status, body) = get_with_tenant(&client, addr, path, ORG_A).await;
     assert_isolated(ORG_A, "label/job/values", status, &body);
-    assert!(
-        body.contains(A_JOB),
-        "label_values: org-a should see its own job value: {body}"
-    );
+    assert2::assert!(body.contains(A_JOB));
     let (status, body) = get_with_tenant(&client, addr, path, ORG_B).await;
     assert_isolated(ORG_B, "label/job/values", status, &body);
-    assert!(
-        body.contains(B_JOB),
-        "label_values: org-b should see its own job value: {body}"
-    );
+    assert2::assert!(body.contains(B_JOB));
 
     // `instance` and `zone` values must also be partitioned.
     for label in ["instance", "zone"] {
@@ -303,17 +270,11 @@ async fn query_exemplars_is_tenant_isolated() {
 
     let (status, body) = get_with_tenant(&client, addr, path, ORG_A).await;
     assert_isolated(ORG_A, "query_exemplars", status, &body);
-    assert!(
-        body.contains(A_TRACE),
-        "query_exemplars: org-a should see its own exemplar: {body}"
-    );
+    assert2::assert!(body.contains(A_TRACE));
 
     let (status, body) = get_with_tenant(&client, addr, path, ORG_B).await;
     assert_isolated(ORG_B, "query_exemplars", status, &body);
-    assert!(
-        body.contains(B_TRACE),
-        "query_exemplars: org-b should see its own exemplar: {body}"
-    );
+    assert2::assert!(body.contains(B_TRACE));
 }
 
 #[tokio::test]
@@ -340,15 +301,9 @@ async fn cardinality_endpoints_are_tenant_isolated() {
     // tenant's own job value when it lists values.
     let path = "/api/v1/cardinality/label_values?label_names%5B%5D=job";
     let (_, body) = get_with_tenant(&client, addr, path, ORG_A).await;
-    assert!(
-        !body.contains(B_JOB),
-        "cardinality/label_values: org-a leaked org-b job: {body}"
-    );
+    assert2::assert!(!body.contains(B_JOB));
     let (_, body) = get_with_tenant(&client, addr, path, ORG_B).await;
-    assert!(
-        !body.contains(A_JOB),
-        "cardinality/label_values: org-b leaked org-a job: {body}"
-    );
+    assert2::assert!(!body.contains(A_JOB));
 }
 
 #[tokio::test]
@@ -374,16 +329,9 @@ async fn read_surfaces_reject_missing_tenant_header() {
             .expect("send request");
         let status = response.status();
         let body = response.text().await.expect("response text");
-        assert_eq!(
-            status,
-            reqwest::StatusCode::BAD_REQUEST,
-            "{path}: missing tenant should be rejected, got {status}: {body}"
-        );
+        assert2::assert!(status == reqwest::StatusCode::BAD_REQUEST);
         let parsed: Value = serde_json::from_str(&body).expect("json body");
-        assert_eq!(parsed["status"], "error", "{path}: error status: {body}");
-        assert_eq!(
-            parsed["errorType"], "bad_data",
-            "{path}: bad_data errorType: {body}"
-        );
+        assert2::assert!(parsed["status"] == "error");
+        assert2::assert!(parsed["errorType"] == "bad_data");
     }
 }

@@ -159,7 +159,7 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
     use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 
@@ -199,10 +199,7 @@ mod tests {
             {
                 return;
             }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "broker did not become controller leader"
-            );
+            assert2::assert!(std::time::Instant::now() <= deadline);
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     }
@@ -222,7 +219,7 @@ mod tests {
             max_version: crate::features::METADATA_VERSION_MAX,
             ..Default::default()
         };
-        assert!(mv == &expected);
+        assert2::assert!(mv == &expected);
     }
 
     #[test]
@@ -231,8 +228,8 @@ mod tests {
         // finalized features and the schema sentinel epoch `-1`, which JVM
         // clients consume as `MetadataVersion.UNKNOWN`.
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
-        assert!(finalized_feature_keys(&image).is_empty());
-        assert!(image.finalized_features_epoch() == -1);
+        assert2::assert!(finalized_feature_keys(&image).is_empty());
+        assert2::assert!(image.finalized_features_epoch() == -1);
     }
 
     #[test]
@@ -263,7 +260,7 @@ mod tests {
                 ..Default::default()
             },
         ];
-        assert!(keys == expected);
+        assert2::assert!(keys == expected);
     }
 
     #[test]
@@ -271,14 +268,8 @@ mod tests {
         let table = crate::api_catalog::supported_apis();
         let produce = table.iter().find(|v| v.api_key == 0).expect("produce");
         let fetch = table.iter().find(|v| v.api_key == 1).expect("fetch");
-        assert!(
-            produce.min_version == 0,
-            "Produce min must be 0 to advertise the legacy v0-2 support"
-        );
-        assert!(
-            fetch.min_version == 0,
-            "Fetch min must be 0 to advertise the legacy v0-3 support"
-        );
+        assert2::assert!(produce.min_version == 0);
+        assert2::assert!(fetch.min_version == 0);
     }
 
     #[test]
@@ -287,7 +278,7 @@ mod tests {
         let table = crate::api_catalog::supported_apis();
         let by_key = |k: i16| table.iter().find(|v| v.api_key == k);
 
-        for (case, key, max) in [
+        for (_case, key, max) in [
             (
                 "add raft voter",
                 80i16,
@@ -311,17 +302,14 @@ mod tests {
                 max_version: max,
                 ..Default::default()
             };
-            assert!(v == &expected, "case: {case}");
+            assert2::assert!(v == &expected);
         }
 
         // DescribeQuorum (55) max follows its schema const — now v2 (KIP-853
         // adds VoterDirectoryId + Nodes).
         let dq = by_key(55).expect("describe_quorum advertised");
-        assert!(
-            dq.max_version == owned::describe_quorum_request::MAX_VERSION,
-            "DescribeQuorum max tracks the codegen const"
-        );
-        assert!(dq.max_version == 2, "DescribeQuorum is v2 after KIP-853");
+        assert2::assert!(dq.max_version == owned::describe_quorum_request::MAX_VERSION);
+        assert2::assert!(dq.max_version == 2);
     }
 
     #[tokio::test]
@@ -329,7 +317,7 @@ mod tests {
         let (broker_handle, _dir) = start_broker().await;
         let broker = broker_handle.broker_arc_for_test();
 
-        for (case, name, version) in [
+        for (_case, name, version) in [
             ("empty client name", "", "1.0.0"),
             ("empty client version", "crabka-test", ""),
         ] {
@@ -342,7 +330,7 @@ mod tests {
                 error_code: codes::INVALID_REQUEST,
                 ..Default::default()
             };
-            assert!(resp == expected, "case: {case}");
+            assert2::assert!(resp == expected);
         }
 
         broker_handle.shutdown().await;
@@ -366,7 +354,7 @@ mod tests {
             api_keys: crate::api_catalog::supported_apis(),
             ..Default::default()
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
 
         broker_handle.shutdown().await;
     }
@@ -385,7 +373,7 @@ mod tests {
             .await
             .expect("submit finalized feature");
         let image = broker.controller.current_image();
-        assert!(image.finalized_features_epoch() > 0);
+        assert2::assert!(image.finalized_features_epoch() > 0);
 
         let req = request("crabka-test", "1.0.0");
         let bytes = handle(&broker, API_VERSIONS_V3, 7, &req)
@@ -400,7 +388,7 @@ mod tests {
             finalized_features: finalized_feature_keys(&image),
             ..Default::default()
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
 
         broker_handle.shutdown().await;
     }
@@ -422,19 +410,19 @@ mod tests {
             "a", // single alnum char — allowed
             "1.2.3.4",
         ] {
-            assert!(is_valid_client_info(s), "{s:?} should be valid");
+            assert2::assert!(is_valid_client_info(s));
         }
     }
 
     #[test]
     fn valid_client_info_rejects_empty() {
-        assert!(!is_valid_client_info(""));
+        assert2::assert!(!is_valid_client_info(""));
     }
 
     #[test]
     fn valid_client_info_rejects_leading_or_trailing_special() {
         for s in ["-leading", "trailing-", ".dotstart", "dotend.", "-only-"] {
-            assert!(!is_valid_client_info(s), "{s:?} should be rejected");
+            assert2::assert!(!is_valid_client_info(s));
         }
     }
 
@@ -450,7 +438,7 @@ mod tests {
             "has\"quote",
             "café", // non-ASCII alphanumeric — KIP-511 regex is ASCII-only
         ] {
-            assert!(!is_valid_client_info(s), "{s:?} should be rejected");
+            assert2::assert!(!is_valid_client_info(s));
         }
     }
 }

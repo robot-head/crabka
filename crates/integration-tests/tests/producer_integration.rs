@@ -9,7 +9,6 @@
 
 use std::time::Duration;
 
-use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
@@ -51,10 +50,7 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "create_topic failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -70,10 +66,7 @@ async fn idempotence_plus_acks_zero_rejects() {
         .acks(Acks::Zero)
         .build()
         .await;
-    assert!(
-        matches!(res, Err(ProducerError::InvalidConfig(_))),
-        "expected InvalidConfig, got {res:?}"
-    );
+    assert2::assert!(matches!(res, Err(ProducerError::InvalidConfig(_))));
     broker.shutdown().await;
 }
 
@@ -142,7 +135,7 @@ async fn idempotent_produce_then_consume() {
             .await
             .expect("oneshot")
             .unwrap_or_else(|e| panic!("record {i} failed: {e:?}"));
-        assert_eq!(m.partition, 0, "single-partition topic");
+        assert2::assert!(m.partition == 0);
     }
 
     // Consume them back through a group.
@@ -168,10 +161,7 @@ async fn idempotent_produce_then_consume() {
             .expect("poll")
             .len();
     }
-    assert!(
-        seen == PRODUCE_N,
-        "expected {PRODUCE_N} records, saw {seen}"
-    );
+    assert2::assert!(seen == PRODUCE_N);
 
     consumer.close().await.expect("consumer close");
     producer.close().await.expect("producer close");

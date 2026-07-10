@@ -75,7 +75,7 @@ async fn duplicate_idempotency_key_produces_once() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    assert!(warmed);
+    assert2::assert!(warmed);
     let engine = Arc::new(DedupEngine::new(
         &bootstrap,
         "gw-dedup",
@@ -102,10 +102,10 @@ async fn duplicate_idempotency_key_produces_once() {
     let anon = anon();
     let first = core.produce(mk(), &anon).await.unwrap();
     let second = core.produce(mk(), &anon).await.unwrap();
-    assert!(!first.deduplicated);
-    assert!(second.deduplicated);
-    assert_eq!(second.partition, first.partition);
-    assert_eq!(second.offset, first.offset);
+    assert2::assert!(!first.deduplicated);
+    assert2::assert!(second.deduplicated);
+    assert2::assert!(second.partition == first.partition);
+    assert2::assert!(second.offset == first.offset);
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap.clone())
         .group_id("dedup-count")
@@ -123,7 +123,7 @@ async fn duplicate_idempotency_key_produces_once() {
             .unwrap()
             .len();
     }
-    assert_eq!(count, 1);
+    assert2::assert!(count == 1);
     token.cancel();
     let _ = own.await;
     broker.shutdown().await;
@@ -182,13 +182,13 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    assert!(warm, "store never warmed");
+    assert2::assert!(warm);
     // Sole member owns all 4 partitions.
     for p in 0..4u32 {
-        assert!(store.owns(p), "should own partition {p}");
+        assert2::assert!(store.owns(p));
     }
     // Map rebuilt from the topic.
-    assert_eq!(store.get("key-A").map(|c| c.offset), Some(Offset(9)));
+    assert2::assert!(store.get("key-A").map(|c| c.offset) == Some(Offset(9)));
 
     token.cancel();
     let _ = handle.await;
@@ -250,7 +250,7 @@ async fn concurrent_duplicates_produce_once() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
-    assert!(warmed);
+    assert2::assert!(warmed);
     let engine = Arc::new(DedupEngine::new(
         &bootstrap,
         "gw-dedup2",
@@ -294,10 +294,7 @@ async fn concurrent_duplicates_produce_once() {
             deduped += 1;
         }
     }
-    assert_eq!(
-        deduped, 7,
-        "exactly one of 8 should be the original producer"
-    );
+    assert2::assert!(deduped == 7);
 
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap.clone())
@@ -316,7 +313,7 @@ async fn concurrent_duplicates_produce_once() {
             .unwrap()
             .len();
     }
-    assert_eq!(count, 1);
+    assert2::assert!(count == 1);
 
     token.cancel();
     let _ = own.await;

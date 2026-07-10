@@ -124,7 +124,6 @@ pub fn merge_metrics(
     reason = "test assertions compare exact hand-constructed sample/exemplar values, not computed floats"
 )]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -159,14 +158,14 @@ mod tests {
         let mut merged = Vec::new();
         merge_metric_series(&mut merged, a);
         merge_metric_series(&mut merged, b);
-        assert_eq!(merged.len(), 1);
-        assert_eq!(
-            merged[0].samples.as_slice(),
-            &[
-                sample("1000", 5.0),
-                sample("2000", 4.0),
-                sample("3000", 5.0)
-            ][..]
+        assert2::assert!(merged.len() == 1);
+        assert2::assert!(
+            merged[0].samples.as_slice()
+                == &[
+                    sample("1000", 5.0),
+                    sample("2000", 4.0),
+                    sample("3000", 5.0)
+                ][..]
         );
     }
 
@@ -187,7 +186,7 @@ mod tests {
         let mut merged = Vec::new();
         merge_metric_series(&mut merged, a);
         merge_metric_series(&mut merged, b);
-        assert!(merged.len() == 2);
+        assert2::assert!(merged.len() == 2);
     }
 
     #[test]
@@ -210,7 +209,7 @@ mod tests {
             ],
         }];
         limit_exemplars(&mut series, Some(1));
-        assert!(series[0].exemplars.len() == 1);
+        assert2::assert!(series[0].exemplars.len() == 1);
     }
 
     #[test]
@@ -240,20 +239,20 @@ mod tests {
             }],
         };
         let merged = merge_metrics(vec![p0, p1], Some(1));
-        assert_eq!(
-            merged,
-            MetricsResponseJson {
-                series: vec![MetricSeries {
-                    labels: labels("api"),
-                    prom_labels: "{svc=\"api\"}".to_string(),
-                    samples: vec![sample("1", 3.0)],
-                    exemplars: vec![Exemplar {
-                        labels: vec![],
-                        value: 1.0,
-                        timestamp_ms: "1".to_string(),
+        assert2::assert!(
+            merged
+                == MetricsResponseJson {
+                    series: vec![MetricSeries {
+                        labels: labels("api"),
+                        prom_labels: "{svc=\"api\"}".to_string(),
+                        samples: vec![sample("1", 3.0)],
+                        exemplars: vec![Exemplar {
+                            labels: vec![],
+                            value: 1.0,
+                            timestamp_ms: "1".to_string(),
+                        }],
                     }],
-                }],
-            }
+                }
         );
     }
 
@@ -273,9 +272,8 @@ mod tests {
             }]
         });
         let resp: MetricsResponseJson = serde_json::from_value(body.clone()).unwrap();
-        assert_eq!(
-            resp,
-            MetricsResponseJson {
+        assert2::assert!(
+            resp == MetricsResponseJson {
                 series: vec![MetricSeries {
                     labels: vec![KeyValue {
                         key: "svc".to_string(),
@@ -295,6 +293,6 @@ mod tests {
             }
         );
         // Re-serializes to the same Tempo shape (round-trip stable).
-        assert_eq!(serde_json::to_value(&resp).unwrap(), body);
+        assert2::assert!(serde_json::to_value(&resp).unwrap() == body);
     }
 }

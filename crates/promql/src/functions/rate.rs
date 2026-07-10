@@ -330,7 +330,7 @@ mod tests {
         datatypes::{Field, Schema},
         record_batch::RecordBatch,
     };
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::common::ScalarValue;
 
     use super::*;
@@ -425,7 +425,7 @@ mod tests {
         let mut eval = Vec::new();
         let mut offset = 0_u32;
         for (eval_ts, ts, val) in steps {
-            assert!(ts.len() == val.len());
+            assert2::assert!(ts.len() == val.len());
             let len = u32::try_from(ts.len()).unwrap();
             all_ts.extend_from_slice(ts);
             all_val.extend_from_slice(val);
@@ -484,7 +484,7 @@ mod tests {
         let values = value_range(&[&[1.0, 2.0]]);
         let range_ms = ColumnarValue::Scalar(ScalarValue::Int64(Some(60_000)));
 
-        for (case, args) in [
+        for (_case, args) in [
             (
                 "timestamp_range has extra rows",
                 invoke_args(
@@ -516,7 +516,7 @@ mod tests {
                 ),
             ),
         ] {
-            assert!(udf.invoke_with_args(args).is_err(), "case {case}");
+            assert2::assert!(udf.invoke_with_args(args).is_err());
         }
     }
 
@@ -527,7 +527,7 @@ mod tests {
         let timestamps = timestamp_range(&[&[0, 60_000]]);
         let values = value_range(&[&[1.0, 2.0]]);
 
-        assert!(
+        assert2::assert!(
             udf.invoke_with_args(invoke_args(
                 Arc::clone(&eval),
                 Arc::clone(&timestamps),
@@ -537,7 +537,7 @@ mod tests {
             ))
             .is_err()
         );
-        assert!(
+        assert2::assert!(
             udf.invoke_with_args(invoke_args(
                 eval,
                 timestamps,
@@ -564,8 +564,8 @@ mod tests {
             )],
             300_000,
         );
-        assert!(out.len() == 1);
-        assert!(approx_eq(out[0], 5.0 / 300.0));
+        assert2::assert!(out.len() == 1);
+        assert2::assert!(approx_eq(out[0], 5.0 / 300.0));
     }
 
     /// `prom_rate` across multiple eval steps yields a per-step rate vector,
@@ -592,9 +592,9 @@ mod tests {
             ],
             300_000,
         );
-        assert!(out.len() == 2);
+        assert2::assert!(out.len() == 2);
         for (step, want) in [(0_usize, 4.0 / 300.0), (1, 5.0 / 300.0)] {
-            assert!(approx_eq(out[step], want), "step {step}");
+            assert2::assert!(approx_eq(out[step], want));
         }
     }
 
@@ -607,7 +607,7 @@ mod tests {
             &[(120_000, &[0, 60_000, 120_000], &[1.0, 2.0, 1.0])],
             120_000,
         );
-        assert!(approx_eq(out[0], 2.0));
+        assert2::assert!(approx_eq(out[0], 2.0));
     }
 
     /// `prom_delta` is gauge mode: 4,3 -> -2.0 (matches the engine).
@@ -615,7 +615,7 @@ mod tests {
     fn delta_udf_is_gauge_delta() {
         let udf = RateUdf::new(RateFamily::Delta);
         let out = run_udf(&udf, &[(60_000, &[30_000, 60_000], &[4.0, 3.0])], 60_000);
-        assert!(approx_eq(out[0], -2.0));
+        assert2::assert!(approx_eq(out[0], -2.0));
     }
 
     /// `prom_irate` reproduces 2/30 from the last two samples (engine number).
@@ -627,7 +627,7 @@ mod tests {
             &[(90_000, &[0, 60_000, 90_000], &[0.0, 1.0, 3.0])],
             120_000,
         );
-        assert!(approx_eq(out[0], 2.0 / 30.0));
+        assert2::assert!(approx_eq(out[0], 2.0 / 30.0));
     }
 
     /// `prom_idelta` reproduces 2.0 from the last two samples (engine number).
@@ -639,7 +639,7 @@ mod tests {
             &[(90_000, &[0, 60_000, 90_000], &[0.0, 1.0, 3.0])],
             120_000,
         );
-        assert!(approx_eq(out[0], 2.0));
+        assert2::assert!(approx_eq(out[0], 2.0));
     }
 
     /// A window with fewer than two samples renders as NULL (no Prometheus
@@ -649,7 +649,7 @@ mod tests {
     fn under_two_samples_yields_null() {
         let udf = RateUdf::new(RateFamily::Rate);
         let out = run_udf_nullable(&udf, &[(60_000, &[60_000], &[1.0])], 60_000);
-        assert!(out[0].is_none());
+        assert2::assert!(out[0].is_none());
     }
 
     /// A genuinely-computed value is kept as a non-null float even when it is
@@ -666,8 +666,8 @@ mod tests {
             &[(120_000, &[60_000, 120_000], &[f64::NAN, 1.0])],
             120_000,
         );
-        assert!(out[0].is_some());
-        assert!(out[0].unwrap().is_nan());
+        assert2::assert!(out[0].is_some());
+        assert2::assert!(out[0].unwrap().is_nan());
     }
 
     /// The UDF installs onto a `SessionContext` under its Prometheus-prefixed
@@ -685,7 +685,7 @@ mod tests {
             "prom_irate",
             "prom_idelta",
         ] {
-            assert!(ctx.udf(name).is_ok());
+            assert2::assert!(ctx.udf(name).is_ok());
         }
     }
 
@@ -732,8 +732,8 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert!(column.len() == 1);
-        assert!(approx_eq(column.value(0), 5.0 / 300.0));
+        assert2::assert!(column.len() == 1);
+        assert2::assert!(approx_eq(column.value(0), 5.0 / 300.0));
     }
 
     /// Confirm the helper round-trips a `DictionaryArray` back into a `RangeArray`.

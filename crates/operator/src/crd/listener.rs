@@ -481,7 +481,6 @@ pub struct ListenerAddress {
 
 #[cfg(test)]
 mod auth_tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -516,7 +515,7 @@ mod auth_tests {
 
     #[test]
     fn listener_authentication_yaml_cases() {
-        for (name, yaml, expected) in [
+        for (_name, yaml, expected) in [
             (
                 "TLS",
                 "name: mtls\nport: 9095\ntype: internal\ntls: true\nauthentication:\n  type: tls\n",
@@ -539,7 +538,7 @@ mod auth_tests {
             ),
         ] {
             let listener: Listener = serde_yaml::from_str(yaml).unwrap();
-            assert_eq!(listener.authentication, expected, "case {name}");
+            assert2::assert!(listener.authentication == expected);
         }
     }
 
@@ -555,10 +554,7 @@ authentication:
 ",
         )
         .err();
-        assert!(
-            err.is_some(),
-            "unknown auth type should fail to deserialize"
-        );
+        assert2::assert!(err.is_some());
     }
 
     #[test]
@@ -635,10 +631,8 @@ authentication:
         ] {
             let listener: Listener = serde_yaml::from_str(yaml)
                 .unwrap_or_else(|error| panic!("case {name}: YAML must parse: {error}"));
-            assert_eq!(
-                listener.authentication,
-                Some(ListenerAuthentication::OAuth(expected)),
-                "case {name}"
+            assert2::assert!(
+                listener.authentication == Some(ListenerAuthentication::OAuth(expected))
             );
         }
     }
@@ -677,7 +671,7 @@ authentication:
             "tlsTrustedCertificates",
             "accessTokenIsJwt",
         ] {
-            assert!(!json.contains(field), "case {field:?}; got: {json}");
+            assert2::assert!(!json.contains(field));
         }
     }
 
@@ -694,7 +688,7 @@ authentication:
             }),
             ..minimal_oauth()
         };
-        for (name, config, present, absent) in [
+        for (_name, config, present, absent) in [
             (
                 "OAuth bearer disabled",
                 ListenerAuthenticationOAuth {
@@ -746,19 +740,13 @@ authentication:
             let authentication = ListenerAuthentication::OAuth(config);
             let json = serde_json::to_string(&authentication).unwrap();
             for fragment in present {
-                assert!(
-                    json.contains(fragment),
-                    "case {name}: missing {fragment:?}; {json}"
-                );
+                assert2::assert!(json.contains(fragment));
             }
             for fragment in absent {
-                assert!(
-                    !json.contains(fragment),
-                    "case {name}: found {fragment:?}; {json}"
-                );
+                assert2::assert!(!json.contains(fragment));
             }
             let decoded: ListenerAuthentication = serde_json::from_str(&json).unwrap();
-            assert_eq!(decoded, authentication, "case {name}");
+            assert2::assert!(decoded == authentication);
         }
     }
 
@@ -786,13 +774,9 @@ authentication:
         let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
             panic!("expected OAuth authentication");
         };
-        assert_eq!(
-            oauth.valid_issuer_uri.as_str(),
-            "https://issuer.example.com/"
-        );
-        assert_eq!(
-            oauth.jwks_endpoint_uri.as_deref(),
-            Some("https://issuer.example.com/jwks")
+        assert2::assert!(oauth.valid_issuer_uri.as_str() == "https://issuer.example.com/");
+        assert2::assert!(
+            oauth.jwks_endpoint_uri.as_deref() == Some("https://issuer.example.com/jwks")
         );
     }
 
@@ -815,7 +799,7 @@ authentication:
             .expect("schema must have properties.type.enum array");
         let names: Vec<&str> = type_enum.iter().filter_map(|x| x.as_str()).collect();
         for want in ["tls", "scram-sha-512", "scram-sha-256", "oauth", "gssapi"] {
-            assert!(names.contains(&want), "missing {want} in {names:?}");
+            assert2::assert!(names.contains(&want));
         }
 
         // OAuth sibling property keys are present at the top level
@@ -853,38 +837,29 @@ authentication:
             "jwksIgnoreKeyUse",
             "keytabSecretRef",
         ] {
-            assert!(props.contains_key(want), "missing property {want}");
+            assert2::assert!(props.contains_key(want));
         }
 
         // customClaimCheck is a string (not an object).
         let ccc = v
             .pointer("/properties/customClaimCheck")
             .expect("customClaimCheck must be present");
-        assert!(
-            ccc.pointer("/type").and_then(|x| x.as_str()) == Some("string"),
-            "customClaimCheck must be a string; got: {ccc}"
-        );
+        assert2::assert!(ccc.pointer("/type").and_then(|x| x.as_str()) == Some("string"));
 
         // validTokenType is also a string with minLength 1.
         let vtt = v
             .pointer("/properties/validTokenType")
             .expect("validTokenType must be present");
-        assert!(
-            vtt.pointer("/type").and_then(|x| x.as_str()) == Some("string"),
-            "validTokenType must be a string; got: {vtt}"
-        );
+        assert2::assert!(vtt.pointer("/type").and_then(|x| x.as_str()) == Some("string"));
     }
 
     #[test]
     fn tls_trusted_certificate_required_fields_missing_rejected() {
-        for (name, yaml) in [
+        for (_name, yaml) in [
             ("missing certificate", r"secretName: foo"),
             ("missing secret name", r"certificate: bar"),
         ] {
-            assert!(
-                serde_yaml::from_str::<TlsTrustedCertificate>(yaml).is_err(),
-                "case {name}"
-            );
+            assert2::assert!(serde_yaml::from_str::<TlsTrustedCertificate>(yaml).is_err());
         }
     }
 
@@ -895,9 +870,9 @@ authentication:
             key: "client-secret".into(),
         };
         let json = serde_json::to_string(&original).unwrap();
-        assert!(json == r#"{"secretName":"my-secret","key":"client-secret"}"#);
+        assert2::assert!(json == r#"{"secretName":"my-secret","key":"client-secret"}"#);
         let round_tripped: OauthClientSecretRef = serde_json::from_str(&json).unwrap();
-        assert!(round_tripped == original);
+        assert2::assert!(round_tripped == original);
     }
 
     #[test]
@@ -942,7 +917,7 @@ authentication:
             "jwksExpirySeconds",
             "jwksIgnoreKeyUse",
         ] {
-            assert!(!yaml.contains(field), "case {field:?}; got:\n{yaml}");
+            assert2::assert!(!yaml.contains(field));
         }
     }
 
@@ -957,7 +932,7 @@ customClaimCheck:
   scope: kafka.write
 ";
         let result: Result<ListenerAuthentication, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err(), "old object shape must be rejected; got Ok");
+        assert2::assert!(result.is_err());
     }
 
     #[test]
@@ -1037,20 +1012,19 @@ jwksIgnoreKeyUse: false
             let ListenerAuthentication::OAuth(actual) = parsed else {
                 panic!("{name}: expected OAuth variant");
             };
-            assert!(actual == expected, "{name}");
+            assert2::assert!(actual == expected);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn internal_listener_json_round_trip_cases() {
-        for (name, peers, expected_json) in [
+        for (_name, peers, expected_json) in [
             (
                 "peers omitted",
                 None,
@@ -1072,12 +1046,8 @@ mod tests {
                 network_policy_peers: peers,
             };
             let actual_json = serde_json::to_value(&listener).unwrap();
-            assert_eq!(&actual_json, &expected_json, "case {name}");
-            assert_eq!(
-                serde_json::from_value::<Listener>(actual_json).unwrap(),
-                listener,
-                "case {name}"
-            );
+            assert2::assert!(&actual_json == &expected_json);
+            assert2::assert!(serde_json::from_value::<Listener>(actual_json).unwrap() == listener);
         }
     }
 
@@ -1105,13 +1075,10 @@ mod tests {
             network_policy_peers: None,
         };
         let json = serde_json::to_string(&l).unwrap();
-        assert!(
-            json.contains("\"advertisedHost\":\"public.host\""),
-            "got: {json}"
-        );
-        assert!(json.contains("\"nodePort\":32100"), "got: {json}");
+        assert2::assert!(json.contains("\"advertisedHost\":\"public.host\""));
+        assert2::assert!(json.contains("\"nodePort\":32100"));
         let back: Listener = serde_json::from_str(&json).unwrap();
-        assert!(back == l);
+        assert2::assert!(back == l);
     }
 
     #[test]
@@ -1125,10 +1092,7 @@ mod tests {
             ingress_class: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
-        assert!(
-            json.contains("\"loadBalancerIP\":\"10.0.0.5\""),
-            "got: {json}"
-        );
+        assert2::assert!(json.contains("\"loadBalancerIP\":\"10.0.0.5\""));
     }
 
     #[test]
@@ -1143,7 +1107,7 @@ mod tests {
             network_policy_peers: None,
         };
         let json = serde_json::to_string(&l).unwrap();
-        assert!(!json.contains("networkPolicyPeers"), "got: {json}");
+        assert2::assert!(!json.contains("networkPolicyPeers"));
     }
 
     #[test]
@@ -1173,12 +1137,9 @@ mod tests {
             network_policy_peers: Some(vec![peer]),
         };
         let json = serde_json::to_string(&l).unwrap();
-        assert!(json.contains("\"networkPolicyPeers\""), "got: {json}");
-        assert!(
-            json.contains("\"matchLabels\":{\"role\":\"client\"}"),
-            "got: {json}"
-        );
+        assert2::assert!(json.contains("\"networkPolicyPeers\""));
+        assert2::assert!(json.contains("\"matchLabels\":{\"role\":\"client\"}"));
         let back: Listener = serde_json::from_str(&json).unwrap();
-        assert!(back == l);
+        assert2::assert!(back == l);
     }
 }

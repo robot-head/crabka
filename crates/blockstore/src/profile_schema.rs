@@ -73,21 +73,21 @@ mod tests {
     #[test]
     fn mandatory_columns_match_blockstore() {
         let schema = profile_samples_schema();
-        assert_eq!(
+        assert2::assert!(
             schema
                 .column_with_name(COL_FINGERPRINT)
                 .unwrap()
                 .1
-                .data_type(),
-            &DataType::UInt64
+                .data_type()
+                == &DataType::UInt64
         );
-        assert_eq!(
+        assert2::assert!(
             schema
                 .column_with_name(COL_TIMESTAMP)
                 .unwrap()
                 .1
-                .data_type(),
-            &DataType::Int64
+                .data_type()
+                == &DataType::Int64
         );
     }
 
@@ -97,8 +97,8 @@ mod tests {
         let (_, field) = schema.column_with_name(PCOL_PROFILE_TYPE).unwrap();
         match field.data_type() {
             DataType::Dictionary(key, value) => {
-                assert_eq!(key.as_ref(), &DataType::Int32);
-                assert_eq!(value.as_ref(), &DataType::Utf8);
+                assert2::assert!(key.as_ref() == &DataType::Int32);
+                assert2::assert!(value.as_ref() == &DataType::Utf8);
             }
             other => panic!("expected Dictionary<Int32,Utf8>, got {other:?}"),
         }
@@ -107,38 +107,37 @@ mod tests {
     #[test]
     fn raw_stacktrace_slot_columns_are_unsigned() {
         let schema = profile_samples_schema();
-        assert_eq!(
+        assert2::assert!(
             schema
                 .column_with_name(PCOL_STACKTRACE_ID)
                 .unwrap()
                 .1
-                .data_type(),
-            &DataType::UInt64
+                .data_type()
+                == &DataType::UInt64
         );
-        assert_eq!(
+        assert2::assert!(
             schema
                 .column_with_name(PCOL_STACKTRACE_PARTITION)
                 .unwrap()
                 .1
-                .data_type(),
-            &DataType::UInt64
+                .data_type()
+                == &DataType::UInt64
         );
     }
 
     #[test]
     fn value_and_total_value_are_int64() {
         let schema = profile_samples_schema();
-        assert_eq!(
-            schema.column_with_name(PCOL_VALUE).unwrap().1.data_type(),
-            &DataType::Int64
+        assert2::assert!(
+            schema.column_with_name(PCOL_VALUE).unwrap().1.data_type() == &DataType::Int64
         );
-        assert_eq!(
+        assert2::assert!(
             schema
                 .column_with_name(PCOL_TOTAL_VALUE)
                 .unwrap()
                 .1
-                .data_type(),
-            &DataType::Int64
+                .data_type()
+                == &DataType::Int64
         );
     }
 
@@ -147,28 +146,28 @@ mod tests {
         let schema = profile_samples_schema();
         let span = schema.column_with_name(PCOL_SPAN_ID).unwrap().1;
         let trace = schema.column_with_name(PCOL_TRACE_ID).unwrap().1;
-        assert_eq!(span.data_type(), &DataType::UInt64);
-        assert!(span.is_nullable());
-        assert_eq!(trace.data_type(), &DataType::Binary);
-        assert!(trace.is_nullable());
+        assert2::assert!(span.data_type() == &DataType::UInt64);
+        assert2::assert!(span.is_nullable());
+        assert2::assert!(trace.data_type() == &DataType::Binary);
+        assert2::assert!(trace.is_nullable());
     }
 
     #[test]
     fn decl_requires_fp_type_ts_and_sorts_by_them() {
-        assert_eq!(
-            profile_samples_decl(),
-            BlockSchema {
-                required: vec![
-                    RequiredColumn::new(COL_FINGERPRINT, DataType::UInt64, false),
-                    RequiredColumn::new(PCOL_PROFILE_TYPE, profile_type_dict(), false),
-                    RequiredColumn::new(COL_TIMESTAMP, DataType::Int64, false),
-                ],
-                sort_key: vec![
-                    COL_FINGERPRINT.to_string(),
-                    PCOL_PROFILE_TYPE.to_string(),
-                    COL_TIMESTAMP.to_string(),
-                ],
-            }
+        assert2::assert!(
+            profile_samples_decl()
+                == BlockSchema {
+                    required: vec![
+                        RequiredColumn::new(COL_FINGERPRINT, DataType::UInt64, false),
+                        RequiredColumn::new(PCOL_PROFILE_TYPE, profile_type_dict(), false),
+                        RequiredColumn::new(COL_TIMESTAMP, DataType::Int64, false),
+                    ],
+                    sort_key: vec![
+                        COL_FINGERPRINT.to_string(),
+                        PCOL_PROFILE_TYPE.to_string(),
+                        COL_TIMESTAMP.to_string(),
+                    ],
+                }
         );
     }
 }

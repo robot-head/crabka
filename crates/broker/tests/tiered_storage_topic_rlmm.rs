@@ -19,7 +19,6 @@
 
 #![allow(clippy::pedantic, clippy::manual_assert)]
 
-use assert2::assert;
 mod support;
 
 use std::time::{Duration, Instant};
@@ -122,10 +121,7 @@ async fn topic_rlmm_activates_against_loopback() {
     let (broker, _log_dir, _remote_dir) = start_broker_with_topic_rlmm().await;
 
     await_activation(&broker).await;
-    assert!(
-        broker.has_partition(METADATA_TOPIC, 0).await,
-        "__remote_log_metadata-0 should be hosted after bootstrap"
-    );
+    assert2::assert!(broker.has_partition(METADATA_TOPIC, 0).await);
 
     broker.shutdown().await;
 }
@@ -211,11 +207,7 @@ async fn copy_then_fetch_round_trip(
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "CreateTopics failed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 
     // Wait for the tiered config to flow from the metadata image through
     // the supervisor's reconcile loop into the partition's `LogConfig`.
@@ -232,11 +224,7 @@ async fn copy_then_fetch_round_trip(
         {
             break;
         }
-        assert!(
-            Instant::now() <= cfg_deadline,
-            "tiered-storage topic config never propagated within 10s; saw {:?}",
-            broker.partition_log_config_for_test(topic, 0)
-        );
+        assert2::assert!(Instant::now() <= cfg_deadline);
         tokio::task::yield_now().await;
     }
 
@@ -259,10 +247,7 @@ async fn copy_then_fetch_round_trip(
         if count_remote_log_files(remote_dir) >= 1 {
             break;
         }
-        assert!(
-            Instant::now() <= copy_deadline,
-            "no segment tiered to remote storage within 30s"
-        );
+        assert2::assert!(Instant::now() <= copy_deadline);
         tokio::task::yield_now().await;
     }
 
@@ -305,17 +290,11 @@ async fn copy_then_fetch_round_trip(
         {
             break first.value.clone();
         }
-        assert!(
-            Instant::now() <= fetch_deadline,
-            "offset 0 never returned records within 30s"
-        );
+        assert2::assert!(Instant::now() <= fetch_deadline);
         tokio::task::yield_now().await;
     };
 
-    assert!(
-        value.as_deref() == Some(b"test-record-0".as_slice()),
-        "offset 0 should read back the first produced record"
-    );
+    assert2::assert!(value.as_deref() == Some(b"test-record-0".as_slice()));
 }
 
 async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
@@ -516,11 +495,7 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "CreateTopics failed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 
     // Wait for the tiered config to propagate into the partition's LogConfig
     // (same gate as the loopback round-trip test).
@@ -535,11 +510,7 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
         {
             break;
         }
-        assert!(
-            Instant::now() <= cfg_deadline,
-            "tiered-storage topic config never propagated within 10s; saw {:?}",
-            broker.partition_log_config_for_test(TOPIC, 0)
-        );
+        assert2::assert!(Instant::now() <= cfg_deadline);
         tokio::task::yield_now().await;
     }
 
@@ -559,10 +530,7 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
     // The RLMM is still NotReady, so add_remote_log_segment_metadata returns
     // NotReady and the copy task must have skipped every segment.
     let tiered = count_remote_log_files(remote_dir.path());
-    assert!(
-        tiered == 0,
-        "expected no tiered objects while RLMM not ready, found {tiered}"
-    );
+    assert2::assert!(tiered == 0);
 
     // Close the test client before broker shutdown for the same reason as
     // `topic_rlmm_copy_then_fetch_round_trip`.

@@ -134,7 +134,7 @@ mod tests {
             is_primary: false,
             primary_url: None,
         };
-        for (name, method, forwarded, state, expected) in [
+        for (_name, method, forwarded, state, expected) in [
             (
                 "read_secondary",
                 Method::GET,
@@ -178,7 +178,7 @@ mod tests {
                 Decision::PassThrough,
             ),
         ] {
-            assert_eq!(decide(&method, forwarded, &state), expected, "case {name}");
+            assert2::assert!(decide(&method, forwarded, &state) == expected);
         }
     }
 }

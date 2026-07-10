@@ -112,12 +112,12 @@ mod tests {
     #[test]
     fn assembles_in_order_chunks_to_complete() {
         let mut s = SnapshotFetchState::new((10, 1), NodeId(2));
-        assert!(s.next_position() == 0);
+        assert2::assert!(s.next_position() == 0);
         let step = s.on_chunk((10, 1), 6, 0, b"abc");
-        assert!(step == SnapshotFetchStep::Continue { next_position: 3 });
+        assert2::assert!(step == SnapshotFetchStep::Continue { next_position: 3 });
         let step = s.on_chunk((10, 1), 6, 3, b"def");
         match step {
-            SnapshotFetchStep::Complete(b) => assert!(b.as_ref() == b"abcdef"),
+            SnapshotFetchStep::Complete(b) => assert2::assert!(b.as_ref() == b"abcdef"),
             other => panic!("expected Complete, got {other:?}"),
         }
     }
@@ -126,13 +126,13 @@ mod tests {
     fn out_of_order_position_restarts() {
         let mut s = SnapshotFetchState::new((10, 1), NodeId(2));
         let _ = s.on_chunk((10, 1), 6, 0, b"abc");
-        assert!(s.on_chunk((10, 1), 6, 99, b"def") == SnapshotFetchStep::Restart);
+        assert2::assert!(s.on_chunk((10, 1), 6, 99, b"def") == SnapshotFetchStep::Restart);
     }
 
     #[test]
     fn mismatched_id_restarts() {
         let mut s = SnapshotFetchState::new((10, 1), NodeId(2));
-        assert!(s.on_chunk((11, 1), 6, 0, b"abc") == SnapshotFetchStep::Restart);
+        assert2::assert!(s.on_chunk((11, 1), 6, 0, b"abc") == SnapshotFetchStep::Restart);
     }
 
     #[test]
@@ -141,8 +141,8 @@ mod tests {
         // Leader declares size 3 but streams 5 bytes in one chunk.
         let step = s.on_chunk((10, 1), 3, 0, b"abcde");
         // buf must not have been blown past the declared size.
-        assert_eq!(step, SnapshotFetchStep::Restart);
-        assert_eq!(s.next_position(), 0);
+        assert2::assert!(step == SnapshotFetchStep::Restart);
+        assert2::assert!(s.next_position() == 0);
     }
 
     #[test]
@@ -150,15 +150,15 @@ mod tests {
         let mut s = SnapshotFetchState::new((10, 1), NodeId(2));
         let too_big = i64::try_from(MAX_SNAPSHOT_BYTES).unwrap() + 1;
         let step = s.on_chunk((10, 1), too_big, 0, b"abc");
-        assert_eq!(step, SnapshotFetchStep::Restart);
-        assert_eq!(s.next_position(), 0);
+        assert2::assert!(step == SnapshotFetchStep::Restart);
+        assert2::assert!(s.next_position() == 0);
     }
 
     #[test]
     fn single_chunk_completes() {
         let mut s = SnapshotFetchState::new((5, 0), NodeId(1));
         match s.on_chunk((5, 0), 3, 0, b"xyz") {
-            SnapshotFetchStep::Complete(b) => assert!(b.as_ref() == b"xyz"),
+            SnapshotFetchStep::Complete(b) => assert2::assert!(b.as_ref() == b"xyz"),
             other => panic!("expected Complete, got {other:?}"),
         }
     }

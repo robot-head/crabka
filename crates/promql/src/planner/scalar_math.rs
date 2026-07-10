@@ -182,7 +182,7 @@ fn build_leaf_batch(
 #[cfg(test)]
 mod tests {
     use arrow::array::Float64Array as Float64ArrayT;
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -214,7 +214,7 @@ mod tests {
         let mut got = Vec::new();
         for batch in &batches {
             // `__name__` must be gone; the projection carries only `l` + `value`.
-            assert!(batch.column_by_name("__name__").is_none());
+            assert2::assert!(batch.column_by_name("__name__").is_none());
             let l = batch
                 .column_by_name("l")
                 .unwrap()
@@ -243,7 +243,7 @@ mod tests {
             &[],
         )
         .await;
-        assert!(got == vec![("x".to_string(), 3.0), ("y".to_string(), 4.0)]);
+        assert2::assert!(got == vec![("x".to_string(), 3.0), ("y".to_string(), 4.0)]);
     }
 
     #[tokio::test]
@@ -257,8 +257,8 @@ mod tests {
     #[tokio::test]
     async fn genuine_nan_value_survives() {
         let got = run(vec![labeled("m", "x", f64::NAN)], ScalarMathOp::Sin, &[]).await;
-        assert!(got.len() == 1);
-        assert!(got[0].1.is_nan());
+        assert2::assert!(got.len() == 1);
+        assert2::assert!(got[0].1.is_nan());
     }
 
     #[tokio::test]
@@ -269,12 +269,12 @@ mod tests {
             &[0.0, 3.0],
         )
         .await;
-        assert!(got == vec![("x".to_string(), 3.0), ("y".to_string(), 0.0)]);
+        assert2::assert!(got == vec![("x".to_string(), 3.0), ("y".to_string(), 0.0)]);
     }
 
     #[tokio::test]
     async fn round_uses_to_nearest_bound() {
         let got = run(vec![labeled("m", "x", 12.0)], ScalarMathOp::Round, &[5.0]).await;
-        assert!(got == vec![("x".to_string(), 10.0)]);
+        assert2::assert!(got == vec![("x".to_string(), 10.0)]);
     }
 }

@@ -238,7 +238,7 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_connect::Source;
 
     use super::*;
@@ -278,16 +278,16 @@ mod tests {
         let rec = rec.expect("source did not yield the produced record");
 
         let payload = rec.value.unwrap();
-        assert_eq!(payload.topic.as_str(), "orders");
-        assert_eq!(payload.partition, PartitionIndex(0));
-        assert_eq!(payload.offset, Offset(0));
-        assert_eq!(payload.value.as_deref(), Some(b"v".as_slice()));
+        assert2::assert!(payload.topic.as_str() == "orders");
+        assert2::assert!(payload.partition == PartitionIndex(0));
+        assert2::assert!(payload.offset == Offset(0));
+        assert2::assert!(payload.value.as_deref() == Some(b"v".as_slice()));
 
         // The checkpoint position is the NEXT offset to read: `last_offset + 1`.
         // Having consumed offset 0, the position for `orders-0` must be exactly
         // 1 (not 0 from `*1` or -1 from `-1`).
         let off = src.checkpoint().unwrap();
-        assert_eq!(off.position.get("orders-0"), Some(&OffsetValue::Long(1)));
+        assert2::assert!(off.position.get("orders-0") == Some(&OffsetValue::Long(1)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -316,6 +316,6 @@ mod tests {
         // The `close -> Ok(())` mutant skips the take, leaving the consumer live
         // and the poll succeeding.
         src.close().await.unwrap();
-        assert!(src.poll().await.is_err());
+        assert2::assert!(src.poll().await.is_err());
     }
 }

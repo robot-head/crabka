@@ -5,7 +5,7 @@ use arrow::{
     datatypes::{DataType, Field},
     record_batch::RecordBatch,
 };
-use assert2::{assert, check};
+use assert2::check;
 use crabka_blockstore::{BlockStore, Labels};
 use crabka_metrics::{
     CompactionIndexManifest, CompactionObjectPlan, CompactionSeriesLabels, MetricBlockKind,
@@ -58,7 +58,7 @@ async fn prometheus_query_reads_float_samples_from_blockstore() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected instant vector");
     };
-    assert!(
+    assert2::assert!(
         samples
             == vec![InstantSample {
                 labels: series_labels,
@@ -111,7 +111,7 @@ async fn prometheus_query_rebuilds_float_index_from_compaction_manifest() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected instant vector");
     };
-    assert!(
+    assert2::assert!(
         samples
             == vec![InstantSample {
                 labels: series_labels,
@@ -160,7 +160,7 @@ async fn tsdb_blocks_reports_compaction_manifest_blocks() {
     let store = MetricBlockStore::from_compaction_manifests(fresh_store, None, &[manifest]);
     let blocks = store.tsdb_blocks("tenant-a").await.unwrap();
 
-    assert!(
+    assert2::assert!(
         blocks
             == vec![TsdbBlock {
                 id: "metrics/float/0002.parquet".to_string(),
@@ -195,29 +195,29 @@ async fn index_metadata_methods_report_float_and_histogram_series() {
     let store = MetricBlockStore::with_histograms(floats, histograms);
 
     let names = store.label_names("tenant-a", &[], 0, 10_000).await.unwrap();
-    assert!(names == vec!["__name__", "instance", "job", "le"]);
+    assert2::assert!(names == vec!["__name__", "instance", "job", "le"]);
 
     let job_values = store
         .label_values("tenant-a", "job", &[], 0, 10_000)
         .await
         .unwrap();
-    assert!(job_values == vec!["api"]);
+    assert2::assert!(job_values == vec!["api"]);
     let instance_values = store
         .label_values("tenant-a", "instance", &[], 0, 10_000)
         .await
         .unwrap();
-    assert!(instance_values == vec!["a", "b"]);
+    assert2::assert!(instance_values == vec!["a", "b"]);
 
     let mut active_series = store.cardinality_active_series("tenant-a").await.unwrap();
     active_series.sort_by_key(|labels| labels.get("instance").unwrap_or("").to_string());
-    assert!(active_series == vec![up, latency]);
+    assert2::assert!(active_series == vec![up, latency]);
 
     let label_names = store.cardinality_label_names("tenant-a").await.unwrap();
     let name_counts = label_names
         .iter()
         .map(|stat| (stat.name.as_str(), stat.series_count))
         .collect::<Vec<_>>();
-    assert!(name_counts == vec![("__name__", 2), ("instance", 2), ("job", 2), ("le", 1)]);
+    assert2::assert!(name_counts == vec![("__name__", 2), ("instance", 2), ("job", 2), ("le", 1)]);
 
     let label_values = store.cardinality_label_values("tenant-a").await.unwrap();
     let value_counts = label_values
@@ -230,7 +230,7 @@ async fn index_metadata_methods_report_float_and_histogram_series() {
             )
         })
         .collect::<Vec<_>>();
-    assert!(
+    assert2::assert!(
         value_counts
             == vec![
                 ("job", "api", 2),
@@ -243,7 +243,7 @@ async fn index_metadata_methods_report_float_and_histogram_series() {
     );
 
     let stats = store.tsdb_stats("tenant-a").await.unwrap();
-    assert!(
+    assert2::assert!(
         stats
             == TsdbStats {
                 head_stats: TsdbHeadStats {
@@ -471,7 +471,7 @@ async fn metadata_reads_compacted_metadata_sidecar_blocks() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         metadata
             == vec![MetadataRecord {
                 metric_family_name: "http_requests_total".to_string(),

@@ -128,7 +128,7 @@ async fn seed_acls_for(bootstrap: &str, principal: &str) {
         .await
         .expect("create_acls");
     for o in outcomes {
-        assert!(o.error.is_none(), "ACL create error: {:?}", o.error);
+        assert2::assert!(o.error.is_none());
     }
 }
 
@@ -249,10 +249,7 @@ async fn await_register_200(http: &reqwest::Client, port: i32, subject: &str, se
         if st == 200 {
             return;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "register on {subject} never returned 200 (last status {st})"
-        );
+        assert2::assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 }
@@ -270,10 +267,7 @@ async fn await_get_body_as_alice(http: &reqwest::Client, url: &str, expected: &s
         {
             return;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "GET {url} never returned {expected:?}"
-        );
+        assert2::assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
@@ -316,10 +310,7 @@ async fn await_register_mtls_200(http: &reqwest::Client, port: i32, subject: &st
         if status == 200 {
             return;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "mTLS register on {subject} never returned 200 (last status {status})"
-        );
+        assert2::assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 }
@@ -341,10 +332,7 @@ async fn await_get_body_over_mtls(
         {
             return;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "mTLS GET {url} never returned {expected:?}"
-        );
+        assert2::assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
@@ -439,11 +427,11 @@ async fn single_node_enforces_authn_and_authz() {
         .unwrap_or_default();
     // cp-calibrated form: lowercase `basic` scheme + the configured realm
     // (this node uses `realm: "test"`). See tests/fixtures/auth/basic.json.
-    assert_eq!(status.as_u16(), 401);
-    assert_eq!(www, r#"basic realm="test""#);
+    assert2::assert!(status.as_u16() == 401);
+    assert2::assert!(www == r#"basic realm="test""#);
 
     // ── 401: wrong password, and an unknown user. ────────────────────────────
-    for (name, user, password) in [
+    for (_name, user, password) in [
         ("wrong_password", "alice", "wrong"),
         ("unknown_user", "bob", "pw"),
     ] {
@@ -455,7 +443,7 @@ async fn single_node_enforces_authn_and_authz() {
             .send()
             .await
             .unwrap();
-        assert_eq!(response.status(), 401, "case {name}");
+        assert2::assert!(response.status() == 401);
     }
 
     // ── 200: alice has Write on `s` → authorized register (poll: ACL cache). ─
@@ -463,7 +451,7 @@ async fn single_node_enforces_authn_and_authz() {
 
     // ── 403: alice authenticates but has no ACL for `other`. ─────────────────
     let st = register_as_alice(&http, port, "other").await;
-    assert_eq!(st, 403, "alice has no ACL on `other` → 403");
+    assert2::assert!(st == 403);
 
     // ── 200 read: alice has Read on `s`. ─────────────────────────────────────
     await_get_body_as_alice(&http, &register_url, "[1]", 15).await;
@@ -561,11 +549,11 @@ async fn https_round_trip_enforces_auth_over_tls() {
         .await
         .unwrap()
         .status();
-    for (name, actual, expected) in [
+    for (_name, actual, expected) in [
         ("anonymous", anonymous_status, 401),
         ("authenticated", authenticated_status, 200),
     ] {
-        assert_eq!(actual, expected, "case {name}");
+        assert2::assert!(actual == expected);
     }
 
     cancel.cancel();
@@ -614,11 +602,7 @@ async fn mtls_two_nodes_authorize_then_forward_to_primary() {
     await_state(&mut a.primary, 25, |s| s.primary_url.is_some()).await;
     await_state(&mut b.primary, 25, |s| s.primary_url.is_some()).await;
     let a_is_primary = a.primary.borrow().is_primary;
-    assert_ne!(
-        a_is_primary,
-        b.primary.borrow().is_primary,
-        "exactly one mTLS node is primary"
-    );
+    assert2::assert!(a_is_primary != b.primary.borrow().is_primary);
     let (primary_port, secondary_port) = if a_is_primary {
         (a.port, b.port)
     } else {
@@ -630,10 +614,7 @@ async fn mtls_two_nodes_authorize_then_forward_to_primary() {
     await_get_body_over_mtls(&mtls_alice, secondary_port, "s", "[1]", 20).await;
 
     let status = register_over_mtls(&mtls_alice, secondary_port, "other").await;
-    assert_eq!(
-        status, 403,
-        "mTLS secondary denies an unauthorized write before forwarding"
-    );
+    assert2::assert!(status == 403);
 
     a.cancel.cancel();
     b.cancel.cancel();
@@ -654,11 +635,7 @@ async fn two_nodes_authorize_then_forward_to_primary() {
     await_state(&mut a.primary, 25, |s| s.primary_url.is_some()).await;
     await_state(&mut b.primary, 25, |s| s.primary_url.is_some()).await;
     let a_is_primary = a.primary.borrow().is_primary;
-    assert_ne!(
-        a_is_primary,
-        b.primary.borrow().is_primary,
-        "exactly one primary"
-    );
+    assert2::assert!(a_is_primary != b.primary.borrow().is_primary);
     let secondary_port = if a_is_primary { b.port } else { a.port };
 
     let http = reqwest::Client::new();
@@ -682,10 +659,7 @@ async fn two_nodes_authorize_then_forward_to_primary() {
     // A write to the SECONDARY for `other` (no ACL): denied at ingress with 403,
     // never forwarded.
     let st = register_as_alice(&http, secondary_port, "other").await;
-    assert_eq!(
-        st, 403,
-        "secondary denies an unauthorized write before forwarding"
-    );
+    assert2::assert!(st == 403);
 
     a.cancel.cancel();
     b.cancel.cancel();
@@ -761,7 +735,7 @@ fn split_pkcs1_for_jwks(der: &[u8]) -> (Vec<u8>, Vec<u8>) {
         }
     }
     fn read_int(der: &[u8], p: &mut usize) -> Vec<u8> {
-        assert_eq!(der[*p], 0x02);
+        assert2::assert!(der[*p] == 0x02);
         *p += 1;
         let (len, adv) = read_len(&der[*p..]);
         *p += adv;
@@ -773,7 +747,7 @@ fn split_pkcs1_for_jwks(der: &[u8]) -> (Vec<u8>, Vec<u8>) {
         bytes
     }
     let mut p = 0usize;
-    assert_eq!(der[p], 0x30);
+    assert2::assert!(der[p] == 0x30);
     p += 1;
     let (_, adv) = read_len(&der[p..]);
     p += adv;
@@ -890,12 +864,7 @@ async fn jwks_bearer_valid_signed_token_returns_200() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        200,
-        "expected 200 with valid signed token, got {}",
-        resp.status()
-    );
+    assert2::assert!(resp.status() == 200);
 
     node.cancel.cancel();
 }
@@ -929,12 +898,7 @@ async fn jwks_bearer_unsigned_token_returns_401() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        401,
-        "expected 401 for unsigned token, got {}",
-        resp.status()
-    );
+    assert2::assert!(resp.status() == 401);
 
     node.cancel.cancel();
 }
@@ -965,12 +929,7 @@ async fn jwks_bearer_wrong_issuer_returns_401() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        resp.status(),
-        401,
-        "expected 401 for wrong issuer, got {}",
-        resp.status()
-    );
+    assert2::assert!(resp.status() == 401);
 
     node.cancel.cancel();
 }

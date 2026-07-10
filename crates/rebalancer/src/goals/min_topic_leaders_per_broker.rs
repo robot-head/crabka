@@ -105,7 +105,6 @@ impl Goal for MinTopicLeadersPerBroker {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::model::BrokerView;
@@ -163,7 +162,7 @@ mod tests {
     fn min_zero_is_no_op() {
         let parts: Vec<_> = (0..4).map(|i| part("t", i, vec![1, 2, 3], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
-        assert!(
+        assert2::assert!(
             MinTopicLeadersPerBroker
                 .propose(&s, &ctx_with(0))
                 .is_empty()
@@ -175,13 +174,9 @@ mod tests {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2, 3], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = MinTopicLeadersPerBroker.propose(&s, &ctx_with(1));
-        assert!(
-            mvs.len() >= 2,
-            "expected >=2 leader flips, got {}",
-            mvs.len()
-        );
+        assert2::assert!(mvs.len() >= 2);
         for m in &mvs {
-            assert!(m.old_replicas == m.new_replicas, "leader-only move");
+            assert2::assert!(m.old_replicas == m.new_replicas);
         }
     }
 
@@ -191,7 +186,7 @@ mod tests {
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = MinTopicLeadersPerBroker.propose(&s, &ctx_with(1));
         for m in &mvs {
-            assert!(m.new_leader != 3, "broker 3 must not get leadership of t");
+            assert2::assert!(m.new_leader != 3);
         }
     }
 
@@ -205,10 +200,7 @@ mod tests {
             .collect();
         let s = state_with(parts, vec![1, 2]);
         let mvs = MinTopicLeadersPerBroker.propose(&s, &ctx_with(1));
-        assert!(
-            mvs.is_empty(),
-            "broker 2 not in ISR anywhere; expected no movements, got {mvs:?}"
-        );
+        assert2::assert!(mvs.is_empty());
     }
 
     #[test]
@@ -221,7 +213,7 @@ mod tests {
         ];
         let s = state_with(parts, vec![1, 2]);
 
-        assert!(
+        assert2::assert!(
             MinTopicLeadersPerBroker
                 .propose(&s, &ctx_with(1))
                 .is_empty()
@@ -233,7 +225,7 @@ mod tests {
         let parts = vec![part("t", 0, vec![1, 2], 1)];
         let s = state_with(parts, vec![1, 2]);
 
-        assert!(
+        assert2::assert!(
             MinTopicLeadersPerBroker
                 .propose(&s, &ctx_with(1))
                 .is_empty()

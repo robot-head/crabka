@@ -168,7 +168,6 @@ fn fetched_records_from_response(
 mod tests {
     use std::time::Duration;
 
-    use assert2::assert;
     use bytes::Bytes;
     use crabka_protocol::{
         UnknownTaggedFields,
@@ -208,7 +207,7 @@ mod tests {
     #[test]
     fn fetch_request_targets_state_topic_partition_with_consumer_limits() {
         let req = fetch_request("__crabka_state", 123);
-        assert!(
+        assert2::assert!(
             req == FetchRequest {
                 replica_id: -1,
                 max_wait_ms: 0,
@@ -251,7 +250,7 @@ mod tests {
         for (quiet_polls, is_loaded, want) in
             [(4, false, false), (5, false, true), (5, true, false)]
         {
-            assert!(should_mark_loaded(quiet_polls, is_loaded) == want);
+            assert2::assert!(should_mark_loaded(quiet_polls, is_loaded) == want);
         }
     }
 
@@ -267,8 +266,8 @@ mod tests {
             vec![fetched(4, Some(STATE_KEY), Some(value))],
         );
 
-        assert!(next_offset == 5);
-        assert!(state.current().is_some_and(|f| f.proposal_id == "p-1"));
+        assert2::assert!(next_offset == 5);
+        assert2::assert!(state.current().is_some_and(|f| f.proposal_id == "p-1"));
     }
 
     #[test]
@@ -284,8 +283,8 @@ mod tests {
             vec![fetched(9, Some("other-key"), Some(b"ignored".to_vec()))],
         );
 
-        assert!(next_offset == 10);
-        assert!(state.current().is_some_and(|f| f.proposal_id == "existing"));
+        assert2::assert!(next_offset == 10);
+        assert2::assert!(state.current().is_some_and(|f| f.proposal_id == "existing"));
     }
 
     #[test]
@@ -300,14 +299,14 @@ mod tests {
             vec![fetched(7, Some(STATE_KEY), None)],
         );
 
-        assert!(next_offset == 8);
-        assert!(state.current().is_none());
+        assert2::assert!(next_offset == 8);
+        assert2::assert!(state.current().is_none());
     }
 
     #[test]
     fn fetch_response_non_transient_error_is_returned() {
         let err = fetched_records_from_response(&fetch_response(42, None)).unwrap_err();
-        assert!(matches!(err, StateTopicError::FetchErrorCode { code: 42 }));
+        assert2::assert!(matches!(err, StateTopicError::FetchErrorCode { code: 42 }));
     }
 
     #[test]
@@ -333,7 +332,7 @@ mod tests {
 
         let records = fetched_records_from_response(&fetch_response(0, Some(payload))).unwrap();
 
-        assert!(
+        assert2::assert!(
             records
                 == vec![
                     (
@@ -369,6 +368,6 @@ mod tests {
             shutdown: CancellationToken::new(),
         };
 
-        assert!(loader.poll_once(0).await.is_err());
+        assert2::assert!(loader.poll_once(0).await.is_err());
     }
 }

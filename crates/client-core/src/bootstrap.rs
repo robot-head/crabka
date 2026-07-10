@@ -38,13 +38,13 @@ mod tests {
         let addrs = resolve("127.0.0.1:9092, 127.0.0.1:9093").await.unwrap();
         let mut ports: Vec<_> = addrs.iter().map(std::net::SocketAddr::port).collect();
         ports.sort_unstable();
-        assert_eq!(ports, vec![9092, 9093]);
+        assert2::assert!(ports == vec![9092, 9093]);
     }
 
     #[tokio::test]
     async fn resolve_errors_when_no_entries_resolve() {
         let err = resolve(" , ").await.unwrap_err();
 
-        assert!(matches!(err, ClientError::Disconnected));
+        assert2::assert!(matches!(err, ClientError::Disconnected));
     }
 }

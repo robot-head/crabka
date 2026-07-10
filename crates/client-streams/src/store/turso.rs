@@ -145,23 +145,20 @@ mod tests {
 
     /// Both backends must satisfy the same byte-KV contract.
     async fn contract(mut s: Box<dyn ByteKeyValueStore>) {
-        assert_eq!(s.get(b"k").await, None);
+        assert2::assert!(s.get(b"k").await == None);
         s.put(Bytes::from_static(b"k"), Bytes::from_static(b"v1"))
             .await;
         s.put(Bytes::from_static(b"k"), Bytes::from_static(b"v2"))
             .await; // upsert
-        assert_eq!(s.get(b"k").await, Some(Bytes::from_static(b"v2")));
+        assert2::assert!(s.get(b"k").await == Some(Bytes::from_static(b"v2")));
         s.put(Bytes::from_static(&[1, 0]), Bytes::from_static(b"a"))
             .await;
         s.put(Bytes::from_static(&[1, 9]), Bytes::from_static(b"b"))
             .await;
         let r = s.range(&[1, 0], &[1, 5]).await; // half-open → only [1,0]
-        assert_eq!(
-            r,
-            vec![(Bytes::from_static(&[1, 0]), Bytes::from_static(b"a"))]
-        );
-        assert_eq!(s.delete(b"k").await, Some(Bytes::from_static(b"v2")));
-        assert_eq!(s.get(b"k").await, None);
+        assert2::assert!(r == vec![(Bytes::from_static(&[1, 0]), Bytes::from_static(b"a"))]);
+        assert2::assert!(s.delete(b"k").await == Some(Bytes::from_static(b"v2")));
+        assert2::assert!(s.get(b"k").await == None);
     }
 
     #[tokio::test]

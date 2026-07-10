@@ -100,13 +100,12 @@ mod tests {
         s.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
             .await;
         let all = s.scan_all().await;
-        assert_eq!(
-            all,
-            vec![
+        assert2::assert!(
+            all == vec![
                 (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
                 (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
             ]
         );
-        assert_eq!(s.approx_len().await, 2);
+        assert2::assert!(s.approx_len().await == 2);
     }
 }

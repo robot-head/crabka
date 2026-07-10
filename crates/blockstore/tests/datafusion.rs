@@ -1,6 +1,5 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use assert2::assert;
 use crabka_blockstore::{
     BlockKey, LogBlockTableProvider, LogRow, TimeRange, labels, register_log_blocks,
     register_log_blocks_from_object_store, series_fingerprint, write_log_block,
@@ -31,9 +30,9 @@ fn assert_single_api_error(batches: &[RecordBatch]) {
         .downcast_ref::<StringArray>()
         .unwrap();
 
-    assert_eq!(batch.num_rows(), 1);
-    assert_eq!(timestamps.value(0), 19);
-    assert_eq!(lines.value(0), "api error");
+    assert2::assert!(batch.num_rows() == 1);
+    assert2::assert!(timestamps.value(0) == 19);
+    assert2::assert!(lines.value(0) == "api error");
 }
 
 #[tokio::test]
@@ -105,7 +104,7 @@ async fn log_block_table_provider_exposes_planned_filter_pushdown() {
     let line_filter = col("line").eq(lit("api error"));
     let unsupported_filter = col("structured_metadata").eq(lit("api error"));
 
-    assert!(
+    assert2::assert!(
         provider
             .supports_filters_pushdown(&[
                 &timestamp_filter,
@@ -172,7 +171,7 @@ async fn log_block_table_provider_scans_planned_object_store_blocks() {
     let provider =
         LogBlockTableProvider::try_new_object_store(store, prefix, std::slice::from_ref(&planned))
             .unwrap();
-    assert_eq!(provider.planned_blocks(), std::slice::from_ref(&planned));
+    assert2::assert!(provider.planned_blocks() == std::slice::from_ref(&planned));
 
     let ctx = SessionContext::new();
     ctx.register_table("logs", Arc::new(provider)).unwrap();
@@ -235,5 +234,5 @@ async fn datafusion_table_rejects_empty_block_list() {
 
     let error = register_log_blocks(&ctx, "logs", "/", &[]).unwrap_err();
 
-    assert!(error.to_string().contains("no log blocks"));
+    assert2::assert!(error.to_string().contains("no log blocks"));
 }

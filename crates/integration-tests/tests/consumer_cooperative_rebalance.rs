@@ -8,7 +8,6 @@ use std::{
     time::Duration,
 };
 
-use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{Assignor, AutoOffsetReset, Consumer};
@@ -43,7 +42,7 @@ async fn cooperative_three_member_partial_revocation() {
     let m1 = build_cooperative_consumer(&bootstrap, "coop-grp-1", "m1", "coop6").await;
     // Let m1's initial sync land and rebalance settle.
     wait_for_assignment_count(&m1, 6).await;
-    assert_eq!(m1.assignment().await.len(), 6, "m1 alone owns all 6");
+    assert2::assert!(m1.assignment().await.len() == 6);
 
     // Intentional real-time pacing between membership changes: cooperative-sticky
     // rebalances in two phases gated by `group.initial.rebalance.delay`, and
@@ -104,11 +103,11 @@ async fn cooperative_three_member_partial_revocation() {
     .await
     .expect("3-member cooperative assignment settled within 30s");
     for (t, _) in &union {
-        assert_eq!(t, "coop6", "all owned partitions are from coop6");
+        assert2::assert!(t == "coop6");
     }
     let mut partitions: Vec<i32> = union.into_iter().map(|(_, p)| p).collect();
     partitions.sort_unstable();
-    assert_eq!(partitions, vec![0, 1, 2, 3, 4, 5]);
+    assert2::assert!(partitions == vec![0, 1, 2, 3, 4, 5]);
 
     m1.close().await.unwrap();
     m2.close().await.unwrap();
@@ -166,7 +165,7 @@ async fn cooperative_transparent_to_poll() {
     })
     .await
     .expect("drained 4 records within 30s");
-    assert_eq!(values_seen.len(), 4, "m1 received all 4 first-wave msgs");
+    assert2::assert!(values_seen.len() == 4);
 
     // Second wave: produce 4 more messages.
     for p in 0..4i32 {
@@ -196,10 +195,7 @@ async fn cooperative_transparent_to_poll() {
     })
     .await
     .expect("drained 4 records within 30s");
-    assert!(
-        m1_second_wave.len() == 4,
-        "m1 consumed all 4 second-wave msgs"
-    );
+    assert2::assert!(m1_second_wave.len() == 4);
 
     // Start m2 — triggers a cooperative rebalance that moves two partitions
     // off m1. m1 keeps polling so its coordinator can complete the rejoin;
@@ -273,16 +269,10 @@ async fn cooperative_transparent_to_poll() {
     .expect("drained m2 until empty within 30s");
 
     // No message loss: m1 delivered the whole second wave.
-    assert!(
-        m1_second_wave.len() == 4,
-        "all 4 second-wave messages delivered by m1 (m1={m1_second_wave:?})"
-    );
+    assert2::assert!(m1_second_wave.len() == 4);
     // No re-delivery: each second-wave value appears in at most one consumer.
     let m1_inter_m2: HashSet<_> = m1_second_wave.intersection(&m2_second_wave).collect();
-    assert!(
-        m1_inter_m2.is_empty(),
-        "no duplicate deliveries across consumers: {m1_inter_m2:?}"
-    );
+    assert2::assert!(m1_inter_m2.is_empty());
     m1.close().await.unwrap();
     m2.close().await.unwrap();
     broker.shutdown().await;
@@ -307,13 +297,10 @@ async fn cooperative_single_member_steady_state() {
     let mut consumer = build_cooperative_consumer(&bootstrap, "only-grp", "m1", "cooponly").await;
     wait_for_assignment_count(&consumer, 3).await;
     let asn = consumer.assignment().await;
-    assert!(
-        asn.len() == 3,
-        "single member owns all 3 partitions: {asn:?}"
-    );
+    assert2::assert!(asn.len() == 3);
     let mut parts: Vec<i32> = asn.iter().map(|(_, p)| *p).collect();
     parts.sort_unstable();
-    assert_eq!(parts, vec![0, 1, 2]);
+    assert2::assert!(parts == vec![0, 1, 2]);
 
     for p in 0..3i32 {
         produce_to_partition(&broker, &producer, "cooponly", p, &[&format!("v{p}")]).await;
@@ -331,7 +318,7 @@ async fn cooperative_single_member_steady_state() {
     })
     .await
     .expect("drained 3 records within 30s");
-    assert_eq!(seen.len(), 3, "received all 3 messages: {seen:?}");
+    assert2::assert!(seen.len() == 3);
 
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -393,7 +380,7 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(cr.topics[0].error_code, 0, "create_topic failed: {cr:?}");
+    assert2::assert!(cr.topics[0].error_code == 0);
 }
 
 /// Produce records to a specific partition index. Mirrors `integration.rs::produce`

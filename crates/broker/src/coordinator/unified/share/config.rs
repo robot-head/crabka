@@ -51,13 +51,12 @@ impl Default for ShareGroupConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     #[test]
     fn defaults_are_kafka_ga() {
         let c = ShareGroupConfig::default();
-        assert!(
+        assert2::assert!(
             (
                 (
                     c.enable,
@@ -96,6 +95,6 @@ mod tests {
                 ),
             )
         );
-        assert!(ShareIsolationLevel::default() == ShareIsolationLevel::ReadUncommitted);
+        assert2::assert!(ShareIsolationLevel::default() == ShareIsolationLevel::ReadUncommitted);
     }
 }

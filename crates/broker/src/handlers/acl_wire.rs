@@ -207,7 +207,7 @@ pub fn permission_to_wire(pt: PermissionType) -> PermissionTypeCode {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -223,11 +223,8 @@ mod tests {
             ("group", 3, Ok(ResourceType::Group)),
             ("cluster", 4, Ok(ResourceType::Cluster)),
         ];
-        for (case, byte, want) in cases {
-            assert!(
-                resource_type_concrete(byte) == want,
-                "case: {case}; byte {byte}"
-            );
+        for (_case, byte, want) in cases {
+            assert2::assert!(resource_type_concrete(byte) == want);
         }
     }
 
@@ -238,11 +235,8 @@ mod tests {
             ("match wildcard", 2, Ok(None)),
             ("literal", 3, Ok(Some(PatternType::Literal))),
         ];
-        for (case, byte, want) in cases {
-            assert!(
-                pattern_type_filter(byte) == want,
-                "case: {case}; byte {byte}"
-            );
+        for (_case, byte, want) in cases {
+            assert2::assert!(pattern_type_filter(byte) == want);
         }
     }
 
@@ -269,11 +263,8 @@ mod tests {
                 Err(WireAclError::UnknownDiscriminant),
             ),
         ];
-        for (case, byte, want) in cases {
-            assert!(
-                resource_type_filter(byte) == want,
-                "case: {case}; byte {byte}"
-            );
+        for (_case, byte, want) in cases {
+            assert2::assert!(resource_type_filter(byte) == want);
         }
     }
 
@@ -330,7 +321,7 @@ mod tests {
 
     #[test]
     fn operation_round_trip_through_wire() {
-        for (case, op) in [
+        for (_case, op) in [
             ("all operations", AclOperation::All),
             ("read", AclOperation::Read),
             ("write", AclOperation::Write),
@@ -339,7 +330,7 @@ mod tests {
             ("two phase commit", AclOperation::TwoPhaseCommit),
         ] {
             let b = operation_to_wire(op);
-            assert!(operation_concrete(b).unwrap() == op, "case: {case}");
+            assert2::assert!(operation_concrete(b).unwrap() == op);
         }
     }
 
@@ -396,7 +387,7 @@ mod tests {
             operation: operation_concrete(8).unwrap(),
             permission_type: permission_concrete(3).unwrap(),
         };
-        assert!(resource_type_to_wire(entry.resource_type) == 6);
+        assert2::assert!(resource_type_to_wire(entry.resource_type) == 6);
         let expected = AclEntry {
             resource_type: ResourceType::DelegationToken,
             resource_name: "User:alice".into(),
@@ -406,6 +397,6 @@ mod tests {
             operation: AclOperation::Describe,
             permission_type: PermissionType::Allow,
         };
-        assert!(entry == expected);
+        assert2::assert!(entry == expected);
     }
 }

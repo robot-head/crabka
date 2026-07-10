@@ -1,6 +1,5 @@
 use std::{fs, path::Path};
 
-use assert2::assert;
 use serde::Deserialize;
 
 include!(concat!(
@@ -64,12 +63,7 @@ fn corpus_entry_round_trips(path: &Path) -> datatest_stable::Result<()> {
         )
     });
     let re = roundtrip(name, meta.version, &bytes);
-    assert!(
-        re == bytes,
-        "byte mismatch in {} ({name} v{})",
-        stem.display(),
-        meta.version
-    );
+    assert2::assert!(re == bytes);
     Ok(())
 }
 

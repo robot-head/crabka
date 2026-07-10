@@ -353,11 +353,7 @@ async fn delivers_2xx() {
         Arc::new(RawCodec),
     ));
 
-    assert!(
-        wait_until(|| received_len(&state) >= 3).await,
-        "expected 3 deliveries, got {}",
-        received_len(&state)
-    );
+    assert2::assert!(wait_until(|| received_len(&state) >= 3).await);
 
     let recv = state.received.lock().unwrap().clone();
     // Collect the offsets seen so we can assert event ids match topic-part-offset.
@@ -379,20 +375,16 @@ async fn delivers_2xx() {
 
         // Envelope is well-formed: topic + offset + embedded JSON value.
         let v: Value = serde_json::from_slice(&r.body).expect("body is a JSON envelope");
-        assert!(signature_valid);
-        assert!(r.timestamp.is_some());
-        assert_eq!(v["topic"].as_str(), Some(topic));
-        assert_eq!(v["partition"].as_i64(), Some(0));
-        assert_eq!(v["offset"].as_i64(), Some(off));
-        assert_eq!(v["event_id"].as_str(), Some(event_id));
-        assert!(v["value"]["n"].is_number());
+        assert2::assert!(signature_valid);
+        assert2::assert!(r.timestamp.is_some());
+        assert2::assert!(v["topic"].as_str() == Some(topic));
+        assert2::assert!(v["partition"].as_i64() == Some(0));
+        assert2::assert!(v["offset"].as_i64() == Some(off));
+        assert2::assert!(v["event_id"].as_str() == Some(event_id));
+        assert2::assert!(v["value"]["n"].is_number());
     }
     offsets_seen.sort_unstable();
-    assert_eq!(
-        offsets_seen,
-        vec![0, 1, 2],
-        "the three offsets 0,1,2 delivered"
-    );
+    assert2::assert!(offsets_seen == vec![0, 1, 2]);
 
     token.cancel();
     let _ = handle.await;
@@ -445,11 +437,7 @@ async fn retries_then_succeeds() {
     ));
 
     // Wait until the event has been received ≥ 3 times (2 failures + 1 success).
-    assert!(
-        wait_until(|| received_len(&state) >= 3).await,
-        "expected ≥3 attempts (2 failed + 1 ok), got {}",
-        received_len(&state)
-    );
+    assert2::assert!(wait_until(|| received_len(&state) >= 3).await);
 
     // The last attempt got a 200, so the record is committed and NOT dead-lettered.
     let client = Client::builder()
@@ -461,10 +449,7 @@ async fn retries_then_succeeds() {
     // Give any (incorrect) DLQ produce a brief chance, then assert emptiness.
     tokio::time::sleep(Duration::from_millis(500)).await;
     let dlq_recs = fetch_dlq(&client, dlq).await;
-    assert!(
-        dlq_recs.is_empty(),
-        "a record that eventually delivers must not be dead-lettered, got {dlq_recs:?}"
-    );
+    assert2::assert!(dlq_recs.is_empty());
 
     token.cancel();
     let _ = handle.await;
@@ -521,36 +506,20 @@ async fn dead_letters_on_exhaustion() {
 
     // The first record exhausts its 2 attempts and lands in the DLQ.
     let after_first = wait_for_dlq(&client, dlq, 1).await;
-    assert!(
-        !after_first.is_empty(),
-        "first record must be dead-lettered after exhaustion"
-    );
+    assert2::assert!(!after_first.is_empty());
     let first = &after_first[0];
-    assert_eq!(
-        first.value.as_deref(),
-        Some(br#"{"first":1}"#.as_ref()),
-        "DLQ record value matches the original"
-    );
-    assert_eq!(
-        first.dlq_source.as_deref(),
-        Some(format!("{topic}-0-0").as_str()),
-        "x-crabka-dlq-source header carries the event id"
-    );
+    assert2::assert!(first.value.as_deref() == Some(br#"{"first":1}"#.as_ref()));
+    assert2::assert!(first.dlq_source.as_deref() == Some(format!("{topic}-0-0").as_str()));
 
     // The loop did NOT wedge: produce a 2nd record (mock still 500) and assert it
     // too reaches the DLQ.
     produce_value(&producer, topic, br#"{"second":2}"#).await;
     let after_second = wait_for_dlq(&client, dlq, 2).await;
-    assert!(
-        after_second.len() >= 2,
-        "second record must also be dead-lettered (loop keeps polling), got {} records",
-        after_second.len()
-    );
-    assert!(
+    assert2::assert!(after_second.len() >= 2);
+    assert2::assert!(
         after_second
             .iter()
-            .any(|r| r.value.as_deref() == Some(br#"{"second":2}"#.as_ref())),
-        "the second produced record must appear in the DLQ"
+            .any(|r| r.value.as_deref() == Some(br#"{"second":2}"#.as_ref()))
     );
 
     token.cancel();
@@ -587,11 +556,7 @@ async fn ordering_within_partition() {
         Arc::new(RawCodec),
     ));
 
-    assert!(
-        wait_until(|| received_len(&state) >= 5).await,
-        "expected 5 deliveries, got {}",
-        received_len(&state)
-    );
+    assert2::assert!(wait_until(|| received_len(&state) >= 5).await);
 
     // Extract the envelope offset for each delivery in arrival order.
     let recv = state.received.lock().unwrap().clone();
@@ -602,11 +567,7 @@ async fn ordering_within_partition() {
             v["offset"].as_i64().expect("offset field")
         })
         .collect();
-    assert_eq!(
-        offsets,
-        vec![0, 1, 2, 3, 4],
-        "deliveries must arrive in ascending-offset (== produced) order, got {offsets:?}"
-    );
+    assert2::assert!(offsets == vec![0, 1, 2, 3, 4]);
 
     token.cancel();
     let _ = handle.await;
@@ -643,26 +604,14 @@ async fn filter_skips_nonmatching() {
     ));
 
     // Exactly one record (the truthy one) is delivered.
-    assert!(
-        wait_until(|| received_len(&state) >= 1).await,
-        "the matching record must be delivered"
-    );
+    assert2::assert!(wait_until(|| received_len(&state) >= 1).await);
     // real-time wait (not a progress poll): settle-then-assert-absence — proving the filtered (false) record never slips through; polling to len==1 could pass before the false record would have arrived.
     // Give the filtered (false) record a chance to (wrongly) slip through.
     tokio::time::sleep(Duration::from_millis(750)).await;
     let recv = state.received.lock().unwrap().clone();
-    assert_eq!(
-        recv.len(),
-        1,
-        "only the matching record should be POSTed, got {} deliveries",
-        recv.len()
-    );
+    assert2::assert!(recv.len() == 1);
     let v: Value = serde_json::from_slice(&recv[0].body).expect("envelope JSON");
-    assert_eq!(
-        v["value"]["deliver"],
-        Value::Bool(true),
-        "the delivered record must be the deliver:true one"
-    );
+    assert2::assert!(v["value"]["deliver"] == Value::Bool(true));
 
     token.cancel();
     let _ = handle.await;
@@ -687,8 +636,5 @@ target_url    = "http://attacker.example.com/exfil"
     let err = file
         .compile()
         .expect_err("target outside allow-list must fail to compile");
-    assert!(
-        err.contains("SSRF guard"),
-        "compile error must cite the SSRF guard, got: {err}"
-    );
+    assert2::assert!(err.contains("SSRF guard"));
 }

@@ -95,7 +95,6 @@ impl Goal for TopicReplicaDistribution {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::model::BrokerView;
@@ -152,13 +151,13 @@ mod tests {
             parts.push(part("t", i + 200, vec![3], 3));
         }
         let s = state_with(parts, vec![1, 2, 3]);
-        assert!(TopicReplicaDistribution.propose(&s, &ctx()).is_empty());
+        assert2::assert!(TopicReplicaDistribution.propose(&s, &ctx()).is_empty());
     }
 
     #[test]
     fn imbalance_pct_uses_difference_times_100_over_total() {
         let counts = std::collections::HashMap::from([(1, 3), (2, 1)]);
-        assert!(TopicReplicaDistribution::imbalance_pct(&counts) == 50);
+        assert2::assert!(TopicReplicaDistribution::imbalance_pct(&counts) == 50);
     }
 
     #[test]
@@ -166,12 +165,9 @@ mod tests {
         let parts: Vec<_> = (0..9).map(|i| part("t", i, vec![1], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = TopicReplicaDistribution.propose(&s, &ctx());
-        assert!(
-            !mvs.is_empty(),
-            "expected swaps for hot-broker concentration"
-        );
+        assert2::assert!(!mvs.is_empty());
         for m in &mvs {
-            assert!(m.old_replicas.len() == m.new_replicas.len());
+            assert2::assert!(m.old_replicas.len() == m.new_replicas.len());
         }
     }
 
@@ -182,7 +178,7 @@ mod tests {
 
         let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "t".into(),
                 partition: 1,
@@ -207,7 +203,7 @@ mod tests {
 
         let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "t".into(),
                 partition: 0,
@@ -230,7 +226,7 @@ mod tests {
 
         let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "t".into(),
                 partition: 0,
@@ -255,9 +251,9 @@ mod tests {
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = TopicReplicaDistribution.propose(&s, &ctx());
         for m in &mvs {
-            assert!(m.topic == "b", "movement on wrong topic: {m:?}");
+            assert2::assert!(m.topic == "b");
         }
-        assert!(!mvs.is_empty(), "expected swaps on topic b");
+        assert2::assert!(!mvs.is_empty());
     }
 
     #[test]
@@ -265,11 +261,7 @@ mod tests {
         let parts: Vec<_> = (0..20).map(|i| part("t", i, vec![1], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 2));
-        assert!(
-            mvs.len() <= 2,
-            "expected at most 2 movements per cap, got {}",
-            mvs.len()
-        );
+        assert2::assert!(mvs.len() <= 2);
     }
 
     #[test]
@@ -279,6 +271,6 @@ mod tests {
 
         let mvs = TopicReplicaDistribution.propose(&s, &ctx_with(10, 1));
 
-        assert!(mvs.len() == 1);
+        assert2::assert!(mvs.len() == 1);
     }
 }

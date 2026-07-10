@@ -74,8 +74,6 @@ impl Rule for DiskPressure {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::assert;
-
     use super::*;
     use crate::{
         capacity::{BrokerCapacities, BrokerCapacity},
@@ -169,7 +167,7 @@ mod tests {
             now_ms: 0,
             cfg: &cfg,
         };
-        assert!(DiskPressure.evaluate(&ctx).is_empty());
+        assert2::assert!(DiskPressure.evaluate(&ctx).is_empty());
     }
 
     #[test]
@@ -190,11 +188,11 @@ mod tests {
             cfg: &cfg,
         };
         let hits = DiskPressure.evaluate(&ctx);
-        assert_eq!(
+        assert2::assert!(
             hits.iter()
                 .map(|hit| (&hit.key, hit.severity))
-                .collect::<Vec<_>>(),
-            vec![(&AnomalyKey::Broker(1), AnomalySeverity::Warning)]
+                .collect::<Vec<_>>()
+                == vec![(&AnomalyKey::Broker(1), AnomalySeverity::Warning)]
         );
     }
 
@@ -216,9 +214,9 @@ mod tests {
             cfg: &cfg,
         };
         let hits = DiskPressure.evaluate(&ctx);
-        assert_eq!(
-            hits.iter().map(|hit| hit.severity).collect::<Vec<_>>(),
-            vec![AnomalySeverity::Critical]
+        assert2::assert!(
+            hits.iter().map(|hit| hit.severity).collect::<Vec<_>>()
+                == vec![AnomalySeverity::Critical]
         );
     }
 
@@ -241,9 +239,9 @@ mod tests {
 
         let hits = DiskPressure.evaluate(&ctx);
 
-        assert_eq!(
-            hits.iter().map(|hit| hit.severity).collect::<Vec<_>>(),
-            vec![AnomalySeverity::Warning]
+        assert2::assert!(
+            hits.iter().map(|hit| hit.severity).collect::<Vec<_>>()
+                == vec![AnomalySeverity::Warning]
         );
     }
 
@@ -264,6 +262,6 @@ mod tests {
             now_ms: 0,
             cfg: &cfg,
         };
-        assert!(DiskPressure.evaluate(&ctx).is_empty());
+        assert2::assert!(DiskPressure.evaluate(&ctx).is_empty());
     }
 }

@@ -801,7 +801,7 @@ fn duration_unit_seconds(unit: &str) -> Result<f64> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use promql_parser::parser::Expr;
 
     use super::*;
@@ -811,14 +811,14 @@ mod tests {
     fn parse_promql_wraps_parser_success() {
         let expr = parse_promql("up").unwrap();
 
-        assert!(matches!(expr, Expr::VectorSelector(_)));
+        assert2::assert!(matches!(expr, Expr::VectorSelector(_)));
     }
 
     #[test]
     fn parse_promql_maps_parser_errors() {
         let err = parse_promql("up {{{").unwrap_err();
 
-        assert!(matches!(err, PromqlError::Parse(_)));
+        assert2::assert!(matches!(err, PromqlError::Parse(_)));
     }
 
     #[test]
@@ -829,7 +829,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(expr.to_string() == "metric[5s1ms]");
+        assert2::assert!(expr.to_string() == "metric[5s1ms]");
     }
 
     #[test]
@@ -840,7 +840,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(expr.to_string() == "metric offset -4s");
+        assert2::assert!(expr.to_string() == "metric offset -4s");
     }
 
     #[test]
@@ -854,7 +854,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, PromqlError::Parse(_)));
+        assert2::assert!(matches!(err, PromqlError::Parse(_)));
     }
 
     #[test]
@@ -865,6 +865,6 @@ mod tests {
         )
         .unwrap();
 
-        assert!(expr.to_string() == "metric offset 5s * 0");
+        assert2::assert!(expr.to_string() == "metric offset 5s * 0");
     }
 }

@@ -76,7 +76,7 @@ fn persisted_quota_entity_key(entity_key: &EntityKey) -> EntityKey {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_metadata::EntityKey;
 
     use super::*;
@@ -95,11 +95,11 @@ mod tests {
         let buckets = Arc::new(QuotaBuckets::new());
         let key: EntityKey = vec![("user".into(), Some("alice".into()))];
         let b = buckets.get_or_create("producer_byte_rate", &key, 0);
-        assert!(b.rate() == 0);
+        assert2::assert!(b.rate() == 0);
 
         let img = img_with_quota(vec![("user", Some("alice"))], "producer_byte_rate", 2048.0);
         refresh_buckets(&img, &buckets);
-        assert!(b.rate() == 2048);
+        assert2::assert!(b.rate() == 2048);
     }
 
     #[test]
@@ -107,11 +107,11 @@ mod tests {
         let buckets = Arc::new(QuotaBuckets::new());
         let key: EntityKey = vec![("user".into(), Some("alice".into()))];
         let b = buckets.get_or_create("producer_byte_rate", &key, 1024);
-        assert!(b.rate() == 1024);
+        assert2::assert!(b.rate() == 1024);
 
         let empty = Arc::new(MetadataImage::new(uuid::Uuid::nil()));
         refresh_buckets(&empty, &buckets);
-        assert!(b.rate() == 0);
+        assert2::assert!(b.rate() == 0);
     }
 
     #[test]
@@ -123,7 +123,7 @@ mod tests {
             ("qos-tier".into(), Some("gold".into())),
         ];
         let b = buckets.get_or_create("producer_byte_rate", &tiered_key, 128);
-        assert!(b.rate() == 128);
+        assert2::assert!(b.rate() == 128);
 
         let img = img_with_quota(
             vec![("user", Some("alice")), ("client-id", Some("app"))],
@@ -131,6 +131,6 @@ mod tests {
             2048.0,
         );
         refresh_buckets(&img, &buckets);
-        assert!(b.rate() == 2048);
+        assert2::assert!(b.rate() == 2048);
     }
 }

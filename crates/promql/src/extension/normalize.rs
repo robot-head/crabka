@@ -230,7 +230,7 @@ mod tests {
         compute::concat_batches,
         datatypes::{DataType, Field, Schema},
     };
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::{
         catalog::MemTable,
         datasource::memory::MemorySourceConfig,
@@ -315,7 +315,7 @@ mod tests {
         let rewritten = node
             .with_exprs_and_inputs(vec![], vec![input.clone()])
             .expect("valid rewrite");
-        assert!(
+        assert2::assert!(
             rewritten
                 == SeriesNormalize {
                     offset_ms: 123,
@@ -377,7 +377,7 @@ mod tests {
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        assert!(
+        assert2::assert!(
             (0..ts.len())
                 .map(|index| ts.value(index))
                 .collect::<Vec<_>>()

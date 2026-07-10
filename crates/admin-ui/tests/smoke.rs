@@ -131,12 +131,12 @@ fn sample_acl_row() -> AclRow {
 async fn healthz_returns_ok() {
     let response = get("/healthz").await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert2::assert!(response.status() == StatusCode::OK);
 }
 
 #[tokio::test]
 async fn unauthenticated_login_page_cases() {
-    for (name, path, required, forbidden) in [
+    for (_name, path, required, forbidden) in [
         (
             "protected root",
             "/",
@@ -156,19 +156,17 @@ async fn unauthenticated_login_page_cases() {
         ),
     ] {
         let response = get(path).await;
-        assert_eq!(response.status(), StatusCode::OK, "case {name}");
-        assert_eq!(
-            response.headers().get(header::CONTENT_TYPE),
-            Some(&header::HeaderValue::from_static(
-                "text/html; charset=utf-8"
-            )),
-            "case {name}"
+        assert2::assert!(response.status() == StatusCode::OK);
+        assert2::assert!(
+            response.headers().get(header::CONTENT_TYPE)
+                == Some(&header::HeaderValue::from_static(
+                    "text/html; charset=utf-8"
+                ))
         );
         let body = response_text(response).await;
-        assert!(
+        assert2::assert!(
             required.iter().all(|needle| body.contains(needle))
-                && forbidden.iter().all(|needle| !body.contains(needle)),
-            "case {name}: {body}"
+                && forbidden.iter().all(|needle| !body.contains(needle))
         );
     }
 }
@@ -187,10 +185,10 @@ async fn root_with_valid_cookie_renders_overview_shell() {
 
     let response = get_from(app, "/", cookie).await;
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert2::assert!(response.status() == StatusCode::OK);
     let body = response_text(response).await;
-    assert_eq!(body, render_page(&RoutePage::overview()));
-    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
+    assert2::assert!(body == render_page(&RoutePage::overview()));
+    assert2::assert!(factory.read_seam_calls.load(Ordering::SeqCst) == 0);
 }
 
 #[tokio::test]
@@ -212,7 +210,7 @@ async fn posting_login_sets_session_cookie_and_cookie_authenticates_protected_ro
     )
     .await;
 
-    assert_eq!(login_response.status(), StatusCode::OK);
+    assert2::assert!(login_response.status() == StatusCode::OK);
     let set_cookie = login_response
         .headers()
         .get(header::SET_COOKIE)
@@ -220,20 +218,20 @@ async fn posting_login_sets_session_cookie_and_cookie_authenticates_protected_ro
         .to_str()
         .expect("cookie is ASCII")
         .to_string();
-    assert!(set_cookie.starts_with(&format!("{SESSION_COOKIE_NAME}=")));
-    assert!(set_cookie.contains("HttpOnly"));
-    assert!(set_cookie.contains("SameSite=Lax"));
-    assert!(set_cookie.contains("Path=/"));
-    assert_eq!(login_broker.calls.load(Ordering::SeqCst), 1);
+    assert2::assert!(set_cookie.starts_with(&format!("{SESSION_COOKIE_NAME}=")));
+    assert2::assert!(set_cookie.contains("HttpOnly"));
+    assert2::assert!(set_cookie.contains("SameSite=Lax"));
+    assert2::assert!(set_cookie.contains("Path=/"));
+    assert2::assert!(login_broker.calls.load(Ordering::SeqCst) == 1);
 
     let login_body = response_text(login_response).await;
-    assert!(!login_body.contains(password_sentinel));
+    assert2::assert!(!login_body.contains(password_sentinel));
 
     let protected_response = get_from(app, "/topics", Some(set_cookie)).await;
 
-    assert_eq!(protected_response.status(), StatusCode::OK);
+    assert2::assert!(protected_response.status() == StatusCode::OK);
     let protected_body = response_text(protected_response).await;
-    assert!(protected_body.contains("orders"));
+    assert2::assert!(protected_body.contains("orders"));
 }
 
 #[tokio::test]
@@ -296,16 +294,13 @@ async fn authenticated_post_mutation_routes_call_admin_mutation_seam() {
     ] {
         let response = post_json_from(app.clone(), path, body, Some(cookie.clone())).await;
 
-        assert_eq!(response.status(), StatusCode::OK, "{path} should succeed");
+        assert2::assert!(response.status() == StatusCode::OK);
         let text = response_text(response).await;
-        assert!(text.contains("status=ok"), "{path} returned {text}");
-        assert!(text.contains(expected_resource), "{path} returned {text}");
+        assert2::assert!(text.contains("status=ok"));
+        assert2::assert!(text.contains(expected_resource));
     }
 
-    assert_eq!(
-        factory.mutation_counts(),
-        [11, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
-    );
+    assert2::assert!(factory.mutation_counts() == [11, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
 }
 
 #[tokio::test]
@@ -316,11 +311,11 @@ async fn post_mutation_routes_authenticate_before_decoding_request_body() {
 
     let response = post_json_from(app, "/topics/create", "not-json", None).await;
 
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(factory.total_mutation_calls(), 0);
+    assert2::assert!(response.status() == StatusCode::UNAUTHORIZED);
+    assert2::assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
+    assert2::assert!(factory.total_mutation_calls() == 0);
     let text = response_text(response).await;
-    assert!(text.contains("not authenticated"));
+    assert2::assert!(text.contains("not authenticated"));
 }
 
 #[tokio::test]
@@ -332,11 +327,11 @@ async fn post_mutation_routes_reject_stale_cookie_before_decoding_request_body()
 
     let response = post_json_from(app, "/topics/create", "not-json", Some(cookie)).await;
 
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(factory.total_mutation_calls(), 0);
+    assert2::assert!(response.status() == StatusCode::UNAUTHORIZED);
+    assert2::assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
+    assert2::assert!(factory.total_mutation_calls() == 0);
     let text = response_text(response).await;
-    assert!(text.contains("not authenticated"));
+    assert2::assert!(text.contains("not authenticated"));
 }
 
 #[tokio::test]
@@ -350,11 +345,11 @@ async fn post_mutation_routes_return_bad_request_for_authenticated_malformed_jso
 
     let response = post_json_from(app, "/topics/create", "not-json", Some(cookie)).await;
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(factory.total_mutation_calls(), 0);
+    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert2::assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
+    assert2::assert!(factory.total_mutation_calls() == 0);
     let text = response_text(response).await;
-    assert!(text.contains("invalid JSON request"));
+    assert2::assert!(text.contains("invalid JSON request"));
 }
 
 #[tokio::test]
@@ -371,11 +366,11 @@ async fn authenticated_post_mutation_routes_reject_oversized_body_before_deseria
 
     let response = post_json_from(app, "/topics/create", oversized_body, Some(cookie)).await;
 
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(factory.total_mutation_calls(), 0);
+    assert2::assert!(response.status() == StatusCode::PAYLOAD_TOO_LARGE);
+    assert2::assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
+    assert2::assert!(factory.total_mutation_calls() == 0);
     let text = response_text(response).await;
-    assert!(text.contains("request body too large"));
+    assert2::assert!(text.contains("request body too large"));
 }
 
 #[tokio::test]
@@ -390,18 +385,12 @@ async fn protected_http_routes_without_cookie_render_guarded_login_page() {
     ] {
         let response = get(path).await;
 
-        assert_eq!(response.status(), StatusCode::OK, "{path} status");
+        assert2::assert!(response.status() == StatusCode::OK);
         let body = response_text(response).await;
-        assert_eq!(body, render_route_html(route), "{path} guarded route HTML");
-        assert_eq!(body, render_page(&RoutePage::login()), "{path} login HTML");
-        assert!(
-            !body.contains("operations-shell"),
-            "{path} operations shell"
-        );
-        assert!(
-            !body.contains("Authentication required."),
-            "{path} auth shell copy"
-        );
+        assert2::assert!(body == render_route_html(route));
+        assert2::assert!(body == render_page(&RoutePage::login()));
+        assert2::assert!(!body.contains("operations-shell"));
+        assert2::assert!(!body.contains("Authentication required."));
     }
 }
 
@@ -427,12 +416,12 @@ async fn authenticated_read_routes_call_injected_seams_and_render_rows() {
     ] {
         let response = get_from(app.clone(), path, cookie.clone()).await;
 
-        assert_eq!(response.status(), StatusCode::OK, "{path} status");
+        assert2::assert!(response.status() == StatusCode::OK);
         let body = response_text(response).await;
-        assert!(body.contains(expected), "{path} row content");
+        assert2::assert!(body.contains(expected));
     }
 
-    assert_eq!(factory.read_counts(), [1; 6]);
+    assert2::assert!(factory.read_counts() == [1; 6]);
 }
 
 #[tokio::test]
@@ -500,7 +489,7 @@ async fn dynamic_read_routes_match_shared_page_renderer() {
     for (path, expected_body) in cases {
         let body = response_text(get_from(app.clone(), path, cookie.clone()).await).await;
 
-        assert_eq!(body, expected_body, "{path} shared renderer output");
+        assert2::assert!(body == expected_body);
     }
 }
 
@@ -522,12 +511,12 @@ async fn missing_or_invalid_cookie_does_not_call_injected_seams() {
         ] {
             let response = get_from(app.clone(), path, cookie.clone()).await;
 
-            assert_eq!(response.status(), StatusCode::OK, "{path} status");
+            assert2::assert!(response.status() == StatusCode::OK);
             let body = response_text(response).await;
-            assert_eq!(body, render_page(&RoutePage::login()), "{path} login page");
+            assert2::assert!(body == render_page(&RoutePage::login()));
         }
 
-        assert_eq!(factory.read_counts_with_seam(), [0; 7]);
+        assert2::assert!(factory.read_counts_with_seam() == [0; 7]);
     }
 }
 
@@ -544,8 +533,8 @@ impl LoginBroker for RecordingLoginBroker {
         password: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
         Box::pin(async move {
-            assert_eq!(username, "alice");
-            assert_eq!(password, "login-route-password-sentinel");
+            assert2::assert!(username == "alice");
+            assert2::assert!(password == "login-route-password-sentinel");
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -641,12 +630,12 @@ impl AdminSeamFactory for RecordingAdminSeamFactory {
         _cfg: &AdminUiConfig,
         record: &SessionRecord,
     ) -> Result<Self::Reader<'a>, UiError> {
-        assert_eq!(
-            record.user,
-            SessionUser {
-                username: "alice".to_string(),
-                principal: "User:alice".to_string(),
-            }
+        assert2::assert!(
+            record.user
+                == SessionUser {
+                    username: "alice".to_string(),
+                    principal: "User:alice".to_string(),
+                }
         );
         self.read_seam_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.clone())
@@ -657,12 +646,12 @@ impl AdminSeamFactory for RecordingAdminSeamFactory {
         _cfg: &AdminUiConfig,
         record: &SessionRecord,
     ) -> Result<Self::Mutations<'a>, UiError> {
-        assert_eq!(
-            record.user,
-            SessionUser {
-                username: "alice".to_string(),
-                principal: "User:alice".to_string(),
-            }
+        assert2::assert!(
+            record.user
+                == SessionUser {
+                    username: "alice".to_string(),
+                    principal: "User:alice".to_string(),
+                }
         );
         self.mutation_seam_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.clone())

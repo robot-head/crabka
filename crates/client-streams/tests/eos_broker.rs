@@ -81,10 +81,7 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert_eq!(
-        resp.error_code, 0,
-        "streams.version finalize failed: {resp:?}"
-    );
+    assert2::assert!(resp.error_code == 0);
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -101,10 +98,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        resp.topics[0].error_code, 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn produce(producer: &crabka_client_producer::Producer, vals: &[&str]) {
@@ -373,11 +367,7 @@ async fn eos_v2_atomic_output_and_restart_resume() {
 
     // Expected committed aggregation: a→1, a→2, b→1 (no duplicates, no aborted
     // data). With EOS-v2 the only records below the LSO must be these three.
-    assert_eq!(
-        got.len(),
-        3,
-        "exactly 3 committed records expected (no duplicates/aborted leakage); got {got:?}",
-    );
+    assert2::assert!(got.len() == 3);
     let a_counts: Vec<i64> = got
         .iter()
         .filter(|(k, _)| k == "a")
@@ -388,16 +378,8 @@ async fn eos_v2_atomic_output_and_restart_resume() {
         .filter(|(k, _)| k == "b")
         .map(|(_, v)| *v)
         .collect();
-    assert_eq!(
-        a_counts,
-        vec![1, 2],
-        "committed 'a' counts must be [1,2]; got {got:?}"
-    );
-    assert_eq!(
-        b_counts,
-        vec![1],
-        "committed 'b' count must be [1]; got {got:?}"
-    );
+    assert2::assert!(a_counts == vec![1, 2]);
+    assert2::assert!(b_counts == vec![1]);
 
     // 4b. Source-offset atomicity. The streams runtime folds the consumed source
     // offsets into the SAME transaction as the output (`AddOffsetsToTxn` +
@@ -413,16 +395,8 @@ async fn eos_v2_atomic_output_and_restart_resume() {
     )
     .await
     .expect("committed source offset surfaced within 20s");
-    assert_ne!(
-        source_off, -1,
-        "committed source offset must be surfaced via OffsetFetch (txn offsets \
-         materialized on COMMIT), not -1",
-    );
-    assert_eq!(
-        source_off, 3,
-        "committed source offset must equal the consumed count (3 input records \
-         → next offset 3); got {source_off}",
-    );
+    assert2::assert!(source_off != -1);
+    assert2::assert!(source_off == 3);
 
     // 5. True cross-restart EOS. Close the first instance, produce one more "a",
     // start a FRESH instance with the SAME application_id under EXACTLY_ONCE_V2.
@@ -470,18 +444,14 @@ async fn eos_v2_atomic_output_and_restart_resume() {
     //     and the consumer reset to `earliest`, double-counting.
     //   * New input IS processed: the lone new "a" at input offset 3 advances the
     //     restored count a=2 → 3 and is committed as `a→3`.
-    assert_eq!(
-        after_restart,
-        vec![
-            ("a".to_string(), 1),
-            ("a".to_string(), 2),
-            ("b".to_string(), 1),
-            ("a".to_string(), 3),
-        ],
-        "after EOS restart the committed output must be EXACTLY [a→1, a→2, b→1, a→3]: \
-         the original three (committed input processed exactly once across the \
-         restart) plus the single new `a→3` (restored store a=2 + one new 'a'); \
-         got {after_restart:?}",
+    assert2::assert!(
+        after_restart
+            == vec![
+                ("a".to_string(), 1),
+                ("a".to_string(), 2),
+                ("b".to_string(), 1),
+                ("a".to_string(), 3),
+            ]
     );
 
     streams2.close().await.unwrap();

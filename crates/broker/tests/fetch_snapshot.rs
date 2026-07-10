@@ -5,7 +5,7 @@
 
 use std::time::{Duration, Instant};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_protocol::owned::{
     create_topics_request::{CreatableTopic, CreateTopicsRequest},
     fetch_snapshot_request::{FetchSnapshotRequest, PartitionSnapshot, SnapshotId, TopicSnapshot},
@@ -54,7 +54,7 @@ async fn fetch_snapshot_serves_metadata_snapshot() {
         })
         .await
         .unwrap();
-    assert!(resp.topics[0].error_code == 0);
+    assert2::assert!(resp.topics[0].error_code == 0);
 
     env.broker
         .trigger_snapshot_for_test()
@@ -66,7 +66,7 @@ async fn fetch_snapshot_serves_metadata_snapshot() {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let out = env.client.send(fetch_at(0)).await.unwrap();
-        assert!(out.error_code == 0, "top-level error_code");
+        assert2::assert!(out.error_code == 0);
         let part = &out.topics[0].partitions[0];
         if part.error_code == 0 {
             check!(
@@ -79,11 +79,7 @@ async fn fetch_snapshot_serves_metadata_snapshot() {
             );
             break;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "snapshot not served within 30s; last partition error_code={}",
-            part.error_code
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // intentional: snapshot production/installation completes
         // asynchronously in raft and has no metadata-image or metric signal
         // (the image was already non-empty after CreateTopics, so it does not
@@ -104,7 +100,7 @@ async fn fetch_snapshot_rejects_non_metadata_topic() {
     req.topics[0].name = "not-metadata".into();
     let out = env.client.send(req).await.unwrap();
     // INVALID_TOPIC_EXCEPTION (17) for any topic other than __cluster_metadata.
-    assert!((out.error_code, out.topics[0].partitions[0].error_code) == (0, 17));
+    assert2::assert!((out.error_code, out.topics[0].partitions[0].error_code) == (0, 17));
 
     env.broker.shutdown().await;
 }

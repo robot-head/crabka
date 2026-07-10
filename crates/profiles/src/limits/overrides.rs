@@ -167,7 +167,7 @@ impl PartialLimits {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -185,7 +185,7 @@ overrides:
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
         let tenant_a = provider.for_tenant("tenant-a");
 
-        assert!(
+        assert2::assert!(
             *tenant_a
                 == Limits {
                     ingestion_rate_profiles_per_sec: 500.0,
@@ -207,10 +207,10 @@ overrides:
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
         let tenant_b = provider.for_tenant("tenant-b");
 
-        assert_eq!(tenant_b.max_label_value_length, 64);
-        assert_eq!(
-            tenant_b.ingestion_rate_profiles_per_sec,
-            Limits::default().ingestion_rate_profiles_per_sec
+        assert2::assert!(tenant_b.max_label_value_length == 64);
+        assert2::assert!(
+            tenant_b.ingestion_rate_profiles_per_sec
+                == Limits::default().ingestion_rate_profiles_per_sec
         );
     }
 
@@ -236,7 +236,7 @@ overrides:
         )
         .unwrap_err();
 
-        assert!(matches!(err, OverridesError::Yaml(_)), "{err:?}");
+        assert2::assert!(matches!(err, OverridesError::Yaml(_)));
     }
 
     #[test]
@@ -249,7 +249,7 @@ bogus_top_level: true
         )
         .unwrap_err();
 
-        assert!(matches!(err, OverridesError::Yaml(_)), "{err:?}");
+        assert2::assert!(matches!(err, OverridesError::Yaml(_)));
     }
 
     #[test]
@@ -263,9 +263,8 @@ overrides:
         )
         .unwrap_err();
 
-        assert!(
-            matches!(err, OverridesError::Invalid { ref tenant, .. } if tenant == "tenant-a"),
-            "{err:?}"
+        assert2::assert!(
+            matches!(err, OverridesError::Invalid { ref tenant, .. } if tenant == "tenant-a")
         );
     }
 
@@ -280,7 +279,7 @@ overrides:
         )
         .unwrap_err();
 
-        assert!(matches!(err, OverridesError::Invalid { .. }), "{err:?}");
+        assert2::assert!(matches!(err, OverridesError::Invalid { .. }));
     }
 
     #[test]
@@ -294,7 +293,7 @@ overrides:
         )
         .unwrap_err();
 
-        assert!(matches!(err, OverridesError::Invalid { .. }), "{err:?}");
+        assert2::assert!(matches!(err, OverridesError::Invalid { .. }));
     }
 
     #[test]
@@ -311,7 +310,7 @@ overrides:
         .unwrap();
         let tenant_a = provider.for_tenant("tenant-a");
 
-        assert!(
+        assert2::assert!(
             *tenant_a
                 == Limits {
                     ingestion_rate_profiles_per_sec: 0.0,

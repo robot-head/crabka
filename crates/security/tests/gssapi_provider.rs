@@ -23,7 +23,6 @@
 //! security-layer message. This exercises the released sspi keytab-client-auth
 //! path end-to-end against a real KDC.
 
-use assert2::assert;
 use crabka_security::gssapi::{
     AcceptStep, GssAcceptor, GssInitiator, InitStep,
     provider::{SspiAcceptor, SspiInitiator},
@@ -93,20 +92,17 @@ fn full_gssapi_handshake_and_wrap_roundtrip() {
         }
     }
 
-    assert!(acceptor_done, "acceptor never reached Established");
+    assert2::assert!(acceptor_done);
 
     // The recovered principal: sspi lowercases the realm; compare case-insensitively.
     let principal = acceptor.src_principal().expect("src_principal");
-    assert!(
-        principal.to_ascii_lowercase() == CLIENT_PRINCIPAL.to_ascii_lowercase(),
-        "recovered principal mismatch (got {principal})"
-    );
+    assert2::assert!(principal.to_ascii_lowercase() == CLIENT_PRINCIPAL.to_ascii_lowercase());
 
     // RFC 4752 security-layer round-trip: acceptor wraps, initiator unwraps.
     let plaintext = [0x01u8, 0x00, 0x10, 0x00];
     let wrapped = acceptor.wrap(&plaintext, false).expect("acceptor wrap");
     let unwrapped = initiator.unwrap(&wrapped).expect("initiator unwrap");
-    assert!(unwrapped == plaintext, "wrap/unwrap round-trip mismatch");
+    assert2::assert!(unwrapped == plaintext);
 }
 
 /// Feed a client token into the acceptor, recording any reply token and whether

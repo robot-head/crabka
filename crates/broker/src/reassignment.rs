@@ -180,7 +180,7 @@ mod tests {
         time::Duration,
     };
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use uuid::Uuid;
 
@@ -334,7 +334,7 @@ mod tests {
             &[NodeId(1), NodeId(3)],
         );
         // broker 1 keeps dA at slot 0; broker 3 keeps dC at slot 1 (NOT dB).
-        assert!(new == vec![da, dc]);
+        assert2::assert!(new == vec![da, dc]);
     }
 
     #[test]
@@ -342,7 +342,7 @@ mod tests {
         let da = uuid::Uuid::from_u128(0xA);
         // replicas [1] dirs [dA]; add broker 2 (no dir yet).
         let new = remap_directories(&[NodeId(1)], &[da], &[NodeId(1), NodeId(2)]);
-        assert!(new == vec![da, uuid::Uuid::nil()]);
+        assert2::assert!(new == vec![da, uuid::Uuid::nil()]);
     }
 
     /// Build an image with explicit directories, to test that
@@ -402,7 +402,7 @@ mod tests {
         let image = img_with_dirs(&[1, 2, 3], &[1, 2, 3], &[3], &[2], 1, &[da, db, dc]);
         let l = liveness(&[1, 2, 3]).await;
         let updates = compute_reassignment_progress(&image, &l).await;
-        assert!(updates.len() == 1);
+        assert2::assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         // Slot 0 → broker 1 → dA; slot 1 → broker 3 → dC (NOT dB).
         check!(
@@ -416,7 +416,7 @@ mod tests {
         let img = img(&[1, 2, 3], &[1, 2, 3], &[3], &[2], 1);
         let l = liveness(&[1, 2, 3]).await;
         let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.len() == 1);
+        assert2::assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         // leader and leader_epoch are unchanged (leader didn't change).
         check!(
@@ -477,14 +477,11 @@ mod tests {
                 vec![1, 2, 3],
             ),
         ];
-        for (case, replicas, isr, adding, removing, leader, alive) in cases {
+        for (_case, replicas, isr, adding, removing, leader, alive) in cases {
             let img = img(&replicas, &isr, &adding, &removing, leader);
             let l = liveness(&alive).await;
             let updates = compute_reassignment_progress(&img, &l).await;
-            assert!(
-                updates.is_empty(),
-                "case {case}: should wait; got {updates:?}"
-            );
+            assert2::assert!(updates.is_empty());
         }
     }
 
@@ -494,13 +491,9 @@ mod tests {
         let img = img(&[1, 2, 3], &[1, 2, 3], &[3], &[2], 2);
         let l = liveness(&[1, 2, 3]).await;
         let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.len() == 1);
+        assert2::assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert!(
-            pr.leader == 1 || pr.leader == 3,
-            "leader was {}",
-            pr.leader.0
-        );
+        assert2::assert!(pr.leader == 1 || pr.leader == 3);
         // leader_epoch bumped; replica set unchanged — completion happens
         // next tick.
         check!(
@@ -534,10 +527,10 @@ mod tests {
         shutdown.cancel();
         task.await.expect("reassignment task panicked");
         let submissions = controller.submissions();
-        assert!(submissions.len() == 1);
-        assert!(submissions[0].len() == 1);
+        assert2::assert!(submissions.len() == 1);
+        assert2::assert!(submissions[0].len() == 1);
         let pr = first_partition(&submissions[0][0]);
-        assert!((&pr.replicas, pr.partition_epoch) == (&vec![NodeId(1), NodeId(3)], 1));
+        assert2::assert!((&pr.replicas, pr.partition_epoch) == (&vec![NodeId(1), NodeId(3)], 1));
     }
 
     #[tokio::test]
@@ -559,8 +552,8 @@ mod tests {
 
         shutdown.cancel();
         task.await.expect("reassignment task panicked");
-        assert!(observed.is_err(), "non-leader must not submit changes");
-        assert!(controller.submitted_len() == 0);
+        assert2::assert!(observed.is_err());
+        assert2::assert!(controller.submitted_len() == 0);
     }
 
     #[tokio::test]
@@ -602,7 +595,7 @@ mod tests {
         let img = Arc::new(img_inner);
         let l = liveness(&[1, 2, 3]).await;
         let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.len() == 2);
+        assert2::assert!(updates.len() == 2);
     }
 
     #[tokio::test]
@@ -612,9 +605,9 @@ mod tests {
         let img = img(&[1, 2, 3, 4, 5], &[1, 2, 3, 4, 5], &[4, 5], &[1, 2], 3);
         let l = liveness(&[1, 2, 3, 4, 5]).await;
         let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.len() == 1);
+        assert2::assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert!(
+        assert2::assert!(
             (&pr.replicas, &pr.isr)
                 == (
                     &vec![NodeId(3), NodeId(4), NodeId(5)],
@@ -630,9 +623,9 @@ mod tests {
         let img = img(&[1, 2, 3, 4], &[1, 2, 3, 4], &[4], &[2], 1);
         let l = liveness(&[1, 2, 3, 4]).await;
         let updates = compute_reassignment_progress(&img, &l).await;
-        assert!(updates.len() == 1);
+        assert2::assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert!(pr.isr == vec![NodeId(1), NodeId(3), NodeId(4)]);
+        assert2::assert!(pr.isr == vec![NodeId(1), NodeId(3), NodeId(4)]);
     }
 }
 

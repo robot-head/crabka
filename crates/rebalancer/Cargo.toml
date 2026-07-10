@@ -22,6 +22,7 @@ name = "crabka-rebalancer"
 path = "src/bin/rebalancer.rs"
 
 [dependencies]
+assert2 = { workspace = true }
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
 bytes.workspace = true
@@ -54,7 +55,6 @@ connectrpc-axum-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
 mutants = { workspace = true }
 tempfile.workspace = true

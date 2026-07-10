@@ -273,7 +273,7 @@ mod tests {
         store.put(b(b"k"), b(b"v"), ctx()).await;
 
         // Cached only — not yet flushed to inner.
-        assert_eq!(store.get(b"k").await, Some(b(b"v")));
+        assert2::assert!(store.get(b"k").await == Some(b(b"v")));
     }
 
     #[tokio::test]
@@ -283,13 +283,13 @@ mod tests {
         store.put(b(b"k"), b(b"v"), ctx()).await;
         let flushed = store.flush().await;
 
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(&flushed[0].0, &b(b"k"));
-        assert_eq!(&flushed[0].1.value, &Some(b(b"v")));
+        assert2::assert!(flushed.len() == 1);
+        assert2::assert!(&flushed[0].0 == &b(b"k"));
+        assert2::assert!(&flushed[0].1.value == &Some(b(b"v")));
 
         // Inner now has the write-through value; serve it from the (now-clean)
         // cache or inner — either way `get` returns it.
-        assert_eq!(store.get(b"k").await, Some(b(b"v")));
+        assert2::assert!(store.get(b"k").await == Some(b(b"v")));
     }
 
     #[tokio::test]
@@ -300,15 +300,15 @@ mod tests {
         let store = CachingKeyValueStore::new(cache(), Box::new(inner));
 
         // Sanity: inner value is visible before the delete.
-        assert_eq!(store.get(b"k").await, Some(b(b"v0")));
+        assert2::assert!(store.get(b"k").await == Some(b(b"v0")));
 
         store.delete(b(b"k"), ctx()).await;
         // Cached tombstone hides the inner value.
-        assert_eq!(store.get(b"k").await, None);
+        assert2::assert!(store.get(b"k").await == None);
 
         // After flush, the inner store no longer has the key.
         store.flush().await;
-        assert_eq!(store.get(b"k").await, None);
+        assert2::assert!(store.get(b"k").await == None);
     }
 
     #[tokio::test]
@@ -325,9 +325,8 @@ mod tests {
 
         // Range [a, d) covers a, b, c.
         let r = store.range(b"a", b"d").await;
-        assert_eq!(
-            r,
-            vec![
+        assert2::assert!(
+            r == vec![
                 (b(b"a"), b(b"9")), // cache wins over inner's a -> 1
                 (b(b"b"), b(b"2")), // cache-only
                 (b(b"c"), b(b"3")), // inner-only
@@ -345,7 +344,7 @@ mod tests {
         store.delete(b(b"a"), ctx()).await;
 
         let r = store.range(b"a", b"c").await;
-        assert_eq!(r, vec![(b(b"b"), b(b"2"))]);
+        assert2::assert!(r == vec![(b(b"b"), b(b"2"))]);
     }
 
     /// A cache miss falls through to the inner store (the `None` arm of `get`).
@@ -356,9 +355,9 @@ mod tests {
         let store = CachingKeyValueStore::new(cache(), Box::new(inner));
 
         // Nothing staged in the cache for "k": the read falls through to inner.
-        assert_eq!(store.get(b"k").await, Some(b(b"inner")));
+        assert2::assert!(store.get(b"k").await == Some(b(b"inner")));
         // A genuinely-absent key returns None from inner.
-        assert_eq!(store.get(b"missing").await, None);
+        assert2::assert!(store.get(b"missing").await == None);
     }
 
     /// `scan_all` overlays the full cache on the full inner store: cache wins on
@@ -376,9 +375,8 @@ mod tests {
         store.delete(b(b"c"), ctx()).await; // tombstone hides inner c
 
         let r = store.scan_all().await;
-        assert_eq!(
-            r,
-            vec![
+        assert2::assert!(
+            r == vec![
                 (b(b"a"), b(b"1")), // inner-only
                 (b(b"b"), b(b"9")), // cache wins
                 (b(b"d"), b(b"4")), // cache-only
@@ -394,13 +392,13 @@ mod tests {
 
         store.put_inner(b(b"k"), b(b"v")).await;
         // Visible via the cache-first read (falls through to inner) ...
-        assert_eq!(store.get(b"k").await, Some(b(b"v")));
+        assert2::assert!(store.get(b"k").await == Some(b(b"v")));
         // ... and no dirty entry was staged.
-        assert!(store.flush().await.is_empty());
+        assert2::assert!(store.flush().await.is_empty());
 
         store.delete_inner(b"k").await;
-        assert_eq!(store.get(b"k").await, None);
-        assert!(store.flush().await.is_empty());
+        assert2::assert!(store.get(b"k").await == None);
+        assert2::assert!(store.flush().await.is_empty());
     }
 
     /// `clear` empties both the cache layer (dropping staged dirty entries) and
@@ -415,10 +413,10 @@ mod tests {
         store.clear().await;
 
         // Both the staged entry and the inner value are gone.
-        assert_eq!(store.get(b"a").await, None);
-        assert_eq!(store.get(b"b").await, None);
-        assert!(store.scan_all().await.is_empty());
-        assert!(store.flush().await.is_empty());
+        assert2::assert!(store.get(b"a").await == None);
+        assert2::assert!(store.get(b"b").await == None);
+        assert2::assert!(store.scan_all().await.is_empty());
+        assert2::assert!(store.flush().await.is_empty());
     }
 
     /// `flush_with_old` reports `old = None` for a key with no prior inner value
@@ -440,17 +438,17 @@ mod tests {
             .iter()
             .map(|(key, old, new, _)| (key.clone(), old.clone(), new.clone()))
             .collect::<Vec<_>>();
-        assert_eq!(
-            actual,
-            vec![
-                (b(b"fresh"), None, Some(b(b"v"))),
-                (b(b"present"), Some(b(b"old")), Some(b(b"new"))),
-            ]
+        assert2::assert!(
+            actual
+                == vec![
+                    (b(b"fresh"), None, Some(b(b"v"))),
+                    (b(b"present"), Some(b(b"old")), Some(b(b"new"))),
+                ]
         );
 
         // Both write-throughs landed.
-        assert_eq!(store.get(b"present").await, Some(b(b"new")));
-        assert_eq!(store.get(b"fresh").await, Some(b(b"v")));
+        assert2::assert!(store.get(b"present").await == Some(b(b"new")));
+        assert2::assert!(store.get(b"fresh").await == Some(b(b"v")));
     }
 
     /// `flush_with_old` on a tombstone returns `new = None` and deletes the inner
@@ -464,11 +462,11 @@ mod tests {
         store.delete(b(b"k"), ctx()).await;
 
         let drained = store.flush_with_old().await;
-        assert_eq!(drained.len(), 1);
-        assert_eq!(&drained[0].0, &b(b"k"));
-        assert_eq!(&drained[0].1, &Some(b(b"old")));
-        assert_eq!(&drained[0].2, &None);
+        assert2::assert!(drained.len() == 1);
+        assert2::assert!(&drained[0].0 == &b(b"k"));
+        assert2::assert!(&drained[0].1 == &Some(b(b"old")));
+        assert2::assert!(&drained[0].2 == &None);
 
-        assert_eq!(store.get(b"k").await, None);
+        assert2::assert!(store.get(b"k").await == None);
     }
 }

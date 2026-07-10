@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use axum::{
     Router,
     extract::State,
@@ -151,11 +151,11 @@ async fn by_id_forwards_tenant_and_window_to_querier() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     // The v2 envelope wraps the querier's trace body.
-    assert!(json["status"] == "COMPLETE");
+    assert2::assert!(json["status"] == "COMPLETE");
     let echoed = json["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0].clone();
     // The querier sees the right trace id in its path, the tenant header, and
     // start/end as epoch seconds.
@@ -213,7 +213,7 @@ async fn merges_duplicate_trace_results_across_shards() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
@@ -261,7 +261,7 @@ async fn deduplicates_spans_across_shards() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let span_sets = json["traces"][0]["spanSets"].as_array().unwrap();
@@ -303,7 +303,7 @@ async fn caps_merged_traces_to_limit_newest_first() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let traces = json["traces"].as_array().unwrap();
@@ -341,10 +341,10 @@ async fn defaults_merged_trace_limit_to_twenty() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["traces"].as_array().unwrap().len() == 20);
+    assert2::assert!(json["traces"].as_array().unwrap().len() == 20);
 }
 
 /// Config for the spss tests: two shards (Live + one block), dispatched in plan
@@ -380,7 +380,7 @@ async fn caps_span_sets_per_trace_to_spss() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let span_sets = json["traces"][0]["spanSets"].as_array().unwrap();
@@ -420,13 +420,13 @@ async fn defaults_span_sets_per_trace_to_three() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let spans = json["traces"][0]["spanSets"][0]["spans"]
         .as_array()
         .unwrap();
-    assert!(spans.len() == 3);
+    assert2::assert!(spans.len() == 3);
 }
 
 #[tokio::test]
@@ -454,10 +454,10 @@ async fn dispatches_search_shards_concurrently() {
     .expect("sharded search should not serialize shard requests")
     .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(
+    assert2::assert!(
         json["traces"][0]["spanSets"][0]["spans"]
             .as_array()
             .unwrap()
@@ -511,7 +511,7 @@ async fn forwards_backend_row_group_job_to_querier() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let received_query = json["traces"][0]["rootTraceName"].as_str().unwrap();
@@ -574,7 +574,7 @@ async fn uses_tenant_specific_backend_row_group_jobs() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let received_query = json["traces"][0]["rootTraceName"].as_str().unwrap();
@@ -613,11 +613,11 @@ async fn metrics_query_range_is_a_single_unsharded_job() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     // Returned verbatim — no cross-shard summing.
-    assert!(
+    assert2::assert!(
         json["series"][0]["samples"]
             == json!([
                 {"timestampMs": "1000000000", "value": 1.0},
@@ -626,8 +626,8 @@ async fn metrics_query_range_is_a_single_unsharded_job() {
     );
 
     let log = seen.lock().unwrap();
-    assert!(log.len() == 1); // exactly one job, not Live + per-block
-    assert!(!log[0].contains("block=")); // unrestricted -> full hot+cold union
+    assert2::assert!(log.len() == 1); // exactly one job, not Live + per-block
+    assert2::assert!(!log[0].contains("block=")); // unrestricted -> full hot+cold union
 }
 
 #[tokio::test]
@@ -651,10 +651,10 @@ async fn metrics_query_limits_exemplars() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["series"][0]["exemplars"].as_array().unwrap().len() == 1);
+    assert2::assert!(json["series"][0]["exemplars"].as_array().unwrap().len() == 1);
 }
 
 #[tokio::test]
@@ -679,10 +679,10 @@ async fn metrics_instant_query_is_a_single_unsharded_job() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(
+    assert2::assert!(
         json["series"][0]["samples"]
             == json!([
                 {"timestampMs": "1000000000", "value": 1.0},
@@ -691,8 +691,8 @@ async fn metrics_instant_query_is_a_single_unsharded_job() {
     );
 
     let log = seen.lock().unwrap();
-    assert!(log.len() == 1);
-    assert!(!log[0].contains("block="));
+    assert2::assert!(log.len() == 1);
+    assert2::assert!(!log[0].contains("block="));
 }
 
 // --- v2 tag discovery / values sharding ------------------------------------
@@ -716,11 +716,11 @@ async fn shards_v2_tag_discovery_across_live_frontier() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     // Both shards' span-scope tags union+dedupe into one scope, sorted.
-    assert!(
+    assert2::assert!(
         json["scopes"]
             == serde_json::json!([{
                 "name": "span",
@@ -752,10 +752,10 @@ async fn dispatches_tag_discovery_shards_concurrently() {
     .expect("sharded tag discovery should not serialize shard requests")
     .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["scopes"][0]["tags"].as_array().unwrap().len() == 2);
+    assert2::assert!(json["scopes"][0]["tags"].as_array().unwrap().len() == 2);
 }
 
 #[tokio::test]
@@ -780,10 +780,10 @@ async fn shards_v2_tag_values_across_live_frontier() {
         .await
         .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(
+    assert2::assert!(
         json["tagValues"]
             == json!([
                 { "type": "string", "value": "backend" },
@@ -818,10 +818,10 @@ async fn dispatches_tag_value_shards_concurrently() {
     .expect("sharded tag values should not serialize shard requests")
     .unwrap();
 
-    assert!(response.status().is_success());
+    assert2::assert!(response.status().is_success());
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
-    assert!(json["tagValues"].as_array().unwrap().len() == 2);
+    assert2::assert!(json["tagValues"].as_array().unwrap().len() == 2);
 }
 
 // --- validation + capacity --------------------------------------------------
@@ -838,24 +838,24 @@ async fn search_requires_valid_start_and_end() {
         "/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D",
     )
     .await;
-    assert!(status == StatusCode::BAD_REQUEST);
-    assert!(body == "missing query parameter start");
+    assert2::assert!(status == StatusCode::BAD_REQUEST);
+    assert2::assert!(body == "missing query parameter start");
 
     let (status, body) = get_text(
         build_router(&upstream, FrontendConfig::default(), single_block_catalog()),
         "/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0",
     )
     .await;
-    assert!(status == StatusCode::BAD_REQUEST);
-    assert!(body == "missing query parameter end");
+    assert2::assert!(status == StatusCode::BAD_REQUEST);
+    assert2::assert!(body == "missing query parameter end");
 
     let (status, body) = get_text(
         build_router(&upstream, FrontendConfig::default(), single_block_catalog()),
         "/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=bogus&end=1",
     )
     .await;
-    assert!(status == StatusCode::BAD_REQUEST);
-    assert!(body == "invalid query parameter start");
+    assert2::assert!(status == StatusCode::BAD_REQUEST);
+    assert2::assert!(body == "invalid query parameter start");
 }
 
 #[tokio::test]
@@ -909,8 +909,8 @@ async fn drains_concurrent_search_requests() {
     .await
     .expect("concurrent frontend requests should drain");
 
-    assert!(first == StatusCode::OK);
-    assert!(second == StatusCode::OK);
+    assert2::assert!(first == StatusCode::OK);
+    assert2::assert!(second == StatusCode::OK);
 }
 
 // --- stub querier responses -------------------------------------------------
@@ -1220,8 +1220,8 @@ async fn search_propagates_upstream_querier_error() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::BAD_REQUEST);
+    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("parse error: unexpected token"));
+    assert2::assert!(text.contains("parse error: unexpected token"));
 }

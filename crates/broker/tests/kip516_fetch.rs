@@ -1,5 +1,4 @@
 //! KIP-516: Fetch by `topic_id` error semantics.
-use assert2::assert;
 mod support;
 
 use crabka_protocol::{
@@ -57,5 +56,5 @@ async fn fetch_unknown_topic_id_returns_unknown_topic_id() {
         .map(|pp| pp.error_code)
         .next()
         .expect("a partition row");
-    assert!(code == 100); // UNKNOWN_TOPIC_ID
+    assert2::assert!(code == 100); // UNKNOWN_TOPIC_ID
 }

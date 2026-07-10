@@ -144,7 +144,7 @@ pub(crate) fn id_to_name(topic_ids: &HashMap<String, WireUuid>) -> HashMap<WireU
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::offset_fetch_response::{
@@ -170,7 +170,7 @@ mod tests {
 
         let req = build_offset_fetch("g", &by_topic, &ids);
         // Legacy single-group fields (v0-7) AND v8+ groups[] with topic_id (v10).
-        assert!(
+        assert2::assert!(
             req == OffsetFetchRequest {
                 group_id: "g".to_string(),
                 topics: Some(vec![OffsetFetchRequestTopic {
@@ -202,7 +202,7 @@ mod tests {
         by_topic.insert("t".to_string(), vec![0]);
         let req = build_offset_fetch("g", &by_topic, &HashMap::new());
         let gtops = req.groups[0].topics.as_ref().unwrap();
-        assert!(gtops[0].topic_id == WireUuid::ZERO);
+        assert2::assert!(gtops[0].topic_id == WireUuid::ZERO);
     }
 
     #[test]
@@ -225,7 +225,7 @@ mod tests {
             ..Default::default()
         };
         let out = parse_offset_fetch(&resp, &HashMap::new());
-        assert!(out == vec![("t".to_string(), 3, 42, -1)]);
+        assert2::assert!(out == vec![("t".to_string(), 3, 42, -1)]);
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
         let mut id_map = HashMap::new();
         id_map.insert(id(9), "named".to_string());
         let out = parse_offset_fetch(&resp, &id_map);
-        assert!(out == vec![("named".to_string(), 0, 5, -1)]);
+        assert2::assert!(out == vec![("named".to_string(), 0, 5, -1)]);
     }
 
     #[test]
@@ -270,7 +270,7 @@ mod tests {
             ..Default::default()
         };
         let out = parse_offset_fetch(&resp, &HashMap::new());
-        assert!(out == vec![("legacy".to_string(), 1, 11, -1)]);
+        assert2::assert!(out == vec![("legacy".to_string(), 1, 11, -1)]);
     }
 
     #[test]
@@ -280,7 +280,7 @@ mod tests {
         let mut ids = HashMap::new();
         ids.insert("t".to_string(), id(7));
         let topics = build_commit_topics(offsets, &ids);
-        assert!(
+        assert2::assert!(
             topics
                 == vec![OffsetCommitRequestTopic {
                     name: "t".to_string(),
@@ -300,7 +300,7 @@ mod tests {
         let mut o2 = HashMap::new();
         o2.insert(("u".to_string(), 0), (1, -1));
         let t2 = build_commit_topics(o2, &HashMap::new());
-        assert!(t2[0].topic_id == WireUuid::ZERO);
+        assert2::assert!(t2[0].topic_id == WireUuid::ZERO);
     }
 
     #[test]
@@ -308,6 +308,6 @@ mod tests {
         let mut ids = HashMap::new();
         ids.insert("t".to_string(), id(7));
         let inv = id_to_name(&ids);
-        assert!(inv.get(&id(7)) == Some(&"t".to_string()));
+        assert2::assert!(inv.get(&id(7)) == Some(&"t".to_string()));
     }
 }

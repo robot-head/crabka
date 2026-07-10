@@ -113,13 +113,10 @@ async fn run_membership_builds_routing_with_offset_tiebreak() {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    assert!(
-        ok,
-        "routing table did not converge with the offset tiebreak"
-    );
+    assert2::assert!(ok);
 
     // Sanity: an unclaimed partition has no owner.
-    assert_eq!(store.owner_of(7), None);
+    assert2::assert!(store.owner_of(7) == None);
     let _ = GatewayConfig::DEDUP_TOPIC_REPLICATION; // touch the type (lint hygiene)
 
     token.cancel();
@@ -201,10 +198,7 @@ async fn run_membership_tombstone_and_malformed_skip() {
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    assert!(
-        reached_none,
-        "expected owner_of(0) to be None after tombstone (malformed record must not kill the loop)"
-    );
+    assert2::assert!(reached_none);
 
     token.cancel();
     let _ = h.await;

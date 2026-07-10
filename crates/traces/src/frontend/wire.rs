@@ -395,7 +395,6 @@ impl TraceByIdResponseJson {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -428,9 +427,8 @@ mod tests {
             },
         };
         let json = serde_json::to_value(&resp).unwrap();
-        assert_eq!(
-            json,
-            serde_json::json!({
+        assert2::assert!(
+            json == serde_json::json!({
                 "traces": [{
                     "traceID": "0a".repeat(16),
                     "rootServiceName": "checkout",
@@ -486,9 +484,8 @@ mod tests {
             "metrics": { "totalBlocks": "2", "inspectedTraces": "3", "inspectedBytes": "5" }
         });
         let resp: SearchResponseJson = serde_json::from_value(body).unwrap();
-        assert_eq!(
-            resp,
-            SearchResponseJson {
+        assert2::assert!(
+            resp == SearchResponseJson {
                 traces: vec![TraceJson {
                     trace_id: "ab".repeat(16),
                     root_service_name: "svc".to_string(),
@@ -545,9 +542,8 @@ mod tests {
             inspected_bytes: 200,
             inspected_spans: 11,
         });
-        assert_eq!(
-            a,
-            Metrics {
+        assert2::assert!(
+            a == Metrics {
                 total_jobs: 2,
                 completed_jobs: 2,
                 total_blocks: 2,
@@ -560,8 +556,8 @@ mod tests {
 
     #[test]
     fn hex_encodes_lowercase() {
-        assert!(hex16(&[0xab; 16]) == "ab".repeat(16));
-        assert!(hex8(&[0x0f; 8]) == "0f".repeat(8));
+        assert2::assert!(hex16(&[0xab; 16]) == "ab".repeat(16));
+        assert2::assert!(hex8(&[0x0f; 8]) == "0f".repeat(8));
     }
 
     #[test]
@@ -601,9 +597,8 @@ mod tests {
         };
         let json = TraceJson::from(&trace);
         let back = TraceResult::from(&json);
-        assert_eq!(
-            back,
-            TraceResult {
+        assert2::assert!(
+            back == TraceResult {
                 trace_id: [3; 16],
                 root_service_name: "svc".into(),
                 root_trace_name: "GET /".into(),

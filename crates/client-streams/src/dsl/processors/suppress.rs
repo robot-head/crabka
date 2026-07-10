@@ -147,16 +147,10 @@ where
                     .get_suppress_store::<K, V>(&self.store_name)
                     .expect("suppress store not found");
                 if let Some(cap) = self.max_records {
-                    assert!(
-                        store.len() <= cap,
-                        "suppress buffer exceeded its max capacity of {cap} records (shutDownWhenFull)"
-                    );
+                    assert2::assert!(store.len() <= cap);
                 }
                 if let Some(cap) = self.max_bytes {
-                    assert!(
-                        store.byte_size() <= cap,
-                        "suppress buffer exceeded its max capacity of {cap} bytes (shutDownWhenFull)"
-                    );
+                    assert2::assert!(store.byte_size() <= cap);
                 }
             }
         }
@@ -259,7 +253,7 @@ mod tests {
             .await;
         }
         // Nothing emitted yet (stream_time = 3 < window end 10).
-        assert!(buffer.is_empty());
+        assert2::assert!(buffer.is_empty());
 
         // A record for window [20,30) advances stream_time to 25 ≥ 10 → [0,10) closes.
         {
@@ -289,9 +283,9 @@ mod tests {
         let (_, rec) = buffer.pop_front().unwrap();
         let k = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(actual_len, 1);
-        assert_eq!(k.window, Window { start: 0, end: 10 });
-        assert_eq!(change.new, Some(2));
+        assert2::assert!(actual_len == 1);
+        assert2::assert!(k.window == Window { start: 0, end: 10 });
+        assert2::assert!(change.new == Some(2));
     }
 
     #[tokio::test]
@@ -355,7 +349,7 @@ mod tests {
             )
             .await;
         }
-        assert!(buffer.is_empty());
+        assert2::assert!(buffer.is_empty());
         // stream_time 16 → threshold 11 >= 10 → [0,10) closes.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -379,15 +373,15 @@ mod tests {
             )
             .await;
         }
-        assert_eq!(buffer.len(), 1);
+        assert2::assert!(buffer.len() == 1);
         let (_, rec) = buffer.pop_front().unwrap();
-        assert_eq!(
+        assert2::assert!(
             rec.key
                 .unwrap()
                 .downcast::<Windowed<String>>()
                 .unwrap()
-                .window,
-            Window { start: 0, end: 10 }
+                .window
+                == Window { start: 0, end: 10 }
         );
     }
 
@@ -518,7 +512,7 @@ mod tests {
             )
             .await;
         }
-        assert!(buffer.is_empty()); // nothing closed yet
+        assert2::assert!(buffer.is_empty()); // nothing closed yet
         // A record in window [10,20) at ts=15 closes [0,10): the close-eviction runs
         // BEFORE the cap check, so len drops to 1 (the new window) → no panic, and
         // both [0,10) entries emit.
@@ -544,7 +538,7 @@ mod tests {
             )
             .await;
         }
-        assert_eq!(buffer.len(), 2); // a@[0,10] and b@[0,10] emitted
+        assert2::assert!(buffer.len() == 2); // a@[0,10] and b@[0,10] emitted
     }
 
     #[tokio::test]
@@ -601,10 +595,7 @@ mod tests {
             proc.process(&mut ctx, Record::new(Some(k.to_string()), change, ts))
                 .await;
         }
-        assert!(
-            buffer.is_empty(),
-            "old timer (60) must not fire after the reset"
-        );
+        assert2::assert!(buffer.is_empty());
 
         // stream-time 90 (threshold 40): a@40 is now due → emits the NEWER value (2).
         {
@@ -634,8 +625,8 @@ mod tests {
         let key = rec.key.unwrap().downcast::<String>().unwrap();
         // The newest value (2), not the stale 1 → the reset kept the latest update.
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(actual_len, 1);
-        assert_eq!(key.as_str(), "a");
-        assert_eq!(change.new, Some(2));
+        assert2::assert!(actual_len == 1);
+        assert2::assert!(key.as_str() == "a");
+        assert2::assert!(change.new == Some(2));
     }
 }

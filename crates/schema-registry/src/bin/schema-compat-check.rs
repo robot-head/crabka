@@ -188,7 +188,7 @@ mod tests {
     fn scalar_wire_group_change_is_compatible() {
         let old = set(user_file(FieldType::Int32));
         let new = set(user_file(FieldType::Int64));
-        assert!(check_backward(&old, &new).is_empty());
+        assert2::assert!(check_backward(&old, &new).is_empty());
     }
 
     #[test]
@@ -196,8 +196,8 @@ mod tests {
         let old = set(user_file(FieldType::Int32));
         let new = set(user_file(FieldType::String));
         let errors = check_backward(&old, &new);
-        assert_eq!(errors.len(), 1);
-        assert!(
+        assert2::assert!(errors.len() == 1);
+        assert2::assert!(
             errors
                 .first()
                 .is_some_and(|error| error.contains("user.proto"))

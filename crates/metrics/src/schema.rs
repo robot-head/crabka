@@ -160,9 +160,9 @@ mod tests {
         match field.data_type() {
             DataType::List(inner) => match inner.data_type() {
                 DataType::Struct(fields) => {
-                    assert_eq!(
-                        fields.iter().map(|field| field.name()).collect::<Vec<_>>(),
-                        vec!["offset", "length"]
+                    assert2::assert!(
+                        fields.iter().map(|field| field.name()).collect::<Vec<_>>()
+                            == vec!["offset", "length"]
                     );
                 }
                 other => panic!("expected Struct, got {other:?}"),
@@ -174,12 +174,8 @@ mod tests {
     #[test]
     fn exemplar_schema_promotes_trace_and_span() {
         let s = exemplar_schema();
-        for (name, column) in [("trace id", "trace_id"), ("span id", "span_id")] {
-            assert_eq!(
-                s.column_with_name(column).unwrap().1.data_type(),
-                &DataType::Utf8,
-                "case {name}"
-            );
+        for (_name, column) in [("trace id", "trace_id"), ("span id", "span_id")] {
+            assert2::assert!(s.column_with_name(column).unwrap().1.data_type() == &DataType::Utf8);
         }
     }
 

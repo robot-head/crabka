@@ -355,9 +355,6 @@ mod tests {
         let frame = wire::encode_protobuf(11, &[0], &[]);
 
         let err = serde.deserialize("orders", &frame).unwrap_err();
-        assert!(
-            err.to_string().contains("messageType"),
-            "expected messageType mismatch error, got {err}"
-        );
+        assert2::assert!(err.to_string().contains("messageType"));
     }
 }

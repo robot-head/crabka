@@ -206,7 +206,6 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
     use crabka_protocol::UnknownTaggedFields;
 
@@ -313,7 +312,7 @@ mod tests {
             operation: None,
             permission_type: None,
         };
-        assert!(built == expected);
+        assert2::assert!(built == expected);
     }
 
     #[test]
@@ -325,10 +324,10 @@ mod tests {
             ("pattern_type_filter", |f| f.pattern_type_filter = 99),
             ("operation", |f| f.operation = 99),
         ];
-        for (axis, corrupt) in cases {
+        for (_axis, corrupt) in cases {
             let mut f = filter(Some("orders"), Some("User:alice"));
             corrupt(&mut f);
-            assert!(build_filter(&f).is_err(), "axis {axis}");
+            assert2::assert!(build_filter(&f).is_err());
         }
     }
 
@@ -347,7 +346,7 @@ mod tests {
             permission_type: PERMISSION_ALLOW,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(matched == expected_matched);
+        assert2::assert!(matched == expected_matched);
 
         let mut prefixed_acl = acl("orders-", "User:bob", AclOperation::Write);
         prefixed_acl.pattern_type = PatternType::Prefixed;
@@ -364,7 +363,7 @@ mod tests {
             permission_type: PERMISSION_ALLOW,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(matched == expected_prefixed);
+        assert2::assert!(matched == expected_prefixed);
 
         let mut results = vec![
             filter_result(codes::NONE, None, vec![matched.clone()]),
@@ -390,7 +389,7 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
-        assert!(results == expected_results);
+        assert2::assert!(results == expected_results);
     }
 
     #[test]
@@ -420,7 +419,7 @@ mod tests {
             resource_type: "Acl".into(),
             name: "orders".into(),
         }];
-        assert!(resources == expected);
+        assert2::assert!(resources == expected);
     }
 
     #[test]
@@ -431,10 +430,7 @@ mod tests {
         let ctx = test_context(&p, &peer);
 
         audit_deleted_acls(log.as_ref(), &ctx, Vec::new());
-        assert!(
-            rx.try_recv().is_err(),
-            "empty audit resource list is a no-op"
-        );
+        assert2::assert!(rx.try_recv().is_err());
 
         audit_deleted_acls(
             log.as_ref(),
@@ -456,7 +452,7 @@ mod tests {
         else {
             panic!("expected AdminOperation");
         };
-        assert!(
+        assert2::assert!(
             (
                 outcome,
                 principal.name.as_str(),
@@ -497,7 +493,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -531,8 +527,8 @@ mod tests {
             filter_results: vec![denied.clone(), denied],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(all_acls(&broker_handle).len() == 1);
+        assert2::assert!(resp == expected);
+        assert2::assert!(all_acls(&broker_handle).len() == 1);
         broker_handle.shutdown().await;
     }
 
@@ -578,10 +574,10 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
 
         let remaining = all_acls(&broker_handle);
-        assert!(remaining == vec![acl("payments", "User:bob", AclOperation::Write)]);
+        assert2::assert!(remaining == vec![acl("payments", "User:bob", AclOperation::Write)]);
         broker_handle.shutdown().await;
     }
 }

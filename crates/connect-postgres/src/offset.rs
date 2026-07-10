@@ -97,12 +97,9 @@ mod tests {
     fn lsn_round_trips_postgres_text_form() {
         let lsn: PgLsn = "16/B374D848".parse().expect("valid LSN");
 
-        assert_eq!(lsn, PgLsn(0x16_b374_d848));
-        assert_eq!(lsn.to_string(), "16/B374D848".to_owned());
-        assert_eq!(
-            "FFFFFFFF/FFFFFFFF".parse::<PgLsn>().expect("max LSN"),
-            PgLsn(u64::MAX)
-        );
+        assert2::assert!(lsn == PgLsn(0x16_b374_d848));
+        assert2::assert!(lsn.to_string() == "16/B374D848".to_owned());
+        assert2::assert!("FFFFFFFF/FFFFFFFF".parse::<PgLsn>().expect("max LSN") == PgLsn(u64::MAX));
     }
 
     #[test]
@@ -110,14 +107,13 @@ mod tests {
         let lsn: PgLsn = "0/2A".parse().expect("valid LSN");
         let offset = lsn.to_source_offset("app", "slot_a");
 
-        assert_eq!(
-            PgLsn::from_source_offset(&offset, "slot_a").expect("matching slot"),
-            lsn
+        assert2::assert!(
+            PgLsn::from_source_offset(&offset, "slot_a").expect("matching slot") == lsn
         );
         match PgLsn::from_source_offset(&offset, "slot_b").expect_err("slot mismatch") {
             PostgresConnectError::Offset(message) => {
                 for needle in ["does not match expected slot", "slot_a", "slot_b"] {
-                    assert!(message.contains(needle), "missing {needle:?} in {message}");
+                    assert2::assert!(message.contains(needle));
                 }
             }
             error => panic!("expected offset error, got {error:?}"),
@@ -133,10 +129,10 @@ mod tests {
             .0
             .insert("slot".to_owned(), OffsetValue::Long(7));
 
-        for (name, offset) in [("missing", missing), ("non_string", non_string)] {
+        for (_name, offset) in [("missing", missing), ("non_string", non_string)] {
             match PgLsn::from_source_offset(&offset, "slot_a").expect_err("slot should fail") {
                 PostgresConnectError::Offset(message) => {
-                    assert_eq!(message, "source offset missing string slot", "case {name}");
+                    assert2::assert!(message == "source offset missing string slot");
                 }
                 error => panic!("expected offset error, got {error:?}"),
             }
@@ -145,15 +141,15 @@ mod tests {
 
     #[test]
     fn malformed_lsn_is_offset_error() {
-        for (name, input) in [
+        for (_name, input) in [
             ("missing_separator", "not-a-lsn"),
             ("invalid_hex", "1/XYZ"),
             ("component_overflow", "100000000/0"),
         ] {
-            assert!(
-                matches!(input.parse::<PgLsn>(), Err(PostgresConnectError::Offset(_))),
-                "case {name}"
-            );
+            assert2::assert!(matches!(
+                input.parse::<PgLsn>(),
+                Err(PostgresConnectError::Offset(_))
+            ));
         }
     }
 }

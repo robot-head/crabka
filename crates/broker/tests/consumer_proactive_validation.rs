@@ -68,7 +68,7 @@
 
 use std::time::{Duration, Instant};
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerError};
@@ -155,7 +155,7 @@ async fn produce(client: &Client, topic: &str, values: &[&str]) {
             }
             panic!("produce failed after {attempt} attempt(s): code {err}");
         }
-        assert!(produced, "produce of {v} did not succeed");
+        assert2::assert!(produced);
     }
 }
 
@@ -173,7 +173,7 @@ async fn create_topic(client: &Client, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    assert!(cr.topics[0].error_code == 0, "create_topic failed: {cr:?}");
+    assert2::assert!(cr.topics[0].error_code == 0);
 }
 
 /// PROACTIVE KIP-320 truncation detection.
@@ -214,11 +214,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
     let pr0 = broker
         .partition_record_for_test(topic, 0)
         .expect("partition record must be present after wait_until_partition_present");
-    assert!(
-        pr0.leader_epoch == 0,
-        "fresh topic should start at leader_epoch 0, got {}",
-        pr0.leader_epoch
-    );
+    assert2::assert!(pr0.leader_epoch == 0);
 
     // Seed the group's committed position. A fresh `auto.offset.reset = None`
     // consumer starts at the log-end sentinel and would read nothing, so we
@@ -251,10 +247,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
                 epochs.push(r.leader_epoch);
             }
         }
-        assert!(
-            epochs == vec![0, 0, 0, 0],
-            "seed consumer must read all 4 records at epoch 0 first, got {epochs:?}"
-        );
+        assert2::assert!(epochs == vec![0, 0, 0, 0]);
         // Commit the consumed position (offset 4, epoch 0) for the group.
         seed.commit_sync().await.unwrap();
         seed.close().await.unwrap();
@@ -272,10 +265,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         .local_log_end_offset(topic, 0)
         .await
         .expect("leader LEO");
-    assert!(
-        leo == 2,
-        "leader LEO should be 2 after truncation, got {leo}"
-    );
+    assert2::assert!(leo == 2);
 
     // (b) Advance the metadata image's leader epoch to 1 (same leader/replicas/
     //     ISR). This is the metadata event the consumer's refresh_leader_epochs
@@ -336,10 +326,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         if !consumer.assignment().await.is_empty() {
             break;
         }
-        assert!(
-            Instant::now() < settle,
-            "consumer assignment did not propagate within 10s after member-count gate"
-        );
+        assert2::assert!(Instant::now() < settle);
         // intentional: bounded re-check tick for a client-side coordinator RPC
         // poll. The SyncGroup response + prime_offsets propagate to the client's
         // `assignment()` a few async hops after the broker-side member-count gate
@@ -366,10 +353,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
     while Instant::now() < deadline {
         match consumer.poll(Duration::from_millis(300)).await {
             Ok(recs) => {
-                assert!(
-                    recs.is_empty(),
-                    "an awaiting_validation partition must not be fetched / deliver records; got {recs:?}"
-                );
+                assert2::assert!(recs.is_empty());
             }
             Err(e) => {
                 got = Some(e);
@@ -410,11 +394,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
     // Discriminator: the validate pass must have issued at least one OFLE RPC.
     // The reactive diverging_epoch / OFFSET_OUT_OF_RANGE paths issue none.
     let ofle_after = broker.offset_for_leader_epoch_count_for_test();
-    assert!(
-        ofle_after > ofle_before,
-        "proactive validation must issue an OffsetForLeaderEpoch RPC \
-         (before={ofle_before}, after={ofle_after})"
-    );
+    assert2::assert!(ofle_after > ofle_before);
 
     consumer.close().await.unwrap();
     broker.shutdown().await;

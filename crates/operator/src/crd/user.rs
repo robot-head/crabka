@@ -422,7 +422,7 @@ impl KafkaUserQuotas {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -430,17 +430,17 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaUser::crd();
-        assert_eq!(crd.spec.group.as_str(), "crabka.io");
-        assert_eq!(crd.spec.names.kind.as_str(), "KafkaUser");
-        assert_eq!(crd.spec.names.plural.as_str(), "kafkausers");
-        assert_eq!(crd.spec.names.short_names, Some(vec!["ku".to_string()]));
-        assert_eq!(
+        assert2::assert!(crd.spec.group.as_str() == "crabka.io");
+        assert2::assert!(crd.spec.names.kind.as_str() == "KafkaUser");
+        assert2::assert!(crd.spec.names.plural.as_str() == "kafkausers");
+        assert2::assert!(crd.spec.names.short_names == Some(vec!["ku".to_string()]));
+        assert2::assert!(
             crd.spec
                 .versions
                 .iter()
                 .map(|v| v.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["v1alpha1"]
+                .collect::<Vec<_>>()
+                == vec!["v1alpha1"]
         );
     }
 
@@ -480,19 +480,18 @@ mod tests {
             "\"type\":\"simple\"",
             "\"name\":\"orders\"",
         ] {
-            assert!(json.contains(want), "case {want:?}; got: {json}");
+            assert2::assert!(json.contains(want));
         }
         let back: KafkaUser = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == ku.spec);
+        assert2::assert!(back.spec == ku.spec);
     }
 
     #[test]
     fn minimum_spec_parses() {
         let json = r#"{"authentication":{"type":"scram-sha-512"}}"#;
         let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            spec,
-            KafkaUserSpec {
+        assert2::assert!(
+            spec == KafkaUserSpec {
                 authentication: Authentication::ScramSha512(ScramSha512Auth {
                     iterations: None,
                     password_length: None,
@@ -510,7 +509,7 @@ mod tests {
             "operations":["Read"]
         }"#;
         let rule: AclRule = serde_json::from_str(json).unwrap();
-        assert!(
+        assert2::assert!(
             rule == AclRule {
                 resource: AclResource {
                     kind: AclResourceKind::Topic,
@@ -526,7 +525,7 @@ mod tests {
 
     #[test]
     fn acl_rule_host_serialization_cases() {
-        for (name, host, expected_host) in [
+        for (_name, host, expected_host) in [
             ("default host omitted", "*", None),
             ("non-default host emitted", "10.0.0.0", Some("10.0.0.0")),
         ] {
@@ -541,10 +540,8 @@ mod tests {
                 permission: AclPermission::Allow,
             };
             let value = serde_json::to_value(&rule).unwrap();
-            assert_eq!(
-                value.get("host").and_then(serde_json::Value::as_str),
-                expected_host,
-                "case {name}: {value}"
+            assert2::assert!(
+                value.get("host").and_then(serde_json::Value::as_str) == expected_host
             );
         }
     }
@@ -553,8 +550,8 @@ mod tests {
     fn quotas_empty_serializes_as_empty_object() {
         let q = KafkaUserQuotas::default();
         let j = serde_json::to_string(&q).unwrap();
-        assert!(j == "{}");
-        assert!(q.to_quota_map().is_empty());
+        assert2::assert!(j == "{}");
+        assert2::assert!(q.to_quota_map().is_empty());
     }
 
     #[test]
@@ -566,9 +563,8 @@ mod tests {
             controller_mutation_rate: None,
         };
         let m = q.to_quota_map();
-        assert_eq!(
-            m,
-            std::collections::BTreeMap::from([
+        assert2::assert!(
+            m == std::collections::BTreeMap::from([
                 ("producer_byte_rate".to_string(), 1_048_576.0),
                 ("request_percentage".to_string(), 25.0),
             ])
@@ -582,9 +578,8 @@ mod tests {
             ..Default::default()
         };
         let m = q.to_quota_map();
-        assert_eq!(
-            m,
-            std::collections::BTreeMap::from([("controller_mutation_rate".to_string(), 2.5)])
+        assert2::assert!(
+            m == std::collections::BTreeMap::from([("controller_mutation_rate".to_string(), 2.5)])
         );
     }
 
@@ -597,7 +592,7 @@ mod tests {
             "controllerMutationRate": 10.5
         }"#;
         let q: KafkaUserQuotas = serde_json::from_str(json).unwrap();
-        assert!(
+        assert2::assert!(
             q == KafkaUserQuotas {
                 producer_byte_rate: Some(1_048_576),
                 consumer_byte_rate: Some(2_097_152),
@@ -609,7 +604,7 @@ mod tests {
 
     #[test]
     fn quota_presence_cases() {
-        for (name, json, expected) in [
+        for (_name, json, expected) in [
             (
                 "present empty quotas clear broker state",
                 r#"{"authentication":{"type":"scram-sha-512"},"quotas":{}}"#,
@@ -622,13 +617,13 @@ mod tests {
             ),
         ] {
             let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
-            assert_eq!(spec.quotas, expected, "case {name}");
+            assert2::assert!(spec.quotas == expected);
         }
     }
 
     #[test]
     fn authentication_json_round_trip_cases() {
-        for (name, authentication, expected_json) in [
+        for (_name, authentication, expected_json) in [
             (
                 "TLS defaults",
                 Authentication::Tls(TlsAuth::default()),
@@ -675,15 +670,15 @@ mod tests {
             ),
         ] {
             let actual_json = serde_json::to_value(&authentication).unwrap();
-            assert_eq!(&actual_json, &expected_json, "case {name}");
+            assert2::assert!(&actual_json == &expected_json);
             let back: Authentication = serde_json::from_value(actual_json).unwrap();
-            assert_eq!(back, authentication, "case {name}");
+            assert2::assert!(back == authentication);
         }
     }
 
     #[test]
     fn status_field_json_cases() {
-        for (name, status, expected) in [
+        for (_name, status, expected) in [
             (
                 "optional fields unset",
                 KafkaUserStatus::default(),
@@ -708,11 +703,7 @@ mod tests {
                 serde_json::json!({"conditions": [], "tls": false, "scramSha512": false, "scramSha256": false, "quotasInSync": false, "external": true}),
             ),
         ] {
-            assert_eq!(
-                serde_json::to_value(status).unwrap(),
-                expected,
-                "case {name}"
-            );
+            assert2::assert!(serde_json::to_value(status).unwrap() == expected);
         }
     }
 
@@ -743,17 +734,17 @@ mod tests {
             "\"name\":\"orders\"",
             "\"producerByteRate\":1048576",
         ] {
-            assert!(j.contains(want), "case {want:?}; got: {j}");
+            assert2::assert!(j.contains(want));
         }
         let back: KafkaUserSpec = serde_json::from_str(&j).unwrap();
-        assert!(back == spec);
+        assert2::assert!(back == spec);
     }
 
     #[test]
     fn tls_external_minimum_spec_parses() {
         let json = r#"{"authentication":{"type":"tls-external"}}"#;
         let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
-        assert!(
+        assert2::assert!(
             spec == KafkaUserSpec {
                 authentication: Authentication::TlsExternal,
                 authorization: None,
@@ -807,7 +798,7 @@ spec:
             let Authentication::DelegationToken(actual) = user.spec.authentication else {
                 panic!("case {name}: expected DelegationToken variant");
             };
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 }

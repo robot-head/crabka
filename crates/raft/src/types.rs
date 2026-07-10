@@ -66,7 +66,6 @@ pub struct AppDataResponse {
 
 #[cfg(test)]
 mod node_tests {
-    use assert2::assert;
 
     use super::*;
     #[test]
@@ -87,7 +86,7 @@ mod node_tests {
             ],
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         };
-        assert!(n.controller_addr() == Some("127.0.0.1:9093".to_string()));
+        assert2::assert!(n.controller_addr() == Some("127.0.0.1:9093".to_string()));
     }
 
     #[test]
@@ -105,6 +104,6 @@ mod node_tests {
             }],
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         };
-        assert!(n.controller_addr() == Some(format!("{host}:9093")));
+        assert2::assert!(n.controller_addr() == Some(format!("{host}:9093")));
     }
 }

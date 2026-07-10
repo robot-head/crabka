@@ -66,7 +66,7 @@ mod tests {
         };
         let s = SubscriptionWrapperSerde;
         let b = s.serialize("t", &w);
-        assert_eq!(s.deserialize("t", &b).unwrap(), w);
+        assert2::assert!(s.deserialize("t", &b).unwrap() == w);
     }
 
     #[test]
@@ -77,6 +77,6 @@ mod tests {
         };
         let s = SubscriptionResponseWrapperSerde;
         let b = s.serialize("t", &w);
-        assert_eq!(s.deserialize("t", &b).unwrap(), w);
+        assert2::assert!(s.deserialize("t", &b).unwrap() == w);
     }
 }

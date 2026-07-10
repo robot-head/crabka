@@ -12,7 +12,7 @@
 //!   * unknown topic / out-of-range partition → per-partition
 //!     `UNKNOWN_TOPIC_OR_PARTITION (3)`
 
-use assert2::{assert, check};
+use assert2::check;
 mod support;
 
 use crabka_protocol::{
@@ -63,7 +63,7 @@ async fn create_topic(p: &support::InProcess, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert!(resp.topics[0].error_code == 0, "{name} create: {resp:?}");
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn init_producer(p: &support::InProcess) -> (i64, i16) {
@@ -138,7 +138,7 @@ async fn after_idempotent_produce_describe_returns_the_producer() {
     let topic_id = topic_id_for(&p, "t").await;
 
     let (pid, epoch) = init_producer(&p).await;
-    assert!(pid > 0);
+    assert2::assert!(pid > 0);
 
     let pr = p
         .client
@@ -159,7 +159,7 @@ async fn after_idempotent_produce_describe_returns_the_producer() {
         })
         .await
         .expect("Produce");
-    assert!(pr.responses[0].partition_responses[0].error_code == 0);
+    assert2::assert!(pr.responses[0].partition_responses[0].error_code == 0);
 
     let resp = p
         .client
@@ -202,10 +202,7 @@ async fn multiple_producers_on_same_partition_all_surfaced() {
 
     let (pid_a, epoch_a) = init_producer(&p).await;
     let (pid_b, epoch_b) = init_producer(&p).await;
-    assert!(
-        pid_a != pid_b,
-        "InitProducerId must return distinct ids on back-to-back calls"
-    );
+    assert2::assert!(pid_a != pid_b);
 
     for (pid, epoch) in [(pid_a, epoch_a), (pid_b, epoch_b)] {
         let pr = p
@@ -227,7 +224,7 @@ async fn multiple_producers_on_same_partition_all_surfaced() {
             })
             .await
             .expect("Produce");
-        assert!(pr.responses[0].partition_responses[0].error_code == 0);
+        assert2::assert!(pr.responses[0].partition_responses[0].error_code == 0);
     }
 
     let resp = p
@@ -244,12 +241,9 @@ async fn multiple_producers_on_same_partition_all_surfaced() {
         .expect("DescribeProducers");
 
     let producers = &resp.topics[0].partitions[0].active_producers;
-    assert!(
-        producers.len() == 2,
-        "expected both producers: {producers:?}"
-    );
+    assert2::assert!(producers.len() == 2);
     let seen: std::collections::HashSet<i64> = producers.iter().map(|p| p.producer_id).collect();
-    assert!(seen.contains(&pid_a) && seen.contains(&pid_b));
+    assert2::assert!(seen.contains(&pid_a) && seen.contains(&pid_b));
 
     p.broker.shutdown().await;
 }
@@ -276,10 +270,7 @@ async fn unknown_topic_returns_unknown_topic_or_partition() {
         .iter()
         .map(|part| (part.error_code, part.active_producers.is_empty()))
         .collect();
-    assert!(
-        (resp.topics.len(), partitions) == (1, vec![(3, true), (3, true)]),
-        "unknown topic must surface UNKNOWN_TOPIC_OR_PARTITION (3) per partition: {resp:?}"
-    );
+    assert2::assert!((resp.topics.len(), partitions) == (1, vec![(3, true), (3, true)]));
 
     p.broker.shutdown().await;
 }
@@ -303,21 +294,21 @@ async fn out_of_range_partition_returns_unknown_topic_or_partition() {
         .await
         .expect("DescribeProducers");
 
-    assert!(resp.topics[0].partitions.len() == 2);
+    assert2::assert!(resp.topics[0].partitions.len() == 2);
     // Partition 0 exists → error_code 0.
     let p0 = resp.topics[0]
         .partitions
         .iter()
         .find(|p| p.partition_index == 0)
         .expect("p0");
-    assert!(p0.error_code == 0, "{p0:?}");
+    assert2::assert!(p0.error_code == 0);
     // Partition 5 doesn't → UNKNOWN_TOPIC_OR_PARTITION.
     let p5 = resp.topics[0]
         .partitions
         .iter()
         .find(|p| p.partition_index == 5)
         .expect("p5");
-    assert!(p5.error_code == 3, "{p5:?}");
+    assert2::assert!(p5.error_code == 3);
 
     p.broker.shutdown().await;
 }

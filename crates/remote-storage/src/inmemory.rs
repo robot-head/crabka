@@ -180,7 +180,6 @@ impl RemoteLogMetadataManager for InmemoryRemoteLogMetadataManager {
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::assert;
     use uuid::Uuid;
 
     use super::*;
@@ -229,27 +228,21 @@ mod tests {
             .remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42)
             .unwrap()
             .expect("segment found");
-        assert_eq!(got, finished);
-        assert_eq!(
-            m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
-            Some(99)
-        );
+        assert2::assert!(got == finished);
+        assert2::assert!(m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap() == Some(99));
     }
 
     #[test]
     fn query_unknown_partition_is_none_not_error() {
         let m = InmemoryRemoteLogMetadataManager::new();
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
-        assert_eq!(
+        assert2::assert!(
             m.remote_log_segment_metadata(&other, LeaderEpoch(0), 0)
-                .unwrap(),
-            None
+                .unwrap()
+                == None
         );
-        assert_eq!(
-            m.highest_offset_for_epoch(&other, LeaderEpoch(0)).unwrap(),
-            None
-        );
-        assert_eq!(m.list_remote_log_segments(&other).unwrap(), Vec::new());
+        assert2::assert!(m.highest_offset_for_epoch(&other, LeaderEpoch(0)).unwrap() == None);
+        assert2::assert!(m.list_remote_log_segments(&other).unwrap() == Vec::new());
     }
 
     #[test]
@@ -262,7 +255,7 @@ mod tests {
         let listed = m
             .list_remote_log_segments_by_epoch(&tp(), LeaderEpoch(0))
             .unwrap();
-        assert_eq!(listed, vec![finished]);
+        assert2::assert!(listed == vec![finished]);
     }
 
     #[test]
@@ -274,16 +267,15 @@ mod tests {
         m.update_remote_log_segment_metadata(finish(10)).unwrap();
 
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
-        for (name, partition, offset, expected) in [
+        for (_name, partition, offset, expected) in [
             ("covered offset", tp(), 42, Some(finished)),
             ("uncovered offset", tp(), 10_000, None),
             ("unknown partition", other, 0, None),
         ] {
-            assert_eq!(
+            assert2::assert!(
                 m.remote_log_segment_metadata(&partition, LeaderEpoch(0), offset)
-                    .unwrap(),
-                expected,
-                "case {name}"
+                    .unwrap()
+                    == expected
             );
         }
     }
@@ -294,7 +286,7 @@ mod tests {
         let err = m
             .update_remote_log_segment_metadata(finish(10))
             .unwrap_err();
-        assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
+        assert2::assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
     }
 
     #[test]
@@ -307,7 +299,7 @@ mod tests {
         m.add_remote_log_segment_metadata(first).unwrap();
         m.update_remote_log_segment_metadata(finish(10)).unwrap();
         let listed = m.list_remote_log_segments(&tp()).unwrap();
-        assert_eq!(listed, vec![finished_first, second]);
+        assert2::assert!(listed == vec![finished_first, second]);
     }
 
     #[test]
@@ -351,14 +343,14 @@ mod tests {
         // list_remote_log_segments matches across the partition.
         let before = m.list_remote_log_segments(&tp()).unwrap();
         let after = restored.list_remote_log_segments(&tp()).unwrap();
-        assert_eq!(before, after);
-        assert_eq!(
+        assert2::assert!(before == after);
+        assert2::assert!(
             restored
                 .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
-                .unwrap(),
-            Some(99)
+                .unwrap()
+                == Some(99)
         );
-        assert_eq!(m.export(), restored.export());
+        assert2::assert!(m.export() == restored.export());
     }
 
     #[test]
@@ -372,7 +364,7 @@ mod tests {
                 broker_id: 1,
             })
             .unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             RemoteStorageError::InvalidPartitionDeleteTransition { .. }
         ));

@@ -15,7 +15,6 @@
 
 use std::{io, net::SocketAddr};
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_protocol::{
@@ -106,7 +105,7 @@ async fn create_topic(addr: SocketAddr, topic: &str, partitions: i32) {
     let resp_bytes = round_trip(&mut stream, 19, VERSION, &body).await.unwrap();
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, VERSION).unwrap();
-    assert!(resp.topics[0].error_code == 0, "CreateTopics must succeed");
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn wait_all_partitions(handle: &BrokerHandle, topic: &str, n: i32) {
@@ -182,17 +181,8 @@ async fn produce_to_partition_on_offline_dir_returns_storage_error() {
     // Confirm spread: both dirs must hold at least one partition of the topic.
     let in_extra = partitions_in_dir(extra.path(), TOPIC);
     let in_primary = partitions_in_dir(primary.path(), TOPIC);
-    assert!(
-        !in_extra.is_empty(),
-        "test premise: at least one partition must land on the extra dir \
-         (primary={} extra={})",
-        in_primary.len(),
-        in_extra.len()
-    );
-    assert!(
-        !in_primary.is_empty(),
-        "test premise: at least one partition must land on the primary dir"
-    );
+    assert2::assert!(!in_extra.is_empty());
+    assert2::assert!(!in_primary.is_empty());
 
     // Pick the smallest partition index on each dir for determinism.
     let mut extra_parts = in_extra.clone();
@@ -205,25 +195,15 @@ async fn produce_to_partition_on_offline_dir_returns_storage_error() {
 
     // Flip ONLY the extra dir offline. The primary dir stays online, so the
     // broker does NOT trigger the all-dirs-offline self-shutdown path.
-    assert!(
-        handle.test_mark_log_dir_offline(extra.path()),
-        "mark_offline must return true (dir was registered and online)"
-    );
+    assert2::assert!(handle.test_mark_log_dir_offline(extra.path()));
 
     // Case 1: Produce to the offline-dir partition must return KAFKA_STORAGE_ERROR (56).
     let code = produce_and_get_error(addr, TOPIC, offline_partition).await;
-    assert!(
-        code == 56,
-        "partition {offline_partition} on offline extra dir must return \
-         KAFKA_STORAGE_ERROR (56); got {code}"
-    );
+    assert2::assert!(code == 56);
 
     // Case 2 (sanity): Produce to the still-online primary-dir partition must succeed.
     let code = produce_and_get_error(addr, TOPIC, online_partition).await;
-    assert!(
-        code == 0,
-        "partition {online_partition} on online primary dir must succeed (0); got {code}"
-    );
+    assert2::assert!(code == 0);
 
     handle.shutdown().await;
 }
@@ -246,10 +226,7 @@ async fn all_log_dirs_offline_triggers_self_shutdown() {
     let mut shutdown_rx = handle.should_shutdown_rx();
 
     // Flip the only log dir offline. This is the all-dirs condition.
-    assert!(
-        handle.test_mark_log_dir_offline(primary.path()),
-        "mark_offline must return true (dir was registered and online)"
-    );
+    assert2::assert!(handle.test_mark_log_dir_offline(primary.path()));
 
     // Wait up to 15 s for the heartbeat client to detect the all-dirs
     // condition and latch should_shutdown to true.
@@ -264,14 +241,8 @@ async fn all_log_dirs_offline_triggers_self_shutdown() {
         }
     })
     .await;
-    assert!(
-        woke.is_ok(),
-        "broker did not signal self-shutdown when all log dirs went offline"
-    );
-    assert!(
-        *shutdown_rx.borrow(),
-        "should_shutdown must be true after all dirs offline"
-    );
+    assert2::assert!(woke.is_ok());
+    assert2::assert!(*shutdown_rx.borrow());
 
     // Shutdown should complete without hanging: the supervisor was already
     // cancelled by the self-shutdown path, and cancelling an already-
@@ -339,13 +310,12 @@ async fn assign_replicas_to_dirs_reports_and_echoes() {
     let mut cur: &[u8] = &resp_bytes;
     let resp = AssignReplicasToDirsResponse::decode(&mut cur, VERSION).unwrap();
 
-    assert!(
+    assert2::assert!(
         (
             resp.error_code,
             resp.directories.is_empty(),
             resp.directories[0].topics[0].partitions[0].error_code,
-        ) == (0, false, 0),
-        "response must echo at least one directory"
+        ) == (0, false, 0)
     );
 
     handle.shutdown().await;
@@ -396,11 +366,7 @@ async fn heartbeat_with_offline_log_dirs_is_accepted() {
     let mut cur: &[u8] = &resp_bytes;
     let resp = BrokerHeartbeatResponse::decode(&mut cur, HB_MAX_VERSION).unwrap();
 
-    assert!(
-        resp.error_code == 0,
-        "BrokerHeartbeat with offline_log_dirs must be accepted (error_code=0), got {}",
-        resp.error_code
-    );
+    assert2::assert!(resp.error_code == 0);
 
     handle.shutdown().await;
 }

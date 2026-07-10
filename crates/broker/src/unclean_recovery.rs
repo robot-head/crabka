@@ -391,7 +391,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -408,24 +407,24 @@ mod tests {
     fn picks_highest_epoch_then_offset() {
         // Broker 3 has a higher epoch even though broker 2 has a longer log.
         let r = [ri(2, 4, 100), ri(3, 5, 10)];
-        assert!(select_best_replica(&r) == Some(NodeId(3)));
+        assert2::assert!(select_best_replica(&r) == Some(NodeId(3)));
     }
 
     #[test]
     fn ties_on_epoch_break_by_offset() {
         let r = [ri(2, 5, 90), ri(3, 5, 120)];
-        assert!(select_best_replica(&r) == Some(NodeId(3)));
+        assert2::assert!(select_best_replica(&r) == Some(NodeId(3)));
     }
 
     #[test]
     fn ties_on_epoch_and_offset_break_by_lowest_broker_id() {
         let r = [ri(3, 5, 100), ri(1, 5, 100), ri(2, 5, 100)];
-        assert!(select_best_replica(&r) == Some(NodeId(1)));
+        assert2::assert!(select_best_replica(&r) == Some(NodeId(1)));
     }
 
     #[test]
     fn empty_input_returns_none() {
-        assert!(select_best_replica(&[]) == None);
+        assert2::assert!(select_best_replica(&[]) == None);
     }
 
     #[test]
@@ -436,16 +435,14 @@ mod tests {
             log_end_offset: 10,
             current_leader_epoch: 7,
         }];
-        assert!(has_newer_leader(&r, 6));
-        assert!(!has_newer_leader(&r, 7));
+        assert2::assert!(has_newer_leader(&r, 6));
+        assert2::assert!(!has_newer_leader(&r, 7));
     }
 }
 
 #[cfg(test)]
 mod urm_tests {
     use std::time::Duration;
-
-    use assert2::assert;
 
     use super::*;
 
@@ -466,8 +463,8 @@ mod urm_tests {
             Some(info(2, 90))
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_secs(5)).await;
-        assert!(got.len() == 2);
-        assert!(select_best_replica(&got) == Some(NodeId(2)));
+        assert2::assert!(got.len() == 2);
+        assert2::assert!(select_best_replica(&got) == Some(NodeId(2)));
     }
 
     #[tokio::test]
@@ -478,7 +475,7 @@ mod urm_tests {
             Some(info(2, 90))
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_millis(50)).await;
-        assert!(
+        assert2::assert!(
             got.iter().map(|info| info.broker_id).collect::<Vec<_>>()
                 == vec![crabka_audit::NodeId(1)]
         );
@@ -492,7 +489,7 @@ mod urm_tests {
             Some(info(2, 90))
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_millis(50)).await;
-        assert!(got == vec![info(1, 50)]);
+        assert2::assert!(got == vec![info(1, 50)]);
     }
 }
 
@@ -503,7 +500,6 @@ mod run_recovery_tests {
         net::SocketAddr,
     };
 
-    use assert2::assert;
     use crabka_metadata::{
         BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
     };
@@ -670,7 +666,7 @@ mod run_recovery_tests {
             MockSource::new(Some(99), image_with_partition(1, &[1, 2])),
             liveness_with_alive(&[]).await,
         );
-        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
+        assert2::assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
     }
 
     #[tokio::test]
@@ -679,7 +675,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), MetadataImage::new(Uuid::nil())),
             liveness_with_alive(&[]).await,
         );
-        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
+        assert2::assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
     }
 
     #[tokio::test]
@@ -688,7 +684,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), image_with_partition(1, &[1, 2])),
             liveness_with_alive(&[1]).await,
         );
-        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
+        assert2::assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
     }
 
     #[tokio::test]
@@ -698,7 +694,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), image_with_partition(1, &[1, 2])),
             liveness_with_alive(&[]).await,
         );
-        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NoEligibleReplica);
+        assert2::assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NoEligibleReplica);
     }
 
     #[tokio::test]
@@ -711,7 +707,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), img),
             liveness_with_alive(&[2]).await,
         );
-        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NoEligibleReplica);
+        assert2::assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NoEligibleReplica);
     }
 
     #[tokio::test]
@@ -730,6 +726,6 @@ mod run_recovery_tests {
             reply: Some(tx),
         };
         mgr.clone().recover_one(j).await;
-        assert!(rx.await.unwrap() == RecoveryOutcome::InProgress);
+        assert2::assert!(rx.await.unwrap() == RecoveryOutcome::InProgress);
     }
 }

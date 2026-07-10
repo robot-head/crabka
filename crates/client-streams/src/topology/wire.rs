@@ -691,32 +691,32 @@ mod tests {
         }];
         let topo = to_wire(&groups, "app");
         let cl = &topo.subtopologies[0].state_changelog_topics[0];
-        assert_eq!(cl.name.as_str(), "app-j-changelog");
-        assert_eq!(
+        assert2::assert!(cl.name.as_str() == "app-j-changelog");
+        assert2::assert!(
             cl.topic_configs
                 .iter()
                 .map(|c| (c.key.as_str(), c.value.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                ("cleanup.policy", "delete"),
-                ("message.timestamp.type", "CreateTime"),
-                ("retention.ms", "86520000"),
-            ]
+                .collect::<Vec<_>>()
+                == vec![
+                    ("cleanup.policy", "delete"),
+                    ("message.timestamp.type", "CreateTime"),
+                    ("retention.ms", "86520000"),
+                ]
         );
     }
 
     #[test]
     fn versioned_store_changelog_config_is_compact_with_min_compaction_lag() {
         let cfgs = versioned_changelog_topic_configs(686_400_000);
-        assert_eq!(
+        assert2::assert!(
             cfgs.iter()
                 .map(|cfg| (cfg.key.as_str(), cfg.value.as_str()))
-                .collect::<Vec<_>>(),
-            vec![
-                ("cleanup.policy", "compact"),
-                ("message.timestamp.type", "CreateTime"),
-                ("min.compaction.lag.ms", "686400000"),
-            ]
+                .collect::<Vec<_>>()
+                == vec![
+                    ("cleanup.policy", "compact"),
+                    ("message.timestamp.type", "CreateTime"),
+                    ("min.compaction.lag.ms", "686400000"),
+                ]
         );
     }
 

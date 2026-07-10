@@ -382,7 +382,7 @@ fn encode(version: i16, resp: &OffsetDeleteResponse) -> Result<Bytes, BrokerErro
 mod tests {
     use std::collections::HashMap;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::BufMut;
     use crabka_protocol::{
         Encode, UnknownTaggedFields,
@@ -432,31 +432,31 @@ mod tests {
     fn decode_subscription_extracts_topic_names() {
         let bytes = encode_subscription(&["foo", "bar"]);
         let got = decode_subscribed_topics(&bytes);
-        assert!(got == vec!["foo".to_string(), "bar".to_string()]);
+        assert2::assert!(got == vec!["foo".to_string(), "bar".to_string()]);
     }
 
     #[test]
     fn decode_subscription_empty_input_is_empty() {
-        assert!(decode_subscribed_topics(&[]).is_empty());
+        assert2::assert!(decode_subscribed_topics(&[]).is_empty());
     }
 
     #[test]
     fn decode_subscription_short_input_is_empty() {
-        assert!(decode_subscribed_topics(&[0u8]).is_empty());
+        assert2::assert!(decode_subscribed_topics(&[0u8]).is_empty());
     }
 
     #[test]
     fn decode_subscription_rejects_out_of_range_version() {
         // Version 99 is not a known ConsumerProtocolSubscription version.
         let bytes = vec![0u8, 99u8];
-        assert!(decode_subscribed_topics(&bytes).is_empty());
+        assert2::assert!(decode_subscribed_topics(&bytes).is_empty());
     }
 
     #[test]
     fn decode_subscription_malformed_body_returns_empty() {
         // Valid version prefix, but truncated body → decode fails.
         let bytes = vec![0u8, 0u8];
-        assert!(decode_subscribed_topics(&bytes).is_empty());
+        assert2::assert!(decode_subscribed_topics(&bytes).is_empty());
     }
 
     // ── whole_error ──────────────────────────────────────────────────
@@ -504,7 +504,7 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -515,7 +515,7 @@ mod tests {
             error_code: codes::GROUP_ID_NOT_FOUND,
             ..Default::default()
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     // ── rewrite_success_as ───────────────────────────────────────────
@@ -562,14 +562,16 @@ mod tests {
             )],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
     fn rewrite_success_as_noop_when_no_none_rows() {
         let rows = resp_topics(&[("t", &[(0, codes::GROUP_SUBSCRIBED_TO_TOPIC)])]);
         let resp = rewrite_success_as(rows, codes::UNKNOWN_SERVER_ERROR);
-        assert!(resp.topics[0].partitions[0].error_code == codes::GROUP_SUBSCRIBED_TO_TOPIC);
+        assert2::assert!(
+            resp.topics[0].partitions[0].error_code == codes::GROUP_SUBSCRIBED_TO_TOPIC
+        );
     }
 
     // ── build_response_rows ──────────────────────────────────────────
@@ -585,10 +587,10 @@ mod tests {
 
         let (out, tombs, to_remove) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
-        assert!(tombs.is_empty(), "no tombstones when denied");
-        assert!(to_remove.is_empty());
+        assert2::assert!(tombs.is_empty());
+        assert2::assert!(to_remove.is_empty());
         for p in &out[0].partitions {
-            assert!(p.error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+            assert2::assert!(p.error_code == codes::TOPIC_AUTHORIZATION_FAILED);
         }
     }
 
@@ -604,8 +606,8 @@ mod tests {
 
         let (out, tombs, _) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
-        assert!(tombs.is_empty(), "subscribed topic → no tombstone");
-        assert!(out[0].partitions[0].error_code == codes::GROUP_SUBSCRIBED_TO_TOPIC);
+        assert2::assert!(tombs.is_empty());
+        assert2::assert!(out[0].partitions[0].error_code == codes::GROUP_SUBSCRIBED_TO_TOPIC);
     }
 
     #[test]
@@ -619,8 +621,8 @@ mod tests {
 
         let (out, tombs, _) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
-        assert!(tombs.is_empty());
-        assert!(out[0].partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        assert2::assert!(tombs.is_empty());
+        assert2::assert!(out[0].partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
     }
 
     #[test]
@@ -664,15 +666,15 @@ mod tests {
         // 3 partitions × 1 tombstone each; offset deltas increase
         // monotonically across the whole batch.
         let deltas: Vec<i32> = tombs.iter().map(|t| t.offset_delta).collect();
-        assert!(deltas == vec![0, 1, 2]);
+        assert2::assert!(deltas == vec![0, 1, 2]);
         // Tombstones carry null values.
-        assert!(tombs.iter().all(|t| t.value.is_none()));
+        assert2::assert!(tombs.iter().all(|t| t.value.is_none()));
         for t in &out {
             for p in &t.partitions {
-                assert!(p.error_code == codes::NONE);
+                assert2::assert!(p.error_code == codes::NONE);
             }
         }
-        assert!(
+        assert2::assert!(
             to_remove
                 == vec![
                     ("t1".to_string(), 0),
@@ -694,7 +696,7 @@ mod tests {
 
         let (out, tombs, _) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
-        assert!(tombs.is_empty());
-        assert!(out[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        assert2::assert!(tombs.is_empty());
+        assert2::assert!(out[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
     }
 }

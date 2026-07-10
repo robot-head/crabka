@@ -412,7 +412,7 @@ fn unix_time_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use axum::{body::Body, http::Request};
     use clap::Parser;
     use tower::ServiceExt;
@@ -423,7 +423,7 @@ mod tests {
     fn parses_distributor_target() {
         let cli = Cli::try_parse_from(["crabka-metrics", "--target", "distributor"]).unwrap();
 
-        assert!(matches!(cli.target, Target::Distributor));
+        assert2::assert!(matches!(cli.target, Target::Distributor));
     }
 
     #[test]
@@ -457,22 +457,22 @@ mod tests {
     fn parses_query_frontend_target() {
         let cli = Cli::try_parse_from(["crabka-metrics", "--target", "query-frontend"]).unwrap();
 
-        assert!(matches!(cli.target, Target::QueryFrontend));
+        assert2::assert!(matches!(cli.target, Target::QueryFrontend));
     }
 
     #[test]
     fn querier_target_is_runnable() {
-        assert!(runnable_targets().contains(&Target::Querier));
+        assert2::assert!(runnable_targets().contains(&Target::Querier));
     }
 
     #[test]
     fn query_frontend_target_is_runnable() {
-        assert!(runnable_targets().contains(&Target::QueryFrontend));
+        assert2::assert!(runnable_targets().contains(&Target::QueryFrontend));
     }
 
     #[test]
     fn ruler_target_is_runnable() {
-        assert!(runnable_targets().contains(&Target::Ruler));
+        assert2::assert!(runnable_targets().contains(&Target::Ruler));
     }
 
     #[tokio::test]
@@ -487,7 +487,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
     }
 
     #[tokio::test]
@@ -500,7 +500,7 @@ mod tests {
         .unwrap();
         let _ = stop_tx.send(());
 
-        assert!(bound.port() != 0);
+        assert2::assert!(bound.port() != 0);
     }
 
     #[tokio::test]
@@ -515,7 +515,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
     }
 
     #[tokio::test]
@@ -528,7 +528,7 @@ mod tests {
         .unwrap();
         let _ = stop_tx.send(());
 
-        assert!(bound.port() != 0);
+        assert2::assert!(bound.port() != 0);
     }
 
     #[tokio::test]
@@ -543,7 +543,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
     }
 
     #[tokio::test]
@@ -556,7 +556,7 @@ mod tests {
         .unwrap();
         let _ = stop_tx.send(());
 
-        assert!(bound.port() != 0);
+        assert2::assert!(bound.port() != 0);
     }
 
     #[test]
@@ -599,6 +599,6 @@ mod tests {
 
     #[test]
     fn rejects_unknown_target() {
-        assert!(Cli::try_parse_from(["crabka-metrics", "--target", "bogus"]).is_err());
+        assert2::assert!(Cli::try_parse_from(["crabka-metrics", "--target", "bogus"]).is_err());
     }
 }

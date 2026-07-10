@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_blockstore::Labels;
 use crabka_metrics::{SamplePayload, WalRecord};
 
@@ -33,10 +33,7 @@ fn parse_duration_ms_supports_all_units_and_compounds_and_rejects_bad_input() {
         ("5x", None),
         ("abc", None),
     ] {
-        assert!(
-            super::parse_duration_ms(input).ok() == want_ms,
-            "case {input:?}"
-        );
+        assert2::assert!(super::parse_duration_ms(input).ok() == want_ms);
     }
 }
 
@@ -69,8 +66,8 @@ for: 1h30m
     )
     .await
     .expect("pending evaluation");
-    assert!(pending == 0);
-    assert!(sink.alerts().is_empty());
+    assert2::assert!(pending == 0);
+    assert2::assert!(sink.alerts().is_empty());
 
     // 90 minutes later the `for: 1h30m` window is satisfied and it fires.
     let firing = super::evaluate_and_dispatch_alerting_rule_with_state(
@@ -83,7 +80,7 @@ for: 1h30m
     )
     .await
     .expect("firing evaluation");
-    assert!(firing == 1);
+    assert2::assert!(firing == 1);
 }
 
 #[tokio::test]
@@ -107,7 +104,7 @@ for: -5m
         &engine, &sink, &mut state, "tenant-a", &rule, 60_000,
     )
     .await;
-    assert!(result.is_err());
+    assert2::assert!(result.is_err());
 }
 
 #[test]
@@ -150,7 +147,7 @@ fn ruler_rule_set_filter_partitions_groups_by_tenant_namespace_and_group() {
         }
     }
 
-    assert!(
+    assert2::assert!(
         assigned
             == BTreeSet::from([
                 ("team-a".to_string(), "alerting".to_string()),
@@ -160,10 +157,7 @@ fn ruler_rule_set_filter_partitions_groups_by_tenant_namespace_and_group() {
             ])
     );
     for (index, total) in [(0, shard_count), (shard_count + 1, shard_count), (1, 0)] {
-        assert!(
-            super::RulerShard::new(index, total).is_err(),
-            "case ({index}, {total})"
-        );
+        assert2::assert!(super::RulerShard::new(index, total).is_err());
     }
 }
 
@@ -349,8 +343,8 @@ async fn recording_rule_append_writes_materialized_records_to_sink() {
     .await
     .expect("recording rule append");
 
-    assert!(appended == 1);
-    assert!(
+    assert2::assert!(appended == 1);
+    assert2::assert!(
         sink.records()
             == vec![WalRecord {
                 tenant: "tenant-a".to_string(),
@@ -391,18 +385,17 @@ async fn recording_rule_merges_rule_level_labels_into_every_series() {
     .await
     .expect("recording rule evaluation");
 
-    assert!(records.len() == 2);
+    assert2::assert!(records.len() == 2);
     for record in &records {
         for (name, value) in [
             ("env", "prod"),
             ("team", "sre"),
             ("__name__", "job:up:current"),
         ] {
-            assert!(
+            assert2::assert!(
                 record
                     .labels
-                    .contains(&(name.to_string(), value.to_string())),
-                "label {name}={value}"
+                    .contains(&(name.to_string(), value.to_string()))
             );
         }
     }
@@ -429,9 +422,9 @@ async fn recording_rule_fails_on_labelset_collision_after_rule_labels() {
     )
     .await;
 
-    assert!(let Err(super::PromqlError::Exec(_)) = &result);
+    assert2::assert!(let Err(super::PromqlError::Exec(_)) = &result);
     if let Err(super::PromqlError::Exec(message)) = result {
-        assert!(message.contains("same labelset after applying rule labels"));
+        assert2::assert!(message.contains("same labelset after applying rule labels"));
     }
 }
 
@@ -496,8 +489,8 @@ annotations:
             .await
             .expect("alert dispatch");
 
-    assert!(dispatched == 1);
-    assert!(
+    assert2::assert!(dispatched == 1);
+    assert2::assert!(
         sink.alerts()
             == vec![super::AlertmanagerAlert {
                 labels: BTreeMap::from([
@@ -542,11 +535,11 @@ annotations:
             .await
             .expect("alert dispatch");
 
-    assert!(dispatched == 1);
+    assert2::assert!(dispatched == 1);
     // `$value` is formatted via format_sample_value and `$labels.job` resolved
     // (in alert label values too); unknown actions like `humanize` are left
     // untouched.
-    assert!(
+    assert2::assert!(
         sink.alerts()
             == vec![super::AlertmanagerAlert {
                 labels: BTreeMap::from([
@@ -672,8 +665,8 @@ for: 5m
     .await
     .expect("replayed alert state evaluation");
 
-    assert!(firing == 1);
-    assert!(sink.alerts()[0].starts_at_ms == 60_000);
+    assert2::assert!(firing == 1);
+    assert2::assert!(sink.alerts()[0].starts_at_ms == 60_000);
 
     state.apply_record(super::RulerAlertStateRecord {
         tenant: "tenant-a".to_string(),
@@ -688,8 +681,8 @@ for: 5m
     .await
     .expect("tombstoned alert state evaluation");
 
-    assert!(pending == 0);
-    assert!(sink.alerts().is_empty());
+    assert2::assert!(pending == 0);
+    assert2::assert!(sink.alerts().is_empty());
 }
 
 #[test]
@@ -721,10 +714,7 @@ fn ruler_group_state_replays_compacted_last_eval_records() {
         ("tenant-a", "team-b", "latency", Some(90_000)),
         ("tenant-b", "team-a", "availability", None),
     ] {
-        assert!(
-            state.last_eval_ms(tenant, namespace, group) == want,
-            "case {tenant}/{namespace}/{group}"
-        );
+        assert2::assert!(state.last_eval_ms(tenant, namespace, group) == want);
     }
 }
 
@@ -773,7 +763,7 @@ fn ruler_rule_set_filter_keeps_only_groups_due_for_evaluation() {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    assert!(
+    assert2::assert!(
         due_group_names
             == BTreeMap::from([
                 ("team-a".to_string(), BTreeSet::from(["new".to_string()])),
@@ -830,7 +820,7 @@ fn ruler_rule_set_filter_combines_shard_ownership_and_due_evaluation() {
         "tenant-a", &rules, &state, shard, 180_000,
     );
 
-    assert!(scheduled == expected);
+    assert2::assert!(scheduled == expected);
 }
 
 #[tokio::test]
@@ -856,16 +846,16 @@ for: 5m
     )
     .await
     .expect("pending alert evaluation");
-    assert!(pending == 0);
-    assert!(sink.alerts().is_empty());
+    assert2::assert!(pending == 0);
+    assert2::assert!(sink.alerts().is_empty());
 
     let firing = super::evaluate_and_dispatch_alerting_rule_with_state(
         &engine, &sink, &mut state, "tenant-a", &rule, 360_000,
     )
     .await
     .expect("firing alert evaluation");
-    assert!(firing == 1);
-    assert!(
+    assert2::assert!(firing == 1);
+    assert2::assert!(
         sink.alerts()
             == vec![super::AlertmanagerAlert {
                 labels: BTreeMap::from([
@@ -909,8 +899,8 @@ expr: up > 0
     )
     .await
     .expect("firing evaluation");
-    assert!(firing == 1);
-    assert!(firing_sink.alerts()[0].ends_at_ms == None);
+    assert2::assert!(firing == 1);
+    assert2::assert!(firing_sink.alerts()[0].ends_at_ms == None);
 
     // Second tick: series drops; a resolved alert with EndsAt is emitted.
     let resolved_sink = RecordingAlertmanagerSink::default();
@@ -924,8 +914,8 @@ expr: up > 0
     )
     .await
     .expect("resolved evaluation");
-    assert!(resolved == 1);
-    assert!(
+    assert2::assert!(resolved == 1);
+    assert2::assert!(
         resolved_sink.alerts()
             == vec![super::AlertmanagerAlert {
                 labels: BTreeMap::from([
@@ -966,8 +956,8 @@ keep_firing_for: 5m
     )
     .await
     .expect("initial firing");
-    assert!(fired == 1);
-    assert!(sink0.alerts()[0].ends_at_ms == None);
+    assert2::assert!(fired == 1);
+    assert2::assert!(sink0.alerts()[0].ends_at_ms == None);
 
     // t=120s: series gone but within keep_firing_for; still firing, no EndsAt.
     let sink1 = RecordingAlertmanagerSink::default();
@@ -977,8 +967,8 @@ keep_firing_for: 5m
     .await
     .expect("kept firing");
     let kept_alerts = sink1.alerts();
-    assert!(kept == 1);
-    assert!(kept_alerts[0].ends_at_ms == None);
+    assert2::assert!(kept == 1);
+    assert2::assert!(kept_alerts[0].ends_at_ms == None);
 
     // t=600s: keep-firing window (deadline 300s) elapsed; resolves with EndsAt.
     let sink2 = RecordingAlertmanagerSink::default();
@@ -988,8 +978,8 @@ keep_firing_for: 5m
     .await
     .expect("resolved after window");
     let resolved_alerts = sink2.alerts();
-    assert!(resolved == 1);
-    assert!(resolved_alerts[0].ends_at_ms == Some(600_000));
+    assert2::assert!(resolved == 1);
+    assert2::assert!(resolved_alerts[0].ends_at_ms == Some(600_000));
 }
 
 #[tokio::test]
@@ -1020,16 +1010,16 @@ rules:
     )
     .await
     .expect("pending group alert evaluation");
-    assert!(pending == 0);
-    assert!(sink.alerts().is_empty());
+    assert2::assert!(pending == 0);
+    assert2::assert!(sink.alerts().is_empty());
 
     let firing = super::evaluate_and_dispatch_alerting_rule_group(
         &engine, &sink, &mut state, "tenant-a", &group, 360_000,
     )
     .await
     .expect("firing group alert evaluation");
-    assert!(firing == 1);
-    assert!(
+    assert2::assert!(firing == 1);
+    assert2::assert!(
         sink.alerts()
             == vec![super::AlertmanagerAlert {
                 labels: BTreeMap::from([
@@ -1081,7 +1071,7 @@ rules:
     )
     .await
     .expect("pending group evaluation");
-    assert!(
+    assert2::assert!(
         pending
             == super::RulerGroupEvaluation {
                 recording_records: 1,
@@ -1102,7 +1092,7 @@ rules:
     .await
     .expect("firing group evaluation");
 
-    assert!(
+    assert2::assert!(
         firing
             == super::RulerGroupEvaluation {
                 recording_records: 1,
@@ -1110,7 +1100,7 @@ rules:
                 last_eval_ms: 360_000,
             }
     );
-    assert!(
+    assert2::assert!(
         wal_sink.records()
             == vec![
                 WalRecord {
@@ -1141,7 +1131,7 @@ rules:
                 },
             ]
     );
-    assert!(
+    assert2::assert!(
         alert_sink.alerts()
             == vec![super::AlertmanagerAlert {
                 labels: BTreeMap::from([
@@ -1209,7 +1199,7 @@ rules:
     .await
     .expect("rule-set evaluation with state persistence");
 
-    assert!(
+    assert2::assert!(
         evaluation
             == super::RulerGroupEvaluation {
                 recording_records: 1,
@@ -1217,7 +1207,7 @@ rules:
                 last_eval_ms: 120_000,
             }
     );
-    assert!(
+    assert2::assert!(
         state_sink.group_records()
             == vec![
                 super::RulerGroupStateRecord {
@@ -1234,7 +1224,7 @@ rules:
                 },
             ]
     );
-    assert!(
+    assert2::assert!(
         state_sink.alert_records()
             == vec![super::RulerAlertStateRecord {
                 tenant: "tenant-a".to_string(),
@@ -1331,8 +1321,8 @@ rules:
     .await
     .expect("scheduled rule-set evaluation");
 
-    assert!(evaluation.recording_records == expected_groups.len());
-    assert!(
+    assert2::assert!(evaluation.recording_records == expected_groups.len());
+    assert2::assert!(
         state_sink
             .group_records()
             .iter()
@@ -1341,12 +1331,12 @@ rules:
             == expected_groups
     );
     for record in state_sink.group_records() {
-        assert!(
+        assert2::assert!(
             group_state.last_eval_ms(&record.tenant, &record.namespace, &record.group)
                 == Some(record.last_eval_ms)
         );
     }
-    assert!(wal_sink.records().len() == expected_groups.len());
+    assert2::assert!(wal_sink.records().len() == expected_groups.len());
 }
 
 #[tokio::test]
@@ -1401,7 +1391,7 @@ rules:
     )
     .await
     .expect("pending rule-set evaluation");
-    assert!(
+    assert2::assert!(
         pending
             == super::RulerGroupEvaluation {
                 recording_records: 1,
@@ -1421,7 +1411,7 @@ rules:
     )
     .await
     .expect("firing rule-set evaluation");
-    assert!(
+    assert2::assert!(
         firing
             == super::RulerGroupEvaluation {
                 recording_records: 1,
@@ -1429,7 +1419,7 @@ rules:
                 last_eval_ms: 360_000,
             }
     );
-    assert!(
+    assert2::assert!(
         wal_sink.records()
             == vec![
                 WalRecord {
@@ -1460,7 +1450,7 @@ rules:
                 },
             ]
     );
-    assert!(
+    assert2::assert!(
         alert_sink.alerts()
             == vec![super::AlertmanagerAlert {
                 labels: BTreeMap::from([

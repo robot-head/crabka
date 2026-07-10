@@ -1,7 +1,5 @@
 use std::process::Command;
 
-use assert2::assert;
-
 fn broker_bin() -> std::path::PathBuf {
     let exe = std::env::var_os("CARGO_BIN_EXE_crabka-broker")
         .expect("cargo provides CARGO_BIN_EXE_<bin> in test env");
@@ -39,31 +37,16 @@ fn run_crabka_format(log_dir: &std::path::Path, node_id: u32, controller_listene
         ])
         .output()
         .expect("spawn crabka format");
-    assert!(
-        out.status.success(),
-        "crabka format failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 #[test]
 fn help_mentions_cluster_id_and_advertised_listener() {
     let out = Command::new(broker_bin()).arg("--help").output().unwrap();
-    assert!(
-        out.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert2::assert!(out.status.success());
     let help = String::from_utf8(out.stdout).unwrap();
-    assert!(
-        help.contains("--cluster-id"),
-        "help missing --cluster-id:\n{help}"
-    );
-    assert!(
-        help.contains("--advertised-listener"),
-        "help missing --advertised-listener:\n{help}"
-    );
+    assert2::assert!(help.contains("--cluster-id"));
+    assert2::assert!(help.contains("--advertised-listener"));
 }
 
 #[test]
@@ -72,7 +55,7 @@ fn version_returns_zero() {
         .arg("--version")
         .output()
         .unwrap();
-    assert!(out.status.success());
+    assert2::assert!(out.status.success());
 }
 
 /// Boot `crabka-broker` with `--config-file` pointing at a
@@ -139,7 +122,7 @@ protocol = "Plaintext"
     let _ = child.kill();
     let _ = child.wait();
 
-    assert!(connected, "broker never opened TCP listener on port {port}");
+    assert2::assert!(connected);
 }
 
 #[test]
@@ -150,10 +133,7 @@ fn errors_when_config_file_and_listen_addr_both_set() {
         .output()
         .expect("spawn crabka-broker");
 
-    assert!(!out.status.success(), "expected non-zero exit");
+    assert2::assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("config-file") && stderr.contains("listen-addr"),
-        "expected clap mutual-exclusion error, got stderr:\n{stderr}"
-    );
+    assert2::assert!(stderr.contains("config-file") && stderr.contains("listen-addr"));
 }

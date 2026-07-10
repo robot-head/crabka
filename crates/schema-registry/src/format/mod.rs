@@ -113,13 +113,13 @@ mod tests {
 
     #[test]
     fn schema_type_wire_names() {
-        for (name, ty, wire) in [
+        for (_name, ty, wire) in [
             ("avro_default", SchemaType::Avro, None),
             ("protobuf", SchemaType::Protobuf, Some("PROTOBUF")),
             ("json", SchemaType::Json, Some("JSON")),
         ] {
-            assert_eq!(ty.wire_name(), wire, "case {name}");
-            assert_eq!(SchemaType::from_wire(wire), ty, "case {name}");
+            assert2::assert!(ty.wire_name() == wire);
+            assert2::assert!(SchemaType::from_wire(wire) == ty);
         }
     }
 
@@ -145,12 +145,12 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(a_form, b_form);
-        assert_ne!(a_form, c.canonical_form());
+        assert2::assert!(a_form == b_form);
+        assert2::assert!(a_form != c.canonical_form());
     }
 
     #[test]
     fn avro_rejects_invalid() {
-        assert!(parse(SchemaType::Avro, "{not avro}", &[]).is_err());
+        assert2::assert!(parse(SchemaType::Avro, "{not avro}", &[]).is_err());
     }
 }

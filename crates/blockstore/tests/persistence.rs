@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use assert2::assert;
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, TimeRange, labels,
     log_tenant_index_manifest_object_path, log_tenant_index_shard_catalog_object_path,
@@ -35,8 +34,8 @@ fn log_index_manifest_round_trips_label_and_block_indexes() {
     write_log_index_manifest(dir.path(), &labels_index, &blocks).unwrap();
     let (loaded_labels, loaded_blocks) = read_log_index_manifest(dir.path()).unwrap();
 
-    assert_eq!(loaded_labels, labels_index);
-    assert_eq!(loaded_blocks, blocks);
+    assert2::assert!(loaded_labels == labels_index);
+    assert2::assert!(loaded_blocks == blocks);
 }
 
 #[tokio::test]
@@ -66,15 +65,15 @@ async fn log_index_manifest_round_trips_through_object_store() {
         .await
         .unwrap();
 
-    assert_eq!(loaded_labels, labels_index);
-    assert_eq!(loaded_blocks, blocks);
+    assert2::assert!(loaded_labels == labels_index);
+    assert2::assert!(loaded_blocks == blocks);
 }
 
 #[test]
 fn tenant_log_index_manifest_object_path_is_tenant_prefixed() {
     let prefix = ObjectPath::from("observability/logs");
 
-    assert!(
+    assert2::assert!(
         log_tenant_index_manifest_object_path(&prefix, "tenant-a").to_string()
             == "observability/logs/tenant=tenant-a/index/logs/manifest.json"
     );
@@ -84,7 +83,7 @@ fn tenant_log_index_manifest_object_path_is_tenant_prefixed() {
 fn tenant_log_index_shard_manifest_object_path_is_tenant_and_time_prefixed() {
     let prefix = ObjectPath::from("observability/logs");
 
-    assert!(
+    assert2::assert!(
         log_tenant_index_shard_manifest_object_path(
             &prefix,
             "tenant-a",
@@ -99,7 +98,7 @@ fn tenant_log_index_shard_manifest_object_path_is_tenant_and_time_prefixed() {
 fn tenant_log_index_shard_catalog_object_path_is_tenant_prefixed() {
     let prefix = ObjectPath::from("observability/logs");
 
-    assert!(
+    assert2::assert!(
         log_tenant_index_shard_catalog_object_path(&prefix, "tenant-a").to_string()
             == "observability/logs/tenant=tenant-a/index/logs/shards/manifest.json"
     );
@@ -145,29 +144,23 @@ async fn tenant_log_index_manifest_round_trips_only_one_tenant() {
         &[selected_api],
     );
 
-    assert_eq!(
-        loaded_labels.label_values("tenant-a", "app"),
-        BTreeSet::from(["api".into()])
+    assert2::assert!(
+        loaded_labels.label_values("tenant-a", "app") == BTreeSet::from(["api".into()])
     );
-    assert_eq!(
-        loaded_labels.label_values("tenant-b", "app"),
-        BTreeSet::new()
-    );
-    assert_eq!(
+    assert2::assert!(loaded_labels.label_values("tenant-b", "app") == BTreeSet::new());
+    assert2::assert!(
         loaded_blocks.match_blocks(
             "tenant-a",
             TimeRange::new(0, 1_000).unwrap(),
             &[selected_api],
-        ),
-        expected_selected
+        ) == expected_selected
     );
-    assert_eq!(
+    assert2::assert!(
         loaded_blocks.match_blocks(
             "tenant-b",
             TimeRange::new(0, 1_000).unwrap(),
             &[other_tenant_api],
-        ),
-        Vec::new()
+        ) == Vec::new()
     );
 }
 
@@ -219,19 +212,16 @@ async fn tenant_log_index_shard_round_trips_only_matching_time_and_series() {
             .unwrap();
     let expected_blocks = blocks.match_blocks("tenant-a", TimeRange::new(150, 250).unwrap(), &[]);
 
-    assert_eq!(
-        loaded_labels.label_values("tenant-a", "app"),
-        BTreeSet::from(["api".into(), "worker".into()])
+    assert2::assert!(
+        loaded_labels.label_values("tenant-a", "app")
+            == BTreeSet::from(["api".into(), "worker".into()])
     );
-    assert_eq!(
-        loaded_labels.label_values("tenant-b", "app"),
-        BTreeSet::new()
+    assert2::assert!(loaded_labels.label_values("tenant-b", "app") == BTreeSet::new());
+    assert2::assert!(
+        loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 1_000).unwrap(), &[])
+            == expected_blocks
     );
-    assert_eq!(
-        loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 1_000).unwrap(), &[]),
-        expected_blocks
-    );
-    assert_eq!(loaded_labels.labels_for("tenant-a", admin), None);
+    assert2::assert!(loaded_labels.labels_for("tenant-a", admin) == None);
 }
 
 #[tokio::test]
@@ -283,13 +273,13 @@ async fn tenant_log_index_shard_catalog_selects_overlapping_shards_and_merges_in
     .unwrap();
     let expected_blocks = blocks.match_blocks("tenant-a", TimeRange::new(150, 250).unwrap(), &[]);
 
-    assert_eq!(
-        loaded_labels.label_values("tenant-a", "app"),
-        BTreeSet::from(["api".into(), "worker".into()])
+    assert2::assert!(
+        loaded_labels.label_values("tenant-a", "app")
+            == BTreeSet::from(["api".into(), "worker".into()])
     );
-    assert_eq!(
-        loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 1_000).unwrap(), &[]),
-        expected_blocks
+    assert2::assert!(
+        loaded_blocks.match_blocks("tenant-a", TimeRange::new(0, 1_000).unwrap(), &[])
+            == expected_blocks
     );
-    assert_eq!(loaded_labels.labels_for("tenant-a", admin), None);
+    assert2::assert!(loaded_labels.labels_for("tenant-a", admin) == None);
 }

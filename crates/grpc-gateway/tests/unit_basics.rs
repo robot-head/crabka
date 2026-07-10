@@ -7,12 +7,12 @@ async fn raw_codec_is_identity() {
     let v = Bytes::from_static(b"hello");
     // Raw passthrough: encode returns the bytes verbatim.
     let encoded = codec.encode("t", EncodeBody::Raw(v.clone())).await.unwrap();
-    assert_eq!(encoded, v);
+    assert2::assert!(encoded == v);
     // Decode returns the bytes verbatim with no schema/structured view.
     let decoded = codec.decode("t", v.clone()).await.unwrap();
-    assert_eq!(decoded.value, v);
-    assert_eq!(decoded.schema, None);
-    assert_eq!(decoded.json, None);
+    assert2::assert!(decoded.value == v);
+    assert2::assert!(decoded.schema == None);
+    assert2::assert!(decoded.json == None);
 }
 
 #[test]
@@ -20,12 +20,12 @@ fn partition_for_is_deterministic_and_bounded() {
     use crabka_grpc_gateway::dedup::partition_for;
     let a = partition_for("order-42", 16);
     let b = partition_for("order-42", 16);
-    assert_eq!(a, b);
-    assert!(a < 16);
+    assert2::assert!(a == b);
+    assert2::assert!(a < 16);
     let spread: std::collections::HashSet<u32> = (0..100)
         .map(|i| partition_for(&format!("k{i}"), 16))
         .collect();
-    assert!(spread.len() > 1);
+    assert2::assert!(spread.len() > 1);
 }
 
 #[test]
@@ -41,7 +41,7 @@ fn claim_value_round_trips() {
     };
     let bytes = serde_json::to_vec(&c).unwrap();
     let back: ClaimValue = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(c, back);
+    assert2::assert!(c == back);
 }
 
 #[tokio::test]
@@ -82,5 +82,5 @@ async fn dedup_produce_before_ownership_is_unavailable() {
         .dedup_produce(&rec, Bytes::from_static(b"x"))
         .await
         .unwrap_err();
-    assert!(matches!(err, GatewayError::Unavailable));
+    assert2::assert!(matches!(err, GatewayError::Unavailable));
 }

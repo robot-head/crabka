@@ -386,22 +386,22 @@ mod tests {
             ),
         ];
 
-        for (name, input, expected) in cases {
+        for (_name, input, expected) in cases {
             let expanded = expanded_config_def(input);
             let actual: Vec<_> = expected
                 .iter()
                 .copied()
                 .filter(|needle| expanded.contains(needle))
                 .collect();
-            assert_eq!(actual, expected, "generated config case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 
     #[test]
     fn type_info_recognizes_options_secrets_and_duration_paths() {
         let optional_secret = analyze_type(&parse_type("Option<SecretString>")).unwrap();
-        assert!(optional_secret.is_option);
-        assert!(optional_secret.is_secret);
+        assert2::assert!(optional_secret.is_option);
+        assert2::assert!(optional_secret.is_secret);
 
         let string_vec = analyze_type(&parse_type("Vec<String>")).unwrap();
         check!((string_vec.is_option, string_vec.is_secret) == (false, false));
@@ -412,17 +412,17 @@ mod tests {
             "usize", "f32", "f64", "Value",
         ] {
             let info = analyze_type(&parse_type(scalar)).unwrap();
-            assert!(!info.is_option, "case {scalar}");
-            assert!(!info.is_secret, "case {scalar}");
+            assert2::assert!(!info.is_option);
+            assert2::assert!(!info.is_secret);
         }
 
-        for (name, ty) in [
+        for (_name, ty) in [
             ("standard_duration_path", "std::time::Duration"),
             ("absolute_duration_path", "::std::time::Duration"),
         ] {
             let info = analyze_type(&parse_type(ty)).unwrap();
-            assert!(!info.is_option, "case {name}");
-            assert!(!info.is_secret, "case {name}");
+            assert2::assert!(!info.is_option);
+            assert2::assert!(!info.is_secret);
         }
     }
 
@@ -441,7 +441,7 @@ mod tests {
             secret: true,
             ..FieldAttrs::default()
         };
-        for (name, attrs, ty) in [
+        for (_name, attrs, ty) in [
             (
                 "secret_type_without_attribute",
                 FieldAttrs::default(),
@@ -453,7 +453,7 @@ mod tests {
                 &string_ty,
             ),
         ] {
-            assert!(validate_field_attrs(&attrs, ty).is_err(), "case {name}");
+            assert2::assert!(validate_field_attrs(&attrs, ty).is_err());
         }
     }
 }

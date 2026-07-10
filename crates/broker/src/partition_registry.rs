@@ -125,7 +125,7 @@ impl PartitionRegistry {
 mod tests {
     use std::{path::Path, sync::Arc};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_ids::PartitionIndex;
     use crabka_log::{Log, LogConfig};
     use tempfile::tempdir;
@@ -168,15 +168,15 @@ mod tests {
         check!(reg.arcs().len() == 1);
 
         let got = reg.get("t", PartitionIndex(0)).expect("present");
-        assert!(Arc::ptr_eq(&got, &p));
+        assert2::assert!(Arc::ptr_eq(&got, &p));
 
         // Replace returns previous.
         let p2 = fixture_partition(dir.path(), "t", PartitionIndex(0));
         let prev = reg
             .insert("t".to_string(), PartitionIndex(0), Arc::clone(&p2))
             .expect("prev");
-        assert!(Arc::ptr_eq(&prev, &p));
-        assert!(reg.arcs().len() == 1);
+        assert2::assert!(Arc::ptr_eq(&prev, &p));
+        assert2::assert!(reg.arcs().len() == 1);
 
         let removed = reg.remove("t", PartitionIndex(0)).expect("removed");
         check!(Arc::ptr_eq(&removed, &p2));
@@ -189,8 +189,8 @@ mod tests {
     async fn partitions_of_and_len_track_topics_and_removals() {
         let dir = tempdir().unwrap();
         let reg = PartitionRegistry::new();
-        assert!(reg.partitions_of("missing").is_empty());
-        assert!(reg.len() == 0);
+        assert2::assert!(reg.partitions_of("missing").is_empty());
+        assert2::assert!(reg.len() == 0);
 
         reg.insert(
             "a".to_string(),
@@ -229,7 +229,7 @@ mod tests {
         let p = fixture_partition(dir.path(), "t", PartitionIndex(1));
         reg.materialize_if_vacant::<String>("t", PartitionIndex(1), || Ok(Arc::clone(&p)))
             .expect("build ok");
-        assert!(reg.contains("t", PartitionIndex(1)));
+        assert2::assert!(reg.contains("t", PartitionIndex(1)));
 
         // Already occupied: build closure must not run.
         reg.materialize_if_vacant::<String>("t", PartitionIndex(1), || {
@@ -238,7 +238,7 @@ mod tests {
         .expect("occupied ok");
 
         let got = reg.get("t", PartitionIndex(1)).expect("present");
-        assert!(Arc::ptr_eq(&got, &p));
+        assert2::assert!(Arc::ptr_eq(&got, &p));
     }
 
     #[tokio::test]
@@ -246,8 +246,8 @@ mod tests {
         let reg = PartitionRegistry::new();
         let err =
             reg.materialize_if_vacant::<String>("t", PartitionIndex(2), || Err("boom".to_string()));
-        assert!(err == Err("boom".to_string()));
-        assert!(!reg.contains("t", PartitionIndex(2)));
+        assert2::assert!(err == Err("boom".to_string()));
+        assert2::assert!(!reg.contains("t", PartitionIndex(2)));
     }
 
     #[tokio::test]
@@ -270,6 +270,6 @@ mod tests {
             fixture_partition(dir.path(), "b", PartitionIndex(0)),
         );
         let arcs = reg.arcs();
-        assert!(arcs.len() == 3);
+        assert2::assert!(arcs.len() == 3);
     }
 }

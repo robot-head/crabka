@@ -24,9 +24,9 @@ fn build_security_uses_scram_sha512_only() {
 
     let security = build_scram_sha512_security(&cfg, "alice", SCRAM_PLAINTEXT_PASSWORD);
 
-    assert_eq!(&security.protocol, &ListenerProtocol::SaslPlaintext);
-    assert!(security.tls.is_none());
-    assert_eq!(security.sasl_host.as_deref(), None);
+    assert2::assert!(&security.protocol == &ListenerProtocol::SaslPlaintext);
+    assert2::assert!(security.tls.is_none());
+    assert2::assert!(security.sasl_host.as_deref() == None);
     assert_scram_sha512_credentials(security.sasl.as_ref(), "alice", SCRAM_PLAINTEXT_PASSWORD);
 }
 
@@ -45,14 +45,13 @@ fn build_security_preserves_sasl_ssl_tls_material() {
     let security = build_scram_sha512_security(&cfg, "carol", SCRAM_SSL_PASSWORD);
     let tls = security.tls.expect("SASL_SSL carries TLS config");
 
-    assert_eq!(&security.protocol, &ListenerProtocol::SaslSsl);
-    assert_eq!(tls.trust_roots_pem, Some(PathBuf::from("ca.pem")));
-    assert_eq!(tls.server_name, "broker.example.test".to_string());
-    assert_eq!(
-        tls.client_identity,
-        Some((PathBuf::from("client.crt"), PathBuf::from("client.key")))
+    assert2::assert!(&security.protocol == &ListenerProtocol::SaslSsl);
+    assert2::assert!(tls.trust_roots_pem == Some(PathBuf::from("ca.pem")));
+    assert2::assert!(tls.server_name == "broker.example.test".to_string());
+    assert2::assert!(
+        tls.client_identity == Some((PathBuf::from("client.crt"), PathBuf::from("client.key")))
     );
-    assert_eq!(security.sasl_host.as_deref(), None);
+    assert2::assert!(security.sasl_host.as_deref() == None);
     assert_scram_sha512_credentials(security.sasl.as_ref(), "carol", SCRAM_SSL_PASSWORD);
 }
 
@@ -66,9 +65,9 @@ fn login_success_debug_redacts_session_id() {
 
     let debug = format!("{success:?}");
 
-    assert!(debug.contains("alice"));
-    assert!(debug.contains("User:alice"));
-    assert!(debug.contains("<redacted>"));
+    assert2::assert!(debug.contains("alice"));
+    assert2::assert!(debug.contains("User:alice"));
+    assert2::assert!(debug.contains("<redacted>"));
     assert_debug_does_not_contain_secret(&debug, SESSION_ID_SENTINEL, "session id");
 }
 
@@ -91,28 +90,28 @@ async fn login_uses_broker_probe_and_creates_session() {
         .await
         .expect("broker probe succeeds");
 
-    assert_eq!(success.username.as_str(), "alice");
-    assert_eq!(success.principal.as_str(), "User:alice");
+    assert2::assert!(success.username.as_str() == "alice");
+    assert2::assert!(success.principal.as_str() == "User:alice");
     let calls = broker.calls.lock().expect("calls lock is not poisoned");
-    assert_eq!(
-        calls.as_slice(),
-        [RecordedLoginCall {
-            bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
-            username: "alice".to_string(),
-            password_matched: true,
-            password_len: EXPECTED_PASSWORD.len(),
-        }]
+    assert2::assert!(
+        calls.as_slice()
+            == [RecordedLoginCall {
+                bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
+                username: "alice".to_string(),
+                password_matched: true,
+                password_len: EXPECTED_PASSWORD.len(),
+            }]
     );
     drop(calls);
 
     let session_id = SessionId::try_from(success.session_id.as_str()).expect("session id is valid");
     let session = sessions.get(&session_id).expect("login creates session");
-    assert_eq!(
-        session.user,
-        crabka_admin_ui::session::SessionUser {
-            username: "alice".to_string(),
-            principal: "User:alice".to_string(),
-        }
+    assert2::assert!(
+        session.user
+            == crabka_admin_ui::session::SessionUser {
+                username: "alice".to_string(),
+                principal: "User:alice".to_string(),
+            }
     );
 }
 
@@ -155,25 +154,13 @@ fn assert_scram_sha512_credentials(
         panic!("expected SCRAM credentials");
     };
 
-    assert_eq!(
-        *mechanism,
-        SaslMechanism::ScramSha512,
-        "SCRAM credentials did not match expected test values"
-    );
-    assert_eq!(
-        username.as_str(),
-        expected_username,
-        "SCRAM credentials did not match expected test values"
-    );
-    assert_eq!(
-        password.as_str(),
-        expected_password,
-        "SCRAM credentials did not match expected test values"
-    );
+    assert2::assert!(*mechanism == SaslMechanism::ScramSha512);
+    assert2::assert!(username.as_str() == expected_username);
+    assert2::assert!(password.as_str() == expected_password);
 }
 
-fn assert_debug_does_not_contain_secret(debug: &str, secret: &str, label: &str) {
-    assert!(!debug.contains(secret), "debug output leaked {label}");
+fn assert_debug_does_not_contain_secret(debug: &str, secret: &str, _label: &str) {
+    assert2::assert!(!debug.contains(secret));
 }
 
 #[derive(Default)]

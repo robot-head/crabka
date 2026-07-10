@@ -133,7 +133,7 @@ fn validate_assign_response(error_code: i16) -> Result<(), String> {
 mod tests {
     use std::{collections::BTreeSet, net::SocketAddr};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_metadata::MetadataImage;
     use crabka_protocol::{Decode, Encode};
     use crabka_raft::{
@@ -243,7 +243,7 @@ mod tests {
             .expect("dir dY missing");
 
         // dX should have exactly one topic (tA) with two partitions [0, 1].
-        assert!(dir_x.topics.len() == 1);
+        assert2::assert!(dir_x.topics.len() == 1);
         let topic_a = dir_x
             .topics
             .iter()
@@ -255,16 +255,16 @@ mod tests {
             .map(|p| p.partition_index)
             .collect();
         part_indices.sort_unstable();
-        assert!(part_indices == vec![0, 1]);
+        assert2::assert!(part_indices == vec![0, 1]);
 
         // dY should have exactly one topic (tB) with one partition [0].
-        assert!(dir_y.topics.len() == 1);
+        assert2::assert!(dir_y.topics.len() == 1);
         let topic_b = dir_y
             .topics
             .iter()
             .find(|t| t.topic_id.0 == *tb.as_bytes())
             .expect("topic tB in dY missing");
-        assert!(
+        assert2::assert!(
             (
                 topic_b.partitions.len(),
                 topic_b.partitions[0].partition_index
@@ -287,7 +287,7 @@ mod tests {
         let decoded =
             AssignReplicasToDirsRequest::decode(&mut bytes.freeze(), 0).expect("decode request");
 
-        assert!((decoded.broker_id, decoded.broker_epoch) == (3, -1));
+        assert2::assert!((decoded.broker_id, decoded.broker_epoch) == (3, -1));
     }
 
     #[tokio::test]
@@ -308,14 +308,14 @@ mod tests {
                 .await
                 .expect_err("bad controller leader must fail");
 
-            assert!(err == expected, "case: leader={leader:?}");
+            assert2::assert!(err == expected);
         }
     }
 
     #[test]
     fn validate_assign_response_rejects_controller_error() {
-        assert!(validate_assign_response(0).is_ok());
+        assert2::assert!(validate_assign_response(0).is_ok());
         let err = validate_assign_response(42).expect_err("non-zero error_code must fail");
-        assert!(err.contains("error_code=42"));
+        assert2::assert!(err.contains("error_code=42"));
     }
 }

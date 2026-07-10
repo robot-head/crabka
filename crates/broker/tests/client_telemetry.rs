@@ -28,7 +28,7 @@
 
 #![allow(clippy::default_trait_access)]
 
-use assert2::{assert, check};
+use assert2::check;
 mod support;
 
 use crabka_protocol::{
@@ -99,18 +99,9 @@ async fn configure_match_all_subscription(
         .await
         .expect("IncrementalAlterConfigs");
 
-    assert!(
-        alter_resp.responses.len() == 1,
-        "expected one resource response, got {}",
-        alter_resp.responses.len()
-    );
+    assert2::assert!(alter_resp.responses.len() == 1);
     let r = &alter_resp.responses[0];
-    assert!(
-        r.error_code == 0,
-        "IncrementalAlterConfigs CLIENT_METRICS must succeed; error_code={} message={:?}",
-        r.error_code,
-        r.error_message,
-    );
+    assert2::assert!(r.error_code == 0);
 }
 
 /// Build a minimal valid OTLP MetricsData payload (uncompressed / compression_type=0).
@@ -160,10 +151,7 @@ async fn api_versions_advertises_telemetry_apis() {
 
     let advertised: std::collections::HashSet<i16> =
         resp.api_keys.iter().map(|k| k.api_key).collect();
-    assert!(
-        (advertised.contains(&71), advertised.contains(&72)) == (true, true),
-        "ApiVersions must advertise telemetry APIs 71 and 72, got {advertised:?}",
-    );
+    assert2::assert!((advertised.contains(&71), advertised.contains(&72)) == (true, true));
 
     p.broker.shutdown().await;
 }
@@ -217,10 +205,7 @@ async fn get_telemetry_subscriptions_with_set_id_echoes_nil() {
         .await
         .expect("GetTelemetrySubscriptions");
 
-    assert!(
-        (resp.error_code, resp.client_instance_id) == (0, WireUuid::ZERO),
-        "non-nil request id must round-trip as nil per schema rules"
-    );
+    assert2::assert!((resp.error_code, resp.client_instance_id) == (0, WireUuid::ZERO));
 
     p.broker.shutdown().await;
 }
@@ -245,11 +230,7 @@ async fn push_telemetry_unknown_instance_rejected() {
         .await
         .expect("PushTelemetry");
 
-    assert!(
-        resp.error_code == 42,
-        "unknown instance must be rejected with INVALID_REQUEST (42), got {}",
-        resp.error_code,
-    );
+    assert2::assert!(resp.error_code == 42);
 
     p.broker.shutdown().await;
 }
@@ -315,11 +296,7 @@ async fn push_telemetry_happy_path_after_subscription() {
         .await
         .expect("PushTelemetry");
 
-    assert!(
-        push_resp.error_code == 0,
-        "valid push must succeed, got error_code={}",
-        push_resp.error_code,
-    );
+    assert2::assert!(push_resp.error_code == 0);
 }
 
 /// A registered instance pushing with a stale subscription_id must be
@@ -340,7 +317,7 @@ async fn push_telemetry_stale_subscription_id_rejected() {
         .await
         .expect("GetTelemetrySubscriptions");
 
-    assert!(get_resp.error_code == 0);
+    assert2::assert!(get_resp.error_code == 0);
     let assigned_id = get_resp.client_instance_id;
     let real_sub_id = get_resp.subscription_id;
     // XOR with a constant to produce a definitely-wrong subscription id.
@@ -358,11 +335,7 @@ async fn push_telemetry_stale_subscription_id_rejected() {
         .await
         .expect("PushTelemetry");
 
-    assert!(
-        push_resp.error_code == 117,
-        "stale subscription_id must yield UNKNOWN_SUBSCRIPTION_ID (117), got {}",
-        push_resp.error_code,
-    );
+    assert2::assert!(push_resp.error_code == 117);
 }
 
 /// Unsupported compression_type must yield UNSUPPORTED_COMPRESSION_TYPE (76).
@@ -384,7 +357,7 @@ async fn push_telemetry_unsupported_compression_rejected() {
         .await
         .expect("GetTelemetrySubscriptions");
 
-    assert!(get_resp.error_code == 0);
+    assert2::assert!(get_resp.error_code == 0);
     let assigned_id = get_resp.client_instance_id;
     let subscription_id = get_resp.subscription_id;
 
@@ -403,9 +376,5 @@ async fn push_telemetry_unsupported_compression_rejected() {
         .await
         .expect("PushTelemetry");
 
-    assert!(
-        push_resp.error_code == 76,
-        "unsupported compression_type must yield UNSUPPORTED_COMPRESSION_TYPE (76), got {}",
-        push_resp.error_code,
-    );
+    assert2::assert!(push_resp.error_code == 76);
 }

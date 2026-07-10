@@ -438,7 +438,7 @@ impl<'a> Reader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use uuid::Uuid;
 
     use super::*;
@@ -479,14 +479,14 @@ mod tests {
         let event = MetadataEvent::AddSegment(add(1, 0, 99, Some(vec![1, 2, 3, 4])));
         let bytes = event.encode();
         let back = MetadataEvent::decode(&bytes).expect("decodes");
-        assert!(back == event);
+        assert2::assert!(back == event);
     }
 
     #[test]
     fn round_trip_add_without_custom_metadata() {
         let event = MetadataEvent::AddSegment(add(2, 100, 199, None));
         let bytes = event.encode();
-        assert!(MetadataEvent::decode(&bytes).unwrap() == event);
+        assert2::assert!(MetadataEvent::decode(&bytes).unwrap() == event);
     }
 
     #[test]
@@ -499,7 +499,7 @@ mod tests {
             broker_id: 13,
         });
         let bytes = event.encode();
-        assert!(MetadataEvent::decode(&bytes).unwrap() == event);
+        assert2::assert!(MetadataEvent::decode(&bytes).unwrap() == event);
     }
 
     #[test]
@@ -512,12 +512,12 @@ mod tests {
             broker_id: 0,
         });
         let bytes = event.encode();
-        assert!(MetadataEvent::decode(&bytes).unwrap() == event);
+        assert2::assert!(MetadataEvent::decode(&bytes).unwrap() == event);
     }
 
     #[test]
     fn round_trip_partition_delete_each_state() {
-        for (name, state) in [
+        for (_name, state) in [
             ("marked", RemotePartitionDeleteState::DeletePartitionMarked),
             (
                 "started",
@@ -535,7 +535,7 @@ mod tests {
                 broker_id: 1,
             });
             let bytes = event.encode();
-            assert_eq!(MetadataEvent::decode(&bytes).unwrap(), event, "case {name}");
+            assert2::assert!(MetadataEvent::decode(&bytes).unwrap() == event);
         }
     }
 
@@ -545,7 +545,7 @@ mod tests {
         let event = MetadataEvent::AddSegment(md);
         let bytes = event.encode();
         let back = MetadataEvent::decode(&bytes).expect("decodes");
-        assert!(back == event);
+        assert2::assert!(back == event);
     }
 
     #[test]
@@ -554,7 +554,7 @@ mod tests {
             .encode()
             .to_vec();
         let err = MetadataEvent::decode(&bytes[..bytes.len() - 5]).unwrap_err();
-        assert!(matches!(err, CodecError::Protocol(_)));
+        assert2::assert!(matches!(err, CodecError::Protocol(_)));
     }
 
     #[test]
@@ -578,7 +578,7 @@ mod tests {
             .encode_value()
             .unwrap();
         let err = MetadataEvent::decode(&bytes).unwrap_err();
-        assert!(matches!(err, CodecError::UnknownState(7, _)));
+        assert2::assert!(matches!(err, CodecError::UnknownState(7, _)));
     }
 
     #[test]
@@ -590,6 +590,6 @@ mod tests {
         .encode_value()
         .unwrap();
         let err = MetadataEvent::decode(&bytes).unwrap_err();
-        assert!(matches!(err, CodecError::Protocol(_)));
+        assert2::assert!(matches!(err, CodecError::Protocol(_)));
     }
 }

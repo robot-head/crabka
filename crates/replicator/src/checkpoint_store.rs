@@ -149,6 +149,6 @@ mod tests {
             .await
             .unwrap();
         let loaded = store2.load().await.unwrap().unwrap();
-        assert_eq!(loaded, off);
+        assert2::assert!(loaded == off);
     }
 }

@@ -51,14 +51,13 @@ pub struct ConfigMapKeyRef {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn logging_defaults_type_inline() {
         let lg: Logging = serde_json::from_str("{}").unwrap();
-        assert!(
+        assert2::assert!(
             lg == Logging {
                 r#type: LoggingType::Inline,
                 loggers: BTreeMap::new(),
@@ -79,21 +78,21 @@ mod tests {
             value_from: None,
         };
         let j = serde_json::to_string(&lg).unwrap();
-        for (name, expected) in [
+        for (_name, expected) in [
             ("loggers object", "\"loggers\""),
             ("broker level", "\"crabka_broker\":\"debug\""),
         ] {
-            assert!(j.contains(expected), "case {name}; got: {j}");
+            assert2::assert!(j.contains(expected));
         }
         let back: Logging = serde_json::from_str(&j).unwrap();
-        assert!(back == lg);
+        assert2::assert!(back == lg);
     }
 
     #[test]
     fn logging_external_round_trips() {
         let json = r#"{"type":"external","valueFrom":{"configMapKeyRef":{"name":"my-log-cm","key":"rust.log"}}}"#;
         let lg: Logging = serde_json::from_str(json).unwrap();
-        assert!(
+        assert2::assert!(
             lg == Logging {
                 r#type: LoggingType::External,
                 loggers: BTreeMap::new(),
@@ -110,6 +109,6 @@ mod tests {
     #[test]
     fn logging_type_rejects_unknown() {
         let err = serde_json::from_str::<LoggingType>("\"log4j\"").unwrap_err();
-        assert!(err.to_string().contains("inline"), "got: {err}");
+        assert2::assert!(err.to_string().contains("inline"));
     }
 }

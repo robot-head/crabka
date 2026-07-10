@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
@@ -125,7 +125,7 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(cr.topics[0].error_code, 0, "create_topic failed: {cr:?}");
+    assert2::assert!(cr.topics[0].error_code == 0);
 }
 
 /// Produce records to a specific partition index (the plain `produce` helper
@@ -188,7 +188,7 @@ async fn create_topic(client: &Client, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(cr.topics[0].error_code, 0, "create_topic failed: {cr:?}");
+    assert2::assert!(cr.topics[0].error_code == 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -229,7 +229,7 @@ async fn rust_producer_to_rust_consumer_through_group() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
         }
     }
-    assert_eq!(seen, vec!["a", "b", "c"]);
+    assert2::assert!(seen == vec!["a", "b", "c"]);
 
     consumer.commit_sync().await.unwrap();
     consumer.close().await.unwrap();
@@ -276,7 +276,7 @@ async fn offsets_survive_broker_restart() {
                 .unwrap()
                 .len();
         }
-        assert_eq!(seen, 3);
+        assert2::assert!(seen == 3);
         consumer.commit_sync().await.unwrap();
         consumer.close().await.unwrap();
         broker.shutdown().await;
@@ -303,7 +303,7 @@ async fn offsets_survive_broker_restart() {
             .unwrap();
         // Quick poll: should NOT receive the same x/y/z again.
         let r = consumer.poll(Duration::from_millis(500)).await.unwrap();
-        assert!(r.is_empty(), "expected empty poll after restart, got {r:?}");
+        assert2::assert!(r.is_empty());
         consumer.close().await.unwrap();
         broker.shutdown().await;
     }
@@ -365,12 +365,7 @@ async fn eager_rebalance_reacquires_and_primes() {
             if m1.assignment().await.len() == 1 && m2.assignment().await.len() == 1 {
                 break;
             }
-            assert!(
-                Instant::now() < settle,
-                "group did not split 1+1 (m1={} m2={})",
-                m1.assignment().await.len(),
-                m2.assignment().await.len()
-            );
+            assert2::assert!(Instant::now() < settle);
             tokio::task::yield_now().await;
         }
     })
@@ -389,11 +384,7 @@ async fn eager_rebalance_reacquires_and_primes() {
             if m1.assignment().await.len() == 2 {
                 break;
             }
-            assert!(
-                Instant::now() < regain,
-                "m1 did not re-acquire both partitions, last={}",
-                m1.assignment().await.len()
-            );
+            assert2::assert!(Instant::now() < regain);
             tokio::task::yield_now().await;
         }
     })
@@ -415,10 +406,7 @@ async fn eager_rebalance_reacquires_and_primes() {
             }
         }
     }
-    assert!(
-        second.len() == 2,
-        "m1 delivered both second-wave records after re-acquiring: {second:?}"
-    );
+    assert2::assert!(second.len() == 2);
 
     m1.close().await.unwrap();
     broker.shutdown().await;
@@ -474,7 +462,7 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
             if m1.assignment().await.len() == 1 && m2.assignment().await.len() == 1 {
                 break;
             }
-            assert!(Instant::now() < settle, "group did not split 1+1");
+            assert2::assert!(Instant::now() < settle);
             tokio::task::yield_now().await;
         }
     })
@@ -492,10 +480,7 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
             if m1.assignment().await.len() == 2 {
                 break;
             }
-            assert!(
-                Instant::now() < regain,
-                "m1 did not re-acquire both partitions"
-            );
+            assert2::assert!(Instant::now() < regain);
             tokio::task::yield_now().await;
         }
     })
@@ -505,10 +490,7 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
     // The rejoin bumped the generation, and the accessor reads it live (shared
     // atomic) — proving the generation the commit path stamps is current.
     let gen_after_rejoin = m1.generation_id();
-    assert!(
-        gen_after_rejoin > gen_after_split,
-        "rejoin should advance the generation: split={gen_after_split} rejoin={gen_after_rejoin}",
-    );
+    assert2::assert!(gen_after_rejoin > gen_after_split);
 
     // Consume a record on each partition so there are offsets to commit, then
     // commit. Pre-fix this stamped the stale start-up generation and the broker
@@ -525,7 +507,7 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
             }
         }
     }
-    assert_eq!(seen.len(), 2, "m1 delivered both records: {seen:?}");
+    assert2::assert!(seen.len() == 2);
 
     m1.commit_sync()
         .await
@@ -566,11 +548,7 @@ async fn delete_records_before(client: &Client, topic: &str, partition: i32, off
         .await
         .expect("DeleteRecords");
     let pr = &resp.topics[0].partitions[0];
-    assert!(
-        pr.error_code == 0,
-        "DeleteRecords error: {:?}",
-        pr.error_code
-    );
+    assert2::assert!(pr.error_code == 0);
     pr.low_watermark
 }
 
@@ -609,11 +587,8 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
 
     // Trim log_start to 5; the consumer (starting at 0) is now below the log.
     let low = delete_records_before(&producer, "oor-latest", 0, 5).await;
-    assert_eq!(low, 5, "expected low_watermark 5, got {low}");
-    assert_eq!(
-        broker.partition_log_start_for_test("oor-latest", 0),
-        Some(5)
-    );
+    assert2::assert!(low == 5);
+    assert2::assert!(broker.partition_log_start_for_test("oor-latest", 0) == Some(5));
 
     let mut consumer = Consumer::builder()
         .bootstrap(&bootstrap)
@@ -634,10 +609,7 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
         .poll(Duration::from_millis(400))
         .await
         .expect("OOR under Latest must reset, not error");
-    assert!(
-        first.is_empty(),
-        "Latest reset jumps to log-end; the pre-trim records must not reappear, got {first:?}"
-    );
+    assert2::assert!(first.is_empty());
 
     // Produce fresh records past the (resolved) log-end; the recovered
     // consumer must deliver exactly these.
@@ -651,18 +623,11 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
             .expect("post-reset poll must not error")
         {
             // Recovery landed at the live log-end (>= 8), never below the trim.
-            assert!(
-                r.offset >= 5,
-                "recovered fetch must be at/after the new log start, got offset {}",
-                r.offset
-            );
+            assert2::assert!(r.offset >= 5);
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
         }
     }
-    assert!(
-        seen == vec!["NEW1", "NEW2", "NEW3"],
-        "consumer recovered and consumed the post-reset records, got {seen:?}"
-    );
+    assert2::assert!(seen == vec!["NEW1", "NEW2", "NEW3"]);
 
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -705,11 +670,8 @@ async fn consumer_resets_on_offset_out_of_range_earliest() {
 
     // Trim log_start to 5; a consumer starting at 0 is now below the log.
     let low = delete_records_before(&producer, "oor-earliest", 0, 5).await;
-    assert_eq!(low, 5, "expected low_watermark 5, got {low}");
-    assert_eq!(
-        broker.partition_log_start_for_test("oor-earliest", 0),
-        Some(5)
-    );
+    assert2::assert!(low == 5);
+    assert2::assert!(broker.partition_log_start_for_test("oor-earliest", 0) == Some(5));
 
     let mut consumer = Consumer::builder()
         .bootstrap(&bootstrap)
@@ -739,18 +701,11 @@ async fn consumer_resets_on_offset_out_of_range_earliest() {
             // Every delivered record must be at or after the new log start.
             // If we ever see an offset < 5, the consumer re-fetched from 0
             // instead of from log_start — the original bug.
-            assert!(
-                r.offset >= 5,
-                "recovered Earliest fetch must be at/after log_start (5), got offset {}",
-                r.offset
-            );
+            assert2::assert!(r.offset >= 5);
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
         }
     }
-    assert!(
-        seen == vec!["f", "g", "h"],
-        "consumer recovered and consumed the surviving records from log_start, got {seen:?}"
-    );
+    assert2::assert!(seen == vec!["f", "g", "h"]);
 
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -820,7 +775,7 @@ async fn consumer_none_policy_surfaces_log_truncation() {
         tokio::time::timeout(Duration::from_secs(30), async {
             let settle = Instant::now() + Duration::from_secs(10);
             while seed.assignment().await.is_empty() {
-                assert!(Instant::now() < settle, "seed assignment did not settle");
+                assert2::assert!(Instant::now() < settle);
                 tokio::task::yield_now().await;
             }
         })
@@ -834,7 +789,7 @@ async fn consumer_none_policy_surfaces_log_truncation() {
 
     // Now trim past offset 0; the group's committed 0 is now below log_start.
     let low = delete_records_before(&producer, "oor-none", 0, 4).await;
-    assert_eq!(low, 4, "expected low_watermark 4, got {low}");
+    assert2::assert!(low == 4);
 
     let mut consumer = Consumer::builder()
         .bootstrap(&bootstrap)
@@ -857,10 +812,7 @@ async fn consumer_none_policy_surfaces_log_truncation() {
     while Instant::now() < deadline {
         match consumer.poll(Duration::from_millis(300)).await {
             Ok(recs) => {
-                assert!(
-                    recs.is_empty(),
-                    "None policy must not deliver records from a truncated position; got {recs:?}"
-                );
+                assert2::assert!(recs.is_empty());
             }
             Err(ConsumerError::LogTruncation {
                 topic,
@@ -868,8 +820,8 @@ async fn consumer_none_policy_surfaces_log_truncation() {
                 fetch_offset,
                 ..
             }) => {
-                assert_eq!(topic, "oor-none");
-                assert_eq!(partition, 0);
+                assert2::assert!(topic == "oor-none");
+                assert2::assert!(partition == 0);
                 check!(
                     fetch_offset == 0,
                     "fetch_offset should be the out-of-range offset 0, got {fetch_offset}"
@@ -880,10 +832,7 @@ async fn consumer_none_policy_surfaces_log_truncation() {
             Err(other) => panic!("expected LogTruncation, got {other:?}"),
         }
     }
-    assert!(
-        got_truncation,
-        "None policy must surface ConsumerError::LogTruncation for the trimmed position"
-    );
+    assert2::assert!(got_truncation);
 
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -945,10 +894,7 @@ async fn committed_leader_epoch_survives_restart() {
                 epochs.push(r.leader_epoch);
             }
         }
-        assert!(
-            epochs == vec![0, 0, 0],
-            "consumed records must carry the partition leader epoch 0, got {epochs:?}"
-        );
+        assert2::assert!(epochs == vec![0, 0, 0]);
 
         consumer.commit_sync().await.unwrap();
         consumer.close().await.unwrap();
@@ -999,22 +945,13 @@ async fn committed_leader_epoch_survives_restart() {
         };
 
         let (offset, epoch) = fetch_committed("epoch-grp").await;
-        assert!(
-            offset == 3,
-            "committed offset should be the log end (3), got {offset}"
-        );
-        assert!(
-            epoch == 0,
-            "committed_leader_epoch must survive restart as 0 (the consumed epoch), got {epoch}"
-        );
+        assert2::assert!(offset == 3);
+        assert2::assert!(epoch == 0);
 
         // Control: a never-committed group yields the -1 "absent" sentinel, so
         // the `epoch == 0` above is a real committed value, not a default.
         let (ctrl_offset, ctrl_epoch) = fetch_committed("never-committed-grp").await;
-        assert!(
-            ctrl_offset == -1 && ctrl_epoch == -1,
-            "uncommitted group must read back (-1, -1), got ({ctrl_offset}, {ctrl_epoch})"
-        );
+        assert2::assert!(ctrl_offset == -1 && ctrl_epoch == -1);
 
         broker.shutdown().await;
     }
@@ -1063,11 +1000,7 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
     // Let the initial join settle, then assert it really is the empty-assignment
     // cold start (a single Stable member with nothing to consume).
     let _ = consumer.poll(Duration::from_millis(200)).await;
-    assert!(
-        consumer.assignment().await.is_empty(),
-        "expected an empty assignment before the topic exists, got len {}",
-        consumer.assignment().await.len()
-    );
+    assert2::assert!(consumer.assignment().await.is_empty());
 
     // The distributor creates the WAL topic AFTER the consumer has joined.
     create_topic_with_partitions(&producer, "wal-late", 2).await;
@@ -1082,11 +1015,7 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
             if consumer.assignment().await.len() == 2 {
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "consumer never rejoined after its topic appeared (last assignment len {})",
-                consumer.assignment().await.len()
-            );
+            assert2::assert!(Instant::now() < deadline);
             tokio::task::yield_now().await;
         }
     })
@@ -1108,10 +1037,7 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
                     String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned(),
                 );
             }
-            assert!(
-                Instant::now() < deadline,
-                "did not deliver all records from the recovered assignment, seen {seen:?}"
-            );
+            assert2::assert!(Instant::now() < deadline);
         }
     })
     .await
@@ -1121,7 +1047,7 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
         .into_iter()
         .map(String::from)
         .collect();
-    assert_eq!(seen, expected, "expected {expected:?}, got {seen:?}");
+    assert2::assert!(seen == expected);
 
     consumer.close().await.unwrap();
     broker.shutdown().await;

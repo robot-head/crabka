@@ -961,7 +961,7 @@ fn chrono_now_ms() -> i64 {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::primitives::uuid::Uuid;
 
     use super::*;
@@ -1039,7 +1039,7 @@ mod tests {
         )
         .await;
         let asg = resp.assignment.expect("assignment present");
-        assert!(
+        assert2::assert!(
             (resp.error_code, resp.member_epoch, asg.topic_partitions)
                 == (
                     codes::NONE,
@@ -1070,7 +1070,7 @@ mod tests {
             },
         )
         .await;
-        assert!(r1.error_code == 0);
+        assert2::assert!(r1.error_code == 0);
 
         let r2 = heartbeat(
             &handle,
@@ -1083,7 +1083,7 @@ mod tests {
             },
         )
         .await;
-        assert!(r2.error_code == 0);
+        assert2::assert!(r2.error_code == 0);
         // Second join recomputes: each member should now own a 2-partition slice.
         let total2: usize = r2
             .assignment
@@ -1092,7 +1092,7 @@ mod tests {
             .iter()
             .map(|tp| tp.partitions.len())
             .sum();
-        assert!(total2 == 2, "with two members each owns 2 of 4 partitions");
+        assert2::assert!(total2 == 2);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1124,14 +1124,11 @@ mod tests {
             },
         )
         .await;
-        assert!(resp.error_code == 0);
+        assert2::assert!(resp.error_code == 0);
         let batches = log.batches().await;
-        assert!(batches.len() == pre_leave + 1);
+        assert2::assert!(batches.len() == pre_leave + 1);
         let leave_batch = &batches[batches.len() - 1];
-        assert!(
-            leave_batch.records.iter().any(|r| r.value.is_none()),
-            "leave batch must contain at least one tombstone"
-        );
+        assert2::assert!(leave_batch.records.iter().any(|r| r.value.is_none()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1166,18 +1163,15 @@ mod tests {
             .expect("50ms is always within Instant range");
         state.add_or_update_member(m);
         reconcile(&mut state, &*metadata);
-        assert!(!state.dirty, "baseline must be clean before eviction");
+        assert2::assert!(!state.dirty);
         let epoch_before = state.group_epoch;
 
         handle_session_tick(&mut state, &config, &*metadata, &*log, &coord)
             .await
             .expect("tick should succeed");
 
-        assert!(state.members.is_empty(), "expired member evicted");
-        assert!(
-            state.group_epoch == epoch_before + 1,
-            "single eviction advances epoch by exactly 1"
-        );
+        assert2::assert!(state.members.is_empty());
+        assert2::assert!(state.group_epoch == epoch_before + 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1196,7 +1190,7 @@ mod tests {
             },
         )
         .await;
-        assert!(joined.member_epoch == 1);
+        assert2::assert!(joined.member_epoch == 1);
         // Re-send with an epoch ahead of the server → fenced.
         let resp = heartbeat(
             &handle,
@@ -1209,7 +1203,7 @@ mod tests {
             },
         )
         .await;
-        assert!(resp.error_code == codes::FENCED_MEMBER_EPOCH);
+        assert2::assert!(resp.error_code == codes::FENCED_MEMBER_EPOCH);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1228,7 +1222,7 @@ mod tests {
             },
         )
         .await;
-        assert!(joined.member_epoch == 1);
+        assert2::assert!(joined.member_epoch == 1);
 
         let resp = heartbeat(
             &handle,
@@ -1242,7 +1236,7 @@ mod tests {
         )
         .await;
 
-        assert!(resp.error_code == codes::STALE_MEMBER_EPOCH);
+        assert2::assert!(resp.error_code == codes::STALE_MEMBER_EPOCH);
     }
 
     #[test]
@@ -1252,7 +1246,7 @@ mod tests {
             ..Default::default()
         };
         let batch = p.into_batch("g", 0);
-        assert!((batch.records.len(), batch.records[0].value.is_none()) == (1, true));
+        assert2::assert!((batch.records.len(), batch.records[0].value.is_none()) == (1, true));
     }
 
     #[test]

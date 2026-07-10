@@ -2824,7 +2824,7 @@ fn heatmap_y_mins(min_value: MinValue, max_value: MaxValue, value_buckets: usize
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use base64::Engine;
     use crabka_pprof::{FunctionRec, LineRec, LocationRec};
 
@@ -2847,13 +2847,13 @@ mod tests {
             .validate(&state, "tenant-a")
             .unwrap();
 
-        assert_eq!(
-            range,
-            MetadataRange {
-                start_ms: 0,
-                end_ms: i64::MAX,
-                omitted: true,
-            }
+        assert2::assert!(
+            range
+                == MetadataRange {
+                    start_ms: 0,
+                    end_ms: i64::MAX,
+                    omitted: true,
+                }
         );
     }
 
@@ -2870,19 +2870,19 @@ mod tests {
         let range = MetadataRange::from_request(0, 1_000)
             .validate(&state, "tenant-a")
             .unwrap();
-        assert_eq!(
-            range,
-            MetadataRange {
-                start_ms: 0,
-                end_ms: 1_000,
-                omitted: false,
-            }
+        assert2::assert!(
+            range
+                == MetadataRange {
+                    start_ms: 0,
+                    end_ms: 1_000,
+                    omitted: false,
+                }
         );
 
         let Err(err) = MetadataRange::from_request(0, 2_000).validate(&state, "tenant-a") else {
             panic!("explicit over-limit metadata range should be rejected");
         };
-        assert!(err.to_string().contains("query length exceeded"), "{err}");
+        assert2::assert!(err.to_string().contains("query length exceeded"));
     }
 
     fn store_with_frame(name: &str) -> InMemoryProfileStore {
@@ -3267,12 +3267,12 @@ mod tests {
 
         // Control: the old [0, 0]-scoped behavior misses the sample entirely.
         let scoped = store.stats("tenant-a", 0, 0).await.unwrap();
-        assert!(!scoped.data_ingested);
+        assert2::assert!(!scoped.data_ingested);
 
         // The handler path queries globally and reports the sample.
         let state = QuerierState::new(Arc::clone(&store));
         let stats = state.global_profile_stats("tenant-a").await.unwrap();
-        assert!(
+        assert2::assert!(
             stats
                 == ProfileStats {
                     data_ingested: true,
@@ -3307,7 +3307,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(err.to_string().contains("query length exceeded"), "{err}");
+        assert2::assert!(err.to_string().contains("query length exceeded"));
     }
 
     #[tokio::test]
@@ -3353,11 +3353,8 @@ overrides:
             .await
             .unwrap();
 
-        assert!(
-            tenant_a_err.to_string().contains("query length exceeded"),
-            "{tenant_a_err}"
-        );
-        assert!(tenant_b_series.is_empty());
+        assert2::assert!(tenant_a_err.to_string().contains("query length exceeded"));
+        assert2::assert!(tenant_b_series.is_empty());
     }
 
     #[tokio::test]
@@ -3412,8 +3409,8 @@ overrides:
             .await
             .unwrap();
 
-        assert!(body.starts_with("digraph flamegraph"));
-        assert!(body.contains("main.work"), "{body}");
+        assert2::assert!(body.starts_with("digraph flamegraph"));
+        assert2::assert!(body.contains("main.work"));
     }
 
     #[tokio::test]
@@ -3441,18 +3438,14 @@ overrides:
             .send()
             .await
             .unwrap();
-        assert!(
-            resp.status() == reqwest::StatusCode::OK,
-            "Get must succeed (Grafana init calls this), got {}",
-            resp.status()
-        );
+        assert2::assert!(resp.status() == reqwest::StatusCode::OK);
         let json: serde_json::Value = resp.json().await.unwrap();
         // Connect JSON omits empty repeated fields, so `settings` is absent or [].
         let empty = json
             .get("settings")
             .and_then(|v| v.as_array())
             .is_none_or(std::vec::Vec::is_empty);
-        assert!(empty, "expected empty settings, got {json}");
+        assert2::assert!(empty);
 
         let resp = client
             .post(format!("http://{bound}/settings.v1.SettingsService/Set"))
@@ -3463,15 +3456,10 @@ overrides:
             .send()
             .await
             .unwrap();
-        assert!(
-            resp.status() == reqwest::StatusCode::OK,
-            "Set must succeed, got {}",
-            resp.status()
-        );
+        assert2::assert!(resp.status() == reqwest::StatusCode::OK);
         let json: serde_json::Value = resp.json().await.unwrap();
-        assert!(
-            json.pointer("/setting/name").and_then(|v| v.as_str()) == Some("flamegraph.collapsed"),
-            "Set must echo the setting, got {json}"
+        assert2::assert!(
+            json.pointer("/setting/name").and_then(|v| v.as_str()) == Some("flamegraph.collapsed")
         );
     }
 
@@ -3602,17 +3590,15 @@ overrides:
             .await
             .unwrap();
 
-        assert_eq!(
+        assert2::assert!(
             body.pointer("/flamebearer/leftTicks")
-                .and_then(serde_json::Value::as_i64),
-            Some(5),
-            "{body}"
+                .and_then(serde_json::Value::as_i64)
+                == Some(5)
         );
-        assert_eq!(
+        assert2::assert!(
             body.pointer("/flamebearer/rightTicks")
-                .and_then(serde_json::Value::as_i64),
-            Some(7),
-            "{body}"
+                .and_then(serde_json::Value::as_i64)
+                == Some(7)
         );
     }
 
@@ -3695,13 +3681,12 @@ overrides:
             .await
             .unwrap();
 
-        assert!(response.get("flamegraph").is_none(), "{response}");
-        assert!(
+        assert2::assert!(response.get("flamegraph").is_none());
+        assert2::assert!(
             response
                 .get("dot")
                 .and_then(serde_json::Value::as_str)
-                .is_none_or(str::is_empty),
-            "{response}"
+                .is_none_or(str::is_empty)
         );
         let tree = response
             .get("tree")
@@ -3709,7 +3694,7 @@ overrides:
             .and_then(|tree| base64::engine::general_purpose::STANDARD.decode(tree).ok())
             .unwrap();
 
-        assert!(tree == b"\x00\x00\x01\x09main.work\x07\x00", "{response}");
+        assert2::assert!(tree == b"\x00\x00\x01\x09main.work\x07\x00");
     }
 
     #[tokio::test]
@@ -3746,14 +3731,14 @@ overrides:
             .await
             .unwrap();
 
-        assert!(response.get("flamegraph").is_none(), "{response}");
+        assert2::assert!(response.get("flamegraph").is_none());
         let tree = response
             .get("tree")
             .and_then(serde_json::Value::as_str)
             .and_then(|tree| base64::engine::general_purpose::STANDARD.decode(tree).ok())
             .unwrap();
 
-        assert!(tree == b"\x00\x00\x01\x09main.work\x07\x00", "{response}");
+        assert2::assert!(tree == b"\x00\x00\x01\x09main.work\x07\x00");
     }
 
     #[tokio::test]
@@ -3790,7 +3775,7 @@ overrides:
             .get("flamegraph")
             .and_then(|flamegraph| flamegraph.get("total"))
             .and_then(json_i64);
-        assert!(total == Some(5), "{response}");
+        assert2::assert!(total == Some(5));
     }
 
     #[tokio::test]
@@ -3822,7 +3807,7 @@ overrides:
             .json()
             .await
             .unwrap();
-        assert!(response.get("profile").is_none(), "{response}");
+        assert2::assert!(response.get("profile").is_none());
         let total: i64 = response
             .get("sample")
             .and_then(serde_json::Value::as_array)
@@ -3838,7 +3823,7 @@ overrides:
             .filter_map(json_i64)
             .sum();
 
-        assert!(total == 5, "{response}");
+        assert2::assert!(total == 5);
     }
 
     #[tokio::test]
@@ -3875,7 +3860,7 @@ overrides:
             .json()
             .await
             .unwrap();
-        assert!(response.get("profile").is_none(), "{response}");
+        assert2::assert!(response.get("profile").is_none());
         let total: i64 = response
             .get("sample")
             .and_then(serde_json::Value::as_array)
@@ -3891,7 +3876,7 @@ overrides:
             .filter_map(json_i64)
             .sum();
 
-        assert!(total == 7, "{response}");
+        assert2::assert!(total == 7);
     }
 
     #[tokio::test]
@@ -4000,7 +3985,7 @@ overrides:
             .get("flamegraph")
             .and_then(|flamegraph| flamegraph.get("total"))
             .and_then(json_i64);
-        assert!(total == Some(7), "{response}");
+        assert2::assert!(total == Some(7));
     }
 
     #[tokio::test]
@@ -4043,17 +4028,12 @@ overrides:
             .await
             .unwrap();
 
-        assert_eq!(
-            response.pointer("/flamegraph/leftTicks").and_then(json_i64),
-            Some(7),
-            "{response}"
-        );
-        assert_eq!(
+        assert2::assert!(response.pointer("/flamegraph/leftTicks").and_then(json_i64) == Some(7));
+        assert2::assert!(
             response
                 .pointer("/flamegraph/rightTicks")
-                .and_then(json_i64),
-            Some(10),
-            "{response}"
+                .and_then(json_i64)
+                == Some(10)
         );
     }
 
@@ -4085,16 +4065,13 @@ overrides:
             .get("profileTypes")
             .and_then(serde_json::Value::as_array)
             .unwrap();
-        assert!(
-            profile_types.iter().any(|profile_type| {
-                profile_type
-                    .get("ID")
-                    .or_else(|| profile_type.get("id"))
-                    .and_then(serde_json::Value::as_str)
-                    == Some(PT)
-            }),
-            "{response}"
-        );
+        assert2::assert!(profile_types.iter().any(|profile_type| {
+            profile_type
+                .get("ID")
+                .or_else(|| profile_type.get("id"))
+                .and_then(serde_json::Value::as_str)
+                == Some(PT)
+        }));
     }
 
     #[tokio::test]
@@ -4127,12 +4104,11 @@ overrides:
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             response
                 .get("profileTypes")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|profile_types| !profile_types.is_empty()),
-            "{response}"
+                .is_some_and(|profile_types| !profile_types.is_empty())
         );
     }
 
@@ -4177,12 +4153,8 @@ overrides:
             .pointer("/series/0/points")
             .and_then(serde_json::Value::as_array)
             .unwrap();
-        assert_eq!(points.len(), 1, "{response}");
-        assert_eq!(
-            points[0].get("value").and_then(serde_json::Value::as_f64),
-            Some(7.0),
-            "{response}"
-        );
+        assert2::assert!(points.len() == 1);
+        assert2::assert!(points[0].get("value").and_then(serde_json::Value::as_f64) == Some(7.0));
     }
 
     /// The `Series` RPC must emit each label set SORTED by name, matching real
@@ -4237,9 +4209,8 @@ overrides:
             "labelNames": ["service_name", "__profile_type__"],
         }))
         .await;
-        assert!(
-            projected == vec!["__profile_type__".to_string(), "service_name".to_string()],
-            "{projected:?}"
+        assert2::assert!(
+            projected == vec!["__profile_type__".to_string(), "service_name".to_string()]
         );
 
         // Full label set (`labelNames=[]`) — also sorted by name, not the order
@@ -4249,14 +4220,13 @@ overrides:
             "labelNames": [],
         }))
         .await;
-        assert!(
+        assert2::assert!(
             full == vec![
                 "__name__".to_string(),
                 "__profile_type__".to_string(),
                 "env".to_string(),
                 "service_name".to_string(),
-            ],
-            "{full:?}"
+            ]
         );
     }
 
@@ -4352,7 +4322,7 @@ overrides:
             .filter_map(|exemplar| exemplar.get("spanId").and_then(serde_json::Value::as_str))
             .collect();
 
-        assert!(span_ids == vec!["2a"], "{response}");
+        assert2::assert!(span_ids == vec!["2a"]);
     }
 
     #[tokio::test]
@@ -4400,8 +4370,8 @@ overrides:
             })
             .collect();
 
-        assert!(profile_ids.contains(&"profile-a"), "{response}");
-        assert!(profile_ids.contains(&"profile-b"), "{response}");
+        assert2::assert!(profile_ids.contains(&"profile-a"));
+        assert2::assert!(profile_ids.contains(&"profile-b"));
     }
 
     #[tokio::test]
@@ -4457,7 +4427,7 @@ overrides:
             })
             .collect();
 
-        assert!(profile_ids == vec!["profile-a"], "{response}");
+        assert2::assert!(profile_ids == vec!["profile-a"]);
     }
 
     #[tokio::test]
@@ -4624,8 +4594,8 @@ overrides:
             })
             .collect();
 
-        assert!(profile_ids.contains(&"profile-a"), "{response}");
-        assert!(profile_ids.contains(&"profile-b"), "{response}");
+        assert2::assert!(profile_ids.contains(&"profile-a"));
+        assert2::assert!(profile_ids.contains(&"profile-b"));
     }
 
     #[tokio::test]
@@ -4690,7 +4660,7 @@ overrides:
             .filter_map(json_i64)
             .sum();
 
-        assert!(count == 1, "{response}");
+        assert2::assert!(count == 1);
     }
 
     #[tokio::test]
@@ -4773,12 +4743,11 @@ overrides:
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             response
                 .pointer("/queryImpact/totalQueriedSeries")
                 .and_then(json_i64)
-                == Some(1),
-            "{response}"
+                == Some(1)
         );
     }
 
@@ -4789,8 +4758,8 @@ overrides:
         )
         .unwrap();
 
-        assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
-        assert!(selector == r#"{service_name="api"}"#);
+        assert2::assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
+        assert2::assert!(selector == r#"{service_name="api"}"#);
     }
 
     #[test]
@@ -4798,8 +4767,8 @@ overrides:
         let (profile_type, selector) =
             parse_render_query("process_cpu:cpu:nanoseconds:cpu:nanoseconds").unwrap();
 
-        assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
-        assert!(selector == "{}");
+        assert2::assert!(profile_type == "process_cpu:cpu:nanoseconds:cpu:nanoseconds");
+        assert2::assert!(selector == "{}");
     }
 
     #[test]
@@ -4815,7 +4784,7 @@ overrides:
         );
 
         let metadata = response.get("metadata").unwrap();
-        assert!(
+        assert2::assert!(
             metadata
                 == &json!({
                     "format": "single",
@@ -4858,8 +4827,8 @@ overrides:
 
     #[test]
     fn limit_zero_means_unlimited() {
-        assert!(limit(0) == usize::MAX);
-        assert!(limit(2) == 2);
+        assert2::assert!(limit(0) == usize::MAX);
+        assert2::assert!(limit(2) == 2);
     }
 
     #[test]
@@ -4910,17 +4879,17 @@ overrides:
     fn tenant_from_headers_validates_and_defaults() {
         // Absent header -> anonymous.
         let empty = HeaderMap::new();
-        assert!(tenant_from_headers(&empty).unwrap() == "anonymous");
+        assert2::assert!(tenant_from_headers(&empty).unwrap() == "anonymous");
 
         // Valid tenant passes through.
         let mut valid = HeaderMap::new();
         valid.insert("x-scope-orgid", "tenant-a".parse().unwrap());
-        assert!(tenant_from_headers(&valid).unwrap() == "tenant-a");
+        assert2::assert!(tenant_from_headers(&valid).unwrap() == "tenant-a");
 
         // Empty header value falls back to anonymous (preserved behaviour).
         let mut blank = HeaderMap::new();
         blank.insert("x-scope-orgid", "".parse().unwrap());
-        assert!(tenant_from_headers(&blank).unwrap() == "anonymous");
+        assert2::assert!(tenant_from_headers(&blank).unwrap() == "anonymous");
     }
 
     #[test]
@@ -4931,8 +4900,8 @@ overrides:
 
         // Mapped to an invalid-argument-class error with a generic message that
         // does not echo the attacker-supplied id.
-        assert!(matches!(err, ProfileError::Plan(_)));
-        assert!(connect_error(err).code() == Code::InvalidArgument);
+        assert2::assert!(matches!(err, ProfileError::Plan(_)));
+        assert2::assert!(connect_error(err).code() == Code::InvalidArgument);
     }
 
     #[tokio::test]
@@ -4955,7 +4924,7 @@ overrides:
             .unwrap()
             .status();
 
-        assert!(status.is_client_error(), "{status}");
+        assert2::assert!(status.is_client_error());
     }
 
     #[test]
@@ -4967,10 +4936,10 @@ overrides:
         let err = state
             .validate_query_range("anonymous", 0, i64::MAX)
             .unwrap_err();
-        assert!(err.to_string().contains("query length exceeded"), "{err}");
+        assert2::assert!(err.to_string().contains("query length exceeded"));
 
         // A bounded recent window stays well within the 721h default.
-        assert!(state.validate_query_range("anonymous", 0, 60_000).is_ok());
+        assert2::assert!(state.validate_query_range("anonymous", 0, 60_000).is_ok());
     }
 
     #[tokio::test]
@@ -4999,12 +4968,11 @@ overrides:
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             response
                 .get("profileTypes")
                 .and_then(serde_json::Value::as_array)
-                .is_some_and(|profile_types| !profile_types.is_empty()),
-            "{response}"
+                .is_some_and(|profile_types| !profile_types.is_empty())
         );
     }
 
@@ -5014,7 +4982,7 @@ overrides:
         let response = profile_error_response(ProfileError::Exec(
             "datafusion: secret plan detail".to_string(),
         ));
-        assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
+        assert2::assert!(response.status() == StatusCode::INTERNAL_SERVER_ERROR);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -5030,12 +4998,12 @@ overrides:
         // `Plan`) keep their user-facing message at 400.
         let response =
             profile_error_response(ProfileError::Plan("query length exceeded".to_string()));
-        assert!(response.status() == StatusCode::BAD_REQUEST);
+        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(body.contains("query length exceeded"), "{body}");
+        assert2::assert!(body.contains("query length exceeded"));
     }
 
     #[test]
@@ -5043,12 +5011,12 @@ overrides:
         let spans =
             parse_span_selectors(&["42".to_string(), "9a517183f26a089d".to_string()]).unwrap();
 
-        assert!(spans == vec![42, 0x9a51_7183_f26a_089d]);
+        assert2::assert!(spans == vec![42, 0x9a51_7183_f26a_089d]);
     }
 
     #[test]
     fn parse_span_selectors_rejects_bad_span() {
-        assert!(parse_span_selectors(&["not-a-span".to_string()]).is_err());
+        assert2::assert!(parse_span_selectors(&["not-a-span".to_string()]).is_err());
     }
 
     #[test]
@@ -5076,7 +5044,7 @@ overrides:
 
     #[test]
     fn heatmap_time_buckets_caps_large_ranges() {
-        assert!(
+        assert2::assert!(
             heatmap_time_buckets(StartMs(0), EndMs(i64::MAX), 10.0).unwrap()
                 == MAX_HEATMAP_TIME_BUCKETS
         );
@@ -5094,7 +5062,7 @@ overrides:
             counts: vec![vec![1, 0], vec![0, 2]],
         });
 
-        assert!(
+        assert2::assert!(
             series
                 == pb::querier::v1::HeatmapSeries {
                     labels: Vec::new(),

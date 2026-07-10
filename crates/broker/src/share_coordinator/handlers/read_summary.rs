@@ -99,7 +99,7 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_log::Offset;
     use crabka_protocol::{
         UnknownTaggedFields,
@@ -120,7 +120,7 @@ mod tests {
         let mut cur: &[u8] = bytes.as_ref();
         let resp =
             ReadShareGroupStateSummaryResponse::decode(&mut cur, VERSION).expect("decode response");
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        assert2::assert!(cur.is_empty());
         resp
     }
 
@@ -205,7 +205,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -244,7 +244,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -278,7 +278,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

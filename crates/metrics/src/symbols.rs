@@ -124,14 +124,14 @@ impl SymbolTable {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
     #[test]
     fn intern_is_stable_and_zero_is_empty() {
         let mut t = SymbolTable::new();
-        assert!(t.resolve(0) == Some(""));
+        assert2::assert!(t.resolve(0) == Some(""));
         let a = t.intern("app");
         let b = t.intern("api");
         check!(t.intern("app") == a);
@@ -147,30 +147,34 @@ mod tests {
         let env = t.intern("env");
         let prod = t.intern("prod");
         let labels = t.resolve_label_refs(&[app, api, env, prod]).unwrap();
-        assert!(labels == vec![("app".into(), "api".into()), ("env".into(), "prod".into())]);
+        assert2::assert!(
+            labels == vec![("app".into(), "api".into()), ("env".into(), "prod".into())]
+        );
     }
 
     #[test]
     fn odd_length_refs_rejected() {
         let t = SymbolTable::new();
-        assert!(t.resolve_label_refs(&[1]).is_err());
+        assert2::assert!(t.resolve_label_refs(&[1]).is_err());
     }
 
     #[test]
     fn from_symbols_requires_empty_first() {
-        assert!(SymbolTable::from_symbols(vec!["x".into()]).is_err());
-        assert!(SymbolTable::from_symbols(vec![String::new(), "x".into()]).is_ok());
+        assert2::assert!(SymbolTable::from_symbols(vec!["x".into()]).is_err());
+        assert2::assert!(SymbolTable::from_symbols(vec![String::new(), "x".into()]).is_ok());
     }
 
     #[test]
     fn from_symbols_rejects_duplicates() {
-        assert!(SymbolTable::from_symbols(vec![String::new(), "x".into(), "x".into()]).is_err());
+        assert2::assert!(
+            SymbolTable::from_symbols(vec![String::new(), "x".into(), "x".into()]).is_err()
+        );
     }
 
     #[test]
     fn resolve_label_refs_rejects_out_of_range_refs() {
         let t = SymbolTable::new();
-        assert!(t.resolve_label_refs(&[0, 7]).is_err());
+        assert2::assert!(t.resolve_label_refs(&[0, 7]).is_err());
     }
 
     #[test]
@@ -182,6 +186,6 @@ mod tests {
 
         let err = t.resolve_label_refs(&[job, api, job, worker]).unwrap_err();
 
-        assert!(matches!(err, SymbolError::DuplicateLabel(name) if name == "job"));
+        assert2::assert!(matches!(err, SymbolError::DuplicateLabel(name) if name == "job"));
     }
 }

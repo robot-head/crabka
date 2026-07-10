@@ -38,7 +38,6 @@ pub fn partition_key(trace_id: &[u8; 16]) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::span::{AttrValue, KeyValue, SpanKind, StatusCode};
@@ -74,7 +73,7 @@ mod tests {
         };
         let bytes = rec.encode().unwrap();
         let back = SpanRecord::decode(&bytes).unwrap();
-        assert!(back == rec);
+        assert2::assert!(back == rec);
     }
 
     #[test]
@@ -83,8 +82,8 @@ mod tests {
         let k1 = partition_key(&trace_id);
         let k2 = partition_key(&trace_id);
         let k3 = partition_key(&[10; 16]);
-        assert!(k1 == k2);
-        assert!(k1 != k3);
+        assert2::assert!(k1 == k2);
+        assert2::assert!(k1 != k3);
     }
 
     #[test]
@@ -93,11 +92,11 @@ mod tests {
         let key = partition_key(&trace_id);
         let expected = crabka_blockstore::fnv1_32(&trace_id).to_be_bytes();
 
-        assert!(key.as_ref() == expected);
+        assert2::assert!(key.as_ref() == expected);
     }
 
     #[test]
     fn wal_topic_matches_spec() {
-        assert!(TRACES_WAL_TOPIC == "__crabka_traces_wal");
+        assert2::assert!(TRACES_WAL_TOPIC == "__crabka_traces_wal");
     }
 }

@@ -116,7 +116,6 @@ impl RemoteLogMetadataManager for NotReadyRlmm {
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::assert;
     use crabka_remote_storage::{
         RemoteLogSegmentId, RemoteLogSegmentState, RemotePartitionDeleteState,
     };
@@ -135,7 +134,7 @@ mod tests {
     #[test]
     fn reads_return_not_ready_with_partition() {
         let m = NotReadyRlmm::new();
-        for (name, err) in [
+        for (_name, err) in [
             (
                 "segment lookup",
                 m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 0)
@@ -156,10 +155,7 @@ mod tests {
                     .unwrap_err(),
             ),
         ] {
-            assert!(
-                matches!(err, RemoteStorageError::NotReady { partition: 3 }),
-                "case {name}"
-            );
+            assert2::assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
         }
     }
 
@@ -179,7 +175,7 @@ mod tests {
         )
         .unwrap();
         let err = m.add_remote_log_segment_metadata(md).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
+        assert2::assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
     }
 
     #[test]
@@ -193,7 +189,7 @@ mod tests {
             broker_id: 0,
         };
         let err = m.update_remote_log_segment_metadata(upd).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
+        assert2::assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
     }
 
     #[test]
@@ -206,6 +202,6 @@ mod tests {
             broker_id: 0,
         };
         let err = m.put_remote_partition_delete_metadata(del).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
+        assert2::assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
     }
 }

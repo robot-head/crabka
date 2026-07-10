@@ -89,7 +89,6 @@ pub(crate) fn feature_enabled(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -97,12 +96,12 @@ mod tests {
     fn feature_enabled_treats_absence_as_disabled() {
         use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
         let mut image = MetadataImage::new(uuid::Uuid::nil());
-        assert!(!feature_enabled(&image, "group.version", 1)); // absent → disabled
+        assert2::assert!(!feature_enabled(&image, "group.version", 1)); // absent → disabled
         image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
             name: "group.version".into(),
             level: 1,
         }));
-        assert!(feature_enabled(&image, "group.version", 1)); // present at 1 → enabled
+        assert2::assert!(feature_enabled(&image, "group.version", 1)); // present at 1 → enabled
     }
 
     #[test]
@@ -112,8 +111,8 @@ mod tests {
             min_version: METADATA_VERSION_MIN,
             max_version: METADATA_VERSION_MAX,
         };
-        assert!(lookup(METADATA_VERSION) == Some(expected));
-        assert!(lookup("not.a.feature").is_none());
+        assert2::assert!(lookup(METADATA_VERSION) == Some(expected));
+        assert2::assert!(lookup("not.a.feature").is_none());
     }
 
     #[test]
@@ -123,9 +122,9 @@ mod tests {
             min_version: 0,
             max_version: 1,
         };
-        assert!(lookup(SHARE_VERSION) == Some(expected));
+        assert2::assert!(lookup(SHARE_VERSION) == Some(expected));
         // Advertised via the registry-derived supported-feature table.
-        assert!(
+        assert2::assert!(
             supported_features()
                 .iter()
                 .any(|f| f.name == SHARE_VERSION && f.min_version == 0 && f.max_version == 1)
@@ -139,9 +138,9 @@ mod tests {
             min_version: 0,
             max_version: 1,
         };
-        assert!(lookup(STREAMS_VERSION) == Some(expected));
+        assert2::assert!(lookup(STREAMS_VERSION) == Some(expected));
         // Advertised via the registry-derived supported-feature table.
-        assert!(
+        assert2::assert!(
             supported_features()
                 .iter()
                 .any(|f| f.name == STREAMS_VERSION && f.min_version == 0 && f.max_version == 1)
@@ -151,7 +150,7 @@ mod tests {
     #[test]
     fn require_feature_is_permissive_on_unfinalized() {
         let image = MetadataImage::new(uuid::Uuid::nil());
-        assert!(require_feature(&image, METADATA_VERSION, 11).is_ok());
+        assert2::assert!(require_feature(&image, METADATA_VERSION, 11).is_ok());
     }
 
     #[test]
@@ -167,10 +166,7 @@ mod tests {
             (10, Ok(())),
             (7, Ok(())),
         ] {
-            assert!(
-                require_feature(&image, METADATA_VERSION, required_level) == want,
-                "level {required_level}"
-            );
+            assert2::assert!(require_feature(&image, METADATA_VERSION, required_level) == want);
         }
     }
 }

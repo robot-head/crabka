@@ -198,7 +198,6 @@ mod rate_bucket {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::limits::{LimitError, Limits};
@@ -215,8 +214,8 @@ mod tests {
     fn trace_size_cap_rejects_over_limit() {
         let limits = limits_with(100, 2048);
 
-        assert!(IngestEnforcer::check_trace_size(&limits, 100).is_ok());
-        assert!(matches!(
+        assert2::assert!(IngestEnforcer::check_trace_size(&limits, 100).is_ok());
+        assert2::assert!(matches!(
             IngestEnforcer::check_trace_size(&limits, 101),
             Err(LimitError::MaxSpansPerTrace { .. })
         ));
@@ -226,7 +225,7 @@ mod tests {
     fn zero_trace_size_cap_is_unlimited() {
         let limits = limits_with(0, 2048);
 
-        assert!(IngestEnforcer::check_trace_size(&limits, 5_000_000).is_ok());
+        assert2::assert!(IngestEnforcer::check_trace_size(&limits, 5_000_000).is_ok());
     }
 
     #[test]
@@ -252,11 +251,7 @@ mod tests {
                 }),
             ),
         ] {
-            assert_eq!(
-                IngestEnforcer::check_attributes(&limits, &attrs),
-                want,
-                "case {attrs:?}"
-            );
+            assert2::assert!(IngestEnforcer::check_attributes(&limits, &attrs) == want);
         }
     }
 
@@ -266,7 +261,7 @@ mod tests {
         // when a stringification would under-report it (e.g. `Bytes`).
         let limits = limits_with(0, 4);
         let oversized_bytes = vec![("k".to_string(), 8_u64)];
-        assert!(matches!(
+        assert2::assert!(matches!(
             IngestEnforcer::check_attributes(&limits, &oversized_bytes),
             Err(LimitError::AttributeTooLong { .. })
         ));
@@ -281,8 +276,8 @@ mod tests {
             ..Limits::default()
         };
 
-        assert!(enforcer.check_span_rate(&limits, "t", 100).is_ok());
-        assert!(matches!(
+        assert2::assert!(enforcer.check_span_rate(&limits, "t", 100).is_ok());
+        assert2::assert!(matches!(
             enforcer.check_span_rate(&limits, "t", 100),
             Err(LimitError::IngestionRateExceeded { .. })
         ));
@@ -306,9 +301,9 @@ mod tests {
         // refill, the next 100-span request must reject because the sustained
         // refill is only 100/sec, not the burst.
         for _ in 0..10 {
-            assert!(enforcer.check_span_rate(&limits, "t", 100).is_ok());
+            assert2::assert!(enforcer.check_span_rate(&limits, "t", 100).is_ok());
         }
-        assert!(matches!(
+        assert2::assert!(matches!(
             enforcer.check_span_rate(&limits, "t", 100),
             Err(LimitError::IngestionRateExceeded { .. })
         ));
@@ -326,13 +321,13 @@ mod tests {
         };
 
         // Reject an over-limit request (150 > 100 available).
-        assert!(matches!(
+        assert2::assert!(matches!(
             enforcer.check_span_rate(&limits, "t", 150),
             Err(LimitError::IngestionRateExceeded { .. })
         ));
         // A following within-limit request for the full capacity still succeeds
         // because the rejected request consumed nothing.
-        assert!(enforcer.check_span_rate(&limits, "t", 100).is_ok());
+        assert2::assert!(enforcer.check_span_rate(&limits, "t", 100).is_ok());
     }
 
     #[test]
@@ -343,17 +338,17 @@ mod tests {
             ..Limits::default()
         };
 
-        assert!(QueryEnforcer::check_search_limit(&limits, 1000).is_ok());
-        assert!(matches!(
+        assert2::assert!(QueryEnforcer::check_search_limit(&limits, 1000).is_ok());
+        assert2::assert!(matches!(
             QueryEnforcer::check_search_limit(&limits, 1001),
             Err(LimitError::TracesPerSearchExceeded { .. })
         ));
         let start_ns = 1_000_000_000_000_000_000_i64;
-        assert!(matches!(
+        assert2::assert!(matches!(
             QueryEnforcer::check_search_duration(&limits, start_ns, start_ns + 7_200_000_000_000),
             Err(LimitError::SearchDurationExceeded { .. })
         ));
-        assert!(
+        assert2::assert!(
             QueryEnforcer::check_search_duration(&limits, start_ns, start_ns + 1_800_000_000_000)
                 .is_ok()
         );

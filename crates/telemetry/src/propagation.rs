@@ -102,7 +102,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use opentelemetry::trace::{TraceContextExt as _, TraceId};
 
     use super::*;
@@ -120,12 +120,11 @@ mod tests {
         let cx = extract_context([(TRACEPARENT, traceparent.as_bytes())]);
         let sc = cx.span().span_context().clone();
 
-        assert!(sc.is_valid());
-        assert_eq!(
-            sc.trace_id(),
-            TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+        assert2::assert!(sc.is_valid());
+        assert2::assert!(
+            sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
         );
-        assert!(sc.is_sampled());
+        assert2::assert!(sc.is_sampled());
     }
 
     #[test]
@@ -135,7 +134,7 @@ mod tests {
         );
         // Invalid UTF-8 header value is dropped, leaving no valid context.
         let cx = extract_context([(TRACEPARENT, [0xff, 0xfe].as_slice())]);
-        assert!(!cx.span().span_context().is_valid());
+        assert2::assert!(!cx.span().span_context().is_valid());
     }
 
     /// Run `f` under a subscriber wired to a real (export-less) `OTel` tracer
@@ -165,7 +164,7 @@ mod tests {
         // would silently drop the trace headers.
         let mut out = Vec::new();
         VecInjector(&mut out).set(TRACEPARENT, "abc".to_owned());
-        assert_eq!(out, vec![(TRACEPARENT.to_owned(), "abc".to_owned())]);
+        assert2::assert!(out == vec![(TRACEPARENT.to_owned(), "abc".to_owned())]);
     }
 
     #[test]
@@ -176,9 +175,9 @@ mod tests {
             .into_iter()
             .collect();
         let ex = MapExtractor(&map);
-        assert_eq!(ex.get(TRACEPARENT), Some("v"));
-        assert!(ex.get("absent").is_none());
-        assert_eq!(ex.keys(), vec![TRACEPARENT]);
+        assert2::assert!(ex.get(TRACEPARENT) == Some("v"));
+        assert2::assert!(ex.get("absent").is_none());
+        assert2::assert!(ex.keys() == vec![TRACEPARENT]);
     }
 
     #[test]
@@ -189,7 +188,7 @@ mod tests {
 
             let headers = current_trace_headers();
             let tp = headers.iter().find(|(k, _)| k == TRACEPARENT);
-            assert!(tp.is_some());
+            assert2::assert!(tp.is_some());
 
             // The injected value carries *this* span's trace id and the sampled
             // flag — pinning both the key and the content so a wrong-key or
@@ -200,15 +199,15 @@ mod tests {
                 .span()
                 .span_context()
                 .trace_id();
-            assert!(value.contains(&trace_id.to_string()));
-            assert!(value.ends_with("-01"));
+            assert2::assert!(value.contains(&trace_id.to_string()));
+            assert2::assert!(value.ends_with("-01"));
         });
     }
 
     #[test]
     fn current_trace_headers_empty_without_active_span() {
         // No subscriber ⇒ no OTel context ⇒ nothing to inject. Safe to call.
-        assert!(current_trace_headers().is_empty());
+        assert2::assert!(current_trace_headers().is_empty());
     }
 
     #[test]
@@ -220,9 +219,8 @@ mod tests {
 
             // The span now belongs to the producer's trace (shares its trace id).
             let sc = span.context().span().span_context().clone();
-            assert_eq!(
-                sc.trace_id(),
-                TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+            assert2::assert!(
+                sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
             );
         });
     }

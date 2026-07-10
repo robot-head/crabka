@@ -56,7 +56,6 @@ pub fn decode_value_header<B: Buf>(buf: &mut B) -> Result<ValueHeader, EnvelopeE
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -66,7 +65,7 @@ mod tests {
         let body: &[u8] = &[0x01, 0x02];
         let value = encode_value(12, 0, body);
         // frameVersion(0)=1 byte, apiKey(12)=1 byte, apiVersion(0)=1 byte, +body.
-        assert!(value.len() == 3 + body.len());
+        assert2::assert!(value.len() == 3 + body.len());
         let mut cur: &[u8] = &value;
         let hdr = decode_value_header(&mut cur).expect("decode header");
         let expected = ValueHeader {
@@ -74,13 +73,13 @@ mod tests {
             api_key: 12,
             api_version: 0,
         };
-        assert!(hdr == expected);
-        assert!(cur == body);
+        assert2::assert!(hdr == expected);
+        assert2::assert!(cur == body);
     }
 
     #[test]
     fn truncated_value_errors() {
         let mut cur: &[u8] = &[]; // no frameVersion byte
-        assert!(decode_value_header(&mut cur).is_err());
+        assert2::assert!(decode_value_header(&mut cur).is_err());
     }
 }

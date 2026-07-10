@@ -848,7 +848,7 @@ pub struct KafkaCondition {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -856,16 +856,16 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = Kafka::crd();
-        assert_eq!(crd.spec.group.as_str(), "crabka.io");
-        assert_eq!(crd.spec.names.kind.as_str(), "Kafka");
-        assert_eq!(crd.spec.names.plural.as_str(), "kafkas");
-        assert_eq!(
+        assert2::assert!(crd.spec.group.as_str() == "crabka.io");
+        assert2::assert!(crd.spec.names.kind.as_str() == "Kafka");
+        assert2::assert!(crd.spec.names.plural.as_str() == "kafkas");
+        assert2::assert!(
             crd.spec
                 .versions
                 .iter()
                 .map(|v| v.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["v1alpha1"]
+                .collect::<Vec<_>>()
+                == vec!["v1alpha1"]
         );
     }
 
@@ -893,12 +893,9 @@ mod tests {
             },
         );
         let json = serde_json::to_string(&k).unwrap();
-        assert!(
-            json.contains("\"kafkaVersion\""),
-            "expected camelCase wire shape, got: {json}"
-        );
+        assert2::assert!(json.contains("\"kafkaVersion\""));
         let back: Kafka = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == k.spec);
+        assert2::assert!(back.spec == k.spec);
     }
 
     #[test]
@@ -933,7 +930,7 @@ mod tests {
             "delegationToken",
             "tieredStorage",
         ] {
-            assert!(!json.contains(field), "case {field:?}; got: {json}");
+            assert2::assert!(!json.contains(field));
         }
     }
 
@@ -944,15 +941,15 @@ mod tests {
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         let cfg: MetricsConfig = spec.metrics_config.expect("metricsConfig present");
         let pm: PodMonitorSpec = cfg.pod_monitor.expect("podMonitor present");
-        assert!(pm.interval.as_deref() == Some("30s"));
+        assert2::assert!(pm.interval.as_deref() == Some("30s"));
     }
 
     #[test]
     fn spec_only_carries_kafka_version() {
         let json = r#"{"kafkaVersion":"0.1.1"}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.kafka_version.as_str(), "0.1.1");
-        assert_eq!(spec.config, None);
+        assert2::assert!(spec.kafka_version.as_str() == "0.1.1");
+        assert2::assert!(spec.config == None);
     }
 
     #[test]
@@ -960,7 +957,7 @@ mod tests {
         let json = r#"{"kafkaVersion":"0.1.1","config":{"log.retention.hours":"24"}}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         let cfg = spec.config.expect("config present");
-        assert!(cfg.get("log.retention.hours").map(String::as_str) == Some("24"));
+        assert2::assert!(cfg.get("log.retention.hours").map(String::as_str) == Some("24"));
     }
 
     #[test]
@@ -973,27 +970,27 @@ mod tests {
             "interBrokerListenerName":"PLAIN"
         }"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            spec.listeners,
-            vec![Listener {
-                name: "PLAIN".to_string(),
-                port: 9092,
-                type_: ListenerType::Internal,
-                tls: false,
-                authentication: None,
-                configuration: None,
-                network_policy_peers: None,
-            }]
+        assert2::assert!(
+            spec.listeners
+                == vec![Listener {
+                    name: "PLAIN".to_string(),
+                    port: 9092,
+                    type_: ListenerType::Internal,
+                    tls: false,
+                    authentication: None,
+                    configuration: None,
+                    network_policy_peers: None,
+                }]
         );
-        assert_eq!(spec.inter_broker_listener_name, Some("PLAIN".to_string()));
+        assert2::assert!(spec.inter_broker_listener_name == Some("PLAIN".to_string()));
     }
 
     #[test]
     fn spec_defaults_listeners_to_empty() {
         let json = r#"{"kafkaVersion":"0.1.1"}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.listeners, vec![]);
-        assert_eq!(spec.inter_broker_listener_name, None);
+        assert2::assert!(spec.listeners == vec![]);
+        assert2::assert!(spec.inter_broker_listener_name == None);
     }
 
     #[test]
@@ -1019,16 +1016,16 @@ mod tests {
             metadata_version: None,
         };
         let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("\"bootstrapServers\""), "got: {json}");
+        assert2::assert!(json.contains("\"bootstrapServers\""));
         let back: KafkaStatus = serde_json::from_str(&json).unwrap();
-        assert!(back == status);
+        assert2::assert!(back == status);
     }
 
     #[test]
     fn spec_carries_metadata_version() {
         let json = r#"{"kafkaVersion":"3.7.0","metadataVersion":"3.6"}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.metadata_version.as_deref() == Some("3.6"));
+        assert2::assert!(spec.metadata_version.as_deref() == Some("3.6"));
     }
 
     #[test]
@@ -1039,16 +1036,16 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_string(&status).unwrap();
-        assert!(json.contains("\"metadataVersion\":\"3.7\""), "got: {json}");
+        assert2::assert!(json.contains("\"metadataVersion\":\"3.7\""));
         let back: KafkaStatus = serde_json::from_str(&json).unwrap();
-        assert!(back == status);
+        assert2::assert!(back == status);
     }
 
     #[test]
     fn spec_carries_network_policy_when_set() {
         let json = r#"{"kafkaVersion":"0.1.1","networkPolicy":{}}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.network_policy.is_some(), "networkPolicy parsed");
+        assert2::assert!(spec.network_policy.is_some());
     }
 
     #[test]
@@ -1057,11 +1054,8 @@ mod tests {
         let json = r#"{"kafkaVersion":"0.1.1","logging":{"loggers":{"root":"info","crabka_broker":"debug"}}}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         let lg = spec.logging.expect("logging present");
-        assert_eq!(lg.r#type, LoggingType::Inline);
-        assert_eq!(
-            lg.loggers.get("crabka_broker").map(String::as_str),
-            Some("debug")
-        );
+        assert2::assert!(lg.r#type == LoggingType::Inline);
+        assert2::assert!(lg.loggers.get("crabka_broker").map(String::as_str) == Some("debug"));
     }
 
     #[test]
@@ -1070,13 +1064,13 @@ mod tests {
             "kafkaVersion": "3.7.0",
         }))
         .expect("parse minimal spec");
-        assert_eq!(v.cluster_ca, None);
-        assert_eq!(v.clients_ca, None);
+        assert2::assert!(v.cluster_ca == None);
+        assert2::assert!(v.clients_ca == None);
     }
 
     #[test]
     fn spec_carries_delegation_token_secret_key_reference() {
-        for (name, json, expected_key) in [
+        for (_name, json, expected_key) in [
             (
                 "default key",
                 r#"{"kafkaVersion":"0.1.1","delegationToken":{"secretKeyRef":{"name":"dt-master"}}}"#,
@@ -1090,13 +1084,12 @@ mod tests {
         ] {
             let spec: KafkaSpec = serde_json::from_str(json).unwrap();
             let dt = spec.delegation_token.expect("delegationToken present");
-            assert_eq!(
-                dt.secret_key_ref,
-                SecretKeyRef {
-                    name: "dt-master".to_string(),
-                    key: expected_key,
-                },
-                "case {name}"
+            assert2::assert!(
+                dt.secret_key_ref
+                    == SecretKeyRef {
+                        name: "dt-master".to_string(),
+                        key: expected_key,
+                    }
             );
         }
     }
@@ -1109,8 +1102,8 @@ mod tests {
             "clientsCa": { "generateCertificateAuthority": false },
         }))
         .expect("parse with CAs");
-        assert_eq!(v.cluster_ca.as_ref().unwrap().validity_days, 30);
-        assert!(
+        assert2::assert!(v.cluster_ca.as_ref().unwrap().validity_days == 30);
+        assert2::assert!(
             !v.clients_ca
                 .as_ref()
                 .unwrap()
@@ -1142,7 +1135,7 @@ authorization:
         let Some(Authorization::Simple(simple)) = spec.authorization.clone() else {
             panic!("expected Simple variant, got {:?}", spec.authorization);
         };
-        assert!(
+        assert2::assert!(
             simple
                 == SimpleAuthorization {
                     super_users: vec!["User:admin".to_string(), "ANONYMOUS".to_string()],
@@ -1152,13 +1145,10 @@ authorization:
         // JSON round-trip pins the camelCase wire shape (`superUsers`,
         // `type: "simple"`).
         let json = serde_json::to_string(&spec).unwrap();
-        assert!(json.contains("\"type\":\"simple\""), "got: {json}");
-        assert!(
-            json.contains("\"superUsers\":[\"User:admin\",\"ANONYMOUS\"]"),
-            "got: {json}"
-        );
+        assert2::assert!(json.contains("\"type\":\"simple\""));
+        assert2::assert!(json.contains("\"superUsers\":[\"User:admin\",\"ANONYMOUS\"]"));
         let back: KafkaSpec = serde_json::from_str(&json).unwrap();
-        assert!(back == spec);
+        assert2::assert!(back == spec);
     }
 
     #[test]
@@ -1180,7 +1170,7 @@ authorization:
         let Some(Authorization::Opa(opa)) = spec.authorization.clone() else {
             panic!("expected Opa variant, got {:?}", spec.authorization);
         };
-        assert!(
+        assert2::assert!(
             opa == OpaAuthorization {
                 url: "http://opa.opa.svc:8181/v1/data/kafka/authz/allow".to_string(),
                 allow_on_error: Some(true),
@@ -1200,10 +1190,10 @@ authorization:
             "\"maximumCacheSize\":50000",
             "\"expireAfterMs\":60000",
         ] {
-            assert!(json.contains(want), "case {want:?}; got: {json}");
+            assert2::assert!(json.contains(want));
         }
         let back: KafkaSpec = serde_json::from_str(&json).unwrap();
-        assert!(back == spec);
+        assert2::assert!(back == spec);
     }
 
     #[test]
@@ -1222,7 +1212,7 @@ authorization:
         let Some(Authorization::Opa(opa)) = spec.authorization.clone() else {
             panic!("expected Opa variant, got {:?}", spec.authorization);
         };
-        assert!(
+        assert2::assert!(
             opa == OpaAuthorization {
                 url: "http://opa.opa.svc:8181/v1/data/kafka/authz/allow".to_string(),
                 allow_on_error: None,
@@ -1241,13 +1231,10 @@ authorization:
             "expireAfterMs",
             "superUsers",
         ] {
-            assert!(
-                !json.contains(absent),
-                "{absent} must be omitted when None/empty; got: {json}"
-            );
+            assert2::assert!(!json.contains(absent));
         }
         let back: KafkaSpec = serde_json::from_str(&json).unwrap();
-        assert!(back == spec);
+        assert2::assert!(back == spec);
     }
 
     // ── tieredStorage round-trip tests ─────────────────────
@@ -1257,7 +1244,7 @@ authorization:
         let json = r#"{"kafkaVersion":"0.1.1","tieredStorage":{"type":"Local"}}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         let ts = spec.tiered_storage.as_ref().expect("tieredStorage parsed");
-        assert!(
+        assert2::assert!(
             ts == &TieredStorage {
                 kind: TieredStorageType::Local,
                 s3: None,
@@ -1268,17 +1255,14 @@ authorization:
         );
 
         let serialized = serde_json::to_string(&spec).unwrap();
-        assert!(
-            serialized.contains("\"tieredStorage\":{\"type\":\"Local\"}"),
-            "round-trip JSON: {serialized}"
-        );
+        assert2::assert!(serialized.contains("\"tieredStorage\":{\"type\":\"Local\"}"));
     }
 
     #[test]
     fn tiered_storage_rejects_unknown_type() {
         let json = r#"{"kafkaVersion":"0.1.1","tieredStorage":{"type":"Bogus"}}"#;
         let res: Result<KafkaSpec, _> = serde_json::from_str(json);
-        assert!(res.is_err(), "unknown TieredStorageType must fail");
+        assert2::assert!(res.is_err());
     }
 
     // ── S3 tiered storage CRD + validation ──────────
@@ -1331,7 +1315,7 @@ authorization:
             persistence: None,
         };
 
-        for (name, storage, expected_fragments) in [
+        for (_name, storage, expected_fragments) in [
             (
                 "S3",
                 s3,
@@ -1358,13 +1342,10 @@ authorization:
         ] {
             let json = serde_json::to_string(&storage).unwrap();
             for fragment in expected_fragments {
-                assert!(
-                    json.contains(fragment),
-                    "case {name}: missing {fragment:?}; got: {json}"
-                );
+                assert2::assert!(json.contains(fragment));
             }
             let back: TieredStorage = serde_json::from_str(&json).unwrap();
-            assert_eq!(back, storage, "case {name}");
+            assert2::assert!(back == storage);
         }
     }
 
@@ -1399,7 +1380,7 @@ authorization:
             }
         }
 
-        for (name, value, expected) in [
+        for (_name, value, expected) in [
             (
                 "local without remote config",
                 storage(TieredStorageType::Local, None, None),
@@ -1469,13 +1450,13 @@ authorization:
                 Err("type=Gcs must not set `s3`".to_string()),
             ),
         ] {
-            assert_eq!(value.validate(), expected, "case {name}");
+            assert2::assert!(value.validate() == expected);
         }
     }
 
     #[test]
     fn metadata_manager_validation_cases() {
-        for (name, kind, topic, expected_error) in [
+        for (_name, kind, topic, expected_error) in [
             (
                 "in-memory manager forbids topic config",
                 MetadataManagerType::InMemory,
@@ -1527,11 +1508,10 @@ authorization:
             }
             .validate();
             match expected_error {
-                Some(fragment) => assert!(
-                    result.is_err_and(|error| error.contains(fragment)),
-                    "case {name}"
-                ),
-                None => assert_eq!(result, Ok(()), "case {name}"),
+                Some(fragment) => {
+                    assert2::assert!(result.is_err_and(|error| error.contains(fragment)))
+                }
+                None => assert2::assert!(result == Ok(())),
             }
         }
     }
@@ -1554,7 +1534,7 @@ authorization:
             }),
         };
         let err = ts.validate().unwrap_err();
-        assert!(err.contains("persistence is only valid with type=Local"));
+        assert2::assert!(err.contains("persistence is only valid with type=Local"));
     }
 
     #[test]
@@ -1571,7 +1551,7 @@ authorization:
             }),
         };
         let err = ts.validate().unwrap_err();
-        assert!(err.contains("persistence.size is required"));
+        assert2::assert!(err.contains("persistence.size is required"));
     }
 
     #[test]
@@ -1587,7 +1567,7 @@ authorization:
                 delete_claim: false,
             }),
         };
-        assert!(ts.validate().is_ok());
+        assert2::assert!(ts.validate().is_ok());
     }
 
     #[test]
@@ -1598,23 +1578,23 @@ authorization:
             delete_claim: true,
         };
         let yaml = serde_yaml::to_string(&p).unwrap();
-        assert!(yaml.contains("deleteClaim: true"));
+        assert2::assert!(yaml.contains("deleteClaim: true"));
         let back: TieredStoragePersistence = serde_yaml::from_str(&yaml).unwrap();
-        assert!(back == p);
+        assert2::assert!(back == p);
     }
 
     #[test]
     fn persistence_delete_claim_defaults_false() {
         let yaml = "size: 5Gi\n";
         let p: TieredStoragePersistence = serde_yaml::from_str(yaml).unwrap();
-        assert!(!p.delete_claim);
+        assert2::assert!(!p.delete_claim);
     }
 
     // ── tracing validation ────────────────────────────────
 
     #[test]
     fn tracing_otlp_validation_cases() {
-        for (name, otlp, expected_error) in [
+        for (_name, otlp, expected_error) in [
             (
                 "missing OTLP block",
                 None,
@@ -1671,11 +1651,10 @@ authorization:
             }
             .validate();
             match expected_error {
-                Some(fragment) => assert!(
-                    result.is_err_and(|error| error.contains(fragment)),
-                    "case {name}"
-                ),
-                None => assert_eq!(result, Ok(()), "case {name}"),
+                Some(fragment) => {
+                    assert2::assert!(result.is_err_and(|error| error.contains(fragment)))
+                }
+                None => assert2::assert!(result == Ok(())),
             }
         }
     }
@@ -1684,11 +1663,11 @@ authorization:
     fn otlp_protocol_env_value_matches_broker_parse() {
         // The broker's `OtlpProtocol::parse` accepts "grpc" and
         // "http/protobuf" (spec values). Lock both ends.
-        for (name, protocol, expected) in [
+        for (_name, protocol, expected) in [
             ("gRPC", OtlpProtocol::Grpc, "grpc"),
             ("HTTP protobuf", OtlpProtocol::HttpProtobuf, "http/protobuf"),
         ] {
-            assert!(protocol.as_env_value() == expected, "case {name}");
+            assert2::assert!(protocol.as_env_value() == expected);
         }
     }
 }

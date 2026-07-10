@@ -626,9 +626,9 @@ mod tests {
         // constant `PartitionIndex(0)` (the Default) is caught: none of these
         // hash to 0.
         let coord = test_coordinator();
-        assert_eq!(coord.partition_for("my-tid"), PartitionIndex(43));
-        assert_eq!(coord.partition_for("producer-1"), PartitionIndex(45));
-        assert_eq!(coord.partition_for("tx-orders-prod"), PartitionIndex(26));
+        assert2::assert!(coord.partition_for("my-tid") == PartitionIndex(43));
+        assert2::assert!(coord.partition_for("producer-1") == PartitionIndex(45));
+        assert2::assert!(coord.partition_for("tx-orders-prod") == PartitionIndex(26));
     }
 
     fn entry(pid: i64, prev: i64) -> TxnEntry {
@@ -675,13 +675,9 @@ mod tests {
         TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
         map.insert(ProducerId(2000), "tid-a".into());
 
-        assert!(
-            map.get(&ProducerId(1000)).is_none(),
-            "stale pre-roll pid must be evicted"
-        );
-        assert_eq!(
-            map.get(&ProducerId(2000)).map(|e| e.value().clone()),
-            Some("tid-a".into())
+        assert2::assert!(map.get(&ProducerId(1000)).is_none());
+        assert2::assert!(
+            map.get(&ProducerId(2000)).map(|e| e.value().clone()) == Some("tid-a".into())
         );
     }
 
@@ -691,10 +687,10 @@ mod tests {
         map.insert(ProducerId(1000), "tid-a".into());
         // Never rolled: prev == -1 → nothing evicted.
         TxnCoordinator::evict_rolled_pid(&map, &entry(1000, -1));
-        assert!(map.get(&ProducerId(1000)).is_some());
+        assert2::assert!(map.get(&ProducerId(1000)).is_some());
         // prev == current (defensive): nothing evicted.
         TxnCoordinator::evict_rolled_pid(&map, &entry(1000, 1000));
-        assert!(map.get(&ProducerId(1000)).is_some());
+        assert2::assert!(map.get(&ProducerId(1000)).is_some());
     }
 
     #[test]
@@ -704,8 +700,8 @@ mod tests {
         // prev=1000 already absent → repeated evictions are harmless no-ops.
         TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
         TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
-        assert!(map.get(&ProducerId(1000)).is_none());
-        assert!(map.get(&ProducerId(2000)).is_some());
+        assert2::assert!(map.get(&ProducerId(1000)).is_none());
+        assert2::assert!(map.get(&ProducerId(2000)).is_some());
     }
 
     // ── Pure transition / guard helpers ───────────────────────────────────
@@ -716,8 +712,8 @@ mod tests {
         e.state = TxnState::Ongoing;
         e.last_update_ms = 1;
         apply_prepare_abort(&mut e, 999);
-        assert_eq!(e.state, TxnState::PrepareAbort);
-        assert_eq!(e.last_update_ms, 999);
+        assert2::assert!(e.state == TxnState::PrepareAbort);
+        assert2::assert!(e.last_update_ms == 999);
     }
 
     #[test]
@@ -752,22 +748,22 @@ mod tests {
 
         // Exact match → ok.
         let mut current = prepared.clone();
-        assert!(complete_abort_guard_ok(&current, &prepared));
+        assert2::assert!(complete_abort_guard_ok(&current, &prepared));
 
         // pid changed → reject.
         current = prepared.clone();
         current.producer_id = ProducerId(9999);
-        assert!(!complete_abort_guard_ok(&current, &prepared));
+        assert2::assert!(!complete_abort_guard_ok(&current, &prepared));
 
         // epoch changed → reject.
         current = prepared.clone();
         current.producer_epoch = 8;
-        assert!(!complete_abort_guard_ok(&current, &prepared));
+        assert2::assert!(!complete_abort_guard_ok(&current, &prepared));
 
         // state advanced past PrepareAbort → reject.
         current = prepared.clone();
         current.state = TxnState::CompleteAbort;
-        assert!(!complete_abort_guard_ok(&current, &prepared));
+        assert2::assert!(!complete_abort_guard_ok(&current, &prepared));
     }
 
     // ── Orchestration loop, driven against a mock backend ─────────────────
@@ -807,7 +803,7 @@ mod tests {
             TxnVersion::Verified,
         )
         .await;
-        assert_eq!(out, vec!["tid-a".to_owned()]);
+        assert2::assert!(out == vec!["tid-a".to_owned()]);
     }
 
     #[tokio::test]
@@ -826,7 +822,7 @@ mod tests {
             TxnVersion::Verified,
         )
         .await;
-        assert!(out.is_empty());
+        assert2::assert!(out.is_empty());
     }
 
     #[tokio::test]
@@ -848,7 +844,7 @@ mod tests {
             TxnVersion::Verified,
         )
         .await;
-        assert!(out.is_empty());
+        assert2::assert!(out.is_empty());
     }
 
     #[tokio::test]
@@ -876,7 +872,7 @@ mod tests {
             TxnVersion::Verified,
         )
         .await;
-        assert!(out.is_empty());
+        assert2::assert!(out.is_empty());
     }
 
     #[tokio::test]
@@ -902,6 +898,6 @@ mod tests {
             TxnVersion::Verified,
         )
         .await;
-        assert_eq!(out, vec!["tid-a".to_owned()]);
+        assert2::assert!(out == vec!["tid-a".to_owned()]);
     }
 }

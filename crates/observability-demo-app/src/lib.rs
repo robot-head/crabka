@@ -111,22 +111,18 @@ mod tests {
 
     #[test]
     fn order_at_is_deterministic_and_cycles_categories() {
-        assert_eq!(order_at(0).category, "books");
-        assert_eq!(order_at(1).category, "electronics");
-        assert_eq!(order_at(5).category, "books");
-        assert_eq!(order_at(0).order_id, "o-0000000000");
-        assert!(
-            order_at(17).amount.abs() < f64::EPSILON,
-            "every 17th order is anomalous (zero amount)"
-        );
+        assert2::assert!(order_at(0).category == "books");
+        assert2::assert!(order_at(1).category == "electronics");
+        assert2::assert!(order_at(5).category == "books");
+        assert2::assert!(order_at(0).order_id == "o-0000000000");
+        assert2::assert!(order_at(17).amount.abs() < f64::EPSILON);
     }
 
     #[test]
     fn order_at_populates_rich_fields_with_aligned_warehouse() {
         let o = order_at(0);
-        assert_eq!(
-            o,
-            Order {
+        assert2::assert!(
+            o == Order {
                 order_id: "o-0000000000".to_string(),
                 category: "books".to_string(),
                 amount: 0.0,
@@ -137,15 +133,14 @@ mod tests {
                 quantity: 1,
                 customer_tier: "free".to_string(),
                 warehouse: "wh-atl".to_string(),
-            },
-            "warehouse must serve the order's region"
+            }
         );
 
         // The warehouse index tracks the region index for every order.
         for i in [1_u64, 2, 3, 7, 42, 199] {
             let o = order_at(i);
             let region_i = REGIONS.iter().position(|r| *r == o.region).unwrap();
-            assert_eq!(WAREHOUSES[region_i], o.warehouse);
+            assert2::assert!(WAREHOUSES[region_i] == o.warehouse);
         }
     }
 
@@ -159,7 +154,7 @@ mod tests {
         ok.payment_method = "card".to_string();
         ok.amount = 42.0;
 
-        for (name, order, expected) in [
+        for (_name, order, expected) in [
             ("zero amount is anomalous", anomalous, (false, "anomalous")),
             (
                 "high-value crypto is fraud",
@@ -169,8 +164,8 @@ mod tests {
             ("normal card is fulfilled", ok, (false, "fulfilled")),
         ] {
             let (expected_suspicious, expected_outcome) = expected;
-            assert_eq!(is_suspicious(&order), expected_suspicious, "case {name}");
-            assert_eq!(classify_outcome(&order), expected_outcome, "case {name}");
+            assert2::assert!(is_suspicious(&order) == expected_suspicious);
+            assert2::assert!(classify_outcome(&order) == expected_outcome);
         }
     }
 
@@ -206,6 +201,6 @@ mod tests {
                 books_count = value; // keep the latest emitted count for "books"
             }
         }
-        assert_eq!(books_count, 2, "two 'books' orders → count 2");
+        assert2::assert!(books_count == 2);
     }
 }

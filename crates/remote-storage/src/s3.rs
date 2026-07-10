@@ -491,7 +491,7 @@ impl RemoteStorageManager for S3RemoteStorage {
 mod tests {
     use std::{collections::BTreeMap, io::Write, path::PathBuf};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_ids::LeaderEpoch;
     use object_store::memory::InMemory;
     use tempfile::TempDir;
@@ -528,8 +528,8 @@ mod tests {
     fn multipart_size_constants() {
         // Pin the multipart threshold/part-size (mutants flip the `*` in the
         // `N * 1024 * 1024` products to `+`/`/`).
-        assert_eq!(DEFAULT_MULTIPART_THRESHOLD, 104_857_600);
-        assert_eq!(DEFAULT_MULTIPART_CHUNK_SIZE, 16_777_216);
+        assert2::assert!(DEFAULT_MULTIPART_THRESHOLD == 104_857_600);
+        assert2::assert!(DEFAULT_MULTIPART_CHUNK_SIZE == 16_777_216);
     }
 
     #[test]
@@ -537,7 +537,7 @@ mod tests {
         // The S3RemoteStorage Debug impl must render something (a `fmt`
         // replaced with `Ok(())` would print nothing).
         let dbg = format!("{:?}", rsm(None));
-        assert!(dbg.contains("S3RemoteStorage"));
+        assert2::assert!(dbg.contains("S3RemoteStorage"));
     }
 
     fn sample_metadata(id: u128) -> RemoteLogSegmentMetadata {
@@ -587,7 +587,7 @@ mod tests {
             store
                 .copy_log_segment_data(&md, &sample_data(src.path(), true))
                 .unwrap();
-            assert!(store.fetch_log_segment(&md, 0, None).unwrap() == b"0123456789");
+            assert2::assert!(store.fetch_log_segment(&md, 0, None).unwrap() == b"0123456789");
         })
         .await
         .unwrap();
@@ -602,15 +602,11 @@ mod tests {
             store
                 .copy_log_segment_data(&md, &sample_data(src.path(), false))
                 .unwrap();
-            for (name, start, end, expected) in [
+            for (_name, start, end, expected) in [
                 ("bounded", 2, Some(5), b"2345".as_slice()),
                 ("open ended", 7, None, b"789".as_slice()),
             ] {
-                assert_eq!(
-                    store.fetch_log_segment(&md, start, end).unwrap(),
-                    expected,
-                    "case {name}"
-                );
+                assert2::assert!(store.fetch_log_segment(&md, start, end).unwrap() == expected);
             }
         })
         .await
@@ -628,7 +624,7 @@ mod tests {
                 .unwrap();
             // Inclusive [3, 3] is a valid single-byte range -> "3" (the guard
             // is `end < start_position`, not `<=`/`==`).
-            assert!(store.fetch_log_segment(&md, 3, Some(3)).unwrap() == b"3");
+            assert2::assert!(store.fetch_log_segment(&md, 3, Some(3)).unwrap() == b"3");
         })
         .await
         .unwrap();
@@ -676,7 +672,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap_err();
-        assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
+        assert2::assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -689,7 +685,7 @@ mod tests {
                 .copy_log_segment_data(&md, &sample_data(src.path(), false))
                 .unwrap();
             let err = store.fetch_index(&md, IndexType::Transaction).unwrap_err();
-            assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
+            assert2::assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
         })
         .await
         .unwrap();
@@ -706,7 +702,7 @@ mod tests {
                 .unwrap();
             store.delete_log_segment_data(&md).unwrap();
             store.delete_log_segment_data(&md).unwrap();
-            assert!(matches!(
+            assert2::assert!(matches!(
                 store.fetch_log_segment(&md, 0, None).unwrap_err(),
                 RemoteStorageError::SegmentNotFound(_)
             ));
@@ -729,7 +725,7 @@ mod tests {
                 .copy_log_segment_data(&b, &sample_data(src.path(), false))
                 .unwrap();
             store.delete_log_segment_data(&a).unwrap();
-            assert!(store.fetch_log_segment(&b, 0, None).unwrap() == b"0123456789");
+            assert2::assert!(store.fetch_log_segment(&b, 0, None).unwrap() == b"0123456789");
         })
         .await
         .unwrap();
@@ -747,10 +743,7 @@ mod tests {
         let md = sample_metadata(30);
         let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), Some("c".to_string()));
         let key = store.log_key(&md);
-        assert!(
-            key.as_ref().starts_with("c/"),
-            "expected prefix to be applied, got {key:?}",
-        );
+        assert2::assert!(key.as_ref().starts_with("c/"));
     }
 
     fn write_log_segment(dir: &std::path::Path, len: usize) -> PathBuf {
@@ -792,11 +785,11 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert_eq!(
-                fetched,
-                (0..SEG_LEN)
-                    .map(|i| u8::try_from(i % 251).unwrap())
-                    .collect::<Vec<_>>()
+            assert2::assert!(
+                fetched
+                    == (0..SEG_LEN)
+                        .map(|i| u8::try_from(i % 251).unwrap())
+                        .collect::<Vec<_>>()
             );
         })
         .await
@@ -828,12 +821,11 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert_eq!(
-                fetched,
-                (0..SEG_LEN)
-                    .map(|i| u8::try_from(i % 251).unwrap())
-                    .collect::<Vec<_>>(),
-                "tail byte was dropped"
+            assert2::assert!(
+                fetched
+                    == (0..SEG_LEN)
+                        .map(|i| u8::try_from(i % 251).unwrap())
+                        .collect::<Vec<_>>()
             );
         })
         .await
@@ -864,7 +856,7 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert_eq!(fetched, (0_u8..10).collect::<Vec<_>>());
+            assert2::assert!(fetched == (0_u8..10).collect::<Vec<_>>());
         })
         .await
         .unwrap();

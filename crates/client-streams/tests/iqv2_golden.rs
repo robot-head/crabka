@@ -83,9 +83,9 @@ async fn iqv2_kv_key_and_range_parity() {
                 .with_query(KeyQuery::<String, i64>::with_key("a".into())),
         )
         .await;
-    assert_eq!(
-        got_a.only_partition_result().unwrap().result(),
-        Some(&Some(kv["key_a"].as_i64().unwrap())),
+    assert2::assert!(
+        got_a.only_partition_result().unwrap().result()
+            == Some(&Some(kv["key_a"].as_i64().unwrap()))
     );
 
     // KeyQuery("z") → Some(None) (present query, absent key).
@@ -95,8 +95,8 @@ async fn iqv2_kv_key_and_range_parity() {
                 .with_query(KeyQuery::<String, i64>::with_key("z".into())),
         )
         .await;
-    assert!(kv["key_z"].is_null());
-    assert_eq!(got_z.only_partition_result().unwrap().result(), Some(&None),);
+    assert2::assert!(kv["key_z"].is_null());
+    assert2::assert!(got_z.only_partition_result().unwrap().result() == Some(&None));
 
     // RangeQuery [a, b] ascending.
     let r = d
@@ -104,10 +104,8 @@ async fn iqv2_kv_key_and_range_parity() {
             RangeQuery::<String, i64>::with_range("a".into(), "b".into()),
         ))
         .await;
-    assert_eq!(
-        r.only_partition_result().unwrap().result(),
-        Some(&pairs(&kv["range_a_b_asc"])),
-        "range [a,b] ascending parity",
+    assert2::assert!(
+        r.only_partition_result().unwrap().result() == Some(&pairs(&kv["range_a_b_asc"]))
     );
 
     // RangeQuery all keys, descending.
@@ -117,10 +115,8 @@ async fn iqv2_kv_key_and_range_parity() {
                 .with_query(RangeQuery::<String, i64>::with_no_bounds().with_descending_keys()),
         )
         .await;
-    assert_eq!(
-        rd.only_partition_result().unwrap().result(),
-        Some(&pairs(&kv["range_all_desc"])),
-        "range all descending parity",
+    assert2::assert!(
+        rd.only_partition_result().unwrap().result() == Some(&pairs(&kv["range_all_desc"]))
     );
 
     // RangeQuery lower-bound b.
@@ -130,10 +126,8 @@ async fn iqv2_kv_key_and_range_parity() {
                 .with_query(RangeQuery::<String, i64>::with_lower_bound("b".into())),
         )
         .await;
-    assert_eq!(
-        rl.only_partition_result().unwrap().result(),
-        Some(&pairs(&kv["range_lower_b"])),
-        "range lower-bound b parity",
+    assert2::assert!(
+        rl.only_partition_result().unwrap().result() == Some(&pairs(&kv["range_lower_b"]))
     );
 }
 
@@ -166,8 +160,8 @@ async fn iqv2_failure_paths() {
     let r = bogus
         .only_partition_result()
         .expect("single partition result");
-    assert!(!r.is_success());
-    assert_eq!(r.failure_reason(), Some(FailureReason::DoesNotExist));
+    assert2::assert!(!r.is_success());
+    assert2::assert!(r.failure_reason() == Some(FailureReason::DoesNotExist));
 
     // Existing KeyValue store queried with a Window query (wrong kind) → NotPresent.
     let wrong_kind = d
@@ -179,8 +173,8 @@ async fn iqv2_failure_paths() {
     let r = wrong_kind
         .only_partition_result()
         .expect("single partition result");
-    assert!(!r.is_success());
-    assert_eq!(r.failure_reason(), Some(FailureReason::NotPresent));
+    assert2::assert!(!r.is_success());
+    assert2::assert!(r.failure_reason() == Some(FailureReason::NotPresent));
 }
 
 /// `WindowKeyQuery` + `WindowRangeQuery` over a 1000ms tumbling count store.
@@ -225,11 +219,7 @@ async fn iqv2_window_key_and_range_parity() {
         .iter()
         .map(|p| (p[0].as_i64().unwrap(), p[1].as_i64().unwrap()))
         .collect();
-    assert_eq!(
-        wk.only_partition_result().unwrap().result(),
-        Some(&want_by_key),
-        "window-key fetch parity",
-    );
+    assert2::assert!(wk.only_partition_result().unwrap().result() == Some(&want_by_key));
 
     // WindowRangeQuery: all keys, window starts in [0, 0].
     let wr = d
@@ -255,11 +245,7 @@ async fn iqv2_window_key_and_range_parity() {
             )
         })
         .collect();
-    assert_eq!(
-        wr.only_partition_result().unwrap().result(),
-        Some(&want_by_range),
-        "window-range fetch parity",
-    );
+    assert2::assert!(wr.only_partition_result().unwrap().result() == Some(&want_by_range));
 }
 
 /// `VersionedKeyQuery` (KIP-960, latest + as-of) and `MultiVersionedKeyQuery`
@@ -304,26 +290,16 @@ async fn iqv2_versioned_key_and_multi_parity() {
     let latest = d
         .query(StateQueryRequest::in_store("vstore").with_query(key()))
         .await;
-    assert_eq!(
-        latest.only_partition_result().unwrap().result(),
-        Some(&ver(&v["latest"])),
-        "versioned latest parity",
-    );
+    assert2::assert!(latest.only_partition_result().unwrap().result() == Some(&ver(&v["latest"])));
     let asof = d
         .query(StateQueryRequest::in_store("vstore").with_query(key().as_of(250)))
         .await;
-    assert_eq!(
-        asof.only_partition_result().unwrap().result(),
-        Some(&ver(&v["as_of_250"])),
-        "versioned as-of 250 parity",
-    );
+    assert2::assert!(asof.only_partition_result().unwrap().result() == Some(&ver(&v["as_of_250"])));
     let asof_miss = d
         .query(StateQueryRequest::in_store("vstore").with_query(key().as_of(50)))
         .await;
-    assert_eq!(
-        asof_miss.only_partition_result().unwrap().result(),
-        Some(&ver(&v["as_of_50"])),
-        "versioned as-of 50 (pre-history) parity",
+    assert2::assert!(
+        asof_miss.only_partition_result().unwrap().result() == Some(&ver(&v["as_of_50"]))
     );
 
     // MultiVersionedKeyQuery: all ascending, then [150,250] descending (the
@@ -334,11 +310,7 @@ async fn iqv2_versioned_key_and_multi_parity() {
                 .with_query(MultiVersionedKeyQuery::<String, i64>::with_key("k".into())),
         )
         .await;
-    assert_eq!(
-        all.only_partition_result().unwrap().result(),
-        Some(&vers(&v["all_asc"])),
-        "versioned multi all-ascending parity",
-    );
+    assert2::assert!(all.only_partition_result().unwrap().result() == Some(&vers(&v["all_asc"])));
     let win = d
         .query(
             StateQueryRequest::in_store("vstore").with_query(
@@ -349,9 +321,7 @@ async fn iqv2_versioned_key_and_multi_parity() {
             ),
         )
         .await;
-    assert_eq!(
-        win.only_partition_result().unwrap().result(),
-        Some(&vers(&v["range_150_250_desc"])),
-        "versioned multi range [150,250] descending parity",
+    assert2::assert!(
+        win.only_partition_result().unwrap().result() == Some(&vers(&v["range_150_250_desc"]))
     );
 }

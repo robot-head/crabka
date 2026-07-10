@@ -105,7 +105,6 @@ pub fn router(state: Arc<handlers::AppState>) -> axum::Router {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -113,14 +112,14 @@ mod tests {
     fn default_registry_has_sixteen_goals() {
         let r = GoalRegistry::default_registry();
         let all = r.select(&[]).unwrap();
-        assert!(all.len() == 16);
+        assert2::assert!(all.len() == 16);
     }
 
     #[test]
     fn default_registry_order_matches_spec() {
         let r = GoalRegistry::default_registry();
         let names: Vec<&str> = r.select(&[]).unwrap().iter().map(|g| g.name()).collect();
-        assert!(
+        assert2::assert!(
             names
                 == vec![
                     // Hard goals (priority order matters for the optimizer's
@@ -142,8 +141,7 @@ mod tests {
                     "NetworkInUsage",
                     "NetworkOutUsage",
                     "CpuUsage",
-                ],
-            "registry order must match the spec's documented priority"
+                ]
         );
     }
 
@@ -151,9 +149,8 @@ mod tests {
     fn select_by_name() {
         let r = GoalRegistry::default_registry();
         let one = r.select(&["ReplicaDistribution".into()]).unwrap();
-        assert_eq!(
-            one.iter().map(|goal| goal.name()).collect::<Vec<_>>(),
-            vec!["ReplicaDistribution"]
+        assert2::assert!(
+            one.iter().map(|goal| goal.name()).collect::<Vec<_>>() == vec!["ReplicaDistribution"]
         );
     }
 

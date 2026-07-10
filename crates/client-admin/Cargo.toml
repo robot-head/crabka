@@ -17,6 +17,7 @@ categories = ["api-bindings", "network-programming"]
 workspace = true
 
 [dependencies]
+assert2            = { workspace = true }
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-ids         = { version = "0.3.8", path = "../ids" }
 crabka-metadata    = { version = "0.3.8", path = "../metadata" }
@@ -31,7 +32,6 @@ tracing            = { workspace = true }
 uuid               = { workspace = true }
 
 [dev-dependencies]
-assert2            = { workspace = true }
 crabka-broker      = { version = "0.3", path = "../broker" }
 crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
 crabka-client-core = { version = "0.3", path = "../client-core", features = ["mock"] }

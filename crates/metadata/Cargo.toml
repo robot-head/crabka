@@ -18,6 +18,7 @@ categories = ["data-structures", "encoding"]
 workspace = true
 
 [dependencies]
+assert2 = { workspace = true }
 wincode = { workspace = true }
 serde-wincode = { workspace = true }
 bytes = { workspace = true }
@@ -31,7 +32,6 @@ crabka-security = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 mutants = { workspace = true }
 proptest = { workspace = true }
 criterion = { version = "5.0.0", package = "codspeed-criterion-compat" }

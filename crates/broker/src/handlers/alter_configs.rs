@@ -179,7 +179,6 @@ pub(crate) async fn handle(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::assert;
     use crabka_protocol::owned::alter_configs_request::{
         AlterConfigsRequest, AlterConfigsResource, AlterableConfig,
     };
@@ -283,7 +282,7 @@ mod tests {
             ),
         ];
 
-        for (case, authorizer, resource_type, resource_name, error_code, error_message) in cases {
+        for (_case, authorizer, resource_type, resource_name, error_code, error_message) in cases {
             let resp = drive_one(authorizer, resource(resource_type, resource_name)).await;
             let expected = AlterConfigsResponse {
                 throttle_time_ms: 0,
@@ -296,7 +295,7 @@ mod tests {
                 }],
                 unknown_tagged_fields: UnknownTaggedFields::default(),
             };
-            assert!(resp == expected, "case: {case}");
+            assert2::assert!(resp == expected);
         }
     }
 }

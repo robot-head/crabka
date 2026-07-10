@@ -253,7 +253,7 @@ fn millis_to_secs_ceil(ms: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_blockstore::Labels;
 
     use super::*;
@@ -280,15 +280,15 @@ mod tests {
     fn active_series_cap_rejects_over_limit() {
         let e = IngestEnforcer::new();
         let l = limits_with(100, 1024, 2048);
-        assert!(e.check_active_series(&l, "t", 1, 99).is_ok());
-        assert!(e.check_active_series(&l, "t", 1, 100).is_err());
+        assert2::assert!(e.check_active_series(&l, "t", 1, 99).is_ok());
+        assert2::assert!(e.check_active_series(&l, "t", 1, 100).is_err());
     }
 
     #[test]
     fn zero_series_cap_is_unlimited() {
         let e = IngestEnforcer::new();
         let l = limits_with(0, 1024, 2048);
-        assert!(e.check_active_series(&l, "t", 1_000_000, 5_000_000).is_ok());
+        assert2::assert!(e.check_active_series(&l, "t", 1_000_000, 5_000_000).is_ok());
     }
 
     #[test]
@@ -298,11 +298,11 @@ mod tests {
         let bad_name = labels(&[("toolong", "x")]);
         let bad_val = labels(&[("a", "toolong")]);
         check!(IngestEnforcer::check_labels(&l, &ok).is_ok());
-        assert!(matches!(
+        assert2::assert!(matches!(
             IngestEnforcer::check_labels(&l, &bad_name),
             Err(LimitError::LabelNameTooLong { .. })
         ));
-        assert!(matches!(
+        assert2::assert!(matches!(
             IngestEnforcer::check_labels(&l, &bad_val),
             Err(LimitError::LabelValueTooLong { .. })
         ));
@@ -316,8 +316,8 @@ mod tests {
             ingestion_burst_size: 100,
             ..Limits::default()
         };
-        assert!(e.check_sample_rate(&l, "t", 100).is_ok());
-        assert!(e.check_sample_rate(&l, "t", 100).is_err());
+        assert2::assert!(e.check_sample_rate(&l, "t", 100).is_ok());
+        assert2::assert!(e.check_sample_rate(&l, "t", 100).is_err());
     }
 
     #[test]
@@ -330,8 +330,8 @@ mod tests {
             ingestion_burst_size: 1,
             ..Limits::default()
         };
-        assert!(e.check_sample_rate(&l, "t", 1).is_ok());
-        assert!(e.check_sample_rate(&l, "t", 1).is_err());
+        assert2::assert!(e.check_sample_rate(&l, "t", 1).is_ok());
+        assert2::assert!(e.check_sample_rate(&l, "t", 1).is_err());
     }
 
     #[test]
@@ -342,7 +342,7 @@ mod tests {
             ingestion_burst_size: 0,
             ..Limits::default()
         };
-        assert!(e.check_sample_rate(&l, "t", 1_000_000).is_ok());
+        assert2::assert!(e.check_sample_rate(&l, "t", 1_000_000).is_ok());
     }
 
     #[test]
@@ -355,14 +355,14 @@ mod tests {
             ingestion_burst_size: 0,
             ..Limits::default()
         };
-        assert!(e.check_sample_rate(&nan, "nan", 1_000_000).is_ok());
+        assert2::assert!(e.check_sample_rate(&nan, "nan", 1_000_000).is_ok());
         // +Inf is unbounded throughput, also disabled rather than int-bucketed.
         let inf = Limits {
             ingestion_rate: f64::INFINITY,
             ingestion_burst_size: 0,
             ..Limits::default()
         };
-        assert!(e.check_sample_rate(&inf, "inf", 1_000_000).is_ok());
+        assert2::assert!(e.check_sample_rate(&inf, "inf", 1_000_000).is_ok());
     }
 
     #[test]
@@ -379,9 +379,9 @@ mod tests {
         for i in 0..1_000 {
             let tenant = format!("tenant-{i}");
             let _ = e.check_sample_rate(&l, &tenant, 1);
-            assert!(e.sample_rate_buckets.len() <= cap);
+            assert2::assert!(e.sample_rate_buckets.len() <= cap);
         }
-        assert!(e.sample_rate_buckets.len() <= cap);
+        assert2::assert!(e.sample_rate_buckets.len() <= cap);
     }
 
     #[test]
@@ -405,11 +405,11 @@ mod tests {
             ..Limits::default()
         };
         let now = 1_000_000_000_000_i64;
-        assert!(matches!(
+        assert2::assert!(matches!(
             QueryEnforcer::check_range(&l, now - 7_200_000, now, now),
             Err(LimitError::QueryRangeTooLong { .. })
         ));
-        assert!(matches!(
+        assert2::assert!(matches!(
             QueryEnforcer::check_range(&l, now - 172_800_000, now - 172_799_000, now),
             Err(LimitError::QueryLookbackExceeded { .. })
         ));

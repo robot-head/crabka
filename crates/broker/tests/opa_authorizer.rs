@@ -29,7 +29,6 @@
 
 use std::{io, net::SocketAddr};
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{
     Broker, BrokerConfig, BrokerHandle, authorizer::opa::OpaAuthorizer, config::ListenerSpec,
@@ -332,11 +331,7 @@ async fn create_topic_as_admin(addr: SocketAddr, name: &str) {
     let resp = drive_create_topics_as_plain(addr, "admin", b"admin-secret", req)
         .await
         .expect("CreateTopics as super-user must round-trip");
-    assert!(
-        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
-        "CreateTopics({name}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Wait (event-driven, on `handle`) until `topic`/partition-0's local
@@ -416,14 +411,12 @@ async fn produce_blocked_by_opa_returns_topic_authorization_failed() {
     handle.shutdown().await;
 
     let p = &resp.responses[0].partition_responses[0];
-    assert!(
+    assert2::assert!(
         (
             resp.responses.len(),
             resp.responses[0].partition_responses.len(),
             p.error_code,
-        ) == (1, 1, ERR_TOPIC_AUTHORIZATION_FAILED),
-        "OPA denied alice's Write on blocked-topic, expected \
-         TOPIC_AUTHORIZATION_FAILED (29), got {p:?}"
+        ) == (1, 1, ERR_TOPIC_AUTHORIZATION_FAILED)
     );
 }
 
@@ -459,13 +452,11 @@ async fn produce_allowed_by_opa_succeeds() {
     handle.shutdown().await;
 
     let p = &resp.responses[0].partition_responses[0];
-    assert!(
+    assert2::assert!(
         (
             resp.responses.len(),
             resp.responses[0].partition_responses.len(),
             p.error_code,
-        ) == (1, 1, 0),
-        "OPA allowed alice's Write on permitted-topic, expected \
-         error_code=0, got {p:?}"
+        ) == (1, 1, 0)
     );
 }

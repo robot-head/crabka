@@ -107,9 +107,8 @@ mod tests {
     #[test]
     fn authz_config_default_is_disabled_with_30s_refresh() {
         let a = super::AuthzConfig::default();
-        assert_eq!(
-            a,
-            super::AuthzConfig {
+        assert2::assert!(
+            a == super::AuthzConfig {
                 enabled: false,
                 super_users: std::collections::HashSet::new(),
                 acl_refresh: std::time::Duration::from_secs(30),
@@ -126,6 +125,6 @@ mod tests {
             crabka_security::UnsecuredJwsValidator::default(),
         ));
         let cfg = super::BearerAuthConfig { validator };
-        assert_eq!(format!("{cfg:?}"), "BearerAuthConfig");
+        assert2::assert!(format!("{cfg:?}") == "BearerAuthConfig");
     }
 }

@@ -133,26 +133,26 @@ mod tests {
     #[test]
     fn dominates_requires_all_bound_partitions_met() {
         let cur = pos(&[("in", 0, 10), ("in", 1, 5)]);
-        for (name, bound, want) in [
+        for (_name, bound, want) in [
             ("exact bound", pos(&[("in", 0, 10)]), true),
             ("ahead of bound", pos(&[("in", 0, 9), ("in", 1, 5)]), true),
             ("behind bound", pos(&[("in", 0, 11)]), false),
             ("unknown topic partition", pos(&[("other", 0, 1)]), false),
         ] {
-            assert_eq!(cur.dominates(&bound), want, "case {name}");
+            assert2::assert!(cur.dominates(&bound) == want);
         }
     }
 
     #[test]
     fn position_offset_reads_present_and_absent_tps() {
         let p = pos(&[("in", 0, 10), ("in", 1, 5)]);
-        for (name, topic, partition, expected) in [
+        for (_name, topic, partition, expected) in [
             ("first present partition", "in", 0, Some(10)),
             ("second present partition", "in", 1, Some(5)),
             ("absent partition", "in", 2, None),
             ("absent topic", "other", 0, None),
         ] {
-            assert_eq!(p.offset(topic, partition), expected, "case {name}");
+            assert2::assert!(p.offset(topic, partition) == expected);
         }
     }
 
@@ -162,10 +162,10 @@ mod tests {
 
         let q = StateQueryRequest::in_store("s")
             .with_query(KeyQuery::<String, i64>::with_key("k".into()));
-        assert_eq!(q.store.as_str(), "s");
-        assert!(matches!(q.partitions, PartitionSel::All));
-        assert!(matches!(q.bound, PositionBound::Unbounded));
-        assert!(!q.require_active);
+        assert2::assert!(q.store.as_str() == "s");
+        assert2::assert!(matches!(q.partitions, PartitionSel::All));
+        assert2::assert!(matches!(q.bound, PositionBound::Unbounded));
+        assert2::assert!(!q.require_active);
     }
 
     #[test]
@@ -177,24 +177,24 @@ mod tests {
             .with_query(KeyQuery::<String, i64>::with_key("k".into()))
             .with_partitions(set.clone());
         match &q.partitions {
-            PartitionSel::Set(s) => assert_eq!(s, &set),
+            PartitionSel::Set(s) => assert2::assert!(s == &set),
             PartitionSel::All => panic!("expected explicit partition set"),
         }
 
         // with_all_partitions resets back to All.
         let q = q.with_all_partitions();
-        assert!(matches!(q.partitions, PartitionSel::All));
+        assert2::assert!(matches!(q.partitions, PartitionSel::All));
 
         // with_position_bound stores the bound.
         let bound_pos = pos(&[("in", 0, 7)]);
         let q = q.with_position_bound(PositionBound::At(bound_pos.clone()));
         match &q.bound {
-            PositionBound::At(p) => assert_eq!(p, &bound_pos),
+            PositionBound::At(p) => assert2::assert!(p == &bound_pos),
             PositionBound::Unbounded => panic!("expected At bound"),
         }
 
         // require_active flips the flag.
         let q = q.require_active();
-        assert!(q.require_active);
+        assert2::assert!(q.require_active);
     }
 }

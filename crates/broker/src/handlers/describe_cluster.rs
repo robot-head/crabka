@@ -174,7 +174,6 @@ pub(crate) async fn handle(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord, NodeId};
     use crabka_security::ListenerProtocol;
 
@@ -253,7 +252,7 @@ mod tests {
             cluster_authorized_operations: i32::MIN,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -302,7 +301,7 @@ mod tests {
             cluster_authorized_operations: i32::MIN,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

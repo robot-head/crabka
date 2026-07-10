@@ -86,8 +86,6 @@ impl Goal for NetworkOutUsage {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::assert;
-
     use super::*;
     use crate::{
         model::BrokerView,
@@ -175,7 +173,7 @@ mod tests {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2]);
         let ctx = ctx_with(Arc::new(UsageStore::default()));
-        assert!(NetworkOutUsage.propose(&s, &ctx).is_empty());
+        assert2::assert!(NetworkOutUsage.propose(&s, &ctx).is_empty());
     }
 
     #[test]
@@ -189,13 +187,13 @@ mod tests {
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(store);
         let mvs = NetworkOutUsage.propose(&s, &ctx);
-        assert!(!mvs.is_empty(), "expected swaps");
+        assert2::assert!(!mvs.is_empty());
     }
 
     #[test]
     fn imbalance_pct_uses_difference_times_100_over_total() {
         let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
-        assert!(NetworkOutUsage::imbalance_pct(&totals) == 50);
+        assert2::assert!(NetworkOutUsage::imbalance_pct(&totals) == 50);
     }
 
     #[test]
@@ -211,7 +209,7 @@ mod tests {
 
         let mvs = NetworkOutUsage.propose(&s, &ctx);
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "hot".into(),
                 partition: 0,
@@ -234,7 +232,7 @@ mod tests {
         ]);
         let ctx = ctx_with(store);
 
-        assert!(NetworkOutUsage.propose(&s, &ctx).is_empty());
+        assert2::assert!(NetworkOutUsage.propose(&s, &ctx).is_empty());
     }
 
     #[test]
@@ -244,7 +242,7 @@ mod tests {
         let store = store_with_counter_pair(vec![(1, "t", 0, 0.0, 300_000.0)]);
         let ctx = ctx_with(store);
 
-        assert!(NetworkOutUsage.propose(&s, &ctx).is_empty());
+        assert2::assert!(NetworkOutUsage.propose(&s, &ctx).is_empty());
     }
 
     #[test]
@@ -261,7 +259,7 @@ mod tests {
 
         let mvs = NetworkOutUsage.propose(&s, &ctx);
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "t".into(),
                 partition: 0,
@@ -288,6 +286,6 @@ mod tests {
 
         let mvs = NetworkOutUsage.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
+        assert2::assert!(mvs.len() == 1);
     }
 }

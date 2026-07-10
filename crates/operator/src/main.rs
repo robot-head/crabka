@@ -79,7 +79,7 @@ mod tests {
             let cli = Cli::parse_from(argv);
             match cli.command {
                 Command::CaRenewalCheck(args) => {
-                    assert_eq!(args.namespace.as_deref(), expected_namespace, "case {name}");
+                    assert2::assert!(args.namespace.as_deref() == expected_namespace);
                 }
                 _ => panic!("case {name}: expected CaRenewalCheck variant"),
             }

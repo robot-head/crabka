@@ -9,7 +9,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use assert2::assert;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -86,7 +85,7 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
     )
     .await
     .unwrap();
-    assert_eq!(descriptors.len(), 1);
+    assert2::assert!(descriptors.len() == 1);
 
     let querier_listener = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
     let querier_port = querier_listener.local_addr().unwrap().port();
@@ -140,7 +139,7 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
         ],
     )
     .await;
-    assert_eq!(labels["data"], json!(["app", "env", "service_name"]));
+    assert2::assert!(labels["data"] == json!(["app", "env", "service_name"]));
 
     let app_values = grafana_proxy_loki_result(
         &http,
@@ -153,7 +152,7 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
         ],
     )
     .await;
-    assert_eq!(app_values["data"], json!(["api"]));
+    assert2::assert!(app_values["data"] == json!(["api"]));
 
     let series = grafana_proxy_loki_result(
         &http,
@@ -167,7 +166,7 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
         ],
     )
     .await;
-    assert!(
+    assert2::assert!(
         series["data"]
             == json!([
                 {
@@ -188,7 +187,7 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
     )
     .await;
 
-    assert!(
+    assert2::assert!(
         result["data"]["result"]
             == json!([
                 {
@@ -212,10 +211,10 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
         base_ns + 2_000_000_000,
     )
     .await;
-    assert!(
-        json_contains_string(&datasource_query, "api grafana datasource error"),
-        "Grafana backend datasource query did not return the expected log line: {datasource_query}"
-    );
+    assert2::assert!(json_contains_string(
+        &datasource_query,
+        "api grafana datasource error"
+    ));
 
     querier.abort();
     broker.shutdown().await;
@@ -250,10 +249,7 @@ async fn create_topic(bootstrap: &str, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        response.topics[0].error_code == 0,
-        "create_topic failed: {response:?}"
-    );
+    assert2::assert!(response.topics[0].error_code == 0);
 }
 
 fn service_config(role: Role, bootstrap: &str, topic: &str, data_root: &TempDir) -> ServiceConfig {
@@ -313,7 +309,7 @@ async fn push_crabka_payload(app: axum::Router, payload: &Value) {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
 }
 
 async fn wait_for_grafana_ready(http: &reqwest::Client, base: &str) {
@@ -333,7 +329,7 @@ async fn wait_for_grafana_ready(http: &reqwest::Client, base: &str) {
         if health_ok && api_ok {
             return;
         }
-        assert!(Instant::now() < deadline, "Grafana did not become ready");
+        assert2::assert!(Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
@@ -346,10 +342,7 @@ async fn wait_for_crabka_ready(http: &reqwest::Client, addr: SocketAddr) {
         {
             return;
         }
-        assert!(
-            Instant::now() < deadline,
-            "Crabka querier did not become ready"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -379,10 +372,7 @@ async fn create_loki_datasource(
         .expect("create Grafana datasource");
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
-    assert!(
-        status.is_success(),
-        "Grafana datasource create failed: {body}"
-    );
+    assert2::assert!(status.is_success());
     let body: Value = serde_json::from_str(&body).expect("datasource JSON");
     body.pointer("/datasource/uid")
         .or_else(|| body.get("uid"))
@@ -406,15 +396,12 @@ async fn assert_grafana_datasource_health(
         .await
         .expect("Grafana datasource health");
     let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    let stdout =
+    let _body = response.text().await.unwrap_or_default();
+    let _stdout =
         String::from_utf8_lossy(&grafana.stdout_to_vec().await.unwrap_or_default()).into_owned();
-    let stderr =
+    let _stderr =
         String::from_utf8_lossy(&grafana.stderr_to_vec().await.unwrap_or_default()).into_owned();
-    assert!(
-        status.is_success(),
-        "Grafana datasource health failed: {body}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
+    assert2::assert!(status.is_success());
 }
 
 async fn grafana_proxy_query_range_result(
@@ -441,10 +428,7 @@ async fn grafana_proxy_query_range_result(
         .expect("Grafana proxy query_range");
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
-    assert!(
-        status.is_success(),
-        "Grafana proxy query_range failed: {body}"
-    );
+    assert2::assert!(status.is_success());
     serde_json::from_str(&body).expect("Grafana proxy query JSON")
 }
 
@@ -466,10 +450,7 @@ async fn grafana_proxy_loki_result(
         .expect("Grafana proxy Loki metadata query");
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
-    assert!(
-        status.is_success(),
-        "Grafana proxy Loki metadata query failed: {body}"
-    );
+    assert2::assert!(status.is_success());
     serde_json::from_str(&body).expect("Grafana proxy Loki metadata JSON")
 }
 
@@ -508,10 +489,7 @@ async fn grafana_backend_loki_query_result(
         .expect("Grafana backend datasource query");
     let status = response.status();
     let body = response.text().await.unwrap_or_default();
-    assert!(
-        status.is_success(),
-        "Grafana backend datasource query failed: {body}"
-    );
+    assert2::assert!(status.is_success());
     serde_json::from_str(&body).expect("Grafana backend query JSON")
 }
 

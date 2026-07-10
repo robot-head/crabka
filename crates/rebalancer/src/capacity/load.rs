@@ -58,8 +58,6 @@ pub fn load_from_path(path: &Path) -> Result<BrokerCapacities, CapacityError> {
 mod tests {
     use std::io::Write;
 
-    use assert2::assert;
-
     use super::*;
     use crate::capacity::BrokerCapacity;
 
@@ -87,7 +85,7 @@ brokers:
         );
         let c = load_from_path(f.path()).expect("load");
         let b1 = c.for_broker(1).expect("broker 1");
-        assert!(
+        assert2::assert!(
             *b1 == BrokerCapacity {
                 max_replicas: Some(4096),
                 disk_bytes: Some(1_099_511_627_776),
@@ -97,7 +95,7 @@ brokers:
             }
         );
         let b2 = c.for_broker(2).expect("broker 2");
-        assert!(
+        assert2::assert!(
             *b2 == BrokerCapacity {
                 max_replicas: Some(2048),
                 disk_bytes: None,
@@ -106,7 +104,7 @@ brokers:
                 cpu_cores: None,
             }
         );
-        assert!(c.for_broker(3).is_none(), "broker 3 unconstrained");
+        assert2::assert!(c.for_broker(3).is_none());
     }
 
     #[test]
@@ -114,7 +112,7 @@ brokers:
         let dir = tempfile::TempDir::new().expect("tempdir");
         let p = dir.path().join("nonexistent");
         let err = load_from_path(&p).expect_err("missing file");
-        assert!(matches!(err, CapacityError::Io(_)), "got {err:?}");
+        assert2::assert!(matches!(err, CapacityError::Io(_)));
     }
 
     #[test]
@@ -129,7 +127,7 @@ brokers:
         );
         let c = load_from_path(f.path()).expect("load");
         let b1 = c.for_broker(1).expect("broker 1");
-        assert!(
+        assert2::assert!(
             *b1 == BrokerCapacity {
                 max_replicas: Some(100),
                 disk_bytes: None,
@@ -149,7 +147,7 @@ brokers: {}
 ",
         );
         let err = load_from_path(f.path()).expect_err("bad version");
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             CapacityError::UnsupportedVersion {
                 found: 999,
@@ -169,7 +167,7 @@ brokers:
 ",
         );
         let err = load_from_path(f.path()).expect_err("negative cpu");
-        assert!(matches!(err, CapacityError::NegativeCpu(_, 5)));
+        assert2::assert!(matches!(err, CapacityError::NegativeCpu(_, 5)));
     }
 
     #[test]
@@ -184,7 +182,7 @@ brokers:
         );
         let c = load_from_path(f.path()).expect("zero cpu is finite and non-negative");
         let b = c.for_broker(5).expect("broker 5");
-        assert!(b.cpu_cores == Some(0.0));
+        assert2::assert!(b.cpu_cores == Some(0.0));
     }
 
     #[test]
@@ -198,7 +196,7 @@ brokers:
 ",
         );
         let err = load_from_path(f.path()).expect_err("nan cpu");
-        assert!(matches!(err, CapacityError::NonFiniteCpu(c, 5) if c.is_nan()));
+        assert2::assert!(matches!(err, CapacityError::NonFiniteCpu(c, 5) if c.is_nan()));
     }
 
     #[test]
@@ -212,6 +210,6 @@ brokers:
 ",
         );
         let err = load_from_path(f.path()).expect_err("infinity cpu");
-        assert!(matches!(err, CapacityError::NonFiniteCpu(c, 5) if c.is_infinite()));
+        assert2::assert!(matches!(err, CapacityError::NonFiniteCpu(c, 5) if c.is_infinite()));
     }
 }

@@ -166,7 +166,7 @@ pub fn get_compact_nullable_bytes_borrowed<'de>(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -175,11 +175,11 @@ mod tests {
         let bytes = [0x06u8, b'k', b'a', b'f', b'k', b'a'];
         let mut cur: &[u8] = &bytes;
         let s = get_compact_string_borrowed(&mut cur).unwrap();
-        assert!(s == "kafka");
+        assert2::assert!(s == "kafka");
         // Pointer identity: `s` points inside `bytes`.
         let bytes_ptr = bytes.as_ptr() as usize;
         let s_ptr = s.as_ptr() as usize;
-        assert!(s_ptr >= bytes_ptr && s_ptr < bytes_ptr + bytes.len());
+        assert2::assert!(s_ptr >= bytes_ptr && s_ptr < bytes_ptr + bytes.len());
     }
 
     #[test]
@@ -199,7 +199,7 @@ mod tests {
         // INT16(-1)
         let bytes = [0xFFu8, 0xFF];
         let mut cur: &[u8] = &bytes;
-        assert!(matches!(
+        assert2::assert!(matches!(
             get_string_borrowed(&mut cur),
             Err(ProtocolError::InvalidValue(_))
         ));
@@ -209,16 +209,16 @@ mod tests {
     fn get_nullable_string_borrowed_null() {
         let bytes = [0xFFu8, 0xFF];
         let mut cur: &[u8] = &bytes;
-        assert!(get_nullable_string_borrowed(&mut cur).unwrap() == None);
-        assert!(cur.is_empty());
+        assert2::assert!(get_nullable_string_borrowed(&mut cur).unwrap() == None);
+        assert2::assert!(cur.is_empty());
     }
 
     #[test]
     fn get_nullable_string_borrowed_some() {
         let bytes = [0x00u8, 0x03, b'f', b'o', b'o'];
         let mut cur: &[u8] = &bytes;
-        assert!(get_nullable_string_borrowed(&mut cur).unwrap() == Some("foo"));
-        assert!(cur.is_empty());
+        assert2::assert!(get_nullable_string_borrowed(&mut cur).unwrap() == Some("foo"));
+        assert2::assert!(cur.is_empty());
     }
 
     #[test]
@@ -227,15 +227,15 @@ mod tests {
         let bytes = [0x00u8, 0x00, 0x00, 0x03, 0x01, 0x02, 0x03];
         let mut cur: &[u8] = &bytes;
         let b = get_bytes_borrowed(&mut cur).unwrap();
-        assert!(b == &[1u8, 2, 3]);
-        assert!(cur.is_empty());
+        assert2::assert!(b == &[1u8, 2, 3]);
+        assert2::assert!(cur.is_empty());
     }
 
     #[test]
     fn get_bytes_borrowed_null_is_error() {
         let bytes = [0xFFu8, 0xFF, 0xFF, 0xFF]; // -1 as INT32
         let mut cur: &[u8] = &bytes;
-        assert!(matches!(
+        assert2::assert!(matches!(
             get_bytes_borrowed(&mut cur),
             Err(ProtocolError::InvalidValue(_))
         ));
@@ -245,7 +245,7 @@ mod tests {
     fn get_nullable_bytes_borrowed_null() {
         let bytes = [0xFFu8, 0xFF, 0xFF, 0xFF];
         let mut cur: &[u8] = &bytes;
-        assert!(get_nullable_bytes_borrowed(&mut cur).unwrap() == None);
+        assert2::assert!(get_nullable_bytes_borrowed(&mut cur).unwrap() == None);
     }
 
     #[test]
@@ -254,15 +254,15 @@ mod tests {
         let bytes = [0x04u8, 0xAA, 0xBB, 0xCC];
         let mut cur: &[u8] = &bytes;
         let b = get_compact_bytes_borrowed(&mut cur).unwrap();
-        assert!(b == &[0xAAu8, 0xBB, 0xCC]);
-        assert!(cur.is_empty());
+        assert2::assert!(b == &[0xAAu8, 0xBB, 0xCC]);
+        assert2::assert!(cur.is_empty());
     }
 
     #[test]
     fn get_compact_bytes_borrowed_null_is_error() {
         let bytes = [0x00u8]; // varint 0 = null
         let mut cur: &[u8] = &bytes;
-        assert!(matches!(
+        assert2::assert!(matches!(
             get_compact_bytes_borrowed(&mut cur),
             Err(ProtocolError::InvalidValue(_))
         ));
@@ -272,7 +272,7 @@ mod tests {
     fn get_compact_nullable_bytes_borrowed_null() {
         let bytes = [0x00u8];
         let mut cur: &[u8] = &bytes;
-        assert!(get_compact_nullable_bytes_borrowed(&mut cur).unwrap() == None);
+        assert2::assert!(get_compact_nullable_bytes_borrowed(&mut cur).unwrap() == None);
     }
 
     #[test]
@@ -280,9 +280,9 @@ mod tests {
         // UVARINT(3) = length+1=3 → 2 bytes; [0x01, 0x02]
         let bytes = [0x03u8, 0x01, 0x02];
         let mut cur: &[u8] = &bytes;
-        assert!(
+        assert2::assert!(
             get_compact_nullable_bytes_borrowed(&mut cur).unwrap() == Some(&[0x01u8, 0x02][..])
         );
-        assert!(cur.is_empty());
+        assert2::assert!(cur.is_empty());
     }
 }

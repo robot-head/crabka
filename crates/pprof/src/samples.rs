@@ -8,7 +8,6 @@ pub use crabka_blockstore::{
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType;
-    use assert2::assert;
 
     use super::*;
 
@@ -20,12 +19,9 @@ mod tests {
             (PCOL_STACKTRACE_ID, DataType::UInt64),
             (PCOL_VALUE, DataType::Int64),
         ] {
-            assert!(
-                schema.column_with_name(column).unwrap().1.data_type() == &want,
-                "{column}"
-            );
+            assert2::assert!(schema.column_with_name(column).unwrap().1.data_type() == &want);
         }
         let (_, field) = schema.column_with_name(PCOL_TRACE_ID).unwrap();
-        assert!(field.is_nullable() && field.data_type() == &DataType::Binary);
+        assert2::assert!(field.is_nullable() && field.data_type() == &DataType::Binary);
     }
 }

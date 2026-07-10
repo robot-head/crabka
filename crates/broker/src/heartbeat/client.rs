@@ -210,7 +210,7 @@ pub(crate) async fn run(mut cfg: Config) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -224,13 +224,13 @@ mod tests {
         let status = crate::log_dir_status::LogDirRegistry::probe(&paths);
 
         // Initially no dirs are offline.
-        assert!(offline_dir_uuids(&status, &ids).is_empty());
+        assert2::assert!(offline_dir_uuids(&status, &ids).is_empty());
 
         // Mark dir `a` as offline.
         status.mark_offline(a.path(), "test");
         let result = offline_dir_uuids(&status, &ids);
         let expected_id = ids.id_for(a.path()).unwrap();
-        assert!((result.len(), result[0].0) == (1, *expected_id.as_bytes()));
+        assert2::assert!((result.len(), result[0].0) == (1, *expected_id.as_bytes()));
     }
 
     #[test]
@@ -241,18 +241,18 @@ mod tests {
         let status = crate::log_dir_status::LogDirRegistry::probe(&paths);
 
         // Empty all_log_dirs: always false.
-        assert!(!all_dirs_offline(&[], &status));
+        assert2::assert!(!all_dirs_offline(&[], &status));
 
         // No dirs offline yet.
-        assert!(!all_dirs_offline(&paths, &status));
+        assert2::assert!(!all_dirs_offline(&paths, &status));
 
         // Only `a` offline: still false.
         status.mark_offline(a.path(), "disk error");
-        assert!(!all_dirs_offline(&paths, &status));
+        assert2::assert!(!all_dirs_offline(&paths, &status));
 
         // Both offline: true.
         status.mark_offline(b.path(), "disk error");
-        assert!(all_dirs_offline(&paths, &status));
+        assert2::assert!(all_dirs_offline(&paths, &status));
     }
 
     #[test]
@@ -262,7 +262,7 @@ mod tests {
             (Duration::from_millis(500), Duration::from_secs(1)),
             (Duration::from_secs(5), Duration::from_secs(1)),
         ] {
-            assert!(heartbeat_rpc_timeout(interval) == want, "{interval:?}");
+            assert2::assert!(heartbeat_rpc_timeout(interval) == want);
         }
     }
 

@@ -90,6 +90,6 @@ mod tests {
     #[test]
     fn role_defaults_to_unattached() {
         let r = Role::default();
-        assert!((matches!(r, Role::Unattached { .. }), r.is_leader()) == (true, false));
+        assert2::assert!((matches!(r, Role::Unattached { .. }), r.is_leader()) == (true, false));
     }
 }

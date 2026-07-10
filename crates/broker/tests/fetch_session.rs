@@ -3,7 +3,7 @@
 //! shared `Client` so the exact `session_id` / `session_epoch` paths
 //! are exercised end-to-end.
 
-use assert2::{assert, check};
+use assert2::check;
 mod support;
 
 use crabka_protocol::{
@@ -49,7 +49,7 @@ async fn create_topic(p: &support::InProcess, name: &str, num_partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert!(resp.topics[0].error_code == 0, "CreateTopics for {name}");
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn topic_id_for(p: &support::InProcess, name: &str) -> WireUuid {
@@ -89,10 +89,7 @@ async fn produce(p: &support::InProcess, topic: &str, partition: i32, records: i
         ..Default::default()
     };
     let resp = p.client.send(req).await.expect("Produce");
-    assert!(
-        resp.responses[0].partition_responses[0].error_code == 0,
-        "Produce error"
-    );
+    assert2::assert!(resp.responses[0].partition_responses[0].error_code == 0);
 }
 
 fn fetch_partition(partition: i32, offset: i64) -> FetchPartition {
@@ -203,7 +200,7 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
         .and_then(|p| p.as_v2())
         .expect("v2 records present");
     let total: usize = batches.iter().map(|b| b.records.len()).sum();
-    assert!(total == 5);
+    assert2::assert!(total == 5);
 
     p.broker.shutdown().await;
 }
@@ -238,7 +235,7 @@ async fn forgotten_topics_drop_partitions_from_subscription() {
         .await
         .expect("new session");
     let sid = r1.session_id;
-    assert!(sid > 0);
+    assert2::assert!(sid > 0);
 
     // Forget t-1.
     let r2 = p
@@ -259,7 +256,7 @@ async fn forgotten_topics_drop_partitions_from_subscription() {
         })
         .await
         .expect("forget t-1");
-    assert!((r2.error_code, r2.session_id) == (0, sid));
+    assert2::assert!((r2.error_code, r2.session_id) == (0, sid));
 
     // Produce to t-1 — should NOT reappear in the next incremental.
     produce(&p, "t", 1, 4).await;
@@ -279,17 +276,14 @@ async fn forgotten_topics_drop_partitions_from_subscription() {
         })
         .await
         .expect("after produce");
-    assert!(r3.error_code == 0);
+    assert2::assert!(r3.error_code == 0);
     let mut seen_partitions: Vec<i32> = r3
         .responses
         .iter()
         .flat_map(|t| t.partitions.iter().map(|p| p.partition_index))
         .collect();
     seen_partitions.sort_unstable();
-    assert!(
-        seen_partitions == vec![2],
-        "t-1 forgotten, only t-2 should appear (t-0 had no new data)"
-    );
+    assert2::assert!(seen_partitions == vec![2]);
 
     p.broker.shutdown().await;
 }
@@ -336,7 +330,7 @@ async fn stale_session_epoch_returns_invalid_epoch() {
         .await
         .expect("new session");
     let sid = r1.session_id;
-    assert!(sid > 0);
+    assert2::assert!(sid > 0);
 
     // Broker expects epoch=1; send 99.
     let r2 = p
@@ -375,7 +369,7 @@ async fn close_session_drops_cache_entry() {
         .await
         .expect("new session");
     let sid = r1.session_id;
-    assert!(sid > 0);
+    assert2::assert!(sid > 0);
 
     // Close: session_id=sid, session_epoch=-1. Broker serves the request
     // sessionless-style (session_id=0 in response) and removes the entry.
@@ -389,10 +383,7 @@ async fn close_session_drops_cache_entry() {
         })
         .await
         .expect("close");
-    assert!(
-        (r2.error_code, r2.session_id) == (0, 0),
-        "close → successful response with session_id=0"
-    );
+    assert2::assert!((r2.error_code, r2.session_id) == (0, 0));
 
     // Re-using sid afterwards is NOT_FOUND.
     let r3 = p
@@ -405,7 +396,7 @@ async fn close_session_drops_cache_entry() {
         })
         .await
         .expect("after close");
-    assert!(r3.error_code == FETCH_SESSION_ID_NOT_FOUND);
+    assert2::assert!(r3.error_code == FETCH_SESSION_ID_NOT_FOUND);
     p.broker.shutdown().await;
 }
 
@@ -423,7 +414,7 @@ async fn sessionless_zero_id_with_stray_epoch_is_invalid() {
         })
         .await
         .expect("stray");
-    assert!((r.error_code, r.session_id) == (INVALID_FETCH_SESSION_EPOCH, 0));
+    assert2::assert!((r.error_code, r.session_id) == (INVALID_FETCH_SESSION_EPOCH, 0));
     p.broker.shutdown().await;
 }
 
@@ -458,6 +449,6 @@ async fn sessionless_full_fetch_round_trip() {
         .and_then(|p| p.as_v2())
         .expect("v2 records");
     let total: usize = batches.iter().map(|b| b.records.len()).sum();
-    assert!(total == 2);
+    assert2::assert!(total == 2);
     p.broker.shutdown().await;
 }

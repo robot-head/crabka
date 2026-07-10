@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_producer::{Producer, ProducerRecord};
@@ -47,11 +47,7 @@ async fn create_topic(bootstrap: &str, name: &str) {
         })
         .await
         .unwrap();
-    assert!(
-        cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36,
-        "create_topic {name}: error_code={}",
-        cr.topics[0].error_code
-    );
+    assert2::assert!(cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36);
 }
 
 fn rec(topic: &str, v: &str) -> ProducerRecord {
@@ -164,14 +160,13 @@ async fn list_transactions_state_filter_excludes_non_matching() {
         })
         .await
         .expect("ListTransactions(state=Empty)");
-    assert!(
+    assert2::assert!(
         (
             r.error_code,
             r.transaction_states
                 .iter()
                 .all(|t| t.transactional_id != "my-tid"),
-        ) == (0, true),
-        "Ongoing txn must not match an Empty state filter: {r:?}",
+        ) == (0, true)
     );
 
     producer.close().await.unwrap();
@@ -192,7 +187,7 @@ async fn list_transactions_reports_unknown_state_filters() {
         .expect("ListTransactions");
     // The known names round-trip silently; the bogus one rides on the
     // unknown_state_filters echo per KIP-664.
-    assert!(
+    assert2::assert!(
         (
             r.error_code,
             r.unknown_state_filters.len(),
@@ -222,7 +217,7 @@ async fn describe_transactions_returns_full_state_for_known_tid() {
             })
             .await
             .expect("DescribeTransactions");
-        assert!(r.transaction_states.len() == 1);
+        assert2::assert!(r.transaction_states.len() == 1);
         let row = &r.transaction_states[0];
         if row.error_code == 0 && !row.topics.is_empty() {
             break row.clone();

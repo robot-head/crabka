@@ -575,7 +575,7 @@ impl ShareCoordinator {
 mod tests {
     use std::path::Path;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_log::{Log, LogConfig};
     use tempfile::tempdir;
 
@@ -640,7 +640,7 @@ mod tests {
         coord.initialize("g", tid, 0, 5, Offset(100)).await.unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
-        assert!(
+        assert2::assert!(
             st == SharePartitionState {
                 state_epoch: 5,
                 start_offset: Offset(100),
@@ -648,7 +648,7 @@ mod tests {
             }
         );
         let summary = coord.read_summary("g", tid, 0).await.expect("present");
-        assert!(summary == (5, 0, Offset(100), 0));
+        assert2::assert!(summary == (5, 0, Offset(100), 0));
     }
 
     #[tokio::test]
@@ -663,7 +663,7 @@ mod tests {
             .initialize("g", tid, 0, 5, Offset(0))
             .await
             .unwrap_err();
-        assert!(err == crate::codes::FENCED_STATE_EPOCH);
+        assert2::assert!(err == crate::codes::FENCED_STATE_EPOCH);
     }
 
     #[tokio::test]
@@ -680,7 +680,7 @@ mod tests {
             .unwrap();
 
         let st = coord.read("g", tid, 0).await.expect("present");
-        assert!(
+        assert2::assert!(
             st == SharePartitionState {
                 state_epoch: 1,
                 leader_epoch: 2,
@@ -693,7 +693,7 @@ mod tests {
         );
 
         let summary = coord.read_summary("g", tid, 0).await.expect("present");
-        assert!(summary == (1, 2, Offset(50), 7));
+        assert2::assert!(summary == (1, 2, Offset(50), 7));
     }
 
     #[tokio::test]
@@ -708,7 +708,7 @@ mod tests {
             .write("g", tid, 0, 4, 0, Offset(0), 0, vec![])
             .await
             .unwrap_err();
-        assert!(err == crate::codes::FENCED_STATE_EPOCH);
+        assert2::assert!(err == crate::codes::FENCED_STATE_EPOCH);
     }
 
     #[tokio::test]
@@ -727,7 +727,7 @@ mod tests {
             .write("g", tid, 0, 1, 4, Offset(0), 0, vec![])
             .await
             .unwrap_err();
-        assert!(err == crate::codes::FENCED_LEADER_EPOCH);
+        assert2::assert!(err == crate::codes::FENCED_LEADER_EPOCH);
     }
 
     #[tokio::test]
@@ -738,9 +738,9 @@ mod tests {
         let tid = uuid::Uuid::from_bytes([8; 16]);
 
         coord.initialize("g", tid, 0, 1, Offset(0)).await.unwrap();
-        assert!(coord.read("g", tid, 0).await.is_some());
+        assert2::assert!(coord.read("g", tid, 0).await.is_some());
         coord.delete("g", tid, 0).await.unwrap();
-        assert!(coord.read("g", tid, 0).await.is_none());
+        assert2::assert!(coord.read("g", tid, 0).await.is_none());
     }
 
     #[tokio::test]
@@ -771,7 +771,7 @@ mod tests {
         let st = coord.read("g", tid, 0).await.expect("present");
         // After the 3rd update crossed the threshold, a snapshot was folded
         // and the counter reset.
-        assert!(
+        assert2::assert!(
             st == SharePartitionState {
                 state_epoch: 1,
                 leader_epoch: 1,
@@ -818,7 +818,7 @@ mod tests {
         recovered.replay_led_partitions().await;
 
         let st = recovered.read("g", tid, 0).await.expect("recovered");
-        assert!(
+        assert2::assert!(
             st == SharePartitionState {
                 state_epoch: 2,
                 leader_epoch: 3,
@@ -929,7 +929,7 @@ mod tests {
         let st = coord.read("g", tid, 0).await.expect("recovered");
         // Batch B is the final snapshot — proves the inter-batch cursor advanced
         // past batch A (base_offset + last_offset_delta + 1 == 2).
-        assert!(
+        assert2::assert!(
             st == SharePartitionState {
                 state_epoch: 2,
                 leader_epoch: 9,
@@ -1013,7 +1013,7 @@ mod tests {
         coord.replay_led_partitions().await;
 
         let st = coord.read("g", tid, 0).await.expect("recovered");
-        assert!(
+        assert2::assert!(
             st == SharePartitionState {
                 state_epoch: 2,
                 leader_epoch: 3,

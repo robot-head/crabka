@@ -64,13 +64,13 @@ pub fn crate_smoke() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
     #[test]
     fn smoke() {
-        assert!(crate_smoke());
+        assert2::assert!(crate_smoke());
     }
 
     #[test]

@@ -564,7 +564,7 @@ mod tests {
             new_isr: vec![NodeId(1), NodeId(2)],
             leader_epoch: LeaderEpoch(7),
         };
-        assert_eq!(proposal, expected);
+        assert2::assert!(proposal == expected);
     }
 
     #[tokio::test]
@@ -593,7 +593,7 @@ mod tests {
             new_isr: vec![NodeId(1), NodeId(2), NodeId(3)],
             leader_epoch: LeaderEpoch(8),
         };
-        assert_eq!(proposal, expected);
+        assert2::assert!(proposal == expected);
     }
 
     #[tokio::test]
@@ -613,7 +613,7 @@ mod tests {
         )
         .await;
 
-        assert!(
+        assert2::assert!(
             compute_proposal(&part, Duration::from_secs(5))
                 .await
                 .is_none()
@@ -662,8 +662,8 @@ mod tests {
 
         shutdown.cancel();
         task.await.unwrap();
-        assert_eq!(metrics.isr_shrinks_total.get(), 1);
-        assert_eq!(metrics.isr_expands_total.get(), 0);
+        assert2::assert!(metrics.isr_shrinks_total.get() == 1);
+        assert2::assert!(metrics.isr_expands_total.get() == 0);
     }
 
     #[test]
@@ -710,7 +710,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert_eq!(req, expected);
+        assert2::assert!(req == expected);
     }
 
     #[test]
@@ -725,7 +725,7 @@ mod tests {
 
         let req = build_alter_partition_request(&image, 5, "orders", 0, &[NodeId(5)], 3);
 
-        assert_eq!(req.broker_epoch, 5);
+        assert2::assert!(req.broker_epoch == 5);
     }
 
     #[tokio::test]
@@ -738,7 +738,7 @@ mod tests {
             .await
             .expect_err("missing controller leader should reject the send");
 
-        assert_eq!(err, "no controller leader");
+        assert2::assert!(err == "no controller leader");
     }
 
     #[tokio::test]
@@ -751,7 +751,7 @@ mod tests {
             .await
             .expect_err("closed local port should fail as transport");
 
-        assert!(matches!(err, AlterPartitionSendError::Transport(_)));
+        assert2::assert!(matches!(err, AlterPartitionSendError::Transport(_)));
     }
 
     #[test]
@@ -763,13 +763,13 @@ mod tests {
 
         let targets = alter_partition_targets(&image, Some(NodeId(2)));
 
-        assert_eq!(
-            targets,
-            vec![
-                (NodeId(2), "b2:9092".to_string()),
-                (NodeId(0), "b0:9092".to_string()),
-                (NodeId(1), "b1:9092".to_string()),
-            ]
+        assert2::assert!(
+            targets
+                == vec![
+                    (NodeId(2), "b2:9092".to_string()),
+                    (NodeId(0), "b0:9092".to_string()),
+                    (NodeId(1), "b1:9092".to_string()),
+                ]
         );
     }
 
@@ -781,12 +781,12 @@ mod tests {
 
         let targets = alter_partition_targets(&image, Some(NodeId(9)));
 
-        assert_eq!(
-            targets,
-            vec![
-                (NodeId(0), "b0:9092".to_string()),
-                (NodeId(1), "b1:9092".to_string())
-            ]
+        assert2::assert!(
+            targets
+                == vec![
+                    (NodeId(0), "b0:9092".to_string()),
+                    (NodeId(1), "b1:9092".to_string())
+                ]
         );
     }
 
@@ -799,11 +799,7 @@ mod tests {
             (crate::codes::UNKNOWN_SERVER_ERROR, 0, false),
         ];
         for (global_err, part_err, want) in cases {
-            assert_eq!(
-                is_not_controller_response(global_err, part_err),
-                want,
-                "global_err={global_err} part_err={part_err}"
-            );
+            assert2::assert!(is_not_controller_response(global_err, part_err) == want);
         }
     }
 
@@ -847,11 +843,7 @@ mod tests {
             ),
         ];
         for (global_err, part_err, want) in cases {
-            assert_eq!(
-                classify_alter_partition_response(global_err, part_err),
-                want,
-                "global_err={global_err} part_err={part_err}"
-            );
+            assert2::assert!(classify_alter_partition_response(global_err, part_err) == want);
         }
     }
 }

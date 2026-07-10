@@ -80,7 +80,7 @@ impl<'a> TelemetryContext<'a> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_security::{AuthMethod, Principal};
 
     use super::*;
@@ -100,7 +100,7 @@ mod tests {
 
         let ctx = RequestContext::new(&principal, &peer, "client-a", true, "SASL_SSL");
 
-        assert!(
+        assert2::assert!(
             (
                 ctx.principal.name.as_str(),
                 ctx.peer,
@@ -117,7 +117,7 @@ mod tests {
 
         let ctx = TelemetryContext::new(&peer, "client-a", "crabka-test", "1.2.3");
 
-        assert!(
+        assert2::assert!(
             (
                 ctx.peer,
                 ctx.client_id,

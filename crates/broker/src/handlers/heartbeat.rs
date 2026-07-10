@@ -85,7 +85,6 @@ fn encode_denied(version: i16) -> Result<Bytes, BrokerError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -104,7 +103,7 @@ mod tests {
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
         let ctx = crate::test_support::request_context(&principal, &peer, "heartbeat-client");
 
-        assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
+        assert2::assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
 
         let bytes = encode_denied(heartbeat_response::MAX_VERSION).expect("encode");
         let mut cur: &[u8] = &bytes;
@@ -114,7 +113,7 @@ mod tests {
             throttle_time_ms: 0,
             ..Default::default()
         };
-        assert!(resp == expected);
-        assert!(cur.is_empty(), "response decoder consumed all bytes");
+        assert2::assert!(resp == expected);
+        assert2::assert!(cur.is_empty());
     }
 }

@@ -1977,7 +1977,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use assert2::{assert, check};
+    use assert2::check;
     use async_trait::async_trait;
     use crabka_blockstore::Labels;
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
@@ -2082,11 +2082,7 @@ mod tests {
             ),
         ];
         for (kind, expected) in cases {
-            assert_eq!(
-                super::compaction_object_key("tenant/a", kind, 42, 99),
-                expected,
-                "kind {kind:?}"
-            );
+            assert2::assert!(super::compaction_object_key("tenant/a", kind, 42, 99) == expected);
         }
     }
 
@@ -2094,21 +2090,22 @@ mod tests {
     fn tenant_dot_segments_cannot_form_path_traversal() {
         // Defense in depth: a tenant of exactly "." or ".." must not survive as
         // a relative-path component in the object key.
-        assert!(super::escape_object_path_segment(".") == "%2E");
-        assert!(super::escape_object_path_segment("..") == "%2E%2E");
+        assert2::assert!(super::escape_object_path_segment(".") == "%2E");
+        assert2::assert!(super::escape_object_path_segment("..") == "%2E%2E");
         let key = super::compaction_object_key("..", super::MetricBlockKind::Float, 42, 99);
-        assert!(key == "metrics/%2E%2E/float/00000000000000000042-00000000000000000099.parquet");
+        assert2::assert!(
+            key == "metrics/%2E%2E/float/00000000000000000042-00000000000000000099.parquet"
+        );
         // Interior dots in a legitimate tenant id are still allowed verbatim.
-        assert!(super::escape_object_path_segment("a.b") == "a.b");
+        assert2::assert!(super::escape_object_path_segment("a.b") == "a.b");
     }
 
     #[test]
     fn compaction_object_plan_pairs_block_and_index_keys() {
         let plan = super::compaction_object_plan("tenant/a", super::MetricBlockKind::Float, 42, 99);
 
-        assert_eq!(
-            plan,
-            super::CompactionObjectPlan {
+        assert2::assert!(
+            plan == super::CompactionObjectPlan {
                 block_key:
                     "metrics/tenant%2Fa/float/00000000000000000042-00000000000000000099.parquet"
                         .to_string(),
@@ -2136,9 +2133,8 @@ mod tests {
             99,
         );
 
-        assert_eq!(
-            plan,
-            super::CompactionObjectPlan {
+        assert2::assert!(
+            plan == super::CompactionObjectPlan {
                 block_key:
                     "metrics/tenant-a/float/00000000000000000042-00000000000000000099.parquet"
                         .to_string(),
@@ -2183,28 +2179,29 @@ mod tests {
         let encoded = manifest.encode().expect("encode manifest");
         let decoded = super::CompactionIndexManifest::decode(&encoded).expect("decode manifest");
 
-        assert_eq!(decoded, manifest);
-        assert_eq!(
-            decoded,
-            super::CompactionIndexManifest {
-                tenant: "tenant-a".to_string(),
-                kind: super::MetricBlockKind::Float,
-                block_key:
-                    "metrics/tenant-a/float/00000000000000000042-00000000000000000099.parquet"
-                        .to_string(),
-                index_key: "metrics/tenant-a/float/00000000000000000042-00000000000000000099.index"
-                    .to_string(),
-                first_offset: 42,
-                last_offset: 99,
-                row_count: 2,
-                min_ts: 1_000,
-                max_ts: 2_000,
-                fingerprints: vec![7, 9],
-                series: vec![super::CompactionSeriesLabels {
-                    fingerprint: 7,
-                    labels: labels(&[("__name__", "up")]),
-                }],
-            }
+        assert2::assert!(decoded == manifest);
+        assert2::assert!(
+            decoded
+                == super::CompactionIndexManifest {
+                    tenant: "tenant-a".to_string(),
+                    kind: super::MetricBlockKind::Float,
+                    block_key:
+                        "metrics/tenant-a/float/00000000000000000042-00000000000000000099.parquet"
+                            .to_string(),
+                    index_key:
+                        "metrics/tenant-a/float/00000000000000000042-00000000000000000099.index"
+                            .to_string(),
+                    first_offset: 42,
+                    last_offset: 99,
+                    row_count: 2,
+                    min_ts: 1_000,
+                    max_ts: 2_000,
+                    fingerprints: vec![7, 9],
+                    series: vec![super::CompactionSeriesLabels {
+                        fingerprint: 7,
+                        labels: labels(&[("__name__", "up")]),
+                    }],
+                }
         );
     }
 
@@ -2240,7 +2237,7 @@ mod tests {
         let decoded =
             super::CompactionIndexManifest::decode(&bytes).expect("decode persisted manifest");
 
-        assert!(decoded == manifest);
+        assert2::assert!(decoded == manifest);
     }
 
     #[tokio::test]
@@ -2315,13 +2312,13 @@ mod tests {
         .await
         .expect("enforce retention");
 
-        assert_eq!(
-            stats,
-            super::CompactionRetentionStats {
-                manifests_scanned: 2,
-                manifests_deleted: 1,
-                blocks_deleted: 1,
-            }
+        assert2::assert!(
+            stats
+                == super::CompactionRetentionStats {
+                    manifests_scanned: 2,
+                    manifests_deleted: 1,
+                    blocks_deleted: 1,
+                }
         );
         check!(
             object_store
@@ -2351,8 +2348,8 @@ mod tests {
 
     #[test]
     fn duration_millis_converts_and_saturates() {
-        assert!(super::duration_millis(std::time::Duration::from_millis(1_234)) == 1_234);
-        assert!(
+        assert2::assert!(super::duration_millis(std::time::Duration::from_millis(1_234)) == 1_234);
+        assert2::assert!(
             super::duration_millis(std::time::Duration::from_millis(i64::MAX as u64 + 1))
                 == i64::MAX
         );
@@ -2392,12 +2389,12 @@ mod tests {
         .await
         .expect_err("mismatched manifest should fail");
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             error,
             super::CompactionRetentionError::ManifestKeyMismatch { listed, manifest }
                 if listed == listed_index_key && manifest == manifest_index_key
         ));
-        assert!(
+        assert2::assert!(
             object_store
                 .head(&object_store::path::Path::from(listed_index_key))
                 .await
@@ -2419,7 +2416,7 @@ mod tests {
         };
 
         let err = cfg.validate().expect_err("empty bootstrap should fail");
-        assert!(format!("{err}").contains("bootstrap"));
+        assert2::assert!(format!("{err}").contains("bootstrap"));
     }
 
     #[tokio::test]
@@ -2439,14 +2436,14 @@ mod tests {
         let runtime = cfg
             .build_runtime(object_store.clone())
             .expect("build runtime");
-        assert_eq!(
-            runtime.loop_config,
-            super::CompactionLoopConfig {
-                wal_topic: crate::WAL_TOPIC.to_string(),
-                poll_timeout: std::time::Duration::from_millis(250),
-                flush_max_rows: 12_345,
-                flush_max_age: std::time::Duration::from_secs(7),
-            }
+        assert2::assert!(
+            runtime.loop_config
+                == super::CompactionLoopConfig {
+                    wal_topic: crate::WAL_TOPIC.to_string(),
+                    poll_timeout: std::time::Duration::from_millis(250),
+                    flush_max_rows: 12_345,
+                    flush_max_age: std::time::Duration::from_secs(7),
+                }
         );
 
         let manifest = super::CompactionIndexManifest::from_plan(
@@ -2470,7 +2467,9 @@ mod tests {
             .bytes()
             .await
             .expect("manifest bytes");
-        assert!(super::CompactionIndexManifest::decode(&bytes).expect("decode") == manifest);
+        assert2::assert!(
+            super::CompactionIndexManifest::decode(&bytes).expect("decode") == manifest
+        );
     }
 
     #[derive(Default)]
@@ -2528,8 +2527,8 @@ mod tests {
         let persisted = crabka_blockstore::read_block(object_store, &writes[0].manifest.block_key)
             .await
             .expect("read persisted block");
-        assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].num_rows(), 2);
+        assert2::assert!(persisted.len() == 1);
+        assert2::assert!(persisted[0].num_rows() == 2);
 
         let manifests = sink.manifests.lock().expect("manifest lock");
         check!(
@@ -2582,8 +2581,8 @@ mod tests {
         let persisted = crabka_blockstore::read_block(object_store, &writes[0].manifest.block_key)
             .await
             .expect("read persisted metadata block");
-        assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].num_rows(), 1);
+        assert2::assert!(persisted.len() == 1);
+        assert2::assert!(persisted[0].num_rows() == 1);
 
         let manifests = sink.manifests.lock().expect("manifest lock");
         check!(
@@ -2735,8 +2734,8 @@ mod tests {
             super::process_compaction_record_batch(&block_writer, &sink, &committer, &records)
                 .await;
 
-        assert!(result.is_err());
-        assert!(committer.commits.lock().expect("commit lock").is_empty());
+        assert2::assert!(result.is_err());
+        assert2::assert!(committer.commits.lock().expect("commit lock").is_empty());
     }
 
     #[tokio::test]
@@ -2825,7 +2824,7 @@ mod tests {
             super::compaction_wal_records_from_consumer_records(crate::WAL_TOPIC, &records)
                 .expect("convert consumer records");
 
-        assert!(
+        assert2::assert!(
             converted
                 == vec![super::CompactionWalRecord {
                     partition: super::PartitionIndex(2),
@@ -2847,7 +2846,7 @@ mod tests {
         let err =
             super::compaction_wal_records_from_consumer_records(crate::WAL_TOPIC, &missing_value)
                 .expect_err("missing value should fail");
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             super::CompactionConsumerRecordError::MissingValue {
                 partition: super::PartitionIndex(3),
@@ -2884,7 +2883,7 @@ mod tests {
         .await
         .expect("commit offsets");
 
-        assert!(*sync.calls.lock().expect("commit calls lock") == 1);
+        assert2::assert!(*sync.calls.lock().expect("commit calls lock") == 1);
     }
 
     struct StaticPoller {
@@ -3024,7 +3023,7 @@ mod tests {
 
         // ONE block written for the whole buffer, not one per poll; a single
         // commit at flush through the last buffered record (offset 11 -> commit 12).
-        assert!(
+        assert2::assert!(
             result
                 == super::CompactionLoopResult {
                     polls: 3,
@@ -3038,7 +3037,7 @@ mod tests {
                 }
         );
         check!(*commit.calls.lock().expect("commit calls lock") == 1);
-        assert!(sink.manifests.lock().expect("manifest lock").len() == 1);
+        assert2::assert!(sink.manifests.lock().expect("manifest lock").len() == 1);
         // The single block spans the full buffered offset range [10, 11].
         let manifests = sink.manifests.lock().expect("manifest lock");
         check!(manifests[0].first_offset == 10);
@@ -3339,10 +3338,7 @@ mod tests {
                 .store
                 .head(&object_store::path::Path::from(manifest.block_key.clone()))
                 .await;
-            assert!(
-                head.is_ok(),
-                "block object must exist before index manifest"
-            );
+            assert2::assert!(head.is_ok());
             self.events
                 .lock()
                 .expect("events lock")
@@ -3370,7 +3366,7 @@ mod tests {
                 .store
                 .head(&object_store::path::Path::from(self.block_key.clone()))
                 .await;
-            assert!(head.is_ok(), "block must be durable before offset commit");
+            assert2::assert!(head.is_ok());
             for offset in offsets {
                 self.events
                     .lock()
@@ -3436,11 +3432,11 @@ mod tests {
         .await
         .expect("run compactor loop");
 
-        assert!(result.writes == 1);
+        assert2::assert!(result.writes == 1);
         // Index manifest write (which only runs after the durable block put) must
         // precede the offset commit in the recorded event order.
         let recorded = events.lock().expect("events lock").clone();
-        assert!(recorded == vec![format!("index:{block_key}"), "commit:12".to_string()]);
+        assert2::assert!(recorded == vec![format!("index:{block_key}"), "commit:12".to_string()]);
     }
 
     struct PollAndCommit {
@@ -3504,25 +3500,16 @@ mod tests {
 
         let compacted = compact_wal_records(&[record.clone(), hist_record]);
 
-        assert_eq!(compacted.len(), 1);
-        assert_eq!(compacted[0].histogram_rows.len(), 1);
-        assert_eq!(compacted[0].histogram_rows[0].timestamp_ms, 21);
-        assert_eq!(compacted[0].exemplar_rows.len(), 1);
-        assert_eq!(
-            compacted[0].exemplar_rows[0].fingerprint,
-            record.series_fingerprint()
-        );
-        assert_eq!(
-            compacted[0].exemplar_rows[0].trace_id.as_deref(),
-            Some("abc")
-        );
-        assert_eq!(
-            compacted[0].exemplar_rows[0].span_id.as_deref(),
-            Some("def")
-        );
-        assert_eq!(
-            compacted[0].exemplar_rows[0].labels.as_slice(),
-            &[("kind".into(), "slow".into())][..]
+        assert2::assert!(compacted.len() == 1);
+        assert2::assert!(compacted[0].histogram_rows.len() == 1);
+        assert2::assert!(compacted[0].histogram_rows[0].timestamp_ms == 21);
+        assert2::assert!(compacted[0].exemplar_rows.len() == 1);
+        assert2::assert!(compacted[0].exemplar_rows[0].fingerprint == record.series_fingerprint());
+        assert2::assert!(compacted[0].exemplar_rows[0].trace_id.as_deref() == Some("abc"));
+        assert2::assert!(compacted[0].exemplar_rows[0].span_id.as_deref() == Some("def"));
+        assert2::assert!(
+            compacted[0].exemplar_rows[0].labels.as_slice()
+                == &[("kind".into(), "slow".into())][..]
         );
     }
 
@@ -3551,17 +3538,11 @@ mod tests {
 
         let compacted = compact_wal_records(&records);
 
-        assert_eq!(compacted.len(), 1);
-        assert_eq!(compacted[0].float_rows.len(), 2);
-        assert_eq!(compacted[0].exemplar_rows.len(), 1);
-        assert_eq!(
-            compacted[0].exemplar_rows[0].fingerprint,
-            labels.fingerprint()
-        );
-        assert_eq!(
-            compacted[0].exemplar_rows[0].trace_id.as_deref(),
-            Some("abc")
-        );
+        assert2::assert!(compacted.len() == 1);
+        assert2::assert!(compacted[0].float_rows.len() == 2);
+        assert2::assert!(compacted[0].exemplar_rows.len() == 1);
+        assert2::assert!(compacted[0].exemplar_rows[0].fingerprint == labels.fingerprint());
+        assert2::assert!(compacted[0].exemplar_rows[0].trace_id.as_deref() == Some("abc"));
     }
 
     #[test]
@@ -3580,16 +3561,16 @@ mod tests {
 
         let compacted = compact_wal_records(std::slice::from_ref(&record));
 
-        assert_eq!(compacted.len(), 1);
-        assert_eq!(
-            compacted[0].metadata_rows.as_slice(),
-            &[super::MetadataRow {
-                fingerprint: record.series_fingerprint(),
-                metric_family_name: "http_requests_total".to_string(),
-                metric_type: "counter".to_string(),
-                help: "Total HTTP requests.".to_string(),
-                unit: "requests".to_string(),
-            }][..]
+        assert2::assert!(compacted.len() == 1);
+        assert2::assert!(
+            compacted[0].metadata_rows.as_slice()
+                == &[super::MetadataRow {
+                    fingerprint: record.series_fingerprint(),
+                    metric_family_name: "http_requests_total".to_string(),
+                    metric_type: "counter".to_string(),
+                    help: "Total HTTP requests.".to_string(),
+                    unit: "requests".to_string(),
+                }][..]
         );
     }
 
@@ -3646,10 +3627,10 @@ mod tests {
         let tenant_a_all = index.metadata("tenant-a", None);
         let tenant_a_http = index.metadata("tenant-a", Some("http_requests_total"));
 
-        assert!(tenant_a_all.len() == 2);
+        assert2::assert!(tenant_a_all.len() == 2);
         check!(tenant_a_all[0].metric_family_name == "http_requests_total");
         check!(tenant_a_all[1].metric_family_name == "up");
-        assert!(tenant_a_http.len() == 1);
+        assert2::assert!(tenant_a_http.len() == 1);
         check!(tenant_a_http[0].metric_type == "counter");
         check!(tenant_a_http[0].help == "Total HTTP requests.");
         check!(index.metadata("tenant-b", Some("http_requests_total"))[0].metric_type == "gauge");
@@ -3672,8 +3653,8 @@ mod tests {
 
         let batches = encode_tenant_batches(&compacted[0]).unwrap();
 
-        assert_eq!(batches.float.as_ref().unwrap().num_rows(), 1);
-        assert_eq!(batches.native_histograms.as_ref().unwrap().num_rows(), 1);
+        assert2::assert!(batches.float.as_ref().unwrap().num_rows() == 1);
+        assert2::assert!(batches.native_histograms.as_ref().unwrap().num_rows() == 1);
     }
 
     #[test]
@@ -3693,8 +3674,8 @@ mod tests {
         let batches = encode_tenant_batches(&compacted[0]).unwrap();
 
         let batch = batches.exemplars.as_ref().expect("exemplar sidecar");
-        assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.schema(), crate::exemplar_schema());
+        assert2::assert!(batch.num_rows() == 1);
+        assert2::assert!(batch.schema() == crate::exemplar_schema());
 
         let trace_ids = batch
             .column_by_name("trace_id")
@@ -3718,7 +3699,7 @@ mod tests {
 
         check!(trace_ids.value(0) == "abc");
         check!(span_ids.value(0) == "def");
-        assert!(label_entries.column(0).len() == 1);
+        assert2::assert!(label_entries.column(0).len() == 1);
         check!(
             label_entries
                 .column(0)

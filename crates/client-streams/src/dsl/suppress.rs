@@ -33,7 +33,7 @@ impl BufferConfig {
     /// `BufferConfig.maxRecords(n)` (the rate-limiter default overflow).
     #[must_use]
     pub fn max_records(n: usize) -> Self {
-        assert!(n >= 1, "max_records must be >= 1");
+        assert2::assert!(n >= 1);
         Self {
             max_records: Some(n),
             max_bytes: None,
@@ -46,7 +46,7 @@ impl BufferConfig {
     /// `key_bytes + value_bytes` summed across buffered entries.
     #[must_use]
     pub fn max_bytes(n: usize) -> Self {
-        assert!(n >= 1, "max_bytes must be >= 1");
+        assert2::assert!(n >= 1);
         Self {
             max_records: None,
             max_bytes: Some(n),
@@ -58,7 +58,7 @@ impl BufferConfig {
     /// `unbounded()` path) — the JVM `unbounded().withMaxRecords(n)`.
     #[must_use]
     pub fn with_max_records(self, n: usize) -> Self {
-        assert!(n >= 1, "max_records must be >= 1");
+        assert2::assert!(n >= 1);
         Self {
             max_records: Some(n),
             ..self
@@ -69,7 +69,7 @@ impl BufferConfig {
     /// `unbounded().withMaxBytes(n)`.
     #[must_use]
     pub fn with_max_bytes(self, n: usize) -> Self {
-        assert!(n >= 1, "max_bytes must be >= 1");
+        assert2::assert!(n >= 1);
         Self {
             max_bytes: Some(n),
             ..self
@@ -164,10 +164,7 @@ impl<KInner> Suppressed<crate::dsl::windows::Windowed<KInner>> {
     /// grace`). Requires a windowed `KTable` + a STRICT buffer (shutDownWhenFull).
     #[must_use]
     pub fn until_window_closes(buffer: BufferConfig) -> Self {
-        assert!(
-            !buffer.is_emit_early(),
-            "untilWindowCloses requires a strict (shutDownWhenFull) buffer config"
-        );
+        assert2::assert!(!buffer.is_emit_early());
         Self {
             buffer,
             buffer_time: |k, _ts| k.window.end,
@@ -182,7 +179,7 @@ impl<K> Suppressed<K> {
     /// newer record for a key replaces the buffered one and resets the timer.
     #[must_use]
     pub fn until_time_limit(wait_ms: i64, buffer: BufferConfig) -> Self {
-        assert!(wait_ms >= 0, "time limit must be >= 0");
+        assert2::assert!(wait_ms >= 0);
         Self {
             buffer,
             buffer_time: |_k, ts| ts,
@@ -232,7 +229,7 @@ mod tests {
 
     #[test]
     fn buffer_config_byte_caps() {
-        for (name, config, expected) in [
+        for (_name, config, expected) in [
             ("unbounded", BufferConfig::unbounded(), (None, None, false)),
             (
                 "eager byte cap",
@@ -253,9 +250,9 @@ mod tests {
             ),
         ] {
             let (expected_byte_cap, expected_record_cap, expected_emit_early) = expected;
-            assert_eq!(config.byte_cap(), expected_byte_cap, "case {name}");
-            assert_eq!(config.record_cap(), expected_record_cap, "case {name}");
-            assert_eq!(config.is_emit_early(), expected_emit_early, "case {name}");
+            assert2::assert!(config.byte_cap() == expected_byte_cap);
+            assert2::assert!(config.record_cap() == expected_record_cap);
+            assert2::assert!(config.is_emit_early() == expected_emit_early);
         }
     }
 
@@ -263,16 +260,16 @@ mod tests {
     fn logging_toggles() {
         use crate::dsl::windows::{Window, Windowed};
         let on = Suppressed::until_window_closes(BufferConfig::unbounded());
-        assert!(on.logging); // default on
+        assert2::assert!(on.logging); // default on
         let off = on.with_logging_disabled();
-        assert!(!off.logging);
-        assert!(off.with_logging_enabled().logging);
+        assert2::assert!(!off.logging);
+        assert2::assert!(off.with_logging_enabled().logging);
         // window-close buffer_time still reads window.end after the toggle
         let wk = Windowed {
             key: "k".to_string(),
             window: Window { start: 0, end: 7 },
         };
-        assert_eq!((off.buffer_time)(&wk, 1), 7);
+        assert2::assert!((off.buffer_time)(&wk, 1) == 7);
     }
 
     #[test]
@@ -283,8 +280,8 @@ mod tests {
             key: "k".to_string(),
             window: Window { start: 0, end: 99 },
         };
-        assert_eq!((wc.buffer_time)(&wk, 5), 99); // window.end
+        assert2::assert!((wc.buffer_time)(&wk, 5) == 99); // window.end
         let tl = Suppressed::<String>::until_time_limit(50, BufferConfig::max_records(2));
-        assert_eq!((tl.buffer_time)(&"k".to_string(), 5), 5); // record ts
+        assert2::assert!((tl.buffer_time)(&"k".to_string(), 5) == 5); // record ts
     }
 }

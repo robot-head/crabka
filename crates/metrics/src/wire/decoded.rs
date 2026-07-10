@@ -176,19 +176,20 @@ pub(super) fn snappy_block_decode_raw<E>(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn negotiate_v1_default_protobuf() {
-        assert!(negotiate(Some("application/x-protobuf")).unwrap() == WireFormat::RemoteWriteV1);
-        assert!(negotiate(None).unwrap() == WireFormat::RemoteWriteV1);
+        assert2::assert!(
+            negotiate(Some("application/x-protobuf")).unwrap() == WireFormat::RemoteWriteV1
+        );
+        assert2::assert!(negotiate(None).unwrap() == WireFormat::RemoteWriteV1);
     }
 
     #[test]
     fn negotiate_v1_explicit_proto_param() {
-        assert!(
+        assert2::assert!(
             negotiate(Some(
                 "application/x-protobuf; proto=prometheus.WriteRequest"
             ))
@@ -199,7 +200,7 @@ mod tests {
 
     #[test]
     fn negotiate_v2_proto_param() {
-        assert!(
+        assert2::assert!(
             negotiate(Some(
                 "application/x-protobuf; proto=io.prometheus.write.v2.Request"
             ))
@@ -211,8 +212,8 @@ mod tests {
     #[test]
     fn negotiate_rejects_json() {
         let err = negotiate(Some("application/json")).unwrap_err();
-        assert!(matches!(err, WireError::UnsupportedContentType(_)));
-        assert!(err.status_code() == 415);
+        assert2::assert!(matches!(err, WireError::UnsupportedContentType(_)));
+        assert2::assert!(err.status_code() == 415);
     }
 
     #[test]
@@ -222,7 +223,7 @@ mod tests {
 
         let back = snappy_block_decode(&compressed, 1 << 20).unwrap();
 
-        assert!(back == input);
+        assert2::assert!(back == input);
     }
 
     #[test]
@@ -233,8 +234,8 @@ mod tests {
 
         let err = snappy_block_decode(&compressed, 4).unwrap_err();
 
-        assert!(matches!(err, WireError::SnappyOutputTooLarge(4)));
-        assert!(err.status_code() == 400);
+        assert2::assert!(matches!(err, WireError::SnappyOutputTooLarge(4)));
+        assert2::assert!(err.status_code() == 400);
     }
 
     /// A snappy block whose varint header *declares* a huge uncompressed length
@@ -257,11 +258,11 @@ mod tests {
         frame.push(0x00);
         frame.push(0x42);
 
-        assert!(snap::raw::decompress_len(&frame).unwrap() as u64 == huge);
+        assert2::assert!(snap::raw::decompress_len(&frame).unwrap() as u64 == huge);
 
         let err = snappy_block_decode(&frame, 1 << 20).unwrap_err();
 
-        assert!(matches!(err, WireError::SnappyOutputTooLarge(_)));
-        assert!(err.status_code() == 400);
+        assert2::assert!(matches!(err, WireError::SnappyOutputTooLarge(_)));
+        assert2::assert!(err.status_code() == 400);
     }
 }

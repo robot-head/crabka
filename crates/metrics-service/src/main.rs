@@ -438,7 +438,7 @@ fn load_runtime_overrides(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use clap::Parser;
 
     use super::*;
@@ -447,7 +447,7 @@ mod tests {
     fn parses_querier_target() {
         let cli = Cli::try_parse_from(["crabka-metrics-service", "--target", "querier"]).unwrap();
 
-        assert!(matches!(cli.target, Target::Querier));
+        assert2::assert!(matches!(cli.target, Target::Querier));
     }
 
     #[test]
@@ -465,13 +465,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::QueryFrontend));
-        assert_eq!(cli.query_frontend_split_ms, 30_000);
-        assert_eq!(cli.query_frontend_shards, 4);
-        assert_eq!(
-            cli.query_frontend_cache_prefix.as_str(),
-            "tenant-a-query-cache"
-        );
+        assert2::assert!(matches!(cli.target, Target::QueryFrontend));
+        assert2::assert!(cli.query_frontend_split_ms == 30_000);
+        assert2::assert!(cli.query_frontend_shards == 4);
+        assert2::assert!(cli.query_frontend_cache_prefix.as_str() == "tenant-a-query-cache");
     }
 
     #[test]
@@ -495,16 +492,16 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Ruler));
-        assert_eq!(cli.ruler_tenant.as_str(), "tenant-a");
-        assert_eq!(cli.ruler_eval_interval_ms, 15_000);
-        assert_eq!(cli.ruler_shard_index, 2);
-        assert_eq!(cli.ruler_shard_total, 4);
-        assert_eq!(
-            cli.ruler_alertmanager_url.as_deref(),
-            Some("http://alertmanager.example/api/v2/alerts")
+        assert2::assert!(matches!(cli.target, Target::Ruler));
+        assert2::assert!(cli.ruler_tenant.as_str() == "tenant-a");
+        assert2::assert!(cli.ruler_eval_interval_ms == 15_000);
+        assert2::assert!(cli.ruler_shard_index == 2);
+        assert2::assert!(cli.ruler_shard_total == 4);
+        assert2::assert!(
+            cli.ruler_alertmanager_url.as_deref()
+                == Some("http://alertmanager.example/api/v2/alerts")
         );
-        assert_eq!(cli.ruler_state_topic.as_str(), "__tenant_a_ruler_state");
+        assert2::assert!(cli.ruler_state_topic.as_str() == "__tenant_a_ruler_state");
     }
 
     #[test]
@@ -518,7 +515,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(cli.listen.port() == 0);
+        assert2::assert!(cli.listen.port() == 0);
     }
 
     #[test]
@@ -534,11 +531,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            &cli.object_store_url,
-            &"file:///tmp/crabka-metrics".to_string()
-        );
-        assert_eq!(&cli.manifest_prefix, &"metrics/tenant-a".to_string());
+        assert2::assert!(&cli.object_store_url == &"file:///tmp/crabka-metrics".to_string());
+        assert2::assert!(&cli.manifest_prefix == &"metrics/tenant-a".to_string());
     }
 
     #[test]
@@ -552,7 +546,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(
+        assert2::assert!(
             cli.runtime_overrides == Some(std::path::PathBuf::from("/etc/crabka/runtime.yaml"))
         );
     }
@@ -576,23 +570,25 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(cli.wal_bootstrap.as_deref(), Some("127.0.0.1:9092"));
-        assert_eq!(cli.wal_group_id.as_str(), "metrics-querier");
-        assert_eq!(cli.wal_client_id.as_str(), "querier-a");
-        assert_eq!(cli.wal_topic.as_str(), "__crabka_metrics_wal");
-        assert_eq!(cli.wal_head_retention_ms, 600_000);
+        assert2::assert!(cli.wal_bootstrap.as_deref() == Some("127.0.0.1:9092"));
+        assert2::assert!(cli.wal_group_id.as_str() == "metrics-querier");
+        assert2::assert!(cli.wal_client_id.as_str() == "querier-a");
+        assert2::assert!(cli.wal_topic.as_str() == "__crabka_metrics_wal");
+        assert2::assert!(cli.wal_head_retention_ms == 600_000);
     }
 
     #[test]
     fn querier_wal_head_retention_default_is_bounded_for_demo_load() {
         let cli = Cli::try_parse_from(["crabka-metrics-service", "--target", "querier"]).unwrap();
 
-        assert!(cli.wal_head_retention_ms == 300_000);
+        assert2::assert!(cli.wal_head_retention_ms == 300_000);
     }
 
     #[test]
     fn rejects_unknown_target() {
-        assert!(Cli::try_parse_from(["crabka-metrics-service", "--target", "bogus"]).is_err());
+        assert2::assert!(
+            Cli::try_parse_from(["crabka-metrics-service", "--target", "bogus"]).is_err()
+        );
     }
 
     #[tokio::test]
@@ -625,9 +621,9 @@ mod tests {
         // the shared shutdown must make that borrow read `true`.
         let shutdown = Shutdown::new();
         let stop = shutdown.rx.clone();
-        assert!(!*stop.borrow());
+        assert2::assert!(!*stop.borrow());
         shutdown.trigger();
-        assert!(*stop.borrow());
+        assert2::assert!(*stop.borrow());
     }
 
     #[tokio::test]
@@ -650,10 +646,7 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_millis(25), shutdown.signalled()).await;
         task.abort();
 
-        assert!(
-            signalled.is_err(),
-            "pending WAL startup should not block caller or trigger shutdown"
-        );
+        assert2::assert!(signalled.is_err());
     }
 
     struct PendingWalHeadConsumer;

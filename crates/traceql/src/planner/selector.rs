@@ -731,7 +731,7 @@ fn anchored(pattern: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::{SpansetExpr, parser::parse};
@@ -747,7 +747,7 @@ mod tests {
     #[test]
     fn conjunctive_comparisons_become_prefilter_matchers() {
         let ms = field_expr_to_matchers(&selector("{ .a = 1 && .b =~ \"x\" }"));
-        assert!(
+        assert2::assert!(
             ms == vec![
                 SpanMatcher {
                     scope: MatchScope::Both,
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn disjunction_does_not_prefilter() {
         let ms = field_expr_to_matchers(&selector("{ .a = 1 || .b = 2 }"));
-        assert!(ms.is_empty());
+        assert2::assert!(ms.is_empty());
     }
 
     #[test]
@@ -782,22 +782,22 @@ mod tests {
         let base = field_expr_to_matcher_disjuncts(&selector("{ .a != nil }")).unwrap();
         for q in ["{ .a != nil && true }", "{ true && .a != nil }"] {
             let with_const = field_expr_to_matcher_disjuncts(&selector(q)).unwrap();
-            assert!(with_const == base, "{q}: {with_const:?} != {base:?}");
+            assert2::assert!(with_const == base);
         }
         // The prefilter matcher is still collected so the scan projects `attr.a`.
         let ms = field_expr_to_matchers(&selector("{ .a != nil && true }"));
-        assert!(ms.len() == 1 && ms[0].key == "a");
+        assert2::assert!(ms.len() == 1 && ms[0].key == "a");
     }
 
     #[test]
     fn const_false_is_match_none_in_matcher_disjuncts() {
         // `false` is the annihilator: zero disjuncts (match nothing), and ANDing
         // it in drops all other disjuncts.
-        assert!(
+        assert2::assert!(
             field_expr_to_matcher_disjuncts(&selector("{ false }")).unwrap()
                 == Vec::<Vec<SpanMatcher>>::new()
         );
-        assert!(
+        assert2::assert!(
             field_expr_to_matcher_disjuncts(&selector("{ .a != nil && false }"))
                 .unwrap()
                 .is_empty()
@@ -809,13 +809,13 @@ mod tests {
         // `{}` / `{ true }` => exactly one disjunct with no matchers, which the
         // planner treats as an unfiltered (match-all) scan.
         let d = field_expr_to_matcher_disjuncts(&selector("{ true }")).unwrap();
-        assert!(d.len() == 1 && d[0].is_empty());
+        assert2::assert!(d.len() == 1 && d[0].is_empty());
     }
 
     #[test]
     fn nil_comparison_is_presence_prefilter() {
         let ms = field_expr_to_matchers(&selector("{ .a != nil }"));
-        assert!(
+        assert2::assert!(
             ms == vec![SpanMatcher {
                 scope: MatchScope::Both,
                 key: "a".into(),
@@ -829,8 +829,8 @@ mod tests {
     #[test]
     fn duration_value_maps_to_integer_nanos() {
         let ms = field_expr_to_matchers(&selector("{ span:duration > 100ms }"));
-        assert_eq!(ms[0].scope, MatchScope::Intrinsic);
-        assert_eq!(&ms[0].value, &MatchValue::Int(100_000_000));
+        assert2::assert!(ms[0].scope == MatchScope::Intrinsic);
+        assert2::assert!(&ms[0].value == &MatchValue::Int(100_000_000));
     }
 
     #[test]
@@ -844,11 +844,11 @@ mod tests {
         };
         for bad in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
             let err = comparison_to_sql(&field, ComparisonOp::Gt, &Value::Float(bad));
-            assert!(matches!(err, Err(TraceqlError::Plan(_))));
+            assert2::assert!(matches!(err, Err(TraceqlError::Plan(_))));
         }
         // Finite floats still produce SQL.
         let ok = comparison_to_sql(&field, ComparisonOp::Gt, &Value::Float(1.5));
-        assert!(ok.is_ok());
+        assert2::assert!(ok.is_ok());
     }
 
     fn intrinsic_field(intrinsic: Intrinsic) -> Field {
@@ -897,7 +897,7 @@ mod tests {
         ];
         for (intrinsic, expected) in cases {
             let col = field_to_column(&intrinsic_field(intrinsic.clone()));
-            assert!(col == expected, "intrinsic {intrinsic:?} -> {col}");
+            assert2::assert!(col == expected);
         }
     }
 
@@ -905,8 +905,10 @@ mod tests {
     fn field_to_column_service_name_resolves_to_root_service() {
         // `service.name` short-circuits to the root-service column for both the
         // ambiguous (Both) and explicit Resource scopes.
-        assert!(field_to_column(&attr_field(Scope::Both, "service.name")) == COL_ROOT_SERVICE_NAME);
-        assert!(
+        assert2::assert!(
+            field_to_column(&attr_field(Scope::Both, "service.name")) == COL_ROOT_SERVICE_NAME
+        );
+        assert2::assert!(
             field_to_column(&attr_field(Scope::Resource, "service.name")) == COL_ROOT_SERVICE_NAME
         );
     }
@@ -923,10 +925,7 @@ mod tests {
             Scope::Instrumentation,
         ] {
             let col = field_to_column(&attr_field(scope.clone(), "region"));
-            assert!(
-                col == format!("{ATTR_PREFIX}region"),
-                "scope {scope:?} -> {col}"
-            );
+            assert2::assert!(col == format!("{ATTR_PREFIX}region"));
         }
     }
 
@@ -946,7 +945,7 @@ mod tests {
         ];
         for (op, expected) in cases {
             let sql = comparison_to_sql(&field, op, &Value::Int(1)).unwrap();
-            assert!(sql == expected, "{op:?} -> {sql}");
+            assert2::assert!(sql == expected);
         }
     }
 
@@ -954,11 +953,11 @@ mod tests {
     fn comparison_to_sql_nil_uses_null_predicates() {
         let field = attr_field(Scope::Both, "x");
         let col = ident(&field_to_column(&field));
-        assert!(
+        assert2::assert!(
             comparison_to_sql(&field, ComparisonOp::Eq, &Value::Nil).unwrap()
                 == format!("{col} IS NULL")
         );
-        assert!(
+        assert2::assert!(
             comparison_to_sql(&field, ComparisonOp::Neq, &Value::Nil).unwrap()
                 == format!("{col} IS NOT NULL")
         );
@@ -969,9 +968,9 @@ mod tests {
         let field = attr_field(Scope::Both, "x");
         let col = ident(&field_to_column(&field));
         let re = comparison_to_sql(&field, ComparisonOp::Re, &Value::Str("ab".into())).unwrap();
-        assert!(re == format!("regexp_like({col}, '^(?:ab)$')"));
+        assert2::assert!(re == format!("regexp_like({col}, '^(?:ab)$')"));
         let nre = comparison_to_sql(&field, ComparisonOp::Nre, &Value::Str("ab".into())).unwrap();
-        assert!(nre == format!("NOT regexp_like({col}, '^(?:ab)$')"));
+        assert2::assert!(nre == format!("NOT regexp_like({col}, '^(?:ab)$')"));
     }
 
     #[test]
@@ -979,7 +978,7 @@ mod tests {
         let field = attr_field(Scope::Both, "x");
         for op in [ComparisonOp::Re, ComparisonOp::Nre] {
             let err = comparison_to_sql(&field, op, &Value::Int(3));
-            assert!(matches!(err, Err(TraceqlError::Plan(_))));
+            assert2::assert!(matches!(err, Err(TraceqlError::Plan(_))));
         }
     }
 
@@ -996,14 +995,14 @@ mod tests {
             ("{ !(.a = 1) }", "(NOT \"attr.a\" = 1)"),
         ] {
             let sql = field_expr_to_sql(&selector(query)).unwrap();
-            assert!(sql == expected, "{query} -> {sql}");
+            assert2::assert!(sql == expected);
         }
     }
 
     #[test]
     fn field_expr_to_sql_bare_field_is_presence_check() {
         let sql = field_expr_to_sql(&selector("{ .a }")).unwrap();
-        assert!(sql == "\"attr.a\" IS NOT NULL");
+        assert2::assert!(sql == "\"attr.a\" IS NOT NULL");
     }
 
     // ---- selector_sql variants: span-only, parent-join, nested ----
@@ -1011,7 +1010,7 @@ mod tests {
     #[test]
     fn selector_sql_plain_predicate_filters_table() {
         let sql = selector_sql("\"spans\"", &selector("{ .a = 1 }")).unwrap();
-        assert!(sql == "SELECT * FROM \"spans\" WHERE \"attr.a\" = 1");
+        assert2::assert!(sql == "SELECT * FROM \"spans\" WHERE \"attr.a\" = 1");
     }
 
     #[test]
@@ -1029,7 +1028,7 @@ mod tests {
         // An event/link scoped selector has its filtering applied at scan time,
         // so the SQL projection is an unfiltered passthrough.
         let sql = selector_sql("\"spans\"", &selector("{ event.foo = 1 }")).unwrap();
-        assert!(sql == "SELECT * FROM \"spans\"");
+        assert2::assert!(sql == "SELECT * FROM \"spans\"");
     }
 
     #[test]
@@ -1038,8 +1037,8 @@ mod tests {
         // parent-qualified branch of `selector_sql_with_parent_table`.
         let fe = selector("{ event.foo = 1 && parent.a = 2 }");
         let sql = selector_sql_with_parent_table("\"spans\"", "\"parents\"", &fe).unwrap();
-        assert!(sql.contains("FROM \"spans\" AS s JOIN \"parents\" AS p"));
-        assert!(sql.contains("p.\"attr.a\" = 2"));
+        assert2::assert!(sql.contains("FROM \"spans\" AS s JOIN \"parents\" AS p"));
+        assert2::assert!(sql.contains("p.\"attr.a\" = 2"));
     }
 
     // ---- parent_field_expr_to_sql_qualified: And/Or/Not pruning ----
@@ -1051,7 +1050,7 @@ mod tests {
         let pred = parent_field_expr_to_sql_qualified(&fe, "s", "p")
             .unwrap()
             .unwrap();
-        assert!(pred == "p.\"attr.a\" = 1");
+        assert2::assert!(pred == "p.\"attr.a\" = 1");
     }
 
     #[test]
@@ -1060,7 +1059,7 @@ mod tests {
         let pred = parent_field_expr_to_sql_qualified(&fe, "s", "p")
             .unwrap()
             .unwrap();
-        assert!(pred == "(p.\"attr.a\" = 1 AND p.\"attr.b\" = 2)");
+        assert2::assert!(pred == "(p.\"attr.a\" = 1 AND p.\"attr.b\" = 2)");
     }
 
     #[test]
@@ -1069,14 +1068,14 @@ mod tests {
         let pred = parent_field_expr_to_sql_qualified(&fe, "s", "p")
             .unwrap()
             .unwrap();
-        assert!(pred == "p.\"attr.a\" IS NOT NULL");
+        assert2::assert!(pred == "p.\"attr.a\" IS NOT NULL");
     }
 
     #[test]
     fn parent_predicate_or_requires_both_sides_parent() {
         // A mixed OR cannot be pushed into the parent join (no safe predicate).
         let mixed = selector("{ parent.a = 1 || .b = 2 }");
-        assert!(
+        assert2::assert!(
             parent_field_expr_to_sql_qualified(&mixed, "s", "p")
                 .unwrap()
                 .is_none()
@@ -1087,7 +1086,7 @@ mod tests {
         let pred = parent_field_expr_to_sql_qualified(&both, "s", "p")
             .unwrap()
             .unwrap();
-        assert!(pred == "(p.\"attr.a\" = 1 OR p.\"attr.b\" = 2)");
+        assert2::assert!(pred == "(p.\"attr.a\" = 1 OR p.\"attr.b\" = 2)");
     }
 
     #[test]
@@ -1096,19 +1095,19 @@ mod tests {
         let pred = parent_field_expr_to_sql_qualified(&fe, "s", "p")
             .unwrap()
             .unwrap();
-        assert!(pred == "(NOT p.\"attr.a\" = 1)");
+        assert2::assert!(pred == "(NOT p.\"attr.a\" = 1)");
     }
 
     #[test]
     fn parent_predicate_non_parent_leaf_yields_none() {
         let fe = selector("{ .b = 2 }");
-        assert!(
+        assert2::assert!(
             parent_field_expr_to_sql_qualified(&fe, "s", "p")
                 .unwrap()
                 .is_none()
         );
         let bare = selector("{ .b }");
-        assert!(
+        assert2::assert!(
             parent_field_expr_to_sql_qualified(&bare, "s", "p")
                 .unwrap()
                 .is_none()
@@ -1120,7 +1119,7 @@ mod tests {
         // Drives the And arm where both sides lower to None (no parent conjunct
         // anywhere) -> the whole And predicate is None.
         let fe = selector("{ .a = 1 && .b = 2 }");
-        assert!(
+        assert2::assert!(
             parent_field_expr_to_sql_qualified(&fe, "s", "p")
                 .unwrap()
                 .is_none()
@@ -1144,7 +1143,7 @@ mod tests {
             ("{ parent.a }", "p.\"attr.a\" IS NOT NULL"),
         ] {
             let sql = field_expr_to_sql_qualified(&selector(query), "s", "p").unwrap();
-            assert!(sql == expected, "{query} -> {sql}");
+            assert2::assert!(sql == expected);
         }
     }
 
@@ -1155,10 +1154,10 @@ mod tests {
         let status = intrinsic_field(Intrinsic::Status);
         for (name, code) in [("unset", 0), ("ok", 1), ("error", 2), ("ERROR", 2)] {
             let sql = comparison_value_sql(&status, &Value::Str(name.into())).unwrap();
-            assert!(sql == code.to_string(), "status {name} -> {sql}");
+            assert2::assert!(sql == code.to_string());
         }
         let err = comparison_value_sql(&status, &Value::Str("bogus".into()));
-        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+        assert2::assert!(matches!(err, Err(TraceqlError::Plan(_))));
     }
 
     #[test]
@@ -1174,10 +1173,10 @@ mod tests {
             ("Server", 2),
         ] {
             let sql = comparison_value_sql(&kind, &Value::Str(name.into())).unwrap();
-            assert!(sql == code.to_string(), "kind {name} -> {sql}");
+            assert2::assert!(sql == code.to_string());
         }
         let err = comparison_value_sql(&kind, &Value::Str("bogus".into()));
-        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+        assert2::assert!(matches!(err, Err(TraceqlError::Plan(_))));
     }
 
     #[test]
@@ -1186,7 +1185,7 @@ mod tests {
         // emitted as a plain integer literal.
         let kind = intrinsic_field(Intrinsic::Kind);
         let sql = comparison_value_sql(&kind, &Value::Int(3)).unwrap();
-        assert!(sql == "3");
+        assert2::assert!(sql == "3");
     }
 
     #[test]
@@ -1194,15 +1193,15 @@ mod tests {
         let trace = intrinsic_field(Intrinsic::TraceId);
         let hex = "0123456789abcdef0123456789abcdef"; // 32 chars = 16 bytes
         let sql = comparison_value_sql(&trace, &Value::Str(hex.into())).unwrap();
-        assert!(sql == format!("X'{hex}'"));
+        assert2::assert!(sql == format!("X'{hex}'"));
 
         // Wrong length is rejected.
         let err = comparison_value_sql(&trace, &Value::Str("abcd".into()));
-        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+        assert2::assert!(matches!(err, Err(TraceqlError::Plan(_))));
 
         // Non-string value is rejected with the hex-string error.
         let err = comparison_value_sql(&trace, &Value::Int(1));
-        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+        assert2::assert!(matches!(err, Err(TraceqlError::Plan(_))));
     }
 
     #[test]
@@ -1211,12 +1210,12 @@ mod tests {
             let field = intrinsic_field(intrinsic.clone());
             let hex = "0011223344556677"; // 16 chars = 8 bytes
             let sql = comparison_value_sql(&field, &Value::Str(hex.into())).unwrap();
-            assert!(sql == format!("X'{hex}'"), "{intrinsic:?}");
+            assert2::assert!(sql == format!("X'{hex}'"));
         }
         let link_trace = intrinsic_field(Intrinsic::LinkTraceId);
         let hex = "0123456789abcdef0123456789abcdef";
         let sql = comparison_value_sql(&link_trace, &Value::Str(hex.into())).unwrap();
-        assert!(sql == format!("X'{hex}'"));
+        assert2::assert!(sql == format!("X'{hex}'"));
     }
 
     #[test]
@@ -1224,14 +1223,14 @@ mod tests {
         let trace = intrinsic_field(Intrinsic::TraceId);
         let hex = "0123456789ABCDEF0123456789ABCDEF";
         let sql = comparison_value_sql(&trace, &Value::Str(hex.into())).unwrap();
-        assert!(sql == "X'0123456789abcdef0123456789abcdef'");
+        assert2::assert!(sql == "X'0123456789abcdef0123456789abcdef'");
     }
 
     #[test]
     fn fixed_hex_lit_rejects_non_hex_characters() {
         // Right length but a non-hex digit ('g') -> error.
         let err = fixed_hex_lit("0123456789abcdeg", 8);
-        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+        assert2::assert!(matches!(err, Err(TraceqlError::Plan(_))));
     }
 
     #[test]
@@ -1244,7 +1243,7 @@ mod tests {
             (Value::Duration(5), "5"),
         ] {
             let sql = comparison_value_sql(&field, &value).unwrap();
-            assert!(sql == expected, "{value:?} -> {sql}");
+            assert2::assert!(sql == expected);
         }
     }
 
@@ -1252,10 +1251,10 @@ mod tests {
 
     #[test]
     fn value_sql_bool_and_nil() {
-        assert!(value_sql(&Value::Bool(true)).unwrap() == "true");
-        assert!(value_sql(&Value::Bool(false)).unwrap() == "false");
+        assert2::assert!(value_sql(&Value::Bool(true)).unwrap() == "true");
+        assert2::assert!(value_sql(&Value::Bool(false)).unwrap() == "false");
         let err = value_sql(&Value::Nil);
-        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+        assert2::assert!(matches!(err, Err(TraceqlError::Plan(_))));
     }
 
     // ---- intrinsic_name: error-message labels ----
@@ -1274,7 +1273,7 @@ mod tests {
         ];
         for (scope, expected) in cases {
             let name = intrinsic_name(&scope);
-            assert!(name == expected, "{scope:?} -> {name}");
+            assert2::assert!(name == expected);
         }
     }
 
@@ -1282,7 +1281,7 @@ mod tests {
     fn enum_value_sql_non_enum_scope_errors() {
         // enum_value_sql guards against being called for a non-enum scope.
         let err = enum_value_sql(&Scope::Both, "ok");
-        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+        assert2::assert!(matches!(err, Err(TraceqlError::Plan(_))));
     }
 
     // ---- comparison_to_sql_qualified: operators + nil + regex ----
@@ -1315,19 +1314,19 @@ mod tests {
         ];
         for (op, value, expected) in cases {
             let sql = comparison_to_sql_qualified(&field, op, &value, "s", "p").unwrap();
-            assert!(sql == expected, "{op:?} {value:?} -> {sql}");
+            assert2::assert!(sql == expected);
         }
         // regex against non-string errors
         let err = comparison_to_sql_qualified(&field, ComparisonOp::Re, &Value::Int(1), "s", "p");
-        assert!(matches!(err, Err(TraceqlError::Plan(_))));
+        assert2::assert!(matches!(err, Err(TraceqlError::Plan(_))));
     }
 
     #[test]
     fn qualified_field_ident_routes_non_parent_to_span_alias() {
         let span = attr_field(Scope::Span, "a");
-        assert!(qualified_field_ident(&span, "s", "p") == "s.\"attr.a\"");
+        assert2::assert!(qualified_field_ident(&span, "s", "p") == "s.\"attr.a\"");
         let parent = attr_field(Scope::Parent, "a");
-        assert!(qualified_field_ident(&parent, "s", "p") == "p.\"attr.a\"");
+        assert2::assert!(qualified_field_ident(&parent, "s", "p") == "p.\"attr.a\"");
     }
 
     // ---- matcher disjuncts: nested negation + Or prefilter ----
@@ -1337,7 +1336,7 @@ mod tests {
         // `!{ event.foo = 1 }` is a nested scope negation, which lowers to a
         // single disjunct of one negated matcher and is usable as a prefilter.
         let ms = field_expr_to_matchers(&selector("{ !(event.foo = 1) }"));
-        assert!(
+        assert2::assert!(
             ms == vec![SpanMatcher {
                 scope: MatchScope::Event,
                 key: "foo".into(),
@@ -1352,13 +1351,13 @@ mod tests {
     fn non_nested_negation_does_not_prefilter() {
         // A negation over a non-nested scope returns no matchers.
         let ms = field_expr_to_matchers(&selector("{ !(.a = 1) }"));
-        assert!(ms.is_empty());
+        assert2::assert!(ms.is_empty());
     }
 
     #[test]
     fn or_of_comparisons_produces_disjunct_per_branch() {
         let disjuncts = field_expr_to_matcher_disjuncts(&selector("{ .a = 1 || .b = 2 }")).unwrap();
-        assert!(
+        assert2::assert!(
             disjuncts
                 == vec![
                     vec![SpanMatcher {
@@ -1382,15 +1381,15 @@ mod tests {
     #[test]
     fn and_of_comparisons_cross_products_into_single_disjunct() {
         let disjuncts = field_expr_to_matcher_disjuncts(&selector("{ .a = 1 && .b = 2 }")).unwrap();
-        assert_eq!(disjuncts.len(), 1);
-        assert_eq!(disjuncts[0].len(), 2);
+        assert2::assert!(disjuncts.len() == 1);
+        assert2::assert!(disjuncts[0].len() == 2);
     }
 
     #[test]
     fn top_level_negation_of_non_nested_has_no_disjuncts() {
         // `field_expr_to_matcher_disjuncts` returns None for a non-nested Not,
         // signalling the prefilter cannot be derived.
-        assert!(field_expr_to_matcher_disjuncts(&selector("{ !(.a = 1) }")).is_none());
+        assert2::assert!(field_expr_to_matcher_disjuncts(&selector("{ !(.a = 1) }")).is_none());
     }
 
     #[test]
@@ -1399,7 +1398,7 @@ mod tests {
         let disjuncts =
             field_expr_to_matcher_disjuncts(&selector("{ !(event.a = 1 || event.b = 2) }"))
                 .unwrap();
-        assert!(
+        assert2::assert!(
             disjuncts
                 == vec![vec![
                     SpanMatcher {
@@ -1426,8 +1425,8 @@ mod tests {
         let disjuncts =
             field_expr_to_matcher_disjuncts(&selector("{ !(event.a = 1 && event.b = 2) }"))
                 .unwrap();
-        assert_eq!(disjuncts.len(), 2);
-        assert!(disjuncts.iter().all(|d| d.len() == 1 && d[0].negated));
+        assert2::assert!(disjuncts.len() == 2);
+        assert2::assert!(disjuncts.iter().all(|d| d.len() == 1 && d[0].negated));
     }
 
     #[test]
@@ -1435,7 +1434,7 @@ mod tests {
         // !!(event.a = 1) -> back to a non-negated matcher.
         let disjuncts =
             field_expr_to_matcher_disjuncts(&selector("{ !(!(event.a = 1)) }")).unwrap();
-        assert!(
+        assert2::assert!(
             disjuncts
                 == vec![vec![SpanMatcher {
                     scope: MatchScope::Event,
@@ -1452,7 +1451,7 @@ mod tests {
     #[test]
     fn matcher_from_bare_field_is_presence_neq_nil() {
         let m = matcher_from_field_expr(&selector("{ resource.region }")).unwrap();
-        assert!(
+        assert2::assert!(
             m == SpanMatcher {
                 scope: MatchScope::Resource,
                 key: "region".into(),
@@ -1470,10 +1469,7 @@ mod tests {
             "{ .a = 1 || .b = 2 }",
             "{ !(.a = 1) }",
         ] {
-            assert!(
-                matcher_from_field_expr(&selector(query)).is_none(),
-                "{query}"
-            );
+            assert2::assert!(matcher_from_field_expr(&selector(query)).is_none());
         }
     }
 
@@ -1491,7 +1487,7 @@ mod tests {
         ];
         for (scope, expected) in cases {
             let got = match_scope(&scope);
-            assert!(got == expected, "{scope:?} -> {got:?}");
+            assert2::assert!(got == expected);
         }
     }
 
@@ -1509,7 +1505,7 @@ mod tests {
         ];
         for (op, expected) in cases {
             let got = match_cmp(op);
-            assert!(got == expected, "{op:?} -> {got:?}");
+            assert2::assert!(got == expected);
         }
     }
 
@@ -1525,7 +1521,7 @@ mod tests {
         ];
         for (value, expected) in cases {
             let got = match_value(&value);
-            assert!(got == expected, "{value:?} -> {got:?}");
+            assert2::assert!(got == expected);
         }
     }
 
@@ -1556,27 +1552,27 @@ mod tests {
         ];
         for (intrinsic, expected) in cases {
             let key = matcher_key(&intrinsic_field(intrinsic.clone()));
-            assert!(key == expected, "{intrinsic:?} -> {key}");
+            assert2::assert!(key == expected);
         }
         // Non-intrinsic scopes keep the raw attribute key.
-        assert!(matcher_key(&attr_field(Scope::Span, "http.method")) == "http.method");
+        assert2::assert!(matcher_key(&attr_field(Scope::Span, "http.method")) == "http.method");
     }
 
     // ---- ident / string_lit / anchored escaping ----
 
     #[test]
     fn ident_escapes_embedded_quotes() {
-        assert!(ident("a\"b") == "\"a\"\"b\"");
+        assert2::assert!(ident("a\"b") == "\"a\"\"b\"");
     }
 
     #[test]
     fn string_lit_escapes_single_quotes() {
-        assert!(string_lit("a'b") == "'a''b'");
+        assert2::assert!(string_lit("a'b") == "'a''b'");
     }
 
     #[test]
     fn anchored_wraps_pattern() {
-        assert!(anchored("ab") == "^(?:ab)$");
+        assert2::assert!(anchored("ab") == "^(?:ab)$");
     }
 
     // ---- has_nested_scope / has_parent_scope across combinators ----
@@ -1593,7 +1589,7 @@ mod tests {
             ("{ .a = 1 && .b = 2 }", false),
         ] {
             let got = has_nested_scope(&selector(query));
-            assert!(got == expected, "{query} -> {got}");
+            assert2::assert!(got == expected);
         }
     }
 
@@ -1606,7 +1602,7 @@ mod tests {
             ("{ .a = 1 }", false),
         ] {
             let got = has_parent_scope(&selector(query));
-            assert!(got == expected, "{query} -> {got}");
+            assert2::assert!(got == expected);
         }
     }
 
@@ -1618,7 +1614,7 @@ mod tests {
             ("{ event:name = \"x\" && parent.a = 1 }", true),
         ] {
             let got = needs_unfiltered_parent_table(&selector(query));
-            assert!(got == expected, "{query} -> {got}");
+            assert2::assert!(got == expected);
         }
     }
 
@@ -1632,8 +1628,8 @@ mod tests {
             negated: false,
         };
         let n = negate_matcher(m.clone());
-        assert!(n.negated);
+        assert2::assert!(n.negated);
         let back = negate_matcher(n);
-        assert!(!back.negated);
+        assert2::assert!(!back.negated);
     }
 }

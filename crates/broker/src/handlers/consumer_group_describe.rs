@@ -130,7 +130,7 @@ fn response(groups: Vec<DescribedGroup>) -> ConsumerGroupDescribeResponse {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
     use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
     use crabka_protocol::Encode;
@@ -174,7 +174,7 @@ mod tests {
             group_id: "orders".into(),
             ..Default::default()
         };
-        assert!(row == expected);
+        assert2::assert!(row == expected);
     }
 
     #[test]
@@ -185,22 +185,19 @@ mod tests {
             ("enabled level", Some(1), false),
             ("explicitly disabled level", Some(0), true),
         ];
-        for (case, level, want_disabled) in cases {
+        for (_case, level, want_disabled) in cases {
             let image = match level {
                 None => MetadataImage::new(uuid::Uuid::nil()),
                 Some(level) => image_with_group_version(level),
             };
-            assert!(
-                group_version_disabled(&image) == want_disabled,
-                "case: {case}; level {level:?}"
-            );
+            assert2::assert!(group_version_disabled(&image) == want_disabled);
         }
     }
 
     #[test]
     fn next_gen_config_gate_inverts_enabled_flag() {
-        assert!(!next_gen_config_disabled(true));
-        assert!(next_gen_config_disabled(false));
+        assert2::assert!(!next_gen_config_disabled(true));
+        assert2::assert!(next_gen_config_disabled(false));
     }
 
     #[test]
@@ -210,11 +207,8 @@ mod tests {
             ("single member", 1, "STABLE"),
             ("multiple members", 3, "STABLE"),
         ];
-        for (case, members, want) in cases {
-            assert!(
-                group_state_for_member_count(members) == want,
-                "case: {case}; members {members}"
-            );
+        for (_case, members, want) in cases {
+            assert2::assert!(group_state_for_member_count(members) == want);
         }
     }
 
@@ -257,7 +251,7 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -287,7 +281,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
 
         broker_handle.shutdown().await;
     }

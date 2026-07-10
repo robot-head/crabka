@@ -15,11 +15,7 @@ fn parse_args() -> (PathBuf, PathBuf, Option<String>) {
             positional.push(a);
         }
     }
-    assert_eq!(
-        positional.len(),
-        2,
-        "usage: codegen [--namespace NAME] <schemas> <out>"
-    );
+    assert2::assert!(positional.len() == 2);
     (
         PathBuf::from(&positional[0]),
         PathBuf::from(&positional[1]),

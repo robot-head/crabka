@@ -9,7 +9,7 @@
 //! JoinGroup and v5 for SyncGroup, so the KIP-559 fields are always
 //! exercised on these tests.
 
-use assert2::{assert, check};
+use assert2::check;
 mod support;
 
 use crabka_protocol::owned::{
@@ -42,9 +42,9 @@ async fn bootstrap_member(p: &support::InProcess) -> (String, i32) {
         })
         .await
         .expect("JoinGroup (bootstrap)");
-    assert!(r1.error_code == 79, "expected MEMBER_ID_REQUIRED");
+    assert2::assert!(r1.error_code == 79);
     let mid = r1.member_id.clone();
-    assert!(!mid.is_empty());
+    assert2::assert!(!mid.is_empty());
 
     // Step 2: re-join with the assigned member_id, falls out as leader.
     let r2 = p
@@ -146,10 +146,7 @@ async fn join_group_response_carries_protocol_type_on_inconsistent_protocol_erro
         })
         .await
         .expect("JoinGroup");
-    assert!(
-        (r.error_code, r.protocol_type.as_deref()) == (23, Some(PROTOCOL_TYPE)),
-        "INCONSISTENT_GROUP_PROTOCOL response must echo the recorded protocol_type: {r:?}"
-    );
+    assert2::assert!((r.error_code, r.protocol_type.as_deref()) == (23, Some(PROTOCOL_TYPE)));
     p.broker.shutdown().await;
 }
 

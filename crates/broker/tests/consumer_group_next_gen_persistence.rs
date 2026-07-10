@@ -4,7 +4,6 @@
 
 use std::sync::Arc;
 
-use assert2::assert;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::owned::{
@@ -28,10 +27,7 @@ async fn create_topic(client: &Client, name: &str, partitions: i32) {
     };
     let resp = client.send(req).await.unwrap();
     let code = resp.topics.first().map(|t| t.error_code).unwrap_or(0);
-    assert!(
-        code == 0,
-        "create_topic {name} failed with error_code {code}"
-    );
+    assert2::assert!(code == 0);
 }
 
 fn rejoin_config(log_dir: std::path::PathBuf) -> BrokerConfig {
@@ -70,7 +66,7 @@ async fn replay_preserves_group_epoch_and_members() {
             ..Default::default()
         };
         let resp = client.send(req).await.unwrap();
-        assert!(resp.error_code == 0);
+        assert2::assert!(resp.error_code == 0);
         member_id = resp.member_id.unwrap();
         initial_epoch = resp.member_epoch;
         // The heartbeat RPC awaits flush_pending→offsets_log.append synchronously,
@@ -100,7 +96,7 @@ async fn replay_preserves_group_epoch_and_members() {
             ..Default::default()
         };
         let resp = client.send(req).await.unwrap();
-        assert!(resp.error_code == 0, "post-restart heartbeat must succeed");
+        assert2::assert!(resp.error_code == 0);
     }
 }
 
@@ -133,17 +129,16 @@ async fn next_gen_state_cleared_after_leave_then_restart() {
             ..Default::default()
         };
         let resp = client.send(join).await.unwrap();
-        assert!(resp.error_code == 0);
+        assert2::assert!(resp.error_code == 0);
         member_id = resp.member_id.unwrap();
         broker.wait_until_group_member_count("gpx", 1).await;
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
                 broker.wait_until_group_empty("gpx"),
             )
             .await
-            .is_err(),
-            "group-empty waiter must not complete while a member is live"
+            .is_err()
         );
         let leave = ConsumerGroupHeartbeatRequest {
             group_id: "gpx".into(),
@@ -179,6 +174,6 @@ async fn next_gen_state_cleared_after_leave_then_restart() {
             ..Default::default()
         };
         let resp = client.send(req).await.unwrap();
-        assert!(resp.error_code == crabka_broker::codes::UNKNOWN_MEMBER_ID);
+        assert2::assert!(resp.error_code == crabka_broker::codes::UNKNOWN_MEMBER_ID);
     }
 }

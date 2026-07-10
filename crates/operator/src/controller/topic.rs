@@ -544,7 +544,6 @@ async fn patch_status(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::crd::{KafkaCondition, KafkaSpec, KafkaStatus, ListenerStatus, ListenerType};
@@ -600,18 +599,18 @@ mod tests {
 
     #[test]
     fn validate_topic_name_accepts_typical() {
-        for (case, name) in [
+        for (_case, name) in [
             ("hyphenated lowercase", "demo-topic"),
             ("mixed punctuation", "My.Topic_1"),
         ] {
-            assert!(validate_kafka_topic_name(name).is_ok(), "case {case}");
+            assert2::assert!(validate_kafka_topic_name(name).is_ok());
         }
     }
 
     #[test]
     fn validate_topic_name_rejection_cases() {
         let too_long = "a".repeat(250);
-        for (name, topic_name) in [
+        for (_name, topic_name) in [
             ("empty", ""),
             ("single dot", "."),
             ("double dot", ".."),
@@ -620,16 +619,13 @@ mod tests {
             ("contains slash", "has/slash"),
             ("contains at sign", "has@at"),
         ] {
-            assert!(
-                validate_kafka_topic_name(topic_name).is_err(),
-                "case {name}"
-            );
+            assert2::assert!(validate_kafka_topic_name(topic_name).is_err());
         }
     }
 
     #[test]
     fn diff_configs_change_cases() {
-        for (name, current, desired, expected) in [
+        for (_name, current, desired, expected) in [
             (
                 "set missing key",
                 BTreeMap::new(),
@@ -661,14 +657,14 @@ mod tests {
                     }
                 })
                 .collect();
-            assert_eq!(actual, expected, "case {name}");
+            assert2::assert!(actual == expected);
         }
     }
 
     #[test]
     fn diff_configs_noop_when_matching() {
         let m = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
-        assert!(diff_configs(&m, &m, "foo").is_empty());
+        assert2::assert!(diff_configs(&m, &m, "foo").is_empty());
     }
 
     #[test]
@@ -682,16 +678,13 @@ mod tests {
             ("segment.bytes".to_string(), "1048576".to_string()),
         ]);
         let ops = diff_configs(&current, &desired, "foo");
-        assert!(
-            ops.len() == 3,
-            "expected SET(retention.ms), SET(segment.bytes), DELETE(cleanup.policy)"
-        );
+        assert2::assert!(ops.len() == 3);
     }
 
     #[test]
     fn internal_listener_bootstrap_returns_listener_when_ready() {
         let k = kafka_ready("demo", "default", 9092);
-        assert!(
+        assert2::assert!(
             internal_listener_bootstrap(&k).as_deref()
                 == Some("demo-broker-headless.default.svc.cluster.local:9092")
         );
@@ -703,6 +696,6 @@ mod tests {
         if let Some(s) = k.status.as_mut() {
             s.conditions[0].status = "False".into();
         }
-        assert!(internal_listener_bootstrap(&k).is_none());
+        assert2::assert!(internal_listener_bootstrap(&k).is_none());
     }
 }

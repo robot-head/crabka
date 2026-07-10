@@ -18,14 +18,13 @@ pub enum MetadataError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn display_topic_exists() {
         let e = MetadataError::TopicExists("my-topic".into());
-        assert!(e.to_string() == "topic 'my-topic' already exists");
+        assert2::assert!(e.to_string() == "topic 'my-topic' already exists");
     }
 
     #[test]
@@ -34,6 +33,6 @@ mod tests {
             topic: "t".into(),
             partition: 7,
         };
-        assert!(e.to_string().contains("partition 7"));
+        assert2::assert!(e.to_string().contains("partition 7"));
     }
 }

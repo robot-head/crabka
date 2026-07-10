@@ -188,7 +188,7 @@ fn pick_swap(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::model::BrokerView;
@@ -242,7 +242,7 @@ mod tests {
         ];
         let parts = vec![part("t", 0, vec![1, 2, 3], 1)];
         let s = state_with(parts, brokers);
-        assert!(RackAware.propose(&s, &ctx()).is_empty());
+        assert2::assert!(RackAware.propose(&s, &ctx()).is_empty());
     }
 
     #[test]
@@ -255,7 +255,7 @@ mod tests {
         let parts = vec![part("t", 0, vec![1, 2], 1)];
         let s = state_with(parts, brokers);
         let mvs = RackAware.propose(&s, &ctx());
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "t".into(),
                 partition: 0,
@@ -263,8 +263,7 @@ mod tests {
                 new_replicas: vec![1, 3],
                 old_leader: 1,
                 new_leader: 1,
-            }],
-            "exactly one movement for one collision"
+            }]
         );
     }
 
@@ -282,7 +281,9 @@ mod tests {
 
         let mvs = RackAware.propose(&s, &ctx());
 
-        assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![1, 4, 3]]);
+        assert2::assert!(
+            mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![1, 4, 3]]
+        );
     }
 
     #[test]
@@ -297,7 +298,7 @@ mod tests {
 
         let mvs = RackAware.propose(&s, &ctx());
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "t".into(),
                 partition: 0,
@@ -320,7 +321,7 @@ mod tests {
         let parts = vec![part("t", 0, vec![1, 2], 1), part("t", 1, vec![1, 2], 1)];
         let s = state_with(parts, brokers);
         let mvs = RackAware.propose(&s, &ctx());
-        assert!(mvs.len() == 2, "one movement per partition");
+        assert2::assert!(mvs.len() == 2);
         for m in &mvs {
             check!(m.old_replicas == vec![1, 2]);
             check!(!m.new_replicas.contains(&2), "broker 2 must move out");
@@ -332,7 +333,7 @@ mod tests {
         let brokers = vec![broker(1, Some("a")), broker(2, Some("b"))];
         let parts = vec![part("t", 0, vec![1, 2], 1)];
         let s = state_with(parts, brokers);
-        assert!(RackAware.propose(&s, &ctx()).is_empty());
+        assert2::assert!(RackAware.propose(&s, &ctx()).is_empty());
     }
 
     #[test]
@@ -345,10 +346,7 @@ mod tests {
         let parts = vec![part("t", 0, vec![1, 2, 3], 1)];
         let s = state_with(parts, brokers);
         let mvs = RackAware.propose(&s, &ctx());
-        assert!(
-            mvs.is_empty(),
-            "RF > rack count must self-limit, got {mvs:?}"
-        );
+        assert2::assert!(mvs.is_empty());
     }
 
     #[test]
@@ -361,7 +359,7 @@ mod tests {
         let parts = vec![part("t", 0, vec![1, 2, 3], 1)];
         let s = state_with(parts, brokers);
 
-        assert!(RackAware.is_satisfied(&s));
+        assert2::assert!(RackAware.is_satisfied(&s));
     }
 
     #[test]
@@ -374,7 +372,7 @@ mod tests {
         let parts = vec![part("t", 0, vec![1, 2, 3], 1)];
         let s = state_with(parts, brokers);
 
-        assert!(RackAware.is_satisfied(&s));
+        assert2::assert!(RackAware.is_satisfied(&s));
     }
 
     #[test]
@@ -387,6 +385,6 @@ mod tests {
         let parts = vec![part("t", 0, vec![1, 2], 1)];
         let s = state_with(parts, brokers);
 
-        assert!(!RackAware.is_satisfied(&s));
+        assert2::assert!(!RackAware.is_satisfied(&s));
     }
 }

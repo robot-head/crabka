@@ -414,14 +414,14 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use tempfile::tempdir;
 
     use super::*;
 
     #[test]
     fn move_read_chunk_size_is_one_mib() {
-        assert!(MOVE_READ_CHUNK_BYTES == 1024 * 1024);
+        assert2::assert!(MOVE_READ_CHUNK_BYTES == 1024 * 1024);
     }
 
     #[test]
@@ -443,7 +443,7 @@ mod tests {
             bogus.path(),
         )
         .expect_err("expected LogDirNotFound");
-        assert!(matches!(err, MoveError::LogDirNotFound));
+        assert2::assert!(matches!(err, MoveError::LogDirNotFound));
     }
 
     #[test]
@@ -461,7 +461,7 @@ mod tests {
             dir.path(),
         )
         .expect_err("expected ReplicaNotAvailable");
-        assert!(matches!(err, MoveError::ReplicaNotAvailable));
+        assert2::assert!(matches!(err, MoveError::ReplicaNotAvailable));
     }
 
     /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>`
@@ -565,10 +565,7 @@ mod tests {
             primary.path(),
         )
         .expect("noop should succeed");
-        assert!(
-            future_logs.is_empty(),
-            "noop must not register a future log"
-        );
+        assert2::assert!(future_logs.is_empty());
     }
 
     #[test]
@@ -587,8 +584,8 @@ mod tests {
         )
         .expect_err("missing partition must reject resume");
 
-        assert!(matches!(err, MoveError::ReplicaNotAvailable));
-        assert!(future_logs.is_empty());
+        assert2::assert!(matches!(err, MoveError::ReplicaNotAvailable));
+        assert2::assert!(future_logs.is_empty());
     }
 
     #[tokio::test]
@@ -627,7 +624,7 @@ mod tests {
         .await
         .expect("future log should catch up and swap");
 
-        assert!(
+        assert2::assert!(
             (
                 part.log_end_offset(),
                 canonicalize_or_self(&part.log_dir.load_full()),
@@ -673,7 +670,7 @@ mod tests {
         .await
         .expect("future log should keep copying after a partial catch-up pass");
 
-        assert!(part.log_end_offset() == 4);
+        assert2::assert!(part.log_end_offset() == 4);
     }
 
     #[tokio::test]
@@ -718,7 +715,7 @@ mod tests {
             extra.path(),
         )
         .expect("same-target alter must be idempotent");
-        assert!(future_logs.len() == 1);
+        assert2::assert!(future_logs.len() == 1);
     }
 
     #[tokio::test]
@@ -765,6 +762,6 @@ mod tests {
             third.path(),
         )
         .expect_err("conflicting-target alter must reject");
-        assert!(matches!(err, MoveError::AlreadyMoving));
+        assert2::assert!(matches!(err, MoveError::AlreadyMoving));
     }
 }

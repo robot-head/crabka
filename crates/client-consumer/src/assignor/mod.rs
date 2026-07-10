@@ -34,13 +34,12 @@ impl Assignor {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn assignor_protocol_names_match_kafka_protocols() {
-        for (name, assignor, expected) in [
+        for (_name, assignor, expected) in [
             ("range", Assignor::Range, "range"),
             (
                 "cooperative sticky",
@@ -48,13 +47,13 @@ mod tests {
                 "cooperative-sticky",
             ),
         ] {
-            assert!(assignor.protocol_name() == expected, "case {name}");
+            assert2::assert!(assignor.protocol_name() == expected);
         }
     }
 
     #[test]
     fn assignor_rebalance_protocols_match_assignor_strategy() {
-        for (name, assignor, expected) in [
+        for (_name, assignor, expected) in [
             ("range", Assignor::Range, RebalanceProtocol::Eager),
             (
                 "cooperative sticky",
@@ -62,7 +61,7 @@ mod tests {
                 RebalanceProtocol::Cooperative,
             ),
         ] {
-            assert!(assignor.rebalance_protocol() == expected, "case {name}");
+            assert2::assert!(assignor.rebalance_protocol() == expected);
         }
     }
 }

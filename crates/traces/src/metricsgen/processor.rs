@@ -100,8 +100,6 @@ impl MetricsGenerator {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
-
     use super::*;
     use crate::metricsgen::{
         clock::MockClock,
@@ -143,27 +141,27 @@ mod tests {
         generator.process(&span("B", "svc", SpanKind::Server, [0xC; 8], [0; 8]));
 
         let payloads = generator.collect(1_000);
-        assert!(payloads.len() == 2);
+        assert2::assert!(payloads.len() == 2);
 
         let a = payloads.iter().find(|p| p.tenant == "A").unwrap();
-        assert!(
+        assert2::assert!(
             a.series
                 .iter()
                 .any(|s| s.name == "traces_service_graph_request_total")
         );
-        assert!(
+        assert2::assert!(
             a.series
                 .iter()
                 .any(|s| s.name == "traces_spanmetrics_calls_total")
         );
 
         let b = payloads.iter().find(|p| p.tenant == "B").unwrap();
-        assert!(
+        assert2::assert!(
             b.series
                 .iter()
                 .any(|s| s.name == "traces_spanmetrics_calls_total")
         );
-        assert!(
+        assert2::assert!(
             !b.series
                 .iter()
                 .any(|s| s.name == "traces_service_graph_request_total")
@@ -180,7 +178,7 @@ mod tests {
         clock.set(11_000_000_000);
         let payloads = generator.collect(2_000);
         let a = payloads.iter().find(|p| p.tenant == "A").unwrap();
-        assert!(
+        assert2::assert!(
             a.series
                 .iter()
                 .any(|s| s.name == "traces_service_graph_unpaired_spans_total")

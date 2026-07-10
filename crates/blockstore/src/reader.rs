@@ -154,7 +154,6 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use assert2::assert;
     use object_store::{ObjectStore, memory::InMemory, path::Path};
     use parquet::{
         arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter},
@@ -166,7 +165,7 @@ mod tests {
 
     #[test]
     fn max_block_bytes_is_one_gib() {
-        assert_eq!(MAX_BLOCK_BYTES, 1024 * 1024 * 1024);
+        assert2::assert!(MAX_BLOCK_BYTES == 1024 * 1024 * 1024);
     }
 
     #[tokio::test]
@@ -193,7 +192,7 @@ mod tests {
             .unwrap();
 
         let out = read_block(store, "b.parquet").await.unwrap();
-        assert_eq!(out, vec![batch]);
+        assert2::assert!(out == vec![batch]);
     }
 
     #[tokio::test]
@@ -222,14 +221,14 @@ mod tests {
         // A tiny cap stands in for the production cap so the test need not
         // materialize an over-cap block; the real block is well above 1 byte.
         let got = read_block_with_cap(store.clone(), "b.parquet", 1).await;
-        assert!(got.is_err());
+        assert2::assert!(got.is_err());
 
         // A cap exactly at the real size is accepted; only bytes above the cap
         // are rejected.
         let size = store.head(&Path::from("b.parquet")).await.unwrap().size;
         let out = read_block_with_cap(store, "b.parquet", size).await.unwrap();
         let total: usize = out.iter().map(RecordBatch::num_rows).sum();
-        assert!(total == 2);
+        assert2::assert!(total == 2);
     }
 
     #[tokio::test]
@@ -270,16 +269,16 @@ mod tests {
                 .map(|group| (group.index, group.compressed_bytes > 0))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(project(&meta), vec![(0, true), (1, true)]);
+        assert2::assert!(project(&meta) == vec![(0, true), (1, true)]);
 
         let got = read_row_group_metadata_with_cap(store.clone(), "meta.parquet", 1).await;
-        assert!(got.is_err());
+        assert2::assert!(got.is_err());
 
         let size = store.head(&Path::from("meta.parquet")).await.unwrap().size;
         let meta = read_row_group_metadata_with_cap(store, "meta.parquet", size)
             .await
             .unwrap();
-        assert_eq!(project(&meta), vec![(0, true), (1, true)]);
+        assert2::assert!(project(&meta) == vec![(0, true), (1, true)]);
     }
 
     #[tokio::test]
@@ -311,7 +310,7 @@ mod tests {
         writer.close().await.unwrap();
 
         let got = read_block_row_groups_with_cap(store.clone(), "rg.parquet", &[1], 1).await;
-        assert!(got.is_err());
+        assert2::assert!(got.is_err());
 
         let size = store.head(&Path::from("rg.parquet")).await.unwrap().size;
         let out = read_block_row_groups_with_cap(store, "rg.parquet", &[1], size)
@@ -325,7 +324,7 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(total, 1);
-        assert_eq!(lines.value(0), "second");
+        assert2::assert!(total == 1);
+        assert2::assert!(lines.value(0) == "second");
     }
 }

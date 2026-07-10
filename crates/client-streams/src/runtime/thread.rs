@@ -1223,9 +1223,8 @@ mod tests {
                 reply,
             })
             .await;
-        assert_eq!(
-            rx.await.unwrap().unwrap(),
-            IqPayload::Value(Some(I64Serde.serialize("t", &7_i64)))
+        assert2::assert!(
+            rx.await.unwrap().unwrap() == IqPayload::Value(Some(I64Serde.serialize("t", &7_i64)))
         );
 
         // empty thread (no tasks) -> RebalanceInProgress
@@ -1246,7 +1245,7 @@ mod tests {
                 reply: reply2,
             })
             .await;
-        assert!(matches!(
+        assert2::assert!(matches!(
             rx2.await.unwrap(),
             Err(IqError::RebalanceInProgress)
         ));
@@ -1330,7 +1329,7 @@ mod tests {
             .expect("partition 0 present");
         let boxed = r.as_ref().expect("partition 0 is a Success");
         let downcast = boxed.downcast_ref::<Option<i64>>().expect("Option<i64>");
-        assert_eq!(*downcast, None, "empty store yields None");
+        assert2::assert!(*downcast == None);
 
         // (2) Partition-set gate: a set excluding p0 omits it entirely.
         let set1 = || PartitionSel::Set([1].into_iter().collect());
@@ -1338,12 +1337,8 @@ mod tests {
             req(set1(), PositionBound::Unbounded, false, reply)
         })
         .await;
-        assert_eq!(
-            find(&out, 0),
-            None,
-            "p0 excluded from the set must not appear"
-        );
-        assert!(find(&out, 1).is_some(), "p1 (in the set) must appear");
+        assert2::assert!(find(&out, 0) == None);
+        assert2::assert!(find(&out, 1).is_some());
 
         // (3) Active-only gate against the standby (p1) task → NotActive.
         let out = serve_iq2_outcome(&mut thread, |reply| {
@@ -1351,7 +1346,7 @@ mod tests {
         })
         .await;
         let (_, _, r) = out.per_partition.iter().find(|(p, _, _)| *p == 1).unwrap();
-        assert_eq!(r.as_ref().err(), Some(&FailureReason::NotActive));
+        assert2::assert!(r.as_ref().err() == Some(&FailureReason::NotActive));
 
         // (4) Position-bound gate: a bound ahead of the (empty) p0 position →
         // NotUpToBound (p0 has never advanced).
@@ -1370,7 +1365,7 @@ mod tests {
         })
         .await;
         let (_, _, r) = out.per_partition.iter().find(|(p, _, _)| *p == 0).unwrap();
-        assert_eq!(r.as_ref().err(), Some(&FailureReason::NotUpToBound));
+        assert2::assert!(r.as_ref().err() == Some(&FailureReason::NotUpToBound));
     }
 
     /// End-to-end of the real runtime global-store path: `StreamThread` builds +
