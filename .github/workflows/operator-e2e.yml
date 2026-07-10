@@ -124,7 +124,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.2
+          version: v4.2.3
       - name: Download prebuilt image tarballs
         uses: actions/download-artifact@v8
         with:
@@ -855,7 +855,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.2
+          version: v4.2.3
       - name: Download prebuilt image tarballs
         uses: actions/download-artifact@v8
         with:
@@ -970,7 +970,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.2
+          version: v4.2.3
       - name: Download prebuilt image tarballs
         uses: actions/download-artifact@v8
         with:
@@ -1215,7 +1215,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.2
+          version: v4.2.3
       - name: Download prebuilt image tarballs
         uses: actions/download-artifact@v8
         with:
@@ -1498,7 +1498,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.2
+          version: v4.2.3
       - name: Download prebuilt image tarballs
         uses: actions/download-artifact@v8
         with:
@@ -2193,7 +2193,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.2
+          version: v4.2.3
       - name: Download prebuilt image tarballs
         uses: actions/download-artifact@v8
         with:
@@ -2463,7 +2463,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.2
+          version: v4.2.3
       - name: Download prebuilt image tarballs
         uses: actions/download-artifact@v8
         with:
@@ -2871,7 +2871,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.2
+          version: v4.2.3
       - name: Download prebuilt image tarballs
         uses: actions/download-artifact@v8
         with:
@@ -3619,7 +3619,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v5
         with:
-          version: v4.2.2
+          version: v4.2.3
       - name: Download prebuilt image tarballs
         uses: actions/download-artifact@v8
         with:
