@@ -1547,6 +1547,7 @@ async fn open_substrate_runtime_with_tenant_record(
         Arc::clone(&store),
         Arc::clone(&snapshot_source),
         crabka_gres_substrate::wal_topic(&config.tenant),
+        format!("{}/r0", config.tenant),
         None,
         || Ok(GresCheckpointWalPruner::in_memory()),
     )?;
@@ -1700,6 +1701,7 @@ struct SingleRangeLiveWalSelection {
     recovery_config: crabka_gres_substrate::LiveRecoveryConfig,
     writer_topic: String,
     checkpoint_topic: String,
+    checkpoint_namespace: String,
 }
 
 fn single_range_live_wal_selection(
@@ -1719,6 +1721,7 @@ fn single_range_live_wal_selection(
     );
     let topic = recovery_config.wal_topic();
     Ok(SingleRangeLiveWalSelection {
+        checkpoint_namespace: recovery_config.checkpoint_namespace(),
         recovery_config,
         writer_topic: topic.clone(),
         checkpoint_topic: topic,
@@ -2206,6 +2209,7 @@ fn build_checkpoint_runtime(
     store: Arc<dyn SubstrateKv>,
     snapshot_source: Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     wal_topic: String,
+    checkpoint_namespace: String,
     checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
     pruner: impl FnOnce() -> std::io::Result<GresCheckpointWalPruner>,
 ) -> std::io::Result<Option<StartedCheckpointRuntime>> {
@@ -2217,7 +2221,7 @@ fn build_checkpoint_runtime(
         None => build_checkpoint_store(checkpoint_config)?,
     };
     let service_config = crabka_gres_substrate::CheckpointConfig::new(
-        config.tenant.clone(),
+        checkpoint_namespace.clone(),
         wal_topic,
         checkpoint_config.frames_threshold,
         checkpoint_config.bytes_threshold,
@@ -2239,7 +2243,7 @@ fn build_checkpoint_runtime(
         stats,
         snapshot_source,
         store: checkpoint_store,
-        tenant: config.tenant.clone(),
+        tenant: checkpoint_namespace,
     }))
 }
 
@@ -2323,6 +2327,7 @@ async fn open_live_substrate_runtime(
         Arc::clone(&store),
         Arc::clone(&snapshot_source),
         wal_selection.checkpoint_topic,
+        wal_selection.checkpoint_namespace,
         checkpoint_store,
         || GresCheckpointWalPruner::kafka(&config.bootstrap, config.kafka_security.clone()),
     )?;
@@ -3358,6 +3363,11 @@ mod tests {
             wal_selection.checkpoint_topic,
             wal_selection.recovery_config.wal_topic()
         );
+        assert_eq!(
+            wal_selection.checkpoint_namespace,
+            wal_selection.recovery_config.checkpoint_namespace()
+        );
+        assert_eq!(wal_selection.checkpoint_namespace, "tenant-a/r0");
         assert_eq!(
             wal_selection.recovery_config.transactional_id(),
             "__gres.tenant-a.r0"
