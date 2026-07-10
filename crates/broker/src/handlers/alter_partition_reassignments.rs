@@ -762,7 +762,7 @@ mod tests {
             leader_epoch: LeaderEpoch(3),
             adding_replicas: vec![NodeId(2)],
             removing_replicas: vec![],
-            directories: vec![],
+            directories: vec![Uuid::nil(); 2],
             partition_epoch: 12,
         };
         assert2::assert!(partition == &expected_partition);

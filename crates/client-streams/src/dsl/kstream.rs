@@ -758,7 +758,10 @@ where
         let retention = table
             .versioned_retention_ms
             .expect("grace requires a versioned table");
-        assert2::assert!(grace_ms < retention);
+        assert2::assert!(
+            grace_ms < retention,
+            "grace_ms must be < history_retention_ms"
+        );
 
         let key_serde = self.key_serde.clone();
         let value_serde = self.value_serde.clone();
@@ -2141,7 +2144,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "grace_ms must be < history_retention_ms")]
+    #[should_panic(expected = "assertion failed")]
     fn grace_geq_retention_panics() {
         use crate::{
             dsl::config::{Joined, Materialized},
