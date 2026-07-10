@@ -1,0 +1,57 @@
+[package]
+name = "crabka-gres"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Crabka Gres service: a pure-Rust Postgres-compatible tenant compute for the Crabka substrate"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-gres"
+readme = "README.md"
+keywords = ["postgres", "database", "serverless", "crabka", "gres"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "crabka-gres"
+path = "src/main.rs"
+
+[dependencies]
+crabka-pgexec = { version = "0.3.9", path = "../pgexec" }
+crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
+crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
+crabka-gres-fdw = { path = "../gres-fdw" }
+crabka-gres-control = { path = "../gres-control" }
+crabka-gres-ranges = { path = "../gres-ranges" }
+crabka-gres-substrate = { path = "../gres-substrate" }
+crabka-object-store = { version = "0.3.8", path = "../object-store" }
+crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
+crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
+crabka-security = { path = "../security" }
+clap = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-rustcrypto = { workspace = true }
+rand = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+assert2 = { workspace = true }
+crabka-broker = { path = "../broker" }
+crabka-gres-control = { path = "../gres-control" }
+crabka-security = { path = "../security" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-postgres = { workspace = true }

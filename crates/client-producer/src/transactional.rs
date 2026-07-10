@@ -17,6 +17,9 @@ pub(crate) enum TxnState {
     InTransaction,
     /// `commit`/`abort` in progress.
     CommittingOrAborting,
+    /// A guard was dropped or `EndTxn` had an uncertain transport outcome.
+    /// `init_transactions` must establish a new epoch before reuse.
+    RecoveryRequired,
     /// Producer is fenced; no further txns possible without re-init.
     Fenced,
 }
@@ -34,17 +37,14 @@ pub(crate) enum TxnState {
 /// transaction state has already moved on, and the returned guard's next
 /// `commit`/`abort` attempt will itself fail immediately.
 ///
-/// Dropping the guard without calling either does nothing — there is no
-/// auto-abort on `Drop` (`Producer` has no `Drop` impl today and this
-/// preserves that). The producer's transaction state stays `InTransaction`
-/// until some guard's `commit`/`abort` runs, or the producer itself is
-/// closed/dropped. This is intentionally caller error, not silently "fixed"
-/// by the type: do not add a `Drop` impl here without that being a
-/// deliberate, separately-reviewed behavior change.
+/// Dropping an unresolved guard marks the producer as recovery-required. This
+/// never guesses whether Kafka committed or aborted the transaction; callers
+/// must call `init_transactions` before the producer can send or begin again.
 #[derive(Debug)]
 #[must_use = "a transaction must be finished with `commit()` or `abort()`"]
 pub struct Transaction<'p> {
     pub(crate) producer: &'p Producer,
+    pub(crate) finished: bool,
 }
 
 impl Transaction<'_> {
@@ -55,14 +55,17 @@ impl Transaction<'_> {
     /// See [`Producer::begin_transaction`] for the shared error conditions.
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
-    pub async fn commit(self) -> Result<(), EndTransactionError<Self>> {
-        self.producer
-            .end_transaction(true)
-            .await
-            .map_err(|source| EndTransactionError {
+    pub async fn commit(mut self) -> Result<(), EndTransactionError<Self>> {
+        match self.producer.end_transaction(true).await {
+            Ok(()) => {
+                self.finished = true;
+                Ok(())
+            }
+            Err(source) => Err(EndTransactionError {
                 transaction: self,
                 source,
-            })
+            }),
+        }
     }
 
     /// Abort this transaction.
@@ -72,14 +75,25 @@ impl Transaction<'_> {
     /// See [`Producer::begin_transaction`] for the shared error conditions.
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
-    pub async fn abort(self) -> Result<(), EndTransactionError<Self>> {
-        self.producer
-            .end_transaction(false)
-            .await
-            .map_err(|source| EndTransactionError {
+    pub async fn abort(mut self) -> Result<(), EndTransactionError<Self>> {
+        match self.producer.end_transaction(false).await {
+            Ok(()) => {
+                self.finished = true;
+                Ok(())
+            }
+            Err(source) => Err(EndTransactionError {
                 transaction: self,
                 source,
-            })
+            }),
+        }
+    }
+}
+
+impl Drop for Transaction<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.producer.require_transaction_recovery();
+        }
     }
 }
 
@@ -95,6 +109,7 @@ impl Transaction<'_> {
 #[must_use = "a transaction must be finished with `commit()` or `abort()`"]
 pub struct OwnedTransaction {
     pub(crate) producer: Arc<Producer>,
+    pub(crate) finished: bool,
 }
 
 impl OwnedTransaction {
@@ -105,14 +120,17 @@ impl OwnedTransaction {
     /// See [`Producer::begin_transaction`] for the shared error conditions.
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
-    pub async fn commit(self) -> Result<(), EndTransactionError<Self>> {
-        self.producer
-            .end_transaction(true)
-            .await
-            .map_err(|source| EndTransactionError {
+    pub async fn commit(mut self) -> Result<(), EndTransactionError<Self>> {
+        match self.producer.end_transaction(true).await {
+            Ok(()) => {
+                self.finished = true;
+                Ok(())
+            }
+            Err(source) => Err(EndTransactionError {
                 transaction: self,
                 source,
-            })
+            }),
+        }
     }
 
     /// Abort this transaction.
@@ -122,14 +140,25 @@ impl OwnedTransaction {
     /// See [`Producer::begin_transaction`] for the shared error conditions.
     /// On failure, `self` is returned via [`EndTransactionError::transaction`]
     /// so a retryable failure can be retried or aborted.
-    pub async fn abort(self) -> Result<(), EndTransactionError<Self>> {
-        self.producer
-            .end_transaction(false)
-            .await
-            .map_err(|source| EndTransactionError {
+    pub async fn abort(mut self) -> Result<(), EndTransactionError<Self>> {
+        match self.producer.end_transaction(false).await {
+            Ok(()) => {
+                self.finished = true;
+                Ok(())
+            }
+            Err(source) => Err(EndTransactionError {
                 transaction: self,
                 source,
-            })
+            }),
+        }
+    }
+}
+
+impl Drop for OwnedTransaction {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.producer.require_transaction_recovery();
+        }
     }
 }
 
@@ -152,7 +181,7 @@ pub struct EndTransactionError<T> {
 mod tests {
     use std::sync::{
         Arc,
-        atomic::{AtomicI16, AtomicU16, Ordering},
+        atomic::{AtomicBool, AtomicI16, AtomicU16, Ordering},
     };
 
     use bytes::BytesMut;
@@ -167,7 +196,7 @@ mod tests {
         },
     };
 
-    use crate::{error::ProducerError, producer::Producer};
+    use crate::{ProducerRecord, error::ProducerError, producer::Producer};
 
     fn encode_v0(resp: &impl Encode) -> Vec<u8> {
         let mut buf = BytesMut::new();
@@ -183,8 +212,18 @@ mod tests {
     /// success) independently per call, so a test can fail a `commit`/`abort`
     /// and then flip the mock to let a retry on the same guard succeed.
     async fn transactional_producer(end_txn_error: Arc<AtomicI16>) -> (MockBroker, Producer) {
+        transactional_producer_with_end_txn_timeout(end_txn_error, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    async fn transactional_producer_with_end_txn_timeout(
+        end_txn_error: Arc<AtomicI16>,
+        end_txn_silent: Arc<AtomicBool>,
+    ) -> (MockBroker, Producer) {
         let port_cell = Arc::new(AtomicU16::new(0));
         let handler_port = port_cell.clone();
+        let next_epoch = Arc::new(AtomicI16::new(3));
+        let handler_epoch = Arc::clone(&next_epoch);
         let mock = MockBroker::start(move |api_key, _version, _corr_id, _body| {
             if api_key == api_versions_request::API_KEY {
                 return Some(encode_v0(&ApiVersionsResponse::default()));
@@ -202,11 +241,14 @@ mod tests {
                 return Some(encode_v0(&InitProducerIdResponse {
                     error_code: 0,
                     producer_id: 7,
-                    producer_epoch: 3,
+                    producer_epoch: handler_epoch.fetch_add(1, Ordering::SeqCst),
                     ..Default::default()
                 }));
             }
             if api_key == end_txn_request::API_KEY {
+                if end_txn_silent.load(Ordering::SeqCst) {
+                    return None;
+                }
                 return Some(encode_v0(&EndTxnResponse {
                     error_code: end_txn_error.load(Ordering::SeqCst),
                     ..Default::default()
@@ -221,6 +263,7 @@ mod tests {
             .bootstrap(mock.addr.to_string())
             .enable_idempotence(false)
             .transactional_id("test-txn")
+            .request_timeout(std::time::Duration::from_millis(10))
             .build()
             .await
             .expect("producer connects to the mock");
@@ -301,4 +344,77 @@ mod tests {
         owned,
         abort
     );
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn uncertain_end_txn_requires_reinitialization_before_reuse() {
+        let end_txn_error = Arc::new(AtomicI16::new(0));
+        let end_txn_silent = Arc::new(AtomicBool::new(true));
+        let (mock, producer) =
+            transactional_producer_with_end_txn_timeout(end_txn_error, end_txn_silent.clone())
+                .await;
+
+        let error = producer
+            .begin_transaction()
+            .await
+            .expect("begin transaction")
+            .commit()
+            .await
+            .expect_err("silent EndTxn has an uncertain outcome");
+        assert!(matches!(error.source, ProducerError::Client(_)));
+        drop(error.transaction);
+
+        assert!(matches!(
+            producer.begin_transaction().await,
+            Err(ProducerError::RecoveryRequired)
+        ));
+        let acknowledgement = producer.send(ProducerRecord::default()).await;
+        assert!(matches!(
+            acknowledgement.await.expect("recovery error is delivered"),
+            Err(ProducerError::RecoveryRequired)
+        ));
+
+        end_txn_silent.store(false, Ordering::SeqCst);
+        producer
+            .init_transactions()
+            .await
+            .expect("reinitialization obtains a new epoch");
+        assert!(*producer.txn_pid_epoch.lock().await == (7, 4));
+        producer
+            .begin_transaction()
+            .await
+            .expect("new epoch permits a transaction")
+            .abort()
+            .await
+            .expect("abort after recovery");
+        mock.stop();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropping_an_open_transaction_requires_explicit_recovery() {
+        let end_txn_error = Arc::new(AtomicI16::new(0));
+        let (mock, producer) = transactional_producer(end_txn_error).await;
+        drop(
+            producer
+                .begin_transaction()
+                .await
+                .expect("begin transaction before drop"),
+        );
+
+        assert!(matches!(
+            producer.begin_transaction().await,
+            Err(ProducerError::RecoveryRequired)
+        ));
+        producer
+            .init_transactions()
+            .await
+            .expect("explicit initialization recovers dropped transaction");
+        producer
+            .begin_transaction()
+            .await
+            .expect("begin after recovery")
+            .abort()
+            .await
+            .expect("abort after recovery");
+        mock.stop();
+    }
 }

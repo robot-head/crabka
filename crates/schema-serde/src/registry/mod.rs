@@ -2,6 +2,8 @@
 
 pub mod model;
 
+use std::collections::{HashMap, HashSet};
+
 use model::{
     RegisterResponse, SchemaByIdResponse, SchemaPayload, SchemaReference, SubjectVersionResponse,
 };
@@ -10,6 +12,7 @@ use reqwest::Client;
 use crate::{error::SchemaSerdeError, subject::SchemaKind};
 
 const CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
+const MAX_REFERENCE_DEPTH: usize = 64;
 
 /// Thin async client over the registry REST API. Cloneable (shares the
 /// underlying `reqwest::Client` connection pool).
@@ -24,6 +27,7 @@ pub struct RegistryClient {
 pub struct FetchedSchema {
     pub schema: String,
     pub message_type: Option<String>,
+    pub references: Vec<SchemaReference>,
 }
 
 impl RegistryClient {
@@ -106,7 +110,78 @@ impl RegistryClient {
         Ok(FetchedSchema {
             schema: resp.schema,
             message_type: resp.message_type,
+            references: resp.references,
         })
+    }
+
+    /// Fetch a schema source by the subject and version named in a reference.
+    pub async fn schema_by_subject_version(
+        &self,
+        subject: &str,
+        version: i32,
+    ) -> Result<FetchedSchema, SchemaSerdeError> {
+        let url = format!("{}/subjects/{subject}/versions/{version}", self.base_url);
+        let resp: SubjectVersionResponse = self.get_json(&url).await?;
+        Ok(FetchedSchema {
+            schema: resp.schema,
+            message_type: resp.message_type,
+            references: resp.references,
+        })
+    }
+
+    /// Resolve registry references to their exact, name-keyed source text.
+    ///
+    /// Resolution is bounded and detects subject-version cycles. It never uses
+    /// the filesystem or any import mechanism beyond Schema Registry.
+    pub async fn reference_sources(
+        &self,
+        references: &[SchemaReference],
+    ) -> Result<HashMap<String, String>, SchemaSerdeError> {
+        let mut sources = HashMap::new();
+        let mut resolving = HashSet::new();
+        self.resolve_reference_sources(references, &mut sources, &mut resolving, 0)
+            .await?;
+        Ok(sources)
+    }
+
+    async fn resolve_reference_sources(
+        &self,
+        references: &[SchemaReference],
+        sources: &mut HashMap<String, String>,
+        resolving: &mut HashSet<(String, i32)>,
+        depth: usize,
+    ) -> Result<(), SchemaSerdeError> {
+        if depth >= MAX_REFERENCE_DEPTH {
+            return Err(SchemaSerdeError::Schema(format!(
+                "schema reference depth exceeds {MAX_REFERENCE_DEPTH}"
+            )));
+        }
+
+        for reference in references {
+            if sources.contains_key(&reference.name) {
+                continue;
+            }
+            let reference_key = (reference.subject.clone(), reference.version);
+            if !resolving.insert(reference_key.clone()) {
+                return Err(SchemaSerdeError::Schema(format!(
+                    "cyclic schema reference at {} version {}",
+                    reference.subject, reference.version
+                )));
+            }
+            let referenced_schema = self
+                .schema_by_subject_version(&reference.subject, reference.version)
+                .await?;
+            Box::pin(self.resolve_reference_sources(
+                &referenced_schema.references,
+                sources,
+                resolving,
+                depth + 1,
+            ))
+            .await?;
+            resolving.remove(&reference_key);
+            sources.insert(reference.name.clone(), referenced_schema.schema);
+        }
+        Ok(())
     }
 
     async fn post_json<B: serde::Serialize, R: serde::de::DeserializeOwned>(
@@ -121,7 +196,7 @@ impl RegistryClient {
             .json(body)
             .send()
             .await
-            .map_err(|e| SchemaSerdeError::Registry(e.to_string()))?;
+            .map_err(|e| SchemaSerdeError::RegistryTransport(e.to_string()))?;
         Self::parse(resp).await
     }
 
@@ -135,7 +210,7 @@ impl RegistryClient {
             .header("Accept", CONTENT_TYPE)
             .send()
             .await
-            .map_err(|e| SchemaSerdeError::Registry(e.to_string()))?;
+            .map_err(|e| SchemaSerdeError::RegistryTransport(e.to_string()))?;
         Self::parse(resp).await
     }
 
@@ -146,14 +221,14 @@ impl RegistryClient {
         let text = resp
             .text()
             .await
-            .map_err(|e| SchemaSerdeError::Registry(e.to_string()))?;
+            .map_err(|e| SchemaSerdeError::RegistryTransport(e.to_string()))?;
         if !status.is_success() {
             return Err(SchemaSerdeError::RegistryStatus {
                 status: status.as_u16(),
                 body: text,
             });
         }
-        serde_json::from_str(&text).map_err(|e| SchemaSerdeError::Registry(e.to_string()))
+        serde_json::from_str(&text).map_err(|e| SchemaSerdeError::RegistryDecode(e.to_string()))
     }
 }
 

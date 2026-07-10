@@ -30,6 +30,9 @@ pub(crate) struct PendingRecord {
 /// `RecordBatch` at flush time and assigns `base_sequence`.
 #[derive(Debug)]
 pub(crate) struct InProgressBatch {
+    /// Recovery generation captured when transactional records were accepted.
+    /// A batch is never allowed to cross a transaction recovery boundary.
+    pub transaction_generation: Option<u64>,
     /// Wall-clock time when this batch's first record was appended.
     /// Used by the sender to decide `linger.ms` expiry (the sender
     /// currently relies on the linger ticker rather than reading this
@@ -42,8 +45,9 @@ pub(crate) struct InProgressBatch {
 }
 
 impl InProgressBatch {
-    fn new() -> Self {
+    fn new(transaction_generation: Option<u64>) -> Self {
         Self {
+            transaction_generation,
             first_append_at: Instant::now(),
             size_bytes: 0,
             records: Vec::new(),
@@ -102,20 +106,24 @@ impl Accumulator {
         value: Option<Bytes>,
         headers: Vec<Header>,
         timestamp_ms: i64,
+        transaction_generation: Option<u64>,
     ) -> AppendResult {
         // Approximate the per-record size: 8 bytes overhead + key + value + headers.
         let record_size = approx_record_size(key.as_deref(), value.as_deref(), &headers);
 
         let need_new_batch = match &self.current {
             None => true,
-            Some(b) => b.size_bytes + record_size > self.batch_size && !b.is_empty(),
+            Some(b) => {
+                b.transaction_generation != transaction_generation
+                    || (b.size_bytes + record_size > self.batch_size && !b.is_empty())
+            }
         };
 
         if need_new_batch {
             if let Some(prev) = self.current.take() {
                 self.ready.push_back(prev);
             }
-            self.current = Some(InProgressBatch::new());
+            self.current = Some(InProgressBatch::new(transaction_generation));
         }
 
         let batch = self
@@ -167,7 +175,7 @@ mod tests {
     #[test]
     fn first_append_creates_batch() {
         let mut a = Accumulator::new(1024);
-        let _ = a.try_append(None, Some(Bytes::from_static(b"hi")), vec![], 0);
+        let _ = a.try_append(None, Some(Bytes::from_static(b"hi")), vec![], 0, None);
         let current = a.current.as_ref().expect("append creates current batch");
         check!(
             (
@@ -182,8 +190,8 @@ mod tests {
     fn record_past_batch_size_rolls_over() {
         let record_size = approx_record_size(None, Some(&[0u8; 32]), &[]);
         let mut a = Accumulator::new(record_size * 2 - 1);
-        let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
-        let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
+        let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0, None);
+        let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0, None);
         let current = a
             .current
             .as_ref()
@@ -202,8 +210,8 @@ mod tests {
         let record_size = approx_record_size(None, Some(&[0u8; 32]), &[]);
         let mut a = Accumulator::new(record_size * 2);
 
-        let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
-        let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
+        let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0, None);
+        let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0, None);
 
         let current = a.current.as_ref().unwrap();
         check!(
@@ -220,7 +228,7 @@ mod tests {
     #[test]
     fn seal_moves_current_to_ready() {
         let mut a = Accumulator::new(1024);
-        let _ = a.try_append(None, Some(Bytes::from_static(b"x")), vec![], 0);
+        let _ = a.try_append(None, Some(Bytes::from_static(b"x")), vec![], 0, None);
         a.seal_current();
         assert2::assert!((a.current.is_none(), a.ready.len()) == (true, 1));
     }
@@ -228,7 +236,7 @@ mod tests {
     #[test]
     fn seal_drops_empty_current_batch() {
         let mut a = Accumulator::new(1024);
-        a.current = Some(InProgressBatch::new());
+        a.current = Some(InProgressBatch::new(None));
 
         assert2::assert!(a.current.as_ref().unwrap().is_empty());
         a.seal_current();

@@ -34,7 +34,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -192,6 +192,8 @@ pub(crate) struct SenderConfig {
     /// by the transaction coordinator via `InitProducerId`. The sender reads this
     /// when stamping transactional batches.
     pub txn_pid_epoch: Arc<Mutex<(i64, i16)>>,
+    pub txn_recovery_required: Arc<AtomicBool>,
+    pub txn_recovery_generation: Arc<AtomicU64>,
 }
 
 /// Mutable per-partition pipeline state, owned by [`run`] and threaded into
@@ -268,6 +270,7 @@ struct PreparedBatch {
     /// every linger tick. Routing redirects (`NOT_LEADER` / `UNKNOWN`) leave
     /// this `None` so they resend immediately at the freshly-resolved leader.
     backoff_until: Option<Instant>,
+    transaction_generation: Option<u64>,
 }
 
 /// One drain cycle. Builds the send list — each partition's pending resend
@@ -311,6 +314,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
         );
         finish_in_flight(cfg);
     }
+    fail_recovered_batches(cfg, &mut to_send);
 
     // A partition with a pending resend is "occupied": it must not also send a
     // new batch (two same-partition requests on the wire could reorder and trip
@@ -362,6 +366,11 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
             b
         };
         let Some(batch) = batch else { continue };
+        if batch_crosses_recovery_barrier(cfg, batch.transaction_generation) {
+            fail_batch(batch.records, ProducerError::RecoveryRequired);
+            finish_in_flight(cfg);
+            continue;
+        }
         let mut pb = prepare_batch(cfg, &key.0, key.1, batch).await;
         pb.first_sent = Some(now);
         occupied.insert(key);
@@ -434,13 +443,16 @@ fn collect_retries(
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum BatchVerdict {
     /// Durably written (`NONE`) or already present (`DUPLICATE_SEQUENCE_NUMBER`).
-    Acked { base_offset: i64 },
+    Acked {
+        base_offset: i64,
+    },
     /// Resend verbatim next cycle (transport failure, `OUT_OF_ORDER`, or routing).
     Retry,
     /// Terminal but non-fatal server error — fail the records with `Server(code)`.
     Terminal(i16),
     /// Fatal idempotence failure (`INVALID_PRODUCER_EPOCH`) — fence the producer.
     Fence,
+    RecoveryRequired,
 }
 
 /// Classification of a per-partition `error_code`: either a direct
@@ -560,6 +572,7 @@ async fn prepare_batch(
         records: batch.records,
         first_sent: None,
         backoff_until: None,
+        transaction_generation: batch.transaction_generation,
     }
 }
 
@@ -587,6 +600,8 @@ struct BatchSendResult {
 /// (no spawn), so they share `&cfg` safely.
 #[tracing::instrument(level = "debug", skip_all, fields(batches = to_send.len()))]
 async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Vec<PreparedBatch>) {
+    let mut to_send = to_send;
+    fail_recovered_batches(cfg, &mut to_send);
     let mut results: FuturesUnordered<_> = to_send
         .into_iter()
         .map(|pb| send_one_batch(cfg, pb))
@@ -630,6 +645,10 @@ async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Ve
             // be released), then fence the producer and stop sending.
             BatchVerdict::Fence => {
                 fenced = Some(vec![pb]);
+            }
+            BatchVerdict::RecoveryRequired => {
+                fail_batch(pb.records, ProducerError::RecoveryRequired);
+                finish_in_flight(cfg);
             }
         }
     }
@@ -729,6 +748,13 @@ fn backoff_deadline(now: Instant, retry_backoff: Duration) -> Instant {
     ),
 )]
 async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendResult {
+    if batch_crosses_recovery_barrier(cfg, pb.transaction_generation) {
+        return BatchSendResult {
+            pb,
+            verdict: BatchVerdict::RecoveryRequired,
+            refresh_needed: false,
+        };
+    }
     // A batch prepared before its topic existed (cold-boot race: the WAL topic's
     // leadership is still settling) carries a ZERO `topic_id`. Produce v≥13 keys
     // topics by id and drops the name on the wire, so a ZERO id makes the broker
@@ -958,6 +984,26 @@ async fn update_leaders_from_metadata(cfg: &SenderConfig) {
     }
 }
 
+fn batch_crosses_recovery_barrier(cfg: &SenderConfig, generation: Option<u64>) -> bool {
+    generation.is_some_and(|batch_generation| {
+        cfg.txn_recovery_required.load(Ordering::Acquire)
+            || batch_generation != cfg.txn_recovery_generation.load(Ordering::Acquire)
+    })
+}
+
+fn fail_recovered_batches(cfg: &SenderConfig, batches: &mut Vec<PreparedBatch>) {
+    let mut retained = Vec::with_capacity(batches.len());
+    for batch in batches.drain(..) {
+        if batch_crosses_recovery_barrier(cfg, batch.transaction_generation) {
+            fail_batch(batch.records, ProducerError::RecoveryRequired);
+            finish_in_flight(cfg);
+        } else {
+            retained.push(batch);
+        }
+    }
+    batches.extend(retained);
+}
+
 /// Decrement `in_flight` for a completed batch, waking any `flush` waiter when
 /// it was the last one outstanding.
 fn finish_in_flight(cfg: &SenderConfig) {
@@ -1060,6 +1106,7 @@ fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
         match e {
             ProducerError::Server(c) => Some(ProducerError::Server(*c)),
             ProducerError::FencedProducer => Some(ProducerError::FencedProducer),
+            ProducerError::RecoveryRequired => Some(ProducerError::RecoveryRequired),
             ProducerError::Closed => Some(ProducerError::Closed),
             ProducerError::FlushTimeout => Some(ProducerError::FlushTimeout),
             ProducerError::BufferFull => Some(ProducerError::BufferFull),
@@ -1136,6 +1183,7 @@ mod tests {
             records: vec![record],
             first_sent,
             backoff_until: None,
+            transaction_generation: None,
         };
         (pb, rx)
     }
@@ -1298,7 +1346,10 @@ mod tests {
 /// described in the module docs.
 #[cfg(test)]
 mod harness {
-    use std::sync::{Mutex as StdMutex, atomic::AtomicI64};
+    use std::sync::{
+        Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicI64, AtomicU64},
+    };
 
     use assert2::check;
     use crabka_client_core::ClientError;
@@ -1407,6 +1458,9 @@ mod harness {
         /// The `leader` argument of every `send_produce` call, in order, so a
         /// test can assert how a batch was routed.
         sent_leaders: StdMutex<Vec<Option<i32>>>,
+        /// Signals each entry into `send_produce`, including injected failures
+        /// before the broker model applies a request.
+        send_started: Notify,
         /// Count of `refresh_metadata` calls, so a test can assert the sender
         /// refreshed after a routing/transport failure.
         refreshes: AtomicUsize,
@@ -1448,6 +1502,7 @@ mod harness {
                 refresh_response: StdMutex::new(MetadataResponse::default()),
                 known_brokers: StdMutex::new(HashSet::new()),
                 sent_leaders: StdMutex::new(Vec::new()),
+                send_started: Notify::new(),
                 refreshes: AtomicUsize::new(0),
                 offsets_seen: AtomicI64::new(0),
             })
@@ -1507,6 +1562,12 @@ mod harness {
         /// The `leader` argument of every `send_produce` call, in order.
         fn sent_leaders(self: &Arc<Self>) -> Vec<Option<i32>> {
             self.sent_leaders.lock().unwrap().clone()
+        }
+
+        /// Total Produce transport calls, including failures before the broker
+        /// model applies the request.
+        fn send_count(self: &Arc<Self>) -> usize {
+            self.sent_leaders.lock().unwrap().len()
         }
 
         /// How many times the sender refreshed cluster metadata.
@@ -1583,6 +1644,7 @@ mod harness {
             req: ProduceRequest,
         ) -> Result<ProduceResponse, ClientError> {
             self.sent_leaders.lock().unwrap().push(leader);
+            self.send_started.notify_one();
             self.last_timeout_ms
                 .store(i64::from(req.timeout_ms), Ordering::Relaxed);
 
@@ -1699,6 +1761,8 @@ mod harness {
         shutdown: CancellationToken,
         partitioner: Arc<UniformStickyPartitioner>,
         transport: Arc<MockTransport>,
+        recovery_required: Arc<AtomicBool>,
+        recovery_generation: Arc<AtomicU64>,
         handle: tokio::task::JoinHandle<()>,
     }
 
@@ -1726,6 +1790,8 @@ mod harness {
         let partition_leaders: Arc<DashMap<(String, i32), i32>> = Arc::new(DashMap::new());
         let partitioner = Arc::new(UniformStickyPartitioner::new());
         let state = Arc::new(AtomicU8::new(STATE_ACTIVE));
+        let recovery_required = Arc::new(AtomicBool::new(false));
+        let recovery_generation = Arc::new(AtomicU64::new(0));
 
         // Box the same Arc<MockTransport> for the sender; keep a clone for the
         // test to inspect.
@@ -1752,6 +1818,8 @@ mod harness {
             transactional_id: None,
             txn_state: Arc::new(Mutex::new(TxnState::Uninitialized)),
             txn_pid_epoch: Arc::new(Mutex::new((1, 0))),
+            txn_recovery_required: Arc::clone(&recovery_required),
+            txn_recovery_generation: Arc::clone(&recovery_generation),
         };
 
         let handle = tokio::spawn(run(cfg));
@@ -1767,6 +1835,8 @@ mod harness {
             shutdown,
             partitioner,
             transport,
+            recovery_required,
+            recovery_generation,
             handle,
         }
     }
@@ -1792,10 +1862,11 @@ mod harness {
         let mut rxs = Vec::with_capacity(n);
         for _ in 0..n {
             let mut a = acc.lock().await;
-            let rx = match a.try_append(None, Some(bytes::Bytes::from_static(b"x")), vec![], 0) {
-                crate::accumulator::AppendResult::Appended(rx) => rx,
-                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
-            };
+            let rx =
+                match a.try_append(None, Some(bytes::Bytes::from_static(b"x")), vec![], 0, None) {
+                    crate::accumulator::AppendResult::Appended(rx) => rx,
+                    crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+                };
             // Seal so each record becomes its own ready batch with a distinct
             // base_sequence — maximizing same-partition pipelining pressure.
             a.seal_current();
@@ -1839,8 +1910,13 @@ mod harness {
         {
             let mut a = acc.lock().await;
             for _ in 0..n {
-                let rx = match a.try_append(None, Some(bytes::Bytes::from_static(b"x")), vec![], 0)
-                {
+                let rx = match a.try_append(
+                    None,
+                    Some(bytes::Bytes::from_static(b"x")),
+                    vec![],
+                    0,
+                    None,
+                ) {
                     crate::accumulator::AppendResult::Appended(rx) => rx,
                     crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
                 };
@@ -2546,6 +2622,99 @@ mod harness {
             .expect("acked Ok");
 
         assert2::assert!(h.transport.last_timeout_ms() == 5000);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn queued_transactional_batch_is_failed_after_recovery_before_reinitialization() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 1, Duration::from_secs(30));
+        let accumulator = Arc::new(Mutex::new(Accumulator::new(1024)));
+        h.accumulators
+            .insert(("t".to_string(), 0), Arc::clone(&accumulator));
+        let rx = match accumulator.lock().await.try_append(
+            None,
+            Some(bytes::Bytes::from_static(b"old")),
+            vec![],
+            0,
+            Some(0),
+        ) {
+            crate::accumulator::AppendResult::Appended(rx) => rx,
+            crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+        };
+
+        h.recovery_required.store(true, Ordering::Release);
+        h.recovery_generation.store(1, Ordering::Release);
+        // Simulate a completed InitProducerId before the sender gets to drain:
+        // the old generation must still be rejected under the new epoch.
+        h.recovery_required.store(false, Ordering::Release);
+        h.wake_tx.send(()).await.expect("sender is running");
+
+        let acknowledgement = tokio::time::timeout(Duration::from_secs(3), rx)
+            .await
+            .expect("recovery must resolve queued acknowledgement")
+            .expect("acknowledgement channel remains connected");
+        assert!(matches!(
+            acknowledgement,
+            Err(ProducerError::RecoveryRequired)
+        ));
+        assert!(transport.applied.load(Ordering::Acquire) == 0);
+
+        shutdown(h).await;
+    }
+
+    /// A transport-failed transactional batch occupies the retry slot. Once
+    /// reinitialization advances the recovery generation, that slot must fail
+    /// locally rather than resend a batch from the prior transaction epoch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_slot_transactional_batch_is_failed_after_recovery_without_resend() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.fail_once_on(0);
+        let h = spawn_sender_with(transport.clone(), 1, Duration::from_secs(30));
+        let accumulator = Arc::new(Mutex::new(Accumulator::new(1024)));
+        h.accumulators
+            .insert(("t".to_string(), 0), Arc::clone(&accumulator));
+        let rx = match accumulator.lock().await.try_append(
+            None,
+            Some(bytes::Bytes::from_static(b"old")),
+            vec![],
+            0,
+            Some(0),
+        ) {
+            crate::accumulator::AppendResult::Appended(rx) => rx,
+            crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+        };
+
+        let initial_send = transport.send_started.notified();
+        h.wake_tx.send(()).await.expect("sender is running");
+        tokio::time::timeout(Duration::from_secs(3), initial_send)
+            .await
+            .expect("transactional batch should reach the controlled transport failure");
+        assert!(
+            transport.send_count() == 1,
+            "initial send must fail exactly once"
+        );
+
+        // Mirror successful reinitialization: the epoch generation advances and
+        // the recovery barrier is lifted before the sender examines its retry slot.
+        h.recovery_required.store(true, Ordering::Release);
+        h.recovery_generation.store(1, Ordering::Release);
+        h.recovery_required.store(false, Ordering::Release);
+        h.wake_tx.send(()).await.expect("sender is running");
+
+        let acknowledgement = tokio::time::timeout(Duration::from_secs(3), rx)
+            .await
+            .expect("recovery must resolve retry-slot acknowledgement")
+            .expect("acknowledgement channel remains connected");
+        assert!(matches!(
+            acknowledgement,
+            Err(ProducerError::RecoveryRequired)
+        ));
+        assert!(
+            transport.send_count() == 1,
+            "a retry-slot batch from the old generation must not resend"
+        );
 
         shutdown(h).await;
     }
