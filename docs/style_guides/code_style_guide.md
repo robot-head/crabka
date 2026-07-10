@@ -28,7 +28,7 @@ Clippy is the practical enforcer of most of these idioms; under `-D warnings` wi
 
 ## Toolchain and Edition
 
-- The workspace pins an **exact stable toolchain** in [`rust-toolchain.toml`](../../rust-toolchain.toml) (`channel = "1.96.1"` with `rustfmt` and `clippy`), so every developer and CI build compiles against the same compiler.
+- The workspace pins an **exact stable toolchain** in [`rust-toolchain.toml`](../../rust-toolchain.toml) (`channel = "1.97.0"` with `rustfmt` and `clippy`), so every developer and CI build compiles against the same compiler.
 - The edition and MSRV are defined once in the workspace [`Cargo.toml`](../../Cargo.toml) (`[workspace.package]` `edition = "2024"` and `rust-version`) and inherited per crate via `edition.workspace = true` / `rust-version.workspace = true` — never hard-code them in a crate's `Cargo.toml`. Check that file for the current values.
 - Do not use nightly-only *language* features in crate code. If a feature is not available on the pinned stable toolchain, it is not available here.
 - The **one** sanctioned use of nightly is `cargo +nightly fmt` (see [Formatting](#formatting)), because `rustfmt.toml` enables a formatting option that is still nightly-gated. That affects only how source is laid out, never what the compiled crates depend on.

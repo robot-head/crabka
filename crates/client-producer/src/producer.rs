@@ -994,9 +994,9 @@ mod tests {
 
             let addr = find_coordinator(&producer, kind, key).await;
 
-            assert!(addr == "127.0.0.1:19092");
+            assert_eq!(addr, "127.0.0.1:19092");
             let requests = seen.lock().unwrap();
-            assert!(*requests == vec![expected_request]);
+            assert_eq!(*requests, vec![expected_request]);
             mock.stop();
         }
     }

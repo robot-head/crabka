@@ -23,7 +23,7 @@ mod union_store;
 
 /// Prost-generated perftools.profiles wire types.
 pub mod proto {
-    #![allow(clippy::all, clippy::pedantic)]
+    #![allow(clippy::all, clippy::pedantic, clippy::useless_borrows_in_formatting)]
 
     include!(concat!(env!("OUT_DIR"), "/perftools.profiles.rs"));
 }
