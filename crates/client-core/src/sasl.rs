@@ -531,7 +531,7 @@ mod tests {
             .unwrap();
             let au_req = reply_frame(&mut server, &au, true).await;
             let au_decoded = decode_sasl_authenticate_frame!(au_req, 2);
-            assert!(au_decoded.auth_bytes.as_ref() == b"\0u\0p");
+            assert_eq!(au_decoded.auth_bytes.as_ref(), b"\0u\0p");
         });
         let creds = SaslCredentials::Plain {
             username: "u".into(),
@@ -562,7 +562,7 @@ mod tests {
                 .unwrap();
                 let req = reply_frame(&mut server, &au, true).await;
                 let decoded = decode_sasl_authenticate_frame!(req, expected_corr);
-                assert!(decoded.auth_bytes.as_ref() == expected_payload);
+                assert_eq!(decoded.auth_bytes.as_ref(), expected_payload);
             }
         });
 

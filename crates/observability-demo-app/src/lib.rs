@@ -11,6 +11,8 @@ pub const FILE_DESCRIPTOR_SET_BYTES: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/file_descriptor_set.bin"));
 
 mod order {
+    #![allow(clippy::useless_borrows_in_formatting)]
+
     include!(concat!(env!("OUT_DIR"), "/demo.rs"));
 }
 pub use order::Order;

@@ -1116,7 +1116,7 @@ fn parse_instant_series(resp: &Value) -> Vec<(BTreeMap<String, String>, f64)> {
             if let Some(value) = columns.get(index).and_then(Value::as_array).and_then(|c| {
                 c.last()
                     .and_then(Value::as_f64)
-                    .or(Some(f64::NAN).filter(|_| !c.is_empty()))
+                    .or((!c.is_empty()).then_some(f64::NAN))
             }) {
                 out.push((labels, value));
             }
