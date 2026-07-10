@@ -499,7 +499,7 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
     }
 
     // (3) tombstone-aging: no surviving tombstone has an elapsed horizon.
-    for (_i, e) in next.iter().enumerate() {
+    for e in next.iter() {
         if matches!(e.kind, EntryKind::Data { value: None })
             && let Some(h) = e.horizon
         {

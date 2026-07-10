@@ -1509,7 +1509,7 @@ authorization:
             .validate();
             match expected_error {
                 Some(fragment) => {
-                    assert2::assert!(result.is_err_and(|error| error.contains(fragment)))
+                    assert2::assert!(result.is_err_and(|error| error.contains(fragment)));
                 }
                 None => assert2::assert!(result == Ok(())),
             }
@@ -1652,7 +1652,7 @@ authorization:
             .validate();
             match expected_error {
                 Some(fragment) => {
-                    assert2::assert!(result.is_err_and(|error| error.contains(fragment)))
+                    assert2::assert!(result.is_err_and(|error| error.contains(fragment)));
                 }
                 None => assert2::assert!(result == Ok(())),
             }

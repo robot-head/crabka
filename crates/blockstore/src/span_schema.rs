@@ -317,7 +317,7 @@ mod tests {
             let (_, f) = s.column_with_name(column).unwrap();
             match f.data_type() {
                 DataType::List(inner) => {
-                    assert2::assert!(matches!(inner.data_type(), DataType::Struct(_)))
+                    assert2::assert!(matches!(inner.data_type(), DataType::Struct(_)));
                 }
                 other => panic!("expected List<Struct>, got {other:?}"),
             }

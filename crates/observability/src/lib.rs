@@ -12091,7 +12091,7 @@ fn metric_series_labels(series: &Value) -> Option<Labels> {
 }
 
 fn sort_loki_metric_results_by_labels(results: &mut [Value]) {
-    results.sort_by_key(|left| metric_series_labels(left));
+    results.sort_by_key(metric_series_labels);
 }
 
 fn metric_vector_matching_key(labels: &Labels, matching: Option<&MetricVectorMatching>) -> Labels {
