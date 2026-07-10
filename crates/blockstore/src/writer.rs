@@ -188,7 +188,7 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use assert2::{assert, check};
+    use assert2::assert;
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
     use super::*;
@@ -266,10 +266,7 @@ mod tests {
             &SummaryColumns::new("trace_id", "start_unix_nano"),
         )
         .unwrap();
-        check!(min_ts == 100);
-        check!(max_ts == 200);
-        check!(row_count == 2);
-        check!(fps.is_empty());
+        assert_eq!((min_ts, max_ts, row_count, fps), (100, 200, 2, Vec::new()));
     }
 
     #[test]

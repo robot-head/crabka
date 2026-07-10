@@ -134,7 +134,6 @@ mod tests {
         expected.sort_unstable();
         expected.dedup();
         assert!(got == expected);
-        assert!(got.windows(2).all(|w| w[0] < w[1]), "sorted, deduped");
     }
 
     #[test]

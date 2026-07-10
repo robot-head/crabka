@@ -62,45 +62,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn schema_with_required_columns_is_valid() {
-        let schema = Schema::new(vec![
-            Field::new(COL_FINGERPRINT, DataType::UInt64, false),
-            Field::new(COL_TIMESTAMP, DataType::Int64, false),
-            Field::new("line", DataType::Utf8, true),
-        ]);
-        assert!(validate_block_schema(&schema).is_ok());
-    }
-
-    #[test]
-    fn schema_missing_fingerprint_is_rejected() {
-        let schema = Schema::new(vec![Field::new(COL_TIMESTAMP, DataType::Int64, false)]);
-        assert!(validate_block_schema(&schema).is_err());
-    }
-
-    #[test]
-    fn schema_with_wrong_timestamp_type_is_rejected() {
-        let schema = Schema::new(vec![
-            Field::new(COL_FINGERPRINT, DataType::UInt64, false),
-            Field::new(COL_TIMESTAMP, DataType::Utf8, false),
-        ]);
-        assert!(validate_block_schema(&schema).is_err());
-    }
-
-    #[test]
-    fn schema_with_nullable_fingerprint_is_rejected() {
-        let schema = Schema::new(vec![
-            Field::new(COL_FINGERPRINT, DataType::UInt64, true),
-            Field::new(COL_TIMESTAMP, DataType::Int64, false),
-        ]);
-        assert!(validate_block_schema(&schema).is_err());
-    }
-
-    #[test]
-    fn schema_with_nullable_timestamp_is_rejected() {
-        let schema = Schema::new(vec![
-            Field::new(COL_FINGERPRINT, DataType::UInt64, false),
-            Field::new(COL_TIMESTAMP, DataType::Int64, true),
-        ]);
-        assert!(validate_block_schema(&schema).is_err());
+    fn validates_required_block_schema_columns() {
+        for (name, schema, want_valid) in [
+            (
+                "required columns",
+                Schema::new(vec![
+                    Field::new(COL_FINGERPRINT, DataType::UInt64, false),
+                    Field::new(COL_TIMESTAMP, DataType::Int64, false),
+                    Field::new("line", DataType::Utf8, true),
+                ]),
+                true,
+            ),
+            (
+                "missing fingerprint",
+                Schema::new(vec![Field::new(COL_TIMESTAMP, DataType::Int64, false)]),
+                false,
+            ),
+            (
+                "wrong timestamp type",
+                Schema::new(vec![
+                    Field::new(COL_FINGERPRINT, DataType::UInt64, false),
+                    Field::new(COL_TIMESTAMP, DataType::Utf8, false),
+                ]),
+                false,
+            ),
+            (
+                "nullable fingerprint",
+                Schema::new(vec![
+                    Field::new(COL_FINGERPRINT, DataType::UInt64, true),
+                    Field::new(COL_TIMESTAMP, DataType::Int64, false),
+                ]),
+                false,
+            ),
+            (
+                "nullable timestamp",
+                Schema::new(vec![
+                    Field::new(COL_FINGERPRINT, DataType::UInt64, false),
+                    Field::new(COL_TIMESTAMP, DataType::Int64, true),
+                ]),
+                false,
+            ),
+        ] {
+            assert!(
+                validate_block_schema(&schema).is_ok() == want_valid,
+                "case {name}"
+            );
+        }
     }
 }

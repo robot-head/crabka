@@ -517,10 +517,16 @@ mod tests {
 
     #[test]
     fn round_trip_partition_delete_each_state() {
-        for state in [
-            RemotePartitionDeleteState::DeletePartitionMarked,
-            RemotePartitionDeleteState::DeletePartitionStarted,
-            RemotePartitionDeleteState::DeletePartitionFinished,
+        for (name, state) in [
+            ("marked", RemotePartitionDeleteState::DeletePartitionMarked),
+            (
+                "started",
+                RemotePartitionDeleteState::DeletePartitionStarted,
+            ),
+            (
+                "finished",
+                RemotePartitionDeleteState::DeletePartitionFinished,
+            ),
         ] {
             let event = MetadataEvent::PartitionDelete(RemotePartitionDeleteMetadata {
                 topic_id_partition: tp(),
@@ -529,7 +535,7 @@ mod tests {
                 broker_id: 1,
             });
             let bytes = event.encode();
-            assert!(MetadataEvent::decode(&bytes).unwrap() == event);
+            assert_eq!(MetadataEvent::decode(&bytes).unwrap(), event, "case {name}");
         }
     }
 
@@ -540,9 +546,6 @@ mod tests {
         let bytes = event.encode();
         let back = MetadataEvent::decode(&bytes).expect("decodes");
         assert!(back == event);
-        if let MetadataEvent::AddSegment(ref md) = back {
-            assert!(md.txn_index_empty());
-        }
     }
 
     #[test]

@@ -126,7 +126,6 @@ impl RemoteLogMetadataManager for SwappableRlmm {
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::assert;
     use crabka_remote_storage::{
         InmemoryRemoteLogMetadataManager, RemoteLogSegmentId, RemoteLogSegmentState,
     };
@@ -160,24 +159,39 @@ mod tests {
         let swap = SwappableRlmm::new(first.clone());
 
         // Write through the facade lands in `first`.
-        swap.add_remote_log_segment_metadata(started(10, 0, 99))
+        let first_segment = started(10, 0, 99);
+        swap.add_remote_log_segment_metadata(first_segment.clone())
             .unwrap();
-        assert!(first.list_remote_log_segments(&tp()).unwrap().len() == 1);
+        assert_eq!(
+            first.list_remote_log_segments(&tp()).unwrap(),
+            vec![first_segment.clone()]
+        );
 
         // Swap in a fresh empty backing impl; reads now show the new
         // (empty) one, not the original.
         let second: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         swap.swap(second.clone());
-        assert!(swap.list_remote_log_segments(&tp()).unwrap().is_empty());
         // The previous `first` is undisturbed — the facade just stopped
         // pointing at it.
-        assert!(first.list_remote_log_segments(&tp()).unwrap().len() == 1);
+        assert_eq!(
+            (
+                swap.list_remote_log_segments(&tp()).unwrap(),
+                first.list_remote_log_segments(&tp()).unwrap(),
+            ),
+            (Vec::new(), vec![first_segment.clone()])
+        );
 
         // Writes after the swap go to `second`.
-        swap.add_remote_log_segment_metadata(started(11, 100, 199))
+        let second_segment = started(11, 100, 199);
+        swap.add_remote_log_segment_metadata(second_segment.clone())
             .unwrap();
-        assert!(second.list_remote_log_segments(&tp()).unwrap().len() == 1);
-        assert!(first.list_remote_log_segments(&tp()).unwrap().len() == 1);
+        assert_eq!(
+            (
+                second.list_remote_log_segments(&tp()).unwrap(),
+                first.list_remote_log_segments(&tp()).unwrap(),
+            ),
+            (vec![second_segment], vec![first_segment])
+        );
     }
 }

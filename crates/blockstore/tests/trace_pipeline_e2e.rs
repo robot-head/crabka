@@ -181,19 +181,32 @@ async fn trace_block_built_indexed_and_located_by_id() {
 
     // INDEX-LESS by-id locate: the bloom (not a global map) finds each trace's
     // block, and only that block.
-    let cand_a = idx.candidate_blocks_for_trace("tenant", &trace_a, 0, 10_000);
-    assert!(cand_a == vec!["blocks/t.parquet".to_string()]);
-    let cand_b = idx.candidate_blocks_for_trace("tenant", &trace_b, 0, 10_000);
-    assert!(cand_b == vec!["blocks/t.parquet".to_string()]);
-    let cand_c = idx.candidate_blocks_for_trace("tenant", &trace_c, 0, 10_000);
-    assert!(cand_c == vec!["blocks/other.parquet".to_string()]);
-
-    // A trace_id the blooms never saw must not (almost surely) match any block.
     let never = [0u8; 16];
-    assert!(
-        idx.candidate_blocks_for_trace("tenant", &never, 0, 10_000)
-            .is_empty()
-    );
+    for (name, trace_id, expected) in [
+        (
+            "first trace in shared block",
+            trace_a,
+            vec!["blocks/t.parquet".to_string()],
+        ),
+        (
+            "second trace in shared block",
+            trace_b,
+            vec!["blocks/t.parquet".to_string()],
+        ),
+        (
+            "trace in other block",
+            trace_c,
+            vec!["blocks/other.parquet".to_string()],
+        ),
+        ("trace absent from blooms", never, Vec::new()),
+    ] {
+        assert_eq!(
+            idx.candidate_blocks_for_trace("tenant", &trace_id, 0, 10_000),
+            expected,
+            "case {name}"
+        );
+    }
+    let cand_a = idx.candidate_blocks_for_trace("tenant", &trace_a, 0, 10_000);
 
     // Read the located block back and confirm both traces survived the round-trip.
     let back = read_block(store, &cand_a[0]).await.unwrap();
@@ -225,8 +238,10 @@ async fn trace_block_built_indexed_and_located_by_id() {
 
     // Rows are grouped/sorted by trace_id: trace A occupies rows 0..3, the
     // grandchild (deepest) is row 2. The root interval must strictly contain it.
-    assert!(trace_ids.value(0) == &trace_a);
-    assert!(trace_ids.value(2) == &trace_a);
+    assert_eq!(
+        (trace_ids.value(0), trace_ids.value(2)),
+        (trace_a.as_slice(), trace_a.as_slice())
+    );
     check!(left.value(0) < left.value(2));
     check!(right.value(2) < right.value(0));
 

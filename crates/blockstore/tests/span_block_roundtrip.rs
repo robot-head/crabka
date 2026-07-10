@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use arrow::{
     array::{DictionaryArray, FixedSizeBinaryArray, Int64Array, StringArray},
-    datatypes::{DataType, Int32Type},
+    datatypes::Int32Type,
     record_batch::RecordBatch,
 };
 use crabka_blockstore::{
@@ -77,16 +77,6 @@ async fn span_block_promotes_configured_attribute_columns() {
     )
     .unwrap();
 
-    assert_eq!(batch.schema(), schema);
-    assert_eq!(
-        batch
-            .schema()
-            .field_with_name("attr.http.method")
-            .unwrap()
-            .data_type(),
-        &DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::Utf8))
-    );
-
     let methods = batch
         .column_by_name("attr.http.method")
         .unwrap()
@@ -99,14 +89,20 @@ async fn span_block_promotes_configured_attribute_columns() {
         .downcast_ref::<StringArray>()
         .unwrap();
     let method_key = usize::try_from(methods.keys().value(0)).unwrap();
-    assert_eq!(method_values.value(method_key), "GET");
     let statuses = batch
         .column_by_name("attr.http.status_code")
         .unwrap()
         .as_any()
         .downcast_ref::<Int64Array>()
         .unwrap();
-    assert_eq!(statuses.value(0), 200);
+    assert_eq!(
+        (
+            batch.schema(),
+            method_values.value(method_key),
+            statuses.value(0),
+        ),
+        (schema, "GET", 200)
+    );
 
     validate_against(&batch.schema(), &span_block_decl()).unwrap();
 }
@@ -131,12 +127,11 @@ async fn span_block_validates_and_round_trips() {
 
     let back = read_block(store, "blocks/spans.parquet").await.unwrap();
     let total: usize = back.iter().map(RecordBatch::num_rows).sum();
-    assert_eq!(total, 2);
     let tids = back[0]
         .column_by_name("trace_id")
         .unwrap()
         .as_any()
         .downcast_ref::<FixedSizeBinaryArray>()
         .unwrap();
-    assert_eq!(tids.value(0), &[1_u8; 16]);
+    assert_eq!((total, tids.value(0)), (2, [1_u8; 16].as_slice()));
 }

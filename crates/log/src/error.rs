@@ -77,8 +77,6 @@ pub enum LogError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-
     use super::*;
 
     #[test]
@@ -87,7 +85,9 @@ mod tests {
             segment: Offset(0),
             file_offset: 1024,
         };
-        assert!(e.to_string().contains("offset 1024"));
-        assert!(e.to_string().contains("segment 0"));
+        assert_eq!(
+            e.to_string(),
+            "partial batch at offset 1024 in segment 0: truncating"
+        );
     }
 }

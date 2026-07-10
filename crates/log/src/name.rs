@@ -79,7 +79,11 @@ mod tests {
 
     #[test]
     fn rejects_wrong_digit_count() {
-        assert!(parse_log_filename("123.log").is_err());
-        assert!(parse_log_filename("000000000000000001847.log").is_err()); // 21 digits
+        for (name, filename) in [
+            ("too few digits", "123.log"),
+            ("too many digits", "000000000000000001847.log"),
+        ] {
+            assert!(parse_log_filename(filename).is_err(), "case {name}");
+        }
     }
 }

@@ -135,23 +135,32 @@ mod tests {
     #[test]
     fn reads_return_not_ready_with_partition() {
         let m = NotReadyRlmm::new();
-        let err = m
-            .remote_log_segment_metadata(&tp(), LeaderEpoch(0), 0)
-            .unwrap_err();
-        assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
-
-        let err = m.list_remote_log_segments(&tp()).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
-
-        let err = m
-            .list_remote_log_segments_by_epoch(&tp(), LeaderEpoch(0))
-            .unwrap_err();
-        assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
-
-        let err = m
-            .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
-            .unwrap_err();
-        assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
+        for (name, err) in [
+            (
+                "segment lookup",
+                m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 0)
+                    .unwrap_err(),
+            ),
+            (
+                "segment list",
+                m.list_remote_log_segments(&tp()).unwrap_err(),
+            ),
+            (
+                "epoch segment list",
+                m.list_remote_log_segments_by_epoch(&tp(), LeaderEpoch(0))
+                    .unwrap_err(),
+            ),
+            (
+                "highest epoch offset",
+                m.highest_offset_for_epoch(&tp(), LeaderEpoch(0))
+                    .unwrap_err(),
+            ),
+        ] {
+            assert!(
+                matches!(err, RemoteStorageError::NotReady { partition: 3 }),
+                "case {name}"
+            );
+        }
     }
 
     #[test]

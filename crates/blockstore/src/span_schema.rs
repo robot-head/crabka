@@ -291,13 +291,16 @@ mod tests {
     #[test]
     fn nested_set_columns_are_int32() {
         let s = span_block_schema();
-        for c in [
-            SCOL_NESTED_SET_LEFT,
-            SCOL_NESTED_SET_RIGHT,
-            SCOL_PARENT_ID,
-            SCOL_CHILD_COUNT,
+        for (name, column) in [
+            ("nested-set left", SCOL_NESTED_SET_LEFT),
+            ("nested-set right", SCOL_NESTED_SET_RIGHT),
+            ("parent id", SCOL_PARENT_ID),
+            ("child count", SCOL_CHILD_COUNT),
         ] {
-            assert!(s.column_with_name(c).unwrap().1.data_type() == &DataType::Int32);
+            assert!(
+                s.column_with_name(column).unwrap().1.data_type() == &DataType::Int32,
+                "case {name}"
+            );
         }
     }
 
@@ -317,10 +320,13 @@ mod tests {
     #[test]
     fn events_and_links_are_list_of_struct() {
         let s = span_block_schema();
-        for c in [SCOL_EVENTS, SCOL_LINKS] {
-            let (_, f) = s.column_with_name(c).unwrap();
+        for (name, column) in [("events", SCOL_EVENTS), ("links", SCOL_LINKS)] {
+            let (_, f) = s.column_with_name(column).unwrap();
             match f.data_type() {
-                DataType::List(inner) => assert!(matches!(inner.data_type(), DataType::Struct(_))),
+                DataType::List(inner) => assert!(
+                    matches!(inner.data_type(), DataType::Struct(_)),
+                    "case {name}"
+                ),
                 other => panic!("expected List<Struct>, got {other:?}"),
             }
         }
@@ -328,24 +334,39 @@ mod tests {
 
     #[test]
     fn kind_and_status_enums_round_trip_i32() {
-        for k in [
-            SpanKind::Unspecified,
-            SpanKind::Internal,
-            SpanKind::Server,
-            SpanKind::Client,
-            SpanKind::Producer,
-            SpanKind::Consumer,
+        for (name, kind) in [
+            ("unspecified", SpanKind::Unspecified),
+            ("internal", SpanKind::Internal),
+            ("server", SpanKind::Server),
+            ("client", SpanKind::Client),
+            ("producer", SpanKind::Producer),
+            ("consumer", SpanKind::Consumer),
         ] {
-            assert!(SpanKind::from_i32(k.as_i32()) == k);
+            assert!(SpanKind::from_i32(kind.as_i32()) == kind, "case {name}");
         }
-        for s in [StatusCode::Unset, StatusCode::Ok, StatusCode::Error] {
-            assert!(StatusCode::from_i32(s.as_i32()) == s);
+        for (name, status) in [
+            ("unset", StatusCode::Unset),
+            ("ok", StatusCode::Ok),
+            ("error", StatusCode::Error),
+        ] {
+            assert!(
+                StatusCode::from_i32(status.as_i32()) == status,
+                "case {name}"
+            );
         }
     }
 
     #[test]
     fn span_decl_sort_key_is_trace_id_then_start() {
-        let d = span_block_decl();
-        assert!(d.sort_key == vec![SCOL_TRACE_ID.to_string(), SCOL_START_NANO.to_string()]);
+        assert_eq!(
+            span_block_decl(),
+            BlockSchema {
+                required: vec![
+                    RequiredColumn::new(SCOL_TRACE_ID, DataType::FixedSizeBinary(16), false,),
+                    RequiredColumn::new(SCOL_START_NANO, DataType::Int64, false),
+                ],
+                sort_key: vec![SCOL_TRACE_ID.to_string(), SCOL_START_NANO.to_string()],
+            }
+        );
     }
 }

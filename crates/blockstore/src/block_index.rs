@@ -63,10 +63,16 @@ mod tests {
 
     #[test]
     fn series_declaration_lists_mandatory_columns() {
-        let decl = series_block_schema();
-        let names: Vec<&str> = decl.required.iter().map(|c| c.name.as_str()).collect();
-        assert!(names == vec!["series_fingerprint", "timestamp"]);
-        assert!(decl.sort_key == vec!["series_fingerprint".to_string(), "timestamp".to_string()]);
+        assert_eq!(
+            series_block_schema(),
+            BlockSchema {
+                required: vec![
+                    RequiredColumn::new("series_fingerprint", DataType::UInt64, false),
+                    RequiredColumn::new("timestamp", DataType::Int64, false),
+                ],
+                sort_key: vec!["series_fingerprint".to_string(), "timestamp".to_string()],
+            }
+        );
     }
 
     #[test]

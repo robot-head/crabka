@@ -236,8 +236,13 @@ mod tests {
     #[test]
     fn maps_warn_to_warning_severity() {
         let v = capture(|| tracing::warn!("disk almost full"));
-        assert!(v["severity"] == "WARNING");
-        assert!(v["message"] == "disk almost full");
+        assert_eq!(
+            (&v["severity"], &v["message"]),
+            (
+                &serde_json::json!("WARNING"),
+                &serde_json::json!("disk almost full")
+            )
+        );
     }
 
     #[test]
@@ -254,7 +259,9 @@ mod tests {
         let v = capture(|| {
             tracing::info!(offset = 42_u64, ratio = 0.5_f64, "metrics");
         });
-        assert!(v["offset"] == 42_u64);
-        assert!(v["ratio"] == 0.5);
+        assert_eq!(
+            (&v["offset"], &v["ratio"]),
+            (&serde_json::json!(42_u64), &serde_json::json!(0.5))
+        );
     }
 }

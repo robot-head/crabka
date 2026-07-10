@@ -233,7 +233,7 @@ fn get_nullable_bytes(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use bytes::BytesMut;
 
     use super::*;
@@ -269,25 +269,17 @@ mod tests {
     }
 
     #[test]
-    fn v0_roundtrip() {
-        let m = fixture_v0();
-        let mut buf = BytesMut::new();
-        m.encode_into(&mut buf);
-        assert!(buf.len() == m.encoded_len());
-        let mut cur: &[u8] = &buf[..];
-        let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert!(decoded == m);
-    }
-
-    #[test]
-    fn v1_roundtrip() {
-        let m = fixture_v1();
-        let mut buf = BytesMut::new();
-        m.encode_into(&mut buf);
-        assert!(buf.len() == m.encoded_len());
-        let mut cur: &[u8] = &buf[..];
-        let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert!(decoded == m);
+    fn message_roundtrips() {
+        for (name, message) in [("v0", fixture_v0()), ("v1", fixture_v1())] {
+            let mut buffer = BytesMut::new();
+            message.encode_into(&mut buffer);
+            let decoded = Message::decode_from(&mut &buffer[..], message.encoded_len()).unwrap();
+            assert_eq!(
+                (buffer.len(), decoded),
+                (message.encoded_len(), message),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -297,9 +289,7 @@ mod tests {
         m.encode_into(&mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        check!(decoded == m);
-        check!(decoded.key.is_none());
-        check!(decoded.value.is_none());
+        assert_eq!(decoded, m);
     }
 
     #[test]
@@ -335,14 +325,18 @@ mod tests {
 
     #[test]
     fn attrs_codec_roundtrip() {
-        for c in [
-            CompressionType::None,
-            CompressionType::Gzip,
-            CompressionType::Snappy,
-            CompressionType::Lz4,
+        for (name, compression) in [
+            ("none", CompressionType::None),
+            ("gzip", CompressionType::Gzip),
+            ("snappy", CompressionType::Snappy),
+            ("lz4", CompressionType::Lz4),
         ] {
-            let bits = attrs_with_compression(0, c);
-            assert!(compression_from_attrs(bits).unwrap() == c);
+            let bits = attrs_with_compression(0, compression);
+            assert_eq!(
+                compression_from_attrs(bits).unwrap(),
+                compression,
+                "case {name}"
+            );
         }
     }
 
@@ -362,33 +356,49 @@ mod tests {
     #[test]
     fn attribute_bit_constants() {
         // `1 << 3`; a `>>` flip would zero the timestamp-type bit.
-        assert!(attrs::TIMESTAMP_TYPE_BIT == 0b0000_1000);
-        assert!(attrs::COMPRESSION_MASK == 0b0000_0111);
+        assert_eq!(
+            (attrs::TIMESTAMP_TYPE_BIT, attrs::COMPRESSION_MASK),
+            (0b0000_1000, 0b0000_0111)
+        );
     }
 
     #[test]
     fn attrs_with_compression_exact_codes() {
-        for (compression, want) in [
-            (CompressionType::None, 0),
-            (CompressionType::Gzip, 1),
-            (CompressionType::Snappy, 2),
-            (CompressionType::Lz4, 3),
+        for (name, compression, want) in [
+            ("none", CompressionType::None, 0),
+            ("gzip", CompressionType::Gzip, 1),
+            ("snappy", CompressionType::Snappy, 2),
+            ("lz4", CompressionType::Lz4, 3),
         ] {
-            check!(
-                attrs_with_compression(0, compression) == want,
-                "{compression:?}"
-            );
+            assert_eq!(attrs_with_compression(0, compression), want, "case {name}");
         }
     }
 
     #[test]
     fn attrs_with_compression_replaces_low_bits_keeps_high() {
         // Overwriting an existing codec replaces (not ORs) the low 3 bits.
-        assert!(attrs_with_compression(3 /* lz4 */, CompressionType::Gzip) == 1);
-        // The timestamp-type bit (bit 3) is preserved across the rewrite.
         let ts = attrs::TIMESTAMP_TYPE_BIT;
-        assert!(attrs_with_compression(ts, CompressionType::Gzip) == ts | 1);
-        assert!(attrs_with_compression(ts, CompressionType::None) == ts);
+        for (name, initial, compression, expected) in [
+            ("replace lz4 with gzip", 3, CompressionType::Gzip, 1),
+            (
+                "preserve timestamp with gzip",
+                ts,
+                CompressionType::Gzip,
+                ts | 1,
+            ),
+            (
+                "preserve timestamp with none",
+                ts,
+                CompressionType::None,
+                ts,
+            ),
+        ] {
+            assert_eq!(
+                attrs_with_compression(initial, compression),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -410,7 +420,13 @@ mod tests {
         m.encode_into(&mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert!(decoded.timestamp == Some(-1));
+        assert_eq!(
+            decoded,
+            Message {
+                timestamp: Some(-1),
+                ..m
+            }
+        );
     }
 
     #[test]
@@ -427,8 +443,7 @@ mod tests {
         m.encode_into(&mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert!(decoded.key == Some(Bytes::new()));
-        assert!(decoded.value == Some(Bytes::from_static(b"v")));
+        assert_eq!(decoded, m);
     }
 
     // Build a frame: crc(4) | magic | attrs | trailing, with a valid CRC.

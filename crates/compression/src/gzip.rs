@@ -83,7 +83,7 @@ mod tests {
             Err(CompressionError::TooLarge { limit: 1024 })
         ));
         let back = decompress(&z, BIG_CAP).unwrap();
-        assert!(back.len() == bomb.len());
+        assert_eq!(back.as_ref(), bomb.as_slice());
     }
 
     #[test]

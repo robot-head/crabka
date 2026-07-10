@@ -528,8 +528,10 @@ mod tests {
     fn multipart_size_constants() {
         // Pin the multipart threshold/part-size (mutants flip the `*` in the
         // `N * 1024 * 1024` products to `+`/`/`).
-        assert!(DEFAULT_MULTIPART_THRESHOLD == 104_857_600); // 100 MiB
-        assert!(DEFAULT_MULTIPART_CHUNK_SIZE == 16_777_216); // 16 MiB
+        assert_eq!(
+            (DEFAULT_MULTIPART_THRESHOLD, DEFAULT_MULTIPART_CHUNK_SIZE),
+            (104_857_600, 16_777_216)
+        );
     }
 
     #[test]
@@ -602,10 +604,16 @@ mod tests {
             store
                 .copy_log_segment_data(&md, &sample_data(src.path(), false))
                 .unwrap();
-            // Inclusive [2, 5] -> "2345".
-            assert!(store.fetch_log_segment(&md, 2, Some(5)).unwrap() == b"2345");
-            // Open-ended from 7 -> "789".
-            assert!(store.fetch_log_segment(&md, 7, None).unwrap() == b"789");
+            for (name, start, end, expected) in [
+                ("bounded", 2, Some(5), b"2345".as_slice()),
+                ("open ended", 7, None, b"789".as_slice()),
+            ] {
+                assert_eq!(
+                    store.fetch_log_segment(&md, start, end).unwrap(),
+                    expected,
+                    "case {name}"
+                );
+            }
         })
         .await
         .unwrap();
@@ -637,16 +645,24 @@ mod tests {
             store
                 .copy_log_segment_data(&md, &sample_data(src.path(), true))
                 .unwrap();
-            for (index_type, want) in [
-                (IndexType::Offset, b"OFFSET-IDX".as_ref()),
-                (IndexType::Timestamp, b"TIME-IDX".as_ref()),
-                (IndexType::ProducerSnapshot, b"SNAP".as_ref()),
-                (IndexType::LeaderEpoch, b"EPOCH-BYTES".as_ref()),
-                (IndexType::Transaction, b"TXN-IDX".as_ref()),
+            for (name, index_type, want) in [
+                ("offset", IndexType::Offset, b"OFFSET-IDX".as_ref()),
+                ("timestamp", IndexType::Timestamp, b"TIME-IDX".as_ref()),
+                (
+                    "producer snapshot",
+                    IndexType::ProducerSnapshot,
+                    b"SNAP".as_ref(),
+                ),
+                (
+                    "leader epoch",
+                    IndexType::LeaderEpoch,
+                    b"EPOCH-BYTES".as_ref(),
+                ),
+                ("transaction", IndexType::Transaction, b"TXN-IDX".as_ref()),
             ] {
                 check!(
                     store.fetch_index(&md, index_type).unwrap() == want,
-                    "{index_type:?}"
+                    "case {name}: {index_type:?}"
                 );
             }
         })
@@ -778,10 +794,12 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert!(fetched.len() == SEG_LEN);
-            for (i, b) in fetched.iter().enumerate() {
-                assert!(*b == u8::try_from(i % 251).unwrap(), "byte mismatch at {i}");
-            }
+            assert_eq!(
+                fetched,
+                (0..SEG_LEN)
+                    .map(|i| u8::try_from(i % 251).unwrap())
+                    .collect::<Vec<_>>()
+            );
         })
         .await
         .unwrap();
@@ -812,9 +830,11 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert!(fetched.len() == SEG_LEN);
-            assert!(
-                fetched.last().copied() == Some(u8::try_from((SEG_LEN - 1) % 251).unwrap()),
+            assert_eq!(
+                fetched,
+                (0..SEG_LEN)
+                    .map(|i| u8::try_from(i % 251).unwrap())
+                    .collect::<Vec<_>>(),
                 "tail byte was dropped"
             );
         })
@@ -846,7 +866,7 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert!(fetched.len() == 10);
+            assert_eq!(fetched, (0_u8..10).collect::<Vec<_>>());
         })
         .await
         .unwrap();

@@ -500,8 +500,7 @@ mod tests {
 
     #[test]
     fn snapshot_size_cap_is_256_mib() {
-        assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == 256 * 1024 * 1024);
-        assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == 268_435_456);
+        assert_eq!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES, 256 * 1024 * 1024);
     }
 
     #[test]
@@ -509,8 +508,10 @@ mod tests {
         let index = seed();
         let mut types = index.profile_types("t");
         types.sort();
-        assert!(types == strings(&[HEAP_TYPE, CPU_TYPE]));
-        assert!(index.profile_types("nope").is_empty());
+        assert_eq!(
+            (types, index.profile_types("nope")),
+            (strings(&[HEAP_TYPE, CPU_TYPE]), Vec::new())
+        );
     }
 
     #[test]
@@ -518,68 +519,76 @@ mod tests {
         let index = seed();
         let cpu_fps = index.fingerprints_for_profile_type("t", CPU_TYPE);
         let heap_fps = index.fingerprints_for_profile_type("t", HEAP_TYPE);
-        assert!(cpu_fps.len() == 1);
-        assert!(cpu_fps.is_disjoint(&heap_fps));
+        assert_eq!(
+            (cpu_fps, heap_fps),
+            (
+                BTreeSet::from([profile_labels("process_cpu", CPU_TYPE, "checkout").fingerprint()]),
+                BTreeSet::from([profile_labels("memory", HEAP_TYPE, "checkout").fingerprint()]),
+            )
+        );
     }
 
     #[test]
     fn profile_index_matching_and_block_helpers_return_pruned_metadata() {
         let (index, cpu_checkout, heap_checkout, cpu_payments) = seed_with_blocks();
 
-        check!(
-            index
-                .matching_fingerprints(
+        assert_eq!(
+            (
+                index
+                    .matching_fingerprints(
+                        "t",
+                        &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
+                    )
+                    .unwrap(),
+                index
+                    .select_fingerprints(
+                        "t",
+                        CPU_TYPE,
+                        &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
+                    )
+                    .unwrap(),
+                index.select_fingerprints("t", CPU_TYPE, &[]).unwrap(),
+                index.candidate_blocks_for_series(
                     "t",
-                    &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
-                )
-                .unwrap()
-                == BTreeSet::from([cpu_checkout, heap_checkout])
+                    &BTreeSet::from([cpu_checkout, cpu_payments]),
+                    175,
+                    180,
+                ),
+                index.block_time_bounds("t", 175, 180),
+                index.block_time_bounds("t", 450, 500),
+                BlockIndex::candidate_blocks(&index, "t", 175, 180),
+                BlockIndex::block_count(&index, "t"),
+            ),
+            (
+                BTreeSet::from([cpu_checkout, heap_checkout]),
+                BTreeSet::from([cpu_checkout]),
+                BTreeSet::from([cpu_checkout, cpu_payments]),
+                strings(&["cpu-checkout.parquet", "cpu-payments.parquet"]),
+                Some((100, 250)),
+                None,
+                strings(&["cpu-checkout.parquet", "cpu-payments.parquet"]),
+                3,
+            )
         );
-        check!(
-            index
-                .select_fingerprints(
-                    "t",
-                    CPU_TYPE,
-                    &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
-                )
-                .unwrap()
-                == BTreeSet::from([cpu_checkout])
-        );
-        check!(
-            index.select_fingerprints("t", CPU_TYPE, &[]).unwrap()
-                == BTreeSet::from([cpu_checkout, cpu_payments])
-        );
-
-        check!(
-            index.candidate_blocks_for_series(
-                "t",
-                &BTreeSet::from([cpu_checkout, cpu_payments]),
-                175,
-                180,
-            ) == strings(&["cpu-checkout.parquet", "cpu-payments.parquet"])
-        );
-        check!(index.block_time_bounds("t", 175, 180) == Some((100, 250)));
-        check!(index.block_time_bounds("t", 450, 500) == None);
-        check!(
-            BlockIndex::candidate_blocks(&index, "t", 175, 180)
-                == strings(&["cpu-checkout.parquet", "cpu-payments.parquet"])
-        );
-        check!(BlockIndex::block_count(&index, "t") == 3);
     }
 
     #[test]
     fn profile_index_profile_type_helpers_return_pruned_metadata() {
         let (index, cpu_checkout, heap_checkout, _) = seed_with_blocks();
 
-        check!(index.profile_types_for_time("t", 175, 180) == strings(&[CPU_TYPE]));
-        check!(index.profile_types_for_time("t", 320, 330) == strings(&[HEAP_TYPE]));
-        check!(
-            index.profile_types_for_fingerprints("t", &BTreeSet::from([cpu_checkout]))
-                == strings(&[CPU_TYPE])
-        );
-        check!(
-            index.profile_types_for_fingerprints("t", &BTreeSet::from([heap_checkout]))
-                == strings(&[HEAP_TYPE])
+        assert_eq!(
+            (
+                index.profile_types_for_time("t", 175, 180),
+                index.profile_types_for_time("t", 320, 330),
+                index.profile_types_for_fingerprints("t", &BTreeSet::from([cpu_checkout])),
+                index.profile_types_for_fingerprints("t", &BTreeSet::from([heap_checkout])),
+            ),
+            (
+                strings(&[CPU_TYPE]),
+                strings(&[HEAP_TYPE]),
+                strings(&[CPU_TYPE]),
+                strings(&[HEAP_TYPE]),
+            )
         );
     }
 
@@ -587,101 +596,109 @@ mod tests {
     fn profile_index_label_helpers_return_pruned_metadata() {
         let (index, cpu_checkout, heap_checkout, _) = seed_with_blocks();
 
-        check!(
-            index
-                .label_values_for_time("t", "service_name", &[], 175, 180)
-                .unwrap()
-                == strings(&["checkout", "payments"])
-        );
-        check!(
-            index.label_values_for_fingerprints(
-                "t",
-                "service_name",
-                &BTreeSet::from([heap_checkout])
-            ) == strings(&["checkout"])
-        );
-        check!(
-            index.label_names_for_time("t", &[], 175, 180).unwrap()
-                == strings(&["__name__", "__profile_type__", "service_name"])
-        );
-        check!(
-            index.label_names_for_fingerprints("t", &BTreeSet::from([cpu_checkout]))
-                == strings(&["__name__", "__profile_type__", "service_name"])
-        );
-
-        check!(
-            index.label_names("t") == strings(&["__name__", "__profile_type__", "service_name"])
-        );
-        check!(index.label_values("t", "service_name") == strings(&["checkout", "payments"]));
-        check!(
-            index
-                .label_names_for(
+        assert_eq!(
+            (
+                index
+                    .label_values_for_time("t", "service_name", &[], 175, 180)
+                    .unwrap(),
+                index.label_values_for_fingerprints(
                     "t",
-                    &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
-                )
-                .unwrap()
-                == strings(&["__name__", "__profile_type__", "service_name"])
-        );
-        check!(
-            index
-                .label_values_for(
-                    "t",
-                    "__name__",
-                    &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
-                )
-                .unwrap()
-                == strings(&["memory", "process_cpu"])
+                    "service_name",
+                    &BTreeSet::from([heap_checkout])
+                ),
+                index.label_names_for_time("t", &[], 175, 180).unwrap(),
+                index.label_names_for_fingerprints("t", &BTreeSet::from([cpu_checkout])),
+                index.label_names("t"),
+                index.label_values("t", "service_name"),
+                index
+                    .label_names_for(
+                        "t",
+                        &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
+                    )
+                    .unwrap(),
+                index
+                    .label_values_for(
+                        "t",
+                        "__name__",
+                        &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")]
+                    )
+                    .unwrap(),
+            ),
+            (
+                strings(&["checkout", "payments"]),
+                strings(&["checkout"]),
+                strings(&["__name__", "__profile_type__", "service_name"]),
+                strings(&["__name__", "__profile_type__", "service_name"]),
+                strings(&["__name__", "__profile_type__", "service_name"]),
+                strings(&["checkout", "payments"]),
+                strings(&["__name__", "__profile_type__", "service_name"]),
+                strings(&["memory", "process_cpu"]),
+            )
         );
     }
 
     #[test]
     fn profile_index_series_helpers_return_projected_metadata() {
-        let (index, _, heap_checkout, _) = seed_with_blocks();
+        let (index, cpu_checkout, heap_checkout, cpu_payments) = seed_with_blocks();
 
-        check!(
-            index
-                .series_for_time("t", &[], &["service_name".to_string()], 175, 180)
-                .unwrap()
-                == vec![
+        let mut blocks = index.all_blocks();
+        blocks.sort_by(|left, right| left.object_key.cmp(&right.object_key));
+        assert_eq!(
+            (
+                index
+                    .series_for_time("t", &[], &["service_name".to_string()], 175, 180)
+                    .unwrap(),
+                index.series_for_fingerprints("t", &BTreeSet::from([heap_checkout]), &[]),
+                index
+                    .series(
+                        "t",
+                        &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")],
+                        &["__name__".to_string()],
+                    )
+                    .unwrap(),
+                blocks,
+            ),
+            (
+                vec![
                     vec![("service_name".to_string(), "checkout".to_string())],
                     vec![("service_name".to_string(), "payments".to_string())],
-                ]
-        );
-        check!(
-            index.series_for_fingerprints("t", &BTreeSet::from([heap_checkout]), &[])
-                == vec![vec![
+                ],
+                vec![vec![
                     ("__name__".to_string(), "memory".to_string()),
                     ("__profile_type__".to_string(), HEAP_TYPE.to_string()),
                     ("service_name".to_string(), "checkout".to_string()),
-                ]]
-        );
-        check!(
-            index
-                .series(
-                    "t",
-                    &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")],
-                    &["__name__".to_string()]
-                )
-                .unwrap()
-                == vec![
+                ]],
+                vec![
                     vec![("__name__".to_string(), "memory".to_string())],
                     vec![("__name__".to_string(), "process_cpu".to_string())],
-                ]
-        );
-
-        let mut block_keys = index
-            .all_blocks()
-            .into_iter()
-            .map(|block| block.object_key)
-            .collect::<Vec<_>>();
-        block_keys.sort();
-        assert!(
-            block_keys
-                == strings(&[
-                    "cpu-checkout.parquet",
-                    "cpu-payments.parquet",
-                    "heap-checkout.parquet",
-                ])
+                ],
+                vec![
+                    BlockMeta {
+                        tenant: "t".to_string(),
+                        object_key: "cpu-checkout.parquet".to_string(),
+                        min_ts: 100,
+                        max_ts: 199,
+                        row_count: 10,
+                        fingerprints: vec![cpu_checkout],
+                    },
+                    BlockMeta {
+                        tenant: "t".to_string(),
+                        object_key: "cpu-payments.parquet".to_string(),
+                        min_ts: 150,
+                        max_ts: 250,
+                        row_count: 30,
+                        fingerprints: vec![cpu_payments],
+                    },
+                    BlockMeta {
+                        tenant: "t".to_string(),
+                        object_key: "heap-checkout.parquet".to_string(),
+                        min_ts: 300,
+                        max_ts: 399,
+                        row_count: 20,
+                        fingerprints: vec![heap_checkout],
+                    },
+                ],
+            )
         );
     }
 
@@ -694,18 +711,25 @@ mod tests {
                 &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")],
             )
             .unwrap();
-        assert!(got.len() == 2);
+        assert_eq!(
+            got,
+            BTreeSet::from([
+                profile_labels("process_cpu", CPU_TYPE, "checkout").fingerprint(),
+                profile_labels("memory", HEAP_TYPE, "checkout").fingerprint(),
+            ])
+        );
     }
 
     #[test]
     fn stacktrace_partition_map_records_block_partitions() {
         let mut index = seed();
         index.add_profile_block("t", "blocks/p1.parquet", vec![0, 1, 2]);
-        assert!(index.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1, 2]);
-        assert!(
-            index
-                .stacktrace_partitions("blocks/absent.parquet")
-                .is_empty()
+        assert_eq!(
+            (
+                index.stacktrace_partitions("blocks/p1.parquet"),
+                index.stacktrace_partitions("blocks/absent.parquet"),
+            ),
+            (vec![0, 1, 2], Vec::new())
         );
     }
 
@@ -747,9 +771,14 @@ mod tests {
             )],
         );
 
-        check!(index.stacktrace_partitions("old.parquet").is_empty());
-        check!(index.stacktrace_partitions("new.parquet") == vec![99]);
-        check!(BlockIndex::candidate_blocks(&index, "t", 0, 10) == vec!["new.parquet"]);
+        assert_eq!(
+            (
+                index.stacktrace_partitions("old.parquet"),
+                index.stacktrace_partitions("new.parquet"),
+                BlockIndex::candidate_blocks(&index, "t", 0, 10),
+            ),
+            (Vec::new(), vec![99], vec!["new.parquet".to_string()])
+        );
     }
 
     #[tokio::test]
@@ -763,8 +792,13 @@ mod tests {
         let loaded = ProfileIndex::load(&store, "index/profiles.json")
             .await
             .unwrap();
-        assert!(loaded.profile_types("t").len() == 2);
-        assert!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
+        assert_eq!(
+            (
+                loaded.profile_types("t"),
+                loaded.stacktrace_partitions("blocks/p1.parquet"),
+            ),
+            (strings(&[HEAP_TYPE, CPU_TYPE]), vec![0, 1])
+        );
     }
 
     #[tokio::test]
@@ -790,8 +824,13 @@ mod tests {
                 .await
                 .is_err()
         );
-        check!(loaded.profile_types("t").len() == 2);
-        check!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
+        assert_eq!(
+            (
+                loaded.profile_types("t"),
+                loaded.stacktrace_partitions("blocks/p1.parquet"),
+            ),
+            (strings(&[HEAP_TYPE, CPU_TYPE]), vec![0, 1])
+        );
     }
 
     #[tokio::test]
@@ -848,6 +887,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(loaded.profile_types("t").len() == 2);
+        let mut profile_types = loaded.profile_types("t");
+        profile_types.sort();
+        assert_eq!(profile_types, strings(&[HEAP_TYPE, CPU_TYPE]));
     }
 }

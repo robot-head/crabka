@@ -196,10 +196,31 @@ mod tests {
         })
         .unwrap();
 
-        let in_3_to_12: Vec<_> = idx.aborted_in_range(Offset(3), Offset(12)).collect();
-        assert!(in_3_to_12.len() == 2);
-
-        let in_5_to_9: Vec<_> = idx.aborted_in_range(Offset(5), Offset(9)).collect();
-        assert!(in_5_to_9.len() == 0);
+        let in_3_to_12 = idx
+            .aborted_in_range(Offset(3), Offset(12))
+            .copied()
+            .collect::<Vec<_>>();
+        let in_5_to_9 = idx
+            .aborted_in_range(Offset(5), Offset(9))
+            .copied()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            (in_3_to_12, in_5_to_9),
+            (
+                vec![
+                    AbortedTxn {
+                        start_offset: Offset(0),
+                        last_offset: Offset(4),
+                        producer_id: ProducerId(1),
+                    },
+                    AbortedTxn {
+                        start_offset: Offset(10),
+                        last_offset: Offset(14),
+                        producer_id: ProducerId(2),
+                    },
+                ],
+                Vec::new(),
+            )
+        );
     }
 }

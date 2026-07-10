@@ -312,18 +312,19 @@ mod tests {
 
     #[test]
     fn validate_rejects_corrupt_deserialized_blooms() {
-        // num_bits == 0 → divide-by-zero on probe.
-        let zero_bits: ShardedTraceBloom =
-            serde_json::from_str(r#"{"shards":[{"bits":[],"num_bits":0,"k":1}]}"#).unwrap();
-        assert!(zero_bits.validate().is_err());
-
-        // Empty shards → divide-by-zero in shard_of.
-        let no_shards: ShardedTraceBloom = serde_json::from_str(r#"{"shards":[]}"#).unwrap();
-        assert!(no_shards.validate().is_err());
-
-        // bits too short for num_bits → out-of-bounds index on lookup.
-        let short_bits: ShardedTraceBloom =
-            serde_json::from_str(r#"{"shards":[{"bits":[0],"num_bits":128,"k":1}]}"#).unwrap();
-        assert!(short_bits.validate().is_err());
+        for (name, json) in [
+            (
+                "zero bit count",
+                r#"{"shards":[{"bits":[],"num_bits":0,"k":1}]}"#,
+            ),
+            ("no shards", r#"{"shards":[]}"#),
+            (
+                "bit vector shorter than declared count",
+                r#"{"shards":[{"bits":[0],"num_bits":128,"k":1}]}"#,
+            ),
+        ] {
+            let bloom: ShardedTraceBloom = serde_json::from_str(json).unwrap();
+            assert!(bloom.validate().is_err(), "case {name}");
+        }
     }
 }

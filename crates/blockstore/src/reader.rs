@@ -154,7 +154,7 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use assert2::{assert, check};
+    use assert2::assert;
     use object_store::{ObjectStore, memory::InMemory, path::Path};
     use parquet::{
         arrow::{AsyncArrowWriter, async_writer::ParquetObjectWriter},
@@ -166,8 +166,7 @@ mod tests {
 
     #[test]
     fn max_block_bytes_is_one_gib() {
-        assert!(MAX_BLOCK_BYTES == 1024 * 1024 * 1024);
-        assert!(MAX_BLOCK_BYTES == 1_073_741_824);
+        assert_eq!(MAX_BLOCK_BYTES, 1024 * 1024 * 1024);
     }
 
     #[tokio::test]
@@ -189,13 +188,12 @@ mod tests {
         .unwrap();
 
         BlockWriter::new(store.clone())
-            .write_block("t", "b.parquet", schema, &[batch])
+            .write_block("t", "b.parquet", schema, std::slice::from_ref(&batch))
             .await
             .unwrap();
 
         let out = read_block(store, "b.parquet").await.unwrap();
-        let total: usize = out.iter().map(RecordBatch::num_rows).sum();
-        assert!(total == 2);
+        assert_eq!(out, vec![batch]);
     }
 
     #[tokio::test]
@@ -266,11 +264,13 @@ mod tests {
         let meta = read_row_group_metadata(store.clone(), "meta.parquet")
             .await
             .unwrap();
-        assert!(meta.len() == 2);
-        for (i, want_index) in [(0, 0), (1, 1)] {
-            check!(meta[i].index == want_index);
-            check!(meta[i].compressed_bytes > 0);
-        }
+        let project = |metadata: &[RowGroupMeta]| {
+            metadata
+                .iter()
+                .map(|group| (group.index, group.compressed_bytes > 0))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(project(&meta), vec![(0, true), (1, true)]);
 
         let got = read_row_group_metadata_with_cap(store.clone(), "meta.parquet", 1).await;
         assert!(got.is_err());
@@ -279,11 +279,7 @@ mod tests {
         let meta = read_row_group_metadata_with_cap(store, "meta.parquet", size)
             .await
             .unwrap();
-        assert!(meta.len() == 2);
-        for (i, want_index) in [(0, 0), (1, 1)] {
-            check!(meta[i].index == want_index);
-            check!(meta[i].compressed_bytes > 0);
-        }
+        assert_eq!(project(&meta), vec![(0, true), (1, true)]);
     }
 
     #[tokio::test]
@@ -323,13 +319,12 @@ mod tests {
             .unwrap();
 
         let total: usize = out.iter().map(RecordBatch::num_rows).sum();
-        assert!(total == 1);
         let lines = out[0]
             .column_by_name("line")
             .unwrap()
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert!(lines.value(0) == "second");
+        assert_eq!((total, lines.value(0)), (1, "second"));
     }
 }

@@ -141,10 +141,15 @@ mod tests {
         let spans = sample_tree();
         let ns = assign_nested_set(&spans);
         let p_left = ns[idx(&spans, 3)].nested_set_left;
-        assert!(ns[idx(&spans, 4)].parent_id == p_left);
         let root_left = ns[idx(&spans, 1)].nested_set_left;
-        assert!(ns[idx(&spans, 2)].parent_id == root_left);
-        assert!(ns[idx(&spans, 3)].parent_id == root_left);
+        assert_eq!(
+            (
+                ns[idx(&spans, 4)].parent_id,
+                ns[idx(&spans, 2)].parent_id,
+                ns[idx(&spans, 3)].parent_id,
+            ),
+            (p_left, root_left, root_left)
+        );
     }
 
     #[test]
@@ -189,37 +194,28 @@ mod tests {
     }
 
     #[test]
-    fn cyclic_parentage_still_assigns_valid_intervals() {
-        // A.parent = B, B.parent = A. Neither is a root, so a DFS seeded only
-        // from roots would never visit them and leave both at {0, 0, 0} —
-        // colliding with real roots and corrupting structural ops. Every node
-        // must still get a valid `left < right` interval.
-        let spans = vec![node(1, Some(2)), node(2, Some(1))];
-        let ns = assign_nested_set(&spans);
-        for n in &ns {
-            assert!(n.nested_set_left < n.nested_set_right);
+    fn cyclic_parentage_assigns_every_node_a_valid_interval() {
+        for (name, spans) in [
+            ("two-node cycle", vec![node(1, Some(2)), node(2, Some(1))]),
+            (
+                "three-node cycle",
+                vec![node(1, Some(3)), node(2, Some(1)), node(3, Some(2))],
+            ),
+        ] {
+            let ns = assign_nested_set(&spans);
+            let mut lefts: Vec<i32> = ns.iter().map(|n| n.nested_set_left).collect();
+            lefts.sort_unstable();
+            lefts.dedup();
+            assert_eq!(
+                (
+                    ns.iter().all(|n| n.nested_set_left < n.nested_set_right),
+                    lefts.len(),
+                    ns.iter().any(|n| n.parent_id == -1),
+                ),
+                (true, ns.len(), true),
+                "case {name}"
+            );
         }
-        // Distinct, non-overlapping intervals → every node was actually visited.
-        let mut lefts: Vec<i32> = ns.iter().map(|n| n.nested_set_left).collect();
-        lefts.sort_unstable();
-        lefts.dedup();
-        assert!(lefts.len() == ns.len());
-        assert!(ns.iter().any(|n| n.parent_id == -1));
-    }
-
-    #[test]
-    fn three_node_cycle_is_fully_visited() {
-        // A->B->C->A: a pure cycle with no acyclic entry point.
-        let spans = vec![node(1, Some(3)), node(2, Some(1)), node(3, Some(2))];
-        let ns = assign_nested_set(&spans);
-        for n in &ns {
-            assert!(n.nested_set_left < n.nested_set_right);
-        }
-        let mut lefts: Vec<i32> = ns.iter().map(|n| n.nested_set_left).collect();
-        lefts.sort_unstable();
-        lefts.dedup();
-        assert!(lefts.len() == ns.len());
-        assert!(ns.iter().any(|n| n.parent_id == -1));
     }
 
     #[test]

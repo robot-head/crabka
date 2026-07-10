@@ -435,8 +435,10 @@ mod tests {
             epochs(),
         )
         .unwrap();
-        assert!(md.max_timestamp_ms() == 777);
-        assert!(md.segment_size_in_bytes() == 4096);
+        assert_eq!(
+            (md.max_timestamp_ms(), md.segment_size_in_bytes()),
+            (777, 4096)
+        );
     }
 
     #[test]
@@ -444,13 +446,24 @@ mod tests {
         use RemoteLogSegmentState::{
             CopySegmentFinished, CopySegmentStarted, DeleteSegmentFinished, DeleteSegmentStarted,
         };
-        for (from, to) in [
-            (CopySegmentStarted, CopySegmentFinished),
-            (CopySegmentStarted, DeleteSegmentStarted),
-            (CopySegmentFinished, DeleteSegmentStarted),
-            (DeleteSegmentStarted, DeleteSegmentFinished),
+        for (name, from, to) in [
+            ("copy completes", CopySegmentStarted, CopySegmentFinished),
+            ("copy cancelled", CopySegmentStarted, DeleteSegmentStarted),
+            (
+                "finished copy deleted",
+                CopySegmentFinished,
+                DeleteSegmentStarted,
+            ),
+            (
+                "delete completes",
+                DeleteSegmentStarted,
+                DeleteSegmentFinished,
+            ),
         ] {
-            check!(from.is_valid_transition(to), "{from:?} -> {to:?}");
+            check!(
+                from.is_valid_transition(to),
+                "case {name}: {from:?} -> {to:?}"
+            );
         }
     }
 
@@ -460,15 +473,38 @@ mod tests {
             CopySegmentFinished, CopySegmentStarted, DeleteSegmentFinished, DeleteSegmentStarted,
         };
         // No backward / skipping / same-state transitions.
-        for (from, to) in [
-            (CopySegmentStarted, CopySegmentStarted),
-            (CopySegmentStarted, DeleteSegmentFinished),
-            (CopySegmentFinished, CopySegmentStarted),
-            (CopySegmentFinished, CopySegmentFinished),
-            (DeleteSegmentStarted, CopySegmentFinished),
-            (DeleteSegmentFinished, DeleteSegmentStarted),
+        for (name, from, to) in [
+            ("repeat copy start", CopySegmentStarted, CopySegmentStarted),
+            (
+                "skip delete start",
+                CopySegmentStarted,
+                DeleteSegmentFinished,
+            ),
+            (
+                "restart copied segment",
+                CopySegmentFinished,
+                CopySegmentStarted,
+            ),
+            (
+                "repeat copy finish",
+                CopySegmentFinished,
+                CopySegmentFinished,
+            ),
+            (
+                "reverse deletion",
+                DeleteSegmentStarted,
+                CopySegmentFinished,
+            ),
+            (
+                "restart finished deletion",
+                DeleteSegmentFinished,
+                DeleteSegmentStarted,
+            ),
         ] {
-            check!(!from.is_valid_transition(to), "{from:?} -> {to:?}");
+            check!(
+                !from.is_valid_transition(to),
+                "case {name}: {from:?} -> {to:?}"
+            );
         }
     }
 
@@ -528,13 +564,22 @@ mod tests {
             broker_id: 2,
         };
         let finished = started.with_update(&update).unwrap();
-        check!(finished.state() == RemoteLogSegmentState::CopySegmentFinished);
-        check!(finished.event_timestamp_ms() == 789);
-        check!(finished.broker_id() == 2);
-        check!(finished.custom_metadata() == Some(&CustomMetadata(vec![1, 2, 3])));
-        // Untouched fields survive.
-        check!(finished.start_offset() == 0);
-        check!(finished.end_offset() == 10);
+        assert_eq!(
+            finished,
+            RemoteLogSegmentMetadata::new(
+                seg_id(),
+                0,
+                10,
+                123,
+                2,
+                789,
+                1024,
+                RemoteLogSegmentState::CopySegmentFinished,
+                epochs(),
+            )
+            .unwrap()
+            .with_custom_metadata(CustomMetadata(vec![1, 2, 3]))
+        );
     }
 
     #[test]
@@ -560,7 +605,22 @@ mod tests {
             broker_id: 2,
         };
         let finished = started.with_update(&update).unwrap();
-        assert!(finished.custom_metadata() == Some(&CustomMetadata(vec![9])));
+        assert_eq!(
+            finished,
+            RemoteLogSegmentMetadata::new(
+                seg_id(),
+                0,
+                10,
+                123,
+                2,
+                789,
+                1024,
+                RemoteLogSegmentState::CopySegmentFinished,
+                epochs(),
+            )
+            .unwrap()
+            .with_custom_metadata(CustomMetadata(vec![9]))
+        );
     }
 
     #[test]
@@ -644,18 +704,38 @@ mod tests {
         use RemotePartitionDeleteState::{
             DeletePartitionFinished, DeletePartitionMarked, DeletePartitionStarted,
         };
-        for (from, to, want) in [
-            (None, DeletePartitionMarked, true),
-            (Some(DeletePartitionMarked), DeletePartitionStarted, true),
-            (Some(DeletePartitionStarted), DeletePartitionFinished, true),
+        for (name, from, to, want) in [
+            ("mark partition", None, DeletePartitionMarked, true),
+            (
+                "start deletion",
+                Some(DeletePartitionMarked),
+                DeletePartitionStarted,
+                true,
+            ),
+            (
+                "finish deletion",
+                Some(DeletePartitionStarted),
+                DeletePartitionFinished,
+                true,
+            ),
             // Invalid: skipping, restarting, or marking twice.
-            (None, DeletePartitionStarted, false),
-            (Some(DeletePartitionMarked), DeletePartitionMarked, false),
-            (Some(DeletePartitionFinished), DeletePartitionStarted, false),
+            ("skip mark", None, DeletePartitionStarted, false),
+            (
+                "mark twice",
+                Some(DeletePartitionMarked),
+                DeletePartitionMarked,
+                false,
+            ),
+            (
+                "restart finished deletion",
+                Some(DeletePartitionFinished),
+                DeletePartitionStarted,
+                false,
+            ),
         ] {
             check!(
                 RemotePartitionDeleteState::is_valid_transition(from, to) == want,
-                "{from:?} -> {to:?}"
+                "case {name}: {from:?} -> {to:?}"
             );
         }
     }

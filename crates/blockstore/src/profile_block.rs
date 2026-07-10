@@ -78,7 +78,6 @@ pub fn encode_profile_samples(rows: &[ProfileSampleRow]) -> Result<RecordBatch> 
 #[cfg(test)]
 mod tests {
     use arrow::array::{Array, BinaryArray, Int64Array, UInt64Array};
-    use assert2::assert;
 
     use super::*;
     use crate::{
@@ -107,8 +106,6 @@ mod tests {
             row(1, 100, 9, 30, None),
         ];
         let batch = encode_profile_samples(&rows).unwrap();
-        assert!(batch.schema() == profile_samples_schema());
-        assert!(batch.num_rows() == 2);
         validate_against(&batch.schema(), &profile_samples_decl()).unwrap();
 
         let stacks = batch
@@ -117,7 +114,6 @@ mod tests {
             .as_any()
             .downcast_ref::<UInt64Array>()
             .unwrap();
-        assert!(stacks.value(0) == 7 && stacks.value(1) == 9);
 
         let values = batch
             .column_by_name(PCOL_VALUE)
@@ -125,7 +121,6 @@ mod tests {
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        assert!(values.value(0) == 50);
 
         let traces = batch
             .column_by_name(PCOL_TRACE_ID)
@@ -133,7 +128,25 @@ mod tests {
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
-        assert!(traces.value(0) == [0xAB; 16].as_slice());
-        assert!(traces.is_null(1));
+        assert_eq!(
+            (
+                batch.schema(),
+                batch.num_rows(),
+                stacks.value(0),
+                stacks.value(1),
+                values.value(0),
+                traces.value(0),
+                traces.is_null(1),
+            ),
+            (
+                profile_samples_schema(),
+                2,
+                7,
+                9,
+                50,
+                [0xAB; 16].as_slice(),
+                true,
+            )
+        );
     }
 }

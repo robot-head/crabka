@@ -1041,14 +1041,14 @@ mod tests {
         // sample_batch sets per-record timestamp_delta = i, base_timestamp = ts_base.
         // Batch 1 records: (off0,ts100),(off1,ts101),(off2,ts102).
         // Batch 2 records: (off3,ts200),(off4,ts201).
-        for (ts, want) in [
-            (100, Some((Offset(0), 100))),
-            (101, Some((Offset(1), 101))),
-            (150, Some((Offset(3), 200))),
-            (201, Some((Offset(4), 201))),
-            (202, None),
+        for (name, ts, want) in [
+            ("first exact", 100, Some((Offset(0), 100))),
+            ("within first batch", 101, Some((Offset(1), 101))),
+            ("between batches", 150, Some((Offset(3), 200))),
+            ("last exact", 201, Some((Offset(4), 201))),
+            ("past end", 202, None),
         ] {
-            check!(seg.offset_for_timestamp(ts) == want, "ts={ts}");
+            check!(seg.offset_for_timestamp(ts) == want, "case {name}: ts={ts}");
         }
         drop(dir);
     }
@@ -1081,11 +1081,20 @@ mod tests {
         // Target ts is the very last record's, so the loop must advance
         // through every window before matching.
         let target = 1_000 + (n - 1);
-        let got = seg.scan_from_floor_windowed(Offset(0), 1, |ts| ts >= target);
-        assert!(got == Some((Offset(n - 1), target)));
-        // No-match case must terminate (cursor passes last_offset) → None.
-        let none = seg.scan_from_floor_windowed(Offset(0), 1, |ts| ts > 10_000);
-        assert!(none == None);
+        for (name, threshold, expected) in [
+            (
+                "match at final record",
+                target,
+                Some((Offset(n - 1), target)),
+            ),
+            ("no matching record", 10_001, None),
+        ] {
+            assert_eq!(
+                seg.scan_from_floor_windowed(Offset(0), 1, |ts| ts >= threshold),
+                expected,
+                "case {name}"
+            );
+        }
         drop(dir);
     }
 
@@ -1160,10 +1169,8 @@ mod tests {
         let b2 = sample_batch(3, 2, 2_000_000);
         seg.append(&b1, 4096).unwrap();
         seg.append(&b2, 4096).unwrap();
-        assert!(seg.last_offset() == 4);
         let read = seg.read(Offset(0), usize::MAX).unwrap();
-        let record_counts: Vec<usize> = read.iter().map(|b| b.records.len()).collect();
-        assert!(record_counts == [3, 2]);
+        assert_eq!((seg.last_offset(), read), (Offset(4), vec![b1, b2]));
     }
 
     #[test]
@@ -1178,11 +1185,19 @@ mod tests {
         let mut seg = Segment::open_active(dir.path(), Offset(0), true).unwrap();
         let position = seg.append(&sample_batch(2, 1, 300), 0).unwrap();
 
-        assert!(position > 0);
-        assert!(seg.last_offset() == 2);
         let read = seg.read(Offset(0), usize::MAX).unwrap();
-        let base_offsets: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
-        assert!(base_offsets == [0, 1, 2]);
+        assert_eq!(
+            (position > 0, seg.last_offset(), read),
+            (
+                true,
+                Offset(2),
+                vec![
+                    sample_batch(0, 1, 100),
+                    sample_batch(1, 1, 200),
+                    sample_batch(2, 1, 300),
+                ],
+            )
+        );
     }
 
     /// Tail recovery must PHYSICALLY truncate a partial/garbage trailing tail,
@@ -1210,11 +1225,10 @@ mod tests {
 
         // Reopen with validation: the tail scan must clip the garbage.
         let seg = Segment::open_active(dir.path(), Offset(0), true).unwrap();
-        assert!(seg.last_offset() == 4);
-        assert!(
-            seg.size_bytes() == valid_size,
-            "garbage tail must be truncated: size {} != valid {valid_size}",
-            seg.size_bytes()
+        assert_eq!(
+            (seg.last_offset(), seg.size_bytes()),
+            (Offset(4), valid_size),
+            "garbage tail must be truncated"
         );
     }
 
@@ -1232,13 +1246,14 @@ mod tests {
         seg.append(&sample_batch(100, 3, 100), 0).unwrap(); // offsets 100..=102
         seg.append(&sample_batch(103, 2, 200), 0).unwrap(); // offsets 103..=104
         seg.append(&sample_batch(105, 1, 300), 0).unwrap(); // offset 105
-        assert!(seg.last_offset() == 105);
-
         let read = seg.read(Offset(103), usize::MAX).unwrap();
-        let bases: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
-        assert!(
-            bases == [103, 105],
-            "read(103) must return batches at 103 and 105; got {bases:?}"
+        assert_eq!(
+            (seg.last_offset(), read),
+            (
+                Offset(105),
+                vec![sample_batch(103, 2, 200), sample_batch(105, 1, 300)],
+            ),
+            "read(103) must return batches at 103 and 105"
         );
     }
 
@@ -1256,11 +1271,10 @@ mod tests {
         seg.append(&sample_batch(105, 1, 300), 0).unwrap(); // offset 105
 
         let r = seg.read_raw(Offset(103), Offset(1000), usize::MAX).unwrap();
-        assert!(!r.is_empty());
-        assert!(
-            r.start_offset == 103,
-            "read_raw(103) must start at offset 103; got {:?}",
-            r.start_offset
+        assert_eq!(
+            (r.is_empty(), r.start_offset),
+            (false, Offset(103)),
+            "read_raw(103) must return data starting at offset 103"
         );
     }
 
@@ -1281,10 +1295,14 @@ mod tests {
         let max_bytes = usize::try_from(seg.size_bytes()).unwrap();
 
         let read = seg.read(Offset(0), max_bytes).unwrap();
-        let bases: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
-        assert!(
-            bases == [0, 1, 2],
-            "all three batches must fit the exact-size budget; got {bases:?}"
+        assert_eq!(
+            read,
+            vec![
+                sample_batch(0, 1, 100),
+                sample_batch(1, 1, 200),
+                sample_batch(2, 1, 300),
+            ],
+            "all three batches must fit the exact-size budget"
         );
     }
 
@@ -1299,11 +1317,15 @@ mod tests {
         seg.truncate_to_relative(1).unwrap();
         let position = seg.append(&sample_batch(1, 1, 300), 0).unwrap();
 
-        assert!(position == expected_position);
-        assert!(seg.last_offset() == 1);
         let read = seg.read(Offset(0), usize::MAX).unwrap();
-        let base_offsets: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
-        assert!(base_offsets == [0, 1]);
+        assert_eq!(
+            (position, seg.last_offset(), read),
+            (
+                expected_position,
+                Offset(1),
+                vec![sample_batch(0, 1, 100), sample_batch(1, 1, 300)],
+            )
+        );
     }
 
     /// `truncate_to_relative` decides which batches to drop by each batch's last
@@ -1323,16 +1345,11 @@ mod tests {
 
         // target_abs = base(0) + rel(3) = 3. Drop batches with last >= 3.
         seg.truncate_to_relative(3).unwrap();
-        assert!(
-            seg.last_offset() == 2,
-            "only batch A (last 2) must remain; got {:?}",
-            seg.last_offset()
-        );
         let read = seg.read(Offset(0), usize::MAX).unwrap();
-        let bases: Vec<i64> = read.iter().map(|b| b.base_offset).collect();
-        assert!(
-            bases == [0],
-            "batch B must be truncated away; got {bases:?}"
+        assert_eq!(
+            (seg.last_offset(), read),
+            (Offset(2), vec![sample_batch(0, 3, 100)]),
+            "batch B must be truncated away"
         );
     }
 
@@ -1344,8 +1361,7 @@ mod tests {
         seg.append(&sample_batch(3, 2, 2_000_000), 4096).unwrap();
         let read = seg.read(Offset(4), usize::MAX).unwrap();
         // Offset 4 falls inside the second batch (offsets 3..=4).
-        assert!(read.len() == 1);
-        assert!(read[0].base_offset == 3);
+        assert_eq!(read, vec![sample_batch(3, 2, 2_000_000)]);
     }
 
     #[test]
@@ -1413,43 +1429,46 @@ mod tests {
         let r = seg
             .read_raw(Offset(0), Offset(3), 10 * 1024 * 1024)
             .unwrap();
-        check!(r.start_offset == 0);
-        check!(r.last_offset == 2);
-        check!(
-            &r.bytes[..] == &wire[..],
-            "raw bytes must equal the on-disk concatenation"
+        assert_eq!(
+            (r.start_offset, r.last_offset, &r.bytes[..]),
+            (Offset(0), Offset(2), &wire[..])
         );
-        let mut cur: &[u8] = &r.bytes;
-        let mut n = 0;
-        while !cur.is_empty() {
-            crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
-            n += 1;
-        }
-        assert!(n == 3);
         drop(dir);
     }
 
     #[test]
     fn read_raw_clamps_at_limit_offset() {
         let (dir, mut seg) = test_segment();
+        let mut expected = bytes::BytesMut::new();
         for off in 0..3i64 {
-            seg.append(&test_batch_at(off), 0).unwrap();
+            let batch = test_batch_at(off);
+            seg.append(&batch, 0).unwrap();
+            if off < 2 {
+                batch.encode(&mut expected).unwrap();
+            }
         }
         let r = seg
             .read_raw(Offset(0), Offset(2), 10 * 1024 * 1024)
             .unwrap();
-        assert!(r.last_offset == 1);
+        assert_eq!(
+            (r.start_offset, r.last_offset, &r.bytes[..]),
+            (Offset(0), Offset(1), &expected[..])
+        );
         drop(dir);
     }
 
     #[test]
     fn read_raw_returns_at_least_one_batch_over_budget() {
         let (dir, mut seg) = test_segment();
-        seg.append(&test_batch_at(0), 0).unwrap();
+        let batch = test_batch_at(0);
+        let mut expected = bytes::BytesMut::new();
+        batch.encode(&mut expected).unwrap();
+        seg.append(&batch, 0).unwrap();
         let r = seg.read_raw(Offset(0), Offset(1), 1).unwrap();
-        check!(r.start_offset == 0);
-        check!(r.last_offset == 0);
-        check!(!r.bytes.is_empty());
+        assert_eq!(
+            (r.start_offset, r.last_offset, &r.bytes[..]),
+            (Offset(0), Offset(0), &expected[..])
+        );
         drop(dir);
     }
 
@@ -1484,29 +1503,26 @@ mod tests {
             seg.append(&test_batch_at(off), 0).unwrap();
         }
         let cases = [
-            (0i64, 5i64, 10 * 1024 * 1024usize), // all batches
-            (0, 3, 10 * 1024 * 1024),            // limit clamp
-            (2, 5, 10 * 1024 * 1024),            // mid-stream start
-            (0, 5, 1),                           // one-batch anti-stall
-            (4, 5, 10 * 1024 * 1024),            // last batch
+            ("all batches", 0i64, 5i64, 10 * 1024 * 1024usize),
+            ("limit clamp", 0, 3, 10 * 1024 * 1024),
+            ("mid-stream start", 2, 5, 10 * 1024 * 1024),
+            ("one-batch anti-stall", 0, 5, 1),
+            ("last batch", 4, 5, 10 * 1024 * 1024),
         ];
-        for (fo, lo, mb) in cases {
+        for (name, fo, lo, mb) in cases {
             let raw = seg.read_raw(Offset(fo), Offset(lo), mb).unwrap();
             let desc = seg.read_raw_desc(Offset(fo), Offset(lo), mb).unwrap();
-            assert!(
-                desc.start_offset == raw.start_offset,
-                "start_offset mismatch for case ({fo},{lo},{mb})"
-            );
-            assert!(
-                desc.last_offset == raw.last_offset,
-                "last_offset mismatch for case ({fo},{lo},{mb})"
+            assert_eq!(
+                (desc.start_offset, desc.last_offset),
+                (raw.start_offset, raw.last_offset),
+                "case {name}: first={fo}, last={lo}, max_bytes={mb}"
             );
             match &desc.region {
                 Some(region) => {
-                    assert!(region.len == raw.bytes.len());
-                    assert!(
-                        region_bytes(region) == raw.bytes[..],
-                        "region bytes must equal read_raw bytes for ({fo},{lo},{mb})"
+                    assert_eq!(
+                        (region.len, region_bytes(region)),
+                        (raw.bytes.len(), raw.bytes.to_vec()),
+                        "case {name}: first={fo}, last={lo}, max_bytes={mb}"
                     );
                 }
                 None => assert!(raw.bytes.is_empty()),
@@ -1528,11 +1544,21 @@ mod tests {
         // Budget that admits ~2-3 batches (each batch is small but > a few bytes).
         let raw = seg.read_raw(Offset(0), Offset(6), 80).unwrap();
         let desc = seg.read_raw_desc(Offset(0), Offset(6), 80).unwrap();
-        assert!(desc.start_offset == raw.start_offset);
-        assert!(desc.last_offset == raw.last_offset);
         let region = desc.region.expect("non-empty");
-        assert!(region.len == raw.bytes.len());
-        assert!(region_bytes(&region) == raw.bytes[..]);
+        assert_eq!(
+            (
+                desc.start_offset,
+                desc.last_offset,
+                region.len,
+                region_bytes(&region),
+            ),
+            (
+                raw.start_offset,
+                raw.last_offset,
+                raw.bytes.len(),
+                raw.bytes.to_vec(),
+            )
+        );
         drop(dir);
     }
     } // sendfile_cfg!
@@ -1570,28 +1596,18 @@ mod tests {
         // Read back the raw .log bytes.
         let mut on_disk = Vec::new();
         seg.read_log_range(0, &mut on_disk, usize::MAX).unwrap();
-        assert!(on_disk.len() == wire.len(), "size must be unchanged");
-
-        // base_offset (0..8) patched to the assigned value.
-        check!(i64::from_be_bytes(on_disk[0..8].try_into().unwrap()) == assigned_base);
-        // partition_leader_epoch (12..16) patched to the stamped epoch.
-        check!(i32::from_be_bytes(on_disk[12..16].try_into().unwrap()) == stamped_epoch);
-        // CRC field (17..21) byte-identical to the producer's.
-        check!(
-            on_disk[17..21] == wire[17..21],
-            "CRC must NOT be recomputed"
-        );
-        // Everything from byte 21 (CRC-covered region) onward is identical.
-        check!(
-            on_disk[21..] == wire[21..],
-            "CRC-covered region + body must be byte-for-byte verbatim"
-        );
+        let mut expected_wire = wire.to_vec();
+        expected_wire[0..8].copy_from_slice(&assigned_base.0.to_be_bytes());
+        expected_wire[12..16].copy_from_slice(&stamped_epoch.to_be_bytes());
+        assert_eq!(on_disk, expected_wire);
 
         // And it decodes (CRC still valid).
         let mut cur: &[u8] = &on_disk;
         let decoded = crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
-        assert!(decoded.base_offset == assigned_base);
-        assert!(decoded.partition_leader_epoch == stamped_epoch);
+        assert_eq!(
+            (decoded.base_offset, decoded.partition_leader_epoch),
+            (assigned_base.0, stamped_epoch)
+        );
         drop(dir);
     }
 
@@ -1607,12 +1623,12 @@ mod tests {
 
         seg.append_verbatim(&wire, Offset(0), 2, 5_000, LeaderEpoch(0), 0)
             .unwrap();
-        assert!(seg.last_offset() == 2);
-        assert!(seg.max_timestamp() == 5_000);
         // Reading at offset 2 (inside the batch) returns the batch.
         let read = seg.read(Offset(2), usize::MAX).unwrap();
-        assert!(read.len() == 1);
-        assert!(read[0].base_offset == 0);
+        assert_eq!(
+            (seg.last_offset(), seg.max_timestamp(), read),
+            (Offset(2), 5_000, vec![producer])
+        );
         drop(dir);
     }
 

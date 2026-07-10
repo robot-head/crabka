@@ -109,26 +109,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 #[test]
-fn add_with_custom_matches_jvm() {
-    let md = base_add().with_custom_metadata(CustomMetadata(vec![1, 2, 3, 4]));
-    assert_byte_exact("add_with_custom", &MetadataEvent::AddSegment(md));
-}
-
-#[test]
-fn add_no_custom_matches_jvm() {
-    assert_byte_exact("add_no_custom", &MetadataEvent::AddSegment(base_add()));
-}
-
-#[test]
-fn add_txn_empty_matches_jvm() {
-    // JVM-captured via the RemoteLogSegmentMetadata(..., boolean) constructor
-    // present in mirror.gcr.io/apache/kafka:4.0.0; same as add_no_custom but txnIdxEmpty=true.
-    let md = base_add().with_txn_index_empty(true);
-    assert_byte_exact("add_txn_empty", &MetadataEvent::AddSegment(md));
-}
-
-#[test]
-fn update_finish_matches_jvm() {
+fn metadata_events_match_jvm_golden_bytes() {
     let update = RemoteLogSegmentMetadataUpdate {
         remote_log_segment_id: segment_id(),
         event_timestamp_ms: 456,
@@ -136,19 +117,33 @@ fn update_finish_matches_jvm() {
         state: RemoteLogSegmentState::CopySegmentFinished,
         broker_id: 42,
     };
-    assert_byte_exact("update_finish", &MetadataEvent::UpdateSegment(update));
-}
-
-#[test]
-fn partition_delete_marked_matches_jvm() {
     let delete = RemotePartitionDeleteMetadata {
         topic_id_partition: topic_id_partition(),
         state: RemotePartitionDeleteState::DeletePartitionMarked,
         event_timestamp_ms: 789,
         broker_id: 42,
     };
-    assert_byte_exact(
-        "partition_delete_marked",
-        &MetadataEvent::PartitionDelete(delete),
-    );
+    for (name, event) in [
+        (
+            "add_with_custom",
+            MetadataEvent::AddSegment(
+                base_add().with_custom_metadata(CustomMetadata(vec![1, 2, 3, 4])),
+            ),
+        ),
+        ("add_no_custom", MetadataEvent::AddSegment(base_add())),
+        // JVM-captured via the RemoteLogSegmentMetadata(..., boolean) constructor
+        // present in mirror.gcr.io/apache/kafka:4.0.0; same as add_no_custom but
+        // txnIdxEmpty=true.
+        (
+            "add_txn_empty",
+            MetadataEvent::AddSegment(base_add().with_txn_index_empty(true)),
+        ),
+        ("update_finish", MetadataEvent::UpdateSegment(update)),
+        (
+            "partition_delete_marked",
+            MetadataEvent::PartitionDelete(delete),
+        ),
+    ] {
+        assert_byte_exact(name, &event);
+    }
 }

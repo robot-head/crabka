@@ -581,18 +581,23 @@ fn usize_count(n: i32) -> Result<usize, MetadataLogError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn config_defaults_match_kafka() {
         let cfg = KafkaMetadataLogConfig::new("127.0.0.1:9092");
-        check!(cfg.topic == METADATA_TOPIC);
-        check!(cfg.num_partitions == 50);
-        check!(cfg.replication == 3);
-        check!(cfg.bootstrap == "127.0.0.1:9092");
-        check!(cfg.security.is_none());
+        assert_eq!(
+            (
+                cfg.topic.as_str(),
+                cfg.num_partitions,
+                cfg.replication,
+                cfg.bootstrap.as_str(),
+                cfg.security.is_none(),
+            ),
+            (METADATA_TOPIC, 50, 3, "127.0.0.1:9092", true)
+        );
     }
 
     #[test]

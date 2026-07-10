@@ -97,7 +97,7 @@ mod tests {
             Err(CompressionError::TooLarge { limit: 1024 })
         ));
         let back = decompress(&z, BIG_CAP).unwrap();
-        assert!(back.len() == bomb.len());
+        assert_eq!(back.as_ref(), bomb.as_slice());
     }
 
     #[test]
@@ -124,15 +124,18 @@ mod tests {
         let big = vec![0xCDu8; 128 * 1024];
         let z = compress(&big).unwrap();
         // LZ4 frame layout: [magic:4][FLG][BD]...
-        assert!(z[0..4] == [0x04, 0x22, 0x4D, 0x18]);
         let flg = z[4];
         let bd = z[5];
         // BD bits 4..6 encode the block max size; value 4 == 64 KiB.
-        assert!((bd >> 4) & 0x7 == 4, "BD={bd:#04x}");
-        // FLG bit 5 = block-independence flag (we request Independent).
-        assert!((flg >> 5) & 1 == 1, "FLG={flg:#04x}");
-        // FLG bit 4 = per-block checksum, bit 2 = content checksum: both off.
-        assert!((flg >> 4) & 1 == 0, "FLG={flg:#04x}");
-        assert!((flg >> 2) & 1 == 0, "FLG={flg:#04x}");
+        assert_eq!(
+            (
+                &z[0..4],
+                (bd >> 4) & 0x7,
+                (flg >> 5) & 1,
+                (flg >> 4) & 1,
+                (flg >> 2) & 1,
+            ),
+            (&[0x04, 0x22, 0x4D, 0x18][..], 4, 1, 0, 0)
+        );
     }
 }

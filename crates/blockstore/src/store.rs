@@ -232,7 +232,7 @@ mod tests {
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     };
-    use assert2::{assert, check};
+    use assert2::assert;
     use object_store::{ObjectStore, memory::InMemory};
 
     use super::*;
@@ -295,8 +295,6 @@ mod tests {
             .unwrap();
         let batches = df.collect().await.unwrap();
         let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
-        assert!(total == 2);
-
         let first = batches[0]
             .column(0)
             .as_any()
@@ -317,7 +315,7 @@ mod tests {
                     .map(|a| a.value(0))
             })
             .expect("line column is utf8");
-        assert!(first == "hello");
+        assert_eq!((total, first), (2, "hello"));
     }
 
     #[tokio::test]
@@ -345,19 +343,22 @@ mod tests {
         web.insert("app", "web");
         mutated.index_mut().add_series("t", web.fingerprint(), &web);
 
-        check!(!Arc::ptr_eq(&bs.index, &mutated.index));
-        check!(
-            bs.index()
-                .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
-                .unwrap()
-                .is_empty()
-        );
-        check!(
-            mutated
-                .index()
-                .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
-                .unwrap()
-                == std::collections::BTreeSet::from([web.fingerprint()])
+        assert_eq!(
+            (
+                Arc::ptr_eq(&bs.index, &mutated.index),
+                bs.index()
+                    .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
+                    .unwrap(),
+                mutated
+                    .index()
+                    .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
+                    .unwrap(),
+            ),
+            (
+                false,
+                std::collections::BTreeSet::new(),
+                std::collections::BTreeSet::from([web.fingerprint()]),
+            )
         );
     }
 

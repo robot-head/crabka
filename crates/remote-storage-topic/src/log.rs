@@ -477,7 +477,7 @@ fn filtered_broadcast(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use futures_util::StreamExt;
 
     use super::*;
@@ -485,11 +485,13 @@ mod tests {
     #[tokio::test]
     async fn publish_assigns_monotonic_offsets() {
         let log = InProcessMetadataEventLog::new(2);
-        check!(log.publish(0, Bytes::from_static(b"a")).await.unwrap() == 0);
-        check!(log.publish(0, Bytes::from_static(b"b")).await.unwrap() == 1);
-        check!(log.publish(1, Bytes::from_static(b"c")).await.unwrap() == 0);
+        let offsets = (
+            log.publish(0, Bytes::from_static(b"a")).await.unwrap(),
+            log.publish(0, Bytes::from_static(b"b")).await.unwrap(),
+            log.publish(1, Bytes::from_static(b"c")).await.unwrap(),
+        );
         let hwms = log.high_water_marks().await.unwrap();
-        assert!(hwms == vec![2, 1]);
+        assert_eq!((offsets, hwms), ((0, 1, 0), vec![2, 1]));
     }
 
     #[tokio::test]
@@ -503,13 +505,16 @@ mod tests {
         }]);
         let a = stream.next().await.unwrap();
         let b = stream.next().await.unwrap();
-        assert!(a.payload.as_ref() == b"a");
-        assert!(b.payload.as_ref() == b"b");
+        assert_eq!(
+            (a.payload.as_ref(), b.payload.as_ref()),
+            (b"a".as_slice(), b"b".as_slice())
+        );
         log.publish(0, Bytes::from_static(b"c")).await.unwrap();
         let c = stream.next().await.unwrap();
-        check!(c.payload.as_ref() == b"c");
-        check!(c.partition == 0);
-        check!(c.offset == 2);
+        assert_eq!(
+            (c.payload.as_ref(), c.partition, c.offset),
+            (b"c".as_slice(), 0, 2)
+        );
     }
 
     #[tokio::test]
@@ -524,8 +529,11 @@ mod tests {
         }]);
         for i in 0..5 {
             let r = stream.next().await.unwrap();
-            assert!(r.payload.as_ref() == &[i]);
-            assert!(r.offset == i64::from(i));
+            assert_eq!(
+                (r.payload.as_ref(), r.offset),
+                (&[i][..], i64::from(i)),
+                "case byte {i}"
+            );
         }
     }
 
@@ -549,9 +557,18 @@ mod tests {
             start_offset: 0,
         }]);
         log.publish(0, Bytes::from_static(b"b")).await.unwrap();
-        for s in [&mut s1, &mut s2] {
-            assert!(s.next().await.unwrap().payload.as_ref() == b"a");
-            assert!(s.next().await.unwrap().payload.as_ref() == b"b");
+        for (name, subscriber) in [
+            ("first subscriber", &mut s1),
+            ("second subscriber", &mut s2),
+        ] {
+            assert_eq!(
+                (
+                    subscriber.next().await.unwrap().payload,
+                    subscriber.next().await.unwrap().payload,
+                ),
+                (Bytes::from_static(b"a"), Bytes::from_static(b"b")),
+                "case {name}"
+            );
         }
     }
 
@@ -595,9 +612,10 @@ mod tests {
         );
         // partition 1 offset 1 ("y") is the only remaining assigned record.
         let r = stream.next().await.unwrap();
-        check!(r.partition == 1);
-        check!(r.offset == 1);
-        check!(r.payload.as_ref() == b"y");
+        assert_eq!(
+            (r.partition, r.offset, r.payload.as_ref()),
+            (1, 1, b"y".as_slice())
+        );
     }
 
     #[tokio::test]
@@ -611,8 +629,7 @@ mod tests {
         log.publish(1, Bytes::from_static(b"skip")).await.unwrap();
         log.publish(0, Bytes::from_static(b"keep")).await.unwrap();
         let r = stream.next().await.unwrap();
-        check!(r.partition == 0);
-        check!(r.payload.as_ref() == b"keep");
+        assert_eq!((r.partition, r.payload.as_ref()), (0, b"keep".as_slice()));
     }
 
     #[tokio::test]
@@ -650,16 +667,19 @@ mod tests {
             let r = stream.next().await.unwrap();
             got.push((r.partition, r.offset, r.payload.to_vec()));
         }
-        assert!(
-            got == vec![
-                (1, 0, b"old0".to_vec()),
-                (1, 1, b"old1".to_vec()),
-                (1, 2, b"old2".to_vec()),
-                (1, 3, b"new".to_vec()),
-            ],
-            "backlog must drain fully (in offset order) before the live append"
+        assert_eq!(
+            (got, handle.assigned()),
+            (
+                vec![
+                    (1, 0, b"old0".to_vec()),
+                    (1, 1, b"old1".to_vec()),
+                    (1, 2, b"old2".to_vec()),
+                    (1, 3, b"new".to_vec()),
+                ],
+                vec![0, 1],
+            ),
+            "backlog drains in order while both partitions remain assigned"
         );
-        assert!(handle.assigned().contains(&1));
     }
 
     #[tokio::test]
@@ -695,7 +715,6 @@ mod tests {
         log.publish(1, Bytes::from_static(b"gone")).await.unwrap();
         log.publish(0, Bytes::from_static(b"here")).await.unwrap();
         let r = stream.next().await.unwrap();
-        check!(r.partition == 0);
-        check!(r.payload.as_ref() == b"here");
+        assert_eq!((r.partition, r.payload.as_ref()), (0, b"here".as_slice()));
     }
 }

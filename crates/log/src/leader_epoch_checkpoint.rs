@@ -317,7 +317,19 @@ mod tests {
         }
         let mut c2 = LeaderEpochCheckpoint::open(path).unwrap();
         c2.append(LeaderEpoch(1), Offset(50)).unwrap();
-        assert!(c2.entries().len() == 2);
+        assert_eq!(
+            c2.entries(),
+            &[
+                EpochEntry {
+                    epoch: LeaderEpoch(0),
+                    start_offset: Offset(0),
+                },
+                EpochEntry {
+                    epoch: LeaderEpoch(1),
+                    start_offset: Offset(50),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -351,8 +363,13 @@ mod tests {
         c.append(LeaderEpoch(0), Offset(0)).unwrap();
         c.append(LeaderEpoch(1), Offset(50)).unwrap();
         c.append(LeaderEpoch(2), Offset(100)).unwrap();
-        assert!(c.end_offset_for_epoch(LeaderEpoch(0), Offset(200)) == 50);
-        assert!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(200)) == 100);
+        assert_eq!(
+            (
+                c.end_offset_for_epoch(LeaderEpoch(0), Offset(200)),
+                c.end_offset_for_epoch(LeaderEpoch(1), Offset(200)),
+            ),
+            (Offset(50), Offset(100))
+        );
     }
 
     #[test]
@@ -370,11 +387,14 @@ mod tests {
         c.append(LeaderEpoch(1), Offset(0)).unwrap();
         c.append(LeaderEpoch(7), Offset(4)).unwrap();
         c.truncate_from_end(Offset(4)).unwrap();
-        check!(c.latest_epoch() == Some(LeaderEpoch(1)));
-        // Epoch 7 began at offset 4 (>= end_offset), so it is gone.
-        check!(c.end_offset_for_epoch(LeaderEpoch(7), Offset(4)) == -1);
-        // Epoch 1 survives; its end is now the log end (4).
-        check!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(4)) == 4);
+        assert_eq!(
+            (
+                c.latest_epoch(),
+                c.end_offset_for_epoch(LeaderEpoch(7), Offset(4)),
+                c.end_offset_for_epoch(LeaderEpoch(1), Offset(4)),
+            ),
+            (Some(LeaderEpoch(1)), Offset(-1), Offset(4))
+        );
     }
 
     #[test]
@@ -384,8 +404,7 @@ mod tests {
         c.append(LeaderEpoch(1), Offset(0)).unwrap();
         c.append(LeaderEpoch(2), Offset(50)).unwrap();
         c.clear().unwrap();
-        assert!(c.entries().is_empty());
-        assert!(c.latest_epoch() == None);
+        assert_eq!((c.entries(), c.latest_epoch()), (&[][..], None));
         // Persisted: a reopen sees no entries.
         let reopened = LeaderEpochCheckpoint::open(path).unwrap();
         assert!(reopened.entries().is_empty());
@@ -407,8 +426,7 @@ mod tests {
     fn missing_file_yields_empty() {
         let (_d, path) = fresh();
         let c = LeaderEpochCheckpoint::open(path).unwrap();
-        assert!(c.entries().is_empty());
-        assert!(c.latest_epoch() == None);
+        assert_eq!((c.entries(), c.latest_epoch()), (&[][..], None));
     }
 
     #[test]
@@ -437,14 +455,9 @@ mod tests {
     fn epoch_for_offset_empty_returns_none() {
         let (_d, path) = fresh();
         let c = LeaderEpochCheckpoint::open(path).unwrap();
-        assert!(
-            c.epoch_for_offset(Offset(0)) == None,
-            "empty checkpoint → None"
-        );
-        assert!(
-            c.epoch_for_offset(Offset(100)) == None,
-            "empty checkpoint → None"
-        );
+        for (name, offset) in [("zero", 0), ("positive", 100)] {
+            assert_eq!(c.epoch_for_offset(Offset(offset)), None, "case {name}");
+        }
     }
 
     #[test]
@@ -505,14 +518,13 @@ mod tests {
         c.append(LeaderEpoch(1), Offset(50)).unwrap();
         // Any offset >= 50 that extends beyond the last known epoch → epoch 1
         // (the current / latest epoch owns all subsequent offsets).
-        assert!(
-            c.epoch_for_offset(Offset(100)) == Some(LeaderEpoch(1)),
-            "offset past last entry → last epoch"
-        );
-        assert!(
-            c.epoch_for_offset(Offset(999)) == Some(LeaderEpoch(1)),
-            "far past last entry → last epoch"
-        );
+        for (name, offset) in [("past last entry", 100), ("far past last entry", 999)] {
+            assert_eq!(
+                c.epoch_for_offset(Offset(offset)),
+                Some(LeaderEpoch(1)),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -520,8 +532,13 @@ mod tests {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
         c.append(LeaderEpoch(0), Offset(0)).unwrap();
-        assert!(c.epoch_for_offset(Offset(0)) == Some(LeaderEpoch(0)));
-        assert!(c.epoch_for_offset(Offset(1000)) == Some(LeaderEpoch(0)));
+        assert_eq!(
+            (
+                c.epoch_for_offset(Offset(0)),
+                c.epoch_for_offset(Offset(1000)),
+            ),
+            (Some(LeaderEpoch(0)), Some(LeaderEpoch(0)))
+        );
     }
 
     // ── epoch_and_offset_for (KIP-320) ────────────────────────────────────────
@@ -546,12 +563,20 @@ mod tests {
         c.append(LeaderEpoch(1), Offset(50)).unwrap();
         c.append(LeaderEpoch(2), Offset(100)).unwrap();
         // Recorded older epoch → (epoch, start of next epoch).
-        assert!(
-            c.epoch_and_offset_for(LeaderEpoch(0), Offset(200)) == (LeaderEpoch(0), Offset(50))
-        );
-        assert!(
-            c.epoch_and_offset_for(LeaderEpoch(1), Offset(200)) == (LeaderEpoch(1), Offset(100))
-        );
+        for (name, requested, expected) in [
+            ("oldest epoch", LeaderEpoch(0), (LeaderEpoch(0), Offset(50))),
+            (
+                "middle epoch",
+                LeaderEpoch(1),
+                (LeaderEpoch(1), Offset(100)),
+            ),
+        ] {
+            assert_eq!(
+                c.epoch_and_offset_for(requested, Offset(200)),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]

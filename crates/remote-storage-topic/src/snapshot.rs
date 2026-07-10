@@ -310,28 +310,34 @@ mod tests {
     }
 
     #[test]
-    fn truncated_file_is_error_not_panic() {
-        let bytes = sample_snapshot().encode();
-        let err = Snapshot::decode(&bytes[..bytes.len() - 3]).unwrap_err();
-        assert!(matches!(
-            err,
-            SnapshotError::Malformed(_) | SnapshotError::TrailingBytes(_)
-        ));
-    }
+    fn malformed_snapshot_inputs_return_errors_without_panicking() {
+        let encoded = sample_snapshot().encode();
+        let cases: [(&str, Vec<u8>, fn(&SnapshotError) -> bool); 3] = [
+            (
+                "truncated file",
+                encoded[..encoded.len() - 3].to_vec(),
+                |err| {
+                    matches!(
+                        err,
+                        SnapshotError::Malformed(_) | SnapshotError::TrailingBytes(_)
+                    )
+                },
+            ),
+            ("garbage bytes", vec![0xFF, 0xFF, 0xFF, 0xFF], |err| {
+                matches!(
+                    err,
+                    SnapshotError::UnsupportedVersion(_) | SnapshotError::Malformed(_)
+                )
+            }),
+            ("empty buffer", Vec::new(), |err| {
+                matches!(err, SnapshotError::Malformed(_))
+            }),
+        ];
 
-    #[test]
-    fn garbage_bytes_are_error_not_panic() {
-        let err = Snapshot::decode(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap_err();
-        assert!(matches!(
-            err,
-            SnapshotError::UnsupportedVersion(_) | SnapshotError::Malformed(_)
-        ));
-    }
-
-    #[test]
-    fn empty_buffer_is_error_not_panic() {
-        let err = Snapshot::decode(&[]).unwrap_err();
-        assert!(matches!(err, SnapshotError::Malformed(_)));
+        for (name, bytes, accepts) in cases {
+            let err = Snapshot::decode(&bytes).unwrap_err();
+            assert!(accepts(&err), "case {name}: {err:?}");
+        }
     }
 
     #[test]
