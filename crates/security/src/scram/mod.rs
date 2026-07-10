@@ -1,10 +1,12 @@
 //! SCRAM (RFC 5802) — supports SHA-256 and SHA-512.
 
 mod client;
+mod pg_verifier;
 mod server;
 
 pub use client::ScramClientExchange;
 use hmac::{Hmac, KeyInit, Mac};
+pub use pg_verifier::{PgScramVerifier, ScramError};
 use ring::rand::{SecureRandom, SystemRandom};
 pub use server::{ScramServerExchange, StepResult};
 use sha2::{Digest, Sha256, Sha512};

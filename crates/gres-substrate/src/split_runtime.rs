@@ -15,16 +15,16 @@ use crabka_gres_ranges::{
     SplitStateStore, TableId,
     prologue::{
         InDoubtSettlement, ProducedBarrier, PrologueError, Range0RecoveryHooks,
-        RangeRecoverySubstrate, RecoverRange, ReplaySummary, ServingGate, SettleOutcome,
-        recover_range,
+        RangeRecoverySubstrate, RecoverRange, ReplaySummary, ServingGate, ServingRange,
+        SettleOutcome, recover_range,
     },
 };
 use crabka_pgkv::{Kv, MemKv, SnapshotKv, WriteOp, key};
 
 use crate::{
     CheckpointConfig, CheckpointFilter, CheckpointService, CheckpointSnapshotSource,
-    CheckpointStats, CheckpointTrigger, CommittedWalReader, InMemoryWalLog, RecoveryFencer,
-    RestoreTail, TransactionalWalWriter, WalFrame, WriterGeneration, apply_frame,
+    CheckpointStats, CheckpointTrigger, CommittedWalReader, InMemoryWalLog, RecoveryBarrier,
+    RecoveryFencer, RestoreTail, TransactionalWalWriter, WalFrame, WriterGeneration, apply_frame,
     checkpoint::{CheckpointStore, InMemoryCheckpointStore},
     restore_latest_filtered_and_replay_tail,
 };
@@ -74,6 +74,7 @@ struct RawKvRange {
     accepting_writes: std::sync::atomic::AtomicBool,
     serving: std::sync::atomic::AtomicBool,
     pause_barrier: tokio::sync::Mutex<Option<i64>>,
+    recovered_serving_state: tokio::sync::Mutex<Option<ServingRange>>,
 }
 
 impl RawKvSplitRuntime {
@@ -202,6 +203,7 @@ impl RawKvSplitRuntime {
             accepting_writes: std::sync::atomic::AtomicBool::new(false),
             serving: std::sync::atomic::AtomicBool::new(false),
             pause_barrier: tokio::sync::Mutex::new(None),
+            recovered_serving_state: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -421,10 +423,15 @@ impl SplitHooks for RawKvSplitRuntime {
 
     async fn successor_fence_prologue(&self, state: &SplitState) -> Result<(), SplitError> {
         let successor = self.range(state.successor)?;
+        let _write_gate = successor.write_gate.lock().await;
+        if successor.recovered_serving_state.lock().await.is_some() {
+            return Ok(());
+        }
         let successor_kv = successor.kv()?;
         let adapter = RawPrologue {
             range: state.successor,
             wal: successor.wal.clone(),
+            barrier: Mutex::new(None),
         };
         let serving_gate = RawServingGate {
             raw_range: successor.clone(),
@@ -444,8 +451,9 @@ impl SplitHooks for RawKvSplitRuntime {
 
     async fn inherit_in_doubt_markers(
         &self,
-        _state: &SplitState,
+        state: &SplitState,
     ) -> Result<Vec<InDoubtMarker>, SplitError> {
+        self.open_recovered_successor(state.successor).await?;
         Ok(Vec::new())
     }
 
@@ -476,6 +484,39 @@ impl SplitHooks for RawKvSplitRuntime {
     }
 }
 
+impl RawKvSplitRuntime {
+    async fn open_recovered_successor(&self, range: RangeId) -> Result<(), SplitError> {
+        let raw_range = self.range(range)?;
+        let _write_gate = raw_range.write_gate.lock().await;
+        if raw_range.serving.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(());
+        }
+        let recovery = raw_range
+            .recovered_serving_state
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| {
+                SplitError::Hook("successor recovery result is missing before serving opens".into())
+            })?;
+        let generation = u64::try_from(recovery.epoch)
+            .map(WriterGeneration)
+            .map_err(|_| SplitError::Hook("prologue epoch is negative".into()))?;
+        raw_range.snapshot.record_recovery(
+            generation,
+            recovery.barrier_offset,
+            recovery.next_journal_seq,
+        );
+        raw_range
+            .accepting_writes
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        raw_range
+            .serving
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 fn split_hook_error(error: impl std::fmt::Display) -> SplitError {
     SplitError::Hook(error.to_string())
 }
@@ -497,6 +538,7 @@ fn parse_row_range_key(key_bytes: &[u8]) -> Result<RangeKey, SplitError> {
 struct RawPrologue {
     range: RangeId,
     wal: Arc<InMemoryWalLog>,
+    barrier: Mutex<Option<RecoveryBarrier>>,
 }
 
 #[async_trait]
@@ -510,8 +552,12 @@ impl RangeRecoverySubstrate for RawPrologue {
             .fence_with_barrier()
             .await
             .map_err(|error| PrologueError::Substrate(error.to_string()))?;
-        i16::try_from(barrier.generation.0)
-            .map_err(|_| PrologueError::Substrate("raw-KV WAL epoch exceeds i16".into()))
+        let epoch = i16::try_from(barrier.generation.0)
+            .map_err(|_| PrologueError::Substrate("raw-KV WAL epoch exceeds i16".into()))?;
+        *self.barrier.lock().map_err(|_| {
+            PrologueError::Substrate("raw-KV prologue barrier lock poisoned".into())
+        })? = Some(barrier);
+        Ok(epoch)
     }
 
     async fn produce_barrier(
@@ -522,11 +568,24 @@ impl RangeRecoverySubstrate for RawPrologue {
         if range != self.range {
             return Err(PrologueError::Substrate("prologue range mismatch".into()));
         }
-        // `fence_epoch` already committed the required atomic fence/barrier pair.
+        let barrier = self
+            .barrier
+            .lock()
+            .map_err(|_| PrologueError::Substrate("raw-KV prologue barrier lock poisoned".into()))?
+            .ok_or_else(|| {
+                PrologueError::Substrate("prologue barrier is missing after fencing".into())
+            })?;
+        let barrier_epoch = i16::try_from(barrier.generation.0)
+            .map_err(|_| PrologueError::Substrate("raw-KV WAL epoch exceeds i16".into()))?;
+        if barrier_epoch != epoch {
+            return Err(PrologueError::Substrate(
+                "prologue barrier epoch differs from fenced epoch".into(),
+            ));
+        }
         Ok(ProducedBarrier {
             range,
             epoch,
-            offset: self.wal.next_offset().await - 1,
+            offset: barrier.offset,
         })
     }
 
@@ -575,23 +634,18 @@ struct RawServingGate {
 impl ServingGate for RawServingGate {
     async fn mark_served(
         &self,
-        _range: RangeId,
+        range: RangeId,
         epoch: i16,
         barrier_offset: i64,
         next_journal_seq: u64,
     ) -> Result<(), PrologueError> {
-        let generation = u64::try_from(epoch)
-            .map(WriterGeneration)
-            .map_err(|_| PrologueError::Substrate("prologue epoch is negative".into()))?;
-        self.raw_range
-            .snapshot
-            .record_recovery(generation, barrier_offset, next_journal_seq);
-        self.raw_range
-            .accepting_writes
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.raw_range
-            .serving
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let serving = ServingRange {
+            range,
+            epoch,
+            barrier_offset,
+            next_journal_seq,
+        };
+        *self.raw_range.recovered_serving_state.lock().await = Some(serving);
         Ok(())
     }
 }

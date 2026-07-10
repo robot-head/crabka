@@ -14,7 +14,8 @@ use crabka_pgtypes::{ColumnType, Datum, numeric::Typmod};
 
 use crate::{
     Column, ColumnDefault, ForeignDataWrapper, ForeignServer, ForeignTableMeta, HashSharding,
-    Index, IndexPlacement, Sequence, ShardingStrategy, TableOptions, UserMapping, View,
+    Index, IndexConstraint, IndexPlacement, Sequence, ShardingStrategy, TableOptions, UserMapping,
+    View,
 };
 
 /// The single schema-value format version. All tables (ordinary and foreign)
@@ -25,10 +26,13 @@ pub const SCHEMA_VERSION: u8 = 5;
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 1;
+const INDEX_VERSION: u8 = 2;
 const SEQUENCE_VERSION: u8 = 1;
 const INDEX_PLACEMENT_LOCAL: u8 = 0;
 const INDEX_PLACEMENT_GLOBAL: u8 = 1;
+const INDEX_CONSTRAINT_NONE: u8 = 0;
+const INDEX_CONSTRAINT_PRIMARY_KEY: u8 = 1;
+const INDEX_CONSTRAINT_UNIQUE: u8 = 2;
 
 mod datum_tag {
     pub const NULL: u8 = 0;
@@ -488,6 +492,11 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
         IndexPlacement::Local => INDEX_PLACEMENT_LOCAL,
         IndexPlacement::Global => INDEX_PLACEMENT_GLOBAL,
     });
+    out.push(match index.constraint {
+        None => INDEX_CONSTRAINT_NONE,
+        Some(IndexConstraint::PrimaryKey) => INDEX_CONSTRAINT_PRIMARY_KEY,
+        Some(IndexConstraint::Unique) => INDEX_CONSTRAINT_UNIQUE,
+    });
     out.extend_from_slice(
         &u32::try_from(index.columns.len())
             .expect("index column count must fit in u32")
@@ -534,6 +543,16 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
             )));
         }
     };
+    let constraint = match take_u8(&mut cur)? {
+        INDEX_CONSTRAINT_NONE => None,
+        INDEX_CONSTRAINT_PRIMARY_KEY => Some(IndexConstraint::PrimaryKey),
+        INDEX_CONSTRAINT_UNIQUE => Some(IndexConstraint::Unique),
+        tag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown index constraint tag {tag}"
+            )));
+        }
+    };
     let column_count = usize::try_from(u32::from_be_bytes(
         take_n(&mut cur, 4)?.try_into().expect("4"),
     ))
@@ -555,6 +574,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         columns,
         unique,
         placement,
+        constraint,
     })
 }
 
@@ -1032,6 +1052,7 @@ mod tests {
             columns: vec!["email".into()],
             unique: true,
             placement: IndexPlacement::Global,
+            constraint: None,
         };
 
         let bytes = serialize_index(&index);

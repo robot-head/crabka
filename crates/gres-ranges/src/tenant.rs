@@ -25,6 +25,7 @@ use crate::{
     RangeSpec, RangeTransferCapability, RangeTransferError, RouteIntent,
     RowInterval as MapRowInterval, SplitCommand, SplitError, SplitHooks, SplitState,
     SplitStateStore, TableId, TableTransferRequest, TenantName,
+    barrier::{Range0Barrier, Range0EndSampler},
     coordinator::{LocalCoordinator, LocalCoordinatorError, TransactionDecision},
     forward::{ForwardError, RegistryRangeScanner, RegistryRemoteForward, RemoteForward},
     registry::RangeRegistry,
@@ -47,8 +48,10 @@ pub struct MultiRangeTenantConfig {
     pub data_dir: Option<PathBuf>,
     /// Optional set of range engines hosted by this gateway process.
     ///
-    /// The set must include range 0. Remote range-0 decision and barrier support is not implemented.
+    /// The set may exclude range 0 only when a read-only range-0 replica is supplied.
     pub hosted_ranges: Option<Vec<RangeId>>,
+    /// Read-only local replica used by an rN-only compute for catalog and global-decision reads.
+    pub range0_replica: Option<ReadOnlyRange0Replica>,
     /// Optional control-plane endpoint map used to reach ranges not hosted here.
     pub range_registry: Option<RangeRegistry>,
     /// TLS-only client used for every remote range call.
@@ -118,6 +121,7 @@ impl MultiRangeTenantConfig {
             range_map,
             data_dir: None,
             hosted_ranges: None,
+            range0_replica: None,
             range_registry: None,
             range_client: None,
             commit_fault_for_testing: None,
@@ -134,11 +138,18 @@ impl MultiRangeTenantConfig {
 
     /// Return a config that opens only the requested local ranges.
     ///
-    /// The gateway must host range 0 until remote range-0 decision and barrier support exists.
+    /// An rN-only gateway requires [`Self::with_read_only_range0_replica`].
     pub fn with_hosted_ranges(mut self, hosted_ranges: Vec<RangeId>) -> Result<Self, TenantError> {
         let hosted_ranges = normalize_hosted_ranges(&self.range_map, hosted_ranges)?;
         self.hosted_ranges = Some(hosted_ranges);
         Ok(self)
+    }
+
+    /// Supply the read-only range-0 replica required by an rN-only gateway.
+    #[must_use]
+    pub fn with_read_only_range0_replica(mut self, replica: ReadOnlyRange0Replica) -> Self {
+        self.range0_replica = Some(replica);
+        self
     }
 
     /// Route non-hosted ranges through this registry snapshot.
@@ -194,11 +205,9 @@ pub enum TenantError {
     /// A hosted range was not present in the layout.
     #[error("--host-ranges contains r{0}, which is absent from --ranges")]
     HostedRangeMissing(RangeId),
-    /// The gateway was configured to route range-0 work remotely.
-    #[error(
-        "gateway must host range r0; remote range-0 decision and barrier support is not implemented"
-    )]
-    GatewayRequiresLocalRangeZero,
+    /// An rN-only gateway lacks the local read-only range-0 replica required for safe reads.
+    #[error("gateway hosting no r0 requires a supplied read-only range-0 replica")]
+    MissingRangeZeroReplica,
     /// The range-0 timestamp oracle failed to start.
     #[error("range r0 timestamp oracle: {0}")]
     TimestampOracle(TsoError),
@@ -208,6 +217,33 @@ pub enum TenantError {
     /// A registry can route calls remotely only through mTLS.
     #[error("remote range routing requires a TLS client identity and trust configuration")]
     MissingRangeTls,
+}
+
+/// Read-only range-0 state injected into an rN-only compute.
+#[derive(Clone)]
+pub struct ReadOnlyRange0Replica {
+    catalog_kv: Arc<dyn crabka_pgkv::Kv>,
+    barrier: Arc<Range0Barrier>,
+}
+
+impl std::fmt::Debug for ReadOnlyRange0Replica {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ReadOnlyRange0Replica(..)")
+    }
+}
+
+impl ReadOnlyRange0Replica {
+    /// Bind a follower tail's catalog store and barrier into one replica.
+    ///
+    /// The catalog KV is derived from `tail`, so the barrier can only certify
+    /// the exact store to which the follower applies committed frames.
+    #[must_use]
+    pub fn new(tail: crate::Range0Tail, sampler: Arc<dyn Range0EndSampler>) -> Self {
+        Self {
+            catalog_kv: tail.store_handle(),
+            barrier: Arc::new(Range0Barrier::new(tail, sampler)),
+        }
+    }
 }
 
 /// Fail-clear rejection for the deliberately narrow local SQL split bridge.
@@ -310,11 +346,7 @@ impl MultiRangeTenant {
         mut open_engine: impl FnMut(Option<&PathBuf>, RangeId) -> Result<SqlEngine, ExecError>,
         timestamp_oracle: Option<Arc<dyn crabka_pgexec::TimestampOracle>>,
     ) -> Result<(Self, MultiRangeTenantHandles), TenantError> {
-        config.hosted_ranges = config
-            .hosted_ranges
-            .take()
-            .map(|ranges| normalize_hosted_ranges(&config.range_map, ranges))
-            .transpose()?;
+        let hosts_range0 = Self::validate_range0_assembly(&mut config)?;
         let mut engines = BTreeMap::new();
         let hosted_ranges = config.hosted_ranges.as_ref();
         for spec in config.range_map.ranges() {
@@ -330,7 +362,11 @@ impl MultiRangeTenant {
             engines.insert(spec.range_id, engine);
         }
 
-        install_range0_catalog(&mut engines);
+        if let Some(replica) = &config.range0_replica {
+            install_replica_catalog(&mut engines, replica);
+        } else {
+            install_range0_catalog(&mut engines);
+        }
 
         if let Some(coordinator) = engines.get_mut(&RangeId::COORDINATOR) {
             coordinator
@@ -350,7 +386,8 @@ impl MultiRangeTenant {
 
         match timestamp_oracle {
             Some(timestamp_oracle) => install_timestamp_oracle(&mut engines, &timestamp_oracle),
-            None => install_memory_timestamp_oracle(&mut engines)?,
+            None if hosts_range0 => install_memory_timestamp_oracle(&mut engines)?,
+            None => install_unavailable_timestamp_oracle(&mut engines),
         }
 
         recover_durable_timestamp_transactions(&engines)?;
@@ -407,6 +444,22 @@ impl MultiRangeTenant {
         };
         let handles = MultiRangeTenantHandles { inner };
         Ok((gateway, handles))
+    }
+
+    fn validate_range0_assembly(config: &mut MultiRangeTenantConfig) -> Result<bool, TenantError> {
+        config.hosted_ranges = config
+            .hosted_ranges
+            .take()
+            .map(|ranges| normalize_hosted_ranges(&config.range_map, ranges))
+            .transpose()?;
+        let hosts_range0 = config
+            .hosted_ranges
+            .as_ref()
+            .is_none_or(|ranges| ranges.contains(&RangeId::COORDINATOR));
+        if !hosts_range0 && config.range0_replica.is_none() {
+            return Err(TenantError::MissingRangeZeroReplica);
+        }
+        Ok(hosts_range0)
     }
 
     /// Snapshot handles for the ranges hosted by this compute process.
@@ -906,6 +959,16 @@ fn install_range0_catalog(engines: &mut BTreeMap<RangeId, SqlEngine>) {
     }
 }
 
+fn install_replica_catalog(
+    engines: &mut BTreeMap<RangeId, SqlEngine>,
+    replica: &ReadOnlyRange0Replica,
+) {
+    for engine in engines.values_mut() {
+        engine.set_catalog_kv(Arc::clone(&replica.catalog_kv));
+        engine.set_range0_barrier(replica.barrier.clone());
+    }
+}
+
 /// Build a pgexec timestamp oracle from a recovered range-0 TSO horizon.
 pub fn pgexec_timestamp_oracle_from_horizon<C, H>(
     committer: C,
@@ -987,6 +1050,43 @@ fn install_timestamp_oracle(
     for engine in engines.values_mut() {
         engine.set_timestamp_oracle(Arc::clone(timestamp_oracle));
     }
+}
+
+struct UnavailableRange0TimestampOracle;
+
+#[async_trait::async_trait]
+impl crabka_pgexec::TimestampOracle for UnavailableRange0TimestampOracle {
+    async fn allocate_read_timestamp(
+        &self,
+    ) -> Result<crabka_pgexec::timestamp_txn::ReadTimestamp, crabka_pgexec::TimestampOracleError>
+    {
+        Err(timestamp_oracle_unavailable())
+    }
+
+    async fn allocate_transaction_id(
+        &self,
+    ) -> Result<crabka_pgexec::TimestampTransactionId, crabka_pgexec::TimestampOracleError> {
+        Err(timestamp_oracle_unavailable())
+    }
+
+    async fn allocate_commit_after(
+        &self,
+        _start_ts: crabka_pgexec::TimestampTransactionId,
+    ) -> Result<crabka_pgexec::CommitTimestamp, crabka_pgexec::TimestampOracleError> {
+        Err(timestamp_oracle_unavailable())
+    }
+}
+
+fn timestamp_oracle_unavailable() -> crabka_pgexec::TimestampOracleError {
+    crabka_pgexec::TimestampOracleError::Unavailable(
+        "range-0 timestamp oracle is unavailable on an rN-only compute".into(),
+    )
+}
+
+fn install_unavailable_timestamp_oracle(engines: &mut BTreeMap<RangeId, SqlEngine>) {
+    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampOracle> =
+        Arc::new(UnavailableRange0TimestampOracle);
+    install_timestamp_oracle(engines, &timestamp_oracle);
 }
 
 struct InProcessRangeScanner {
@@ -2899,9 +2999,6 @@ fn normalize_hosted_ranges(
     range_map: &RangeMap,
     mut hosted_ranges: Vec<RangeId>,
 ) -> Result<Vec<RangeId>, TenantError> {
-    if !hosted_ranges.contains(&RangeId::COORDINATOR) {
-        return Err(TenantError::GatewayRequiresLocalRangeZero);
-    }
     hosted_ranges.sort_unstable();
     hosted_ranges.dedup();
     for range_id in &hosted_ranges {
@@ -3608,12 +3705,95 @@ fn row_shard_key_error() -> PgError {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_pgkv::Kv;
+    use crabka_pgkv::{Kv, MemKv};
 
     use super::*;
 
     fn tenant() -> TenantName {
         TenantName::parse("tenant_a").expect("tenant")
+    }
+
+    struct EmptyRange0End;
+
+    #[async_trait::async_trait]
+    impl crate::barrier::Range0EndSampler for EmptyRange0End {
+        async fn sample_end_after_call_begins(&self) -> Result<i64, crate::barrier::BarrierError> {
+            Ok(-1)
+        }
+    }
+
+    #[test]
+    fn rn_only_assembly_requires_and_uses_read_only_range0_replica() {
+        let range0_kv = Arc::new(MemKv::default());
+        let replica = ReadOnlyRange0Replica::new(
+            crate::range0_tail::Range0Tail::new(range0_kv),
+            Arc::new(EmptyRange0End),
+        );
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0,100")
+            .expect("config")
+            .with_hosted_ranges(vec![RangeId::new(1)])
+            .expect("r1 host")
+            .with_read_only_range0_replica(replica);
+
+        let (gateway, _) = MultiRangeTenant::start_with_engine_factory(config, |_dir, range_id| {
+            assert!(range_id == RangeId::new(1));
+            Ok(SqlEngine::new())
+        })
+        .expect("rN-only assembly");
+
+        let engines = gateway.hosted_range_engines();
+        assert!(engines.contains_key(&RangeId::new(1)));
+        assert!(!engines.contains_key(&RangeId::COORDINATOR));
+        assert!(!engines[&RangeId::new(1)].has_gtm());
+    }
+
+    #[tokio::test]
+    async fn rn_only_replica_binds_barrier_to_follower_catalog_and_rejects_timestamp_dml() {
+        let follower_kv: Arc<dyn Kv> = Arc::new(MemKv::default());
+        let unrelated_kv: Arc<dyn Kv> = Arc::new(MemKv::default());
+        let follower_catalog = SqlEngine::with_kv(Arc::clone(&follower_kv)).expect("catalog");
+        let unrelated_catalog =
+            SqlEngine::with_kv(Arc::clone(&unrelated_kv)).expect("unrelated catalog");
+        follower_catalog
+            .connect()
+            .simple_query("CREATE TABLE follower_table (id int4) SHARDED")
+            .await
+            .expect("follower catalog table");
+        unrelated_catalog
+            .connect()
+            .simple_query("CREATE TABLE unrelated_table (id int4) SHARDED")
+            .await
+            .expect("unrelated catalog table");
+
+        let replica = ReadOnlyRange0Replica::new(
+            crate::range0_tail::Range0Tail::new(Arc::clone(&follower_kv)),
+            Arc::new(EmptyRange0End),
+        );
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,0:1")
+            .expect("config")
+            .with_hosted_ranges(vec![RangeId::new(1)])
+            .expect("r1 host")
+            .with_read_only_range0_replica(replica);
+        let (_gateway, handles) =
+            MultiRangeTenant::start_with_engine_factory(config, |_dir, _id| Ok(SqlEngine::new()))
+                .expect("rN-only assembly");
+
+        let range1 = &handles.inner.serving.load().engines[&RangeId::new(1)];
+        assert!(range1.catalog_table("follower_table").is_ok());
+        assert!(range1.catalog_table("unrelated_table").is_err());
+
+        let error = range1
+            .connect()
+            .simple_query("INSERT INTO follower_table VALUES (1)")
+            .await
+            .expect_err("rN-only timestamp DML must fail closed");
+        assert_eq!(error.code, sqlstate::FEATURE_NOT_SUPPORTED);
+        assert!(
+            error
+                .message
+                .contains("range-0 timestamp oracle is unavailable"),
+            "unexpected rN-only DML error: {error:?}"
+        );
     }
 
     #[test]
@@ -3655,17 +3835,13 @@ mod tests {
     }
 
     #[test]
-    fn hosted_ranges_reject_remote_range_zero() {
-        let error = MultiRangeTenantConfig::from_boundaries(tenant(), "0,100,200")
+    fn hosted_ranges_allow_remote_range_zero_until_replica_is_supplied() {
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0,100,200")
             .expect("cfg")
             .with_hosted_ranges(vec![RangeId::new(2)])
-            .expect_err("remote range zero rejected");
+            .expect("rN-only configuration is parsed");
 
-        assert_eq!(
-            error.to_string(),
-            "gateway must host range r0; remote range-0 decision and barrier support is not implemented"
-        );
-        assert!(matches!(error, TenantError::GatewayRequiresLocalRangeZero));
+        assert!(config.hosted_ranges == Some(vec![RangeId::new(2)]));
     }
 
     #[test]
@@ -3694,7 +3870,7 @@ mod tests {
             panic!("remote range zero must be rejected at startup");
         };
 
-        assert!(matches!(error, TenantError::GatewayRequiresLocalRangeZero));
+        assert!(matches!(error, TenantError::MissingRangeZeroReplica));
     }
 
     #[test]

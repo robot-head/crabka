@@ -130,6 +130,16 @@ pub enum ReconcileError {
     /// so the broker pod never boots with broken OTLP env vars.
     #[error("tracing: {0}")]
     TracingInvalid(String),
+    #[error("gres control: {0}")]
+    GresControl(#[from] crabka_gres_control::ControlError),
+    #[error("producer error: {0}")]
+    Producer(#[from] crabka_client_producer::ProducerError),
+    #[error("gres control write: {0}")]
+    GresControlWrite(#[from] crate::context::GresControlWriteError),
+    #[error("admin error: {0}")]
+    Admin(#[from] crabka_client_admin::AdminError),
+    #[error("pgdog admin error: {0}")]
+    PgdogAdmin(#[from] crate::context::PgdogAdminError),
 }
 
 /// Build a Kubernetes-style condition with `lastTransitionTime` set to

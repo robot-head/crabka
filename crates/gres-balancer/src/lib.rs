@@ -841,18 +841,6 @@ mod tests {
                 self.inner
                     .mutate_range_layout_if_version(tenant, expected_record_version, mutation)
             }
-
-            fn move_range_layout_if_version(
-                &mut self,
-                _tenant: &TenantName,
-                _expected_record_version: u64,
-                _move_range: RangeLayoutMove,
-            ) -> Result<Option<TenantRecord>, ControlError> {
-                Err(ControlError::UnsupportedRegistryMutation {
-                    mutation: "range versioned move",
-                    reason: "test store rejects versioned move",
-                })
-            }
         }
 
         struct UnsupportedLayoutStore {
@@ -955,19 +943,6 @@ mod tests {
                     tenant,
                     expected_record_version.saturating_add(1),
                     split,
-                )
-            }
-
-            fn move_range_layout_if_version(
-                &mut self,
-                tenant: &TenantName,
-                expected_record_version: u64,
-                move_range: RangeLayoutMove,
-            ) -> Result<Option<TenantRecord>, ControlError> {
-                self.inner.move_range_layout_if_version(
-                    tenant,
-                    expected_record_version.saturating_add(1),
-                    move_range,
                 )
             }
         }

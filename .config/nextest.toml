@@ -7,6 +7,9 @@ broker-share-state = { max-threads = 1 }
 broker-transactions = { max-threads = 1 }
 broker-tiered-storage-rlmm = { max-threads = 1 }
 consumer-cooperative-rebalance = { max-threads = 1 }
+# Chapter Gres FDW roundtrip tests: each boots an in-process broker + schema
+# registry; cap concurrency to avoid broker saturation on constrained runners.
+gres-fdw = { max-threads = 2 }
 schema-registry-fixed-port-captures = { max-threads = 1 }
 
 [[profile.default.overrides]]
@@ -38,6 +41,11 @@ threads-required = 'num-test-threads'
 filter = 'package(crabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
 test-group = 'schema-registry-fixed-port-captures'
 threads-required = 'num-test-threads'
+
+[[profile.default.overrides]]
+# crabka-gres-fdw's integration tests boot an in-process broker + registry.
+filter = 'package(crabka-gres-fdw) & kind(test)'
+test-group = 'gres-fdw'
 
 [[profile.ci.overrides]]
 filter = 'package(crabka-broker) & (binary(jvm_acceptance) | binary(jvm_consumer_group_next_gen))'

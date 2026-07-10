@@ -7,6 +7,7 @@ use crate::{
     checkpoint::CheckpointFilter,
     error::SubstrateError,
     frame::{BARRIER_SEQ, WalFrame},
+    transfer::TableTransferSelector,
 };
 
 /// A committed WAL record fetched from the tenant topic.
@@ -74,6 +75,58 @@ pub fn replay_committed_frames_from_filtered(
         first_expected_journal_seq,
         Some(filter),
     )
+}
+
+/// Decode committed frames while applying a stateful table-transfer closure.
+///
+/// Unlike a range filter, selecting an MVCC tuple changes the selector state:
+/// CLOG operations later in the WAL for its xmin/xmax become required input.
+pub fn replay_committed_frames_from_table_transfer(
+    kv: &dyn Kv,
+    frames: impl IntoIterator<Item = ReplayItem>,
+    own_barrier_offset: i64,
+    replay_start_offset: i64,
+    first_expected_journal_seq: u64,
+    selector: &mut TableTransferSelector,
+) -> Result<ReplayOutcome, SubstrateError> {
+    let mut expected = first_expected_journal_seq;
+    for item in frames {
+        if item.offset < replay_start_offset {
+            continue;
+        }
+        let frame = WalFrame::decode(&item.bytes)?;
+        if frame.journal_seq == BARRIER_SEQ {
+            if item.offset >= own_barrier_offset {
+                return Ok(ReplayOutcome {
+                    next_journal_seq: expected,
+                });
+            }
+            continue;
+        }
+        if frame.journal_seq != expected {
+            return Err(SubstrateError::SequenceGap {
+                expected,
+                found: frame.journal_seq,
+                offset: item.offset,
+            });
+        }
+        let selected = frame
+            .ops
+            .iter()
+            .try_fold(Vec::new(), |mut ops, operation| {
+                if let Some(operation) = selector.select_tail_op(operation)? {
+                    ops.push(operation);
+                }
+                Ok::<_, SubstrateError>(ops)
+            })?;
+        apply_frame(kv, &selected)?;
+        expected = expected.checked_add(1).ok_or_else(|| {
+            SubstrateError::Frame("journal sequence exhausted before barrier".into())
+        })?;
+    }
+    Err(SubstrateError::Unavailable(
+        "replay reached end before recovery barrier".into(),
+    ))
 }
 
 fn replay_committed_frames_from_with_filter(

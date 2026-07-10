@@ -43,6 +43,7 @@ jobs:
       doc_examples: ${{ steps.filter.outputs.doc_examples }}
       traces: ${{ steps.filter.outputs.traces }}
       metrics: ${{ steps.filter.outputs.metrics }}
+      gres: ${{ steps.filter.outputs.gres }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -233,6 +234,39 @@ jobs:
               - 'Cargo.lock'
               - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
+            gres:
+              - 'docs/PG_COMPAT_MATRIX.md'
+              - 'tools/check-pg-compat-matrix.sh'
+              - 'tools/check-pg-compat-matrix.py'
+              - 'tools/gres-adopt-regress.sh'
+              - 'NOTICE'
+              - 'crates/gres-control/**'
+              - 'crates/operator/src/controller/gres.rs'
+              - 'crates/operator/src/crd/gres.rs'
+              - 'crates/operator/tests/reconcile_gres*.rs'
+              - 'crates/operator/tests/shared/**'
+              - 'crates/pgtypes/**'
+              - 'crates/pgparser/**'
+              - 'crates/pgwire/**'
+              - 'crates/security/**'
+              - 'crates/cli/**'
+              - 'crates/pgkv/**'
+              - 'crates/pgmvcc/**'
+              - 'crates/pgcatalog/**'
+              - 'crates/pgexec/**'
+              - 'crates/gres/**'
+              - 'crates/gres-activator/**'
+              - 'crates/gres-ranges/**'
+              - 'crates/gres-substrate/**'
+              - 'crates/gres-fdw/**'
+              - 'crates/gres-conformance/**'
+              - 'scripts/gres-psql-smoke.sh'
+              - 'scripts/gres-durable-restart-smoke.sh'
+              - 'scripts/gres-substrate-smoke.sh'
+              - 'scripts/gres-e2e.sh'
+              - 'scripts/gres-coldstart.sh'
+              - 'scripts/gres-range-scaling.sh'
+              - 'scripts/gres-sharded-conformance.sh'
 
   rust:
     needs: changes
@@ -433,6 +467,52 @@ jobs:
             -w /workspace \
             "${IMAGE}" \
             "cargo creusot --replay -p crabka-verified && cargo creusot --replay -p crabka-throttle"
+
+  gres-range-scaling:
+    needs: changes
+    if: ${{ needs.changes.outputs.gres == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generate Gres range-scaling artifact
+        run: |
+          CRABKA_GRES_RANGE_SCALING_MODE=dry-run \
+          CRABKA_GRES_RANGE_SCALING_KEEP_ARTIFACTS=1 \
+          ./scripts/gres-range-scaling.sh
+      - name: Upload Gres range-scaling artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gres-range-scaling-artifacts
+          path: target/gres-range-scaling-artifacts
+          if-no-files-found: error
+          retention-days: 30
+
+  gres-sharded-conformance:
+    needs: changes
+    if: ${{ needs.changes.outputs.gres == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gres-sharded-conformance
+      - name: G-8 sharded conformance gate
+        run: ./scripts/gres-sharded-conformance.sh
+      - name: Upload G-8 sharded conformance artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gres-sharded-conformance-artifacts
+          path: target/gres-sharded-conformance-artifacts
+          if-no-files-found: error
+          retention-days: 30
 
   helm-lint:
     needs: changes
@@ -809,6 +889,195 @@ jobs:
           flags: traces-conformance
           fail_ci_if_error: false
 
+  # Crabka Gres conformance gate: build the vendored Postgres-compatible engine,
+  # run psql smoke coverage, then diff against a postgres:18 oracle with the
+  # checked-in parity baseline. The parity reports are uploaded for triage.
+  gres-conformance:
+    needs: changes
+    if: ${{ needs.changes.outputs.gres == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      oracle:
+        image: postgres:18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 54320:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gres-conformance
+      - name: PostgreSQL compatibility matrix anti-rot check
+        run: ./tools/check-pg-compat-matrix.sh --self-test
+      - name: Install psql 18 (pgdg)
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update && sudo apt-get install -y postgresql-client-18
+      - run: cargo build --locked -p crabka-cli -p crabka-broker -p crabka-gres -p crabka-gres-activator -p crabka-gres-conformance
+      - run: ./scripts/gres-psql-smoke.sh
+      - name: Durable restart smoke
+        run: ./scripts/gres-durable-restart-smoke.sh
+      - name: Substrate WAL smoke
+        run: CRABKA_GRES_SKIP_BUILD=1 ./scripts/gres-substrate-smoke.sh
+      - name: Front-door PgDog e2e gate
+        run: CRABKA_GRES_SKIP_BUILD=1 ./scripts/gres-e2e.sh
+      - name: Cold-start SLO gate
+        run: CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_COLDSTART_KEEP_ARTIFACTS=1 ./scripts/gres-coldstart.sh
+      - name: Conformance harness against the parity baseline
+        run: |
+          ./target/debug/crabka-gres --listen 127.0.0.1:54333 &
+          for _ in $(seq 30); do
+            if psql "host=127.0.0.1 port=54333 user=crab dbname=crab sslmode=prefer" -tAc 'SELECT 1' >/dev/null 2>&1; then break; fi
+            sleep 0.3
+          done
+          ./target/debug/crabka-gres-conformance \
+            --oracle-url "host=127.0.0.1 port=54320 user=postgres dbname=postgres" \
+            --subject-url "host=127.0.0.1 port=54333 user=crab dbname=crab" \
+            --corpus crates/gres-conformance/corpus \
+            --baseline crates/gres-conformance/baseline.json \
+            --corpus-regress crates/gres-conformance/corpus-regress \
+            --regress-baseline crates/gres-conformance/corpus-regress/baseline.json \
+            --regress-out regress-parity.json \
+            --regress-summary regress-parity.md \
+            --out parity.json --summary parity.md
+      - name: Create a fresh oracle database for the substrate leg
+        run: psql "host=127.0.0.1 port=54320 user=postgres dbname=postgres" -c "CREATE DATABASE oracle2"
+      - name: Conformance against the substrate-backed engine
+        run: |
+          export CRABKA_CLUSTER_ID=00000000-0000-0000-0000-000000000001
+          BROKER_PID=""
+          GRES_PID=""
+          cleanup() {
+            kill "${GRES_PID:-}" "${BROKER_PID:-}" 2>/dev/null || true
+            wait "${GRES_PID:-}" "${BROKER_PID:-}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          ./target/debug/crabka format \
+            --log-dir /tmp/gres-substrate-ci-data \
+            --cluster-id "$CRABKA_CLUSTER_ID" \
+            --standalone \
+            --node-id 1 \
+            --controller-listener 127.0.0.1:9093
+          ./target/debug/crabka-broker \
+            --log-dir /tmp/gres-substrate-ci-data \
+            --cluster-id "$CRABKA_CLUSTER_ID" \
+            --broker-id 1 \
+            --listen-addr 127.0.0.1:9092 &
+          BROKER_PID=$!
+          for _ in $(seq 80); do
+            if python3 -c 'import socket; socket.create_connection(("127.0.0.1", 9092), timeout=0.2).close()' >/dev/null 2>&1
+            then
+              break
+            fi
+            sleep 0.25
+          done
+          python3 -c 'import socket; socket.create_connection(("127.0.0.1", 9092), timeout=0.2).close()'
+
+          ./target/debug/crabka-gres \
+            --listen 127.0.0.1:54334 \
+            --substrate-bootstrap 127.0.0.1:9092 \
+            --tenant conformance &
+          GRES_PID=$!
+          for _ in $(seq 80); do
+            if psql "host=127.0.0.1 port=54334 user=crab dbname=crab sslmode=prefer" -tAc 'SELECT 1' >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.25
+          done
+          psql "host=127.0.0.1 port=54334 user=crab dbname=crab sslmode=prefer" -tAc 'SELECT 1'
+          ./target/debug/crabka-gres-conformance \
+            --oracle-url "host=127.0.0.1 port=54320 user=postgres dbname=oracle2" \
+            --subject-url "host=127.0.0.1 port=54334 user=crab dbname=crab" \
+            --corpus crates/gres-conformance/corpus \
+            --baseline crates/gres-conformance/baseline.json \
+            --out parity-substrate.json --summary parity-substrate.md
+      - name: Publish parity summary
+        if: ${{ !cancelled() }}
+        run: cat parity.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish pg_regress adoption summary
+        if: ${{ !cancelled() }}
+        run: cat regress-parity.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish substrate parity summary
+        if: ${{ !cancelled() }}
+        run: cat parity-substrate.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload parity report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gres-parity-report
+          path: |
+            parity.json
+            parity.md
+            regress-parity.json
+            regress-parity.md
+            parity-substrate.json
+            parity-substrate.md
+          if-no-files-found: warn
+      - name: Upload Gres front-door e2e artifacts
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gres-front-door-e2e-artifacts
+          path: target/gres-e2e-artifacts
+          if-no-files-found: warn
+      - name: Upload Gres cold-start artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gres-coldstart-artifacts
+          path: target/gres-coldstart-artifacts
+          if-no-files-found: warn
+
+  # Gres engine integration coverage: pgwire, executor, FDW, and the service
+  # binary have most behavior behind tests/ targets rather than unit tests.
+  gres-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.gres == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gres-integration
+      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Gres engine integration coverage
+        run: |
+          cargo llvm-cov nextest -p crabka-pgwire -p crabka-pgexec -p crabka-gres-fdw -p crabka-gres-substrate -p crabka-gres \
+            --profile ci --tests --lcov --output-path lcov.info
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: lcov.info
+          disable_search: true
+          flags: gres-integration
+          fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: gres-integration
+          fail_ci_if_error: false
+
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
   # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
   # reach back via the Docker bridge gateway (typically 172.17.0.1). See
@@ -1171,6 +1440,8 @@ jobs:
       - grpc-gateway-integration
       - schema-registry-integration
       - traces-conformance
+      - gres-conformance
+      - gres-integration
       - broker-jvm-acceptance
       - broker-integration
       - operator-integration

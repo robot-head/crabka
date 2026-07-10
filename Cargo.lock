@@ -2743,6 +2743,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "clap",
+ "crabka-broker",
  "crabka-client-admin",
  "crabka-client-core",
  "crabka-gres-control",
@@ -2750,8 +2751,10 @@ dependencies = [
  "crabka-gres-ranges",
  "crabka-gres-substrate",
  "crabka-object-store",
+ "crabka-pgcatalog",
  "crabka-pgexec",
  "crabka-pgkv",
+ "crabka-pgmvcc",
  "crabka-pgwire",
  "crabka-protocol",
  "crabka-security",
@@ -2873,6 +2876,7 @@ dependencies = [
 name = "crabka-gres-ranges"
 version = "0.3.9"
 dependencies = [
+ "arc-swap",
  "assert2",
  "async-trait",
  "crabka-gres-control",
@@ -2883,14 +2887,17 @@ dependencies = [
  "crabka-pgparser",
  "crabka-pgtypes",
  "crabka-pgwire",
+ "crabka-security",
  "derive_more",
  "proptest",
+ "rustls",
  "serde",
  "serde_json",
  "stateright",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 
@@ -3342,6 +3349,7 @@ name = "crabka-pgcatalog"
 version = "0.3.9"
 dependencies = [
  "crabka-pgkv",
+ "crabka-pgmvcc",
  "crabka-pgtypes",
  "proptest",
  "tempfile",

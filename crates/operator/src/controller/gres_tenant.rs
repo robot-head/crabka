@@ -122,7 +122,7 @@ async fn reconcile_inner(
         }
     };
 
-    if has_multiple_ranges(&obj.spec.ranges) {
+    if obj.meta().deletion_timestamp.is_none() && has_multiple_ranges(&obj.spec.ranges) {
         patch_unsupported_multi_range_status(&tenant_api, &name, &obj, None).await?;
         return Ok(Action::requeue(UNSUPPORTED_TOPOLOGY_REQUEUE));
     }

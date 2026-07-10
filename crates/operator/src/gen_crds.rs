@@ -1,7 +1,8 @@
 use std::{fs, path::Path};
 
 use crate::crd::{
-    Kafka, KafkaGrpcGateway, KafkaNodePool, KafkaRebalance, KafkaTopic, KafkaUser, SchemaRegistry,
+    Gres, GresTenant, Kafka, KafkaGrpcGateway, KafkaNodePool, KafkaRebalance, KafkaTopic,
+    KafkaUser, SchemaRegistry,
 };
 
 /// Write every CRD this operator owns into `out_dir` as
@@ -17,6 +18,8 @@ pub fn write_all(out_dir: &Path) -> anyhow::Result<()> {
     write_one::<KafkaRebalance>(out_dir)?;
     write_one::<KafkaGrpcGateway>(out_dir)?;
     write_one::<SchemaRegistry>(out_dir)?;
+    write_one::<Gres>(out_dir)?;
+    write_one::<GresTenant>(out_dir)?;
     Ok(())
 }
 
@@ -76,6 +79,12 @@ mod tests {
                 "crabka.io_schemaregistries.yaml",
                 "plural: schemaregistries",
                 Some("- sr"),
+            ),
+            ("crabka.io_greses.yaml", "plural: greses", Some("- gg")),
+            (
+                "crabka.io_grestenants.yaml",
+                "plural: grestenants",
+                Some("- gt"),
             ),
         ] {
             let path = dir.path().join(file);

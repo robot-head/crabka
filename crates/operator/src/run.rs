@@ -26,6 +26,7 @@ use crate::{
 /// election surfaces an unrecoverable API error. Per-task failures inside
 /// the `tokio::select!` arms are logged but not propagated, since this is
 /// supervisor glue and the e2e test is the contract.
+#[allow(clippy::too_many_lines)]
 pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
     telemetry::init_tracing(&config.log_filter);
     let (registry, metrics) = telemetry::new_registry_with_metrics();
@@ -79,6 +80,14 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
         let ctx = ctx.clone();
         async move { controller::schema_registry::run(ctx).await }
     });
+    let gres_handle = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { controller::gres::run(ctx).await }
+    });
+    let gres_tenant_handle = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { controller::gres_tenant::run(ctx).await }
+    });
 
     tokio::select! {
         res = health_handle => match res {
@@ -120,6 +129,16 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::error!(error = %e, "SchemaRegistry controller exited with error"),
             Err(e) => tracing::error!(error = %e, "SchemaRegistry controller task panicked"),
+        },
+        res = gres_handle => match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "Gres controller exited with error"),
+            Err(e) => tracing::error!(error = %e, "Gres controller task panicked"),
+        },
+        res = gres_tenant_handle => match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "GresTenant controller exited with error"),
+            Err(e) => tracing::error!(error = %e, "GresTenant controller task panicked"),
         },
         () = shutdown_signal() => tracing::info!("shutdown signal received"),
     }
