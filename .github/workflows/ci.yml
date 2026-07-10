@@ -242,7 +242,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        toolchain: ["1.96.0"]
+        toolchain: ["1.97.0"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

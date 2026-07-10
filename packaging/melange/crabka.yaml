@@ -29,8 +29,8 @@ pipeline:
     runs: |
       rustup-init -y --default-toolchain none --no-modify-path
       export PATH="$HOME/.cargo/bin:$PATH"
-      rustup toolchain install 1.96.0 --component cargo --profile minimal
-      rustup default 1.96.0
+      rustup toolchain install 1.97.0 --component cargo --profile minimal
+      rustup default 1.97.0
   - name: Build all crabka binaries
     runs: |
       export PATH="$HOME/.cargo/bin:$PATH"

@@ -10,7 +10,7 @@ so there is no second dependency set to keep in sync.
 
 | File | Purpose |
 | --- | --- |
-| `MODULE.bazel` | bzlmod: pins `rules_rust`, the Rust toolchain (1.96.0 / edition 2024), and the `crate_universe` repo (`@crates`) spliced from the Cargo workspace. |
+| `MODULE.bazel` | bzlmod: pins `rules_rust`, the Rust toolchain (1.97.0 / edition 2024), and the `crate_universe` repo (`@crates`) spliced from the Cargo workspace. |
 | `.bazelrc`, `.bazelversion` | Bazel settings + version pin. |
 | `//:BUILD.bazel` | Re-exported public targets. |
 | `//crates/<crate>:BUILD.bazel` | `rust_library` targets for the in-scope crates. |

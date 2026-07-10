@@ -16,7 +16,7 @@ kafka_install_dir: /opt/kafka
 crabka_git_repo: "https://github.com/robot-head/crabka.git"
 crabka_git_ref: "main"
 crabka_install_dir: /opt/crabka
-crabka_rust_channel: "1.96.0"
+crabka_rust_channel: "1.97.0"
 
 # OMB. The playbook assumes you've run `bench/omb/scripts/fetch-omb.sh`
 # so `.omb/` exists in the repo root; the deploy-client playbook
