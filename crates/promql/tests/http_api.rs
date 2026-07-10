@@ -178,7 +178,7 @@ async fn query_endpoint_returns_native_histogram_envelope() {
     let body = response_json(response).await;
     assert_eq!(body["status"].as_str(), Some("success"));
     assert_eq!(body["data"]["resultType"].as_str(), Some("vector"));
-    assert_eq!(body["data"]["result"][0].get("value").is_none(), true);
+    assert!(body["data"]["result"][0].get("value").is_none());
     assert_eq!(
         body["data"]["result"][0]["metric"]["__name__"].as_str(),
         Some("request_duration_seconds")
@@ -2239,7 +2239,7 @@ async fn rules_endpoint_can_exclude_alert_payloads() {
     let alert_rule = &body["data"]["groups"][0]["rules"][0];
     assert_eq!(alert_rule["type"].as_str(), Some("alerting"));
     assert_eq!(alert_rule["name"].as_str(), Some("HighLatency"));
-    assert_eq!(alert_rule.get("alerts").is_none(), true);
+    assert!(alert_rule.get("alerts").is_none());
 }
 
 #[tokio::test]
@@ -2436,11 +2436,10 @@ rules:
     let rule = &body["data"]["groups"][0]["rules"][0];
     assert_eq!(rule["name"].as_str(), Some("UnsupportedAlert"));
     assert_eq!(rule["health"].as_str(), Some("err"));
-    assert_eq!(
+    assert!(
         rule["lastError"]
             .as_str()
-            .is_some_and(|error| error.contains("start")),
-        true
+            .is_some_and(|error| error.contains("start"))
     );
     assert_eq!(rule["alerts"].clone(), serde_json::json!([]));
 }
@@ -3143,11 +3142,10 @@ rules:
     let body = response_json(response).await;
     assert_eq!(body["status"].as_str(), Some("error"));
     assert_eq!(body["errorType"].as_str(), Some("bad_data"));
-    assert_eq!(
+    assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("expr")),
-        true
+            .is_some_and(|error| error.contains("expr"))
     );
 
     let response = app
@@ -3174,11 +3172,10 @@ rules:
     let body = response_json(response).await;
     assert_eq!(body["status"].as_str(), Some("error"));
     assert_eq!(body["errorType"].as_str(), Some("bad_data"));
-    assert_eq!(
+    assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("PromQL")),
-        true
+            .is_some_and(|error| error.contains("PromQL"))
     );
 
     let response = app
@@ -3711,11 +3708,10 @@ async fn remote_read_endpoint_rejects_selected_series_over_tenant_limit() {
     let body = response_json(response).await;
     assert_eq!(body["status"].as_str(), Some("error"));
     assert_eq!(body["errorType"].as_str(), Some("execution"));
-    assert_eq!(
+    assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("series per query exceeded")),
-        true
+            .is_some_and(|error| error.contains("series per query exceeded"))
     );
 }
 
@@ -3785,11 +3781,10 @@ async fn remote_read_endpoint_rejects_samples_over_tenant_limit() {
     let body = response_json(response).await;
     assert_eq!(body["status"].as_str(), Some("error"));
     assert_eq!(body["errorType"].as_str(), Some("execution"));
-    assert_eq!(
+    assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("samples per query exceeded")),
-        true
+            .is_some_and(|error| error.contains("samples per query exceeded"))
     );
 }
 
@@ -3865,7 +3860,7 @@ async fn remote_read_endpoint_returns_matching_exemplars() {
     let series = &read_response.results[0].timeseries[0];
     assert_eq!(series.exemplars.len(), 1);
     assert_eq!(series.exemplars[0].timestamp, 10_500);
-    assert_eq!(series.exemplars[0].value, 7.0);
+    assert!((series.exemplars[0].value - 7.0).abs() < f64::EPSILON);
     assert_eq!(
         series.exemplars[0]
             .labels
@@ -3947,10 +3942,10 @@ async fn remote_read_endpoint_returns_matching_native_histograms() {
     let series = &read_response.results[0].timeseries[0];
     assert_eq!(read_response.results.len(), 1);
     assert_eq!(read_response.results[0].timeseries.len(), 1);
-    assert_eq!(series.samples.is_empty(), true);
+    assert!(series.samples.is_empty());
     assert_eq!(series.histograms.len(), 1);
     assert_eq!(series.histograms[0].timestamp, 10_000);
-    assert_eq!(series.histograms[0].sum, 10.0);
+    assert!((series.histograms[0].sum - 10.0).abs() < f64::EPSILON);
     assert_eq!(
         &series.histograms[0].count,
         &Some(pb::v1::histogram::Count::CountFloat(4.0))
@@ -4033,7 +4028,7 @@ async fn cardinality_label_names_endpoint_returns_label_name_counts() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     // Mimir returns the cardinality object directly, with no status envelope.
-    assert_eq!(body.get("status").is_none(), true);
+    assert!(body.get("status").is_none());
     assert_eq!(body["label_names_count"].as_i64(), Some(3));
     assert_eq!(body["label_values_count_total"].as_i64(), Some(4));
     assert_eq!(
@@ -4332,7 +4327,7 @@ async fn cardinality_active_series_endpoint_returns_series_labels_under_mimir_pr
     let body = response_json(response).await;
     // Mimir active_series returns a bare object whose `data` array holds flat
     // label maps -- no status envelope, no seriesLabels/metric wrapper.
-    assert_eq!(body.get("status").is_none(), true);
+    assert!(body.get("status").is_none());
     assert_eq!(
         body["data"].clone(),
         serde_json::json!([
@@ -4378,7 +4373,7 @@ async fn cardinality_active_series_endpoint_filters_selector_parameter() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body.get("status").is_none(), true);
+    assert!(body.get("status").is_none());
     assert_eq!(
         body["data"].clone(),
         serde_json::json!([
@@ -4421,7 +4416,7 @@ async fn cardinality_active_series_endpoint_honors_limit_parameter() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body.get("status").is_none(), true);
+    assert!(body.get("status").is_none());
     assert_eq!(body["data"].as_array().expect("data array").len(), 1);
 }
 
@@ -4461,7 +4456,7 @@ async fn cardinality_active_series_endpoint_accepts_post_form_body() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body.get("status").is_none(), true);
+    assert!(body.get("status").is_none());
     assert_eq!(
         body["data"].clone(),
         serde_json::json!([
@@ -4523,7 +4518,7 @@ async fn cardinality_label_values_endpoint_returns_label_value_counts() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     // Mimir nests per-value cardinality under each label, with no envelope.
-    assert_eq!(body.get("status").is_none(), true);
+    assert!(body.get("status").is_none());
     assert_eq!(body["series_count_total"].as_i64(), Some(3));
     assert_eq!(
         body["labels"].clone(),
@@ -4742,7 +4737,7 @@ async fn cardinality_label_values_endpoint_accepts_post_form_body() {
     let body = response_json(response).await;
     let labels = body["labels"].as_array().expect("labels array");
     // __name__ has the highest series_count, so it sorts first.
-    assert_eq!(body.get("status").is_none(), true);
+    assert!(body.get("status").is_none());
     assert_eq!(body["series_count_total"].as_i64(), Some(2));
     assert_eq!(labels.len(), 3);
     assert_eq!(labels[0]["label_name"].as_str(), Some("__name__"));
@@ -4913,7 +4908,7 @@ async fn status_flags_endpoint_returns_prometheus_flag_strings() {
     let body = response_json(response).await;
     assert_eq!(body["status"].as_str(), Some("success"));
     assert_eq!(body["data"]["query.lookback-delta"].as_str(), Some("5m"));
-    assert_eq!(body["data"]["log.level"].as_str().is_some(), true);
+    assert!(body["data"]["log.level"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -4937,11 +4932,10 @@ async fn status_config_endpoint_is_available_under_mimir_prefix() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     assert_eq!(body["status"].as_str(), Some("success"));
-    assert_eq!(
+    assert!(
         body["data"]["yaml"]
             .as_str()
-            .is_some_and(|yaml| yaml.contains("global:")),
-        true
+            .is_some_and(|yaml| yaml.contains("global:"))
     );
 }
 
@@ -5184,8 +5178,8 @@ async fn status_runtimeinfo_endpoint_is_available_under_mimir_prefix() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     assert_eq!(body["status"].as_str(), Some("success"));
-    assert_eq!(body["data"]["startTime"].as_str().is_some(), true);
-    assert_eq!(body["data"]["serverTime"].as_str().is_some(), true);
+    assert!(body["data"]["startTime"].as_str().is_some());
+    assert!(body["data"]["serverTime"].as_str().is_some());
     assert_eq!(body["data"]["reloadConfigSuccess"].as_bool(), Some(true));
     assert_eq!(body["data"]["timeSeriesCount"].as_i64(), Some(2));
 }

@@ -4868,7 +4868,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(got.series.len(), 1);
-        assert_eq!(got.series[0].exemplars.is_empty(), true);
+        assert!(got.series[0].exemplars.is_empty());
     }
 
     #[tokio::test]
@@ -4895,7 +4895,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(got.series.len(), 1);
-        assert_eq!(got.series[0].exemplars.is_empty(), true);
+        assert!(got.series[0].exemplars.is_empty());
     }
 
     #[test]

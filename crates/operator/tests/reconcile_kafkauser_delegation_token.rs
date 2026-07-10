@@ -238,25 +238,19 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
         .as_i64()
         .expect("delegationTokenMaxTimestampMs is i64");
     let conds = status["conditions"].as_array().expect("conditions array");
-    assert_eq!(
-        status["delegationTokenId"].is_string(),
-        true,
-        "status: {status}"
-    );
-    assert_eq!(expiry > 0, true, "status: {status}");
-    assert_eq!(max_ts >= expiry, true, "status: {status}");
-    assert_eq!(
+    assert!(status["delegationTokenId"].is_string(), "status: {status}");
+    assert!(expiry > 0, "status: {status}");
+    assert!(max_ts >= expiry, "status: {status}");
+    assert!(
         conds
             .iter()
             .any(|c| c["type"] == "Ready" && c["status"] == "True" && c["reason"] == "TokenReady"),
-        true,
         "status: {status}"
     );
-    assert_eq!(
+    assert!(
         conds.iter().any(|c| c["type"] == "TokenIssued"
             && c["status"] == "True"
             && c["reason"] == "Issued"),
-        true,
         "status: {status}"
     );
 }

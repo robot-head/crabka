@@ -311,15 +311,15 @@ mod tests {
         let validity_days: u32 = 365;
         let ca = generate_clients_ca("root", validity_days).expect("generate CA");
 
-        assert_eq!(ca.cert_pem.contains("BEGIN CERTIFICATE"), true);
-        assert_eq!(ca.key_pem.contains("BEGIN PRIVATE KEY"), true);
+        assert!(ca.cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(ca.key_pem.contains("BEGIN PRIVATE KEY"));
 
         let der = pem_to_der(&ca.cert_pem);
         let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse CA DER");
 
         let subject = cert.subject().to_string();
-        assert_eq!(subject.contains("CN=root"), true, "subject was {subject}");
-        assert_eq!(subject.contains("O=crabka"), true, "subject was {subject}");
+        assert!(subject.contains("CN=root"), "subject was {subject}");
+        assert!(subject.contains("O=crabka"), "subject was {subject}");
 
         let bc = cert
             .basic_constraints()
@@ -438,12 +438,12 @@ mod tests {
             .extended_key_usage()
             .expect("EKU parse")
             .expect("EKU present");
-        assert_eq!(
-            eku.value.server_auth, true,
+        assert!(
+            eku.value.server_auth,
             "broker leaf must carry both serverAuth and clientAuth"
         );
-        assert_eq!(
-            eku.value.client_auth, true,
+        assert!(
+            eku.value.client_auth,
             "broker leaf must carry both serverAuth and clientAuth"
         );
 

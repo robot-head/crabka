@@ -117,7 +117,7 @@ async fn forward_maps_owner_responses() {
     let ok = fwd.forward(&addr, &rec("ok"), &anon()).await.unwrap();
     assert_eq!(ok.partition, PartitionIndex(7));
     assert_eq!(ok.offset, Offset(11));
-    assert_eq!(ok.deduplicated, true);
+    assert!(ok.deduplicated);
 
     for (name, key, expected) in [
         ("retriable_owner_error", "retriable", "unavailable"),
@@ -234,7 +234,7 @@ async fn forward_handler_error_arm_returns_retriable() {
         "complete forward error result"
     );
     assert_eq!(result.offset, Offset(-1), "complete forward error result");
-    assert_eq!(result.deduplicated, false, "complete forward error result");
+    assert!(!result.deduplicated, "complete forward error result");
     assert_eq!(
         result.error.map(|error| error.retriable),
         Some(true),
@@ -361,10 +361,7 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
         Offset(-1),
         "complete anonymous-rejection result"
     );
-    assert_eq!(
-        result.deduplicated, false,
-        "complete anonymous-rejection result"
-    );
+    assert!(!result.deduplicated, "complete anonymous-rejection result");
     assert_eq!(
         result.error.map(|error| error.retriable),
         Some(false),

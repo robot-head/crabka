@@ -88,7 +88,7 @@ async fn trace_split_across_queriers_reassembles() {
     assert_eq!(trace.span_count(), 3);
     assert_eq!(metrics.completed_jobs, 2);
     assert_eq!(metrics.total_jobs, 2);
-    assert_eq!(matches!(status, TraceStatus::Complete), true);
+    assert!(matches!(status, TraceStatus::Complete));
 }
 
 #[tokio::test]

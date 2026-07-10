@@ -25,7 +25,7 @@ fn build_security_uses_scram_sha512_only() {
     let security = build_scram_sha512_security(&cfg, "alice", SCRAM_PLAINTEXT_PASSWORD);
 
     assert_eq!(&security.protocol, &ListenerProtocol::SaslPlaintext);
-    assert_eq!(security.tls.is_some(), false);
+    assert!(security.tls.is_none());
     assert_eq!(security.sasl_host.as_deref(), None);
     assert_scram_sha512_credentials(security.sasl.as_ref(), "alice", SCRAM_PLAINTEXT_PASSWORD);
 }

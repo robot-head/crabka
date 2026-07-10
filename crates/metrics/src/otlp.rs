@@ -1458,7 +1458,7 @@ mod tests {
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
         assert_eq!(series.len(), 1);
-        assert_eq!(series[0].exemplars.is_empty(), true);
+        assert!(series[0].exemplars.is_empty());
     }
 
     #[test]

@@ -303,7 +303,7 @@ mod tests {
                 i32::try_from(i).expect("index fits"),
                 "record {i}"
             );
-            assert_eq!(record.value.is_some(), true, "record {i}");
+            assert!(record.value.is_some(), "record {i}");
         }
 
         let footer = RecordBatch::decode(&mut cur).expect("footer batch");
@@ -555,8 +555,9 @@ mod tests {
 
     #[test]
     fn byte_range_returns_expected_slice() {
+        type TestCase1<'a> = (&'a str, usize, usize, &'a [u8]);
         let buf: Vec<u8> = (0u8..=255).collect();
-        let cases: [(&str, usize, usize, &[u8]); 3] = [
+        let cases: [TestCase1<'_>; 3] = [
             // In-range read.
             ("in-range read", 10, 5, &buf[10..15]),
             // Position past EOF → empty.

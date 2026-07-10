@@ -344,7 +344,7 @@ mod tests {
         web.insert("app", "web");
         mutated.index_mut().add_series("t", web.fingerprint(), &web);
 
-        assert_eq!(Arc::ptr_eq(&bs.index, &mutated.index), false);
+        assert!(!Arc::ptr_eq(&bs.index, &mutated.index));
         assert_eq!(
             bs.index()
                 .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])

@@ -732,8 +732,8 @@ mod tests {
             ),
             ("host prefix", IpMatcher::parse("192.168.1.1/32").unwrap()),
         ] {
-            assert_eq!(matcher.matches_ip_text("192.168.1.1"), true, "case {name}");
-            assert_eq!(matcher.matches_ip_text("192.168.1.2"), false, "case {name}");
+            assert!(matcher.matches_ip_text("192.168.1.1"), "case {name}");
+            assert!(!matcher.matches_ip_text("192.168.1.2"), "case {name}");
         }
     }
 

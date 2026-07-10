@@ -465,7 +465,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::QueryFrontend), true);
+        assert!(matches!(cli.target, Target::QueryFrontend));
         assert_eq!(cli.query_frontend_split_ms, 30_000);
         assert_eq!(cli.query_frontend_shards, 4);
         assert_eq!(
@@ -495,7 +495,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Ruler), true);
+        assert!(matches!(cli.target, Target::Ruler));
         assert_eq!(cli.ruler_tenant.as_str(), "tenant-a");
         assert_eq!(cli.ruler_eval_interval_ms, 15_000);
         assert_eq!(cli.ruler_shard_index, 2);

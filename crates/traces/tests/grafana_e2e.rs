@@ -1286,11 +1286,10 @@ async fn grafana_e2e_full_surface() -> TestResult {
     let q = enc("{ resource.service.name = \"checkout-frontend\" }");
     let search = get_json(&client, &proxy(&format!("api/search?q={q}&{range}"))).await?;
     assert_eq!(search["traces"][0]["traceID"].as_str(), Some(TRACE_A_HEX));
-    assert_eq!(
+    assert!(
         search["metrics"]["inspectedSpans"]
             .as_u64()
-            .is_some_and(|n| n > 0),
-        true
+            .is_some_and(|n| n > 0)
     );
 
     // E9 — legacy logfmt `tags=` search (no `q`).
@@ -1434,12 +1433,8 @@ async fn grafana_e2e_full_surface() -> TestResult {
     // groups each trace under one root); checkout-frontend (Trace A) and
     // bulk-svc (Trace B) are both roots. cart-backend is a non-root service, so
     // it appears as a span attribute, not a resource value.
-    assert_eq!(
-        typed.contains(&("string", "checkout-frontend")),
-        true,
-        "{values}"
-    );
-    assert_eq!(typed.contains(&("string", "bulk-svc")), true, "{values}");
+    assert!(typed.contains(&("string", "checkout-frontend")), "{values}");
+    assert!(typed.contains(&("string", "bulk-svc")), "{values}");
 
     // E17 — v2 typed values for the intrinsic span:duration (type "duration").
     let values = get_json(
@@ -1527,14 +1522,13 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &proxy(&format!("api/metrics/query?q={iq}&time={now_secs}")),
     )
     .await?;
-    assert_eq!(
+    assert!(
         metrics["series"]
             .as_array()
             .is_some_and(|series| !series.is_empty()),
-        true,
         "instant query must collapse each series to one sample: {metrics}"
     );
-    assert_eq!(
+    assert!(
         metrics["series"]
             .as_array()
             .into_iter()
@@ -1542,7 +1536,6 @@ async fn grafana_e2e_full_surface() -> TestResult {
             .all(|series| series["samples"]
                 .as_array()
                 .is_some_and(|samples| samples.len() == 1)),
-        true,
         "instant query must collapse each series to one sample: {metrics}"
     );
 

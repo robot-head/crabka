@@ -50,12 +50,24 @@ fn host_deny(resource_type: ResourceType, operation: AclOperation, host: &str) -
     }
 }
 
+fn assert_capability_cases(
+    cases: impl IntoIterator<Item = (&'static str, Vec<AclEntry>, Capabilities)>,
+) {
+    for (name, entries, expected) in cases {
+        assert_eq!(
+            derive_capabilities("User:alice", &entries),
+            expected,
+            "case {name}"
+        );
+    }
+}
+
 #[test]
-fn capability_cases() {
+fn capability_grant_cases() {
     let mut other_principal = allow(ResourceType::Cluster, AclOperation::All);
     other_principal.principal = "User:bob".to_string();
 
-    for (name, entries, expected) in [
+    assert_capability_cases([
         (
             "topic administration grants",
             vec![
@@ -141,6 +153,12 @@ fn capability_cases() {
                 ..Capabilities::default()
             },
         ),
+    ]);
+}
+
+#[test]
+fn capability_deny_precedence_cases() {
+    assert_capability_cases([
         (
             "deny alter-configs does not mask alter",
             vec![
@@ -203,6 +221,12 @@ fn capability_cases() {
                 ..Capabilities::default()
             },
         ),
+    ]);
+}
+
+#[test]
+fn capability_host_cases() {
+    assert_capability_cases([
         (
             "exact deny precedence",
             vec![
@@ -237,13 +261,7 @@ fn capability_cases() {
             )],
             Capabilities::default(),
         ),
-    ] {
-        assert_eq!(
-            derive_capabilities("User:alice", &entries),
-            expected,
-            "case {name}"
-        );
-    }
+    ]);
 }
 
 #[test]

@@ -417,8 +417,8 @@ mod tests {
         // Both the staged entry and the inner value are gone.
         assert_eq!(store.get(b"a").await, None);
         assert_eq!(store.get(b"b").await, None);
-        assert_eq!(store.scan_all().await.is_empty(), true);
-        assert_eq!(store.flush().await.is_empty(), true);
+        assert!(store.scan_all().await.is_empty());
+        assert!(store.flush().await.is_empty());
     }
 
     /// `flush_with_old` reports `old = None` for a key with no prior inner value

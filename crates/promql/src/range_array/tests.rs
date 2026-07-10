@@ -48,10 +48,10 @@ fn basic_accessors_report_empty_state_and_exact_ranges() {
     let empty = RangeArray::from_ranges(values.clone(), []).unwrap();
     let range_array = RangeArray::from_ranges(values, [(1_u32, 0_u32), (0, 2), (2, 1)]).unwrap();
     assert_eq!(empty.len(), 0);
-    assert_eq!(empty.is_empty(), true);
+    assert!(empty.is_empty());
     assert_eq!(empty.ranges(), &[][..]);
     assert_eq!(range_array.len(), 3);
-    assert_eq!(range_array.is_empty(), false);
+    assert!(!range_array.is_empty());
     assert_eq!(range_array.ranges(), &[(1, 0), (0, 2), (2, 1)][..]);
 }
 

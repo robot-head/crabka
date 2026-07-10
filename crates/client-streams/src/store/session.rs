@@ -434,7 +434,7 @@ mod tests {
         // changelog: put, put, remove → 3 entries (last is a tombstone)
         let cl = s.take_changelog();
         assert_eq!(cl.len(), 3);
-        assert_eq!(cl[2].1.is_none(), true);
+        assert!(cl[2].1.is_none());
     }
 
     #[tokio::test]
@@ -656,7 +656,7 @@ mod tests {
         );
         let cl = s.take_changelog();
         assert_eq!(cl.len(), 1);
-        assert_eq!(cl[0].1.is_none(), true); // changelog tombstone
+        assert!(cl[0].1.is_none()); // changelog tombstone
     }
 
     /// `apply_changelog` on a cached store writes BELOW the cache (no dirty entry

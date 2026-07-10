@@ -1030,8 +1030,12 @@ fn string_matches(value: &str, op: MatchCmp, expected: &MatchValue) -> bool {
         return false;
     };
     match op {
-        MatchCmp::Eq => value == expected,
-        MatchCmp::Neq => value != expected,
+        MatchCmp::Eq => value
+            .partial_cmp(expected.as_str())
+            .is_some_and(std::cmp::Ordering::is_eq),
+        MatchCmp::Neq => !value
+            .partial_cmp(expected.as_str())
+            .is_some_and(std::cmp::Ordering::is_eq),
         MatchCmp::Re => {
             regex::Regex::new(&format!("^(?:{expected})$")).is_ok_and(|re| re.is_match(value))
         }
@@ -1051,8 +1055,12 @@ fn int_matches(value: i64, op: MatchCmp, expected: &MatchValue) -> bool {
         _ => return false,
     };
     match op {
-        MatchCmp::Eq => value == expected,
-        MatchCmp::Neq => value != expected,
+        MatchCmp::Eq => value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
+        MatchCmp::Neq => !value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
         MatchCmp::Lt => value < expected,
         MatchCmp::Lte => value <= expected,
         MatchCmp::Gt => value > expected,
@@ -1097,15 +1105,18 @@ fn kind_enum_value(name: &str) -> Option<i32> {
     }
 }
 
-#[allow(clippy::float_cmp)]
 fn float_matches(value: f64, op: MatchCmp, expected: &MatchValue) -> bool {
     let expected = match expected {
         MatchValue::Float(value) => *value,
         _ => return false,
     };
     match op {
-        MatchCmp::Eq => value == expected,
-        MatchCmp::Neq => value != expected,
+        MatchCmp::Eq => value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
+        MatchCmp::Neq => !value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
         MatchCmp::Lt => value < expected,
         MatchCmp::Lte => value <= expected,
         MatchCmp::Gt => value > expected,
@@ -1781,12 +1792,13 @@ mod tests {
                 .value(0)
                 == 500
         );
-        #[allow(clippy::float_cmp)]
-        let ratio_ok = batch
+        let ratio_ok = (batch
             .column(1)
             .as_primitive::<datafusion::arrow::datatypes::Float64Type>()
             .value(0)
-            == 0.5;
+            - 0.5)
+            .abs()
+            < f64::EPSILON;
         check!(ratio_ok);
         check!(batch.column(2).as_boolean().value(0));
         check!(batch.column(3).as_string::<i32>().value(0) == "kaboom");

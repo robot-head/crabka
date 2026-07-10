@@ -154,7 +154,8 @@ mod tests {
 
     #[test]
     fn encoded_responses_preserve_wire_fields() {
-        let cases: [(&str, fn(i16) -> Result<Bytes, BrokerError>, i16); 2] = [
+        type TestCase1<'a> = (&'a str, fn(i16) -> Result<Bytes, BrokerError>, i16);
+        let cases: [TestCase1<'_>; 2] = [
             (
                 "not coordinator",
                 |version| encode_err(version, codes::NOT_COORDINATOR),

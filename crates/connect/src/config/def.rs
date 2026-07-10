@@ -365,7 +365,7 @@ mod tests {
             "postgres://localhost/app".to_string()
         );
         assert_eq!(resolved.get_string("schema").unwrap(), "public".to_string());
-        assert_eq!(resolved.contains_key("missing_optional"), false);
+        assert!(!resolved.contains_key("missing_optional"));
     }
 
     #[tokio::test]
@@ -511,7 +511,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(resolved.get_string("name").unwrap(), "source-a".to_string());
-        assert_eq!(resolved.get_bool("enabled").unwrap(), true);
+        assert!(resolved.get_bool("enabled").unwrap());
         assert_eq!(resolved.get_i64("limit").unwrap(), 42);
         assert_eq!(resolved.get_u64("unsigned_limit").unwrap(), u64::MAX);
         assert_eq!(resolved.get_u64("timeout_ms").unwrap(), 2500);

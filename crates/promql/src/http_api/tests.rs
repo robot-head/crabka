@@ -246,11 +246,10 @@ async fn query_range_rejects_ranges_over_tenant_limit() {
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["status"].as_str(), Some("error"));
     assert_eq!(body["errorType"].as_str(), Some("execution"));
-    assert_eq!(
+    assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("query range too long")),
-        true
+            .is_some_and(|error| error.contains("query range too long"))
     );
 }
 
@@ -429,11 +428,10 @@ async fn series_rejects_selected_series_over_tenant_limit() {
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["status"].as_str(), Some("error"));
     assert_eq!(body["errorType"].as_str(), Some("execution"));
-    assert_eq!(
+    assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("series per query exceeded")),
-        true
+            .is_some_and(|error| error.contains("series per query exceeded"))
     );
 }
 
@@ -474,10 +472,9 @@ async fn cardinality_active_series_rejects_over_tenant_limit() {
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(body["status"].as_str(), Some("error"));
     assert_eq!(body["errorType"].as_str(), Some("execution"));
-    assert_eq!(
+    assert!(
         body["error"]
             .as_str()
-            .is_some_and(|error| error.contains("series per query exceeded")),
-        true
+            .is_some_and(|error| error.contains("series per query exceeded"))
     );
 }

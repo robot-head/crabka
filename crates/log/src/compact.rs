@@ -318,8 +318,8 @@ mod core_tests {
     fn txn_data_fully_gone_checks_survivor_set() {
         let mut survivors = HashSet::new();
         survivors.insert(ProducerId(1000));
-        assert_eq!(txn_data_fully_gone(ProducerId(2000), &survivors), true);
-        assert_eq!(txn_data_fully_gone(ProducerId(1000), &survivors), false);
+        assert!(txn_data_fully_gone(ProducerId(2000), &survivors));
+        assert!(!txn_data_fully_gone(ProducerId(1000), &survivors));
     }
 }
 

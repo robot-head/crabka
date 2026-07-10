@@ -433,7 +433,7 @@ mod tests {
         // The in-range tombstone is present with a None value.
         let bb2 = r.iter().find(|(k, _)| k == &key(b"bb2")).unwrap();
         assert_eq!(bb2.1.value.as_ref(), None);
-        assert_eq!(bb2.1.dirty, true);
+        assert!(bb2.1.dirty);
 
         // A range scan must NOT promote recency: LRU head stays the
         // first-inserted key (ccc), so it is evicted first.
@@ -458,6 +458,6 @@ mod tests {
         c.delete(key(b"k"), ctx());
         let e = c.get(&key(b"k")).unwrap();
         assert_eq!(e.value.as_ref(), None);
-        assert_eq!(e.dirty, true);
+        assert!(e.dirty);
     }
 }

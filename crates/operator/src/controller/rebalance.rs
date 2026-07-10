@@ -699,7 +699,7 @@ mod tests {
     // ----- decide() matrix --------------------------------------------
 
     #[test]
-    fn decide_cases() {
+    fn decide_initial_and_approval_cases() {
         for (name, state, command, has_session, expected) in [
             (
                 "new creates proposal",
@@ -736,6 +736,14 @@ mod tests {
                 true,
                 RebalanceAction::Idle,
             ),
+        ] {
+            assert_eq!(decide(state, command, has_session), expected, "case {name}");
+        }
+    }
+
+    #[test]
+    fn decide_refresh_stop_and_poll_cases() {
+        for (name, state, command, has_session, expected) in [
             (
                 "refresh proposal-ready",
                 RebalanceState::ProposalReady,

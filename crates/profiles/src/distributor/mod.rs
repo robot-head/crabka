@@ -1005,11 +1005,10 @@ mod tests {
 
         let recs = sink.0.lock().unwrap();
         assert_eq!(recs.len(), 2);
-        assert_eq!(recs.iter().all(|rec| rec.tenant == "tenant-a"), true);
-        assert_eq!(
+        assert!(recs.iter().all(|rec| rec.tenant == "tenant-a"));
+        assert!(
             recs.iter()
-                .all(|rec| rec.labels.iter().any(|(name, _)| name == "service_name")),
-            true
+                .all(|rec| rec.labels.iter().any(|(name, _)| name == "service_name"))
         );
     }
 
@@ -1359,10 +1358,9 @@ overrides:
         );
 
         assert_eq!(err.code(), Code::ResourceExhausted);
-        assert_eq!(
+        assert!(
             err.message()
-                .is_some_and(|message| message.contains("max series exceeded")),
-            true
+                .is_some_and(|message| message.contains("max series exceeded"))
         );
     }
 
@@ -1487,12 +1485,9 @@ overrides:
         let recs = sink.0.lock().unwrap();
         assert_eq!(recs.len(), 1);
         assert_eq!(recs[0].tenant.as_str(), "tenant-a");
-        assert_eq!(
-            recs[0].labels.iter().any(|(name, value)| {
-                name == "__profile_type__" && value == "samples:samples:count:samples:count"
-            }),
-            true
-        );
+        assert!(recs[0].labels.iter().any(|(name, value)| {
+            name == "__profile_type__" && value == "samples:samples:count:samples:count"
+        }));
     }
 
     #[tokio::test]
@@ -1733,7 +1728,7 @@ overrides:
         map.insert("tenant-new".to_string(), 0);
 
         assert_eq!(map.len(), MAX_TENANTS);
-        assert_eq!(map.contains_key("tenant-new"), true);
+        assert!(map.contains_key("tenant-new"));
     }
 
     #[tokio::test]
@@ -1799,11 +1794,10 @@ overrides:
 
         let connect = connect_error(ProfilesError::Internal("secret detail".to_string()));
         assert_eq!(connect.code(), Code::Internal);
-        assert_eq!(
+        assert!(
             connect
                 .message()
-                .is_some_and(|message| message == INTERNAL_ERROR_MESSAGE),
-            true
+                .is_some_and(|message| message == INTERNAL_ERROR_MESSAGE)
         );
     }
 
@@ -1883,9 +1877,9 @@ overrides:
 
         let recs = sink.0.lock().unwrap();
         let mapping = &recs[0].symbols.mappings[0];
-        assert_eq!(mapping.has_functions, true);
-        assert_eq!(mapping.has_filenames, false);
-        assert_eq!(mapping.has_line_numbers, true);
-        assert_eq!(mapping.has_inline_frames, false);
+        assert!(mapping.has_functions);
+        assert!(!mapping.has_filenames);
+        assert!(mapping.has_line_numbers);
+        assert!(!mapping.has_inline_frames);
     }
 }

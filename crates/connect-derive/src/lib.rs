@@ -352,7 +352,7 @@ mod tests {
         let cases = [
             (
                 "secret fields",
-                r#"
+                r"
                 struct Demo {
                     #[config(secret)]
                     password: SecretString,
@@ -361,7 +361,7 @@ mod tests {
                     #[config(required, secret)]
                     required_maybe_password: Option<SecretString>,
                 }
-                "#,
+                ",
                 [
                     "def=def.secret(\"password\");",
                     "def=def.optional(\"maybe_password\",",
@@ -370,14 +370,14 @@ mod tests {
             ),
             (
                 "plain fields",
-                r#"
+                r"
                 struct Demo {
                     database_url: String,
                     note: Option<String>,
                     #[config(required)]
                     required_note: Option<String>,
                 }
-                "#,
+                ",
                 [
                     "def=def.required(\"database_url\",",
                     "def=def.optional(\"note\",",
@@ -400,8 +400,8 @@ mod tests {
     #[test]
     fn type_info_recognizes_options_secrets_and_duration_paths() {
         let optional_secret = analyze_type(&parse_type("Option<SecretString>")).unwrap();
-        assert_eq!(optional_secret.is_option, true);
-        assert_eq!(optional_secret.is_secret, true);
+        assert!(optional_secret.is_option);
+        assert!(optional_secret.is_secret);
 
         let string_vec = analyze_type(&parse_type("Vec<String>")).unwrap();
         check!((string_vec.is_option, string_vec.is_secret) == (false, false));
@@ -412,8 +412,8 @@ mod tests {
             "usize", "f32", "f64", "Value",
         ] {
             let info = analyze_type(&parse_type(scalar)).unwrap();
-            assert_eq!(info.is_option, false, "case {scalar}");
-            assert_eq!(info.is_secret, false, "case {scalar}");
+            assert!(!info.is_option, "case {scalar}");
+            assert!(!info.is_secret, "case {scalar}");
         }
 
         for (name, ty) in [
@@ -421,8 +421,8 @@ mod tests {
             ("absolute_duration_path", "::std::time::Duration"),
         ] {
             let info = analyze_type(&parse_type(ty)).unwrap();
-            assert_eq!(info.is_option, false, "case {name}");
-            assert_eq!(info.is_secret, false, "case {name}");
+            assert!(!info.is_option, "case {name}");
+            assert!(!info.is_secret, "case {name}");
         }
     }
 

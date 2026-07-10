@@ -394,9 +394,9 @@ mod tests {
     fn stat_computes_mean_and_sample_stddev() {
         let s = stat(&[2.0, 4.0, 6.0]);
         assert_eq!(s.n, 3);
-        assert_eq!(s.mean, 4.0);
+        assert!((s.mean - 4.0).abs() < f64::EPSILON);
         // sample variance = ((−2)²+0²+2²)/(3−1) = 8/2 = 4 → stddev 2.
-        assert_eq!(s.stddev, 2.0);
+        assert!((s.stddev - 2.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -414,9 +414,9 @@ mod tests {
 
     #[test]
     fn cv_percent_is_zero_when_mean_zero() {
-        assert_eq!(stat(&[0.0, 0.0]).cv_percent(), 0.0);
+        assert!(stat(&[0.0, 0.0]).cv_percent().abs() < f64::EPSILON);
         let s = stat(&[100.0, 200.0, 300.0]); // mean 200, stddev 100 → cv 50%
-        assert_eq!(s.cv_percent(), 50.0);
+        assert!((s.cv_percent() - 50.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -437,11 +437,11 @@ mod tests {
         assert_eq!(c.crabka.n_runs, 3);
         assert_eq!(c.kafka.n_runs, 2);
         let cm = c.crabka.metrics["producer_msgs_per_sec"];
-        assert_eq!(cm.mean, 200.0);
-        assert_eq!(cm.stddev, 100.0);
+        assert!((cm.mean - 200.0).abs() < f64::EPSILON);
+        assert!((cm.stddev - 100.0).abs() < f64::EPSILON);
         let km = c.kafka.metrics["producer_msgs_per_sec"];
-        assert_eq!(km.mean, 50.0);
-        assert_eq!(km.stddev, 0.0);
+        assert!((km.mean - 50.0).abs() < f64::EPSILON);
+        assert!(km.stddev.abs() < f64::EPSILON);
         assert_eq!(km.n, 2);
     }
 
@@ -522,7 +522,7 @@ mod tests {
             .iter()
             .find(|s| s.metric == "broker_mem_working_set_mb")
             .expect("broker mem series present");
-        assert_eq!(mem.points[0].mean, 2.0);
+        assert!((mem.points[0].mean - 2.0).abs() < f64::EPSILON);
     }
 
     #[test]

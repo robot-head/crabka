@@ -134,6 +134,6 @@ mod tests {
         assert_eq!(stacks.value(1), 9);
         assert_eq!(values.value(0), 50);
         assert_eq!(traces.value(0), [0xAB; 16].as_slice());
-        assert_eq!(traces.is_null(1), true);
+        assert!(traces.is_null(1));
     }
 }

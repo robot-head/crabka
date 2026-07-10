@@ -489,18 +489,17 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
 
 // ── test 9: StatefulSet omits introspection volume when JWT mode ───────────
 
-/// Symmetric absence assertion: a JWT-mode parent Kafka produces a
-/// StatefulSet pod template with no `oauth-introspection-secret`
-/// volume or mount. Mirrors
-/// `statefulset_omits_oauth_jwks_trust_volume_when_no_trust_certs`
-/// shape.
+// Symmetric absence assertion: a JWT-mode parent Kafka produces a
+// StatefulSet pod template with no `oauth-introspection-secret`
+// volume or mount. Mirrors
+// `statefulset_omits_oauth_jwks_trust_volume_when_no_trust_certs`
+// shape.
 // ── pool-reconcile fixtures (tests 5, 6, 8, 9) ─────────────────────────────
 
-/// Parent-Kafka body that carries an OAuth listener in either JWT or
-/// introspection mode (per `jwt_mode`). Used as the GET response for
-/// the pool reconciler's `kafka_api.get_opt(parent_name)` step so the
-/// rendered pod template picks up the right branch of
-/// `oauth_introspection_secret_mount`.
+// Parent-Kafka body that carries an OAuth listener in either JWT or
+// introspection mode (per `jwt_mode`). Used as the GET response for the pool
+// reconciler's `kafka_api.get_opt(parent_name)` step so the rendered pod
+// template picks up the right branch of `oauth_introspection_secret_mount`.
 fn parent_kafka_body_with_oauth(
     name: &str,
     namespace: &str,

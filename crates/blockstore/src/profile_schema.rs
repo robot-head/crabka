@@ -148,9 +148,9 @@ mod tests {
         let span = schema.column_with_name(PCOL_SPAN_ID).unwrap().1;
         let trace = schema.column_with_name(PCOL_TRACE_ID).unwrap().1;
         assert_eq!(span.data_type(), &DataType::UInt64);
-        assert_eq!(span.is_nullable(), true);
+        assert!(span.is_nullable());
         assert_eq!(trace.data_type(), &DataType::Binary);
-        assert_eq!(trace.is_nullable(), true);
+        assert!(trace.is_nullable());
     }
 
     #[test]

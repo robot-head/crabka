@@ -344,6 +344,13 @@ fn last_status_patch_body(state: &Arc<MockState>, topic_name: &str) -> serde_jso
 /// status `Ready=True topic_id=Some(...)`.
 #[tokio::test]
 async fn creates_topic_on_first_reconcile() {
+    #[derive(Debug, PartialEq, Eq)]
+    enum CallShape<'a> {
+        Metadata(Vec<&'a str>),
+        CreateTopics(Vec<(&'a str, i32, i32)>),
+        Other,
+    }
+
     let state = MockState::new(standard_kube_rules(TOPIC_NAME));
     let client = mock_client(&state, NS);
     let ctx = Arc::new(fixture_ctx(client, NS));
@@ -356,12 +363,6 @@ async fn creates_topic_on_first_reconcile() {
     reconcile(Arc::new(kt), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    #[derive(Debug, PartialEq, Eq)]
-    enum CallShape<'a> {
-        Metadata(Vec<&'a str>),
-        CreateTopics(Vec<(&'a str, i32, i32)>),
-        Other,
-    }
     let actual = calls
         .iter()
         .map(|call| match call {
@@ -537,7 +538,7 @@ async fn immutable_topic_field_change_cases() {
         });
         let body = last_status_patch_body(&state, TOPIC_NAME);
         let condition = &body["status"]["conditions"][0];
-        assert_eq!(has_mutation, false, "case {name}: {calls:?}");
+        assert!(!has_mutation, "case {name}: {calls:?}");
         assert_eq!(
             condition["status"].as_str(),
             Some("False"),
@@ -603,12 +604,12 @@ async fn config_diff_sets_and_deletes() {
                 if topic == TOPIC_NAME && key == "foo"
         )
     });
-    assert_eq!(
-        has_set_bar, true,
+    assert!(
+        has_set_bar,
         "expected SET bar=2 and DELETE foo, got {ops:?}"
     );
-    assert_eq!(
-        has_delete_foo, true,
+    assert!(
+        has_delete_foo,
         "expected SET bar=2 and DELETE foo, got {ops:?}"
     );
 

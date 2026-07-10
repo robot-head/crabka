@@ -29,9 +29,8 @@ fn assert_single_float_sample(result: &QueryResult, job: &str, expected: f64, co
     assert_eq!(samples.len(), 1, "{context}");
     assert_eq!(samples[0].labels.get("__name__"), None, "{context}");
     assert_eq!(samples[0].labels.get("job"), Some(job), "{context}");
-    assert_eq!(
+    assert!(
         approx_eq(float_value(&samples[0].value), expected),
-        true,
         "{context}"
     );
 }
@@ -44,9 +43,8 @@ fn assert_single_on_x_float_sample(result: &QueryResult, expected: f64, context:
     assert_eq!(samples[0].labels.get("__name__"), None, "{context}");
     assert_eq!(samples[0].labels.get("job"), None, "{context}");
     assert_eq!(samples[0].labels.get("x"), Some("1"), "{context}");
-    assert_eq!(
+    assert!(
         approx_eq(float_value(&samples[0].value), expected),
-        true,
         "{context}"
     );
 }
@@ -574,7 +572,7 @@ async fn instant_label_join_combines_source_labels() {
     assert_eq!(samples.len(), 1);
     assert_eq!(samples[0].labels.get("target"), Some("api/a"));
     assert_eq!(samples[0].labels.get("zone"), Some("us-east-1a"));
-    assert_eq!(approx_eq(float_value(&samples[0].value), 1.0), true);
+    assert!(approx_eq(float_value(&samples[0].value), 1.0));
 }
 
 #[tokio::test]
@@ -603,7 +601,7 @@ async fn instant_label_replace_uses_regex_capture_groups() {
     assert_eq!(samples.len(), 1);
     assert_eq!(samples[0].labels.get("host"), Some("api-1"));
     assert_eq!(samples[0].labels.get("instance"), Some("api-1:9100"));
-    assert_eq!(approx_eq(float_value(&samples[0].value), 1.0), true);
+    assert!(approx_eq(float_value(&samples[0].value), 1.0));
 }
 
 #[tokio::test]
@@ -779,11 +777,7 @@ async fn instant_unary_numeric_functions_transform_vector_values() {
                 .find(|sample| sample.labels.get("case") == Some(case))
                 .expect("sample for case");
             assert_eq!(sample.labels.get("__name__"), None, "case {case}");
-            assert_eq!(
-                approx_eq(float_value(&sample.value), value),
-                true,
-                "case {case}"
-            );
+            assert!(approx_eq(float_value(&sample.value), value), "case {case}");
         }
     }
 }
@@ -865,11 +859,7 @@ async fn instant_hyperbolic_functions_transform_vector_values() {
                 .find(|sample| sample.labels.get("case") == Some(case))
                 .expect("sample for case");
             assert_eq!(sample.labels.get("__name__"), None, "case {case}");
-            assert_eq!(
-                approx_eq(float_value(&sample.value), value),
-                true,
-                "case {case}"
-            );
+            assert!(approx_eq(float_value(&sample.value), value), "case {case}");
         }
     }
 }
@@ -979,11 +969,7 @@ async fn instant_trigonometric_functions_transform_vector_values() {
                 .find(|sample| sample.labels.get("case") == Some(case))
                 .expect("sample for case");
             assert_eq!(sample.labels.get("__name__"), None, "case {case}");
-            assert_eq!(
-                approx_eq(float_value(&sample.value), value),
-                true,
-                "case {case}"
-            );
+            assert!(approx_eq(float_value(&sample.value), value), "case {case}");
         }
     }
 }
@@ -1089,9 +1075,8 @@ async fn instant_calendar_functions_extract_utc_fields_from_sample_values() {
         assert_eq!(samples.len(), 1, "query {query}");
         assert_eq!(samples[0].labels.get("__name__"), None, "query {query}");
         assert_eq!(samples[0].labels.get("case"), Some("leap"), "query {query}");
-        assert_eq!(
+        assert!(
             approx_eq(float_value(&samples[0].value), expected),
-            true,
             "query {query}"
         );
     }
@@ -1486,7 +1471,7 @@ async fn instant_sum_by_groups_by_exact_labels_and_drops_metric_name() {
         .expect("api group");
     assert_eq!(api.labels.get("__name__"), None);
     assert_eq!(api.labels.get("instance"), None);
-    assert_eq!(approx_eq(float_value(&api.value), 3.0), true);
+    assert!(approx_eq(float_value(&api.value), 3.0));
     let web = samples
         .iter()
         .find(|sample| sample.labels.get("job") == Some("web"))
@@ -1520,7 +1505,7 @@ async fn instant_count_counts_series() {
         panic!("expected vector");
     };
     assert_eq!(samples.len(), 1);
-    assert_eq!(approx_eq(float_value(&samples[0].value), 2.0), true);
+    assert!(approx_eq(float_value(&samples[0].value), 2.0));
 }
 
 #[tokio::test]
@@ -1547,7 +1532,7 @@ async fn instant_group_returns_one_for_each_group() {
     assert!(samples.len() == 2);
     for sample in samples {
         assert_eq!(sample.labels.get("__name__"), None);
-        assert_eq!(approx_eq(float_value(&sample.value), 1.0), true);
+        assert!(approx_eq(float_value(&sample.value), 1.0));
     }
 }
 
@@ -1727,7 +1712,7 @@ async fn instant_count_values_counts_by_sample_value() {
         .find(|sample| sample.labels.get("code") == Some("200"))
         .expect("200 bucket");
     assert_eq!(ok.labels.get("__name__"), None);
-    assert_eq!(approx_eq(float_value(&ok.value), 2.0), true);
+    assert!(approx_eq(float_value(&ok.value), 2.0));
     let err = samples
         .iter()
         .find(|sample| sample.labels.get("code") == Some("500"))
@@ -2007,9 +1992,8 @@ async fn instant_topk_and_bottomk_ignore_histograms() {
             Some(expected_instance),
             "{query}"
         );
-        assert_eq!(
+        assert!(
             approx_eq(float_value(&samples[0].value), expected_value),
-            true,
             "{query}"
         );
     }
@@ -2258,7 +2242,7 @@ async fn instant_quantile_aggregation_ignores_histograms() {
     assert_eq!(samples.len(), 1);
     assert_eq!(samples[0].labels.get("__name__"), None);
     assert_eq!(samples[0].labels.get("job"), Some("api"));
-    assert_eq!(approx_eq(float_value(&samples[0].value), 4.0), true);
+    assert!(approx_eq(float_value(&samples[0].value), 4.0));
 }
 
 #[tokio::test]
@@ -2313,9 +2297,8 @@ async fn instant_min_max_and_std_aggregations_ignore_histograms() {
         assert_eq!(samples.len(), 1, "{query}");
         assert_eq!(samples[0].labels.get("__name__"), None, "{query}");
         assert_eq!(samples[0].labels.get("job"), Some("api"), "{query}");
-        assert_eq!(
+        assert!(
             approx_eq(float_value(&samples[0].value), expected),
-            true,
             "{query}"
         );
     }
@@ -2361,9 +2344,8 @@ async fn instant_count_and_group_aggregations_include_histograms() {
         assert_eq!(samples.len(), 1, "{query}");
         assert_eq!(samples[0].labels.get("__name__"), None, "{query}");
         assert_eq!(samples[0].labels.get("job"), Some("api"), "{query}");
-        assert_eq!(
+        assert!(
             approx_eq(float_value(&samples[0].value), expected),
-            true,
             "{query}"
         );
     }
@@ -2483,8 +2465,8 @@ async fn instant_sum_aggregation_combines_native_histograms_with_different_span_
     let SampleValue::Histogram(histogram) = &samples[0].value else {
         panic!("expected histogram");
     };
-    assert_eq!(approx_eq(histogram.count, 10.0), true);
-    assert_eq!(approx_eq(histogram.sum, 30.0), true);
+    assert!(approx_eq(histogram.count, 10.0));
+    assert!(approx_eq(histogram.sum, 30.0));
     assert_eq!(
         &histogram.positive_spans,
         &vec![BucketSpan {
@@ -2541,11 +2523,7 @@ async fn instant_sum_and_avg_aggregations_omit_mixed_float_and_histogram_groups(
         };
         assert_eq!(samples.len(), 1, "{query}");
         assert_eq!(samples[0].labels.get("job"), Some("web"), "{query}");
-        assert_eq!(
-            approx_eq(float_value(&samples[0].value), 6.0),
-            true,
-            "{query}"
-        );
+        assert!(approx_eq(float_value(&samples[0].value), 6.0), "{query}");
     }
 }
 
@@ -2856,9 +2834,8 @@ async fn native_histogram_scalar_arithmetic_scales_histograms() {
         assert_eq!(samples.len(), 1, "{query}");
         assert_eq!(samples[0].labels.get("__name__"), None, "{query}");
         assert_eq!(samples[0].labels.get("job"), Some("api"), "{query}");
-        assert_eq!(
+        assert!(
             approx_eq(float_value(&samples[0].value), expected),
-            true,
             "{query}"
         );
     }
@@ -3543,11 +3520,11 @@ async fn vector_vector_group_left_fill_right_preserves_unmatched_many_side() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(values.len(), 3);
     assert_eq!(values["a"].0, Some("east"));
-    assert_eq!(approx_eq(values["a"].1, 110.0), true);
+    assert!(approx_eq(values["a"].1, 110.0));
     assert_eq!(values["b"].0, Some("east"));
-    assert_eq!(approx_eq(values["b"].1, 60.0), true);
+    assert!(approx_eq(values["b"].1, 60.0));
     assert_eq!(values["c"].0, None);
-    assert_eq!(approx_eq(values["c"].1, 7.0), true);
+    assert!(approx_eq(values["c"].1, 7.0));
 }
 
 #[tokio::test]
@@ -3604,11 +3581,11 @@ async fn vector_vector_group_right_fill_left_preserves_unmatched_many_side() {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(values.len(), 3);
     assert_eq!(values["a"].0, Some("east"));
-    assert_eq!(approx_eq(values["a"].1, 110.0), true);
+    assert!(approx_eq(values["a"].1, 110.0));
     assert_eq!(values["b"].0, Some("east"));
-    assert_eq!(approx_eq(values["b"].1, 60.0), true);
+    assert!(approx_eq(values["b"].1, 60.0));
     assert_eq!(values["c"].0, None);
-    assert_eq!(approx_eq(values["c"].1, 7.0), true);
+    assert!(approx_eq(values["c"].1, 7.0));
 }
 
 #[tokio::test]
@@ -3704,7 +3681,7 @@ async fn info_function_uses_data_label_selector_to_filter_and_copy_labels() {
             ("region", "east"),
         ])
     );
-    assert_eq!(approx_eq(float_value(&samples[0].value), 7.0), true);
+    assert!(approx_eq(float_value(&samples[0].value), 7.0));
 }
 
 #[tokio::test]
@@ -4216,7 +4193,7 @@ async fn instant_increase_corrects_counter_resets() {
         panic!("expected vector");
     };
     assert_eq!(samples.len(), 1);
-    assert_eq!(approx_eq(float_value(&samples[0].value), 2.0), true);
+    assert!(approx_eq(float_value(&samples[0].value), 2.0));
 }
 
 #[tokio::test]
@@ -4241,7 +4218,7 @@ async fn instant_delta_is_gauge_delta_without_reset_correction() {
         panic!("expected vector");
     };
     assert_eq!(samples.len(), 1);
-    assert_eq!(approx_eq(float_value(&samples[0].value), -2.0), true);
+    assert!(approx_eq(float_value(&samples[0].value), -2.0));
 }
 
 #[tokio::test]
@@ -4332,7 +4309,7 @@ async fn instant_irate_uses_last_two_samples_per_second() {
         panic!("expected vector");
     };
     assert_eq!(samples.len(), 1);
-    assert_eq!(approx_eq(float_value(&samples[0].value), 2.0 / 30.0), true);
+    assert!(approx_eq(float_value(&samples[0].value), 2.0 / 30.0));
 }
 
 #[tokio::test]
@@ -4357,7 +4334,7 @@ async fn instant_idelta_uses_last_two_samples_without_per_second_division() {
         panic!("expected vector");
     };
     assert_eq!(samples.len(), 1);
-    assert_eq!(approx_eq(float_value(&samples[0].value), 2.0), true);
+    assert!(approx_eq(float_value(&samples[0].value), 2.0));
 }
 
 #[tokio::test]
@@ -4612,7 +4589,7 @@ async fn instant_basic_over_time_functions_reduce_range_samples() {
             assert!(samples[0].labels.get("__name__").is_none());
         }
         assert_eq!(samples[0].labels.get("job"), Some("api"));
-        assert_eq!(approx_eq(float_value(&samples[0].value), expected), true);
+        assert!(approx_eq(float_value(&samples[0].value), expected));
     }
 }
 
@@ -5214,10 +5191,10 @@ async fn instant_subquery_aligns_start_to_step_grid() {
         panic!("expected vector");
     };
     assert_eq!(samples.len(), 1);
-    assert_eq!(
-        approx_eq(float_value(&samples[0].value), 2.366_666_666_666_666_7,),
-        true
-    );
+    assert!(approx_eq(
+        float_value(&samples[0].value),
+        2.366_666_666_666_666_7,
+    ));
 }
 
 #[tokio::test]
@@ -6231,9 +6208,8 @@ async fn range_scalar_expr_planner_path_matches_interpreter() {
             1,
             "scalar `{query}` must yield one unlabeled series with one point per grid step"
         );
-        assert_eq!(
+        assert!(
             series[0].labels.is_empty(),
-            true,
             "scalar `{query}` must yield one unlabeled series with one point per grid step"
         );
         assert_eq!(
@@ -8694,11 +8670,10 @@ async fn native_histogram_planner_path_matches_interpreter() {
         2,
         "bare native selector must carry histogram payloads, got: {samples:?}"
     );
-    assert_eq!(
+    assert!(
         samples
             .iter()
             .all(|sample| matches!(sample.value, SampleValue::Histogram(_))),
-        true,
         "bare native selector must carry histogram payloads, got: {samples:?}"
     );
 
@@ -9150,9 +9125,8 @@ async fn histogram_range_planner_path_matches_interpreter() {
         None,
         "rate yields one nameless histogram sample"
     );
-    assert_eq!(
+    assert!(
         matches!(rate_samples[0].value, SampleValue::Histogram(_)),
-        true,
         "rate yields one nameless histogram sample"
     );
 

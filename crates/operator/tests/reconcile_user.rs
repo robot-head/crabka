@@ -264,17 +264,14 @@ async fn first_reconcile_provisions_scram_and_acls() {
     let state = MockState::new(rules);
     let client = mock_client(&state, NS);
     let ctx = Arc::new(fixture_ctx(client, NS));
-
     let fake = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     let fake_for_assert = fake.clone();
     ctx.insert_admin_client_for_test(CLUSTER, fake).await;
-
     let ku = ku_with_finalizer(
         USER,
         vec![rule_topic("orders", &[AclOp::Read, AclOp::Describe])],
     );
     reconcile(Arc::new(ku), ctx).await.unwrap();
-
     let calls = fake_for_assert.lock().await.calls();
     // Expected sequence: AlterUserScramCredentials (upsert) -> DescribeAcls -> CreateAcls.
     assert!(
@@ -323,7 +320,6 @@ async fn first_reconcile_provisions_scram_and_acls() {
             ],
         "two ops fan out into two ACL entries",
     );
-
     // Status patch lands Ready=True.
     let observed = state.take_observed();
     let status = observed
@@ -586,8 +582,8 @@ async fn first_reconcile_sets_declared_quotas() {
         })
         .expect("AlterUserQuotas must have been issued");
     let (ops, validate_only) = alter;
-    assert_eq!(described, true);
-    assert_eq!(validate_only, false);
+    assert!(described);
+    assert!(!validate_only);
     assert_eq!(
         ops,
         vec![
@@ -736,7 +732,7 @@ async fn empty_quotas_object_tombstones_everything() {
         ops.iter()
             .map(|op| match op {
                 QuotaOp::Remove { key } => key.as_str(),
-                _ => panic!("expected remove op, got {op:?}"),
+                QuotaOp::Set { .. } => panic!("expected remove op, got {op:?}"),
             })
             .collect::<std::collections::BTreeSet<_>>(),
         std::collections::BTreeSet::from(["consumer_byte_rate", "producer_byte_rate"])

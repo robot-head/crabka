@@ -1077,8 +1077,12 @@ fn string_matches(value: &str, op: MatchCmp, expected: &MatchValue) -> bool {
         return false;
     };
     match op {
-        MatchCmp::Eq => value == expected,
-        MatchCmp::Neq => value != expected,
+        MatchCmp::Eq => value
+            .partial_cmp(expected.as_str())
+            .is_some_and(std::cmp::Ordering::is_eq),
+        MatchCmp::Neq => !value
+            .partial_cmp(expected.as_str())
+            .is_some_and(std::cmp::Ordering::is_eq),
         MatchCmp::Re => {
             regex::Regex::new(&format!("^(?:{expected})$")).is_ok_and(|re| re.is_match(value))
         }
@@ -1098,8 +1102,12 @@ fn int_matches(value: i64, op: MatchCmp, expected: &MatchValue) -> bool {
         _ => return false,
     };
     match op {
-        MatchCmp::Eq => value == expected,
-        MatchCmp::Neq => value != expected,
+        MatchCmp::Eq => value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
+        MatchCmp::Neq => !value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
         MatchCmp::Lt => value < expected,
         MatchCmp::Lte => value <= expected,
         MatchCmp::Gt => value > expected,
@@ -1144,15 +1152,18 @@ fn kind_enum_value(name: &str) -> Option<i32> {
     }
 }
 
-#[allow(clippy::float_cmp)]
 fn float_matches(value: f64, op: MatchCmp, expected: &MatchValue) -> bool {
     let expected = match expected {
         MatchValue::Float(value) => *value,
         _ => return false,
     };
     match op {
-        MatchCmp::Eq => value == expected,
-        MatchCmp::Neq => value != expected,
+        MatchCmp::Eq => value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
+        MatchCmp::Neq => !value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
         MatchCmp::Lt => value < expected,
         MatchCmp::Lte => value <= expected,
         MatchCmp::Gt => value > expected,
@@ -3797,15 +3808,11 @@ mod tests {
     }
 
     fn assert_cloud_region_resource_attr(attrs: &[(String, AttrValue)]) {
-        assert_eq!(
-            attrs.contains(&("cloud.region".into(), AttrValue::Str("us-east-1".into()))),
-            true
-        );
-        assert_eq!(
-            attrs
+        assert!(attrs.contains(&("cloud.region".into(), AttrValue::Str("us-east-1".into()))));
+        assert!(
+            !attrs
                 .iter()
-                .any(|(key, _)| key == "__resource.cloud.region"),
-            false
+                .any(|(key, _)| key == "__resource.cloud.region")
         );
     }
 
@@ -4902,7 +4909,7 @@ mod tests {
 
         // After swap: candidate_blocks via the same handle now returns the new block.
         let after = handle.load().candidate_blocks("tenant", 0, 10_000);
-        assert_eq!(after.is_empty(), false);
+        assert!(!after.is_empty());
         assert_eq!(
             after.first().map(String::as_str),
             Some("blocks/swap-test.parquet")

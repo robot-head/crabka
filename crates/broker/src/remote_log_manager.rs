@@ -1484,7 +1484,7 @@ mod tests {
         let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
         assert!(
             out.iter()
-                .map(|segment| segment.start_offset())
+                .map(crabka_remote_storage::RemoteLogSegmentMetadata::start_offset)
                 .collect::<Vec<_>>()
                 == vec![0, 10]
         );
@@ -1549,7 +1549,7 @@ mod tests {
         let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
         assert!(
             out.iter()
-                .map(|segment| segment.start_offset())
+                .map(crabka_remote_storage::RemoteLogSegmentMetadata::start_offset)
                 .collect::<Vec<_>>()
                 == vec![0]
         );

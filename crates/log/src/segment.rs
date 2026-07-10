@@ -1187,7 +1187,7 @@ mod tests {
         let position = seg.append(&sample_batch(2, 1, 300), 0).unwrap();
 
         let read = seg.read(Offset(0), usize::MAX).unwrap();
-        assert_eq!(position > 0, true);
+        assert!(position > 0);
         assert_eq!(seg.last_offset(), Offset(2));
         assert_eq!(
             read,
@@ -1277,9 +1277,8 @@ mod tests {
         seg.append(&sample_batch(105, 1, 300), 0).unwrap(); // offset 105
 
         let r = seg.read_raw(Offset(103), Offset(1000), usize::MAX).unwrap();
-        assert_eq!(
-            r.is_empty(),
-            false,
+        assert!(
+            !r.is_empty(),
             "read_raw(103) must return data starting at offset 103"
         );
         assert_eq!(

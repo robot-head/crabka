@@ -148,7 +148,8 @@ mod tests {
 
     #[test]
     fn supported_operations_match_kafka_by_resource() {
-        let cases: [(&str, ResourceType, &[AclOperation]); 3] = [
+        type TestCase1<'a> = (&'a str, ResourceType, &'a [AclOperation]);
+        let cases: [TestCase1<'_>; 3] = [
             (
                 "topic",
                 ResourceType::Topic,

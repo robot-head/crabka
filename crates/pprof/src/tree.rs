@@ -563,7 +563,7 @@ mod tests {
             tree.add_stack(&stack(&[&format!("leaf{idx}"), "main"]), 1);
         }
         let fg = tree.to_flamegraph(4);
-        assert_eq!(fg.names.iter().any(|name| name == "other"), true);
+        assert!(fg.names.iter().any(|name| name == "other"));
         assert_eq!(fg.total, 10);
     }
 

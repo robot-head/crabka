@@ -304,12 +304,10 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_cases_are_named_and_table_driven() {
+    fn compatibility_basic_cases_are_named_and_table_driven() {
         let plain = "syntax = \"proto3\"; message U { int32 a = 1; int32 b = 2; }";
         let oneof = "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }";
         let small = "syntax = \"proto3\"; message U { int32 id = 1; }";
-        let big = "syntax = \"proto3\"; message U { int32 id = 1; } message V { int32 a = 1; }";
-
         for (name, reader, writer, compatible) in [
             (
                 "field-added",
@@ -365,6 +363,21 @@ mod tests {
                 "syntax = \"proto3\"; message U { int32 a = 1; }".to_string(),
                 true,
             ),
+        ] {
+            assert_eq!(
+                check(&reader, &writer, &[], &[]).is_ok(),
+                compatible,
+                "case {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn compatibility_extended_cases_are_named_and_table_driven() {
+        let small = "syntax = \"proto3\"; message U { int32 id = 1; }";
+        let big = "syntax = \"proto3\"; message U { int32 id = 1; } message V { int32 a = 1; }";
+
+        for (name, reader, writer, compatible) in [
             (
                 "reserve-number",
                 "syntax = \"proto3\"; message U { reserved 2; int32 id = 1; }".to_string(),

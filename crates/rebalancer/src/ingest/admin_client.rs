@@ -59,7 +59,7 @@ mod tests {
     fn metadata_request_fetches_all_topics_without_auto_creation() {
         let req = metadata_request();
         assert_eq!(req.topics, None);
-        assert_eq!(req.allow_auto_topic_creation, false);
+        assert!(!req.allow_auto_topic_creation);
     }
 
     #[test]

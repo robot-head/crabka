@@ -52,7 +52,8 @@ mod tests {
     }
     #[test]
     fn roundtrips_all_versions() {
-        let cases: [(&str, fn(i16) -> TxnOffsetCommitResponse); 2] = [
+        type TestCase1<'a> = (&'a str, fn(i16) -> TxnOffsetCommitResponse);
+        let cases: [TestCase1<'_>; 2] = [
             ("default", |_| TxnOffsetCommitResponse::default()),
             ("populated", TxnOffsetCommitResponse::populated),
         ];

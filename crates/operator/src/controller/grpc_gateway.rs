@@ -1357,10 +1357,9 @@ mod tests {
             .iter()
             .find(|e| e.name == "CRABKA_GATEWAY_CLIENT_ID")
             .expect("client id env");
-        assert_eq!(
+        assert!(
             args.iter()
                 .any(|arg| arg == "--advertised-addr=$(POD_IP):9500"),
-            true,
             "args: {args:?}"
         );
         assert_eq!(fr.field_path.as_str(), "status.podIP", "args: {args:?}");
@@ -1404,7 +1403,7 @@ mod tests {
         let ports = container.ports.expect("ports");
         assert_eq!(readiness_get.path.as_deref(), Some("/readyz"));
         assert_eq!(liveness_get.path.as_deref(), Some("/healthz"));
-        assert_eq!(ports.iter().any(|p| p.container_port == 9500), true);
+        assert!(ports.iter().any(|p| p.container_port == 9500));
     }
 
     #[test]

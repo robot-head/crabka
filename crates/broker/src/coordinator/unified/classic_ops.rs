@@ -563,7 +563,7 @@ mod tests {
         let action = handle_join(&mut g, &join_req("m1", Some("inst-a")), "h");
         match action {
             JoinAction::Immediate(r) => {
-                assert!((r.error_code, r.generation_id) == (codes::NONE, g.generation_id))
+                assert!((r.error_code, r.generation_id) == (codes::NONE, g.generation_id));
             }
             _ => panic!("expected Immediate success (static rejoin)"),
         }
@@ -684,7 +684,7 @@ mod tests {
         ] {
             match handle_sync(&mut g, &sync_req(member_id, generation)) {
                 SyncAction::Immediate(r) => {
-                    assert!(r.error_code == expected, "case {case}")
+                    assert!(r.error_code == expected, "case {case}");
                 }
                 _ => panic!("case {case}: expected immediate sync error"),
             }
@@ -718,7 +718,7 @@ mod tests {
         ];
         match handle_sync(&mut g, &req) {
             SyncAction::LeaderInstalled(r) => {
-                assert!((r.error_code, r.assignment) == (codes::NONE, Bytes::from_static(b"L")))
+                assert!((r.error_code, r.assignment) == (codes::NONE, Bytes::from_static(b"L")));
             }
             _ => panic!("expected LeaderInstalled"),
         }

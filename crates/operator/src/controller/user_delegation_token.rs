@@ -964,8 +964,8 @@ mod tests {
             vec!["hmac", "password", "sasl.jaas.config", "token-id"]
         );
         let jaas = std::str::from_utf8(&data["sasl.jaas.config"].0).unwrap();
-        assert_eq!(jaas.contains("tokenauth=\"true\""), true, "jaas: {jaas}");
-        assert_eq!(jaas.contains("ScramLoginModule"), true, "jaas: {jaas}");
+        assert!(jaas.contains("tokenauth=\"true\""), "jaas: {jaas}");
+        assert!(jaas.contains("ScramLoginModule"), "jaas: {jaas}");
 
         // Status patch carries delegationTokenId + TokenIssued condition.
         let patches = users.patches.lock().unwrap();
@@ -973,11 +973,8 @@ mod tests {
         let status = body.get("status").unwrap();
         assert_eq!(patches.len(), 1);
         assert_eq!(name.as_str(), "alice");
-        assert_eq!(status.get("delegationTokenId").is_some(), true);
-        assert_eq!(
-            status.get("delegationTokenExpiryTimestampMs").is_some(),
-            true
-        );
+        assert!(status.get("delegationTokenId").is_some());
+        assert!(status.get("delegationTokenExpiryTimestampMs").is_some());
         let conds = status.get("conditions").unwrap().as_array().unwrap();
         assert!(
             conds

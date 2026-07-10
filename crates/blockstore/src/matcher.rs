@@ -94,7 +94,7 @@ mod tests {
         let selector = parse_query_shard_selector("1_of_1").unwrap();
 
         assert_eq!(selector, QueryShardSelector { index: 1, total: 1 });
-        assert_eq!(selector.matches(42), true);
+        assert!(selector.matches(42));
     }
 
     #[test]

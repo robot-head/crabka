@@ -792,10 +792,10 @@ mod tests {
         apply_deleted(&mut s, "av", 1, 1, &av("A"));
         assert_eq!(s.versions("av", false), Some(vec![sv(2)]));
         assert_eq!(s.versions("av", true), Some(vec![sv(1), sv(2)]));
-        assert_eq!(s.version("av", Some(sv(1)), false).is_some(), false);
-        assert_eq!(s.version("av", Some(sv(1)), true).is_some(), true);
+        assert!(s.version("av", Some(sv(1)), false).is_none());
+        assert!(s.version("av", Some(sv(1)), true).is_some());
         assert_eq!(s.permanent_delete_version("av", sv(1)), Some(sv(1)));
-        assert_eq!(s.version("av", Some(sv(1)), true).is_some(), false);
+        assert!(s.version("av", Some(sv(1)), true).is_none());
         assert_eq!(s.versions("av", true), Some(vec![sv(2)]));
         // idempotent replay: deleting a missing subject/version is a no-op
         for (name, subject, version) in [

@@ -174,7 +174,6 @@ async fn list_offsets_by_timestamp_local() {
 #[tokio::test]
 async fn end_to_end_create_produce_fetch_delete() {
     let p = support::start().await;
-
     // 1. ApiVersions.
     let v = p
         .client
@@ -186,7 +185,6 @@ async fn end_to_end_create_produce_fetch_delete() {
         .await
         .unwrap();
     assert!(v.error_code == 0);
-
     // 2. CreateTopics.
     let cr = p
         .client
@@ -203,12 +201,10 @@ async fn end_to_end_create_produce_fetch_delete() {
         .await
         .unwrap();
     assert!(cr.topics[0].error_code == 0);
-
     // 3. Metadata — confirm topic is visible and grab its UUID.
     let meta = p.client.send(MetadataRequest::default()).await.unwrap();
     assert!(meta.topics.iter().any(|t| t.name.as_deref() == Some("e2e")));
     let topic_id = topic_id_for(&p.client, "e2e").await;
-
     // 4. Produce 3 records.
     let pr = p
         .client
@@ -230,7 +226,6 @@ async fn end_to_end_create_produce_fetch_delete() {
         .await
         .unwrap();
     assert!(pr.responses[0].partition_responses[0].error_code == 0);
-
     // 5. ListOffsets — latest after producing 3 records is 3.
     let lo = p
         .client
@@ -255,7 +250,6 @@ async fn end_to_end_create_produce_fetch_delete() {
             lo.topics[0].partitions[0].offset
         ) == (0, 3)
     );
-
     // 6. Fetch and confirm 3 records are returned.
     let fr = p
         .client
@@ -287,7 +281,6 @@ async fn end_to_end_create_produce_fetch_delete() {
         .expect("v2 records present after produce");
     let total: usize = batches.iter().map(|b| b.records.len()).sum();
     assert!(total == 3);
-
     p.broker.shutdown().await;
 }
 

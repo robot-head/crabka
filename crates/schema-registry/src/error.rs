@@ -127,7 +127,7 @@ mod tests {
         let e = SrError::Incompatible(vec!["reader missing default".into()]);
         assert_eq!(e.error_code(), 409);
         assert_eq!(e.http_status(), StatusCode::CONFLICT);
-        assert_eq!(e.to_string().contains("incompatible"), true);
+        assert!(e.to_string().contains("incompatible"));
     }
 
     #[test]
@@ -227,11 +227,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(v["error_code"].as_i64(), Some(40401));
-        assert_eq!(
+        assert!(
             v["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("av-value")),
-            true
+                .is_some_and(|message| message.contains("av-value"))
         );
     }
 }

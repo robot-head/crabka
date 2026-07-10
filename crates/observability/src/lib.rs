@@ -21345,12 +21345,12 @@ mod tests {
                 "topic".to_string(),
             );
 
-        assert_eq!(deps.metrics.is_some(), true);
-        assert_eq!(deps.wal_sink.is_some(), true);
-        assert_eq!(deps.ingest_limiter.is_some(), true);
-        assert_eq!(deps.query_authorizer.is_some(), true);
-        assert_eq!(deps.hot_tail.is_some(), true);
-        assert_eq!(deps.deferred_wal_consumer_connect.is_some(), true);
+        assert!(deps.metrics.is_some());
+        assert!(deps.wal_sink.is_some());
+        assert!(deps.ingest_limiter.is_some());
+        assert!(deps.query_authorizer.is_some());
+        assert!(deps.hot_tail.is_some());
+        assert!(deps.deferred_wal_consumer_connect.is_some());
         check!(Arc::ptr_eq(
             &deps.metrics.as_ref().unwrap().registry,
             &metrics.registry
@@ -21801,15 +21801,15 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(filters.rule_kind, Some("alerting"));
-        assert_eq!(filters.exclude_alerts, true);
-        assert_eq!(filters.evaluation_time.is_some(), true);
-        assert_eq!(filters.rule_names.contains("HighError"), true);
-        assert_eq!(filters.rule_groups.contains("api"), true);
-        assert_eq!(filters.files.contains("rules.yaml"), true);
+        assert!(filters.exclude_alerts);
+        assert!(filters.evaluation_time.is_some());
+        assert!(filters.rule_names.contains("HighError"));
+        assert!(filters.rule_groups.contains("api"));
+        assert!(filters.files.contains("rules.yaml"));
         assert_eq!(filters.group_limit, Some(2));
         assert_eq!(filters.group_next_token.as_deref(), Some("next"));
         assert_eq!(filters.label_selectors.len(), 1);
-        assert_eq!(filters.has_rule_filter(), true);
+        assert!(filters.has_rule_filter());
 
         let recording = PrometheusRulesFilters::parse(Some("type=record")).unwrap();
         assert_eq!(recording.rule_kind, Some("recording"));

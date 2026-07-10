@@ -240,7 +240,15 @@ mod tests {
 
     #[tokio::test]
     async fn handler_maps_resource_and_authorization_cases() {
-        let cases: [(&str, Arc<dyn Authorizer>, i8, &str, i16, Option<&str>); 4] = [
+        type TestCase1<'a> = (
+            &'a str,
+            Arc<dyn Authorizer>,
+            i8,
+            &'a str,
+            i16,
+            Option<&'a str>,
+        );
+        let cases: [TestCase1<'_>; 4] = [
             (
                 "unsupported resource type",
                 Arc::new(crate::authorizer::AllowAllAuthorizer),

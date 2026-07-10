@@ -379,7 +379,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(flamegraph.total, 9);
-        assert_eq!(flamegraph.names.iter().any(|name| name == "hot_fn"), true);
+        assert!(flamegraph.names.iter().any(|name| name == "hot_fn"));
     }
 
     #[tokio::test]
@@ -442,7 +442,7 @@ mod tests {
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
-        assert_eq!(trace_ids.is_null(0), false);
+        assert!(!trace_ids.is_null(0));
         assert_eq!(trace_ids.value(0), &[0xaa; 16][..]);
     }
 

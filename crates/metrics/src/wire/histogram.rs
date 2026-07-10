@@ -285,7 +285,7 @@ mod tests {
 
         let native = v1_histogram_to_native(&histogram).unwrap();
 
-        assert_eq!(native.is_float, false);
+        assert!(!native.is_float);
         assert!((native.count - 9.0).abs() < f64::EPSILON);
         assert!((native.zero_count - 1.0).abs() < f64::EPSILON);
         assert_eq!(native.positive_counts, vec![4.0, 3.0, 6.0]);
@@ -312,8 +312,8 @@ mod tests {
 
         let native = v2_histogram_to_native(&histogram).unwrap();
 
-        assert_eq!(native.is_float, true);
-        assert_eq!(native.is_nhcb(), true);
+        assert!(native.is_float);
+        assert!(native.is_nhcb());
         assert_eq!(native.positive_counts, vec![1.5, 2.5]);
         assert_eq!(native.custom_values, Some(vec![0.1, 0.2, 0.3]));
         assert_eq!(native.start_timestamp_ms, Some(7));

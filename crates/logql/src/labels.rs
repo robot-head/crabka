@@ -440,10 +440,7 @@ mod tests {
 
         assert_eq!(format.assignments(), &[route.clone(), summary]);
         assert_eq!(route.destination(), "route");
-        assert_eq!(
-            matches!(route.value(), LabelFormatValue::Rename(source) if source == "path"),
-            true
-        );
+        assert!(matches!(route.value(), LabelFormatValue::Rename(source) if source == "path"));
     }
 
     #[test]

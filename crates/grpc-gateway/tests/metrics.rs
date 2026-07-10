@@ -146,14 +146,12 @@ async fn webhook_out_and_dead_letter_present() {
 
     let (_, body) = render_metrics().await;
 
-    assert_eq!(
+    assert!(
         body.contains(r#"crabka_gateway_webhook_out_total{result="p8_unique_wh"}"#),
-        true,
         "expected webhook and dead-letter metrics in body:\n{body}"
     );
-    assert_eq!(
+    assert!(
         body.contains("crabka_gateway_dead_letter_total"),
-        true,
         "expected webhook and dead-letter metrics in body:\n{body}"
     );
 }

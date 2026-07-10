@@ -1489,14 +1489,12 @@ mod tests {
         let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
         let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
         let built = built();
-
         let mut thread = StreamThread::new(
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
             0,
         );
-
         // 1. Initial assignment:
         // Subtopology 0 Partition 0 -> Active
         // Subtopology 0 Partition 1 -> Standby
@@ -1527,7 +1525,6 @@ mod tests {
                 }],
             }],
         };
-
         thread
             .apply_assignment(
                 &assignment1,
@@ -1553,7 +1550,6 @@ mod tests {
                     (("0".to_string(), 2), TaskRole::Warmup),
                 ]
         );
-
         // 2. Updated assignment:
         // Subtopology 0 Partition 0 -> Standby (Demoted)
         // Subtopology 0 Partition 1 -> removed
@@ -1585,7 +1581,6 @@ mod tests {
                 }],
             }],
         };
-
         thread
             .apply_assignment(
                 &assignment2,

@@ -218,6 +218,7 @@ mod tests {
 
     #[test]
     fn header_bytes_matches_requested_key_and_preserves_value() {
+        type TestCase1<'a> = (&'a str, Option<&'a [u8]>);
         let rec = Record {
             headers: vec![
                 header("other", Bytes::from_static(&[0])),
@@ -226,8 +227,7 @@ mod tests {
             ..Default::default()
         };
 
-        let cases: [(&str, Option<&[u8]>); 2] =
-            [("target", Some(&[0xCA, 0xFE])), ("missing", None)];
+        let cases: [TestCase1<'_>; 2] = [("target", Some(&[0xCA, 0xFE])), ("missing", None)];
         for (key, want) in cases {
             assert!(header_bytes(&rec, key) == want, "key {key:?}");
         }

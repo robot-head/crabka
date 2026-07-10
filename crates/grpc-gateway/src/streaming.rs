@@ -412,14 +412,12 @@ mod tests {
             }])
             .expect("predicate compiles");
 
-            assert_eq!(
+            assert!(
                 decoded_record_matches(&predicates, &decoded_json(matching)),
-                true,
                 "case {name}"
             );
-            assert_eq!(
-                decoded_record_matches(&predicates, &decoded_json(nonmatching)),
-                false,
+            assert!(
+                !decoded_record_matches(&predicates, &decoded_json(nonmatching)),
                 "case {name}"
             );
         }

@@ -731,7 +731,8 @@ mod tests {
     async fn preferred_election_error_cases() {
         // Replicas are always [1, 2, 3]; the preferred leader is replica 1.
         // (current_leader, isr, alive, expected)
-        let cases: [(u64, &[u64], &[u64], ElectError); 3] = [
+        type TestCase1<'a> = (u64, &'a [u64], &'a [u64], ElectError);
+        let cases: [TestCase1<'_>; 3] = [
             // Preferred replica 1 is already the leader.
             (
                 1,
@@ -846,7 +847,8 @@ mod tests {
     async fn shutdown_replacement_error_cases() {
         // Replicas are always [1, 2, 3]; leader is always broker 1.
         // (isr, alive, shutting_down, expected)
-        let cases: [(&[u64], &[u64], u64, ElectError); 3] = [
+        type TestCase2 = (&'static [u64], &'static [u64], u64, ElectError);
+        let cases: [TestCase2; 3] = [
             // Broker 5 wants to shut down, but leader is 1. No-op.
             (&[1, 2, 3], &[1, 2, 3, 5], 5, ElectError::ElectionNotNeeded),
             // Broker 1 wants to drain. ISR is {1} only (singleton). No

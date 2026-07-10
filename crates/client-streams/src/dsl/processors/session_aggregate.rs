@@ -394,7 +394,6 @@ mod tests {
             offset: 0,
             timestamp: 0,
         };
-
         let mut proc = KStreamSessionAggregateProcessor {
             store_name: "s".into(),
             gap_ms: 60,
@@ -408,7 +407,6 @@ mod tests {
             forwarder: TupleForwarder::default(),
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
-
         // record 1 @ ts=0 → new session [0,0] count 1, no candidates → one update.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -447,7 +445,6 @@ mod tests {
                 new: Some(1)
             }
         );
-
         // record 2 @ ts=30 (within gap 60 of session [0,0]) → merge:
         //   tombstone [0,0], update merged [0,30] count 2.
         {
@@ -474,7 +471,7 @@ mod tests {
         let tch = tomb.value.downcast::<Change<i64>>().unwrap();
         let tkey = tomb.key.unwrap().downcast::<Windowed<String>>().unwrap();
         assert_eq!(tkey.window, Window { start: 0, end: 0 });
-        assert_eq!(tch.is_tombstone(), true);
+        assert!(tch.is_tombstone());
         let (_, upd) = buffer.pop_front().unwrap();
         let uch = upd.value.downcast::<Change<i64>>().unwrap();
         let ukey = upd.key.unwrap().downcast::<Windowed<String>>().unwrap();

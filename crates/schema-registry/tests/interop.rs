@@ -312,8 +312,8 @@ async fn our_store_decodes_cp_schema_registry_records() {
     let got_v: serde_json::Value = serde_json::from_str(schema_str)
         .unwrap_or_else(|e| panic!("schema is not valid JSON: {e}\n  raw: {schema_str}"));
     let expected_v: serde_json::Value = serde_json::from_str(avro_schema).unwrap();
-    assert_eq!(
-        schema_type_omitted, true,
+    assert!(
+        schema_type_omitted,
         "complete GET /schemas/ids/1 projection"
     );
     assert_eq!(got_v, expected_v, "complete GET /schemas/ids/1 projection");

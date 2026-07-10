@@ -983,12 +983,11 @@ async fn oauth_optional_fields_render_broker_toml_cases() {
         reconcile(Arc::new(kafka), ctx).await.unwrap();
 
         let toml = extract_broker0_toml(&state.take_observed(), cluster);
-        assert_eq!(toml.contains("[oauthbearer]"), true, "case {name}: {toml}");
-        assert_eq!(
+        assert!(toml.contains("[oauthbearer]"), "case {name}: {toml}");
+        assert!(
             expected_fragments
                 .iter()
                 .all(|fragment| toml.contains(fragment)),
-            true,
             "case {name}: {toml}"
         );
     }
@@ -1038,47 +1037,46 @@ async fn oauth_listener_valid_token_type_in_introspection_mode_rejected_with_lis
 
 // ── fallbackUserNameClaim + prefix render to broker TOML ──────────────────
 
-/// An OAuth listener with `fallbackUserNameClaim: "client_id"`
-/// and `fallbackUserNamePrefix: "service-account-"` reconciles cleanly
-/// and the rendered broker-config ConfigMap embeds both keys under
-/// `[oauthbearer]`. The broker's principal extractor consults the
-/// fallback claim only when `userNameClaim` (default `sub`) is
-/// absent/empty on the incoming token, then prepends the prefix to the
-/// resolved name. Strimzi convention for Keycloak service-account
-/// tokens whose `sub` is a UUID.
+// An OAuth listener with `fallbackUserNameClaim: "client_id"`
+// and `fallbackUserNamePrefix: "service-account-"` reconciles cleanly
+// and the rendered broker-config ConfigMap embeds both keys under
+// `[oauthbearer]`. The broker's principal extractor consults the
+// fallback claim only when `userNameClaim` (default `sub`) is
+// absent/empty on the incoming token, then prepends the prefix to the
+// resolved name. Strimzi convention for Keycloak service-account
+// tokens whose `sub` is a UUID.
 // ── groupsClaim JsonPath + delimiter render to broker TOML ────────────────
 
-/// An OAuth listener with `groupsClaim:
-/// "$.realm_access.roles[*]"` (RFC 9535 JsonPath, evaluated by
-/// jsonpath-rust on the broker) and `groupsClaimDelimiter: ","`
-/// reconciles cleanly and the rendered broker-config ConfigMap embeds
-/// both keys under `[oauthbearer]`. The path is emitted as a TOML
-/// multi-line literal string (triple-single-quoted) so the `[*]`
-/// selector and any future predicate single-quotes survive without
-/// escape collisions. The delimiter is a plain TOML basic string. The
-/// resolved groups are attached to the Kafka principal but no
-/// broker-side authorizer reads them yet.
+// An OAuth listener with `groupsClaim:
+// "$.realm_access.roles[*]"` (RFC 9535 JsonPath, evaluated by
+// jsonpath-rust on the broker) and `groupsClaimDelimiter: ","`
+// reconciles cleanly and the rendered broker-config ConfigMap embeds
+// both keys under `[oauthbearer]`. The path is emitted as a TOML
+// multi-line literal string (triple-single-quoted) so the `[*]`
+// selector and any future predicate single-quotes survive without
+// escape collisions. The delimiter is a plain TOML basic string. The
+// resolved groups are attached to the Kafka principal but no
+// broker-side authorizer reads them yet.
 // ── JWKS refresher policy fields render to broker TOML ────────────────────
 
-/// An OAuth listener with `jwksMinRefreshPauseSeconds: 2`,
-/// `jwksExpirySeconds: 3600`, and `jwksIgnoreKeyUse: true` reconciles
-/// cleanly and the rendered broker-config ConfigMap embeds all three
-/// keys under `[oauthbearer]`. The broker's JWKS refresher consumes
-/// them: `min_on_demand_pause` rate-limits on-demand refreshes,
-/// `expiry_ms` is the hard fail-closed cache age the signed-JWT
-/// validator pre-checks against `last_successful_fetch`, and
-/// `ignore_key_use` toggles whether `use=enc` JWK entries are filtered
-/// out at parse time.
+// An OAuth listener with `jwksMinRefreshPauseSeconds: 2`,
+// `jwksExpirySeconds: 3600`, and `jwksIgnoreKeyUse: true` reconciles
+// cleanly and the rendered broker-config ConfigMap embeds all three
+// keys under `[oauthbearer]`. The broker's JWKS refresher consumes
+// them: `min_on_demand_pause` rate-limits on-demand refreshes,
+// `expiry_ms` is the hard fail-closed cache age the signed-JWT
+// validator pre-checks against `last_successful_fetch`, and
+// `ignore_key_use` toggles whether `use=enc` JWK entries are filtered
+// out at parse time.
 // ── JWKS policy fields rejected on introspection-mode ─────────────────────
 
-/// The 3 JWKS refresher policy fields
-/// (`jwksMinRefreshPauseSeconds`, `jwksExpirySeconds`,
-/// `jwksIgnoreKeyUse`) are JWT-mode only — the broker's introspection
-/// validator does not consult a JWKS, so setting any of them on an
-/// `accessTokenIsJwt: false` listener is rejected at reconcile with
-/// `ListenersValid=False` reason
-/// `ListenerOauthJwksFieldsRejectedInIntrospectionMode`. Mirrors the
-/// `validTokenType` and other cross-mode rejection shapes.
+// The 3 JWKS refresher policy fields (`jwksMinRefreshPauseSeconds`,
+// `jwksExpirySeconds`, `jwksIgnoreKeyUse`) are JWT-mode only — the broker's
+// introspection validator does not consult a JWKS, so setting any of them on
+// an `accessTokenIsJwt: false` listener is rejected at reconcile with
+// `ListenersValid=False` reason
+// `ListenerOauthJwksFieldsRejectedInIntrospectionMode`. Mirrors the
+// `validTokenType` and other cross-mode rejection shapes.
 #[tokio::test]
 async fn oauth_listener_jwks_fields_in_introspection_mode_rejected_with_listeners_valid_false() {
     let items = vec![shared::fake_pool_list_item("brokers", "ns24", "c24", 1, 1)];

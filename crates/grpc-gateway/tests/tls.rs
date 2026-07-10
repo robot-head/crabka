@@ -492,12 +492,12 @@ async fn tls_forward_between_two_gateways() {
     let first = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
     // Same key through A again → forwarded to B → B's map hit → deduplicated.
     let second = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
-    assert_eq!(
-        first.deduplicated, false,
+    assert!(
+        !first.deduplicated,
         "first mTLS forward should produce and the second should deduplicate"
     );
-    assert_eq!(
-        second.deduplicated, true,
+    assert!(
+        second.deduplicated,
         "first mTLS forward should produce and the second should deduplicate"
     );
     assert_eq!(

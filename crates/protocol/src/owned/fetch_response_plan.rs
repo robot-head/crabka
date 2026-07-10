@@ -471,7 +471,8 @@ mod tests {
     fn fetch_response_plan_cases_match_encode_all_versions() {
         // Cover non-flexible (4..=11, i32 prefix) and flexible (12..=18,
         // uvarint prefix + tagged buffers) — the canonical codec range.
-        let cases: [(&str, fn(i16) -> FetchResponse); 4] = [
+        type TestCase1<'a> = (&'a str, fn(i16) -> FetchResponse);
+        let cases: [TestCase1<'_>; 4] = [
             ("multi_partition", multi_partition_response),
             ("populated", FetchResponse::populated),
             ("default", |_| FetchResponse::default()),

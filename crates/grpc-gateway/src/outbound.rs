@@ -574,14 +574,15 @@ mod tests {
     /// JSON delivery, and each envelope fallback reason.
     #[tokio::test]
     async fn decode_to_json_delivery_cases() {
-        let json = br#"{"decoded":true,"n":7}"#;
-        let cases: [(
-            &str,
+        type TestCase1<'a> = (
+            &'a str,
             Box<dyn RecordCodec>,
             bool,
-            Option<&'static [u8]>,
+            Option<&'a [u8]>,
             Option<Vec<u8>>,
-        ); 5] = [
+        );
+        let json = br#"{"decoded":true,"n":7}"#;
+        let cases: [TestCase1<'_>; 5] = [
             (
                 "decoded JSON",
                 Box::new(StubCodec(Some(decoded_with_json(json)))),

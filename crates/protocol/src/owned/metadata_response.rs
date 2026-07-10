@@ -52,7 +52,8 @@ mod tests {
     }
     #[test]
     fn roundtrips_all_versions() {
-        let cases: [(&str, fn(i16) -> MetadataResponse); 2] = [
+        type TestCase1<'a> = (&'a str, fn(i16) -> MetadataResponse);
+        let cases: [TestCase1<'_>; 2] = [
             ("default", |_| MetadataResponse::default()),
             ("populated", MetadataResponse::populated),
         ];

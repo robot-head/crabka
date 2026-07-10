@@ -188,19 +188,15 @@ mod tests {
 
         assert_eq!(total, 10);
         assert_eq!(inner.sample.len(), 2);
-        assert_eq!(
-            inner.sample.iter().all(|sample| sample.value != vec![0]),
-            true
-        );
-        assert_eq!(inner.function.iter().all(|function| function.id > 0), true);
-        assert_eq!(inner.location.iter().all(|location| location.id > 0), true);
-        assert_eq!(
+        assert!(inner.sample.iter().all(|sample| sample.value != vec![0]));
+        assert!(inner.function.iter().all(|function| function.id > 0));
+        assert!(inner.location.iter().all(|location| location.id > 0));
+        assert!(
             inner
                 .sample
                 .iter()
                 .flat_map(|sample| sample.location_id.iter())
-                .all(|location_id| *location_id > 0),
-            true
+                .all(|location_id| *location_id > 0)
         );
         assert_eq!(
             sample_paths(inner),
@@ -236,12 +232,9 @@ mod tests {
             .map(|sample| sample.value.iter().sum::<i64>())
             .sum();
 
-        assert_eq!(inner.sample.len() <= 4, true);
+        assert!(inner.sample.len() <= 4);
         assert_eq!(total, 10);
-        assert_eq!(
-            inner.string_table.iter().any(|value| value == "other"),
-            true
-        );
+        assert!(inner.string_table.iter().any(|value| value == "other"));
     }
 
     fn sample_paths(profile: &crate::proto::Profile) -> Vec<Vec<String>> {

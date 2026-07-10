@@ -117,7 +117,7 @@ mod tests {
             result: 42,
             position: Position::default(),
         };
-        assert_eq!(qr.is_success(), true);
+        assert!(qr.is_success());
         assert_eq!(qr.result(), Some(&42));
         assert_eq!(qr.position(), Some(&Position::default()));
         assert_eq!(qr.failure_reason(), None);
@@ -131,7 +131,7 @@ mod tests {
             reason: FailureReason::NotPresent,
             message: "store not on this task".to_string(),
         };
-        assert_eq!(qr.is_success(), false);
+        assert!(!qr.is_success());
         assert_eq!(qr.result(), None);
         assert_eq!(qr.position(), None);
         assert_eq!(qr.failure_reason(), Some(FailureReason::NotPresent));
@@ -158,8 +158,8 @@ mod tests {
         );
         let sqr = StateQueryResult::new(map);
         assert_eq!(sqr.partition_results().len(), 2);
-        assert_eq!(sqr.only_partition_result().is_none(), true);
-        assert_eq!(sqr.global_result().is_none(), true);
+        assert!(sqr.only_partition_result().is_none());
+        assert!(sqr.global_result().is_none());
     }
 
     #[test]

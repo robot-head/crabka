@@ -542,7 +542,7 @@ mod tests {
         .expect("enabled");
         assert_eq!(cfg.endpoint.as_str(), "http://collector:4317");
         assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
-        assert_eq!(cfg.sample_ratio, 1.0);
+        assert!((cfg.sample_ratio - 1.0).abs() < f64::EPSILON);
         assert_eq!(cfg.service_name.as_str(), "crabka-broker");
         assert_eq!(cfg.service_instance_id.as_str(), "7");
         assert_eq!(cfg.service_version.as_str(), "0.1.1");
@@ -642,7 +642,7 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(cfg.sample_ratio, 0.25);
+        assert!((cfg.sample_ratio - 0.25).abs() < f64::EPSILON);
 
         // Out-of-range clamps to [0,1].
         let cfg = OtlpConfig::from_env(
@@ -655,7 +655,7 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(cfg.sample_ratio, 1.0);
+        assert!((cfg.sample_ratio - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

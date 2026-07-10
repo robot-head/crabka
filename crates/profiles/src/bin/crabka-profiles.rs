@@ -374,7 +374,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::QueryFrontend), true);
+        assert!(matches!(cli.target, Target::QueryFrontend));
         assert_eq!(cli.query_frontend_shard_ms, 30_000);
     }
 
@@ -435,7 +435,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Compactor), true);
+        assert!(matches!(cli.target, Target::Compactor));
         assert_eq!(cli.compactor_max_blocks_per_job, 3);
     }
 

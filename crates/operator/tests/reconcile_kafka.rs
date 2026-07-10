@@ -437,9 +437,8 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
             "step {} should {what}: {uri}",
             idx + 1
         );
-        assert_eq!(
+        assert!(
             uri.contains(want_substr),
-            true,
             "step {} should {what}: {uri}",
             idx + 1
         );
@@ -488,7 +487,7 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
 
     // Status patch is last.
     assert_eq!(&methods_and_uris[16].0, &Method::PATCH);
-    assert_eq!(methods_and_uris[16].1.contains("/kafkas/demo/status"), true);
+    assert!(methods_and_uris[16].1.contains("/kafkas/demo/status"));
 
     check!(
         state.remaining_rules() == 0,

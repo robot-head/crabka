@@ -296,6 +296,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_malformed_resource_principal_and_host() {
+        type TestCase1 = (fn(&mut AclCreation), &'static str);
         let valid = creation("topic-a", "User:alice", OPERATION_READ);
         let entry = validate(&valid).expect("valid ACL creation");
         let expected = AclEntry {
@@ -309,8 +310,7 @@ mod tests {
         };
         assert!(entry == expected);
 
-        #[allow(clippy::type_complexity)]
-        let cases: [(fn(&mut AclCreation), &str); 4] = [
+        let cases: [TestCase1; 4] = [
             (|c| c.resource_name.clear(), "empty resource_name"),
             (
                 |c| c.resource_name = "bad\0name".into(),

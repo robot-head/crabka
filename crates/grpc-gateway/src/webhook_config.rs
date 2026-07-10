@@ -486,8 +486,8 @@ key_source = "header:X-Delivery"
         assert_eq!(ep.signature_prefix.as_deref(), Some("sha256="));
         assert_eq!(ep.timestamp_header.as_deref(), None);
         assert_eq!(ep.timestamp_tolerance_secs, 300);
-        assert_eq!(ep.idempotency_source.is_some(), true);
-        assert_eq!(ep.key_source.is_some(), true);
+        assert!(ep.idempotency_source.is_some());
+        assert!(ep.key_source.is_some());
         assert_eq!(ep.max_body_bytes, 1024 * 1024);
         assert_eq!(ep.schema_subject.as_deref(), None);
         assert_eq!(ep.schema_format, SchemaFormat::Json);
@@ -511,8 +511,8 @@ principal = "svc:stripe-ingest"
         assert_eq!(ep.signature_prefix.as_deref(), None);
         assert_eq!(ep.timestamp_header.as_deref(), None);
         assert_eq!(ep.timestamp_tolerance_secs, 300);
-        assert_eq!(ep.idempotency_source.is_none(), true);
-        assert_eq!(ep.key_source.is_none(), true);
+        assert!(ep.idempotency_source.is_none());
+        assert!(ep.key_source.is_none());
         assert_eq!(ep.max_body_bytes, 1024 * 1024);
         assert_eq!(ep.schema_subject.as_deref(), None);
         assert_eq!(ep.schema_format, SchemaFormat::Json);

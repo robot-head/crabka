@@ -911,9 +911,9 @@ mod config_hash_tests {
         spec_b.listeners = vec![crate::controller::listeners::synthesized_default_listener()];
         spec_b.inter_broker_listener_name = Some("PLAIN".into());
         let h_with_listener = combined_config_hash(&spec_b, None, None, None);
-        assert_eq!(h == h_again, true);
-        assert_eq!(h == config_hash(config_only_form), true);
-        assert_eq!(h != h_with_listener, true);
+        assert!(h == h_again);
+        assert!(h == config_hash(config_only_form));
+        assert!(h != h_with_listener);
     }
 
     #[test]
@@ -956,11 +956,8 @@ mod config_hash_tests {
                 ..Default::default()
             });
         }
-        assert_eq!(h_off != h_on, true);
-        assert_eq!(
-            h_on == combined_config_hash(&spec_on_diff_interval, None, None, None),
-            true
-        );
+        assert!(h_off != h_on);
+        assert!(h_on == combined_config_hash(&spec_on_diff_interval, None, None, None));
     }
 
     #[test]
@@ -996,8 +993,8 @@ mod config_hash_tests {
             None,
             None,
         );
-        assert_eq!(h_none != h_a, true);
-        assert_eq!(h_a != h_b, true);
+        assert!(h_none != h_a);
+        assert!(h_a != h_b);
     }
 
     #[test]
@@ -1087,8 +1084,8 @@ mod config_hash_tests {
         // broker.properties keys are dropped.
         let keys: Vec<&str> = data.keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["broker-0.toml", "broker-1.toml"]);
-        assert_eq!(data["broker-0.toml"].contains("demo-0.svc"), true);
-        assert_eq!(data["broker-1.toml"].contains("demo-1.svc"), true);
+        assert!(data["broker-0.toml"].contains("demo-0.svc"));
+        assert!(data["broker-1.toml"].contains("demo-1.svc"));
     }
 
     #[test]
@@ -1122,8 +1119,8 @@ mod config_hash_tests {
         // A different pin differs again.
         let h_pin2 = combined_config_hash(&spec, None, Some("3.7"), None);
         assert_eq!(h_default.clone(), config_hash(""));
-        assert_eq!(h_default != h_pin, true);
-        assert_eq!(h_pin != h_pin2, true);
+        assert!(h_default != h_pin);
+        assert!(h_pin != h_pin2);
     }
 
     #[test]
@@ -1416,18 +1413,13 @@ mod cluster_object_tests {
             let listeners_pos = toml.find("[[listeners]]").unwrap();
             // The server-name top-level scalar must also precede [[listeners]].
             let server_name_pos = toml.find("controller_server_name").unwrap();
-            assert_eq!(toml.contains(expected), true, "broker-{id}.toml: {toml}");
-            assert_eq!(
+            assert!(toml.contains(expected), "broker-{id}.toml: {toml}");
+            assert!(
                 toml.contains(expected_server_name),
-                true,
                 "broker-{id}.toml: {toml}"
             );
-            assert_eq!(key_pos < listeners_pos, true, "broker-{id}.toml: {toml}");
-            assert_eq!(
-                server_name_pos < listeners_pos,
-                true,
-                "broker-{id}.toml: {toml}"
-            );
+            assert!(key_pos < listeners_pos, "broker-{id}.toml: {toml}");
+            assert!(server_name_pos < listeners_pos, "broker-{id}.toml: {toml}");
         }
     }
 }

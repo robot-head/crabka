@@ -311,8 +311,9 @@ mod tests {
 
     #[test]
     fn malformed_snapshot_inputs_return_errors_without_panicking() {
+        type TestCase1<'a> = (&'a str, Vec<u8>, fn(&SnapshotError) -> bool);
         let encoded = sample_snapshot().encode();
-        let cases: [(&str, Vec<u8>, fn(&SnapshotError) -> bool); 3] = [
+        let cases: [TestCase1<'_>; 3] = [
             (
                 "truncated file",
                 encoded[..encoded.len() - 3].to_vec(),

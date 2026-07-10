@@ -424,7 +424,7 @@ mod tests {
             ["__name__", "env", "__profile_id__"].map(|name| out[0].labels.get(name)),
             [Some("samples"), Some("prod"), Some("abcd")]
         );
-        assert_eq!(out[0].profile.sample_types().is_empty(), false);
+        assert!(!out[0].profile.sample_types().is_empty());
         let split = crate::ingest::split_sample_types(&out[0]).unwrap();
         assert_eq!(split[0].samples[0].timestamp_ns, 1_700_000_000_000_000_123);
         assert_eq!(split[0].samples[0].span_id, Some(42));

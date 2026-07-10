@@ -201,13 +201,12 @@ mod tests {
             let mut lefts: Vec<i32> = ns.iter().map(|n| n.nested_set_left).collect();
             lefts.sort_unstable();
             lefts.dedup();
-            assert_eq!(
+            assert!(
                 ns.iter().all(|n| n.nested_set_left < n.nested_set_right),
-                true,
                 "case {name}"
             );
             assert_eq!(lefts.len(), ns.len(), "case {name}");
-            assert_eq!(ns.iter().any(|n| n.parent_id == -1), true, "case {name}");
+            assert!(ns.iter().any(|n| n.parent_id == -1), "case {name}");
         }
     }
 

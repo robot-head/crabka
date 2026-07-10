@@ -924,7 +924,7 @@ mod tests {
         let m2 = m.clone();
         let err = on_blocking(move || m2.add_remote_log_segment_metadata(bad).unwrap_err()).await;
         // Eager rejection means nothing was published.
-        assert_eq!(matches!(err, RemoteStorageError::InvalidAdd { .. }), true);
+        assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
         assert_eq!(log.high_water_marks().await.unwrap(), vec![0; 2]);
         m.shutdown();
     }
@@ -1473,14 +1473,12 @@ mod tests {
         while std::time::Instant::now() < deadline {
             let read = m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42);
             let list = m.list_remote_log_segments(&tp());
-            assert_eq!(
+            assert!(
                 matches!(read, Err(RemoteStorageError::NotReady { partition }) if partition == mp),
-                true,
                 "HWM-unknown read and list paths must both return NotReady"
             );
-            assert_eq!(
+            assert!(
                 matches!(list, Err(RemoteStorageError::NotReady { partition }) if partition == mp),
-                true,
                 "HWM-unknown read and list paths must both return NotReady"
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

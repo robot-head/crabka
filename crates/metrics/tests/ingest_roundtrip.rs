@@ -65,24 +65,20 @@ async fn remote_write_v1_lands_as_block() {
     let wal_record = inspect_wal_record(&bootstrap).await;
     let fingerprint = wal_record.series_fingerprint();
     assert_eq!(wal_record.tenant.as_str(), "tenant-a");
-    assert_eq!(
+    assert!(
         wal_record
             .labels
             .iter()
-            .any(|(name, value)| name == "__name__" && value == "up"),
-        true
+            .any(|(name, value)| name == "__name__" && value == "up")
     );
-    assert_eq!(
-        matches!(
-            wal_record.payload,
-            SamplePayload::Float {
-                timestamp_ms: 100,
-                value,
-                start_timestamp_ms: None,
-            } if (value - 1.0).abs() < f64::EPSILON
-        ),
-        true
-    );
+    assert!(matches!(
+        wal_record.payload,
+        SamplePayload::Float {
+            timestamp_ms: 100,
+            value,
+            start_timestamp_ms: None,
+        } if (value - 1.0).abs() < f64::EPSILON
+    ));
 
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let mut config = MetricsCompactorConfig::new(bootstrap);

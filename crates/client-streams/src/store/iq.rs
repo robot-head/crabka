@@ -172,7 +172,7 @@ mod tests {
         let counts = (q.iq_kv_all().await.len(), q.iq_kv_approx_count().await);
         assert_eq!(hits, (Some(I64Serde.serialize("t", &2)), None));
         assert_eq!(range_keys, vec![b"a".as_slice(), b"b".as_slice()]);
-        assert_eq!(reverse_range.is_empty(), true);
+        assert!(reverse_range.is_empty());
         assert_eq!(counts, (3, 3));
     }
 

@@ -453,7 +453,7 @@ mod tests {
         h.push(&make_state(30, &[1]));
         let got = h.oldest_since(15).expect("memo at 20 satisfies cutoff");
         assert_eq!(got.snapshot_at_ms, 20);
-        assert_eq!(h.oldest_since(1000).is_none(), true);
+        assert!(h.oldest_since(1000).is_none());
     }
 
     #[test]

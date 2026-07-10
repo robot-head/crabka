@@ -2066,7 +2066,7 @@ mod tests {
                 .find(|v| v.name == "data")
                 .expect("data volume present");
             assert_eq!(claims, vec![], "case {name}");
-            assert_eq!(data_vol.empty_dir.is_some(), true, "case {name}");
+            assert!(data_vol.empty_dir.is_some(), "case {name}");
         }
     }
 
@@ -3073,8 +3073,8 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|volume| volume.name == resource_name);
-            assert_eq!(mount_present, false, "case {name}");
-            assert_eq!(volume_present, false, "case {name}");
+            assert!(!mount_present, "case {name}");
+            assert!(!volume_present, "case {name}");
         }
     }
 
@@ -3259,7 +3259,7 @@ mod tests {
             mount.mount_path.as_str(),
             crate::controller::listeners::TIER_STORAGE_PATH
         );
-        assert_eq!(mount.read_only.unwrap_or(false), false);
+        assert!(!mount.read_only.unwrap_or(false));
     }
 
     // ── S3 tiered storage env + volume gating ────────────────────────
@@ -3472,22 +3472,20 @@ mod tests {
                 .iter()
                 .find(|container| container.name == "broker")
                 .expect("broker container");
-            assert_eq!(
-                pod_spec
+            assert!(
+                !pod_spec
                     .volumes
                     .as_ref()
                     .unwrap()
                     .iter()
                     .any(|volume| volume.name == resource_name),
-                false,
                 "case {name}"
             );
-            assert_eq!(
-                broker
+            assert!(
+                !broker
                     .volume_mounts
                     .as_ref()
                     .is_some_and(|mounts| mounts.iter().any(|mount| mount.name == resource_name)),
-                false,
                 "case {name}"
             );
         }
@@ -3782,9 +3780,10 @@ mod tests {
                 ],
             ),
         ] {
-            let parent = tracing
-                .map(|otlp| parent_with_tracing("demo", otlp))
-                .unwrap_or_else(|| parent_fixture("demo"));
+            let parent = tracing.map_or_else(
+                || parent_fixture("demo"),
+                |otlp| parent_with_tracing("demo", otlp),
+            );
             let pool = pool_fixture("brokers", "demo", 1);
             let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
             let actual = sts

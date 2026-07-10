@@ -381,7 +381,7 @@ mod tests {
             realm: "MyRealm".to_string(),
             ..input()
         });
-        assert_eq!(s.require_auth, true);
+        assert!(s.require_auth);
         assert_eq!(s.realm.as_str(), "MyRealm");
     }
 
@@ -625,7 +625,7 @@ mod tests {
         assert_eq!(tls.trust_roots_pem, Some(PathBuf::from("/broker-ca.pem")));
         assert_eq!(tls.server_name, "broker.internal".to_string());
         assert_eq!(tls.client_identity, None);
-        assert_eq!(c.sasl.is_none(), true);
+        assert!(c.sasl.is_none());
     }
 
     #[test]
@@ -655,7 +655,7 @@ mod tests {
             other => panic!("expected PLAIN, got {other:?}"),
         };
         assert_eq!(c.protocol, ListenerProtocol::SaslPlaintext);
-        assert_eq!(c.tls.is_none(), true);
+        assert!(c.tls.is_none());
         assert_eq!(credentials.0.as_str(), "u");
         assert_eq!(credentials.1.as_str(), "p");
     }
@@ -671,8 +671,8 @@ mod tests {
         });
         let c = s.client.expect("SASL_SSL ⇒ Some");
         assert_eq!(c.protocol, ListenerProtocol::SaslSsl);
-        assert_eq!(c.tls.is_some(), true);
-        assert_eq!(matches!(c.sasl, Some(SaslCredentials::Scram { .. })), true);
+        assert!(c.tls.is_some());
+        assert!(matches!(c.sasl, Some(SaslCredentials::Scram { .. })));
     }
 
     #[test]
@@ -752,7 +752,7 @@ mod tests {
         let out = build_security(&i).unwrap();
         let bearer_configured = out.bearer.is_some();
         let h = out.jwks_handle.unwrap();
-        assert_eq!(bearer_configured, true);
+        assert!(bearer_configured);
         assert_eq!(
             h.endpoint_uri.as_str(),
             "https://idp.example.com/.well-known/jwks.json"
@@ -784,9 +784,8 @@ mod tests {
         };
         let out = build_security(&i).unwrap();
         let bearer = out.bearer.as_ref().expect("signed bearer config");
-        let validator = match bearer.validator.as_ref() {
-            OAuthBearerValidator::Signed(validator) => validator,
-            _ => panic!("expected signed validator"),
+        let OAuthBearerValidator::Signed(validator) = bearer.validator.as_ref() else {
+            panic!("expected signed validator");
         };
         let h = out.jwks_handle.as_ref().unwrap();
         assert_eq!(h.endpoint_uri.as_str(), "https://idp/jwks");

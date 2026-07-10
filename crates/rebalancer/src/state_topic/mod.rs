@@ -201,8 +201,8 @@ mod tests {
     #[test]
     fn loaded_state_tracks_current_value_and_loaded_flag() {
         let state = LoadedState::new();
-        assert_eq!(state.is_loaded(), false);
-        assert_eq!(state.current().is_none(), true);
+        assert!(!state.is_loaded());
+        assert!(state.current().is_none());
 
         let mut file = in_flight("p1", Phase::Submit);
         file.target_terminal_status = Some(ProposalStatus::Cancelled);
@@ -214,15 +214,15 @@ mod tests {
         state.mark_loaded();
         assert!(state.is_loaded());
         state.store(None);
-        assert_eq!(state.current().is_none(), true);
-        assert_eq!(state.is_loaded(), true);
+        assert!(state.current().is_none());
+        assert!(state.is_loaded());
     }
 
     #[tokio::test]
     async fn in_memory_backend_mirrors_writes_and_tombstones() {
         let backend = fake::InMemoryBackend::new_loaded();
-        assert_eq!(backend.is_loaded(), true);
-        assert_eq!(backend.loaded().is_none(), true);
+        assert!(backend.is_loaded());
+        assert!(backend.loaded().is_none());
 
         let file = in_flight("p2", Phase::Wait);
         backend.write(&file).await.unwrap();
@@ -234,7 +234,7 @@ mod tests {
         );
 
         backend.delete().await.unwrap();
-        assert_eq!(backend.loaded().is_none(), true);
-        assert_eq!(backend.is_loaded(), true);
+        assert!(backend.loaded().is_none());
+        assert!(backend.is_loaded());
     }
 }

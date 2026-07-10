@@ -355,7 +355,7 @@ async fn tls_external_user_status_reports_external_true_and_tls_principal_and_no
         Some("User:alice"),
         "body = {body}"
     );
-    assert_eq!(s["secret"].is_null(), true, "body = {body}");
+    assert!(s["secret"].is_null(), "body = {body}");
     assert_eq!(s["scramSha512"].as_bool(), Some(false), "body = {body}");
     assert_eq!(s["tls"].as_bool(), Some(false), "body = {body}");
 }

@@ -227,14 +227,14 @@ filter         = "json:$.type"
         );
         assert_eq!(sub.target_url.as_str(), "https://hooks.example.com/deliver");
         assert_eq!(sub.signing_secret.as_deref(), Some(b"s3cr3t".as_slice()));
-        assert_eq!(sub.filter.is_some(), true);
+        assert!(sub.filter.is_some());
         assert_eq!(sub.dead_letter_topic.as_deref(), None);
         assert_eq!(sub.max_attempts, 5);
         assert_eq!(sub.base_backoff_ms, 500);
         assert_eq!(sub.max_backoff_ms, 30_000);
         assert_eq!(sub.request_timeout_ms, 10_000);
-        assert_eq!(sub.headers.is_empty(), true);
-        assert_eq!(sub.decode_to_json, false);
+        assert!(sub.headers.is_empty());
+        assert!(!sub.decode_to_json);
     }
 
     #[test]

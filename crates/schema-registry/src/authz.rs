@@ -383,12 +383,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn route_mappings_are_named_and_table_driven() {
-        use AclOperation::{Alter, Delete, Describe, Read, Write};
-        use ResourceType::{Cluster, Topic};
+    use AclOperation::{Alter, Delete, Describe, Read, Write};
+    use ResourceType::{Cluster, Topic};
 
-        for (name, method, path, expected) in [
+    const ROUTE_MAPPING_CASES: &[(&str, &str, &str, Option<(ResourceType, &str, AclOperation)>)] =
+        &[
             (
                 "register",
                 "POST",
@@ -542,7 +541,11 @@ mod tests {
                 Some((Topic, "foo/bar", Write)),
             ),
             ("root-unmapped", "GET", "/", None),
-        ] {
+        ];
+
+    #[test]
+    fn route_mappings_are_named_and_table_driven() {
+        for (name, method, path, expected) in ROUTE_MAPPING_CASES {
             let expected = expected.map(|(resource_type, resource_name, operation)| {
                 (resource_type, resource_name.to_string(), operation)
             });

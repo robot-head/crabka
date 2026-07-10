@@ -379,13 +379,13 @@ async fn delivers_2xx() {
 
         // Envelope is well-formed: topic + offset + embedded JSON value.
         let v: Value = serde_json::from_slice(&r.body).expect("body is a JSON envelope");
-        assert_eq!(signature_valid, true);
-        assert_eq!(r.timestamp.is_some(), true);
+        assert!(signature_valid);
+        assert!(r.timestamp.is_some());
         assert_eq!(v["topic"].as_str(), Some(topic));
         assert_eq!(v["partition"].as_i64(), Some(0));
         assert_eq!(v["offset"].as_i64(), Some(off));
         assert_eq!(v["event_id"].as_str(), Some(event_id));
-        assert_eq!(v["value"]["n"].is_number(), true);
+        assert!(v["value"]["n"].is_number());
     }
     offsets_seen.sort_unstable();
     assert_eq!(

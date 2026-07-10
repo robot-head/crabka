@@ -225,7 +225,7 @@ async fn update_voter_submits_record_without_membership_change() {
         .unwrap();
     assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert_eq!(st.membership.is_none(), true);
+    assert!(st.membership.is_none());
     assert_eq!(st.submitted.len(), 1);
 }
 
@@ -270,6 +270,6 @@ async fn remove_voter_with_mismatched_directory_id_is_noop() {
         .unwrap();
     assert!(out == ReconfigOutcome::Committed); // idempotent no-op
     let st = mock.0.lock().unwrap();
-    assert_eq!(st.membership.is_none(), true);
-    assert_eq!(st.submitted.is_empty(), true);
+    assert!(st.membership.is_none());
+    assert!(st.submitted.is_empty());
 }

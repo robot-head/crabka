@@ -1605,7 +1605,7 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(status_is_success, true);
+        assert!(status_is_success);
         assert_eq!(body["status"].as_str(), Some("success"));
         assert_eq!(body["data"]["resultType"].as_str(), Some("vector"));
     }
@@ -1626,7 +1626,7 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(status_is_success, true);
+        assert!(status_is_success);
         assert_eq!(body["status"].as_str(), Some("success"));
         assert_eq!(body["data"]["resultType"].as_str(), Some("vector"));
     }
@@ -1653,7 +1653,7 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(status_is_success, true);
+        assert!(status_is_success);
         assert_eq!(
             body["data"]["result"][0]["metric"]["job"].as_str(),
             Some("api")
@@ -1691,7 +1691,7 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(status_is_success, true);
+        assert!(status_is_success);
         assert_eq!(body["data"]["resultType"].as_str(), Some("matrix"));
         assert_eq!(
             body["data"]["result"][0]["values"]
@@ -2953,6 +2953,6 @@ rules:
         let _ = stop_tx.send(());
         // Bounded so a regression (handle never resolving) fails instead of hanging.
         let joined = tokio::time::timeout(std::time::Duration::from_secs(5), server).await;
-        assert!(matches!(joined, Ok(Ok(_))));
+        assert!(matches!(joined, Ok(Ok(()))));
     }
 }

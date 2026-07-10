@@ -197,11 +197,10 @@ mod tests {
         let new = set(user_file(FieldType::String));
         let errors = check_backward(&old, &new);
         assert_eq!(errors.len(), 1);
-        assert_eq!(
+        assert!(
             errors
                 .first()
-                .is_some_and(|error| error.contains("user.proto")),
-            true
+                .is_some_and(|error| error.contains("user.proto"))
         );
     }
 }

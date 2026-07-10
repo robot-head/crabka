@@ -446,7 +446,7 @@ mod tests {
             // Confirm entry is in by_id.
             assert_eq!(first.0.as_str(), "{\"type\":\"string\"}");
             assert_eq!(first.1, SchemaFormat::Protobuf);
-            assert_eq!(client.by_id.contains_key(&1), true);
+            assert!(client.by_id.contains_key(&1));
             // Second call — should be a cache hit.
             let second = client.schema_by_id(1).await.unwrap();
             assert_eq!(second, first);
@@ -463,11 +463,8 @@ mod tests {
             assert_eq!(id, 2);
             assert_eq!(schema.as_str(), "{\"type\":\"record\"}");
             assert_eq!(fmt, SchemaFormat::Json);
-            assert_eq!(client.by_id.contains_key(&2), true);
-            assert_eq!(
-                client.by_subject_latest.contains_key("my-subject-value"),
-                true
-            );
+            assert!(client.by_id.contains_key(&2));
+            assert!(client.by_subject_latest.contains_key("my-subject-value"));
         });
     }
 }

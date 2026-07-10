@@ -288,7 +288,7 @@ fn range_query_plan_shards_avg_for_partial_sum_count_reduction() {
     .unwrap();
 
     assert_eq!(plan.len(), 3);
-    assert_eq!(plan.iter().all(|subquery| subquery.shard.is_some()), true);
+    assert!(plan.iter().all(|subquery| subquery.shard.is_some()));
 }
 
 #[test]
@@ -307,9 +307,8 @@ fn range_query_plan_shards_stddev_and_stdvar_for_moment_reduction() {
         .unwrap();
 
         assert_eq!(plan.len(), 3, "{query}");
-        assert_eq!(
+        assert!(
             plan.iter().all(|subquery| subquery.shard.is_some()),
-            true,
             "{query}"
         );
     }
@@ -367,9 +366,8 @@ fn range_query_plan_shards_min_and_max_aggregate_reducers() {
         .unwrap();
 
         assert_eq!(plan.len(), 3, "{query}");
-        assert_eq!(
+        assert!(
             plan.iter().all(|subquery| subquery.shard.is_some()),
-            true,
             "{query}"
         );
     }
@@ -390,7 +388,7 @@ fn range_query_plan_shards_group_aggregate_reducer() {
     .unwrap();
 
     assert_eq!(plan.len(), 3);
-    assert_eq!(plan.iter().all(|subquery| subquery.shard.is_some()), true);
+    assert!(plan.iter().all(|subquery| subquery.shard.is_some()));
 }
 
 #[test]
@@ -409,9 +407,8 @@ fn range_query_plan_shards_topk_and_bottomk_for_final_rank_reduction() {
         .unwrap();
 
         assert_eq!(plan.len(), 3, "{query}");
-        assert_eq!(
+        assert!(
             plan.iter().all(|subquery| subquery.shard.is_some()),
-            true,
             "{query}"
         );
     }
@@ -516,7 +513,6 @@ fn range_query_merge_sums_sharded_partial_float_samples_for_same_series() {
 }
 
 #[test]
-#[allow(clippy::float_cmp)]
 fn range_query_merge_sums_native_histograms_with_different_span_layouts() {
     let labels = labels(&[]);
     let result = merge_range_query_results(vec![
@@ -561,8 +557,8 @@ fn range_query_merge_sums_native_histograms_with_different_span_layouts() {
     let SampleValue::Histogram(histogram) = &series[0].samples[0].1 else {
         panic!("expected histogram sample");
     };
-    assert_eq!(histogram.count, 10.0);
-    assert_eq!(histogram.sum, 30.0);
+    assert!((histogram.count - 10.0).abs() < f64::EPSILON);
+    assert!((histogram.sum - 30.0).abs() < f64::EPSILON);
     assert_eq!(
         &histogram.positive_spans,
         &vec![BucketSpan {

@@ -742,14 +742,8 @@ mod tests {
     fn cancel_poll_deadline_and_expiry_are_strict_until_deadline() {
         let now = std::time::Instant::now();
         let deadline = cancel_poll_deadline(now, Duration::from_secs(5));
-        assert_eq!(
-            cancel_poll_expired(now + Duration::from_secs(4), deadline),
-            false
-        );
-        assert_eq!(
-            cancel_poll_expired(now + Duration::from_secs(5), deadline),
-            true
-        );
+        assert!(!cancel_poll_expired(now + Duration::from_secs(4), deadline));
+        assert!(cancel_poll_expired(now + Duration::from_secs(5), deadline));
     }
 
     #[test]

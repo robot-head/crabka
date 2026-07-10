@@ -1302,7 +1302,7 @@ mod tests {
 
         assert_eq!(diff.left_ticks, 10);
         assert_eq!(diff.right_ticks, 15);
-        assert_eq!(diff.names.iter().any(|name| name == "b"), true);
+        assert!(diff.names.iter().any(|name| name == "b"));
     }
 
     #[tokio::test]
@@ -1486,8 +1486,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(fg.names.iter().any(|name| name == "alpha"), true);
-        assert_eq!(fg.names.iter().any(|name| name == "beta"), true);
+        assert!(fg.names.iter().any(|name| name == "alpha"));
+        assert!(fg.names.iter().any(|name| name == "beta"));
         assert_eq!(fg.total, 12);
     }
 
@@ -1513,7 +1513,7 @@ mod tests {
         assert_eq!(fg.total, 15);
         assert_eq!(fg.names[0].as_str(), "total");
         assert_eq!(self_value_for(&fg, "work"), 15);
-        assert_eq!(fg.names.iter().any(|name| name == "other"), false);
+        assert!(!fg.names.iter().any(|name| name == "other"));
     }
 
     #[tokio::test]
@@ -1532,8 +1532,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(fg.total, 15);
-        assert_eq!(fg.names.iter().any(|name| name == "work"), true);
-        assert_eq!(fg.names.iter().any(|name| name == "other"), false);
+        assert!(fg.names.iter().any(|name| name == "work"));
+        assert!(!fg.names.iter().any(|name| name == "other"));
     }
 
     #[tokio::test]

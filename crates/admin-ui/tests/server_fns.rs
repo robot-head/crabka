@@ -605,9 +605,8 @@ async fn public_create_topic_authentication_precedes_validation_cases() {
         )
         .await;
 
-        assert_eq!(
+        assert!(
             matches!(result, Err(UiError::NotAuthenticated)),
-            true,
             "case {name}"
         );
         assert_eq!(

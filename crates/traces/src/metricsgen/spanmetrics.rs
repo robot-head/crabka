@@ -450,11 +450,10 @@ mod tests {
         let lat = find(&out, "traces_spanmetrics_latency", "GET /x");
         assert!(lat.exemplars.len() == 1);
         let ex = &lat.exemplars[0];
-        assert_eq!(
+        assert!(
             ex.labels
                 .iter()
-                .any(|(k, v)| { k == "trace_id" && v == "abababababababababababababababab" }),
-            true
+                .any(|(k, v)| { k == "trace_id" && v == "abababababababababababababababab" })
         );
         assert!((ex.value - 0.005).abs() < 1e-6);
     }

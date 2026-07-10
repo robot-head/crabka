@@ -251,9 +251,8 @@ async fn allow_all_default_is_unrestricted() {
         result.partition, 0,
         "complete deterministic result projection"
     );
-    assert_eq!(
+    assert!(
         result.offset >= 0,
-        true,
         "complete deterministic result projection"
     );
 
@@ -353,7 +352,7 @@ async fn simpleacl_allows_authorized_produce() {
     let ok = send_as(&state, &alice, "t", b"yes").await;
     assert_eq!(ok.error.as_ref(), None);
     assert_eq!(ok.partition, 0);
-    assert_eq!(ok.offset >= 0, true);
+    assert!(ok.offset >= 0);
     assert_eq!(count_value(&bootstrap, "t", b"yes").await, 1);
 
     // Ungranted topic → PERMISSION_DENIED, not produced.

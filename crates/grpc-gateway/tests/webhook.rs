@@ -296,8 +296,8 @@ signature_encoding = "hex"
     let status = resp.status();
     let wr = parse_response(resp).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(wr.deduplicated, false);
-    assert_eq!(wr.offset >= 0, true);
+    assert!(!wr.deduplicated);
+    assert!(wr.offset >= 0);
 
     // Verify the record landed in the topic.
     assert_eq!(count_topic(&bootstrap, topic, "vhp-verify").await, 1);
@@ -452,8 +452,8 @@ idempotency_source = "json:$.id"
         StatusCode::OK,
         "redelivery should deduplicate at the original offset"
     );
-    assert_eq!(
-        first.deduplicated, false,
+    assert!(
+        !first.deduplicated,
         "redelivery should deduplicate at the original offset"
     );
     assert_eq!(
@@ -461,8 +461,8 @@ idempotency_source = "json:$.id"
         StatusCode::OK,
         "redelivery should deduplicate at the original offset"
     );
-    assert_eq!(
-        second.deduplicated, true,
+    assert!(
+        second.deduplicated,
         "redelivery should deduplicate at the original offset"
     );
     assert_eq!(
@@ -569,8 +569,8 @@ idempotency_source = "header:X-Delivery"
         StatusCode::OK,
         "second delivery with the same header should deduplicate"
     );
-    assert_eq!(
-        first.deduplicated, false,
+    assert!(
+        !first.deduplicated,
         "second delivery with the same header should deduplicate"
     );
     assert_eq!(
@@ -578,8 +578,8 @@ idempotency_source = "header:X-Delivery"
         StatusCode::OK,
         "second delivery with the same header should deduplicate"
     );
-    assert_eq!(
-        second.deduplicated, true,
+    assert!(
+        second.deduplicated,
         "second delivery with the same header should deduplicate"
     );
     assert_eq!(
@@ -643,7 +643,7 @@ async fn generic_produce_route() {
     let status = resp.status();
     let first = parse_response(resp).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(first.deduplicated, false);
+    assert!(!first.deduplicated);
 
     // Same idempotency key twice → second is deduplicated.
     let idem_key = "gpr-key-1";
@@ -681,8 +681,8 @@ async fn generic_produce_route() {
         StatusCode::OK,
         "second keyed request should deduplicate at the original offset"
     );
-    assert_eq!(
-        keyed_first.deduplicated, false,
+    assert!(
+        !keyed_first.deduplicated,
         "second keyed request should deduplicate at the original offset"
     );
     assert_eq!(
@@ -690,8 +690,8 @@ async fn generic_produce_route() {
         StatusCode::OK,
         "second keyed request should deduplicate at the original offset"
     );
-    assert_eq!(
-        keyed_second.deduplicated, true,
+    assert!(
+        keyed_second.deduplicated,
         "second keyed request should deduplicate at the original offset"
     );
     assert_eq!(

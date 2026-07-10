@@ -1469,7 +1469,7 @@ mod tests {
             &raw.profile.sample_types()[0],
             &("wall".to_string(), "nanoseconds".to_string())
         );
-        assert_eq!(raw.profile.samples().is_empty(), false);
+        assert!(!raw.profile.samples().is_empty());
         let functions = raw
             .profile
             .inner()

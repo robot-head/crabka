@@ -2731,28 +2731,22 @@ overrides:
             .filter(|record| matches!(record.payload, SamplePayload::Float { .. }))
             .collect::<Vec<_>>();
         assert_eq!(float_records.len(), 2);
-        assert_eq!(
-            matches!(
-                float_records[0].payload,
-                SamplePayload::Float {
-                    timestamp_ms: 2,
-                    value: 7.0,
-                    ..
-                }
-            ),
-            true
-        );
-        assert_eq!(
-            matches!(
-                float_records[1].payload,
-                SamplePayload::Float {
-                    timestamp_ms: 3,
-                    value: 12.0,
-                    ..
-                }
-            ),
-            true
-        );
+        assert!(matches!(
+            float_records[0].payload,
+            SamplePayload::Float {
+                timestamp_ms: 2,
+                value: 7.0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            float_records[1].payload,
+            SamplePayload::Float {
+                timestamp_ms: 3,
+                value: 12.0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -2795,17 +2789,14 @@ overrides:
                 ("service_name".to_string(), "checkout".to_string()),
             ]
         );
-        assert_eq!(
-            matches!(
-                target.payload,
-                SamplePayload::Float {
-                    timestamp_ms: 1,
-                    value: 1.0,
-                    ..
-                }
-            ),
-            true
-        );
+        assert!(matches!(
+            target.payload,
+            SamplePayload::Float {
+                timestamp_ms: 1,
+                value: 1.0,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -3056,27 +3047,21 @@ overrides:
         assert_eq!(records[0].tenant.as_str(), "tenant-a");
         assert_eq!(&records[0].labels, &records[1].labels);
         assert_eq!(&records[1].labels, &records[1].labels);
-        assert_eq!(
-            matches!(
-                records[0].payload,
-                SamplePayload::Float {
-                    timestamp_ms: 10,
-                    value: 1.0,
-                    ..
-                }
-            ),
-            true
-        );
-        assert_eq!(
-            matches!(
-                records[1].payload,
-                SamplePayload::Float {
-                    timestamp_ms: 20,
-                    value: 2.0,
-                    ..
-                }
-            ),
-            true
-        );
+        assert!(matches!(
+            records[0].payload,
+            SamplePayload::Float {
+                timestamp_ms: 10,
+                value: 1.0,
+                ..
+            }
+        ));
+        assert!(matches!(
+            records[1].payload,
+            SamplePayload::Float {
+                timestamp_ms: 20,
+                value: 2.0,
+                ..
+            }
+        ));
     }
 }

@@ -1502,7 +1502,7 @@ mod tests {
     fn query_hint_multiple_entries_parse() {
         let q = parse("{ .a = 1 } | count_over_time() with (most_recent=true, exemplars=true)")
             .unwrap();
-        assert_eq!(q.hints.most_recent, true);
+        assert!(q.hints.most_recent);
         assert_eq!(q.hints.exemplars, Some(true));
     }
 

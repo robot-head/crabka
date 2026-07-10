@@ -950,8 +950,8 @@ mod tests {
 
     #[test]
     fn bytes_to_mb_is_proper_mebibyte() {
-        assert_eq!(bytes_to_mb(1_048_576), 1.0);
-        assert_eq!(bytes_to_mb(0), 0.0);
+        assert!((bytes_to_mb(1_048_576) - 1.0).abs() < f64::EPSILON);
+        assert!(bytes_to_mb(0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -981,7 +981,7 @@ mod tests {
         };
         let sec = params.to_security();
         assert_eq!(sec.protocol, ListenerProtocol::Ssl);
-        assert_eq!(sec.protocol.requires_tls(), true);
+        assert!(sec.protocol.requires_tls());
         assert!(sec.sasl.is_none());
         let tls = sec.tls.expect("Ssl security carries a TLS config");
         assert_eq!(

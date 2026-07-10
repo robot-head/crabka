@@ -493,8 +493,8 @@ async fn scan_with_no_match_returns_none_tables() {
     store.push_float("t", lbls(&[("__name__", "up")]), 1000, 1.0);
     let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "absent")];
     let result = store.scan("t", &matchers, 0, 5000).await.unwrap();
-    assert_eq!(result.float_table.is_none(), true);
-    assert_eq!(result.histogram_table.is_none(), true);
+    assert!(result.float_table.is_none());
+    assert!(result.histogram_table.is_none());
 }
 
 #[tokio::test]

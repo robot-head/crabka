@@ -176,113 +176,153 @@ mod tests {
 
     use super::*;
 
+    struct AttributeCase {
+        name: &'static str,
+        bits: i16,
+        compression: CompressionType,
+        timestamp_type: TimestampType,
+        transactional: bool,
+        control_batch: bool,
+        delete_horizon: bool,
+    }
+
+    fn assert_attribute_case(case: &AttributeCase) {
+        let attributes = Attributes(case.bits);
+        assert_eq!(
+            attributes.compression(),
+            case.compression,
+            "case {}",
+            case.name
+        );
+        assert_eq!(
+            attributes.timestamp_type(),
+            case.timestamp_type,
+            "case {}",
+            case.name
+        );
+        assert_eq!(
+            attributes.is_transactional(),
+            case.transactional,
+            "case {}",
+            case.name
+        );
+        assert_eq!(
+            attributes.is_control_batch(),
+            case.control_batch,
+            "case {}",
+            case.name
+        );
+        assert_eq!(
+            attributes.has_delete_horizon(),
+            case.delete_horizon,
+            "case {}",
+            case.name
+        );
+    }
+
     #[test]
-    fn attribute_bit_cases() {
-        let cases = [
-            (
-                "zero",
-                0,
-                CompressionType::None,
-                TimestampType::CreateTime,
-                false,
-                false,
-                false,
-            ),
-            (
-                "gzip",
-                0x01,
-                CompressionType::Gzip,
-                TimestampType::CreateTime,
-                false,
-                false,
-                false,
-            ),
-            (
-                "snappy",
-                0x02,
-                CompressionType::Snappy,
-                TimestampType::CreateTime,
-                false,
-                false,
-                false,
-            ),
-            (
-                "lz4",
-                0x03,
-                CompressionType::Lz4,
-                TimestampType::CreateTime,
-                false,
-                false,
-                false,
-            ),
-            (
-                "zstd",
-                0x04,
-                CompressionType::Zstd,
-                TimestampType::CreateTime,
-                false,
-                false,
-                false,
-            ),
-            (
-                "log append",
-                0x08,
-                CompressionType::None,
-                TimestampType::LogAppendTime,
-                false,
-                false,
-                false,
-            ),
-            (
-                "transactional",
-                0x10,
-                CompressionType::None,
-                TimestampType::CreateTime,
-                true,
-                false,
-                false,
-            ),
-            (
-                "control",
-                0x20,
-                CompressionType::None,
-                TimestampType::CreateTime,
-                false,
-                true,
-                false,
-            ),
-            (
-                "delete horizon",
-                0x40,
-                CompressionType::None,
-                TimestampType::CreateTime,
-                false,
-                false,
-                true,
-            ),
-            (
-                "all",
-                0x7c,
-                CompressionType::Zstd,
-                TimestampType::LogAppendTime,
-                true,
-                true,
-                true,
-            ),
-        ];
-        for (case, bits, codec, timestamp, transactional, control, horizon) in cases {
-            let attributes = Attributes(bits);
-            let actual = (
-                attributes.compression(),
-                attributes.timestamp_type(),
-                attributes.is_transactional(),
-                attributes.is_control_batch(),
-                attributes.has_delete_horizon(),
-            );
-            assert!(
-                actual == (codec, timestamp, transactional, control, horizon),
-                "case {case}"
-            );
+    fn attribute_compression_cases() {
+        for case in [
+            AttributeCase {
+                name: "zero",
+                bits: 0,
+                compression: CompressionType::None,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                name: "gzip",
+                bits: 0x01,
+                compression: CompressionType::Gzip,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                name: "snappy",
+                bits: 0x02,
+                compression: CompressionType::Snappy,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                name: "lz4",
+                bits: 0x03,
+                compression: CompressionType::Lz4,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                name: "zstd",
+                bits: 0x04,
+                compression: CompressionType::Zstd,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+        ] {
+            assert_attribute_case(&case);
+        }
+    }
+
+    #[test]
+    fn attribute_flag_cases() {
+        for case in [
+            AttributeCase {
+                name: "log append",
+                bits: 0x08,
+                compression: CompressionType::None,
+                timestamp_type: TimestampType::LogAppendTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                name: "transactional",
+                bits: 0x10,
+                compression: CompressionType::None,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: true,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                name: "control",
+                bits: 0x20,
+                compression: CompressionType::None,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: true,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                name: "delete horizon",
+                bits: 0x40,
+                compression: CompressionType::None,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: true,
+            },
+            AttributeCase {
+                name: "all",
+                bits: 0x7c,
+                compression: CompressionType::Zstd,
+                timestamp_type: TimestampType::LogAppendTime,
+                transactional: true,
+                control_batch: true,
+                delete_horizon: true,
+            },
+        ] {
+            assert_attribute_case(&case);
         }
     }
 

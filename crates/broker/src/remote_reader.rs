@@ -487,8 +487,9 @@ mod tests {
 
     #[test]
     fn position_for_relative_offset_returns_floor() {
+        type TestCase1<'a> = (&'a [OffsetIndexEntry], u32, u32);
         let entries = offset_entries(&[(0, 0), (10, 256), (20, 512), (30, 1024)]);
-        let cases: [(&[OffsetIndexEntry], u32, u32); 5] = [
+        let cases: [TestCase1<'_>; 5] = [
             (&entries, 10, 256),   // exact
             (&entries, 15, 256),   // between
             (&entries, 0, 0),      // first entry exact
@@ -527,8 +528,9 @@ mod tests {
 
     #[test]
     fn relative_offset_for_timestamp_returns_first_ge() {
+        type TestCase2<'a> = (&'a [TimeIndexEntry], i64, Option<u32>);
         let entries = time_entries(&[(1_000, 0), (2_000, 10), (3_000, 20)]);
-        let cases: [(&[TimeIndexEntry], i64, Option<u32>); 4] = [
+        let cases: [TestCase2<'_>; 4] = [
             (&entries, 1_000, Some(0)),  // exact match
             (&entries, 1_500, Some(10)), // between → next
             (&entries, 4_000, None),     // after last

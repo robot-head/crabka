@@ -1527,11 +1527,10 @@ mod tests {
         ]);
 
         assert_eq!(label_set, expected);
-        assert_eq!(series_fingerprint(&expected) != 0, true);
-        assert_eq!(
+        assert!(series_fingerprint(&expected) != 0);
+        assert!(
             series_fingerprint(&labels([("a", "bc")]))
-                != series_fingerprint(&labels([("ab", "c")])),
-            true
+                != series_fingerprint(&labels([("ab", "c")]))
         );
     }
 

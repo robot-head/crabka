@@ -76,7 +76,7 @@ async fn manual_connector_config_contract_builds_typed_config() {
 
     assert_eq!(config.database_url.as_str(), "postgres://localhost/app");
     assert_eq!(config.password.expose_secret(), "secret");
-    assert_eq!(config.enabled, true);
+    assert!(config.enabled);
     assert_eq!(config.signed_limit, -12);
     assert_eq!(config.max_batch, 500);
     assert_eq!(config.topics, vec!["alpha".to_string(), "beta".to_string()]);

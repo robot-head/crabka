@@ -610,8 +610,8 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert_eq!(col.is_null(0), false);
-        assert_eq!(col.value(0), 1.5);
+        assert!(!col.is_null(0));
+        assert!((col.value(0) - 1.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -630,8 +630,8 @@ mod tests {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
-        assert_eq!(col.is_null(0), false);
-        assert_eq!(col.value(0), true);
+        assert!(!col.is_null(0));
+        assert!(col.value(0));
     }
 
     #[test]

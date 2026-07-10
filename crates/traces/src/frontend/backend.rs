@@ -373,7 +373,7 @@ mod tests {
         );
         assert_eq!(mock.search_calls().len(), 1);
         assert_eq!(mock.search_calls()[0].tenant.as_str(), "t1");
-        assert_eq!(matches!(mock.search_calls()[0].shard, JobShard::Live), true);
+        assert!(matches!(mock.search_calls()[0].shard, JobShard::Live));
     }
 
     #[tokio::test]

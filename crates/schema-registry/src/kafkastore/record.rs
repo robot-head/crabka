@@ -497,7 +497,7 @@ mod tests {
             &[],
         );
         let val: SchemaValue = serde_json::from_slice(&v).unwrap();
-        assert_eq!(val.deleted, true);
+        assert!(val.deleted);
         assert_eq!(val.id, sid(7));
     }
 

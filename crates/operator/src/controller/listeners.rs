@@ -1397,7 +1397,6 @@ mod tests {
             configuration: None,
             network_policy_peers: None,
         };
-
         for (name, listeners, selected, expected, expected_reason) in [
             (
                 "duplicate name",
@@ -3517,11 +3516,11 @@ mod toml_rendering_tests {
         );
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        assert_eq!(toml_str.contains("controller_quorum_voters"), false);
-        assert_eq!(toml_str.contains("controller_server_name"), false);
-        assert_eq!(toml_str.contains("[server_properties]"), false);
-        assert_eq!(toml_str.contains("[authorization]"), false);
-        assert_eq!(toml_str.contains("[remote_storage]"), false);
+        assert!(!toml_str.contains("controller_quorum_voters"));
+        assert!(!toml_str.contains("controller_server_name"));
+        assert!(!toml_str.contains("[server_properties]"));
+        assert!(!toml_str.contains("[authorization]"));
+        assert!(!toml_str.contains("[remote_storage]"));
         assert!(parsed.controller_quorum_voters.is_empty());
         assert_eq!(parsed.controller_server_name, None);
     }
@@ -4137,8 +4136,8 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert_eq!(t.contains("[remote_storage.kafka_metadata]"), true);
-        assert_eq!(t.contains("bootstrap ="), false);
+        assert!(t.contains("[remote_storage.kafka_metadata]"));
+        assert!(!t.contains("bootstrap ="));
     }
 
     #[test]
@@ -4211,7 +4210,7 @@ mod toml_rendering_tests {
         assert_eq!(s3.region.as_str(), "us-east-1");
         assert_eq!(s3.prefix.as_deref(), Some("cluster-a"));
         assert_eq!(s3.endpoint.as_deref(), Some("http://minio.svc:9000"));
-        assert_eq!(s3.allow_http, true);
+        assert!(s3.allow_http);
         assert_eq!(s3.multipart_threshold, Some(4096));
         assert_eq!(s3.multipart_chunk_size, Some(1024));
         assert_eq!(s3.access_key_id.as_deref(), None);
@@ -4421,7 +4420,7 @@ mod toml_rendering_tests {
         assert_eq!(gcs.bucket.as_str(), "crabka-tier");
         assert_eq!(gcs.prefix.as_deref(), Some("cluster-a"));
         assert_eq!(gcs.endpoint.as_deref(), Some("http://fake-gcs.svc:4443"));
-        assert_eq!(gcs.allow_http, true);
+        assert!(gcs.allow_http);
         assert_eq!(
             gcs.service_account_path.as_deref(),
             Some("/etc/crabka/gcs-credentials/key.json")
@@ -6019,14 +6018,8 @@ mod san_tests {
             ..Default::default()
         };
         let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-        assert_eq!(
-            sans.contains(&SubjectAltName::Ip("203.0.113.10".parse().unwrap())),
-            true
-        );
-        assert_eq!(
-            sans.contains(&SubjectAltName::Dns("node1.example.com".into())),
-            true
-        );
+        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.10".parse().unwrap())));
+        assert!(sans.contains(&SubjectAltName::Dns("node1.example.com".into())));
     }
 
     #[test]
@@ -6046,14 +6039,8 @@ mod san_tests {
             .insert(0, vec![LbIngress::Ip("203.0.113.20".parse().unwrap())]);
         observed.lb_bootstrap = vec![LbIngress::Ip("203.0.113.30".parse().unwrap())];
         let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
-        assert_eq!(
-            sans.contains(&SubjectAltName::Ip("203.0.113.20".parse().unwrap())),
-            true
-        );
-        assert_eq!(
-            sans.contains(&SubjectAltName::Ip("203.0.113.30".parse().unwrap())),
-            true
-        );
+        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.20".parse().unwrap())));
+        assert!(sans.contains(&SubjectAltName::Ip("203.0.113.30".parse().unwrap())));
     }
 
     #[test]

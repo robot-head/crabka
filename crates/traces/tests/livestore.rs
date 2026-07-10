@@ -77,7 +77,7 @@ fn exposes_recent_spans_as_mem_table_over_span_schema() {
 
     let table = store.mem_table("tenant-a").unwrap();
     assert_eq!(table.schema(), span_block_schema());
-    assert_eq!(table.schema().index_of(SCOL_TRACE_ID).is_ok(), true);
+    assert!(table.schema().index_of(SCOL_TRACE_ID).is_ok());
 }
 
 #[tokio::test]
@@ -111,17 +111,15 @@ async fn live_source_exposes_trace_spans_and_tags() {
     );
 
     let names = store.tag_names("tenant-a", None, 0, 100).await.unwrap();
-    assert_eq!(
+    assert!(
         names
             .iter()
-            .any(|tags| { tags.scope == TagScope::Resource && tags.tags == vec!["service.name"] }),
-        true
+            .any(|tags| { tags.scope == TagScope::Resource && tags.tags == vec!["service.name"] })
     );
-    assert_eq!(
+    assert!(
         names
             .iter()
-            .any(|tags| tags.scope == TagScope::Span && tags.tags == vec!["http.method"]),
-        true
+            .any(|tags| tags.scope == TagScope::Span && tags.tags == vec!["http.method"])
     );
     assert_tag_scope_contains(
         &names,
@@ -300,7 +298,7 @@ async fn live_source_batches_filter_by_time_range() {
     check!(
         batches
             .iter()
-            .map(|batch| batch.num_rows())
+            .map(arrow::array::RecordBatch::num_rows)
             .collect::<Vec<_>>()
             == vec![1]
     );
@@ -323,7 +321,7 @@ async fn live_source_window_keeps_trace_level_columns_global() {
     assert!(
         batches
             .iter()
-            .map(|batch| batch.num_rows())
+            .map(arrow::array::RecordBatch::num_rows)
             .collect::<Vec<_>>()
             == vec![1]
     );

@@ -4400,8 +4400,8 @@ overrides:
             })
             .collect();
 
-        assert_eq!(profile_ids.contains(&"profile-a"), true, "{response}");
-        assert_eq!(profile_ids.contains(&"profile-b"), true, "{response}");
+        assert!(profile_ids.contains(&"profile-a"), "{response}");
+        assert!(profile_ids.contains(&"profile-b"), "{response}");
     }
 
     #[tokio::test]
@@ -4624,8 +4624,8 @@ overrides:
             })
             .collect();
 
-        assert_eq!(profile_ids.contains(&"profile-a"), true, "{response}");
-        assert_eq!(profile_ids.contains(&"profile-b"), true, "{response}");
+        assert!(profile_ids.contains(&"profile-a"), "{response}");
+        assert!(profile_ids.contains(&"profile-b"), "{response}");
     }
 
     #[tokio::test]

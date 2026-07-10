@@ -276,8 +276,8 @@ async fn keyed_record_forwards_to_owner_and_dedups() {
 
     // Same key through A again → forwarded to B → B's map hit → deduplicated.
     let second = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
-    assert_eq!(first.deduplicated, false);
-    assert_eq!(second.deduplicated, true);
+    assert!(!first.deduplicated);
+    assert!(second.deduplicated);
     assert_eq!(first.offset, first.offset);
     assert_eq!(second.offset, first.offset);
 

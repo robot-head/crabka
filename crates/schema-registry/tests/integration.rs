@@ -129,11 +129,10 @@ async fn register_then_get_round_trips_all_three_formats() {
     // GET by id round-trips, with schemaType for pb/js and none for avro
     let got_av = get_json(&app, "/schemas/ids/1").await;
     assert_eq!(got_av.get("schemaType"), None);
-    assert_eq!(
+    assert!(
         got_av["schema"]
             .as_str()
-            .is_some_and(|schema| schema.contains("record")),
-        true
+            .is_some_and(|schema| schema.contains("record"))
     );
     let got_pb = get_json(&app, "/schemas/ids/2").await;
     assert_eq!(got_pb["schemaType"], "PROTOBUF");
@@ -380,11 +379,10 @@ async fn lookup_endpoint() {
     assert_eq!(&body["subject"], &serde_json::json!("av-value"));
     assert_eq!(&body["id"], &serde_json::json!(1));
     assert_eq!(&body["version"], &serde_json::json!(1));
-    assert_eq!(
+    assert!(
         body["schema"]
             .as_str()
-            .is_some_and(|s| s.contains("record")),
-        true
+            .is_some_and(|s| s.contains("record"))
     );
 
     // Lookup a schema not registered under the subject -> 404 / 40403
@@ -489,11 +487,10 @@ async fn import_file_descriptor_set_registers_dependencies_first() {
         &serde_json::json!("common/money.proto")
     );
     assert_eq!(&imported["references"][0]["version"], &serde_json::json!(1));
-    assert_eq!(
+    assert!(
         imported["schema"]
             .as_str()
-            .is_some_and(|schema| schema.contains("service OrderService")),
-        true
+            .is_some_and(|schema| schema.contains("service OrderService"))
     );
 
     cancel.cancel();
@@ -914,11 +911,10 @@ async fn compatibility_endpoint_real_verdict() {
     let b = body_json(r).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(&b["is_compatible"], &serde_json::json!(false));
-    assert_eq!(
+    assert!(
         b["messages"]
             .as_array()
-            .is_some_and(|messages| !messages.is_empty()),
-        true
+            .is_some_and(|messages| !messages.is_empty())
     );
 
     cancel.cancel();

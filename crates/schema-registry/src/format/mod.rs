@@ -145,8 +145,8 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(a_form == b_form, true);
-        assert_eq!(a_form != c.canonical_form(), true);
+        assert_eq!(a_form, b_form);
+        assert_ne!(a_form, c.canonical_form());
     }
 
     #[test]

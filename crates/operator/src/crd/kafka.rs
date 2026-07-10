@@ -1110,12 +1110,11 @@ mod tests {
         }))
         .expect("parse with CAs");
         assert_eq!(v.cluster_ca.as_ref().unwrap().validity_days, 30);
-        assert_eq!(
-            v.clients_ca
+        assert!(
+            !v.clients_ca
                 .as_ref()
                 .unwrap()
-                .generate_certificate_authority,
-            false
+                .generate_certificate_authority
         );
     }
 

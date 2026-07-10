@@ -166,7 +166,7 @@ async fn iqv2_failure_paths() {
     let r = bogus
         .only_partition_result()
         .expect("single partition result");
-    assert_eq!(r.is_success(), false);
+    assert!(!r.is_success());
     assert_eq!(r.failure_reason(), Some(FailureReason::DoesNotExist));
 
     // Existing KeyValue store queried with a Window query (wrong kind) → NotPresent.
@@ -179,7 +179,7 @@ async fn iqv2_failure_paths() {
     let r = wrong_kind
         .only_partition_result()
         .expect("single partition result");
-    assert_eq!(r.is_success(), false);
+    assert!(!r.is_success());
     assert_eq!(r.failure_reason(), Some(FailureReason::NotPresent));
 }
 

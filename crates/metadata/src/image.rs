@@ -998,7 +998,7 @@ mod tests {
     #[test]
     fn fresh_image_has_no_features_and_unknown_epoch() {
         let m = img();
-        assert_eq!(m.finalized_features().is_empty(), true);
+        assert!(m.finalized_features().is_empty());
         assert_eq!(m.finalized_features_epoch(), -1);
     }
 
@@ -2380,7 +2380,7 @@ mod tests {
                 token_id: "tok-1".into(),
             },
         ));
-        assert_eq!(img.delegation_token_by_id("tok-1").is_none(), true);
+        assert!(img.delegation_token_by_id("tok-1").is_none());
         assert_eq!(img.all_delegation_tokens().count(), 0);
     }
 
@@ -2419,7 +2419,7 @@ mod tests {
             .expect("hmac_b present");
         assert_eq!(found_a.token_id.as_str(), "tok-a");
         assert_eq!(found_b.token_id.as_str(), "tok-b");
-        assert_eq!(img.delegation_token_by_hmac(&[0xCC; 32]).is_none(), true);
+        assert!(img.delegation_token_by_hmac(&[0xCC; 32]).is_none());
     }
 
     #[test]
@@ -2434,7 +2434,7 @@ mod tests {
 
         let alice_tokens = img.delegation_tokens_by_owner(&alice);
         assert_eq!(alice_tokens.len(), 2);
-        assert_eq!(alice_tokens.iter().all(|token| token.owner == alice), true);
+        assert!(alice_tokens.iter().all(|token| token.owner == alice));
 
         let bob_tokens = img.delegation_tokens_by_owner(&bob);
         assert_eq!(
@@ -2468,7 +2468,7 @@ mod tests {
             }]),
         }));
         assert_eq!(image.kraft_version(), 1);
-        assert_eq!(image.voters().contains(NodeId(1)), true);
+        assert!(image.voters().contains(NodeId(1)));
     }
 
     #[test]
@@ -2531,7 +2531,7 @@ mod tests {
                 configs: std::collections::BTreeMap::new(),
             },
         ));
-        assert_eq!(img.client_metrics_config("sub-a").is_none(), true);
+        assert!(img.client_metrics_config("sub-a").is_none());
         assert_eq!(img.client_metrics_subscriptions().count(), 0);
     }
 
@@ -2594,8 +2594,8 @@ mod tests {
                 name: "orders".into(),
             },
         ));
-        assert_eq!(img.topic_by_id(&id).is_none(), true);
-        assert_eq!(img.topic_name_by_id(&id).is_none(), true);
+        assert!(img.topic_by_id(&id).is_none());
+        assert!(img.topic_name_by_id(&id).is_none());
     }
 
     #[test]

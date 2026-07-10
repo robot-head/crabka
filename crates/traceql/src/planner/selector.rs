@@ -1427,7 +1427,7 @@ mod tests {
             field_expr_to_matcher_disjuncts(&selector("{ !(event.a = 1 && event.b = 2) }"))
                 .unwrap();
         assert_eq!(disjuncts.len(), 2);
-        assert_eq!(disjuncts.iter().all(|d| d.len() == 1 && d[0].negated), true);
+        assert!(disjuncts.iter().all(|d| d.len() == 1 && d[0].negated));
     }
 
     #[test]

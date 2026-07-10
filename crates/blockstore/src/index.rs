@@ -950,8 +950,8 @@ mod tests {
                 .unwrap(),
             BTreeSet::from([fp])
         );
-        assert_eq!(snapshot.contains("web"), false);
-        assert_eq!(snapshot.contains("env"), false);
+        assert!(!snapshot.contains("web"));
+        assert!(!snapshot.contains("env"));
     }
 
     #[test]
@@ -1059,8 +1059,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(expected.is_empty(), false);
-        assert_eq!(expected.len() < series.len(), true);
+        assert!(!expected.is_empty());
+        assert!(expected.len() < series.len());
         assert_eq!(got, expected);
     }
 
@@ -1089,8 +1089,8 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(expected.is_empty(), false);
-        assert_eq!(expected.len() < series.len(), true);
+        assert!(!expected.is_empty());
+        assert!(expected.len() < series.len());
         assert_eq!(got, expected);
     }
 

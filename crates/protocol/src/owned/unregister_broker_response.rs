@@ -52,7 +52,8 @@ mod tests {
     }
     #[test]
     fn roundtrips_all_versions() {
-        let cases: [(&str, fn(i16) -> UnregisterBrokerResponse); 2] = [
+        type TestCase1<'a> = (&'a str, fn(i16) -> UnregisterBrokerResponse);
+        let cases: [TestCase1<'_>; 2] = [
             ("default", |_| UnregisterBrokerResponse::default()),
             ("populated", UnregisterBrokerResponse::populated),
         ];

@@ -451,12 +451,10 @@ mod tests {
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
         let rc = rc();
-
         let mut proc = VersionedKTableSourceProcessor::<String, i64> {
             store_name: "vtbl".into(),
             _pd: PhantomData,
         };
-
         // Record 1: k=10 @ts=100
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -487,7 +485,6 @@ mod tests {
                 },
             "first record"
         );
-
         // Record 2: k=20 @ts=200
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -518,7 +515,6 @@ mod tests {
                 },
             "record @200"
         );
-
         // Record 3: k=15 @ts=150 (out-of-order)
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -549,7 +545,6 @@ mod tests {
                 },
             "record @150: as_of(150) before put = v@100=10"
         );
-
         // Latest (non-versioned get) must still be 20.
         check!(
             stores

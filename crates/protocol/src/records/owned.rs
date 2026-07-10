@@ -338,7 +338,8 @@ mod record_tests {
 
     #[test]
     fn record_roundtrip_cases() {
-        let cases: [(&str, fn() -> Record); 3] = [
+        type TestCase1<'a> = (&'a str, fn() -> Record);
+        let cases: [TestCase1<'_>; 3] = [
             ("minimal", fixture_minimal_record),
             ("keyed with headers", fixture_keyed_record),
             ("large payload", fixture_large_payload_record),
@@ -694,7 +695,8 @@ mod batch_tests {
 
     #[test]
     fn uncompressed_roundtrip_cases() {
-        let cases: [(&str, fn() -> RecordBatch); 3] = [
+        type TestCase2 = (&'static str, fn() -> RecordBatch);
+        let cases: [TestCase2; 3] = [
             ("empty", fixture_empty_batch),
             ("single", fixture_single_record_batch),
             ("multiple", fixture_multi_record_batch),

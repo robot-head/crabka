@@ -319,7 +319,8 @@ mod tests {
     #[test]
     fn build_filter_rejects_malformed_axes() {
         #[allow(clippy::type_complexity)]
-        let cases: [(&str, fn(&mut DeleteAclsFilter)); 3] = [
+        type TestCase1<'a> = (&'a str, fn(&mut DeleteAclsFilter));
+        let cases: [TestCase1<'_>; 3] = [
             ("resource_type_filter", |f| f.resource_type_filter = 99),
             ("pattern_type_filter", |f| f.pattern_type_filter = 99),
             ("operation", |f| f.operation = 99),

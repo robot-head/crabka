@@ -39,7 +39,6 @@ async fn duplicate_idempotency_key_produces_once() {
         types::GatewayRecord,
     };
     use tokio_util::sync::CancellationToken;
-
     let (broker, bootstrap, _dir) = boot().await;
     let dedup_topic = "__crabka_grpc_dedup";
     ensure_dedup_topic(&bootstrap, dedup_topic, 4, 3_600_000, 1, None)
@@ -60,7 +59,6 @@ async fn duplicate_idempotency_key_produces_once() {
         )
         .await
         .unwrap();
-
     let store = Arc::new(DedupStore::new(4));
     let token = CancellationToken::new();
     let own = tokio::spawn(store.clone().run_ownership(
@@ -93,7 +91,6 @@ async fn duplicate_idempotency_key_produces_once() {
         .await
         .unwrap()
         .with_dedup(engine);
-
     let mk = || GatewayRecord {
         topic: "dedup-user".into(),
         key: None,
@@ -107,13 +104,12 @@ async fn duplicate_idempotency_key_produces_once() {
     let anon = anon();
     let first = core.produce(mk(), &anon).await.unwrap();
     let second = core.produce(mk(), &anon).await.unwrap();
-    assert_eq!(first.deduplicated, false);
-    assert_eq!(second.deduplicated, true);
+    assert!(!first.deduplicated);
+    assert!(second.deduplicated);
     assert_eq!(first.partition, first.partition);
     assert_eq!(second.partition, first.partition);
     assert_eq!(first.offset, first.offset);
     assert_eq!(second.offset, first.offset);
-
     // Exactly one record landed in the user topic.
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap.clone())
@@ -133,7 +129,6 @@ async fn duplicate_idempotency_key_produces_once() {
             .len();
     }
     assert_eq!(count, 1);
-
     token.cancel();
     let _ = own.await;
     broker.shutdown().await;

@@ -77,7 +77,7 @@ async fn server_round_trips_search_and_echo() {
         .unwrap();
     let status = echo.status();
     let body = echo.text().await.unwrap();
-    assert_eq!(status.is_success(), true);
+    assert!(status.is_success());
     assert_eq!(body.as_str(), "echo");
 
     let url = format!("http://{addr}/api/search?q=%7B%20%7D&start=0&end=100&limit=20&spss=3");

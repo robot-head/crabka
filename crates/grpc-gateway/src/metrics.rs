@@ -489,14 +489,12 @@ mod tests {
         m.observe_request_duration("webhook_in", 0.02);
 
         let buf = encode(&m);
-        assert_eq!(
+        assert!(
             buf.contains("method=\"send\""),
-            true,
             "method labels missing:\n{buf}"
         );
-        assert_eq!(
+        assert!(
             buf.contains("method=\"webhook_in\""),
-            true,
             "method labels missing:\n{buf}"
         );
 

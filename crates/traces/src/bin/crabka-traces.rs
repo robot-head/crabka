@@ -876,7 +876,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Distributor), true);
+        assert!(matches!(cli.target, Target::Distributor));
         assert_eq!(cli.grpc_listen.as_str(), "127.0.0.1:4317");
     }
 
@@ -891,7 +891,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Distributor), true);
+        assert!(matches!(cli.target, Target::Distributor));
         assert_eq!(cli.jaeger_compact_listen.as_str(), "127.0.0.1:6831");
     }
 
@@ -906,7 +906,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Distributor), true);
+        assert!(matches!(cli.target, Target::Distributor));
         assert_eq!(cli.jaeger_grpc_listen.as_str(), "127.0.0.1:14250");
     }
 
@@ -957,7 +957,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::BlockBuilder), true);
+        assert!(matches!(cli.target, Target::BlockBuilder));
         assert_eq!(cli.block_builder_window_secs, 30);
     }
 
@@ -1052,7 +1052,7 @@ mod tests {
             "42",
         ])
         .unwrap();
-        assert_eq!(matches!(cli.target, Target::LiveStore), true);
+        assert!(matches!(cli.target, Target::LiveStore));
         assert_eq!(cli.retention_ns, 42);
     }
 
@@ -1068,8 +1068,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Querier), true);
-        assert_eq!(cli.querier_live_store, true);
+        assert!(matches!(cli.target, Target::Querier));
+        assert!(cli.querier_live_store);
         assert_eq!(cli.retention_ns, 42);
     }
 
@@ -1084,7 +1084,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Querier), true);
+        assert!(matches!(cli.target, Target::Querier));
         assert_eq!(
             cli.querier_live_store_url.as_deref(),
             Some("http://127.0.0.1:3201")
@@ -1501,7 +1501,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Querier), true);
+        assert!(matches!(cli.target, Target::Querier));
         assert_eq!(cli.max_trace_spans, 100);
         check!(build_querier_router(&cli).await.is_ok());
     }
@@ -1517,7 +1517,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Querier), true);
+        assert!(matches!(cli.target, Target::Querier));
         assert_eq!(cli.max_search_traces, 42);
         check!(build_querier_router(&cli).await.is_ok());
     }
@@ -1533,7 +1533,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Querier), true);
+        assert!(matches!(cli.target, Target::Querier));
         assert_eq!(cli.max_metric_exemplars, 7);
         check!(engine_opts_from_cli(&cli).max_exemplars == 7);
     }
@@ -1549,7 +1549,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Distributor), true);
+        assert!(matches!(cli.target, Target::Distributor));
         assert_eq!(cli.max_spans_per_trace, 42);
     }
 
@@ -1566,7 +1566,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Distributor), true);
+        assert!(matches!(cli.target, Target::Distributor));
         assert_eq!(cli.max_ingest_spans_per_second, 42);
         assert_eq!(cli.ingest_rate_burst, 7);
     }
@@ -1584,7 +1584,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::Compactor), true);
+        assert!(matches!(cli.target, Target::Compactor));
         assert_eq!(cli.compaction_start_ns, 100);
         assert_eq!(cli.compaction_end_ns, 200);
     }
@@ -1634,7 +1634,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(matches!(cli.target, Target::QueryFrontend), true);
+        assert!(matches!(cli.target, Target::QueryFrontend));
         assert_eq!(
             cli.querier_url.as_str(),
             "http://querier-a.example:3200,http://querier-b.example:3200"

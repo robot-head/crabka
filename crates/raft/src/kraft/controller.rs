@@ -3314,8 +3314,8 @@ mod tests {
         let mut batch = one_offset_batch(0, 1, b"a");
         engine.log.append(&mut batch).expect("append");
 
-        assert_eq!(engine.serve_fetch_records(Offset(-1)).is_empty(), true);
-        assert_eq!(engine.serve_fetch_records(Offset(1)).is_empty(), true);
+        assert!(engine.serve_fetch_records(Offset(-1)).is_empty());
+        assert!(engine.serve_fetch_records(Offset(1)).is_empty());
         let records = engine.serve_fetch_records(Offset(0));
         let decoded = decode_batches(&records).expect("decode served records");
         assert_eq!(
@@ -3673,7 +3673,7 @@ mod tests {
 
         let qs = ctrl.quorum_state().await.unwrap();
         assert_eq!(qs.leader_id, Some(NodeId(1)));
-        assert_eq!(qs.high_watermark > 0, true);
+        assert!(qs.high_watermark > 0);
         ctrl.shutdown().await;
     }
 

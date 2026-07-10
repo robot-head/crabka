@@ -592,7 +592,7 @@ mod tests {
         assert_eq!(cfg.num_partitions, 50);
         assert_eq!(cfg.replication, 3);
         assert_eq!(cfg.bootstrap.as_str(), "127.0.0.1:9092");
-        assert_eq!(cfg.security.is_none(), true);
+        assert!(cfg.security.is_none());
     }
 
     #[test]

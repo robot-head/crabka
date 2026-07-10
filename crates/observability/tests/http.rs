@@ -11668,13 +11668,12 @@ async fn tail_endpoint_rejects_delay_for_over_five_seconds() {
         panic!("expected HTTP websocket error");
     };
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
+    assert!(
         response
             .headers()
             .get("content-type")
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("text/plain")),
-        true
+            .is_some_and(|value| value.starts_with("text/plain"))
     );
     assert_eq!(
         response.body().as_deref(),

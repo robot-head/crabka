@@ -194,7 +194,7 @@ mod tests {
                 topic,
                 ..
             } => {
-                assert_eq!(*reuse_source_for_changelog, true);
+                assert!(*reuse_source_for_changelog);
                 assert_eq!(topic.as_str(), "in");
             }
             _ => panic!("node 0 should be a TableSource"),

@@ -120,8 +120,8 @@ mod tests {
     #[test]
     fn default_limits_are_generous_and_finite() {
         let l = Limits::default();
-        assert_eq!(l.ingestion_rate > 0.0, true);
-        assert_eq!(l.max_global_series_per_user >= 100_000, true);
+        assert!(l.ingestion_rate > 0.0);
+        assert!(l.max_global_series_per_user >= 100_000);
         assert_eq!(l.max_label_name_length, 1024);
     }
 

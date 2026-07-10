@@ -79,7 +79,7 @@ mod tests {
     fn secret_bytes_debug_does_not_leak_bytes() {
         let s = SecretBytes::new(b"super-secret-master-key".to_vec());
         let d = format!("{s:?}");
-        assert_eq!(d.contains("redacted"), true, "got {d:?}");
-        assert_eq!(d.contains("super-secret"), false, "got {d:?}");
+        assert!(d.contains("redacted"), "got {d:?}");
+        assert!(!d.contains("super-secret"), "got {d:?}");
     }
 }

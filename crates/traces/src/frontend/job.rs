@@ -376,17 +376,14 @@ mod tests {
             .filter(|j| matches!(j, JobShard::Block { .. }))
             .collect();
         assert_eq!(rg_jobs.len(), 1);
-        assert_eq!(
-            matches!(
-                rg_jobs[0],
-                JobShard::Block {
-                    row_group_start: 0,
-                    row_group_end: 3,
-                    ..
-                }
-            ),
-            true
-        );
+        assert!(matches!(
+            rg_jobs[0],
+            JobShard::Block {
+                row_group_start: 0,
+                row_group_end: 3,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
