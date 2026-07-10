@@ -480,14 +480,14 @@ mod tests {
     #[test]
     fn leader_predicate_matches_current_node_only() {
         let cases = [
-            (Some(NodeId(1)), true),
-            (Some(NodeId(2)), false),
-            (None, false),
+            ("local leader", Some(NodeId(1)), true),
+            ("other leader", Some(NodeId(2)), false),
+            ("no leader", None, false),
         ];
-        for (leader, want) in cases {
+        for (case, leader, want) in cases {
             assert!(
                 is_controller_leader(leader, NodeId(1)) == want,
-                "leader {leader:?}"
+                "case: {case}; leader {leader:?}"
             );
         }
     }
@@ -703,8 +703,11 @@ mod tests {
         let resp =
             BrokerHeartbeatResponse::decode(&mut cur, broker_heartbeat_response::MAX_VERSION)
                 .unwrap();
-        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.is_fenced);
+        let expected = BrokerHeartbeatResponse {
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            ..Default::default()
+        };
+        assert!(resp == expected);
     }
 
     #[test]

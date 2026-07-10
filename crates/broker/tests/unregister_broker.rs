@@ -24,8 +24,13 @@ async fn unregister_known_broker_drops_it_from_metadata() {
         .send(MetadataRequest::default())
         .await
         .expect("Metadata (before unregister)");
-    assert!(resp.brokers.len() == 1);
-    assert!(resp.brokers[0].node_id == 1);
+    assert!(
+        resp.brokers
+            .iter()
+            .map(|broker| broker.node_id)
+            .collect::<Vec<_>>()
+            == vec![1]
+    );
 
     let r = p
         .client
@@ -35,8 +40,10 @@ async fn unregister_known_broker_drops_it_from_metadata() {
         })
         .await
         .expect("UnregisterBroker");
-    assert!(r.error_code == 0, "{r:?}");
-    assert!(r.error_message.is_none() || r.error_message.as_deref() == Some(""));
+    assert!(
+        (r.error_code, r.error_message.as_deref().unwrap_or("")) == (0, ""),
+        "{r:?}"
+    );
 
     // The Raft commit may race the Metadata response; await the controller
     // image dropping broker 1 instead of polling the wire.
@@ -59,11 +66,13 @@ async fn unregister_unknown_broker_returns_invalid_request() {
         })
         .await
         .expect("UnregisterBroker");
-    assert!(r.error_code == 42, "expected INVALID_REQUEST (42): {r:?}");
     assert!(
-        r.error_message
-            .as_deref()
-            .is_some_and(|m| m.contains("999") && m.contains("not registered")),
+        (
+            r.error_code,
+            r.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("999") && m.contains("not registered")),
+        ) == (42, true),
         "error message must name the broker and say it isn't registered: {r:?}",
     );
 
@@ -82,11 +91,13 @@ async fn unregister_negative_broker_id_rejected() {
         })
         .await
         .expect("UnregisterBroker");
-    assert!(r.error_code == 42, "expected INVALID_REQUEST (42): {r:?}");
     assert!(
-        r.error_message
-            .as_deref()
-            .is_some_and(|m| m.contains("non-negative")),
+        (
+            r.error_code,
+            r.error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("non-negative")),
+        ) == (42, true),
         "error must explain the broker_id sign requirement: {r:?}",
     );
 

@@ -71,8 +71,12 @@ mod tests {
     #[test]
     fn commit_marker_attribute_bits_set() {
         let b = build_marker_batch(ProducerId(1000), 0, Offset(7), MarkerType::Commit);
-        assert!(b.attributes.is_transactional());
-        assert!(b.attributes.is_control_batch());
+        assert!(
+            (
+                b.attributes.is_transactional(),
+                b.attributes.is_control_batch(),
+            ) == (true, true)
+        );
     }
 
     #[test]

@@ -425,8 +425,7 @@ mod tests {
         let t_lagging = t_caught_in_isr + Duration::from_millis(10);
         s.update_follower_leo(NodeId(3), o(9), o(10), t_lagging);
         let lagging = s.per_follower.get(&NodeId(3)).unwrap();
-        assert!(lagging.last_fetch == t_lagging);
-        assert!(lagging.last_caught_up == t_caught_in_isr);
+        assert!((lagging.last_fetch, lagging.last_caught_up) == (t_lagging, t_caught_in_isr));
 
         let t_caught_out_of_isr = t_lagging + Duration::from_millis(10);
         s.update_follower_leo(NodeId(3), o(10), o(10), t_caught_out_of_isr);

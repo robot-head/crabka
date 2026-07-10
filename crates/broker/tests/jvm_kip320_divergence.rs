@@ -312,12 +312,7 @@ async fn kip320_wire_conformance_offset_for_leader_epoch() {
             .expect("offset_for_leader_epoch");
         eprintln!("CRABKA[kip320] OffsetForLeaderEpoch(epoch=0) => {answer:?}");
         assert!(
-            answer.error_code == 0,
-            "OffsetForLeaderEpoch returned error {}",
-            answer.error_code
-        );
-        assert!(
-            answer.end_offset == epoch0_end,
+            (answer.error_code, answer.end_offset) == (0, epoch0_end),
             "OffsetForLeaderEpoch(epoch=0).end_offset {} != epoch-0 boundary {}",
             answer.end_offset,
             epoch0_end,

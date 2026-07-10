@@ -1038,16 +1038,19 @@ mod tests {
             },
         )
         .await;
-        assert!(resp.error_code == 0);
-        assert!(resp.member_epoch == 1, "epoch advances to group epoch 1");
         let asg = resp.assignment.expect("assignment present");
-        let total: usize = asg
-            .topic_partitions
-            .iter()
-            .map(|tp| tp.partitions.len())
-            .sum();
-        assert!(total == 4, "one member gets all 4 partitions");
-        assert!(asg.topic_partitions[0].topic_id == id);
+        assert!(
+            (resp.error_code, resp.member_epoch, asg.topic_partitions)
+                == (
+                    codes::NONE,
+                    1,
+                    vec![TopicPartitions {
+                        topic_id: id,
+                        partitions: vec![0, 1, 2, 3],
+                        ..Default::default()
+                    }],
+                )
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1249,8 +1252,7 @@ mod tests {
             ..Default::default()
         };
         let batch = p.into_batch("g", 0);
-        assert!(batch.records.len() == 1);
-        assert!(batch.records[0].value.is_none());
+        assert!((batch.records.len(), batch.records[0].value.is_none()) == (1, true));
     }
 
     #[test]
@@ -1279,11 +1281,24 @@ mod tests {
         let mut restored = ShareGroupState::new("g");
         apply_seed(&mut restored, seed);
 
-        assert!(restored.group_epoch == 3);
-        assert!(restored.target.epoch == 3);
         let rm = restored.members.get("m1").expect("member restored");
-        check!(rm.member_epoch == 3);
-        check!(rm.assigned_partitions[&id] == vec![0, 1]);
-        check!(restored.target.per_member["m1"][&id] == vec![0, 1]);
+        check!(
+            (
+                restored.group_epoch,
+                restored.target.epoch,
+                rm.member_epoch,
+                &rm.assigned_partitions,
+                &restored.target.per_member,
+            ) == (
+                3,
+                3,
+                3,
+                &std::collections::HashMap::from([(id, vec![0, 1])]),
+                &std::collections::HashMap::from([(
+                    "m1".to_string(),
+                    std::collections::HashMap::from([(id, vec![0, 1])]),
+                )]),
+            )
+        );
     }
 }

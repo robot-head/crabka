@@ -195,8 +195,7 @@ mod tests {
         log.append(b1.clone()).await.unwrap();
         log.append(b2.clone()).await.unwrap();
         let got = log.batches().await;
-        assert!(got.len() == 2);
-        assert!(got[1].max_timestamp == 42);
+        assert!(got == vec![b1, b2]);
     }
 
     #[tokio::test]

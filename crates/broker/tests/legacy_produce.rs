@@ -245,14 +245,10 @@ async fn produce_v0_upconverts_and_is_readable_via_fetch() {
     );
     let rec = &batch.records[0];
     assert!(
-        rec.key.as_deref() == Some(b"k".as_ref()),
-        "key mismatch: {:?}",
-        rec.key
-    );
-    assert!(
-        rec.value.as_deref() == Some(b"v".as_ref()),
-        "value mismatch: {:?}",
-        rec.value
+        (rec.key.as_deref(), rec.value.as_deref()) == (Some(b"k".as_ref()), Some(b"v".as_ref())),
+        "decoded record key/value mismatch: key={:?} value={:?}",
+        rec.key,
+        rec.value,
     );
 
     p.broker.shutdown().await;

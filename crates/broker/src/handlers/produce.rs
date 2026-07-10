@@ -1504,20 +1504,13 @@ mod tests {
             ..Default::default()
         };
         let decoded = decode_owned_batch(
-            RecordsPayload::V2(vec![batch]),
+            RecordsPayload::V2(vec![batch.clone()]),
             "orders",
             &crate::metrics::BrokerMetrics::new(),
         )
         .expect("decode owned batch");
 
-        check!(decoded.last_offset_delta == 1);
-        check!(decoded.max_timestamp == 9876);
-        check!(decoded.producer_id == 22);
-        check!(decoded.producer_epoch == 3);
-        check!(decoded.base_sequence == 11);
-        assert!(decoded.records.len() == 2);
-        check!(decoded.records[0].value.as_deref() == Some(&b"a"[..]));
-        check!(decoded.records[1].value.as_deref() == Some(&b"b"[..]));
+        assert!(decoded == batch);
     }
 
     #[test]
@@ -1932,10 +1925,23 @@ mod tests {
             let data = dispatch_slice(wire.clone(), None, 7);
             match data {
                 ProduceData::Verbatim(v) => {
-                    check!(&v.bytes[..] == &wire[..]);
-                    check!(v.leader_epoch == 7);
-                    check!(v.max_timestamp == 42);
-                    check!(v.last_offset_delta == 0);
+                    assert!(
+                        (
+                            v.bytes,
+                            v.last_offset_delta,
+                            v.max_timestamp,
+                            v.leader_epoch,
+                            v.producer_id,
+                            v.is_transactional,
+                        ) == (
+                            wire,
+                            0,
+                            42,
+                            crabka_log::LeaderEpoch(7),
+                            crabka_log::ProducerId(-1),
+                            false,
+                        )
+                    );
                 }
                 ProduceData::Owned(_) => panic!("expected Verbatim"),
             }
@@ -2069,12 +2075,25 @@ mod tests {
                     // Stored bytes are the COMPRESSED wire bytes — verbatim, not
                     // re-encoded from decompressed records ("must stay compressed").
                     // Header fields came from the v2 header, no record decode.
-                    check!(&v.bytes[..] == &wire[..]);
                     check!(v.bytes.len() == wire.len());
                     check!(v.bytes.len() < big.len());
-                    check!(v.max_timestamp == 7_777);
-                    check!(v.last_offset_delta == 0);
-                    check!(v.leader_epoch == 3);
+                    assert!(
+                        (
+                            v.bytes,
+                            v.last_offset_delta,
+                            v.max_timestamp,
+                            v.leader_epoch,
+                            v.producer_id,
+                            v.is_transactional,
+                        ) == (
+                            wire,
+                            0,
+                            7_777,
+                            crabka_log::LeaderEpoch(3),
+                            crabka_log::ProducerId(-1),
+                            false,
+                        )
+                    );
                 }
                 ProduceData::Owned(_) => {
                     panic!("lz4 producer batch must pass through verbatim (no decompress)")
@@ -2103,20 +2122,34 @@ mod tests {
             let prepared =
                 prepare_batch(PartitionPayload::Slice(wire.clone()), None, "t", &m).unwrap();
             assert!(matches!(prepared.source, PreparedSource::Verbatim(_)));
-            check!(prepared.producer_id == 4242);
-            check!(prepared.producer_epoch == 9);
-            check!(prepared.base_sequence == 17);
-            check!(prepared.last_offset_delta == 2);
-            check!(prepared.max_timestamp == 555);
+            assert!(
+                (
+                    prepared.attributes,
+                    prepared.last_offset_delta,
+                    prepared.max_timestamp,
+                    prepared.producer_id,
+                    prepared.producer_epoch,
+                    prepared.base_sequence,
+                ) == (b.attributes, 2, 555, 4242, 9, 17)
+            );
 
             // Cross-check: an owned decode of the same compressed bytes yields
             // the same header identity (proving the header read is correct).
             let mut cur: &[u8] = &wire;
             let owned = RecordBatch::decode(&mut cur).unwrap();
-            check!(owned.producer_id == prepared.producer_id);
-            check!(owned.producer_epoch == prepared.producer_epoch);
-            check!(owned.base_sequence == prepared.base_sequence);
-            check!(owned.last_offset_delta == prepared.last_offset_delta);
+            assert!(
+                (
+                    owned.producer_id,
+                    owned.producer_epoch,
+                    owned.base_sequence,
+                    owned.last_offset_delta,
+                ) == (
+                    prepared.producer_id,
+                    prepared.producer_epoch,
+                    prepared.base_sequence,
+                    prepared.last_offset_delta,
+                )
+            );
         }
     }
 }

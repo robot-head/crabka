@@ -156,9 +156,10 @@ mod tests {
         g.add_or_update_member(fresh_member("m1", "t"));
         let (inp, t) = input("t", 4);
         let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        check!(outcome == ReconcileOutcome::Recomputed);
-        check!(g.target.per_member["m1"][&t] == vec![0, 1, 2, 3]);
-        check!(!g.dirty);
+        check!(
+            (outcome, g.target.per_member["m1"][&t].as_slice(), g.dirty,)
+                == (ReconcileOutcome::Recomputed, &[0, 1, 2, 3][..], false,)
+        );
     }
 
     #[test]
@@ -177,8 +178,7 @@ mod tests {
         reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let epoch1 = g.group_epoch;
         let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        assert!(outcome == ReconcileOutcome::NoChange);
-        assert!(g.group_epoch == epoch1);
+        assert!((outcome, g.group_epoch) == (ReconcileOutcome::NoChange, epoch1));
     }
 
     #[test]
@@ -191,8 +191,7 @@ mod tests {
         let (inp2, _) = input("t", 4);
         g.dirty = true;
         let outcome = reconcile_if_dirty(&mut g, &inp2, &UniformAssignor);
-        assert!(outcome == ReconcileOutcome::Recomputed);
-        assert!(g.group_epoch > epoch_before);
+        assert!((outcome, g.group_epoch > epoch_before) == (ReconcileOutcome::Recomputed, true));
     }
 
     #[test]
@@ -326,8 +325,7 @@ mod tests {
         g.add_or_update_member(member_with_regex("m1", &[], Some("^b")));
         assert!(g.dirty, "regex change must mark group dirty");
         let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        assert!(outcome == ReconcileOutcome::Recomputed);
-        assert!(g.group_epoch > epoch_before);
+        assert!((outcome, g.group_epoch > epoch_before) == (ReconcileOutcome::Recomputed, true));
     }
 
     #[test]

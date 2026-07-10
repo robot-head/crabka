@@ -213,9 +213,8 @@ async fn describe_cluster_authorized_operations_default_is_not_present() {
         .send(DescribeClusterRequest::default())
         .await
         .expect("DescribeCluster");
-    assert!(resp.error_code == 0, "DescribeCluster error: {resp:?}");
     assert!(
-        resp.cluster_authorized_operations == i32::MIN,
+        (resp.error_code, resp.cluster_authorized_operations) == (0, i32::MIN),
         "opt-out must leave the sentinel"
     );
     h.shutdown().await;
@@ -234,9 +233,8 @@ async fn describe_cluster_authorized_operations_super_user_gets_full_mask() {
         })
         .await
         .expect("DescribeCluster");
-    assert!(resp.error_code == 0, "DescribeCluster error: {resp:?}");
     assert!(
-        resp.cluster_authorized_operations == CLUSTER_FULL_MASK,
+        (resp.error_code, resp.cluster_authorized_operations) == (0, CLUSTER_FULL_MASK),
         "super-user must see the full cluster mask, got 0b{:b}",
         resp.cluster_authorized_operations
     );
@@ -263,9 +261,8 @@ async fn describe_groups_authorized_operations_default_is_not_present() {
         .expect("DescribeGroups");
     assert!(resp.groups.len() == 1);
     let g = &resp.groups[0];
-    assert!(g.error_code == 0, "DescribeGroups error: {g:?}");
     assert!(
-        g.authorized_operations == i32::MIN,
+        (g.error_code, g.authorized_operations) == (0, i32::MIN),
         "opt-out must leave the sentinel"
     );
     h.shutdown().await;
@@ -289,9 +286,8 @@ async fn describe_groups_authorized_operations_super_user_gets_full_mask() {
         .expect("DescribeGroups");
     assert!(resp.groups.len() == 1);
     let g = &resp.groups[0];
-    assert!(g.error_code == 0, "DescribeGroups error: {g:?}");
     assert!(
-        g.authorized_operations == GROUP_FULL_MASK,
+        (g.error_code, g.authorized_operations) == (0, GROUP_FULL_MASK),
         "super-user must see the full group mask, got 0b{:b}",
         g.authorized_operations
     );

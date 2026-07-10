@@ -462,8 +462,16 @@ mod tests {
             .expect("read state")
             .expect("state present");
 
-        assert!(state.state_epoch == initial_epoch + 1);
-        assert!(state.start_offset == crabka_log::Offset(33));
+        assert!(
+            (
+                state.state_epoch,
+                state.leader_epoch,
+                state.start_offset,
+                state.delivery_complete_count,
+                state.state_batches,
+                state.updates_since_snapshot,
+            ) == (initial_epoch + 1, 0, crabka_log::Offset(33), 0, vec![], 0,)
+        );
         broker_handle.shutdown().await;
     }
 }

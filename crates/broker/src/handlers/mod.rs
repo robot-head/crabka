@@ -362,11 +362,8 @@ mod tests {
         let mut cur: &[u8] = &bytes;
         let decoded = ApiVersionsResponse::decode(&mut cur, 3).expect("decode response");
 
-        assert!(decoded.error_code == crate::codes::NONE);
-        assert!(decoded.api_keys.len() == 1);
-        assert!(decoded.api_keys[0].api_key == 18);
-        assert!(decoded.api_keys[0].min_version == 0);
-        assert!(decoded.api_keys[0].max_version == 4);
+        assert!(decoded == resp);
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
     }
 
     #[test]

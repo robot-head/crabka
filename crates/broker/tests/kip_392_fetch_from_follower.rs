@@ -254,9 +254,8 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         .await
         .expect("Fetch to leader (rack-b)");
     let part = &r_leader.responses[0].partitions[0];
-    assert!(part.partition_index == 0);
     assert!(
-        part.preferred_read_replica == follower_node,
+        (part.partition_index, part.preferred_read_replica) == (0, follower_node),
         "leader should redirect a rack-b consumer to the rack-b follower (node {follower_node})"
     );
 

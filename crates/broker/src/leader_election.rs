@@ -839,8 +839,7 @@ mod tests {
         let new_pr = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, NodeId(1))
             .await
             .expect("should pick replacement");
-        assert!(new_pr.leader == 3);
-        assert!(new_pr.leader_epoch == 6);
+        assert!((new_pr.leader, new_pr.leader_epoch) == (NodeId(3), LeaderEpoch(6)));
     }
 
     #[tokio::test]
@@ -978,9 +977,11 @@ mod tests {
         .await;
 
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 2);
-        assert!(pr.isr == vec![NodeId(2), NodeId(3)]);
-        assert!(pr.leader_epoch == 6, "leader_epoch must bump on election");
+        assert!(
+            (pr.leader, &pr.isr, pr.leader_epoch)
+                == (NodeId(2), &vec![NodeId(2), NodeId(3)], LeaderEpoch(6)),
+            "partition result must elect broker 2, retain the live ISR, and bump leader epoch"
+        );
     }
 
     #[tokio::test]
@@ -1142,8 +1143,7 @@ mod tests {
         .await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 3);
-        assert!(pr.isr == vec![NodeId(3)]);
+        assert!((pr.leader, &pr.isr) == (NodeId(3), &vec![NodeId(3)]));
     }
 
     #[tokio::test]
@@ -1166,9 +1166,8 @@ mod tests {
         .await;
         assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 2);
         assert!(
-            pr.isr == vec![NodeId(2)],
+            (pr.leader, &pr.isr) == (NodeId(2), &vec![NodeId(2)]),
             "clean ISR-only election keeps the surviving ISR member, not a singleton-of-some-other-replica"
         );
     }
@@ -1231,8 +1230,7 @@ mod tests {
         let batches = source.submitted_batches().await;
         assert!(batches.len() == 1);
         let pr = one_partition_change(&batches[0]);
-        assert!(pr.leader == 2);
-        assert!(pr.partition_epoch == 1);
+        assert!((pr.leader, pr.partition_epoch) == (NodeId(2), 1));
     }
 
     // ── KIP-112: compute_offline_dir_failover_changes ───────────────────────
@@ -1561,11 +1559,13 @@ mod tests {
         )
         .await;
         assert!(
-            plan.changes.is_empty(),
-            "Balanced strategy must defer to the URM, not elect immediately, got {:?}",
-            plan.changes,
+            (&plan.changes, &plan.recoveries)
+                == (
+                    &Vec::new(),
+                    &vec![("t".to_string(), 0, RecoveryStrategy::Balanced)],
+                ),
+            "Balanced strategy must defer to the URM without an immediate change"
         );
-        assert!(plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Balanced)]);
     }
 
     #[tokio::test]
@@ -1591,8 +1591,7 @@ mod tests {
             "strategy None must not enqueue an offset-aware recovery",
         );
         let pr = one_partition_change(&plan.changes);
-        assert!(pr.leader == 2, "legacy path picks first alive replica");
-        assert!(pr.isr == vec![NodeId(2)]);
+        assert!((pr.leader, &pr.isr) == (NodeId(2), &vec![NodeId(2)]));
     }
 }
 

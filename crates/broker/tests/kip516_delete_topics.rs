@@ -27,6 +27,5 @@ async fn delete_topics_by_unknown_id_returns_unknown_topic_id() {
         .expect("delete topics");
 
     let r = resp.responses.first().expect("one response row");
-    assert!(r.error_code == 100); // UNKNOWN_TOPIC_ID
-    assert!(r.topic_id == bogus); // requested id echoed
+    assert!((r.error_code, r.topic_id) == (100, bogus)); // UNKNOWN_TOPIC_ID, requested id echoed
 }

@@ -761,7 +761,9 @@ mod tests {
         use clap::Parser;
 
         let args = Args::try_parse_from(["crabka-broker", "--config-file=/tmp/a.toml"]).unwrap();
-        assert!(args.config_file.as_deref() == Some(std::path::Path::new("/tmp/a.toml")));
-        assert!(args.advertised_listener.is_none());
+        assert!(
+            (args.config_file.as_deref(), args.advertised_listener)
+                == (Some(std::path::Path::new("/tmp/a.toml")), None)
+        );
     }
 }

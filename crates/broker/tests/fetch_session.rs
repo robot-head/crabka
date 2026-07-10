@@ -142,10 +142,15 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
         })
         .await
         .expect("Fetch new-session");
-    check!(r1.error_code == 0, "no top-level error");
-    check!(r1.session_id > 0, "broker allocated a session id");
-    assert!(r1.responses.len() == 1, "new session emits full response");
-    check!(r1.responses[0].partitions.len() == 3, "all 3 partitions");
+    check!(
+        (
+            r1.error_code,
+            r1.session_id > 0,
+            r1.responses.len(),
+            r1.responses[0].partitions.len(),
+        ) == (0, true, 1, 3),
+        "new session response mismatch: {r1:?}"
+    );
     let sid = r1.session_id;
 
     // (2) Immediate incremental: nothing changed → empty response.
@@ -162,10 +167,8 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
         })
         .await
         .expect("Fetch incremental empty");
-    check!(r2.error_code == 0);
-    check!(r2.session_id == sid, "session id echoed");
     check!(
-        r2.responses.is_empty(),
+        (r2.error_code, r2.session_id, r2.responses.is_empty()) == (0, sid, true),
         "no partition changed → no topics in response, got {:?}",
         r2.responses
     );
@@ -185,11 +188,15 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
         })
         .await
         .expect("Fetch incremental after produce");
-    check!(r3.error_code == 0);
-    check!(r3.session_id == sid);
-    assert!(r3.responses.len() == 1);
-    assert!(r3.responses[0].partitions.len() == 1);
-    check!(r3.responses[0].partitions[0].partition_index == 0);
+    check!(
+        (
+            r3.error_code,
+            r3.session_id,
+            r3.responses.len(),
+            r3.responses[0].partitions.len(),
+            r3.responses[0].partitions[0].partition_index,
+        ) == (0, sid, 1, 1, 0)
+    );
     let batches = r3.responses[0].partitions[0]
         .records
         .as_ref()
@@ -252,8 +259,7 @@ async fn forgotten_topics_drop_partitions_from_subscription() {
         })
         .await
         .expect("forget t-1");
-    assert!(r2.error_code == 0);
-    assert!(r2.session_id == sid);
+    assert!((r2.error_code, r2.session_id) == (0, sid));
 
     // Produce to t-1 — should NOT reappear in the next incremental.
     produce(&p, "t", 1, 4).await;
@@ -305,9 +311,10 @@ async fn unknown_session_id_returns_not_found() {
         })
         .await
         .expect("Fetch unknown sid");
-    check!(r.error_code == FETCH_SESSION_ID_NOT_FOUND);
-    check!(r.session_id == 0);
-    check!(r.responses.is_empty());
+    check!(
+        (r.error_code, r.session_id, r.responses.is_empty())
+            == (FETCH_SESSION_ID_NOT_FOUND, 0, true)
+    );
     p.broker.shutdown().await;
 }
 
@@ -342,9 +349,10 @@ async fn stale_session_epoch_returns_invalid_epoch() {
         })
         .await
         .expect("stale epoch");
-    check!(r2.error_code == INVALID_FETCH_SESSION_EPOCH);
-    check!(r2.session_id == 0);
-    check!(r2.responses.is_empty());
+    check!(
+        (r2.error_code, r2.session_id, r2.responses.is_empty())
+            == (INVALID_FETCH_SESSION_EPOCH, 0, true)
+    );
     p.broker.shutdown().await;
 }
 
@@ -381,8 +389,10 @@ async fn close_session_drops_cache_entry() {
         })
         .await
         .expect("close");
-    assert!(r2.error_code == 0);
-    assert!(r2.session_id == 0, "close → response session_id=0");
+    assert!(
+        (r2.error_code, r2.session_id) == (0, 0),
+        "close → successful response with session_id=0"
+    );
 
     // Re-using sid afterwards is NOT_FOUND.
     let r3 = p
@@ -413,8 +423,7 @@ async fn sessionless_zero_id_with_stray_epoch_is_invalid() {
         })
         .await
         .expect("stray");
-    assert!(r.error_code == INVALID_FETCH_SESSION_EPOCH);
-    assert!(r.session_id == 0);
+    assert!((r.error_code, r.session_id) == (INVALID_FETCH_SESSION_EPOCH, 0));
     p.broker.shutdown().await;
 }
 
@@ -439,9 +448,10 @@ async fn sessionless_full_fetch_round_trip() {
         })
         .await
         .expect("sessionless");
-    check!(r.error_code == 0);
-    check!(r.session_id == 0, "sessionless → no allocation");
-    assert!(r.responses.len() == 1);
+    check!(
+        (r.error_code, r.session_id, r.responses.len()) == (0, 0, 1),
+        "sessionless response mismatch: {r:?}"
+    );
     let batches = r.responses[0].partitions[0]
         .records
         .as_ref()

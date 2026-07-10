@@ -65,31 +65,34 @@ mod tests {
 
     #[test]
     fn murmur2_matches_kafka_vectors_for_remainder_lengths() {
-        let cases: &[(&[u8], u32)] = &[
-            (b"", 0x106e_08d9),
-            (b"a", 0xa2d0_b27c),
-            (b"ab", 0x12d8_262a),
-            (b"abc", 0x1c94_221b),
-            (b"abcd", 0xb11a_b5f4),
-            (b"abcde", 0x1b89_7edd),
+        let cases: &[(&str, &[u8], u32)] = &[
+            ("empty", b"", 0x106e_08d9),
+            ("one-byte remainder", b"a", 0xa2d0_b27c),
+            ("two-byte remainder", b"ab", 0x12d8_262a),
+            ("three-byte remainder", b"abc", 0x1c94_221b),
+            ("one full word", b"abcd", 0xb11a_b5f4),
+            ("word plus remainder", b"abcde", 0x1b89_7edd),
         ];
 
-        for (input, expected) in cases {
-            assert!(murmur2(input) == *expected);
+        for (case, input, expected) in cases {
+            assert!(murmur2(input) == *expected, "case {case}");
         }
     }
 
     #[test]
     fn murmur2_partition_matches_kafka_utils_abs_mod() {
-        let cases: &[(&[u8], i32, i32)] = &[
-            (b"my-tid", 50, 43),
-            (b"producer-1", 50, 45),
-            (b"tx-orders-prod", 50, 26),
-            (b"abcde", 7, 4),
+        let cases: &[(&str, &[u8], i32, i32)] = &[
+            ("transactional id", b"my-tid", 50, 43),
+            ("producer id", b"producer-1", 50, 45),
+            ("orders id", b"tx-orders-prod", 50, 26),
+            ("seven partitions", b"abcde", 7, 4),
         ];
 
-        for (input, partitions, expected) in cases {
-            assert!(murmur2_partition(input, *partitions) == *expected);
+        for (case, input, partitions, expected) in cases {
+            assert!(
+                murmur2_partition(input, *partitions) == *expected,
+                "case {case}"
+            );
         }
     }
 }

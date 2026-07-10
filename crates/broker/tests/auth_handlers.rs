@@ -318,11 +318,10 @@ async fn metadata_response_carries_listener_endpoints() {
         .await
         .expect("Metadata round-trip");
     assert!(
-        !resp.brokers.is_empty(),
-        "MetadataResponse must include at least one broker"
-    );
-    assert!(
-        resp.brokers.iter().any(|b| b.node_id == 1),
+        (
+            resp.brokers.is_empty(),
+            resp.brokers.iter().any(|b| b.node_id == 1),
+        ) == (false, true),
         "MetadataResponse must include this broker (node_id=1): {:?}",
         resp.brokers,
     );
@@ -1169,9 +1168,9 @@ async fn sasl_oauthbearer_invalid_token_two_round_failure() {
         let token = unsecured_jws("admin", now_unix_secs() - 3600);
         let round1 =
             oauthbearer_authenticate(&mut stream, &mut corr, oauthbearer_initial(&token)).await?;
-        assert!(round1.error_code == 0, "round 1 must not close yet");
         assert!(
-            &round1.auth_bytes[..] == br#"{"status":"invalid_token"}"#,
+            (round1.error_code, &round1.auth_bytes[..])
+                == (0, br#"{"status":"invalid_token"}"#.as_slice()),
             "round 1 must carry the RFC 7628 error JSON"
         );
 
@@ -1308,9 +1307,9 @@ async fn sasl_oauthbearer_signed_token_wrong_key_two_round_failure() {
         let token = es256_token(&kp_b, "k1", &claims);
         let round1 =
             oauthbearer_authenticate(&mut stream, &mut corr, oauthbearer_initial(&token)).await?;
-        assert!(round1.error_code == 0, "round 1 must not close yet");
         assert!(
-            &round1.auth_bytes[..] == br#"{"status":"invalid_token"}"#,
+            (round1.error_code, &round1.auth_bytes[..])
+                == (0, br#"{"status":"invalid_token"}"#.as_slice()),
             "round 1 must carry the RFC 7628 error JSON"
         );
 
@@ -1769,9 +1768,8 @@ async fn plain_listener_session_lifetime_ms_is_zero_and_no_timer() {
         .expect("SaslAuthenticate round-trip");
     let mut cur: &[u8] = &auth_resp_bytes;
     let auth_resp = SaslAuthenticateResponse::decode(&mut cur, 2).unwrap();
-    assert!(auth_resp.error_code == 0, "PLAIN authenticate must succeed");
     assert!(
-        auth_resp.session_lifetime_ms == 0,
+        (auth_resp.error_code, auth_resp.session_lifetime_ms) == (0, 0),
         "PLAIN listener must report session_lifetime_ms = 0 (no KIP-368 deadline)"
     );
 
@@ -1856,13 +1854,15 @@ async fn alter_scram_creds_super_user_can_provision() {
     )
     .await
     .expect("PLAIN auth + AUSCR upsertion");
-    assert!(resp.results.len() == 1, "one result row per upsertion");
     check!(
-        resp.results[0].error_code == 0,
-        "expected error_code=0, got {:?}",
+        (
+            resp.results.len(),
+            resp.results[0].error_code,
+            resp.results[0].user.as_str(),
+        ) == (1, 0, "alice"),
+        "unexpected result row: {:?}",
         resp.results[0]
     );
-    check!(resp.results[0].user == "alice");
 
     // Round-trip: now log in as `alice` over SCRAM, proving the upserted
     // credential actually reached the metadata image. Wait for the raft
@@ -1926,13 +1926,15 @@ async fn alter_scram_creds_super_user_can_provision_sha256() {
     )
     .await
     .expect("PLAIN auth + AUSCR upsertion (SHA-256)");
-    assert!(resp.results.len() == 1);
     check!(
-        resp.results[0].error_code == 0,
-        "expected error_code=0, got {:?}",
+        (
+            resp.results.len(),
+            resp.results[0].error_code,
+            resp.results[0].user.as_str(),
+        ) == (1, 0, "alice"),
+        "unexpected result row: {:?}",
         resp.results[0]
     );
-    check!(resp.results[0].user == "alice");
 
     // Wait for the upserted credential to reach the committed metadata
     // image, then authenticate as `alice` over SHA-256 SCRAM.
@@ -1998,9 +2000,8 @@ async fn alter_scram_creds_non_super_user_rejected() {
     .await
     .expect("PLAIN auth + AUSCR (rejected)");
     handle.shutdown().await;
-    assert!(resp.results.len() == 1);
     assert!(
-        resp.results[0].error_code == 31, // CLUSTER_AUTHORIZATION_FAILED
+        (resp.results.len(), resp.results[0].error_code) == (1, 31), // CLUSTER_AUTHORIZATION_FAILED
         "non-super-user must get CLUSTER_AUTHORIZATION_FAILED, got {:?}",
         resp.results[0]
     );
@@ -2050,9 +2051,8 @@ async fn alter_scram_creds_low_iterations_rejected() {
     .await
     .expect("PLAIN auth + AUSCR (rejected)");
     handle.shutdown().await;
-    assert!(resp.results.len() == 1);
     assert!(
-        resp.results[0].error_code == KAFKA_UNACCEPTABLE_CREDENTIAL,
+        (resp.results.len(), resp.results[0].error_code) == (1, KAFKA_UNACCEPTABLE_CREDENTIAL),
         "iterations < 4096 must get UNACCEPTABLE_CREDENTIAL, got {:?}",
         resp.results[0]
     );
@@ -2177,9 +2177,8 @@ async fn alter_scram_creds_unknown_mechanism_returns_unsupported_sasl_mechanism(
             .expect("PLAIN auth + AUSCR unknown mechanism");
 
     handle.shutdown().await;
-    assert!(resp.results.len() == 1);
     assert!(
-        resp.results[0].error_code == KAFKA_UNSUPPORTED_SASL_MECHANISM,
+        (resp.results.len(), resp.results[0].error_code) == (1, KAFKA_UNSUPPORTED_SASL_MECHANISM),
         "unknown SCRAM mechanism must get UNSUPPORTED_SASL_MECHANISM, got {:?}",
         resp.results[0]
     );
@@ -2234,9 +2233,8 @@ async fn alter_scram_creds_duplicate_resource_rejected() {
     .await
     .expect("PLAIN auth + AUSCR (duplicate)");
     handle.shutdown().await;
-    assert!(resp.results.len() == 1, "one result row per username");
     assert!(
-        resp.results[0].error_code == KAFKA_DUPLICATE_RESOURCE,
+        (resp.results.len(), resp.results[0].error_code) == (1, KAFKA_DUPLICATE_RESOURCE),
         "duplicate username must get DUPLICATE_RESOURCE, got {:?}",
         resp.results[0]
     );
@@ -2306,10 +2304,12 @@ async fn alter_scram_creds_duplicate_deletion_and_upsertion_rejected_per_user() 
             .expect("PLAIN auth + AUSCR duplicate deletion/upsertion");
 
     handle.shutdown().await;
-    assert!(resp.results.len() == 1, "one result row per username");
-    assert!(resp.results[0].user == "alice");
     assert!(
-        resp.results[0].error_code == KAFKA_DUPLICATE_RESOURCE,
+        (
+            resp.results.len(),
+            resp.results[0].user.as_str(),
+            resp.results[0].error_code,
+        ) == (1, "alice", KAFKA_DUPLICATE_RESOURCE),
         "delete+upsert for same username must get DUPLICATE_RESOURCE, got {:?}",
         resp.results[0]
     );
@@ -2351,9 +2351,8 @@ async fn alter_scram_creds_missing_deletion_returns_resource_not_found_91() {
             .expect("PLAIN auth + AUSCR missing deletion");
 
     handle.shutdown().await;
-    assert!(resp.results.len() == 1);
     assert!(
-        resp.results[0].error_code == 91,
+        (resp.results.len(), resp.results[0].error_code) == (1, 91),
         "missing deletion target must get RESOURCE_NOT_FOUND (91), got {:?}",
         resp.results[0]
     );
@@ -2492,17 +2491,12 @@ async fn api_versions_reachable_pre_auth_on_sasl_listener() {
         .expect("ApiVersionsResponse must decode successfully");
 
     check!(
-        av_resp.error_code == 0,
-        "ApiVersions error_code must be 0 on SASL listener pre-auth"
-    );
-    check!(
-        av_resp.api_keys.iter().any(|k| k.api_key == 17),
-        "ApiVersionsResponse must list SaslHandshake (17): {:?}",
-        av_resp.api_keys
-    );
-    check!(
-        av_resp.api_keys.iter().any(|k| k.api_key == 36),
-        "ApiVersionsResponse must list SaslAuthenticate (36): {:?}",
+        (
+            av_resp.error_code,
+            av_resp.api_keys.iter().any(|k| k.api_key == 17),
+            av_resp.api_keys.iter().any(|k| k.api_key == 36),
+        ) == (0, true, true),
+        "ApiVersionsResponse pre-auth projection mismatch: {:?}",
         av_resp.api_keys
     );
 
@@ -2607,12 +2601,10 @@ async fn unsupported_mechanism_rejected_but_handshake_retryable() {
     let sh_resp =
         SaslHandshakeResponse::decode(&mut cur, 1).expect("SaslHandshakeResponse must decode");
     assert!(
-        sh_resp.error_code == 33, // UNSUPPORTED_SASL_MECHANISM
-        "GSSAPI handshake must return error_code=33, got {:?}",
-        sh_resp.error_code
-    );
-    assert!(
-        sh_resp.mechanisms.iter().any(|m| m == "PLAIN"),
+        (
+            sh_resp.error_code,
+            sh_resp.mechanisms.iter().any(|m| m == "PLAIN")
+        ) == (33, true),
         "error response must include the enabled mechanisms list: {:?}",
         sh_resp.mechanisms
     );
@@ -2805,9 +2797,11 @@ async fn gssapi_handshake_advertised_when_enabled() {
 
     handle.shutdown().await;
 
-    assert!(sh_resp.error_code == 0, "GSSAPI handshake must succeed");
     assert!(
-        sh_resp.mechanisms.iter().any(|m| m == "GSSAPI"),
+        (
+            sh_resp.error_code,
+            sh_resp.mechanisms.iter().any(|m| m == "GSSAPI")
+        ) == (0, true),
         "GSSAPI must be advertised; got {:?}",
         sh_resp.mechanisms
     );

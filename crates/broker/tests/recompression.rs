@@ -268,12 +268,11 @@ async fn topic_compression_lz4_recompresses_producer_gzip_batch() {
 
     let served = fetch_first_batch(addr, TOPIC, topic_id).await;
     check!(
-        served.attributes.compression() == CompressionType::Lz4,
-        "broker must re-encode the gzip batch to lz4 before write"
-    );
-    assert!(served.records.len() == 1);
-    check!(
-        served.records[0].value.as_deref() == Some(payload.as_slice()),
+        (
+            served.attributes.compression(),
+            served.records.len(),
+            served.records[0].value.as_deref()
+        ) == (CompressionType::Lz4, 1, Some(payload.as_slice())),
         "record payload must survive the recompress round-trip"
     );
 
@@ -298,10 +297,11 @@ async fn topic_compression_producer_preserves_producer_gzip() {
 
     let served = fetch_first_batch(addr, TOPIC, topic_id).await;
     assert!(
-        served.attributes.compression() == CompressionType::Gzip,
-        "compression.type=producer must preserve the producer's gzip flag"
+        (
+            served.attributes.compression(),
+            served.records[0].value.as_deref()
+        ) == (CompressionType::Gzip, Some(payload.as_slice()))
     );
-    assert!(served.records[0].value.as_deref() == Some(payload.as_slice()));
 
     handle.shutdown().await;
 }

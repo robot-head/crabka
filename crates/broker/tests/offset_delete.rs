@@ -151,12 +151,14 @@ async fn delete_offsets_from_empty_group_round_trip() {
         })
         .await
         .expect("OffsetDelete");
-    check!(resp.error_code == 0, "top-level NONE");
-    assert!(resp.topics.len() == 1);
-    assert!(resp.topics[0].partitions.len() == 1);
     check!(
-        resp.topics[0].partitions[0].error_code == 0,
-        "partition 0 NONE"
+        (
+            resp.error_code,
+            resp.topics.len(),
+            resp.topics[0].partitions.len(),
+            resp.topics[0].partitions[0].error_code,
+        ) == (0, 1, 1, 0),
+        "OffsetDelete response shape mismatch: {resp:?}"
     );
 
     // Verify partition 0 is gone, partition 1 still has its offset.
@@ -224,9 +226,8 @@ async fn delete_offsets_missing_topic_returns_unknown_topic_or_partition() {
         })
         .await
         .expect("OffsetDelete");
-    assert!(resp.error_code == 0, "top-level NONE");
     assert!(
-        resp.topics[0].partitions[0].error_code == 3,
+        (resp.error_code, resp.topics[0].partitions[0].error_code) == (0, 3),
         "UNKNOWN_TOPIC_OR_PARTITION (3) for missing topic"
     );
 
@@ -264,10 +265,12 @@ async fn delete_offsets_partition_out_of_range_returns_unknown_topic_or_partitio
         })
         .await
         .expect("OffsetDelete");
-    check!(resp.error_code == 0);
-    check!(resp.topics[0].partitions[0].error_code == 0, "p=0 deleted");
     check!(
-        resp.topics[0].partitions[1].error_code == 3,
+        (
+            resp.error_code,
+            resp.topics[0].partitions[0].error_code,
+            resp.topics[0].partitions[1].error_code
+        ) == (0, 0, 3),
         "p=99 UNKNOWN_TOPIC_OR_PARTITION"
     );
 
@@ -353,9 +356,8 @@ async fn delete_offsets_for_subscribed_topic_returns_group_subscribed() {
         })
         .await
         .expect("OffsetDelete");
-    check!(resp.error_code == 0, "top-level NONE");
     check!(
-        resp.topics[0].partitions[0].error_code == 86,
+        (resp.error_code, resp.topics[0].partitions[0].error_code) == (0, 86),
         "GROUP_SUBSCRIBED_TO_TOPIC (86)"
     );
 

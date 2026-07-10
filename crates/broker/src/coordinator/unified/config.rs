@@ -228,10 +228,8 @@ mod tests {
     #[test]
     fn default_registers_uniform_and_range() {
         let cfg = NextGenConfig::default();
-        assert!(cfg.assignors.len() == 2);
         let names: Vec<&str> = cfg.assignors.iter().map(|a| a.name()).collect();
-        assert!(names.contains(&"uniform"));
-        assert!(names.contains(&"range"));
+        assert!(names == vec!["uniform", "range"]);
     }
 
     #[test]
@@ -265,8 +263,16 @@ mod tests {
     fn assignor_enabled_matches_find_assignor() {
         let mut cfg = NextGenConfig::default();
         cfg.register_assignor(Arc::new(TestAssignor("y"))).unwrap();
-        for name in ["uniform", "range", "y", "ghost"] {
-            assert!(cfg.assignor_enabled(name) == cfg.find_assignor(name).is_some());
+        for (case, name) in [
+            ("built-in uniform", "uniform"),
+            ("built-in range", "range"),
+            ("custom", "y"),
+            ("absent", "ghost"),
+        ] {
+            assert!(
+                cfg.assignor_enabled(name) == cfg.find_assignor(name).is_some(),
+                "case {case}"
+            );
         }
     }
 
@@ -282,33 +288,45 @@ mod tests {
     #[test]
     fn migration_policy_from_str_round_trips_all_names() {
         use ConsumerGroupMigrationPolicy as P;
-        for p in [P::Disabled, P::Upgrade, P::Downgrade, P::Bidirectional] {
-            assert!(p.as_str().parse::<P>().unwrap() == p);
+        for (case, input, expected) in [
+            ("disabled", "disabled", P::Disabled),
+            ("upgrade", "upgrade", P::Upgrade),
+            ("downgrade", "downgrade", P::Downgrade),
+            ("bidirectional", "bidirectional", P::Bidirectional),
+            (
+                "mixed-case bidirectional",
+                "BiDirectional",
+                P::Bidirectional,
+            ),
+            ("uppercase upgrade", "UPGRADE", P::Upgrade),
+        ] {
+            assert!(input.parse::<P>().unwrap() == expected, "case {case}");
         }
-        // Case-insensitive.
-        assert!("BiDirectional".parse::<P>().unwrap() == P::Bidirectional);
-        assert!("UPGRADE".parse::<P>().unwrap() == P::Upgrade);
     }
 
     #[test]
     fn migration_policy_from_str_rejects_junk() {
-        assert!("sideways".parse::<ConsumerGroupMigrationPolicy>().is_err());
-        assert!("".parse::<ConsumerGroupMigrationPolicy>().is_err());
+        for (case, input) in [("unknown name", "sideways"), ("empty name", "")] {
+            assert!(
+                input.parse::<ConsumerGroupMigrationPolicy>().is_err(),
+                "case {case}"
+            );
+        }
     }
 
     #[test]
     fn migration_policy_direction_truth_table() {
         use ConsumerGroupMigrationPolicy as P;
         let cases = [
-            (P::Disabled, (false, false)),
-            (P::Upgrade, (true, false)),
-            (P::Downgrade, (false, true)),
-            (P::Bidirectional, (true, true)),
+            ("disabled", P::Disabled, (false, false)),
+            ("upgrade", P::Upgrade, (true, false)),
+            ("downgrade", P::Downgrade, (false, true)),
+            ("bidirectional", P::Bidirectional, (true, true)),
         ];
-        for (policy, want) in cases {
+        for (case, policy, want) in cases {
             assert!(
                 (policy.allows_upgrade(), policy.allows_downgrade()) == want,
-                "policy {policy:?}"
+                "case {case}, policy {policy:?}"
             );
         }
     }

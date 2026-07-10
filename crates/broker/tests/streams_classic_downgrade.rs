@@ -443,9 +443,8 @@ async fn drained_streams_group_downgrades_and_preserves_offsets() {
         .await
         .expect("OffsetFetch");
     let part = &fr.groups[0].topics[0].partitions[0];
-    assert!(part.error_code == ERR_NONE, "OffsetFetch error: {part:?}");
     assert!(
-        part.committed_offset == 42,
+        (part.error_code, part.committed_offset) == (ERR_NONE, 42),
         "committed offset must survive classic↔streams downgrade, got {}",
         part.committed_offset
     );
@@ -553,9 +552,11 @@ async fn converted_group_admin_views_respect_type_lock() {
         .await
         .expect("ListGroups");
     let rows: Vec<_> = lg.groups.iter().filter(|g| g.group_id == "g3").collect();
-    assert!(rows.len() == 1, "g3 listed once, got {}", rows.len());
     assert!(
-        rows[0].group_type.eq_ignore_ascii_case("streams"),
+        (
+            rows.len(),
+            rows[0].group_type.eq_ignore_ascii_case("streams"),
+        ) == (1, true),
         "g3 must be typed streams, got {:?}",
         rows[0].group_type
     );

@@ -177,8 +177,7 @@ mod tests {
 
         let recovered = recover_from_partition_tail(&partition).expect("tail record");
 
-        assert!(recovered.0 == seq + 1);
-        assert!(recovered.1 == chain_hash(&GENESIS_HEAD, seq, value));
+        assert!(recovered == (seq + 1, chain_hash(&GENESIS_HEAD, seq, value)));
     }
 
     #[tokio::test]

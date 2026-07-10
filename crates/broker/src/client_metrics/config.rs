@@ -176,26 +176,46 @@ mod tests {
 
     #[test]
     fn effective_interval_defaults_and_clamps() {
-        let mut m = std::collections::BTreeMap::new();
-        assert_eq!(effective_interval_ms(&m), DEFAULT_INTERVAL_MS);
-        m.insert("interval.ms".to_string(), "60000".to_string());
-        assert_eq!(effective_interval_ms(&m), 60_000);
+        for (case, interval, expected) in [
+            ("default", None, DEFAULT_INTERVAL_MS),
+            ("configured", Some("60000"), 60_000),
+        ] {
+            let mut configs = std::collections::BTreeMap::new();
+            if let Some(interval) = interval {
+                configs.insert("interval.ms".to_string(), interval.to_string());
+            }
+            assert_eq!(effective_interval_ms(&configs), expected, "case {case}");
+        }
     }
 
     #[test]
     fn parse_match_rules_roundtrip() {
         let rules = parse_match_rules("client_id=svc-.*,client_software_name=java").unwrap();
-        assert_eq!(rules.len(), 2);
-        assert!(rules.iter().any(|r| r.selector == MatchSelector::ClientId));
+        let parsed: Vec<_> = rules
+            .iter()
+            .map(|rule| (rule.selector, rule.pattern.as_str()))
+            .collect();
+        assert_eq!(
+            parsed,
+            vec![
+                (MatchSelector::ClientId, "svc-.*"),
+                (MatchSelector::ClientSoftwareName, "java"),
+            ]
+        );
     }
 
     #[test]
     fn parse_metrics_collapses_star() {
-        assert_eq!(parse_metrics("*"), vec!["*".to_string()]);
-        assert_eq!(parse_metrics(""), Vec::<String>::new());
-        assert_eq!(
-            parse_metrics("a.,b."),
-            vec!["a.".to_string(), "b.".to_string()]
-        );
+        for (case, input, expected) in [
+            ("all metrics", "*", vec!["*".to_string()]),
+            ("empty", "", Vec::new()),
+            (
+                "prefixes",
+                "a.,b.",
+                vec!["a.".to_string(), "b.".to_string()],
+            ),
+        ] {
+            assert_eq!(parse_metrics(input), expected, "case {case}");
+        }
     }
 }

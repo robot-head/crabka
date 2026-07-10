@@ -205,29 +205,33 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_key_round_trip() {
-        let key = ShareStateKey {
-            record_type: KEY_SHARE_SNAPSHOT,
-            group_id: "g1".into(),
-            topic_id: Uuid::from_bytes([7; 16]),
-            partition: 3,
-        };
-        let bytes = encode_state_key(&key);
-        assert!(peek_type(&bytes) == KEY_SHARE_SNAPSHOT);
-        assert!(parse_state_key(&bytes).unwrap() == key);
-    }
-
-    #[test]
-    fn update_key_round_trip() {
-        let key = ShareStateKey {
-            record_type: KEY_SHARE_UPDATE,
-            group_id: "another-group".into(),
-            topic_id: Uuid::from_bytes([1; 16]),
-            partition: 0,
-        };
-        let bytes = encode_state_key(&key);
-        assert!(peek_type(&bytes) == KEY_SHARE_UPDATE);
-        assert!(parse_state_key(&bytes).unwrap() == key);
+    fn key_round_trip_scenarios() {
+        for (case, key, expected_type) in [
+            (
+                "snapshot key",
+                ShareStateKey {
+                    record_type: KEY_SHARE_SNAPSHOT,
+                    group_id: "g1".into(),
+                    topic_id: Uuid::from_bytes([7; 16]),
+                    partition: 3,
+                },
+                KEY_SHARE_SNAPSHOT,
+            ),
+            (
+                "update key",
+                ShareStateKey {
+                    record_type: KEY_SHARE_UPDATE,
+                    group_id: "another-group".into(),
+                    topic_id: Uuid::from_bytes([1; 16]),
+                    partition: 0,
+                },
+                KEY_SHARE_UPDATE,
+            ),
+        ] {
+            let bytes = encode_state_key(&key);
+            assert!(peek_type(&bytes) == expected_type, "case {case}");
+            assert!(parse_state_key(&bytes).unwrap() == key, "case {case}");
+        }
     }
 
     #[test]
@@ -327,6 +331,6 @@ mod tests {
             state_batches: vec![],
         };
         let decoded = ShareSnapshotValue::decode(&v.encode()).unwrap();
-        assert!(decoded.delivery_complete_count == 1_234_567);
+        assert!(decoded == v);
     }
 }

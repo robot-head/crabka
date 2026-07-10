@@ -276,37 +276,27 @@ async fn persister_round_trip() {
 
     // Read full state.
     let r = read_state(&client, "g1", tid, 0).await;
-    check!(r.error_code == 0, "read error: {}", r.error_code);
     check!(
-        r.start_offset == 5,
-        "SPSO must be 5, got {}",
-        r.start_offset
-    );
-    check!(
-        r.state_batches
-            .iter()
-            .any(|b| b.first_offset == 5 && b.last_offset == 9),
+        (
+            r.error_code,
+            r.start_offset,
+            r.state_batches
+                .iter()
+                .any(|b| b.first_offset == 5 && b.last_offset == 9)
+        ) == (0, 5, true),
         "written batch must be present: {:?}",
         r.state_batches
     );
 
     // Summary matches.
     let s = read_summary(&client, "g1", tid, 0).await;
-    check!(s.error_code == 0, "summary error: {}", s.error_code);
     check!(
-        s.start_offset == 5,
-        "summary SPSO 5, got {}",
-        s.start_offset
-    );
-    check!(
-        s.state_epoch == 0,
-        "summary state_epoch 0, got {}",
-        s.state_epoch
-    );
-    check!(
-        s.delivery_complete_count == 2,
-        "summary DCC 2, got {}",
-        s.delivery_complete_count
+        (
+            s.error_code,
+            s.start_offset,
+            s.state_epoch,
+            s.delivery_complete_count
+        ) == (0, 5, 0, 2)
     );
 
     // Delete, then a fresh read returns the missing/initial sentinel.
@@ -333,12 +323,11 @@ async fn persister_round_trip() {
 
     let after = read_state(&client, "g1", tid, 0).await;
     assert!(
-        after.error_code == 0,
-        "read-after-delete error: {}",
-        after.error_code
-    );
-    assert!(
-        after.start_offset == -1 && after.state_batches.is_empty(),
+        (
+            after.error_code,
+            after.start_offset,
+            after.state_batches.is_empty()
+        ) == (0, -1, true),
         "deleted key must read as missing/initial, got start_offset {} batches {:?}",
         after.start_offset,
         after.state_batches

@@ -422,14 +422,24 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&bytes);
 
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.throttle_time_ms == 0);
-        let resource = resp
-            .config_resources
-            .iter()
-            .find(|r| r.resource_name == "orders")
-            .expect("seeded topic resource");
-        assert!(resource.resource_type == RESOURCE_TYPE_TOPIC);
+        let expected = ListConfigResourcesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            config_resources: vec![
+                ConfigResource {
+                    resource_type: RESOURCE_TYPE_TOPIC,
+                    resource_name: "__consumer_offsets".into(),
+                    ..Default::default()
+                },
+                ConfigResource {
+                    resource_type: RESOURCE_TYPE_TOPIC,
+                    resource_name: "orders".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

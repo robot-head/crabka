@@ -473,19 +473,32 @@ mod tests {
         };
         let res = super::describe_one(&img, r);
         assert_eq!(res.error_code, crate::codes::NONE);
-        let by_name: std::collections::HashMap<_, _> =
-            res.configs.iter().map(|c| (c.name.as_str(), c)).collect();
-        let cases = [
-            ("metrics", Some("a."), super::CONFIG_SOURCE_CLIENT_METRICS),
-            ("interval.ms", Some("300000"), super::CONFIG_SOURCE_DEFAULT),
-        ];
-        for (key, want_value, want_source) in cases {
-            assert!(
-                (by_name[key].value.as_deref(), by_name[key].config_source)
-                    == (want_value, want_source),
-                "key {key}"
-            );
-        }
+        let by_name: std::collections::BTreeMap<_, _> = res
+            .configs
+            .into_iter()
+            .map(|config| (config.name.clone(), config))
+            .collect();
+        let expected = std::collections::BTreeMap::from([
+            (
+                "interval.ms".to_string(),
+                DescribeConfigsResourceResult {
+                    name: "interval.ms".into(),
+                    value: Some("300000".into()),
+                    config_source: super::CONFIG_SOURCE_DEFAULT,
+                    ..Default::default()
+                },
+            ),
+            (
+                "metrics".to_string(),
+                DescribeConfigsResourceResult {
+                    name: "metrics".into(),
+                    value: Some("a.".into()),
+                    config_source: super::CONFIG_SOURCE_CLIENT_METRICS,
+                    ..Default::default()
+                },
+            ),
+        ]);
+        assert!(by_name == expected);
     }
 
     fn anon() -> crabka_security::Principal {

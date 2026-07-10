@@ -177,41 +177,52 @@ mod tests {
     use crate::test_support::start_broker_with_authorizer as start_broker;
 
     #[test]
-    fn committed_maps_to_none() {
-        let (code, msg) = outcome_to_code(Ok(ReconfigOutcome::Committed));
-        assert!(code == codes::NONE);
-        assert!(msg.is_none());
-    }
+    fn outcomes_map_to_expected_error_and_message() {
+        let cases = [
+            (
+                "committed",
+                Ok(ReconfigOutcome::Committed),
+                (codes::NONE, None),
+            ),
+            (
+                "not leader with known leader",
+                Ok(ReconfigOutcome::NotLeader {
+                    leader: Some(crabka_audit::NodeId(3)),
+                }),
+                (
+                    codes::NOT_LEADER_OR_FOLLOWER,
+                    Some("not the raft leader; current leader is 3".to_string()),
+                ),
+            ),
+            (
+                "voter not caught up",
+                Err(RaftError::VoterNotCaughtUp {
+                    id: crabka_audit::NodeId(7),
+                    lag: 99,
+                }),
+                (
+                    codes::INVALID_REQUEST,
+                    Some("voter 7 not caught up (lag 99)".to_string()),
+                ),
+            ),
+            (
+                "reconfiguration in progress",
+                Err(RaftError::ReconfigInProgress),
+                (
+                    codes::REQUEST_TIMED_OUT,
+                    Some("another reconfiguration is in progress".to_string()),
+                ),
+            ),
+            (
+                "reconfiguration rejected",
+                Err(RaftError::ReconfigRejected("nope".into())),
+                (codes::INVALID_REQUEST, Some("nope".to_string())),
+            ),
+        ];
 
-    #[test]
-    fn not_leader_maps_to_not_leader_or_follower() {
-        let (code, msg) = outcome_to_code(Ok(ReconfigOutcome::NotLeader {
-            leader: Some(crabka_audit::NodeId(3)),
-        }));
-        assert!(code == codes::NOT_LEADER_OR_FOLLOWER);
-        assert!(msg.unwrap().contains('3'));
-    }
-
-    #[test]
-    fn not_caught_up_maps_to_invalid_request() {
-        let (code, _) = outcome_to_code(Err(RaftError::VoterNotCaughtUp {
-            id: crabka_audit::NodeId(7),
-            lag: 99,
-        }));
-        assert!(code == codes::INVALID_REQUEST);
-    }
-
-    #[test]
-    fn in_progress_maps_to_request_timed_out() {
-        let (code, _) = outcome_to_code(Err(RaftError::ReconfigInProgress));
-        assert!(code == codes::REQUEST_TIMED_OUT);
-    }
-
-    #[test]
-    fn rejected_maps_to_invalid_request_with_reason() {
-        let (code, msg) = outcome_to_code(Err(RaftError::ReconfigRejected("nope".into())));
-        assert!(code == codes::INVALID_REQUEST);
-        assert!(msg.as_deref() == Some("nope"));
+        for (case, outcome, expected) in cases {
+            assert!(outcome_to_code(outcome) == expected, "case: {case}");
+        }
     }
 
     /// Decode→encode round-trip at min and max versions. Guards against
@@ -232,7 +243,7 @@ mod tests {
             let bytes = encode_resp(version, &resp).expect("encode");
             let mut cur: &[u8] = &bytes;
             let decoded = AddRaftVoterResponse::decode(&mut cur, version).expect("decode");
-            assert!(decoded.error_code == codes::NOT_LEADER_OR_FOLLOWER);
+            assert!(decoded == resp, "response at v{version}");
             assert!(cur.is_empty(), "all bytes consumed at v{version}");
         }
     }
@@ -256,8 +267,12 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.error_message.as_deref() == Some("add-raft-voter denied"));
+        let expected = AddRaftVoterResponse {
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("add-raft-voter denied".into()),
+            ..Default::default()
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 

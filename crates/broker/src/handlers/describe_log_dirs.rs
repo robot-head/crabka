@@ -349,13 +349,16 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("t".to_string(), vec![0, 2]);
         let f = Filter::Topics(m);
-        for (topic, partition, want) in [
-            ("t", 0, true),
-            ("t", 1, false),
-            ("t", 2, true),
-            ("other", 0, false),
+        for (case, topic, partition, want) in [
+            ("selected first partition", "t", 0, true),
+            ("unselected partition", "t", 1, false),
+            ("selected second partition", "t", 2, true),
+            ("other topic", "other", 0, false),
         ] {
-            assert!(f.allows(topic, partition) == want, "{topic}-{partition}");
+            assert!(
+                f.allows(topic, partition) == want,
+                "case: {case}; {topic}-{partition}"
+            );
         }
     }
 
@@ -364,8 +367,15 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert("t".to_string(), vec![]);
         let f = Filter::Topics(m);
-        for (topic, partition, want) in [("t", 0, true), ("t", 7, true), ("u", 0, false)] {
-            assert!(f.allows(topic, partition) == want, "{topic}-{partition}");
+        for (case, topic, partition, want) in [
+            ("matching topic first partition", "t", 0, true),
+            ("matching topic arbitrary partition", "t", 7, true),
+            ("other topic", "u", 0, false),
+        ] {
+            assert!(
+                f.allows(topic, partition) == want,
+                "case: {case}; {topic}-{partition}"
+            );
         }
     }
 

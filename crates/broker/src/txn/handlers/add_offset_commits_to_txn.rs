@@ -153,22 +153,25 @@ mod tests {
     }
 
     #[test]
-    fn encode_err_preserves_error_code_on_the_wire() {
-        let bytes = encode_err(4, codes::NOT_COORDINATOR).expect("encode error");
-        assert!(!bytes.is_empty());
-        let resp = decode(&bytes, 4);
+    fn encoded_responses_preserve_wire_fields() {
+        let cases: [(&str, fn(i16) -> Result<Bytes, BrokerError>, i16); 2] = [
+            (
+                "not coordinator",
+                |version| encode_err(version, codes::NOT_COORDINATOR),
+                codes::NOT_COORDINATOR,
+            ),
+            ("success", encode_ok, codes::NONE),
+        ];
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NOT_COORDINATOR);
-    }
-
-    #[test]
-    fn encode_ok_preserves_success_code_on_the_wire() {
-        let bytes = encode_ok(4).expect("encode ok");
-        assert!(!bytes.is_empty());
-        let resp = decode(&bytes, 4);
-
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
+        for (case, encode, expected_code) in cases {
+            let bytes = encode(4).unwrap_or_else(|error| panic!("{case}: {error}"));
+            assert!(!bytes.is_empty(), "case: {case}");
+            let resp = decode(&bytes, 4);
+            let expected = AddOffsetsToTxnResponse {
+                error_code: expected_code,
+                ..Default::default()
+            };
+            assert!(resp == expected, "case: {case}");
+        }
     }
 }

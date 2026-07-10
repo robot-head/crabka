@@ -363,14 +363,20 @@ mod tests {
         (resp, broker_handle, dir)
     }
 
-    fn assert_ok_row(resp: &UpdateFeaturesResponse, feature: &str) {
-        let row = resp
-            .results
-            .iter()
-            .find(|row| row.feature == feature)
-            .expect("feature result row");
-        assert!(row.error_code == codes::NONE, "{resp:?}");
-        assert!(row.error_message.is_none(), "{resp:?}");
+    fn assert_ok_response(resp: &UpdateFeaturesResponse, feature: &str) {
+        let expected = UpdateFeaturesResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            results: vec![UpdatableFeatureResult {
+                feature: feature.to_string(),
+                error_code: codes::NONE,
+                error_message: None,
+                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+            }],
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(resp == &expected, "{resp:?}");
     }
 
     fn assert_row_error(resp: &UpdateFeaturesResponse, feature: &str, message: &str) {
@@ -415,14 +421,14 @@ mod tests {
         let cases = [
             // (allow_downgrade, upgrade_type, want); allow_downgrade is
             // ignored at v1+ — only upgrade_type decides.
-            (true, 1, false),
-            (false, 2, true),
-            (false, 3, true),
+            ("upgrade", true, 1, false),
+            ("safe downgrade", false, 2, true),
+            ("unsafe downgrade", false, 3, true),
         ];
-        for (allow_downgrade, upgrade_type, want) in cases {
+        for (case, allow_downgrade, upgrade_type, want) in cases {
             assert!(
                 downgrade_allowed(1, allow_downgrade, upgrade_type) == want,
-                "allow_downgrade {allow_downgrade}, upgrade_type {upgrade_type}"
+                "case: {case}; allow_downgrade {allow_downgrade}, upgrade_type {upgrade_type}"
             );
         }
     }
@@ -430,16 +436,26 @@ mod tests {
     #[test]
     fn row_sets_message_only_on_error() {
         let ok = row("metadata.version".into(), codes::NONE, "x");
-        assert!(ok.feature == "metadata.version");
-        assert!(ok.error_message.is_none());
+        let expected_ok = UpdatableFeatureResult {
+            feature: "metadata.version".into(),
+            error_code: codes::NONE,
+            error_message: None,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(ok == expected_ok);
 
         let err = row(
             "metadata.version".into(),
             codes::INVALID_UPDATE_VERSION,
             "bad",
         );
-        assert!(err.feature == "metadata.version");
-        assert!(err.error_message.as_deref() == Some("bad"));
+        let expected_err = UpdatableFeatureResult {
+            feature: "metadata.version".into(),
+            error_code: codes::INVALID_UPDATE_VERSION,
+            error_message: Some("bad".into()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert!(err == expected_err);
     }
 
     #[test]
@@ -660,8 +676,7 @@ mod tests {
 
         let resp = handle(&broker, req, version, &ctx).await;
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert_ok_row(&resp, crate::features::METADATA_VERSION);
+        assert_ok_response(&resp, crate::features::METADATA_VERSION);
         wait_for_finalized_feature(
             &broker,
             crate::features::METADATA_VERSION,
@@ -743,8 +758,7 @@ mod tests {
         let (resp, broker_handle, _dir) =
             call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert_ok_row(&resp, crate::features::METADATA_VERSION);
+        assert_ok_response(&resp, crate::features::METADATA_VERSION);
         broker_handle.shutdown().await;
     }
 
@@ -773,8 +787,7 @@ mod tests {
         let (resp, broker_handle, _dir) =
             call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert_ok_row(&resp, crate::features::METADATA_VERSION);
+        assert_ok_response(&resp, crate::features::METADATA_VERSION);
         broker_handle.shutdown().await;
     }
 

@@ -137,18 +137,8 @@ mod tests {
             let bytes = encode_resp(version, &resp).expect("encode");
             let mut cur: &[u8] = &bytes;
             let decoded = RemoveRaftVoterResponse::decode(&mut cur, version).expect("decode");
-            assert!(
-                (
-                    decoded.error_code,
-                    decoded.error_message.as_deref(),
-                    cur.is_empty(),
-                ) == (
-                    codes::INVALID_REQUEST,
-                    Some("cannot remove the last voter"),
-                    true,
-                ),
-                "all bytes consumed at v{version}"
-            );
+            assert!(decoded == resp, "response at v{version}");
+            assert!(cur.is_empty(), "all bytes consumed at v{version}");
         }
     }
 
@@ -171,8 +161,12 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.error_message.as_deref() == Some("remove-raft-voter denied"));
+        let expected = RemoveRaftVoterResponse {
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("remove-raft-voter denied".into()),
+            ..Default::default()
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 

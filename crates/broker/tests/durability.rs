@@ -319,8 +319,10 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
         .await
         .expect("Fetch");
     let pd = &resp.responses[0].partitions[0];
-    assert!(pd.error_code == 0);
-    assert!(pd.high_watermark == 3, "HW should equal LEO for rf=1");
+    assert!(
+        (pd.error_code, pd.high_watermark) == (0, 3),
+        "HW should equal LEO for rf=1"
+    );
 
     broker.shutdown().await;
 }

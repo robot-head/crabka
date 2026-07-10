@@ -347,7 +347,7 @@ fn encode_err_all(
 mod tests {
     use std::{collections::HashSet, path::Path, sync::Arc};
 
-    use assert2::{assert, check};
+    use assert2::assert;
     use crabka_log::{Log, LogConfig};
     use crabka_protocol::owned::{
         txn_offset_commit_request::{TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic},
@@ -518,11 +518,29 @@ mod tests {
             .expect("read offsets log");
         assert!(read.batches.len() == 1);
         let batch = &read.batches[0];
-        check!(batch.attributes.is_transactional());
-        check!(batch.max_timestamp == 12_345);
-        check!(batch.producer_id == 47);
-        check!(batch.producer_epoch == 5);
-        check!(batch.last_offset_delta == 1);
+        assert!(
+            (
+                batch.base_offset,
+                batch.partition_leader_epoch,
+                batch.attributes,
+                batch.last_offset_delta,
+                batch.base_timestamp,
+                batch.max_timestamp,
+                batch.producer_id,
+                batch.producer_epoch,
+                batch.base_sequence,
+            ) == (
+                0,
+                -1,
+                batch.attributes.with_transactional(true),
+                1,
+                12_345,
+                12_345,
+                47,
+                5,
+                0,
+            )
+        );
         let record_rows: Vec<_> = batch
             .records
             .iter()

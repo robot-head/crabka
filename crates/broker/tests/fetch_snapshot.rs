@@ -69,14 +69,13 @@ async fn fetch_snapshot_serves_metadata_snapshot() {
         assert!(out.error_code == 0, "top-level error_code");
         let part = &out.topics[0].partitions[0];
         if part.error_code == 0 {
-            check!(part.index == 0);
             check!(
-                part.size > 0,
-                "served snapshot reports a non-zero total size"
-            );
-            check!(
-                part.unaligned_records.payload_len() > 0,
-                "served snapshot page carries bytes"
+                (
+                    part.index,
+                    part.size > 0,
+                    part.unaligned_records.payload_len() > 0
+                ) == (0, true, true),
+                "served snapshot must report index 0, nonzero size, and payload bytes"
             );
             break;
         }
@@ -104,9 +103,8 @@ async fn fetch_snapshot_rejects_non_metadata_topic() {
     let mut req = fetch_at(0);
     req.topics[0].name = "not-metadata".into();
     let out = env.client.send(req).await.unwrap();
-    assert!(out.error_code == 0, "top-level error_code is success");
     // INVALID_TOPIC_EXCEPTION (17) for any topic other than __cluster_metadata.
-    assert!(out.topics[0].partitions[0].error_code == 17);
+    assert!((out.error_code, out.topics[0].partitions[0].error_code) == (0, 17));
 
     env.broker.shutdown().await;
 }

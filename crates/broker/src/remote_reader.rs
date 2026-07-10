@@ -665,8 +665,13 @@ mod tests {
         // 5 trailing bytes that don't complete a 24-byte entry.
         buf.extend_from_slice(&[0xAA; 5]);
         let entries = parse_txn_index(&buf).expect("valid txn index");
-        assert!(entries.len() == 1, "partial trailing entry ignored");
-        assert!(entries[0].producer_id.get() == 1000);
+        assert!(
+            entries
+                .iter()
+                .map(|entry| entry.producer_id.get())
+                .collect::<Vec<_>>()
+                == vec![1000]
+        );
     }
 
     #[test]

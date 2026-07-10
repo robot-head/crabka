@@ -109,10 +109,15 @@ mod tests {
     #[test]
     fn resolve_timeout_2pc_is_sentinel_regardless_of_request() {
         // Even an out-of-range request (-5) is ignored under 2PC.
-        for requested in [30_000, 0, i32::MAX, -5] {
+        for (case, requested) in [
+            ("normal timeout ignored", 30_000),
+            ("zero timeout ignored", 0),
+            ("maximum timeout ignored", i32::MAX),
+            ("negative timeout ignored", -5),
+        ] {
             assert!(
                 resolve_txn_timeout(true, requested) == NO_TIMEOUT_MS,
-                "{requested}"
+                "case: {case}; requested {requested}"
             );
         }
     }
@@ -120,14 +125,25 @@ mod tests {
     #[test]
     fn resolve_timeout_non_2pc_clamps_to_kafka_bounds() {
         // Below the floor clamps up; above the ceiling clamps down.
-        for (requested, want) in [
-            (30_000, 30_000),
-            (0, MIN_TXN_TIMEOUT_MS),
-            (-1, MIN_TXN_TIMEOUT_MS),
-            (i32::MAX, MAX_TXN_TIMEOUT_MS),
-            (MAX_TXN_TIMEOUT_MS + 1, MAX_TXN_TIMEOUT_MS),
+        for (case, requested, want) in [
+            ("in-range timeout", 30_000, 30_000),
+            ("zero clamps to floor", 0, MIN_TXN_TIMEOUT_MS),
+            ("negative clamps to floor", -1, MIN_TXN_TIMEOUT_MS),
+            (
+                "maximum integer clamps to ceiling",
+                i32::MAX,
+                MAX_TXN_TIMEOUT_MS,
+            ),
+            (
+                "above maximum clamps to ceiling",
+                MAX_TXN_TIMEOUT_MS + 1,
+                MAX_TXN_TIMEOUT_MS,
+            ),
         ] {
-            assert!(resolve_txn_timeout(false, requested) == want, "{requested}");
+            assert!(
+                resolve_txn_timeout(false, requested) == want,
+                "case: {case}; {requested}"
+            );
         }
     }
 

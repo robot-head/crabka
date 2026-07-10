@@ -388,9 +388,15 @@ mod tests {
     #[test]
     fn controller_listener_uses_bound_controller_endpoint() {
         let listener = controller_listener("192.0.2.10:19093".parse().unwrap());
-        assert_eq!(listener.name, "CONTROLLER");
-        assert_eq!(listener.host, "192.0.2.10");
-        assert_eq!(listener.port, 19093);
+        assert_eq!(
+            listener,
+            Listener {
+                name: "CONTROLLER".to_string(),
+                host: "192.0.2.10".to_string(),
+                port: 19093,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
@@ -401,10 +407,18 @@ mod tests {
                 .map(|s| s.parse().unwrap())
                 .collect();
 
-        assert_eq!(select_bootstrap_server(&servers, 0), servers[0]);
-        assert_eq!(select_bootstrap_server(&servers, 2), servers[2]);
-        assert_eq!(select_bootstrap_server(&servers, 3), servers[0]);
-        assert_eq!(select_bootstrap_server(&servers, 5), servers[2]);
+        for (case, attempt, expected_index) in [
+            ("first server", 0, 0),
+            ("last server", 2, 2),
+            ("wrap to first", 3, 0),
+            ("wrap to last", 5, 2),
+        ] {
+            assert_eq!(
+                select_bootstrap_server(&servers, attempt),
+                servers[expected_index],
+                "case {case}"
+            );
+        }
     }
 
     #[test]
@@ -419,16 +433,23 @@ mod tests {
             listener,
         );
 
-        let cluster_id_string = cluster_id.to_string();
-        assert_eq!(req.cluster_id.as_deref(), Some(cluster_id_string.as_str()));
-        assert_eq!(req.timeout_ms, 30_000);
-        assert_eq!(req.voter_id, 7);
-        assert_eq!(req.voter_directory_id.0, *dir.as_bytes());
-        assert_eq!(req.listeners.len(), 1);
-        assert_eq!(req.listeners[0].name, "CONTROLLER");
-        assert_eq!(req.listeners[0].host, "127.0.0.1");
-        assert_eq!(req.listeners[0].port, 19093);
-        assert!(req.ack_when_committed);
+        assert_eq!(
+            req,
+            AddRaftVoterRequest {
+                cluster_id: Some(cluster_id.to_string()),
+                timeout_ms: 30_000,
+                voter_id: 7,
+                voter_directory_id: crabka_protocol::primitives::uuid::Uuid(*dir.as_bytes()),
+                listeners: vec![Listener {
+                    name: "CONTROLLER".to_string(),
+                    host: "127.0.0.1".to_string(),
+                    port: 19093,
+                    ..Default::default()
+                }],
+                ack_when_committed: true,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
@@ -465,26 +486,27 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            log_join_outcome(NodeId(1), target, &response(codes::NONE)),
-            JoinOutcome::Accepted
-        );
-        assert_eq!(
-            log_join_outcome(NodeId(1), target, &response(codes::NOT_LEADER_OR_FOLLOWER)),
-            JoinOutcome::NotLeader
-        );
-        assert_eq!(
-            log_join_outcome(NodeId(1), target, &response(codes::REQUEST_TIMED_OUT)),
-            JoinOutcome::TimedOut
-        );
-        assert_eq!(
-            log_join_outcome(NodeId(1), target, &response(codes::INVALID_REQUEST)),
-            JoinOutcome::NotCaughtUp
-        );
-        assert_eq!(
-            log_join_outcome(NodeId(1), target, &response(1234)),
-            JoinOutcome::Unexpected(1234)
-        );
+        for (case, error_code, expected) in [
+            ("accepted", codes::NONE, JoinOutcome::Accepted),
+            (
+                "not leader",
+                codes::NOT_LEADER_OR_FOLLOWER,
+                JoinOutcome::NotLeader,
+            ),
+            ("timed out", codes::REQUEST_TIMED_OUT, JoinOutcome::TimedOut),
+            (
+                "not caught up",
+                codes::INVALID_REQUEST,
+                JoinOutcome::NotCaughtUp,
+            ),
+            ("unexpected", 1234, JoinOutcome::Unexpected(1234)),
+        ] {
+            assert_eq!(
+                log_join_outcome(NodeId(1), target, &response(error_code)),
+                expected,
+                "case {case}"
+            );
+        }
     }
 
     #[tokio::test]

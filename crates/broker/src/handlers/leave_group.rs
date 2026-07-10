@@ -123,14 +123,7 @@ mod tests {
         let mut cur: &[u8] = &bytes;
         let decoded =
             LeaveGroupResponse::decode(&mut cur, leave_group_response::MAX_VERSION).unwrap();
-        assert!(
-            (
-                decoded.error_code,
-                decoded.throttle_time_ms,
-                decoded.members,
-                cur.is_empty(),
-            ) == (codes::GROUP_AUTHORIZATION_FAILED, 0, vec![], true),
-            "response decoder consumed all bytes"
-        );
+        assert!(decoded == resp);
+        assert!(cur.is_empty(), "response decoder consumed all bytes");
     }
 }

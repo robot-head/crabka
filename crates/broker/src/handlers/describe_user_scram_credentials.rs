@@ -350,33 +350,27 @@ mod tests {
             ],
         );
 
-        assert!(
-            resp.results.len() == 2,
-            "duplicate users collapse to one row"
-        );
-        let alice_rows: Vec<_> = resp.results.iter().filter(|r| r.user == "alice").collect();
-        assert!(
-            alice_rows.len() == 1,
-            "alice should appear once: {:?}",
-            resp.results
-        );
-        assert!(alice_rows[0].error_code == KAFKA_DUPLICATE_RESOURCE);
-        assert!(alice_rows[0].credential_infos.is_empty());
-
-        let bob = resp
-            .results
-            .iter()
-            .find(|r| r.user == "bob")
-            .expect("distinct users remain in the response");
-        assert!(bob.error_code == 0);
-        assert!(
-            bob.credential_infos
-                == vec![CredentialInfo {
-                    mechanism: 2,
-                    iterations: 8192,
-                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
-                }]
-        );
+        let expected = DescribeUserScramCredentialsResponse {
+            results: vec![
+                DescribeUserScramCredentialsResult {
+                    user: "alice".into(),
+                    error_code: KAFKA_DUPLICATE_RESOURCE,
+                    error_message: Some(format!("{DESCRIBE_DUPLICATE_USER}: alice")),
+                    ..Default::default()
+                },
+                DescribeUserScramCredentialsResult {
+                    user: "bob".into(),
+                    credential_infos: vec![CredentialInfo {
+                        mechanism: 2,
+                        iterations: 8192,
+                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        assert!(resp == expected);
     }
 
     #[test]
@@ -434,8 +428,7 @@ mod tests {
         let resp: DescribeUserScramCredentialsResponse =
             crate::test_support::decode_response(&bytes, 0);
 
-        assert!(resp.error_code == 0, "Cluster Describe should authorize");
-        assert!(resp.results.is_empty());
+        assert!(resp == DescribeUserScramCredentialsResponse::default());
         broker_handle.shutdown().await;
     }
 
@@ -461,8 +454,12 @@ mod tests {
         let resp: DescribeUserScramCredentialsResponse =
             crate::test_support::decode_response(&bytes, 0);
 
-        assert!(resp.error_code == CLUSTER_AUTHORIZATION_FAILED);
-        assert!(resp.results.is_empty());
+        let expected = DescribeUserScramCredentialsResponse {
+            error_code: CLUSTER_AUTHORIZATION_FAILED,
+            error_message: Some("describe-user-scram-credentials denied".into()),
+            ..Default::default()
+        };
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

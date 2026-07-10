@@ -170,22 +170,29 @@ mod tests {
     #[test]
     fn ok_row_preserves_requested_group_id() {
         let row = ok_row("orders");
-        assert!(row.group_id == "orders");
-        assert!(row.error_code == codes::NONE);
+        let expected = DescribedGroup {
+            group_id: "orders".into(),
+            ..Default::default()
+        };
+        assert!(row == expected);
     }
 
     #[test]
     fn group_version_gate_distinguishes_disabled_and_enabled_images() {
         // (finalized group.version level; None = fresh image) → disabled?
-        let cases = [(None, true), (Some(1), false), (Some(0), true)];
-        for (level, want_disabled) in cases {
+        let cases = [
+            ("fresh image", None, true),
+            ("enabled level", Some(1), false),
+            ("explicitly disabled level", Some(0), true),
+        ];
+        for (case, level, want_disabled) in cases {
             let image = match level {
                 None => MetadataImage::new(uuid::Uuid::nil()),
                 Some(level) => image_with_group_version(level),
             };
             assert!(
                 group_version_disabled(&image) == want_disabled,
-                "level {level:?}"
+                "case: {case}; level {level:?}"
             );
         }
     }
@@ -198,11 +205,15 @@ mod tests {
 
     #[test]
     fn group_state_reflects_member_count() {
-        let cases = [(0, "EMPTY"), (1, "STABLE"), (3, "STABLE")];
-        for (members, want) in cases {
+        let cases = [
+            ("empty group", 0, "EMPTY"),
+            ("single member", 1, "STABLE"),
+            ("multiple members", 3, "STABLE"),
+        ];
+        for (case, members, want) in cases {
             assert!(
                 group_state_for_member_count(members) == want,
-                "members {members}"
+                "case: {case}; members {members}"
             );
         }
     }

@@ -875,8 +875,10 @@ mod tests {
         assert!(authenticate[0..7] == [0, 0, 0, 3, 0, 0, 0]);
 
         let principal = server.await.expect("server task").expect("authenticated");
-        assert!(principal.name == "broker");
-        assert!(principal.auth_method == crabka_security::AuthMethod::SaslPlain);
+        assert!(
+            (principal.name.as_str(), principal.auth_method)
+                == ("broker", crabka_security::AuthMethod::SaslPlain)
+        );
     }
 
     #[tokio::test]

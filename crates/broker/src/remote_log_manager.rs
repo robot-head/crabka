@@ -1482,9 +1482,12 @@ mod tests {
         // now=10_000, retention=500ms → seg with max_ts < 9_500 is deletable.
         // seg0 (100) + seg1 (200) qualify; seg2 (9_500) stops the walk.
         let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
-        assert!(out.len() == 2);
-        check!(out[0].start_offset() == 0);
-        check!(out[1].start_offset() == 10);
+        assert!(
+            out.iter()
+                .map(|segment| segment.start_offset())
+                .collect::<Vec<_>>()
+                == vec![0, 10]
+        );
     }
 
     #[test]
@@ -1544,8 +1547,12 @@ mod tests {
                                                      // walk stopped at seg1 already.
         ];
         let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
-        assert!(out.len() == 1);
-        assert!(out[0].start_offset() == 0);
+        assert!(
+            out.iter()
+                .map(|segment| segment.start_offset())
+                .collect::<Vec<_>>()
+                == vec![0]
+        );
     }
 
     #[tokio::test]

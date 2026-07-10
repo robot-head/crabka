@@ -101,12 +101,16 @@ mod tests {
 
         let parsed = parse_request(&frame, |_, _| false).expect("parse request");
 
-        check!(parsed.api_key == 3);
-        check!(parsed.api_version == 8);
-        check!(parsed.correlation_id == 42);
-        check!(parsed.client_id == Some("client-a"));
-        check!(!parsed.body_flexible);
-        check!(parsed.body == b"body".as_slice());
+        check!(
+            (
+                parsed.api_key,
+                parsed.api_version,
+                parsed.correlation_id,
+                parsed.client_id,
+                parsed.body_flexible,
+                parsed.body,
+            ) == (3, 8, 42, Some("client-a"), false, b"body".as_slice())
+        );
     }
 
     #[test]
@@ -116,12 +120,16 @@ mod tests {
         let parsed =
             parse_request(&frame, |key, version| key == 18 && version >= 3).expect("parse request");
 
-        check!(parsed.api_key == 18);
-        check!(parsed.api_version == 3);
-        check!(parsed.correlation_id == 7);
-        check!(parsed.client_id == Some("client-a"));
-        check!(parsed.body_flexible);
-        check!(parsed.body == b"body".as_slice());
+        check!(
+            (
+                parsed.api_key,
+                parsed.api_version,
+                parsed.correlation_id,
+                parsed.client_id,
+                parsed.body_flexible,
+                parsed.body,
+            ) == (18, 3, 7, Some("client-a"), true, b"body".as_slice())
+        );
     }
 
     #[test]
@@ -138,9 +146,10 @@ mod tests {
         let parsed =
             parse_request(&frame, |key, version| key == 18 && version >= 3).expect("parse request");
 
-        check!(parsed.client_id == Some("client-a"));
-        check!(parsed.body_flexible);
-        check!(parsed.body == b"body".as_slice());
+        check!(
+            (parsed.client_id, parsed.body_flexible, parsed.body)
+                == (Some("client-a"), true, b"body".as_slice())
+        );
     }
 
     #[test]
@@ -149,8 +158,7 @@ mod tests {
 
         let parsed = parse_request(&frame, |_, _| false).expect("parse request");
 
-        check!(parsed.client_id == Some(""));
-        check!(parsed.body == b"body".as_slice());
+        check!((parsed.client_id, parsed.body) == (Some(""), b"body".as_slice()));
     }
 
     #[test]

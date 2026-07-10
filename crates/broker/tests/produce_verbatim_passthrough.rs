@@ -262,14 +262,20 @@ async fn lz4_batch_passes_through_and_roundtrips() {
     // recompression to a different codec) and decode to the same records.
     let fetched = fetch_first_batch(&broker, &client, "lz4t", topic_id, 200).await;
     check!(
-        fetched.attributes.compression() == CompressionType::Lz4,
-        "stored batch must keep producer's Lz4 codec; got {:?}",
-        fetched.attributes.compression()
+        (
+            fetched.attributes.compression(),
+            fetched.records.len(),
+            fetched.records[0].value.as_deref(),
+            fetched.records[199].value.as_deref(),
+            fetched.base_offset
+        ) == (
+            CompressionType::Lz4,
+            200,
+            Some(&value[..]),
+            Some(&value[..]),
+            0
+        )
     );
-    assert!(fetched.records.len() == 200, "all records round-trip");
-    check!(fetched.records[0].value.as_deref() == Some(&value[..]));
-    check!(fetched.records[199].value.as_deref() == Some(&value[..]));
-    check!(fetched.base_offset == 0);
 
     broker.shutdown().await;
 }
@@ -356,12 +362,12 @@ async fn recompression_config_takes_owned_path() {
     let fetched = fetch_first_batch(&broker, &client, "recmp", topic_id, 10).await;
     // Owned path recompressed lz4 → zstd: stored batch carries the TOPIC codec.
     check!(
-        fetched.attributes.compression() == CompressionType::Zstd,
-        "recompression config must rewrite codec to zstd; got {:?}",
-        fetched.attributes.compression()
+        (
+            fetched.attributes.compression(),
+            fetched.records.len(),
+            fetched.records[0].value.as_deref()
+        ) == (CompressionType::Zstd, 10, Some(&value[..]))
     );
-    assert!(fetched.records.len() == 10);
-    check!(fetched.records[0].value.as_deref() == Some(&value[..]));
 
     broker.shutdown().await;
 }

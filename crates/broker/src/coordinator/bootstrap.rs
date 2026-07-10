@@ -755,9 +755,13 @@ mod tests {
         // Type locked + seed reconstructed.
         assert!(coord.group_type("sg") == Some(crate::coordinator::unified::GroupType::Share));
         let seed = coord.cached_share_seed("sg").expect("seed cached");
-        check!(seed.group_epoch == 4);
-        check!(seed.members.contains_key("m1"));
-        check!(seed.current_per_member["m1"].member_epoch == 4);
+        check!(
+            (
+                seed.group_epoch,
+                seed.members.keys().collect::<Vec<_>>(),
+                seed.current_per_member["m1"].member_epoch,
+            ) == (4, vec![&"m1".to_string()], 4)
+        );
 
         // A member tombstone scrubs the member from the seed.
         let tomb_key =
@@ -853,9 +857,13 @@ mod tests {
         // Type locked to Streams + seed reconstructed.
         assert!(coord.group_type("stg") == Some(crate::coordinator::unified::GroupType::Streams));
         let seed = coord.cached_streams_seed("stg").expect("seed cached");
-        check!(seed.group_epoch == 7);
-        check!(seed.members.contains_key("m1"));
-        check!(seed.current_per_member["m1"].member_epoch == 7);
+        check!(
+            (
+                seed.group_epoch,
+                seed.members.keys().collect::<Vec<_>>(),
+                seed.current_per_member["m1"].member_epoch,
+            ) == (7, vec![&"m1".to_string()], 7)
+        );
 
         // A member tombstone scrubs the member from the seed.
         let tomb_key = persistence::parse_key(&sp::encode_streams_key(
@@ -1003,13 +1011,25 @@ mod tests {
             }],
         };
         apply_group_metadata(&mut g, v, 0);
-        check!(g.generation_id == 5);
-        check!(g.protocol_type.as_deref() == Some("consumer"));
-        check!(g.leader_id.as_deref() == Some("m1"));
-        check!(g.state == ClassicGroupState::Stable);
-        check!(g.members.contains_key("m1"));
-        check!(g.members["m1"].assignment.as_deref() == Some(b"asn" as &[u8]));
-        check!(g.current_member_id_for_instance("inst") == Some("m1"));
+        check!(
+            (
+                g.generation_id,
+                g.protocol_type.as_deref(),
+                g.leader_id.as_deref(),
+                g.state,
+                g.members.keys().collect::<Vec<_>>(),
+                g.members["m1"].assignment.as_deref(),
+                g.current_member_id_for_instance("inst"),
+            ) == (
+                5,
+                Some("consumer"),
+                Some("m1"),
+                ClassicGroupState::Stable,
+                vec![&"m1".to_string()],
+                Some(b"asn" as &[u8]),
+                Some("m1"),
+            )
+        );
 
         // No members → Empty state.
         let mut empty = ClassicState::new("g2");
@@ -1491,9 +1511,16 @@ mod tests {
 
         // All three commits present — the second batch is only reached when the
         // cursor arithmetic `base_offset + last_offset_delta + 1` is exact.
-        check!(committed.len() == 3);
-        check!(committed[&("t".to_string(), 0)].offset == 100);
-        check!(committed[&("t".to_string(), 1)].offset == 101);
-        check!(committed[&("t".to_string(), 2)].offset == 202);
+        check!(
+            committed
+                .iter()
+                .map(|((topic, partition), value)| ((topic.clone(), *partition), value.offset))
+                .collect::<HashMap<_, _>>()
+                == HashMap::from([
+                    (("t".to_string(), 0), Offset(100)),
+                    (("t".to_string(), 1), Offset(101)),
+                    (("t".to_string(), 2), Offset(202)),
+                ])
+        );
     }
 }

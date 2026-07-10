@@ -372,14 +372,15 @@ async fn ip_quota_alter_then_describe_round_trip() {
         false,
     )
     .await;
-    assert!(desc.len() == 1);
     assert!(
-        desc[0]
-            .1
-            .iter()
-            .find(|(k, _)| k == "connection_creation_rate")
-            .map(|(_, v)| *v)
-            == Some(2.0)
+        (
+            desc.len(),
+            desc[0]
+                .1
+                .iter()
+                .find(|(k, _)| k == "connection_creation_rate")
+                .map(|(_, v)| *v),
+        ) == (1, Some(2.0))
     );
 }
 

@@ -558,8 +558,19 @@ mod tests {
         );
         let out = assign(&members, &inp);
         // A keeps 0,1 (sticky); B fills the rest to balance 2/2.
-        assert!(out.active["A"]["sub-0"] == vec![0, 1]);
-        assert!(out.active["B"]["sub-0"] == vec![2, 3]);
+        assert!(
+            out.active
+                == HashMap::from([
+                    (
+                        "A".to_string(),
+                        BTreeMap::from([("sub-0".to_string(), vec![0, 1])]),
+                    ),
+                    (
+                        "B".to_string(),
+                        BTreeMap::from([("sub-0".to_string(), vec![2, 3])]),
+                    ),
+                ])
+        );
     }
 
     #[test]
@@ -672,19 +683,21 @@ mod tests {
         let out = assign(&members, &inp);
         // Move applied: A keeps 0, B takes 1; no warmup.
         assert!(
-            out.active
-                == HashMap::from([
-                    (
-                        "A".to_string(),
-                        BTreeMap::from([("sub-0".to_string(), vec![0])]),
-                    ),
-                    (
-                        "B".to_string(),
-                        BTreeMap::from([("sub-0".to_string(), vec![1])]),
-                    ),
-                ])
+            (out.active, out.warmup)
+                == (
+                    HashMap::from([
+                        (
+                            "A".to_string(),
+                            BTreeMap::from([("sub-0".to_string(), vec![0])]),
+                        ),
+                        (
+                            "B".to_string(),
+                            BTreeMap::from([("sub-0".to_string(), vec![1])]),
+                        ),
+                    ]),
+                    HashMap::new(),
+                )
         );
-        assert!(out.warmup.is_empty());
     }
 
     #[test]

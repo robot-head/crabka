@@ -373,11 +373,7 @@ async fn describe_all_users_round_trip() {
         .find(|(u, _, _)| u == "alice")
         .expect("alice must appear in response");
     assert!(
-        alice_row.1 == 0,
-        "per-user error_code should be 0 for alice"
-    );
-    assert!(
-        alice_row.2.iter().any(|(mech, _)| *mech == 2),
+        (alice_row.1, alice_row.2.iter().any(|(mech, _)| *mech == 2),) == (0, true),
         "expected mechanism=2 (SCRAM-SHA-512) in credential_infos; got {:?}",
         alice_row.2,
     );
@@ -449,18 +445,19 @@ async fn describe_duplicate_requested_user_returns_single_duplicate_resource_row
         .filter(|(user, _, _)| user == "alice")
         .collect();
     assert!(
-        alice_rows.len() == 1,
-        "alice should appear once: {per_user:?}"
+        (
+            alice_rows.len(),
+            alice_rows[0].1,
+            alice_rows[0].2.is_empty(),
+        ) == (1, KAFKA_DUPLICATE_RESOURCE, true),
+        "alice should appear once with duplicate-resource status: {per_user:?}"
     );
-    assert!(alice_rows[0].1 == KAFKA_DUPLICATE_RESOURCE);
-    assert!(alice_rows[0].2.is_empty());
 
     let bob = per_user
         .iter()
         .find(|(user, _, _)| user == "bob")
         .expect("distinct users remain successful");
-    assert!(bob.1 == 0);
-    assert!(bob.2 == vec![(WIRE_MECH_SCRAM_SHA_512, 8192)]);
+    assert!((bob.1, bob.2.as_slice()) == (0, &[(WIRE_MECH_SCRAM_SHA_512, 8192)][..]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

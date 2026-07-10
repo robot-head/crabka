@@ -434,14 +434,19 @@ mod tests {
             // Branch 1: ceiling = 1h < 24h renew period. The renew period is
             // clamped *down* to chosen_lifetime, so expiry must collapse to
             // max, and both must equal issue + 1h (the chosen_lifetime).
-            (one_hour, one_hour, one_hour),
+            ("short ceiling clamps renewal", one_hour, one_hour, one_hour),
             // Branch 2: ceiling = 7d > 24h renew period. Now the renew period
             // is the smaller of the two, so expiry (issue + 24h) and max
             // (issue + 7d, the ceiling untouched) must be SEPARATE, leaving
             // room for Renew to extend expiry up to max.
-            (seven_days, RENEW_24H_MS, seven_days),
+            (
+                "long ceiling preserves renewal window",
+                seven_days,
+                RENEW_24H_MS,
+                seven_days,
+            ),
         ];
-        for (ceiling_ms, expiry_delta, max_delta) in cases {
+        for (case, ceiling_ms, expiry_delta, max_delta) in cases {
             let req = CreateDelegationTokenRequest {
                 max_lifetime_ms: -1,
                 ..Default::default()
@@ -470,7 +475,10 @@ mod tests {
                 throttle_time_ms: 0,
                 unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
             };
-            assert!(resp == expected, "ceiling {ceiling_ms}: {resp:?}");
+            assert!(
+                resp == expected,
+                "case: {case}; ceiling {ceiling_ms}: {resp:?}"
+            );
         }
 
         controller.cancel().await;
@@ -658,9 +666,13 @@ mod tests {
         };
 
         // (finalized metadata.version level; None = fresh image) → gated?
-        let cases = [(None, false), (Some(13), true), (Some(14), false)];
-        for (level, want_gated) in cases {
-            assert!(gate(level) == want_gated, "level {level:?}");
+        let cases = [
+            ("fresh image", None, false),
+            ("below gate", Some(13), true),
+            ("at gate", Some(14), false),
+        ];
+        for (case, level, want_gated) in cases {
+            assert!(gate(level) == want_gated, "case: {case}; level {level:?}");
         }
     }
 

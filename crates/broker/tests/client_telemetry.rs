@@ -161,12 +161,8 @@ async fn api_versions_advertises_telemetry_apis() {
     let advertised: std::collections::HashSet<i16> =
         resp.api_keys.iter().map(|k| k.api_key).collect();
     assert!(
-        advertised.contains(&71),
-        "ApiVersions must advertise GetTelemetrySubscriptions (71), got {advertised:?}",
-    );
-    assert!(
-        advertised.contains(&72),
-        "ApiVersions must advertise PushTelemetry (72), got {advertised:?}",
+        (advertised.contains(&71), advertised.contains(&72)) == (true, true),
+        "ApiVersions must advertise telemetry APIs 71 and 72, got {advertised:?}",
     );
 
     p.broker.shutdown().await;
@@ -188,34 +184,17 @@ async fn get_telemetry_subscriptions_with_nil_id_returns_assigned_id_and_no_subs
         .await
         .expect("GetTelemetrySubscriptions");
 
-    check!(resp.error_code == 0, "handler must succeed: {resp:?}");
     check!(
-        resp.client_instance_id != WireUuid::ZERO,
-        "broker must assign a fresh client_instance_id when caller sent nil"
-    );
-    // No subscriptions configured → empty requested_metrics (the "don't push" signal).
-    check!(
-        resp.requested_metrics.is_empty(),
-        "no subscription configured → requested_metrics must be empty, got {:?}",
-        resp.requested_metrics,
-    );
-    // Standard KIP-714 compression advertisement: ZSTD(4), LZ4(3), GZIP(1), SNAPPY(2).
-    check!(
-        resp.accepted_compression_types == vec![4i8, 3, 1, 2],
-        "accepted_compression_types must be [4,3,1,2], got {:?}",
-        resp.accepted_compression_types,
-    );
-    check!(
-        resp.telemetry_max_bytes == 1_048_576,
-        "telemetry_max_bytes must be 1 MiB, got {}",
-        resp.telemetry_max_bytes,
-    );
-    check!(resp.delta_temporality, "delta_temporality must be true",);
-    // Default interval when no subscription is matched: 300 000 ms (5 min).
-    check!(
-        resp.push_interval_ms == 300_000,
-        "push_interval_ms must be 300_000 when no subscription configured, got {}",
-        resp.push_interval_ms,
+        (
+            resp.error_code,
+            resp.client_instance_id != WireUuid::ZERO,
+            resp.requested_metrics.is_empty(),
+            &resp.accepted_compression_types,
+            resp.telemetry_max_bytes,
+            resp.delta_temporality,
+            resp.push_interval_ms,
+        ) == (0, true, true, &vec![4i8, 3, 1, 2], 1_048_576, true, 300_000),
+        "nil-id subscription response shape mismatch: {resp:?}"
     );
 
     p.broker.shutdown().await;
@@ -238,9 +217,8 @@ async fn get_telemetry_subscriptions_with_set_id_echoes_nil() {
         .await
         .expect("GetTelemetrySubscriptions");
 
-    assert!(resp.error_code == 0);
     assert!(
-        resp.client_instance_id == WireUuid::ZERO,
+        (resp.error_code, resp.client_instance_id) == (0, WireUuid::ZERO),
         "non-nil request id must round-trip as nil per schema rules"
     );
 
@@ -299,33 +277,24 @@ async fn push_telemetry_happy_path_after_subscription() {
         .expect("GetTelemetrySubscriptions");
 
     check!(
-        get_resp.error_code == 0,
-        "GetTelemetrySubscriptions must succeed: {get_resp:?}"
-    );
-    check!(
-        get_resp.client_instance_id != WireUuid::ZERO,
-        "broker must assign a fresh client_instance_id"
-    );
-    check!(
-        get_resp.requested_metrics == vec!["*".to_string()],
-        "match-all subscription must reflect as [\"*\"], got {:?}",
-        get_resp.requested_metrics,
-    );
-    check!(
-        get_resp.push_interval_ms == 100,
-        "push_interval_ms must equal the configured interval (100), got {}",
-        get_resp.push_interval_ms,
-    );
-    check!(
-        get_resp.accepted_compression_types == vec![4i8, 3, 1, 2],
-        "accepted_compression_types must be [4,3,1,2], got {:?}",
-        get_resp.accepted_compression_types,
-    );
-    check!(get_resp.delta_temporality, "delta_temporality must be true");
-    check!(
-        get_resp.telemetry_max_bytes == 1_048_576,
-        "telemetry_max_bytes must be 1 MiB, got {}",
-        get_resp.telemetry_max_bytes,
+        (
+            get_resp.error_code,
+            get_resp.client_instance_id != WireUuid::ZERO,
+            &get_resp.requested_metrics,
+            get_resp.push_interval_ms,
+            &get_resp.accepted_compression_types,
+            get_resp.delta_temporality,
+            get_resp.telemetry_max_bytes,
+        ) == (
+            0,
+            true,
+            &vec!["*".to_string()],
+            100,
+            &vec![4i8, 3, 1, 2],
+            true,
+            1_048_576,
+        ),
+        "match-all subscription response mismatch: {get_resp:?}"
     );
 
     let assigned_id = get_resp.client_instance_id;

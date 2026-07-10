@@ -15,7 +15,7 @@
 
 use std::{io, net::SocketAddr};
 
-use assert2::{assert, check};
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_protocol::{
@@ -339,18 +339,13 @@ async fn assign_replicas_to_dirs_reports_and_echoes() {
     let mut cur: &[u8] = &resp_bytes;
     let resp = AssignReplicasToDirsResponse::decode(&mut cur, VERSION).unwrap();
 
-    check!(
-        resp.error_code == 0,
-        "AssignReplicasToDirs top-level error_code must be NONE (0), got {}",
-        resp.error_code
-    );
     assert!(
-        !resp.directories.is_empty(),
+        (
+            resp.error_code,
+            resp.directories.is_empty(),
+            resp.directories[0].topics[0].partitions[0].error_code,
+        ) == (0, false, 0),
         "response must echo at least one directory"
-    );
-    check!(
-        resp.directories[0].topics[0].partitions[0].error_code == 0,
-        "per-partition error_code must be NONE (0)"
     );
 
     handle.shutdown().await;

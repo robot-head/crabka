@@ -839,17 +839,21 @@ mod tests {
         ]);
         let cases = [
             // Self is a follower replica → included.
-            (NodeId(2), HashSet::from_iter([("t".to_string(), 0)])),
+            (
+                "follower",
+                NodeId(2),
+                HashSet::from_iter([("t".to_string(), 0)]),
+            ),
             // Self is the leader → excluded.
-            (NodeId(1), HashSet::new()),
+            ("leader", NodeId(1), HashSet::new()),
             // Self is not a replica at all → excluded.
-            (NodeId(99), HashSet::new()),
+            ("non-replica", NodeId(99), HashSet::new()),
         ];
-        for (node_id, want) in cases {
+        for (case, node_id, want) in cases {
             assert!(
                 desired_follower_set(node_id, &img) == want,
-                "node {}",
-                node_id.0
+                "case {case}: node {}",
+                node_id.0,
             );
         }
     }
@@ -1021,16 +1025,13 @@ mod tests {
             .get("t", PartitionIndex(0))
             .expect("local leader materialized");
         assert!(
-            part.current_leader
-                .load(std::sync::atomic::Ordering::Acquire)
-                == 2,
+            (
+                part.current_leader
+                    .load(std::sync::atomic::Ordering::Acquire),
+                part.current_leader_epoch
+                    .load(std::sync::atomic::Ordering::Acquire),
+            ) == (2, 7),
             "leader cache updated"
-        );
-        assert!(
-            part.current_leader_epoch
-                .load(std::sync::atomic::Ordering::Acquire)
-                == 7,
-            "leader epoch cache updated"
         );
         let state = part.replica_state.lock().await;
         assert!(state.isr == [NodeId(1), NodeId(2), NodeId(3)].into_iter().collect());
@@ -1067,8 +1068,7 @@ mod tests {
         supervisor.reconcile(&img).await;
 
         check!(token.is_cancelled());
-        check!(supervisor.tasks.len() == 0);
-        check!(supervisor.task_targets.len() == 0);
+        check!((supervisor.tasks.len(), supervisor.task_targets.len()) == (0, 0));
     }
 
     #[tokio::test]
@@ -1088,8 +1088,7 @@ mod tests {
         supervisor.reconcile(&img).await;
 
         check!(token.is_cancelled());
-        check!(supervisor.tasks.len() == 0);
-        check!(supervisor.task_targets.len() == 0);
+        check!((supervisor.tasks.len(), supervisor.task_targets.len()) == (0, 0));
     }
 
     #[tokio::test]

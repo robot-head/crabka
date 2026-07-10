@@ -148,8 +148,9 @@ mod tests {
         });
 
         let g = captured.lock().unwrap();
-        check!(g.name.as_deref() == Some("Produce"));
-        check!(g.kind.as_deref() == Some("server"));
-        check!(g.api_key == Some(0));
+        check!(
+            (g.name.as_deref(), g.kind.as_deref(), g.api_key)
+                == (Some("Produce"), Some("server"), Some(0))
+        );
     }
 }

@@ -757,8 +757,19 @@ mod tests {
 
         let image = broker.controller.current_image();
         let partition = image.partition("orders", 7).expect("partition committed");
-        assert!(partition.adding_replicas == vec![NodeId(2)]);
-        assert!(partition.partition_epoch == 12);
+        let expected_partition = PartitionRecord {
+            topic: "orders".into(),
+            partition: 7,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2)],
+            isr: vec![NodeId(1)],
+            leader_epoch: LeaderEpoch(3),
+            adding_replicas: vec![NodeId(2)],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 12,
+        };
+        assert!(partition == &expected_partition);
         broker_handle.shutdown().await;
     }
 

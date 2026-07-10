@@ -1051,9 +1051,13 @@ mod tests {
         pending.member_metadata.push(("m1".into(), None)); // tombstone
         let batch = pending.into_batch("g1", 123);
         // group_metadata + topology + one member tombstone = 3 records.
-        check!(batch.records.len() == 3);
-        check!(batch.max_timestamp == 123);
-        check!(batch.last_offset_delta == 2);
+        check!(
+            (
+                batch.records.len(),
+                batch.max_timestamp,
+                batch.last_offset_delta,
+            ) == (3, 123, 2)
+        );
         // The tombstone record carries a null value.
         let tombstone = batch.records.iter().find(|r| r.value.is_none()).unwrap();
         assert!(tombstone.key.is_some());

@@ -637,6 +637,34 @@ mod tests {
         e
     }
 
+    fn entry_projection(
+        e: &TxnEntry,
+    ) -> (
+        &str,
+        ProducerId,
+        i16,
+        TxnState,
+        i32,
+        &HashSet<crate::txn::state::TopicPartition>,
+        ProducerId,
+        ProducerId,
+        i64,
+        i64,
+    ) {
+        (
+            &e.transactional_id,
+            e.producer_id,
+            e.producer_epoch,
+            e.state,
+            e.txn_timeout_ms,
+            &e.partitions,
+            e.prev_producer_id,
+            e.next_producer_id,
+            e.last_update_ms,
+            e.start_ms,
+        )
+    }
+
     #[test]
     fn evict_rolled_pid_drops_only_the_prior_id_on_a_roll() {
         let map: DashMap<ProducerId, String> = DashMap::new();
@@ -700,22 +728,20 @@ mod tests {
         e.state = TxnState::PrepareAbort;
         e.producer_epoch = 4;
         apply_complete_abort(&mut e, ProducerId(1000), 5, 42);
-        check!(e.state == TxnState::CompleteAbort);
-        check!(e.producer_id == 1000);
-        check!(e.producer_epoch == 5);
-        check!(e.prev_producer_id == -1, "no roll must not set prev");
-        check!(e.last_update_ms == 42);
+        let mut expected = entry(1000, -1);
+        expected.state = TxnState::CompleteAbort;
+        expected.producer_epoch = 5;
+        expected.last_update_ms = 42;
+        check!(entry_projection(&e) == entry_projection(&expected));
 
         // Roll: fresh pid at epoch 0 → prior pid recorded as prev.
         let mut rolled = entry(1000, -1);
         rolled.state = TxnState::PrepareAbort;
         apply_complete_abort(&mut rolled, ProducerId(2000), 0, 43);
-        check!(rolled.producer_id == 2000);
-        check!(rolled.producer_epoch == 0);
-        check!(
-            rolled.prev_producer_id == 1000,
-            "roll must record prior pid"
-        );
+        let mut expected_rolled = entry(2000, 1000);
+        expected_rolled.state = TxnState::CompleteAbort;
+        expected_rolled.last_update_ms = 43;
+        check!(entry_projection(&rolled) == entry_projection(&expected_rolled));
     }
 
     #[test]

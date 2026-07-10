@@ -627,9 +627,11 @@ mod tests {
         .await
         .expect("future log should catch up and swap");
 
-        assert!(part.log_end_offset() == 3);
         assert!(
-            canonicalize_or_self(&part.log_dir.load_full()) == canonicalize_or_self(target.path())
+            (
+                part.log_end_offset(),
+                canonicalize_or_self(&part.log_dir.load_full()),
+            ) == (Offset(3), canonicalize_or_self(target.path()))
         );
     }
 

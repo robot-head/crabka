@@ -57,31 +57,34 @@ mod tests {
 
     #[test]
     fn resolves_levels() {
-        for (level, want) in [
-            (None, TxnVersion::Classic),
-            (Some(0), TxnVersion::Classic),
-            (Some(1), TxnVersion::Flexible),
-            (Some(2), TxnVersion::Verified),
+        for (case, level, want) in [
+            ("feature absent", None, TxnVersion::Classic),
+            ("classic level", Some(0), TxnVersion::Classic),
+            ("flexible level", Some(1), TxnVersion::Flexible),
+            ("verified level", Some(2), TxnVersion::Verified),
         ] {
             assert!(
                 resolve_txn_version(&image_with_tv(level)) == want,
-                "{level:?}"
+                "case: {case}; level {level:?}"
             );
         }
     }
 
     #[test]
     fn behavior_predicates() {
-        for (v, want_flexible, want_verified) in [
-            (TxnVersion::Classic, false, false),
-            (TxnVersion::Flexible, true, false),
-            (TxnVersion::Verified, true, true),
+        for (case, v, want_flexible, want_verified) in [
+            ("classic behavior", TxnVersion::Classic, false, false),
+            ("flexible behavior", TxnVersion::Flexible, true, false),
+            ("verified behavior", TxnVersion::Verified, true, true),
         ] {
             assert!(
                 v.flexible_records() == want_flexible,
-                "{v:?} flexible_records"
+                "case: {case}; {v:?} flexible_records"
             );
-            assert!(v.verified() == want_verified, "{v:?} verified");
+            assert!(
+                v.verified() == want_verified,
+                "case: {case}; {v:?} verified"
+            );
         }
     }
 }

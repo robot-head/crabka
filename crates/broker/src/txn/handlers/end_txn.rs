@@ -712,15 +712,27 @@ mod tests {
         let ids = crate::producer_id_manager::ProducerIdManager::new();
         let cases = [
             // Below TV_2 (Classic, Flexible): pid + epoch unchanged.
-            (TxnVersion::Classic, (ProducerId(7), 3)),
-            (TxnVersion::Flexible, (ProducerId(7), 3)),
+            (
+                "classic identity unchanged",
+                TxnVersion::Classic,
+                (ProducerId(7), 3),
+            ),
+            (
+                "flexible identity unchanged",
+                TxnVersion::Flexible,
+                (ProducerId(7), 3),
+            ),
             // TV_2 (Verified) non-overflow: same pid, epoch + 1.
-            (TxnVersion::Verified, (ProducerId(7), 4)),
+            (
+                "verified epoch bumps",
+                TxnVersion::Verified,
+                (ProducerId(7), 4),
+            ),
         ];
-        for (version, want) in cases {
+        for (case, version, want) in cases {
             assert!(
                 next_producer_identity(version, ProducerId(7), 3, &ids) == want,
-                "txn version {version:?}"
+                "case: {case}; txn version {version:?}"
             );
         }
     }
@@ -733,8 +745,7 @@ mod tests {
         // (monotonic from PID_BASE) and the epoch resets to 0. No panic.
         let (new_pid, new_epoch) =
             next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX, &ids);
-        assert!(new_pid != 7);
-        assert!(new_epoch == 0);
+        assert!((new_pid != 7, new_epoch) == (true, 0));
         // The allocator hands out a distinct pid on the next overflow too.
         let (next_pid, _) =
             next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX, &ids);
@@ -764,11 +775,18 @@ mod tests {
         let cases = [
             // Entry is exactly as Phase 1 left it: same pid/epoch, still in
             // Prepare — proceed.
-            (7, 3, TxnState::PrepareCommit, ReacquireDecision::Proceed),
+            (
+                "unchanged prepared entry",
+                7,
+                3,
+                TxnState::PrepareCommit,
+                ReacquireDecision::Proceed,
+            ),
             // A concurrent InitProducerId bumped the epoch during the marker
             // fan-out. We must NOT overwrite with the stale epoch / Complete
             // state.
             (
+                "concurrent epoch bump",
                 7,
                 4,
                 TxnState::PrepareCommit,
@@ -776,6 +794,7 @@ mod tests {
             ),
             // Producer id changed underneath us — fenced.
             (
+                "new producer id",
                 8,
                 3,
                 TxnState::PrepareCommit,
@@ -784,6 +803,7 @@ mod tests {
             // Another caller (or an EndTxn retry that lost the race) already
             // drove this exact transition. Report success, do not re-write.
             (
+                "already completed",
                 7,
                 3,
                 TxnState::CompleteCommit,
@@ -794,6 +814,7 @@ mod tests {
             // fan-out no longer reflects the live transaction; refuse to
             // finalise.
             (
+                "wrong ongoing state",
                 7,
                 3,
                 TxnState::Ongoing,
@@ -803,13 +824,14 @@ mod tests {
             // different finalisation kind raced us. Refuse to write
             // CompleteCommit.
             (
+                "wrong prepare state",
                 7,
                 3,
                 TxnState::PrepareAbort,
                 ReacquireDecision::Reject(codes::INVALID_TXN_STATE),
             ),
         ];
-        for (pid, epoch, state, expected) in cases {
+        for (case, pid, epoch, state, expected) in cases {
             let e = entry(pid, epoch, state);
             let decision = validate_complete_reacquire(
                 &e,
@@ -820,7 +842,7 @@ mod tests {
             );
             assert!(
                 decision == expected,
-                "observed pid {pid}, epoch {epoch}, state {state:?}"
+                "case: {case}; observed pid {pid}, epoch {epoch}, state {state:?}"
             );
         }
     }

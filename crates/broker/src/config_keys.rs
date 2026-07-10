@@ -544,25 +544,31 @@ mod tests {
     }
 
     #[test]
-    fn validate_segment_bytes_rejects_zero() {
-        assert!(validate_topic_config(SEGMENT_BYTES, "0").is_err());
+    fn validate_segment_bytes_boundary_cases() {
+        for (case, value, expected) in [
+            ("zero rejected", "0", Err(())),
+            ("minimum accepted", "1", Ok(())),
+        ] {
+            assert!(
+                validate_topic_config(SEGMENT_BYTES, value).map_err(|_| ()) == expected,
+                "case {case}"
+            );
+        }
     }
 
     #[test]
-    fn validate_segment_bytes_accepts_minimum_one() {
-        assert!(validate_topic_config(SEGMENT_BYTES, "1").is_ok());
-    }
-
-    #[test]
-    fn validate_cleanup_policy_accepts_delete_and_compact() {
-        assert!(validate_topic_config(CLEANUP_POLICY, "delete").is_ok());
-        assert!(validate_topic_config(CLEANUP_POLICY, "compact").is_ok());
-    }
-
-    #[test]
-    fn validate_cleanup_policy_rejects_unknown() {
-        assert!(validate_topic_config(CLEANUP_POLICY, "compact,delete").is_err());
-        assert!(validate_topic_config(CLEANUP_POLICY, "junk").is_err());
+    fn validate_cleanup_policy_cases() {
+        for (case, value, expected) in [
+            ("delete accepted", "delete", Ok(())),
+            ("compact accepted", "compact", Ok(())),
+            ("combined rejected", "compact,delete", Err(())),
+            ("unknown rejected", "junk", Err(())),
+        ] {
+            assert!(
+                validate_topic_config(CLEANUP_POLICY, value).map_err(|_| ()) == expected,
+                "case {case}"
+            );
+        }
     }
 
     #[test]
@@ -734,52 +740,31 @@ mod tests {
     }
 
     #[test]
-    fn apply_retention_ms_propagates() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_MS.into(), "60000".into());
-        let base = LogConfig::default();
-        let out = apply_to_log_config(&o, &base);
-        assert!(out.retention_ms == Some(Duration::from_mins(1)));
+    fn apply_retention_ms_cases() {
+        for (case, value, expected) in [
+            ("positive", "60000", Some(Duration::from_mins(1))),
+            ("unlimited", "-1", None),
+            ("zero", "0", Some(Duration::from_millis(0))),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(RETENTION_MS.into(), value.into());
+            let out = apply_to_log_config(&overrides, &LogConfig::default());
+            assert!(out.retention_ms == expected, "case {case}");
+        }
     }
 
     #[test]
-    fn apply_retention_ms_minus_one_means_unlimited() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_MS.into(), "-1".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_ms == None);
-    }
-
-    #[test]
-    fn apply_retention_ms_zero_is_retained() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_MS.into(), "0".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_ms == Some(Duration::from_millis(0)));
-    }
-
-    #[test]
-    fn apply_retention_bytes_propagates() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_BYTES.into(), "1048576".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_bytes == Some(1_048_576));
-    }
-
-    #[test]
-    fn apply_retention_bytes_minus_one_means_unlimited() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_BYTES.into(), "-1".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_bytes == None);
-    }
-
-    #[test]
-    fn apply_retention_bytes_zero_is_retained() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_BYTES.into(), "0".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_bytes == Some(0));
+    fn apply_retention_bytes_cases() {
+        for (case, value, expected) in [
+            ("positive", "1048576", Some(1_048_576)),
+            ("unlimited", "-1", None),
+            ("zero", "0", Some(0)),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(RETENTION_BYTES.into(), value.into());
+            let out = apply_to_log_config(&overrides, &LogConfig::default());
+            assert!(out.retention_bytes == expected, "case {case}");
+        }
     }
 
     #[test]
@@ -801,23 +786,30 @@ mod tests {
     }
 
     #[test]
-    fn apply_cleanup_policy_compact_propagates() {
-        let mut overrides = std::collections::BTreeMap::new();
-        overrides.insert(CLEANUP_POLICY.to_string(), "compact".to_string());
-        let out = apply_to_log_config(&overrides, &crabka_log::LogConfig::default());
-        assert!(out.cleanup_policy == crabka_log::CleanupPolicy::Compact);
-    }
-
-    #[test]
-    fn apply_cleanup_policy_delete_propagates() {
-        let mut overrides = std::collections::BTreeMap::new();
-        overrides.insert(CLEANUP_POLICY.to_string(), "delete".to_string());
-        let base = crabka_log::LogConfig {
-            cleanup_policy: crabka_log::CleanupPolicy::Compact,
-            ..crabka_log::LogConfig::default()
-        };
-        let out = apply_to_log_config(&overrides, &base);
-        assert!(out.cleanup_policy == crabka_log::CleanupPolicy::Delete);
+    fn apply_cleanup_policy_cases() {
+        for (case, value, base_policy, expected) in [
+            (
+                "compact",
+                "compact",
+                crabka_log::CleanupPolicy::Delete,
+                crabka_log::CleanupPolicy::Compact,
+            ),
+            (
+                "delete",
+                "delete",
+                crabka_log::CleanupPolicy::Compact,
+                crabka_log::CleanupPolicy::Delete,
+            ),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(CLEANUP_POLICY.to_string(), value.to_string());
+            let base = LogConfig {
+                cleanup_policy: base_policy,
+                ..LogConfig::default()
+            };
+            let out = apply_to_log_config(&overrides, &base);
+            assert!(out.cleanup_policy == expected, "case {case}");
+        }
     }
 
     #[test]
@@ -842,56 +834,32 @@ mod tests {
     }
 
     #[test]
-    fn apply_local_retention_ms_minus_two_means_inherit() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_MS.into(), "-2".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_ms == None);
-
-        let mut unlimited = BTreeMap::new();
-        unlimited.insert(LOCAL_RETENTION_MS.into(), "-1".into());
-        let out = apply_to_log_config(&unlimited, &LogConfig::default());
-        assert!(out.local_retention_ms == None);
+    fn apply_local_retention_ms_cases() {
+        for (case, value, expected) in [
+            ("inherit", "-2", None),
+            ("unlimited", "-1", None),
+            ("zero", "0", Some(Duration::from_millis(0))),
+            ("positive", "60000", Some(Duration::from_mins(1))),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(LOCAL_RETENTION_MS.into(), value.into());
+            let out = apply_to_log_config(&overrides, &LogConfig::default());
+            assert!(out.local_retention_ms == expected, "case {case}");
+        }
     }
 
     #[test]
-    fn apply_local_retention_ms_zero_is_retained() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_MS.into(), "0".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_ms == Some(Duration::from_millis(0)));
-    }
-
-    #[test]
-    fn apply_local_retention_ms_positive_propagates() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_MS.into(), "60000".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_ms == Some(Duration::from_mins(1)));
-    }
-
-    #[test]
-    fn apply_local_retention_bytes_propagates() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_BYTES.into(), "1048576".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_bytes == Some(1_048_576));
-    }
-
-    #[test]
-    fn apply_local_retention_bytes_minus_two_means_inherit() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_BYTES.into(), "-2".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_bytes == None);
-    }
-
-    #[test]
-    fn apply_local_retention_bytes_zero_is_retained() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_BYTES.into(), "0".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_bytes == Some(0));
+    fn apply_local_retention_bytes_cases() {
+        for (case, value, expected) in [
+            ("positive", "1048576", Some(1_048_576)),
+            ("inherit", "-2", None),
+            ("zero", "0", Some(0)),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(LOCAL_RETENTION_BYTES.into(), value.into());
+            let out = apply_to_log_config(&overrides, &LogConfig::default());
+            assert!(out.local_retention_bytes == expected, "case {case}");
+        }
     }
 
     #[test]
@@ -919,18 +887,18 @@ mod tests {
     }
 
     #[test]
-    fn recovery_strategy_accepts_valid_values() {
-        for v in ["None", "Balanced", "Aggressive"] {
+    fn recovery_strategy_validation_cases() {
+        for (case, value, expected) in [
+            ("none accepted", "None", Ok(())),
+            ("balanced accepted", "Balanced", Ok(())),
+            ("aggressive accepted", "Aggressive", Ok(())),
+            ("unknown rejected", "fast", Err(())),
+        ] {
             assert!(
-                validate_topic_config(UNCLEAN_RECOVERY_STRATEGY, v).is_ok(),
-                "{v}"
+                validate_topic_config(UNCLEAN_RECOVERY_STRATEGY, value).map_err(|_| ()) == expected,
+                "case {case}"
             );
         }
-    }
-
-    #[test]
-    fn recovery_strategy_rejects_garbage() {
-        assert!(validate_topic_config(UNCLEAN_RECOVERY_STRATEGY, "fast").is_err());
     }
 
     #[test]

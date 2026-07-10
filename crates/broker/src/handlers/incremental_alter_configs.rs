@@ -596,14 +596,16 @@ mod tests {
         let mut to_submit = Vec::new();
         handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
         assert!(out.error_code == codes::NONE);
-        assert!(to_submit.len() == 1);
-        match &to_submit[0] {
-            MetadataRecord::V1ClientMetricsConfig(rec) => {
-                assert!(rec.name == "sub-a");
-                assert!(rec.configs.get("interval.ms").map(String::as_str) == Some("60000"));
-            }
-            other => panic!("expected V1ClientMetricsConfig, got {other:?}"),
-        }
+        let expected = vec![MetadataRecord::V1ClientMetricsConfig(
+            crabka_metadata::ClientMetricsConfigRecord {
+                name: "sub-a".into(),
+                configs: std::collections::BTreeMap::from([
+                    ("interval.ms".into(), "60000".into()),
+                    ("metrics".into(), "org.apache.kafka.consumer.".into()),
+                ]),
+            },
+        )];
+        assert!(to_submit == expected);
     }
 
     #[test]
@@ -657,12 +659,12 @@ mod tests {
         let mut to_submit = Vec::new();
         handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
         assert!(out.error_code == codes::NONE);
-        match &to_submit[0] {
-            MetadataRecord::V1ClientMetricsConfig(rec) => {
-                assert!(!rec.configs.contains_key("interval.ms"));
-                assert!(rec.configs.get("metrics").map(String::as_str) == Some("a."));
-            }
-            other => panic!("expected V1ClientMetricsConfig, got {other:?}"),
-        }
+        let expected = vec![MetadataRecord::V1ClientMetricsConfig(
+            ClientMetricsConfigRecord {
+                name: "sub-a".into(),
+                configs: std::collections::BTreeMap::from([("metrics".into(), "a.".into())]),
+            },
+        )];
+        assert!(to_submit == expected);
     }
 }

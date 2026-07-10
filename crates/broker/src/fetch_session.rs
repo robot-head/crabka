@@ -1110,8 +1110,7 @@ mod tests {
         cache.finalize_incremental(id, &sent);
         let g = cache.inner.lock().unwrap();
         let s = g.sessions.get(&id).unwrap().partitions.get(&key).unwrap();
-        assert!(s.last_high_watermark == 42);
-        assert!(s.last_log_start_offset == 7);
+        assert!((s.last_high_watermark, s.last_log_start_offset) == (42, 7));
     }
 
     #[test]

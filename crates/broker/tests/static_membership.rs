@@ -67,8 +67,7 @@ async fn bootstrap_static_member(
         .send(join_request(group_id, &mid, Some(instance_id)))
         .await
         .expect("JoinGroup #2");
-    assert!(r2.error_code == 0);
-    assert!(r2.leader == mid);
+    assert!((r2.error_code, &r2.leader) == (0, &mid));
     let generation = r2.generation_id;
 
     // 3. Leader SyncGroup installs an assignment for itself.
@@ -89,8 +88,7 @@ async fn bootstrap_static_member(
         })
         .await
         .expect("SyncGroup");
-    assert!(r3.error_code == 0);
-    assert!(r3.assignment == assignment);
+    assert!((r3.error_code, &r3.assignment) == (0, &assignment));
 
     (mid, generation, assignment)
 }
@@ -129,9 +127,8 @@ async fn static_rejoin_preserves_assignment_and_generation() {
         .send(join_request("g-static-1", "", Some("instance-A")))
         .await
         .expect("rebootstrap JoinGroup");
-    assert!(boot.error_code == MEMBER_ID_REQUIRED);
     assert!(
-        boot.member_id == mid1,
+        (boot.error_code, &boot.member_id) == (MEMBER_ID_REQUIRED, &mid1),
         "static bootstrap returns the existing slot's member_id"
     );
 
@@ -142,12 +139,7 @@ async fn static_rejoin_preserves_assignment_and_generation() {
         .send(join_request("g-static-1", &mid1, Some("instance-A")))
         .await
         .expect("static rejoin");
-    check!(rejoin.error_code == 0);
-    check!(
-        rejoin.generation_id == gen1,
-        "static rejoin must NOT advance generation_id"
-    );
-    check!(rejoin.member_id == mid1);
+    check!((rejoin.error_code, rejoin.generation_id, &rejoin.member_id) == (0, gen1, &mid1));
     drop(assignment);
 
     p.broker.shutdown().await;
@@ -241,10 +233,14 @@ async fn leave_group_resolves_static_member_by_instance_id() {
         })
         .await
         .expect("LeaveGroup");
-    check!(resp.error_code == 0);
-    assert!(resp.members.len() == 1);
-    check!(resp.members[0].error_code == 0);
-    check!(resp.members[0].group_instance_id.as_deref() == Some("instance-C"));
+    check!(
+        (
+            resp.error_code,
+            resp.members.len(),
+            resp.members[0].error_code,
+            resp.members[0].group_instance_id.as_deref()
+        ) == (0, 1, 0, Some("instance-C"))
+    );
 
     // A subsequent Heartbeat from the old member id should be rejected —
     // the slot is gone.

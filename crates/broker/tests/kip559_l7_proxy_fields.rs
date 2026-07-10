@@ -64,17 +64,15 @@ async fn bootstrap_member(p: &support::InProcess) -> (String, i32) {
         })
         .await
         .expect("JoinGroup");
-    check!(r2.error_code == 0, "JoinGroup must succeed: {r2:?}");
-
     // KIP-559: protocol_type and protocol_name must be set on the
     // success response.
     check!(
-        r2.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
-        "JoinGroup must echo protocol_type: {r2:?}"
-    );
-    check!(
-        r2.protocol_name.as_deref() == Some(PROTOCOL_NAME),
-        "JoinGroup must echo protocol_name: {r2:?}"
+        (
+            r2.error_code,
+            r2.protocol_type.as_deref(),
+            r2.protocol_name.as_deref(),
+        ) == (0, Some(PROTOCOL_TYPE), Some(PROTOCOL_NAME)),
+        "JoinGroup response mismatch: {r2:?}"
     );
 
     (mid, r2.generation_id)
@@ -109,16 +107,13 @@ async fn sync_group_response_carries_protocol_type_and_name_on_success() {
         })
         .await
         .expect("SyncGroup");
-    check!(r3.error_code == 0, "SyncGroup must succeed: {r3:?}");
-
-    // KIP-559: both fields must be echoed on the v5+ response.
     check!(
-        r3.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
-        "SyncGroup must echo protocol_type: {r3:?}"
-    );
-    check!(
-        r3.protocol_name.as_deref() == Some(PROTOCOL_NAME),
-        "SyncGroup must echo protocol_name: {r3:?}"
+        (
+            r3.error_code,
+            r3.protocol_type.as_deref(),
+            r3.protocol_name.as_deref(),
+        ) == (0, Some(PROTOCOL_TYPE), Some(PROTOCOL_NAME)),
+        "SyncGroup response protocol projection mismatch: {r3:?}"
     );
 
     p.broker.shutdown().await;
@@ -152,11 +147,7 @@ async fn join_group_response_carries_protocol_type_on_inconsistent_protocol_erro
         .await
         .expect("JoinGroup");
     assert!(
-        r.error_code == 23,
-        "expected INCONSISTENT_GROUP_PROTOCOL (23), got {r:?}"
-    );
-    assert!(
-        r.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
+        (r.error_code, r.protocol_type.as_deref()) == (23, Some(PROTOCOL_TYPE)),
         "INCONSISTENT_GROUP_PROTOCOL response must echo the recorded protocol_type: {r:?}"
     );
     p.broker.shutdown().await;
@@ -184,16 +175,12 @@ async fn sync_group_response_carries_protocol_type_on_unknown_member_error() {
         .await
         .expect("SyncGroup");
     check!(
-        r.error_code == 25,
-        "expected UNKNOWN_MEMBER_ID (25), got {r:?}"
-    );
-    check!(
-        r.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
-        "UNKNOWN_MEMBER_ID response must echo the recorded protocol_type: {r:?}"
-    );
-    check!(
-        r.protocol_name.as_deref() == Some(PROTOCOL_NAME),
-        "UNKNOWN_MEMBER_ID response must echo the recorded protocol_name: {r:?}"
+        (
+            r.error_code,
+            r.protocol_type.as_deref(),
+            r.protocol_name.as_deref(),
+        ) == (25, Some(PROTOCOL_TYPE), Some(PROTOCOL_NAME)),
+        "UNKNOWN_MEMBER_ID response mismatch: {r:?}"
     );
 
     p.broker.shutdown().await;

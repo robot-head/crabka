@@ -100,11 +100,15 @@ mod tests {
 
         let ctx = RequestContext::new(&principal, &peer, "client-a", true, "SASL_SSL");
 
-        assert!(ctx.principal.name == "alice");
-        assert!(ctx.peer == &peer);
-        assert!(ctx.client_id == "client-a");
-        assert!(ctx.sendfile_capable);
-        assert!(ctx.connection_listener_name == "SASL_SSL");
+        assert!(
+            (
+                ctx.principal.name.as_str(),
+                ctx.peer,
+                ctx.client_id,
+                ctx.sendfile_capable,
+                ctx.connection_listener_name,
+            ) == ("alice", &peer, "client-a", true, "SASL_SSL")
+        );
     }
 
     #[test]
@@ -113,9 +117,13 @@ mod tests {
 
         let ctx = TelemetryContext::new(&peer, "client-a", "crabka-test", "1.2.3");
 
-        assert!(ctx.peer == &peer);
-        assert!(ctx.client_id == "client-a");
-        assert!(ctx.software_name == "crabka-test");
-        assert!(ctx.software_version == "1.2.3");
+        assert!(
+            (
+                ctx.peer,
+                ctx.client_id,
+                ctx.software_name,
+                ctx.software_version,
+            ) == (&peer, "client-a", "crabka-test", "1.2.3")
+        );
     }
 }

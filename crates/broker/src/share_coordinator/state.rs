@@ -98,8 +98,15 @@ mod tests {
             delivery_complete_count: 0,
             state_batches: vec![batch(0, 9), batch(10, 19), batch(20, 29)],
         });
-        assert!(s.state_epoch == 2);
-        assert!(s.start_offset == 0);
+        assert!(
+            s == SharePartitionState {
+                state_epoch: 2,
+                leader_epoch: 3,
+                state_batches: vec![batch(0, 9), batch(10, 19), batch(20, 29)],
+                snapshot_epoch: 1,
+                ..Default::default()
+            }
+        );
 
         // Advance SPSO past the first two batches and write a new one.
         s.apply_update(&ShareUpdateValue {
@@ -144,17 +151,21 @@ mod tests {
                 batch(30, 39),
             ],
         );
-        assert!(s.state_batches.len() == 3);
-        let updated = s
-            .state_batches
-            .iter()
-            .find(|b| b.first_offset == 10)
-            .unwrap();
-        assert!(updated.last_offset == 25);
-        assert!(updated.delivery_count == 5);
-        // Sorted ascending by first_offset.
-        let firsts: Vec<Offset> = s.state_batches.iter().map(|b| b.first_offset).collect();
-        assert!(firsts == vec![Offset(0), Offset(10), Offset(30)]);
+        assert!(
+            s == SharePartitionState {
+                state_batches: vec![
+                    batch(0, 9),
+                    StateBatch {
+                        first_offset: Offset(10),
+                        last_offset: Offset(25),
+                        delivery_state: 2,
+                        delivery_count: 5,
+                    },
+                    batch(30, 39),
+                ],
+                ..Default::default()
+            }
+        );
     }
 
     #[test]
@@ -165,7 +176,12 @@ mod tests {
         };
         // A written batch entirely below the SPSO is ignored.
         s.merge_batches(Offset(50), &[batch(0, 9)]);
-        assert!(s.state_batches.is_empty());
+        assert!(
+            s == SharePartitionState {
+                start_offset: Offset(50),
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

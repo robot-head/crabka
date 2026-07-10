@@ -88,9 +88,12 @@ async fn api_versions_round_trip() {
         })
         .await
         .expect("ApiVersions");
-    assert!(resp.error_code == 0);
-    // Must include ApiVersions itself.
-    assert!(resp.api_keys.iter().any(|k| k.api_key == 18));
+    assert!(
+        (
+            resp.error_code,
+            resp.api_keys.iter().any(|k| k.api_key == 18)
+        ) == (0, true)
+    );
     p.broker.shutdown().await;
 }
 
@@ -109,9 +112,13 @@ async fn create_then_delete_topic_round_trip() {
         ..Default::default()
     };
     let resp = p.client.send(create).await.expect("CreateTopics");
-    assert!(resp.topics.len() == 1);
-    check!(resp.topics[0].error_code == 0);
-    check!(resp.topics[0].num_partitions == 2);
+    assert!(
+        (
+            resp.topics.len(),
+            resp.topics[0].error_code,
+            resp.topics[0].num_partitions
+        ) == (1, 0, 2)
+    );
 
     let delete = DeleteTopicsRequest {
         topics: vec![DeleteTopicState {
@@ -123,8 +130,7 @@ async fn create_then_delete_topic_round_trip() {
         ..Default::default()
     };
     let dresp = p.client.send(delete).await.expect("DeleteTopics");
-    assert!(dresp.responses.len() == 1);
-    assert!(dresp.responses[0].error_code == 0);
+    assert!((dresp.responses.len(), dresp.responses[0].error_code) == (1, 0));
 
     p.broker.shutdown().await;
 }
@@ -196,9 +202,10 @@ async fn metadata_returns_this_broker_and_listed_topics() {
         .unwrap();
     assert!(topic.partitions.len() == 3);
     for (i, part) in topic.partitions.iter().enumerate() {
-        check!(part.error_code == 0);
-        check!(part.partition_index == i32::try_from(i).unwrap());
-        check!(part.leader_id == 1);
+        check!(
+            (part.error_code, part.partition_index, part.leader_id)
+                == (0, i32::try_from(i).unwrap(), 1)
+        );
     }
     p.broker.shutdown().await;
 }
@@ -227,9 +234,8 @@ async fn produce_assigns_base_offsets() {
     };
     let resp = p.client.send(req).await.expect("Produce 1");
     assert!(resp.responses.len() == 1);
-    assert!(resp.responses[0].partition_responses.len() == 1);
-    check!(resp.responses[0].partition_responses[0].error_code == 0);
-    check!(resp.responses[0].partition_responses[0].base_offset == 0);
+    let first = &resp.responses[0].partition_responses;
+    assert!((first.len(), first[0].error_code, first[0].base_offset) == (1, 0, 0));
 
     // Second produce: 2 records → base 3.
     let req2 = ProduceRequest {
@@ -248,8 +254,8 @@ async fn produce_assigns_base_offsets() {
         ..Default::default()
     };
     let resp2 = p.client.send(req2).await.expect("Produce 2");
-    assert!(resp2.responses[0].partition_responses[0].error_code == 0);
-    assert!(resp2.responses[0].partition_responses[0].base_offset == 3);
+    let second = &resp2.responses[0].partition_responses[0];
+    assert!((second.error_code, second.base_offset) == (0, 3));
 
     p.broker.shutdown().await;
 }
@@ -353,8 +359,13 @@ async fn list_offsets_earliest_and_latest() {
     let earliest = p.client.send(mk(-2)).await.expect("ListOffsets earliest");
     let latest = p.client.send(mk(-1)).await.expect("ListOffsets latest");
     for (label, resp) in [("earliest", &earliest), ("latest", &latest)] {
-        check!(resp.topics[0].partitions[0].error_code == 0, "{label}");
-        check!(resp.topics[0].partitions[0].offset == 0, "{label}");
+        check!(
+            (
+                resp.topics[0].partitions[0].error_code,
+                resp.topics[0].partitions[0].offset
+            ) == (0, 0),
+            "{label}"
+        );
     }
 
     p.broker.shutdown().await;
@@ -369,10 +380,7 @@ async fn find_coordinator_returns_self() {
     };
     let r = p.client.send(req).await.expect("FindCoordinator");
     for c in &r.coordinators {
-        check!(c.error_code == 0);
-        check!(c.node_id == 1);
-        check!(!c.host.is_empty());
-        check!(c.port > 0);
+        check!((c.error_code, c.node_id, c.host.is_empty(), c.port > 0) == (0, 1, false, true));
     }
     p.broker.shutdown().await;
 }
@@ -395,8 +403,7 @@ async fn join_group_with_empty_member_returns_member_id_required() {
         ..Default::default()
     };
     let r = p.client.send(req).await.expect("JoinGroup");
-    assert!(r.error_code == 79); // MEMBER_ID_REQUIRED
-    assert!(!r.member_id.is_empty());
+    assert!((r.error_code, r.member_id.is_empty()) == (79, false)); // MEMBER_ID_REQUIRED
     p.broker.shutdown().await;
 }
 
@@ -441,10 +448,15 @@ async fn join_group_single_member_completes_after_deadline() {
         })
         .await
         .expect("JoinGroup2");
-    check!(r2.error_code == 0);
-    check!(r2.leader == r1.member_id);
-    check!(r2.member_id == r1.member_id);
-    check!(!r2.members.is_empty(), "leader sees member list");
+    check!(
+        (
+            r2.error_code,
+            &r2.leader,
+            &r2.member_id,
+            r2.members.is_empty(),
+        ) == (0, &r1.member_id, &r1.member_id, false),
+        "leader response must echo the member id and include the member list"
+    );
     p.broker.shutdown().await;
 }
 
@@ -511,8 +523,7 @@ async fn full_group_flow_join_sync_heartbeat_commit_fetch_leave() {
         })
         .await
         .unwrap();
-    assert!(r2.error_code == 0);
-    assert!(r2.leader == mid);
+    assert!((r2.error_code, &r2.leader) == (0, &mid));
     let generation = r2.generation_id;
 
     // Step 3: leader SyncGroup with a single-member assignment.
@@ -533,8 +544,7 @@ async fn full_group_flow_join_sync_heartbeat_commit_fetch_leave() {
         })
         .await
         .unwrap();
-    assert!(r3.error_code == 0);
-    assert!(r3.assignment.as_ref() == b"asgn");
+    assert!((r3.error_code, r3.assignment.as_ref()) == (0, b"asgn".as_slice()));
 
     // Step 4: Heartbeat → 0.
     let r4 = p
@@ -618,9 +628,7 @@ async fn init_producer_id_returns_fresh_pid() {
         .send(InitProducerIdRequest::default())
         .await
         .expect("InitProducerId");
-    check!(r.error_code == 0);
-    check!(r.producer_id >= 1000);
-    check!(r.producer_epoch == 0);
+    check!((r.error_code, r.producer_id >= 1000, r.producer_epoch) == (0, true, 0));
     p.broker.shutdown().await;
 }
 
@@ -694,13 +702,13 @@ async fn idempotent_produce_dedups_duplicate_batch() {
     };
 
     let r1 = p.client.send(req.clone()).await.expect("Produce 1");
-    assert!(r1.responses[0].partition_responses[0].error_code == 0);
-    assert!(r1.responses[0].partition_responses[0].base_offset == 0);
+    let first = &r1.responses[0].partition_responses[0];
+    assert!((first.error_code, first.base_offset) == (0, 0));
 
     // Send the same batch again — must be deduped (error 0, base_offset 0).
     let r2 = p.client.send(req).await.expect("Produce 2 (dup)");
-    assert!(r2.responses[0].partition_responses[0].error_code == 0);
-    assert!(r2.responses[0].partition_responses[0].base_offset == 0);
+    let duplicate = &r2.responses[0].partition_responses[0];
+    assert!((duplicate.error_code, duplicate.base_offset) == (0, 0));
 
     p.broker.shutdown().await;
 }
@@ -785,13 +793,12 @@ async fn find_coordinator_txn_creates_topic_and_returns_local_broker() {
         .expect("FindCoordinator(TRANSACTION)");
     // The broker bootstraps __transaction_state on demand, resolves the
     // partition leader, and returns itself (the only broker in the cluster).
-    assert!(r.error_code == 0, "top-level error_code");
-    assert!(r.coordinators.len() == 1, "one coordinator entry");
+    assert!((r.error_code, r.coordinators.len()) == (0, 1));
     let c = &r.coordinators[0];
-    check!(c.error_code == 0, "coordinator error_code");
-    check!(c.node_id == 1, "node_id should be this single broker");
-    check!(!c.host.is_empty(), "host should be non-empty");
-    check!(c.port > 0, "port should be positive");
+    check!(
+        (c.error_code, c.node_id, c.host.is_empty(), c.port > 0) == (0, 1, false, true),
+        "coordinator must be this broker with a non-empty endpoint"
+    );
     p.broker.shutdown().await;
 }
 
@@ -820,12 +827,10 @@ async fn init_producer_id_with_transactional_id_returns_real_pid() {
         })
         .await
         .expect("InitProducerId");
-    check!(r.error_code == 0, "error_code should be NONE");
     check!(
-        r.producer_id >= 1_000,
-        "producer_id should come from txn coordinator's pool"
+        (r.error_code, r.producer_id >= 1_000, r.producer_epoch) == (0, true, 0),
+        "successful first allocation must return a real producer id at epoch 0"
     );
-    check!(r.producer_epoch == 0, "first allocation → epoch 0");
     p.broker.shutdown().await;
 }
 
@@ -852,7 +857,7 @@ async fn init_producer_id_with_same_tid_bumps_epoch() {
         })
         .await
         .expect("InitProducerId 1");
-    assert!(r1.error_code == 0, "r1 error_code");
+    assert!((r1.error_code, r1.producer_id >= 1_000, r1.producer_epoch) == (0, true, 0));
 
     let r2 = p
         .client
@@ -863,11 +868,10 @@ async fn init_producer_id_with_same_tid_bumps_epoch() {
         })
         .await
         .expect("InitProducerId 2");
-    check!(r2.error_code == 0, "r2 error_code");
-    check!(r1.producer_id == r2.producer_id, "same pid for same tid");
     check!(
-        r2.producer_epoch == r1.producer_epoch + 1,
-        "second call bumps epoch by 1"
+        (r2.error_code, r2.producer_id, r2.producer_epoch,)
+            == (0, r1.producer_id, r1.producer_epoch + 1),
+        "second call must preserve producer id and bump epoch by 1"
     );
     p.broker.shutdown().await;
 }

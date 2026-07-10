@@ -476,28 +476,44 @@ mod tests {
     }
 
     #[test]
-    fn group_key_denied_maps_to_group_authorization_failed() {
+    fn denied_keys_map_to_resource_specific_authorization_errors() {
         let authz = deny_authorizer();
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
-        let code = key_authz_failure(&authz, &image, &anon(), &peer, KEY_TYPE_GROUP, "g");
-        assert!(code == Some(codes::GROUP_AUTHORIZATION_FAILED));
-    }
+        let cases = [
+            (
+                "group key",
+                KEY_TYPE_GROUP,
+                "g",
+                codes::GROUP_AUTHORIZATION_FAILED,
+            ),
+            (
+                "transactional id key",
+                KEY_TYPE_TRANSACTION,
+                "t",
+                codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
+            ),
+        ];
 
-    #[test]
-    fn txn_key_denied_maps_to_transactional_id_authorization_failed() {
-        let authz = deny_authorizer();
-        let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
-        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
-        let code = key_authz_failure(&authz, &image, &anon(), &peer, KEY_TYPE_TRANSACTION, "t");
-        assert!(code == Some(codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
+        for (case, key_type, key, expected) in cases {
+            let code = key_authz_failure(&authz, &image, &anon(), &peer, key_type, key);
+            assert!(code == Some(expected), "case: {case}");
+        }
     }
 
     #[test]
     fn denied_entry_carries_the_failure_code() {
         let c = denied_coordinator("g".into(), codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(c.error_code == codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(c.node_id == -1);
+        let expected = Coordinator {
+            key: "g".into(),
+            node_id: -1,
+            host: String::new(),
+            port: -1,
+            error_code: codes::GROUP_AUTHORIZATION_FAILED,
+            error_message: Some("authorization failed".into()),
+            ..Default::default()
+        };
+        assert!(c == expected);
     }
 
     fn listener(name: &str, advertised: &str) -> crate::config::ListenerSpec {

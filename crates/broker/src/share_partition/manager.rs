@@ -479,8 +479,7 @@ mod tests {
 
         let cell = mgr.get_or_load("g1", tid, 0).await;
         let st = cell.lock().await;
-        assert!(st.start_offset == 0);
-        assert!(!st.dirty);
+        assert!(*st == AcquisitionState::new(Offset(0)));
         drop(st);
         // A second call returns the same cached cell.
         let cell2 = mgr.get_or_load("g1", tid, 0).await;
@@ -574,11 +573,20 @@ mod tests {
         ));
         let mgr = manager_with_image(image);
 
-        // Known partition resolves to (leader_id, leader_epoch) from the image.
-        assert!(mgr.current_leader_of(tid, 0) == (2, 5));
-        // Unknown partition of a known topic -> (-1, -1).
-        assert!(mgr.current_leader_of(tid, 9) == (-1, -1));
-        // Unknown topic -> (-1, -1).
-        assert!(mgr.current_leader_of(uuid::Uuid::from_bytes([99; 16]), 0) == (-1, -1));
+        for (case, topic_id, partition, expected) in [
+            ("known partition", tid, 0, (2, 5)),
+            ("unknown partition", tid, 9, (-1, -1)),
+            (
+                "unknown topic",
+                uuid::Uuid::from_bytes([99; 16]),
+                0,
+                (-1, -1),
+            ),
+        ] {
+            assert!(
+                mgr.current_leader_of(topic_id, partition) == expected,
+                "case {case}"
+            );
+        }
     }
 }

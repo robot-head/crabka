@@ -70,9 +70,8 @@ async fn single_member_full_lifecycle() {
     let mut req = heartbeat("g1", "", 0);
     req.subscribed_topic_names = Some(vec!["t1".into()]);
     let resp = client.send(req).await.unwrap();
-    assert!(resp.error_code == 0);
     let member_id = resp.member_id.clone().unwrap();
-    assert!(resp.member_epoch == 1);
+    assert!((resp.error_code, resp.member_epoch) == (0, 1));
     let assigned = resp.assignment.as_ref().unwrap();
     let total_partitions: usize = assigned
         .topic_partitions
@@ -84,8 +83,7 @@ async fn single_member_full_lifecycle() {
     let mut hb2 = heartbeat("g1", &member_id, 1);
     hb2.subscribed_topic_names = Some(vec!["t1".into()]);
     let resp2 = client.send(hb2).await.unwrap();
-    assert!(resp2.error_code == 0);
-    assert!(resp2.member_epoch == 1);
+    assert!((resp2.error_code, resp2.member_epoch) == (0, 1));
 
     let leave = heartbeat("g1", &member_id, -1);
     let resp3 = client.send(leave).await.unwrap();
@@ -232,9 +230,13 @@ async fn describe_after_join() {
         })
         .await
         .unwrap();
-    assert!(desc.groups.len() == 1);
-    check!(desc.groups[0].error_code == 0);
-    check!(desc.groups[0].group_state == "STABLE");
+    check!(
+        (
+            desc.groups.len(),
+            desc.groups[0].error_code,
+            desc.groups[0].group_state.as_str(),
+        ) == (1, 0, "STABLE")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -267,9 +269,8 @@ async fn stale_epoch_rejected() {
     let mut catch_up = heartbeat("g6", &mid, 1);
     catch_up.subscribed_topic_names = Some(vec!["t6".into()]);
     let rc = client.send(catch_up).await.unwrap();
-    assert!(rc.error_code == 0);
     assert!(
-        rc.member_epoch == 2,
+        (rc.error_code, rc.member_epoch) == (0, 2),
         "A should be at epoch 2 after catch-up"
     );
 
@@ -297,9 +298,8 @@ async fn first_join_with_client_member_id_echoes_and_assigns() {
     req.subscribed_topic_names = Some(vec!["tc".into()]);
     let resp = client.send(req).await.unwrap();
 
-    assert!(resp.error_code == 0, "client-id first-join failed");
     assert!(
-        resp.member_id.as_deref() == Some("client-generated-id"),
+        (resp.error_code, resp.member_id.as_deref()) == (0, Some("client-generated-id")),
         "broker must echo the client-supplied member id"
     );
     let parts: usize = resp
@@ -388,13 +388,7 @@ async fn list_groups_includes_next_gen_consumer_group() {
         .filter(|g| g.group_id == "glist")
         .collect();
     assert!(
-        matches.len() == 1,
-        "glist must be listed exactly once, got {} rows",
-        matches.len()
-    );
-    assert!(
-        matches[0].group_type == "consumer",
-        "unfiltered list must tag glist as consumer, got {:?}",
-        matches[0].group_type
+        (matches.len(), matches[0].group_type.as_str()) == (1, "consumer"),
+        "unfiltered list must contain one consumer glist row: {matches:?}"
     );
 }

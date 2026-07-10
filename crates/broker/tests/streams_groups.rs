@@ -257,23 +257,15 @@ async fn stateless_single_member_converges() {
     )
     .await;
 
-    check!(resp.error_code == 0, "heartbeat error: {resp:?}");
-    check!(!member_id.is_empty(), "broker must mint a member id");
     check!(
-        resp.member_epoch >= 1,
-        "first join advances the member epoch, got {}",
-        resp.member_epoch
-    );
-    // The single member owns both partitions of subtopology "0".
-    check!(
-        active_partition_count(&resp) == 2,
-        "lone member must own both input partitions, got {:?}",
-        resp.active_tasks
-    );
-    check!(
-        active_partitions_for(&resp, "0") == vec![0, 1],
-        "subtopology 0 must be assigned partitions [0, 1], got {:?}",
-        resp.active_tasks
+        (
+            resp.error_code,
+            member_id.is_empty(),
+            resp.member_epoch >= 1,
+            active_partition_count(&resp),
+            active_partitions_for(&resp, "0"),
+        ) == (0, false, true, 2, vec![0, 1]),
+        "single-member streams assignment mismatch: {resp:?}"
     );
 }
 
@@ -400,25 +392,15 @@ async fn describe_returns_the_group() {
         desc.groups.len()
     );
     let g = &desc.groups[0];
-    check!(g.error_code == 0, "describe error: {:?}", g.error_code);
     check!(
-        g.group_id == "streams-app-3",
-        "described group id mismatch: {:?}",
-        g.group_id
-    );
-    check!(
-        !g.members.is_empty(),
-        "described group must list the joined member"
-    );
-    check!(
-        g.members.iter().any(|m| m.member_id == member_id),
-        "described group must contain member {member_id}, got {:?}",
-        g.members.iter().map(|m| &m.member_id).collect::<Vec<_>>()
-    );
-    check!(
-        !g.group_state.is_empty(),
-        "group_state must be a non-empty phase string, got {:?}",
-        g.group_state
+        (
+            g.error_code,
+            g.group_id.as_str(),
+            g.members.is_empty(),
+            g.members.iter().any(|m| m.member_id == member_id),
+            g.group_state.is_empty(),
+        ) == (0, "streams-app-3", false, true, false),
+        "described group projection mismatch: {g:?}"
     );
 }
 
@@ -451,19 +433,13 @@ async fn leave_removes_member() {
 
     // The group is retained (Empty) but the member is gone.
     let desc = describe(&client, "streams-app-4").await;
-    assert!(
-        desc.groups.len() == 1,
-        "group row still present after leave, got {}",
-        desc.groups.len()
-    );
     let g = &desc.groups[0];
     assert!(
-        g.error_code == 0,
-        "retained group describe error: {:?}",
-        g.error_code
-    );
-    assert!(
-        !g.members.iter().any(|m| m.member_id == member_id),
+        (
+            desc.groups.len(),
+            g.error_code,
+            g.members.iter().any(|m| m.member_id == member_id),
+        ) == (1, 0, false),
         "left member {member_id} must be gone, got {:?}",
         g.members.iter().map(|m| &m.member_id).collect::<Vec<_>>()
     );

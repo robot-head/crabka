@@ -375,28 +375,17 @@ async fn diverging_epoch_returned_on_stale_last_fetched_epoch() {
     let part = &resp.responses[0].partitions[0];
     // NONE error code: divergence is reported in-band, not as an error.
     check!(
-        part.error_code == 0,
-        "expected NONE, got {}",
-        part.error_code
-    );
-    check!(
-        part.diverging_epoch.end_offset == k,
-        "diverging_epoch.end_offset should be the epoch-0 boundary {k}, got {}",
-        part.diverging_epoch.end_offset
-    );
-    check!(
-        part.diverging_epoch.epoch == e0,
-        "diverging_epoch.epoch should be {e0}, got {}",
-        part.diverging_epoch.epoch
-    );
-    // No records are served alongside a divergence signal.
-    check!(
-        part.records.is_none()
-            || part
-                .records
-                .as_ref()
-                .and_then(|r| r.as_v2())
-                .is_none_or(<[_]>::is_empty),
+        (
+            part.error_code,
+            part.diverging_epoch.end_offset,
+            part.diverging_epoch.epoch,
+            part.records.is_none()
+                || part
+                    .records
+                    .as_ref()
+                    .and_then(|r| r.as_v2())
+                    .is_none_or(<[_]>::is_empty),
+        ) == (0, k, e0, true),
         "diverging fetch must serve no records"
     );
 

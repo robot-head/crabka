@@ -259,9 +259,8 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
     assert!(
-        resp.topics[0].error_code == 0,
+        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -596,9 +595,8 @@ async fn alter_then_describe_round_trip() {
         false,
     )
     .await;
-    assert!(alter_resp.len() == 1, "one entry in response");
     assert!(
-        alter_resp[0].1 == 0,
+        (alter_resp.len(), alter_resp[0].1) == (1, 0),
         "alter should succeed; error_code={}",
         alter_resp[0].1
     );

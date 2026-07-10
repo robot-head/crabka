@@ -228,9 +228,7 @@ mod tests {
         let req = build_request(7, &assignments);
 
         // broker_id, epoch, and two directories.
-        check!(req.broker_id == 7);
-        check!(req.broker_epoch == -1);
-        check!(req.directories.len() == 2);
+        check!((req.broker_id, req.broker_epoch, req.directories.len()) == (7, -1, 2));
 
         // Find dir dX and dY by their UUID bytes.
         let dir_x = req
@@ -266,16 +264,18 @@ mod tests {
             .iter()
             .find(|t| t.topic_id.0 == *tb.as_bytes())
             .expect("topic tB in dY missing");
-        assert!(topic_b.partitions.len() == 1);
-        assert!(topic_b.partitions[0].partition_index == 0);
+        assert!(
+            (
+                topic_b.partitions.len(),
+                topic_b.partitions[0].partition_index
+            ) == (1, 0)
+        );
     }
 
     #[test]
     fn build_request_empty_assignments() {
         let req = build_request(1, &[]);
-        check!(req.broker_id == 1);
-        check!(req.broker_epoch == -1);
-        check!(req.directories.is_empty());
+        check!((req.broker_id, req.broker_epoch, req.directories) == (1, -1, Vec::new()));
     }
 
     #[test]
@@ -287,8 +287,7 @@ mod tests {
         let decoded =
             AssignReplicasToDirsRequest::decode(&mut bytes.freeze(), 0).expect("decode request");
 
-        assert!(decoded.broker_id == 3);
-        assert!(decoded.broker_epoch == -1);
+        assert!((decoded.broker_id, decoded.broker_epoch) == (3, -1));
     }
 
     #[tokio::test]

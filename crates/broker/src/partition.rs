@@ -934,11 +934,10 @@ mod tests {
             p.install_leader_change(leader, epoch).await;
 
             assert!(
-                p.current_leader.load(Ordering::Acquire) == leader,
-                "case ({leader}, {epoch})"
-            );
-            assert!(
-                p.current_leader_epoch.load(Ordering::Acquire) == epoch,
+                (
+                    p.current_leader.load(Ordering::Acquire),
+                    p.current_leader_epoch.load(Ordering::Acquire),
+                ) == (leader, epoch),
                 "case ({leader}, {epoch})"
             );
             let st = p.replica_state.lock().await;

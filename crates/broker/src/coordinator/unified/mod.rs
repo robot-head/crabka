@@ -99,10 +99,17 @@ mod helper_tests {
 
     #[test]
     fn validate_member_epoch_maps_all_fencing_outcomes() {
-        assert!(validate_member_epoch(None, 7) == Err(codes::UNKNOWN_MEMBER_ID));
-        assert!(validate_member_epoch(Some(5), 4) == Err(codes::STALE_MEMBER_EPOCH));
-        assert!(validate_member_epoch(Some(5), 6) == Err(codes::FENCED_MEMBER_EPOCH));
-        assert!(validate_member_epoch(Some(5), 5) == Ok(5));
+        for (case, stored, request, expected) in [
+            ("unknown member", None, 7, Err(codes::UNKNOWN_MEMBER_ID)),
+            ("stale epoch", Some(5), 4, Err(codes::STALE_MEMBER_EPOCH)),
+            ("fenced epoch", Some(5), 6, Err(codes::FENCED_MEMBER_EPOCH)),
+            ("accepted epoch", Some(5), 5, Ok(5)),
+        ] {
+            assert!(
+                validate_member_epoch(stored, request) == expected,
+                "case {case}"
+            );
+        }
     }
 
     #[test]
@@ -1687,8 +1694,12 @@ mod tests {
     #[test]
     fn once_lock_getters_return_installed_first_values() {
         let coord = make_coord();
-        assert!(coord.metadata_source().is_none());
-        assert!(coord.share_persister().is_none());
+        assert!(
+            (
+                coord.metadata_source().is_none(),
+                coord.share_persister().is_none(),
+            ) == (true, true)
+        );
 
         let first_source = fixed_source(crabka_metadata::MetadataImage::new(real_uuid(1)));
         let second_source = fixed_source(crabka_metadata::MetadataImage::new(real_uuid(2)));
@@ -1708,9 +1719,13 @@ mod tests {
     #[test]
     fn cache_updates_and_forced_type_transitions_are_observable() {
         let coord = make_coord();
-        check!(coord.cached_seed("g") == None);
-        check!(coord.cached_share_seed("sg") == None);
-        check!(coord.cached_streams_seed("st") == None);
+        check!(
+            (
+                coord.cached_seed("g").is_none(),
+                coord.cached_share_seed("sg").is_none(),
+                coord.cached_streams_seed("st").is_none(),
+            ) == (true, true, true)
+        );
 
         coord.update_cache(
             "g",
@@ -1721,8 +1736,7 @@ mod tests {
             },
         );
         let cached = coord.cached_seed("g").unwrap();
-        assert!(cached.group_epoch == 7);
-        assert!(cached.target_epoch == 8);
+        assert!((cached.group_epoch, cached.target_epoch) == (7, 8));
 
         coord.seeds.insert(
             "g".into(),
@@ -1734,9 +1748,13 @@ mod tests {
         coord.mark_next_gen("g");
         assert!(coord.group_type("g") == Some(GroupType::NextGen));
         coord.mark_classic_after_downgrade("g");
-        check!(coord.group_type("g") == Some(GroupType::Classic));
-        check!(coord.seeds.get("g").is_none());
-        check!(coord.cached_seed("g") == None);
+        check!(
+            (
+                coord.group_type("g"),
+                coord.seeds.get("g").is_none(),
+                coord.cached_seed("g").is_none(),
+            ) == (Some(GroupType::Classic), true, true)
+        );
 
         coord.update_share_cache(
             "sg",
@@ -1747,8 +1765,7 @@ mod tests {
             },
         );
         let share_cached = coord.cached_share_seed("sg").unwrap();
-        assert!(share_cached.group_epoch == 17);
-        assert!(share_cached.target_epoch == 18);
+        assert!((share_cached.group_epoch, share_cached.target_epoch) == (17, 18));
 
         coord.update_streams_cache(
             "st",
@@ -1759,8 +1776,7 @@ mod tests {
             },
         );
         let streams_cached = coord.cached_streams_seed("st").unwrap();
-        assert!(streams_cached.group_epoch == 27);
-        assert!(streams_cached.assignment_epoch == 28);
+        assert!((streams_cached.group_epoch, streams_cached.assignment_epoch) == (27, 28));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2067,12 +2083,19 @@ mod tests {
         let snapshot = provider.snapshot();
         let proto_topic_id = crabka_protocol::primitives::uuid::Uuid(*topic_id.as_bytes());
 
-        check!(snapshot.topic_id_by_name.get("input") == Some(&proto_topic_id));
-        check!(snapshot.partitions_per_topic.get(&proto_topic_id) == Some(&2));
         check!(
-            snapshot.partition_racks.get(&(proto_topic_id, 0))
-                == Some(&vec!["rack-a".to_string(), "rack-b".to_string()])
+            (
+                snapshot.topic_id_by_name,
+                snapshot.partitions_per_topic,
+                snapshot.partition_racks,
+            ) == (
+                std::collections::HashMap::from([("input".to_string(), proto_topic_id)]),
+                std::collections::HashMap::from([(proto_topic_id, 2)]),
+                std::collections::HashMap::from([(
+                    (proto_topic_id, 0),
+                    vec!["rack-a".to_string(), "rack-b".to_string()],
+                )]),
+            )
         );
-        check!(snapshot.partition_racks.get(&(proto_topic_id, 1)) == None);
     }
 }

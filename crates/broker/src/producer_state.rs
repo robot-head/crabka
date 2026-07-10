@@ -593,8 +593,7 @@ mod tests {
         let evicted = s.expire_older_than(10_000, 5_000).await;
         assert!(evicted == 1);
         let snap = s.snapshot("t", PartitionIndex(0)).await;
-        assert!(snap.len() == 1);
-        assert!(snap[0].0 == 2, "only the recently-active producer survives");
+        assert!(snap.iter().map(|entry| entry.0).collect::<Vec<_>>() == vec![2]);
     }
 
     #[tokio::test]

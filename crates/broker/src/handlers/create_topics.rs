@@ -480,18 +480,18 @@ mod replica_assignment_tests {
         }));
         let cases = [
             // Exact (user, client-id) tuple match should throttle on overage.
-            ("app-x", true),
+            ("exact user and client match", "app-x", true),
             // Non-matching client_id should not throttle.
-            ("other", false),
+            ("nonmatching client", "other", false),
         ];
-        for (client_id, want_throttle) in cases {
+        for (case, client_id, want_throttle) in cases {
             let buckets = crate::quota::QuotaBuckets::new();
             let delay = crate::quota::consume_controller_mutation_quota(
                 &img, &buckets, "alice", client_id, 10,
             );
             assert!(
                 (delay > std::time::Duration::ZERO) == want_throttle,
-                "client_id {client_id}, delay {delay:?}"
+                "case: {case}; client_id {client_id}, delay {delay:?}"
             );
         }
     }

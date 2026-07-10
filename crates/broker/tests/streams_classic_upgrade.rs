@@ -428,12 +428,7 @@ async fn drained_classic_group_converts_and_preserves_offsets() {
         .expect("topic 'in' in OffsetFetch response");
     let part = t.partitions.first().expect("partition 0");
     assert!(
-        part.error_code == ERR_NONE,
-        "OffsetFetch error: {:?}",
-        part.error_code
-    );
-    assert!(
-        part.committed_offset == 42,
+        (part.error_code, part.committed_offset) == (ERR_NONE, 42),
         "committed offset must survive conversion, got {}",
         part.committed_offset
     );

@@ -61,8 +61,12 @@ mod tests {
     #[test]
     fn allocate_returns_monotonic_pids_starting_at_base() {
         let m = ProducerIdManager::new();
-        for want_pid in [PID_BASE, PID_BASE + 1, PID_BASE + 2] {
-            assert!(m.allocate() == (ProducerId(want_pid), 0));
+        for (case, want_pid) in [
+            ("base", PID_BASE),
+            ("second", PID_BASE + 1),
+            ("third", PID_BASE + 2),
+        ] {
+            assert!(m.allocate() == (ProducerId(want_pid), 0), "case {case}");
         }
     }
 

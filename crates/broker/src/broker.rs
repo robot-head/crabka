@@ -4583,10 +4583,14 @@ mod tests {
             active.insert("subtopology-0".to_string(), vec![0, 1]);
             active
         };
-        check!(streams.group_id.as_str() == streams_group_id);
-        check!(streams.members.len() == 1);
-        check!(streams.members[0].member_id.as_str() == streams_member_id);
-        check!(streams.members[0].active == expected_active);
+        check!(
+            (
+                streams.group_id.as_str(),
+                streams.members.len(),
+                streams.members[0].member_id.as_str(),
+                &streams.members[0].active,
+            ) == (streams_group_id, 1, streams_member_id, &expected_active)
+        );
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
@@ -4726,9 +4730,12 @@ mod tests {
             .expect("controller endpoint");
         // Self keeps its real directory id; peers get the nil placeholder.
         check!(
-            ep0.host.as_str() == "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local"
+            (ep0.host.as_str(), ep0.port)
+                == (
+                    "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local",
+                    9093,
+                )
         );
-        check!(ep0.port == 9093);
         check!(v0.directory_id == self_dir);
 
         let v1 = set.get(crabka_audit::NodeId(1)).expect("voter 1 present");
@@ -4758,8 +4765,7 @@ mod tests {
             .get(crabka_audit::NodeId(3))
             .expect("self voter present");
         let ep = v.endpoints.iter().find(|e| e.name == "CONTROLLER").unwrap();
-        assert!(ep.host == "192.168.1.5");
-        assert!(ep.port == 9099);
+        assert!((ep.host.as_str(), ep.port) == ("192.168.1.5", 9099));
     }
 
     #[test]
@@ -4782,28 +4788,28 @@ mod tests {
     fn connection_guard_increments_and_decrements_global_and_per_ip() {
         let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, usize::MAX));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        assert!(limiter.total() == 0);
-        assert!(limiter.per_ip_count(ip) == 0);
+        assert!((limiter.total(), limiter.per_ip_count(ip)) == (0, 0));
 
         let g1 = limiter
             .try_acquire(ip)
             .expect("acquire under unlimited caps");
-        assert!(limiter.total() == 1);
-        assert!(limiter.per_ip_count(ip) == 1);
+        assert!((limiter.total(), limiter.per_ip_count(ip)) == (1, 1));
 
         let g2 = limiter.try_acquire(ip).expect("second acquire");
-        assert!(limiter.total() == 2);
-        assert!(limiter.per_ip_count(ip) == 2);
+        assert!((limiter.total(), limiter.per_ip_count(ip)) == (2, 2));
 
         drop(g1);
-        assert!(limiter.total() == 1);
-        assert!(limiter.per_ip_count(ip) == 1);
+        assert!((limiter.total(), limiter.per_ip_count(ip)) == (1, 1));
 
         drop(g2);
         // Per-IP entry must be removed (not left at 0) when it hits zero.
-        check!(limiter.total() == 0);
-        check!(limiter.per_ip_count(ip) == 0);
-        check!(limiter.per_ip.get(&ip).is_none());
+        check!(
+            (
+                limiter.total(),
+                limiter.per_ip_count(ip),
+                limiter.per_ip.get(&ip).is_none(),
+            ) == (0, 0, true)
+        );
     }
 
     #[test]
@@ -4815,9 +4821,13 @@ mod tests {
         // Global ceiling of 1 reached — a different IP is still rejected,
         // and the rejection reserves nothing (per-IP entry not created).
         check!(limiter.try_acquire(b).is_none());
-        check!(limiter.total() == 1);
-        check!(limiter.per_ip_count(b) == 0);
-        check!(limiter.per_ip.get(&b).is_none());
+        check!(
+            (
+                limiter.total(),
+                limiter.per_ip_count(b),
+                limiter.per_ip.get(&b).is_none(),
+            ) == (1, 0, true)
+        );
     }
 
     #[test]
@@ -4829,12 +4839,10 @@ mod tests {
         // Second from the same IP rejected; global must be rolled back so
         // the count reflects only the one live connection.
         check!(limiter.try_acquire(a).is_none());
-        check!(limiter.total() == 1);
-        check!(limiter.per_ip_count(a) == 1);
+        check!((limiter.total(), limiter.per_ip_count(a)) == (1, 1));
         // A different IP is still under its own per-IP ceiling.
         let _g2 = limiter.try_acquire(b).expect("first from b allowed");
-        assert!(limiter.total() == 2);
-        assert!(limiter.per_ip_count(b) == 1);
+        assert!((limiter.total(), limiter.per_ip_count(b)) == (2, 1));
     }
 
     #[test]
@@ -4874,8 +4882,12 @@ mod tests {
         // reports doubled values), so assert the portable invariant: tuning grows
         // each buffer above the explicit tiny baseline instead of pinning a host
         // sysctl-dependent absolute size.
-        check!(sock.send_buffer_size().expect("read send buffer") > send_before);
-        check!(sock.recv_buffer_size().expect("read recv buffer") > recv_before);
+        check!(
+            (
+                sock.send_buffer_size().expect("read send buffer") > send_before,
+                sock.recv_buffer_size().expect("read recv buffer") > recv_before,
+            ) == (true, true)
+        );
         drop(client);
     }
 
@@ -5244,8 +5256,7 @@ mod tests {
         else {
             panic!("trigger_snapshot_for_test should write a readable snapshot");
         };
-        assert!(snapshot.total_size > 0);
-        assert!(!snapshot.bytes.is_empty());
+        assert!((snapshot.total_size > 0, snapshot.bytes.is_empty()) == (true, false));
 
         let local_topic = "handle-local-log-mutant-topic";
         let local_part = local_partition_with_records(dir.path(), local_topic, 0, &[b"a", b"b"]);
@@ -5299,8 +5310,10 @@ mod tests {
         let observed_config = handle
             .partition_log_config_for_test(helper_topic, 0)
             .expect("helper partition log config");
-        assert!(observed_config.retention_ms == helper_config.retention_ms);
-        assert!(observed_config.segment_bytes == helper_config.segment_bytes);
+        assert!(
+            (observed_config.retention_ms, observed_config.segment_bytes)
+                == (helper_config.retention_ms, helper_config.segment_bytes)
+        );
         let last_offset = handle
             .produce_records_for_test(helper_topic, 0, 3)
             .await
@@ -5317,18 +5330,18 @@ mod tests {
             .expect("helper partition log lock")
             .read(crabka_log::Offset(2), 1 << 20)
             .expect("read helper partition records");
-        assert!(read.start_offset == crabka_log::Offset(2));
-        assert!(!read.batches.is_empty());
+        assert!((read.start_offset, read.batches.is_empty()) == (crabka_log::Offset(2), false));
         let records: Vec<_> = read
             .batches
             .iter()
             .flat_map(|batch| batch.records.iter())
             .collect();
-        check!(records.len() == 1);
-        check!(records[0].offset_delta == 0);
         check!(
-            records[0].value.as_ref().map(bytes::Bytes::as_ref)
-                == Some(b"test-record-2".as_slice())
+            (
+                records.len(),
+                records[0].offset_delta,
+                records[0].value.as_ref().map(bytes::Bytes::as_ref),
+            ) == (1, 0, Some(b"test-record-2".as_slice()))
         );
         // Waiting for log_end + 1 must stay pending; waiting for the reached
         // log_end must resolve (both the >= and == variants).
@@ -5546,9 +5559,13 @@ mod tests {
             .group_describe_for_test(group_id)
             .await
             .expect("next-gen group describe");
-        check!(described.group_id.as_str() == group_id);
-        check!(described.members.len() == 1);
-        check!(described.members[0].member_id.as_str() == member_id);
+        check!(
+            (
+                described.group_id.as_str(),
+                described.members.len(),
+                described.members[0].member_id.as_str(),
+            ) == (group_id, 1, member_id)
+        );
         assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
@@ -5598,9 +5615,13 @@ mod tests {
             .classic_group_inspect_for_test(classic_group_id)
             .await
             .expect("classic group inspect");
-        check!(classic.group_id.as_str() == classic_group_id);
-        check!(classic.members.len() == 1);
-        check!(classic.members[0].member_id.as_str() == classic_member_id);
+        check!(
+            (
+                classic.group_id.as_str(),
+                classic.members.len(),
+                classic.members[0].member_id.as_str(),
+            ) == (classic_group_id, 1, classic_member_id)
+        );
 
         let created_classic_group_id = "handle-create-classic-group-mutant";
         assert!(
@@ -5614,8 +5635,10 @@ mod tests {
             .classic_group_inspect_for_test(created_classic_group_id)
             .await
             .expect("created classic group inspect");
-        assert!(created.group_id == created_classic_group_id);
-        assert!(created.members.is_empty());
+        assert!(
+            (created.group_id.as_str(), created.members.is_empty())
+                == (created_classic_group_id, true)
+        );
 
         let marked_classic_group_id = "handle-marked-classic-group-mutant";
         assert!(

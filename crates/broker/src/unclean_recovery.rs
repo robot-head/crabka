@@ -478,8 +478,10 @@ mod urm_tests {
             Some(info(2, 90))
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_millis(50)).await;
-        assert!(got.len() == 1, "must return what arrived before the cap");
-        assert!(got[0].broker_id == crabka_audit::NodeId(1));
+        assert!(
+            got.iter().map(|info| info.broker_id).collect::<Vec<_>>()
+                == vec![crabka_audit::NodeId(1)]
+        );
     }
 
     #[tokio::test]

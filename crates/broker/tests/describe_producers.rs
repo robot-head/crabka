@@ -115,19 +115,17 @@ async fn empty_partition_returns_no_active_producers() {
         .await
         .expect("DescribeProducers");
 
-    assert!(resp.topics.len() == 1);
-    check!(resp.topics[0].name == "fresh");
-    assert!(resp.topics[0].partitions.len() == 1);
     let part = &resp.topics[0].partitions[0];
     check!(
-        part.error_code == 0,
-        "fresh partition must succeed: {part:?}"
-    );
-    check!(part.partition_index == 0);
-    check!(
-        part.active_producers.is_empty(),
-        "no produce has happened — list must be empty: {:?}",
-        part.active_producers,
+        (
+            resp.topics.len(),
+            resp.topics[0].name.as_str(),
+            resp.topics[0].partitions.len(),
+            part.error_code,
+            part.partition_index,
+            part.active_producers.is_empty(),
+        ) == (1, "fresh", 1, 0, 0, true),
+        "fresh partition response mismatch: {part:?}"
     );
 
     p.broker.shutdown().await;
@@ -176,24 +174,22 @@ async fn after_idempotent_produce_describe_returns_the_producer() {
         .await
         .expect("DescribeProducers");
 
-    assert!(resp.topics.len() == 1);
-    assert!(resp.topics[0].partitions.len() == 1);
     let part = &resp.topics[0].partitions[0];
-    assert!(part.error_code == 0, "{part:?}");
-    assert!(
-        part.active_producers.len() == 1,
-        "expected exactly one tracked producer, got {:?}",
-        part.active_producers
-    );
     let producer = &part.active_producers[0];
-    check!(producer.producer_id == pid);
-    check!(producer.producer_epoch == i32::from(epoch));
-    // base_seq=0, last_offset_delta=n-1=2 → last_sequence = 2.
-    check!(producer.last_sequence == 2);
-    // Crabka doesn't yet wire per-partition txn bookkeeping; sentinels
-    // stay at -1.
-    check!(producer.coordinator_epoch == -1);
-    check!(producer.current_txn_start_offset == -1);
+    check!(
+        (
+            resp.topics.len(),
+            resp.topics[0].partitions.len(),
+            part.error_code,
+            part.active_producers.len(),
+            producer.producer_id,
+            producer.producer_epoch,
+            producer.last_sequence,
+            producer.coordinator_epoch,
+            producer.current_txn_start_offset,
+        ) == (1, 1, 0, 1, pid, i32::from(epoch), 2, -1, -1),
+        "unexpected tracked producer response: {resp:?}"
+    );
 
     p.broker.shutdown().await;
 }
@@ -275,15 +271,15 @@ async fn unknown_topic_returns_unknown_topic_or_partition() {
         .await
         .expect("DescribeProducers");
 
-    assert!(resp.topics.len() == 1);
-    assert!(resp.topics[0].partitions.len() == 2);
-    for part in &resp.topics[0].partitions {
-        assert!(
-            part.error_code == 3,
-            "unknown topic must surface UNKNOWN_TOPIC_OR_PARTITION (3) per partition, got {part:?}"
-        );
-        assert!(part.active_producers.is_empty());
-    }
+    let partitions: Vec<_> = resp.topics[0]
+        .partitions
+        .iter()
+        .map(|part| (part.error_code, part.active_producers.is_empty()))
+        .collect();
+    assert!(
+        (resp.topics.len(), partitions) == (1, vec![(3, true), (3, true)]),
+        "unknown topic must surface UNKNOWN_TOPIC_OR_PARTITION (3) per partition: {resp:?}"
+    );
 
     p.broker.shutdown().await;
 }

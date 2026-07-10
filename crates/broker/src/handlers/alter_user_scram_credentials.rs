@@ -583,13 +583,13 @@ mod tests {
     #[test]
     fn wire_to_mech_maps_both_scram_variants() {
         let cases = [
-            (1, Some(SaslMechanism::ScramSha256)),
-            (2, Some(SaslMechanism::ScramSha512)),
-            (0, None),
-            (99, None),
+            ("SCRAM-256", 1, Some(SaslMechanism::ScramSha256)),
+            ("SCRAM-512", 2, Some(SaslMechanism::ScramSha512)),
+            ("unknown zero", 0, None),
+            ("unknown high", 99, None),
         ];
-        for (wire, expected) in cases {
-            assert!(wire_to_mech(wire) == expected, "wire {wire}");
+        for (case, wire, expected) in cases {
+            assert!(wire_to_mech(wire) == expected, "case: {case}; wire {wire}");
         }
     }
 
@@ -701,14 +701,14 @@ mod tests {
 
         let cases = [
             // No finalized metadata.version — gate permits.
-            (None, false),
+            ("no feature", None, false),
             // Below SCRAM_MIN_LEVEL — gate rejects.
-            (Some(10), true),
+            ("below floor", Some(10), true),
             // At SCRAM_MIN_LEVEL — gate permits.
-            (Some(11), false),
+            ("at floor", Some(11), false),
         ];
-        for (level, want_err) in cases {
-            assert!(gate(level) == want_err, "level {level:?}");
+        for (case, level, want_err) in cases {
+            assert!(gate(level) == want_err, "case: {case}; level {level:?}");
         }
     }
 
@@ -783,8 +783,15 @@ mod tests {
         };
         let (stored_key, server_key) =
             crabka_security::derive_keys_from_salted(SaslMechanism::ScramSha256, &salted_password);
-        assert!(record.stored_key == stored_key);
-        assert!(record.server_key == server_key);
+        let expected_record = crabka_metadata::ScramCredentialRecord {
+            user: "odd-bytes".into(),
+            mechanism: SaslMechanism::ScramSha256,
+            salt: b"salt".to_vec(),
+            stored_key,
+            server_key,
+            iterations: u32::try_from(MIN_ITERATIONS).expect("positive iteration count"),
+        };
+        assert!(record == &expected_record);
     }
 
     #[test]

@@ -820,8 +820,7 @@ mod tests {
         // Decodes with the assigned offset + stamped epoch.
         let mut cur: &[u8] = &r.bytes;
         let decoded = ProtoBatch::decode(&mut cur).unwrap();
-        assert!(decoded.base_offset == 0);
-        assert!(decoded.partition_leader_epoch == 5);
+        assert!((decoded.base_offset, decoded.partition_leader_epoch) == (0, 5));
 
         drop(tx);
         writer.await.expect("writer join");
@@ -855,9 +854,13 @@ mod tests {
             .unwrap()
             .read(Offset(0), 10 * 1024 * 1024)
             .unwrap();
-        assert!(read.batches.len() == 1);
-        check!(read.batches[0].attributes.compression() == CompressionType::Lz4);
-        check!(read.batches[0].records.len() == 2);
+        assert!(
+            (
+                read.batches.len(),
+                read.batches[0].attributes.compression(),
+                read.batches[0].records.len(),
+            ) == (1, CompressionType::Lz4, 2)
+        );
     }
 
     #[tokio::test]

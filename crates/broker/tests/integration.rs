@@ -149,9 +149,13 @@ async fn list_offsets_by_timestamp_local() {
 
     // Positive timestamp: first record with ts >= 150 is offset 1 (ts 200).
     let r = query(150).await;
-    check!(r.topics[0].partitions[0].error_code == 0);
-    check!(r.topics[0].partitions[0].offset == 1);
-    check!(r.topics[0].partitions[0].timestamp == 200);
+    check!(
+        (
+            r.topics[0].partitions[0].error_code,
+            r.topics[0].partitions[0].offset,
+            r.topics[0].partitions[0].timestamp,
+        ) == (0, 1, 200)
+    );
 
     // EARLIEST_LOCAL (-4) → local log start = 0.
     let r = query(-4).await;
@@ -159,8 +163,12 @@ async fn list_offsets_by_timestamp_local() {
 
     // MAX_TIMESTAMP (-3) → offset 2 (ts 300), echoes timestamp 300.
     let r = query(-3).await;
-    assert!(r.topics[0].partitions[0].offset == 2);
-    assert!(r.topics[0].partitions[0].timestamp == 300);
+    assert!(
+        (
+            r.topics[0].partitions[0].offset,
+            r.topics[0].partitions[0].timestamp
+        ) == (2, 300)
+    );
 }
 
 #[tokio::test]
@@ -241,8 +249,12 @@ async fn end_to_end_create_produce_fetch_delete() {
         })
         .await
         .unwrap();
-    assert!(lo.topics[0].partitions[0].error_code == 0);
-    assert!(lo.topics[0].partitions[0].offset == 3);
+    assert!(
+        (
+            lo.topics[0].partitions[0].error_code,
+            lo.topics[0].partitions[0].offset
+        ) == (0, 3)
+    );
 
     // 6. Fetch and confirm 3 records are returned.
     let fr = p

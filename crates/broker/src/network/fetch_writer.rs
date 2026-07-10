@@ -743,7 +743,7 @@ mod tests {
     fn plan_total_len_matches_frame_prefix() {
         // The 4-byte frame prefix the writer emits must equal the actual bytes
         // following it (header + body). Off-by-one here corrupts every frame.
-        for version in [4i16, 12, 18] {
+        for (case, version) in [("legacy", 4i16), ("flexible", 12), ("latest", 18)] {
             let resp = sample_response(version);
             let ops =
                 build_fetch_plan(&resp, version, 1, version >= 12, resolve_records_inline).unwrap();
@@ -753,7 +753,7 @@ mod tests {
             let declared = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
             let header_after_len = head.len() - 4;
             let tail_len: usize = ops[1..].iter().map(WriteOp::len).sum();
-            assert_eq!(declared, header_after_len + tail_len);
+            assert_eq!(declared, header_after_len + tail_len, "case {case}");
         }
     }
 

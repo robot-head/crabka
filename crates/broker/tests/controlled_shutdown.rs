@@ -106,9 +106,8 @@ async fn create_topic(addr: SocketAddr, name: &str, partitions: i32, rf: i16) {
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, CREATE_TOPICS_VERSION)
         .expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
     assert!(
-        resp.topics[0].error_code == 0,
+        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
         "CreateTopics({name}) must succeed: {:?}",
         resp.topics[0].error_message
     );

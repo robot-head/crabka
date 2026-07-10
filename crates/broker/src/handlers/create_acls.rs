@@ -271,21 +271,27 @@ mod tests {
         let c = creation(&resource_name, &principal_name, OPERATION_READ);
 
         let entry = validate(&c).expect("exact boundary lengths are valid");
-        assert!(entry.resource_name == resource_name);
-        assert!(entry.principal == principal_name);
+        let expected = AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: resource_name.clone(),
+            pattern_type: PatternType::Literal,
+            principal: principal_name.clone(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        };
+        assert!(entry == expected);
 
         let mut too_long_resource = c.clone();
         too_long_resource.resource_name = "r".repeat(MAX_RESOURCE_NAME_LEN + 1);
         let err = validate(&too_long_resource).unwrap_err();
-        assert!(err.0 == codes::INVALID_REQUEST);
-        assert!(err.1 == "resource_name too long");
+        assert!(err == (codes::INVALID_REQUEST, "resource_name too long"));
 
         let mut too_long_principal = c;
         too_long_principal.principal =
             format!("User:{}", "a".repeat(MAX_PRINCIPAL_LEN + 1 - "User:".len()));
         let err = validate(&too_long_principal).unwrap_err();
-        assert!(err.0 == codes::INVALID_REQUEST);
-        assert!(err.1 == "principal too long");
+        assert!(err == (codes::INVALID_REQUEST, "principal too long"));
     }
 
     #[test]
@@ -326,8 +332,12 @@ mod tests {
     #[test]
     fn error_and_submit_helpers_preserve_non_default_result_fields() {
         let err = acl_error_result(codes::INVALID_REQUEST, "bad acl");
-        assert!(err.error_code == codes::INVALID_REQUEST);
-        assert!(err.error_message.as_deref() == Some("bad acl"));
+        let expected_err = AclCreationResult {
+            error_code: codes::INVALID_REQUEST,
+            error_message: Some("bad acl".into()),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(err == expected_err);
 
         let mut results = vec![
             AclCreationResult::default(),

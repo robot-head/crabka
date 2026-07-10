@@ -242,9 +242,8 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
     assert!(
-        resp.topics[0].error_code == 0,
+        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -275,9 +274,8 @@ async fn create_topic_plaintext(addr: SocketAddr, topic: &str, partitions: i32, 
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
     assert!(
-        resp.topics[0].error_code == 0,
+        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );

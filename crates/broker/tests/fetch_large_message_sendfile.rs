@@ -148,8 +148,7 @@ async fn large_message_fetch_round_trips_byte_exact() {
         .await
         .expect("Fetch");
 
-    assert!(r.error_code == 0);
-    assert!(r.responses.len() == 1);
+    assert!((r.error_code, r.responses.len()) == (0, 1));
     let batches = r.responses[0].partitions[0]
         .records
         .as_ref()

@@ -136,10 +136,9 @@ async fn v3_valid_client_info_accepted() {
     let resp = send_api_versions(kafka_addr, 3, "crabka-client-core", "0.1.1")
         .await
         .expect("ApiVersions");
-    assert!(resp.error_code == 0, "valid v3 must succeed: {resp:?}");
     assert!(
-        !resp.api_keys.is_empty(),
-        "valid v3 must return the API list",
+        (resp.error_code, resp.api_keys.is_empty()) == (0, false),
+        "valid v3 must succeed with API list: {resp:?}"
     );
 
     handle.shutdown().await;
@@ -153,12 +152,8 @@ async fn v3_empty_software_name_rejected_with_invalid_request() {
         .await
         .expect("ApiVersions");
     assert!(
-        resp.error_code == INVALID_REQUEST,
-        "empty name must be rejected: {resp:?}"
-    );
-    assert!(
-        resp.api_keys.is_empty(),
-        "error path must not advertise APIs",
+        (resp.error_code, resp.api_keys.is_empty()) == (INVALID_REQUEST, true),
+        "empty name rejection mismatch: {resp:?}"
     );
 
     handle.shutdown().await;
@@ -221,10 +216,9 @@ async fn pre_v3_does_not_validate_client_info() {
         .await
         .expect("ApiVersions");
     assert!(
-        resp.error_code == 0,
-        "v0 ApiVersions must not validate KIP-511 fields: {resp:?}"
+        (resp.error_code, resp.api_keys.is_empty()) == (0, false),
+        "v0 ApiVersions projection mismatch: {resp:?}"
     );
-    assert!(!resp.api_keys.is_empty());
 
     handle.shutdown().await;
 }

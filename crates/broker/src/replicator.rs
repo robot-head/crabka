@@ -1002,8 +1002,7 @@ mod tests {
 
         let req = build_fetch_request(&cfg, Offset(0), FETCH_MAX_BYTES);
 
-        assert!(req.replica_id == -1);
-        assert!(req.replica_state.replica_id == -1);
+        assert!((req.replica_id, req.replica_state.replica_id) == (-1, -1));
     }
 
     #[test]

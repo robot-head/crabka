@@ -385,10 +385,6 @@ mod tests {
         let encoded = v.encode_value();
         let decoded = OffsetCommitValue::decode_value(&encoded).unwrap();
         assert!(decoded == v);
-        assert!(decoded.offset == 42);
-        assert!(decoded.leader_epoch == 0);
-        assert!(decoded.metadata == "meta");
-        assert!(decoded.commit_timestamp_ms == 1_000_000);
     }
 
     #[test]

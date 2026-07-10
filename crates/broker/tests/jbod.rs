@@ -158,8 +158,10 @@ async fn partitions_spread_across_dirs_and_describe_log_dirs_reports_them() {
     // 2. DescribeLogDirs reports one result per configured dir, and the
     //    union of `t` partitions across results is the full 0..N set.
     let resp = describe_log_dirs(addr).await;
-    assert!(resp.error_code == 0);
-    assert!(resp.results.len() == 2, "one result per log dir");
+    assert!(
+        (resp.error_code, resp.results.len()) == (0, 2),
+        "one result per log dir"
+    );
 
     let mut reported: Vec<i32> = Vec::new();
     for result in &resp.results {
@@ -168,8 +170,7 @@ async fn partitions_spread_across_dirs_and_describe_log_dirs_reports_them() {
             if topic.name == "t" {
                 for p in &topic.partitions {
                     reported.push(p.partition_index);
-                    assert!(p.partition_size >= 0);
-                    assert!(!p.is_future_key);
+                    assert!((p.partition_size >= 0, p.is_future_key) == (true, false));
                 }
             }
         }

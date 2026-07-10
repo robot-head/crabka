@@ -759,6 +759,12 @@ mod tests {
     use super::*;
     use crate::handlers;
 
+    macro_rules! named_api_keys {
+        ($($key:ident),+ $(,)?) => {
+            [$( (stringify!($key), ApiKey::$key) ),+]
+        };
+    }
+
     #[test]
     fn registry_registers_plain_handlers() {
         let registry = build_registry();
@@ -771,11 +777,23 @@ mod tests {
         assert!(api_versions.body_flexible(3));
         assert!(!api_versions.body_flexible(2));
 
-        for key in [25, 27, 59, 69, 73, 83, 84, 85, 86, 87, 89] {
+        for (case, key) in [
+            ("add offsets to transaction", 25),
+            ("write transaction markers", 27),
+            ("fetch snapshot", 59),
+            ("consumer group heartbeat", 69),
+            ("share group heartbeat", 73),
+            ("initialize share group state", 83),
+            ("read share group state", 84),
+            ("write share group state", 85),
+            ("delete share group state", 86),
+            ("read share group state summary", 87),
+            ("delete share group offsets", 89),
+        ] {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
-            assert!(entry.is_plain(), "api_key {key}");
+            assert!(entry.is_plain(), "case: {case}; api_key {key}");
         }
     }
 
@@ -783,55 +801,55 @@ mod tests {
     fn registry_registers_raw_context_handlers() {
         let registry = build_registry();
 
-        for api_key in [
-            ApiKey::Produce,
-            ApiKey::Metadata,
-            ApiKey::OffsetCommit,
-            ApiKey::OffsetFetch,
-            ApiKey::FindCoordinator,
-            ApiKey::JoinGroup,
-            ApiKey::Heartbeat,
-            ApiKey::LeaveGroup,
-            ApiKey::SyncGroup,
-            ApiKey::DeleteGroups,
-            ApiKey::ListOffsets,
-            ApiKey::OffsetForLeaderEpoch,
-            ApiKey::CreateTopics,
-            ApiKey::DeleteTopics,
-            ApiKey::AlterConfigs,
-            ApiKey::IncrementalAlterConfigs,
-            ApiKey::DeleteRecords,
-            ApiKey::CreatePartitions,
-            ApiKey::DescribeGroups,
-            ApiKey::ListGroups,
-            ApiKey::OffsetDelete,
-            ApiKey::DescribeCluster,
-            ApiKey::DescribeProducers,
-            ApiKey::DescribeTransactions,
-            ApiKey::ListTransactions,
-            ApiKey::UnregisterBroker,
-            ApiKey::DescribeTopicPartitions,
-            ApiKey::ListConfigResources,
-            ApiKey::DescribeQuorum,
-            ApiKey::AddRaftVoter,
-            ApiKey::RemoveRaftVoter,
-            ApiKey::UpdateRaftVoter,
-            ApiKey::AlterPartition,
-            ApiKey::BrokerHeartbeat,
-            ApiKey::GetReplicaLogInfo,
-            ApiKey::ConsumerGroupHeartbeat,
-            ApiKey::ShareGroupDescribe,
-            ApiKey::ShareFetch,
-            ApiKey::ShareAcknowledge,
-            ApiKey::ShareGroupHeartbeat,
-            ApiKey::StreamsGroupHeartbeat,
-            ApiKey::DescribeShareGroupOffsets,
-            ApiKey::AlterShareGroupOffsets,
-            ApiKey::DeleteShareGroupOffsets,
-            ApiKey::InitProducerId,
-            ApiKey::AddPartitionsToTxn,
-            ApiKey::EndTxn,
-            ApiKey::TxnOffsetCommit,
+        for (case, api_key) in named_api_keys![
+            Produce,
+            Metadata,
+            OffsetCommit,
+            OffsetFetch,
+            FindCoordinator,
+            JoinGroup,
+            Heartbeat,
+            LeaveGroup,
+            SyncGroup,
+            DeleteGroups,
+            ListOffsets,
+            OffsetForLeaderEpoch,
+            CreateTopics,
+            DeleteTopics,
+            AlterConfigs,
+            IncrementalAlterConfigs,
+            DeleteRecords,
+            CreatePartitions,
+            DescribeGroups,
+            ListGroups,
+            OffsetDelete,
+            DescribeCluster,
+            DescribeProducers,
+            DescribeTransactions,
+            ListTransactions,
+            UnregisterBroker,
+            DescribeTopicPartitions,
+            ListConfigResources,
+            DescribeQuorum,
+            AddRaftVoter,
+            RemoveRaftVoter,
+            UpdateRaftVoter,
+            AlterPartition,
+            BrokerHeartbeat,
+            GetReplicaLogInfo,
+            ConsumerGroupHeartbeat,
+            ShareGroupDescribe,
+            ShareFetch,
+            ShareAcknowledge,
+            ShareGroupHeartbeat,
+            StreamsGroupHeartbeat,
+            DescribeShareGroupOffsets,
+            AlterShareGroupOffsets,
+            DeleteShareGroupOffsets,
+            InitProducerId,
+            AddPartitionsToTxn,
+            EndTxn,
+            TxnOffsetCommit,
         ] {
             let key = api_key as i16;
             let entry = registry
@@ -842,7 +860,7 @@ mod tests {
                     entry.kind(),
                     DispatchKind::Context(_) | DispatchKind::Produce(_)
                 ),
-                "api_key {key}"
+                "case: {case}; api_key {key}"
             );
         }
     }
@@ -851,13 +869,13 @@ mod tests {
     fn registry_registers_telemetry_handlers() {
         let registry = build_registry();
 
-        for key in [71, 72] {
+        for (case, key) in [("get telemetry subscriptions", 71), ("push telemetry", 72)] {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
             assert!(
                 matches!(entry.kind(), DispatchKind::Telemetry(_)),
-                "api_key {key}"
+                "case: {case}; api_key {key}"
             );
         }
     }
@@ -866,18 +884,18 @@ mod tests {
     fn registry_registers_decoded_context_handlers() {
         let registry = build_registry();
 
-        for api_key in [
-            ApiKey::DescribeAcls,
-            ApiKey::CreateAcls,
-            ApiKey::DeleteAcls,
-            ApiKey::ElectLeaders,
-            ApiKey::AlterPartitionReassignments,
-            ApiKey::ListPartitionReassignments,
-            ApiKey::DescribeClientQuotas,
-            ApiKey::AlterClientQuotas,
-            ApiKey::DescribeUserScramCredentials,
-            ApiKey::AlterUserScramCredentials,
-            ApiKey::UpdateFeatures,
+        for (case, api_key) in named_api_keys![
+            DescribeAcls,
+            CreateAcls,
+            DeleteAcls,
+            ElectLeaders,
+            AlterPartitionReassignments,
+            ListPartitionReassignments,
+            DescribeClientQuotas,
+            AlterClientQuotas,
+            DescribeUserScramCredentials,
+            AlterUserScramCredentials,
+            UpdateFeatures,
         ] {
             let key = api_key as i16;
             let entry = registry
@@ -888,7 +906,7 @@ mod tests {
                     entry.kind(),
                     DispatchKind::DecodedContext(_) | DispatchKind::EncodedContext(_)
                 ),
-                "api_key {key}"
+                "case: {case}; api_key {key}"
             );
         }
     }
@@ -897,13 +915,19 @@ mod tests {
     fn registry_registers_auth_handlers() {
         let registry = build_registry();
 
-        for key in [34, 38, 39, 40, 41] {
+        for (case, key) in [
+            ("alter replica log directories", 34),
+            ("create delegation token", 38),
+            ("renew delegation token", 39),
+            ("expire delegation token", 40),
+            ("describe delegation token", 41),
+        ] {
             let entry = registry
                 .get(key)
                 .unwrap_or_else(|| panic!("registered api_key {key}"));
             assert!(
                 matches!(entry.kind(), DispatchKind::Auth(_)),
-                "api_key {key}"
+                "case: {case}; api_key {key}"
             );
         }
     }
@@ -933,24 +957,50 @@ mod tests {
 
         let registry = build_registry();
         let cases = [
-            (0, owned::produce_request::FLEXIBLE_MIN - 1, false),
-            (0, owned::produce_request::FLEXIBLE_MIN, true),
-            (1, owned::fetch_request::FLEXIBLE_MIN - 1, false),
-            (1, owned::fetch_request::FLEXIBLE_MIN, true),
             (
+                "produce before flexible minimum",
+                0,
+                owned::produce_request::FLEXIBLE_MIN - 1,
+                false,
+            ),
+            (
+                "produce at flexible minimum",
+                0,
+                owned::produce_request::FLEXIBLE_MIN,
+                true,
+            ),
+            (
+                "fetch before flexible minimum",
+                1,
+                owned::fetch_request::FLEXIBLE_MIN - 1,
+                false,
+            ),
+            (
+                "fetch at flexible minimum",
+                1,
+                owned::fetch_request::FLEXIBLE_MIN,
+                true,
+            ),
+            (
+                "SASL authenticate before flexible minimum",
                 36,
                 owned::sasl_authenticate_request::FLEXIBLE_MIN - 1,
                 false,
             ),
-            (36, owned::sasl_authenticate_request::FLEXIBLE_MIN, true),
-            (17, i16::MAX, false),
-            (999, 0, false),
+            (
+                "SASL authenticate at flexible minimum",
+                36,
+                owned::sasl_authenticate_request::FLEXIBLE_MIN,
+                true,
+            ),
+            ("non-flexible SASL handshake", 17, i16::MAX, false),
+            ("unknown API", 999, 0, false),
         ];
 
-        for (api_key, version, want) in cases {
+        for (case, api_key, version, want) in cases {
             assert!(
                 registry.body_flexible(api_key, version) == want,
-                "api_key {api_key} version {version}"
+                "case: {case}; api_key {api_key} version {version}"
             );
         }
     }

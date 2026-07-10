@@ -447,7 +447,13 @@ mod tests {
     fn acl_description_preserves_non_read_operations() {
         let desc = acl_description(&acl("payments", "User:bob", AclOperation::Write));
 
-        assert!(desc.principal == "User:bob");
-        assert!(desc.operation == OPERATION_WRITE);
+        let expected = AclDescription {
+            principal: "User:bob".into(),
+            host: "*".into(),
+            operation: OPERATION_WRITE,
+            permission_type: PERMISSION_ALLOW,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(desc == expected);
     }
 }

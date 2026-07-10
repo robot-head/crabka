@@ -159,7 +159,7 @@ mod tests {
 
     #[test]
     fn consume_configured_quota_ignores_non_positive_rates() {
-        for rate in [-1.0, 0.0] {
+        for (case, rate) in [("negative", -1.0), ("zero", 0.0)] {
             let image = image_with_quota(vec![("user", Some("alice"))], "producer_byte_rate", rate);
             let buckets = QuotaBuckets::new();
             let initial_rate_called = Arc::new(AtomicBool::new(false));
@@ -184,9 +184,9 @@ mod tests {
                 |_, _, _| Duration::from_secs(1),
             );
 
-            check!(delay == Duration::ZERO);
-            check!(buckets.is_empty());
-            assert!(!initial_rate_called.load(Ordering::Relaxed));
+            check!(delay == Duration::ZERO, "case {case}");
+            check!(buckets.is_empty(), "case {case}");
+            assert!(!initial_rate_called.load(Ordering::Relaxed), "case {case}");
         }
     }
 

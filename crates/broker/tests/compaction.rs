@@ -146,9 +146,8 @@ async fn create_topic_with_configs(
     let mut cur: &[u8] = &resp_bytes;
     let resp =
         CreateTopicsResponse::decode(&mut cur, VERSION).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
     assert!(
-        resp.topics[0].error_code == 0,
+        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );

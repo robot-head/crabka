@@ -8,7 +8,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use assert2::{assert, check};
+use assert2::assert;
 mod support;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -294,24 +294,17 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
     let mut ms_cur: &[u8] = &legacy_bytes;
     let recs = decode_message_set(&mut ms_cur, legacy_bytes.len()).expect("decode_message_set");
 
+    let projection: Vec<_> = recs
+        .iter()
+        .map(|record| (record.key.as_deref(), record.value.as_deref()))
+        .collect();
     assert!(
-        recs.len() == 2,
-        "expected 2 records in MessageSet; got {}",
-        recs.len()
+        projection
+            == vec![
+                (Some(b"key0".as_ref()), Some(b"val0".as_ref())),
+                (Some(b"key1".as_ref()), Some(b"val1".as_ref())),
+            ]
     );
-    for (i, key, value) in [
-        (0usize, b"key0" as &[u8], b"val0" as &[u8]),
-        (1, b"key1", b"val1"),
-    ] {
-        check!(
-            recs[i].key.as_deref() == Some(key),
-            "record {i} key mismatch"
-        );
-        check!(
-            recs[i].value.as_deref() == Some(value),
-            "record {i} value mismatch"
-        );
-    }
 
     p.broker.shutdown().await;
 }
@@ -405,16 +398,8 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
     let recs = decode_message_set(&mut ms_cur, legacy_bytes.len())
         .expect("decode_message_set on snappy-recompressed payload");
     assert!(
-        recs.len() == 50,
-        "expected 50 records after snappy decompression"
-    );
-    check!(
-        recs[0].key.as_deref() == Some(b"key-0000".as_ref()),
-        "first record key mismatch"
-    );
-    check!(
-        recs[49].key.as_deref() == Some(b"key-0049".as_ref()),
-        "last record key mismatch"
+        (recs.len(), recs[0].key.as_deref(), recs[49].key.as_deref())
+            == (50, Some(b"key-0000".as_ref()), Some(b"key-0049".as_ref()))
     );
 
     p.broker.shutdown().await;
@@ -473,12 +458,13 @@ async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
 
     let mut ms_cur: &[u8] = &legacy_bytes;
     let recs = decode_message_set(&mut ms_cur, legacy_bytes.len()).expect("decode_message_set");
-    assert!(recs.len() == 1, "expected 1 record");
-    check!(recs[0].key.as_deref() == Some(b"k".as_ref()));
-    check!(recs[0].value.as_deref() == Some(b"v".as_ref()));
-    check!(
-        recs[0].timestamp == None,
-        "v0 MessageSet must carry no timestamp"
+    assert!(
+        (
+            recs.len(),
+            recs[0].timestamp,
+            recs[0].key.as_deref(),
+            recs[0].value.as_deref()
+        ) == (1, None, Some(b"k".as_ref()), Some(b"v".as_ref()))
     );
 
     p.broker.shutdown().await;
@@ -518,12 +504,7 @@ async fn fetch_v3_drops_control_batch() {
 
     let part = &fetch_resp.responses[0].partitions[0];
     assert!(
-        part.error_code == 0,
-        "fetch partition error: {}",
-        part.error_code
-    );
-    assert!(
-        part.records.is_none(),
+        (part.error_code, part.records.is_none()) == (0, true),
         "control batch must be dropped, leaving no records on the wire"
     );
 

@@ -351,8 +351,19 @@ mod tests {
         let mut prefixed_acl = acl("orders-", "User:bob", AclOperation::Write);
         prefixed_acl.pattern_type = PatternType::Prefixed;
         let matched = matching_acl_result(&prefixed_acl);
-        assert!(matched.pattern_type == PATTERN_TYPE_PREFIXED);
-        assert!(matched.operation == OPERATION_WRITE);
+        let expected_prefixed = DeleteAclsMatchingAcl {
+            error_code: codes::NONE,
+            error_message: None,
+            resource_type: RESOURCE_TYPE_TOPIC,
+            resource_name: "orders-".into(),
+            pattern_type: PATTERN_TYPE_PREFIXED,
+            principal: "User:bob".into(),
+            host: "*".into(),
+            operation: OPERATION_WRITE,
+            permission_type: PERMISSION_ALLOW,
+            unknown_tagged_fields: UnknownTaggedFields::default(),
+        };
+        assert!(matched == expected_prefixed);
 
         let mut results = vec![
             filter_result(codes::NONE, None, vec![matched.clone()]),

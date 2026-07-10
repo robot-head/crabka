@@ -1139,14 +1139,18 @@ mod tests {
             },
         )
         .await;
-        check!(resp.error_code == codes::NONE);
         check!(!resp.member_id.is_empty(), "server mints a member id");
         // No metadata source / no topology → NotReady, empty assignment, but the
         // member still advances to the (bumped) group epoch.
-        check!(resp.member_epoch == 1);
-        check!(resp.active_tasks == Some(vec![]));
-        check!(resp.standby_tasks == Some(vec![]));
-        check!(resp.warmup_tasks == Some(vec![]));
+        check!(
+            (
+                resp.error_code,
+                resp.member_epoch,
+                resp.active_tasks,
+                resp.standby_tasks,
+                resp.warmup_tasks,
+            ) == (codes::NONE, 1, Some(vec![]), Some(vec![]), Some(vec![]))
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1175,8 +1179,7 @@ mod tests {
             },
         )
         .await;
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.member_epoch == epoch);
+        assert!((resp.error_code, resp.member_epoch) == (codes::NONE, epoch));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1298,8 +1301,7 @@ mod tests {
             },
         )
         .await;
-        assert!(resp.error_code == codes::NONE);
-        assert!(resp.member_epoch == -1);
+        assert!((resp.error_code, resp.member_epoch) == (codes::NONE, -1));
         let batches = log.batches().await;
         assert!(batches.len() == pre_leave + 1);
         let leave_batch = &batches[batches.len() - 1];
@@ -1366,16 +1368,33 @@ mod tests {
         };
         apply_seed(&mut actor, seed);
 
-        check!(actor.state.group_epoch == 4);
-        check!(actor.state.target.epoch == 4);
-        check!(actor.state.topology_epoch == 2);
         let m = actor.state.members.get("m1").expect("member restored");
-        check!(m.member_epoch == 4);
-        check!(m.previous_member_epoch == 3);
-        check!(m.process_id == "p1");
-        check!(m.active == BTreeMap::from([("0".to_string(), vec![0, 1])]));
-        check!(actor.state.target.active["m1"] == BTreeMap::from([("0".to_string(), vec![0, 1])]));
-        check!(actor.state.phase == StreamsGroupStatePhase::Stable);
+        check!(
+            (
+                actor.state.group_epoch,
+                actor.state.target.epoch,
+                actor.state.topology_epoch,
+                m.member_epoch,
+                m.previous_member_epoch,
+                m.process_id.as_str(),
+                &m.active,
+                &actor.state.target.active,
+                actor.state.phase,
+            ) == (
+                4,
+                4,
+                2,
+                4,
+                3,
+                "p1",
+                &BTreeMap::from([("0".to_string(), vec![0, 1])]),
+                &std::collections::HashMap::from([(
+                    "m1".to_string(),
+                    BTreeMap::from([("0".to_string(), vec![0, 1])]),
+                )]),
+                StreamsGroupStatePhase::Stable,
+            )
+        );
     }
 
     #[test]
@@ -1393,14 +1412,10 @@ mod tests {
             (("sub-a".to_string(), 1), Offset(5)),
         ]);
         let lag = task_lag(&m);
-        // 10 - 3 = 7 (kills `-`→`+` which is 13, and `-`→`/` which is 3).
-        check!(lag[&("sub-a".to_string(), 0)] == 7);
-        // 5 - 5 = 0 (kills `-`→`/` which would be 1).
-        check!(lag[&("sub-a".to_string(), 1)] == 0);
-        // sub-b has no reported position, so it is absent (pins the filter and
-        // kills the fixed-map replacements that inject sub-b / xyzzy keys).
-        check!(!lag.contains_key(&("sub-b".to_string(), 0)));
-        check!(lag.len() == 2);
+        // The whole map pins subtraction and the filter that excludes sub-b.
+        check!(
+            lag == BTreeMap::from([(("sub-a".to_string(), 0), 7), (("sub-a".to_string(), 1), 0),])
+        );
     }
 
     #[test]

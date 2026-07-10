@@ -699,12 +699,23 @@ mod tests {
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
-        assert!(changes.len() == 1);
-        let MetadataRecord::V1Partition(record) = &changes[0] else {
-            panic!("wrong change variant");
-        };
-        assert!(record.partition == 7);
-        assert!(record.partition_epoch == 12);
+        let expected_changes = vec![MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 7,
+            leader: crabka_metadata::NodeId(2),
+            replicas: vec![
+                crabka_metadata::NodeId(2),
+                crabka_metadata::NodeId(4),
+                crabka_metadata::NodeId(6),
+            ],
+            isr: vec![crabka_metadata::NodeId(2), crabka_metadata::NodeId(4)],
+            leader_epoch: crabka_metadata::LeaderEpoch(9),
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 12,
+        })];
+        assert!(changes == expected_changes);
     }
 
     #[test]
@@ -753,11 +764,23 @@ mod tests {
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
         assert!(resp == expected);
-        assert!(changes.len() == 1);
-        let MetadataRecord::V1Partition(record) = &changes[0] else {
-            panic!("wrong change variant");
-        };
-        assert!(record.isr == vec![crabka_metadata::NodeId(1), crabka_metadata::NodeId(2)]);
+        let expected_changes = vec![MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: crabka_metadata::NodeId(1),
+            replicas: vec![
+                crabka_metadata::NodeId(1),
+                crabka_metadata::NodeId(2),
+                crabka_metadata::NodeId(3),
+            ],
+            isr: vec![crabka_metadata::NodeId(1), crabka_metadata::NodeId(2)],
+            leader_epoch: crabka_metadata::LeaderEpoch(5),
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        })];
+        assert!(changes == expected_changes);
     }
 
     #[test]

@@ -489,9 +489,8 @@ async fn create_topic_plaintext(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
     assert!(
-        resp.topics[0].error_code == 0,
+        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
         "CreateTopics({name}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -832,9 +831,8 @@ async fn create_topic_sasl_plain(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
     assert!(
-        resp.topics[0].error_code == 0,
+        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
         "CreateTopics({name}) must succeed: {:?}",
         resp.topics[0].error_message
     );

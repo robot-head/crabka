@@ -397,6 +397,16 @@ mod tests {
         }
     }
 
+    fn expected_broker(host: &str, port: i32) -> MetadataResponseBroker {
+        MetadataResponseBroker {
+            node_id: 7,
+            host: host.into(),
+            port,
+            rack: Some("rack-a".into()),
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        }
+    }
+
     /// The connection-listener endpoint wins when present: a request that
     /// arrived on the `"tls"` listener gets the tls endpoint's host:port,
     /// even though `"plain"` is the inter-broker listener.
@@ -426,8 +436,7 @@ mod tests {
             endpoint("tls", "tls-host", 9094),
         ]);
         let out = project_broker(&rec, "plain", "plain");
-        assert!(out.host == "plain-host");
-        assert!(out.port == 9092);
+        assert!(out == expected_broker("plain-host", 9092));
     }
 
     /// When the connection listener isn't registered on the broker, fall back
@@ -439,8 +448,7 @@ mod tests {
             endpoint("tls", "tls-host", 9094),
         ]);
         let out = project_broker(&rec, "external", "plain");
-        assert!(out.host == "plain-host");
-        assert!(out.port == 9092);
+        assert!(out == expected_broker("plain-host", 9092));
     }
 
     /// When neither the connection listener nor the inter-broker listener are
@@ -452,8 +460,7 @@ mod tests {
             endpoint("other-b", "host-b", 5001),
         ]);
         let out = project_broker(&rec, "tls", "plain");
-        assert!(out.host == "host-a");
-        assert!(out.port == 5000);
+        assert!(out == expected_broker("host-a", 5000));
     }
 
     /// With no endpoints at all, fall back to the legacy top-level host/port.
@@ -461,7 +468,6 @@ mod tests {
     fn project_broker_falls_back_to_legacy_host_port() {
         let rec = record(vec![]);
         let out = project_broker(&rec, "tls", "plain");
-        assert!(out.host == "legacy-host");
-        assert!(out.port == 1000);
+        assert!(out == expected_broker("legacy-host", 1000));
     }
 }

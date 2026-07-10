@@ -1136,7 +1136,7 @@ impl Default for BrokerConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
     use crate::BrokerError as BrokerStartError;
@@ -1156,12 +1156,22 @@ mod tests {
     #[test]
     fn kafka_rlmm_config_default_has_sane_topic_settings() {
         let c = KafkaRlmmConfig::default();
-        check!(c.num_partitions == 50);
-        check!(c.replication == 3);
-        check!(c.bootstrap.is_empty());
-        check!(c.snapshot_dir == std::path::PathBuf::new());
-        check!(c.snapshot_interval == DEFAULT_RLMM_SNAPSHOT_INTERVAL);
-        check!(c.security.is_none());
+        assert!(
+            (
+                c.num_partitions,
+                c.replication,
+                c.bootstrap,
+                c.snapshot_dir,
+                c.snapshot_interval,
+            ) == (
+                50,
+                3,
+                String::new(),
+                std::path::PathBuf::new(),
+                DEFAULT_RLMM_SNAPSHOT_INTERVAL,
+            )
+        );
+        assert!(c.security.is_none());
     }
 
     #[test]
@@ -1174,8 +1184,13 @@ mod tests {
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
             security: None,
         };
-        assert!(c.snapshot_interval == std::time::Duration::from_mins(1));
-        assert!(c.snapshot_dir == std::path::PathBuf::from("/data/remote-log-metadata"));
+        assert!(
+            (c.snapshot_interval, c.snapshot_dir)
+                == (
+                    std::time::Duration::from_mins(1),
+                    std::path::PathBuf::from("/data/remote-log-metadata"),
+                )
+        );
     }
 
     #[test]
@@ -1261,8 +1276,7 @@ mod tests {
     #[test]
     fn defaults_listen_on_localhost_9092() {
         let c = BrokerConfig::default();
-        assert!(c.listen_addr.port() == 9092);
-        assert!(c.broker_id == 1);
+        assert!((c.listen_addr.port(), c.broker_id) == (9092, 1));
     }
 
     #[test]
@@ -1275,12 +1289,13 @@ mod tests {
     fn defaults_use_conservative_raft_timings() {
         let c = BrokerConfig::default();
         assert!(
-            c.controller_election_timeout
-                == std::time::Duration::from_millis(DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS)
-        );
-        assert!(
-            c.controller_heartbeat_interval
-                == std::time::Duration::from_millis(DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS)
+            (
+                c.controller_election_timeout,
+                c.controller_heartbeat_interval,
+            ) == (
+                std::time::Duration::from_millis(DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS),
+                std::time::Duration::from_millis(DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS),
+            )
         );
     }
 
@@ -1349,8 +1364,7 @@ mod tests {
             roles: vec![NodeRole::Controller],
             ..BrokerConfig::default()
         };
-        assert!(c.is_controller());
-        assert!(!c.is_broker());
+        assert!((c.is_controller(), c.is_broker()) == (true, false));
     }
 
     #[test]
@@ -1359,8 +1373,7 @@ mod tests {
             roles: vec![NodeRole::Broker],
             ..BrokerConfig::default()
         };
-        assert!(c.is_broker());
-        assert!(!c.is_controller());
+        assert!((c.is_broker(), c.is_controller()) == (true, false));
     }
 
     #[test]
@@ -1493,9 +1506,13 @@ mod tests {
     #[test]
     fn auto_leader_rebalance_defaults_to_true_in_default() {
         let c = BrokerConfig::default();
-        check!(c.auto_leader_rebalance_enable);
-        check!(c.leader_imbalance_check_interval_secs == 300);
-        check!(c.leader_imbalance_per_broker_percentage == 10);
+        assert!(
+            (
+                c.auto_leader_rebalance_enable,
+                c.leader_imbalance_check_interval_secs,
+                c.leader_imbalance_per_broker_percentage,
+            ) == (true, 300, 10)
+        );
     }
 
     #[test]
@@ -1542,10 +1559,9 @@ mod tests {
     #[test]
     fn rack_and_selector_default_off() {
         let c = BrokerConfig::default();
-        assert!(c.rack == None);
-        assert!(c.replica_selector == crate::replica_selector::ReplicaSelectorKind::Leader);
         let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert!(t.rack == None);
-        assert!(t.replica_selector == crate::replica_selector::ReplicaSelectorKind::Leader);
+        let expected = (None, crate::replica_selector::ReplicaSelectorKind::Leader);
+        assert!((c.rack, c.replica_selector) == expected);
+        assert!((t.rack, t.replica_selector) == expected);
     }
 }

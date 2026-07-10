@@ -405,9 +405,10 @@ mod tests {
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         // Slot 0 → broker 1 → dA; slot 1 → broker 3 → dC (NOT dB).
-        check!(pr.replicas == vec![NodeId(1), NodeId(3)]);
-        check!(pr.directories == vec![da, dc]);
-        check!(pr.partition_epoch == 1);
+        check!(
+            (&pr.replicas, &pr.directories, pr.partition_epoch)
+                == (&vec![NodeId(1), NodeId(3)], &vec![da, dc], 1)
+        );
     }
 
     #[tokio::test]
@@ -418,13 +419,25 @@ mod tests {
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         // leader and leader_epoch are unchanged (leader didn't change).
-        check!(pr.replicas == vec![NodeId(1), NodeId(3)]);
-        check!(pr.adding_replicas == Vec::<NodeId>::new());
-        check!(pr.removing_replicas == Vec::<NodeId>::new());
-        check!(pr.isr == vec![NodeId(1), NodeId(3)]);
-        check!(pr.leader == 1);
-        check!(pr.leader_epoch == crabka_metadata::LeaderEpoch(5));
-        check!(pr.partition_epoch == 1);
+        check!(
+            (
+                &pr.replicas,
+                &pr.adding_replicas,
+                &pr.removing_replicas,
+                &pr.isr,
+                pr.leader,
+                pr.leader_epoch,
+                pr.partition_epoch,
+            ) == (
+                &vec![NodeId(1), NodeId(3)],
+                &Vec::<NodeId>::new(),
+                &Vec::<NodeId>::new(),
+                &vec![NodeId(1), NodeId(3)],
+                NodeId(1),
+                crabka_metadata::LeaderEpoch(5),
+                1,
+            )
+        );
     }
 
     #[tokio::test]
@@ -490,10 +503,19 @@ mod tests {
         );
         // leader_epoch bumped; replica set unchanged — completion happens
         // next tick.
-        check!(pr.leader_epoch == crabka_metadata::LeaderEpoch(6));
-        check!(pr.partition_epoch == 1);
-        check!(pr.adding_replicas == vec![NodeId(3)]);
-        check!(pr.removing_replicas == vec![NodeId(2)]);
+        check!(
+            (
+                pr.leader_epoch,
+                pr.partition_epoch,
+                &pr.adding_replicas,
+                &pr.removing_replicas,
+            ) == (
+                crabka_metadata::LeaderEpoch(6),
+                1,
+                &vec![NodeId(3)],
+                &vec![NodeId(2)],
+            )
+        );
     }
 
     #[tokio::test]
@@ -515,8 +537,7 @@ mod tests {
         assert!(submissions.len() == 1);
         assert!(submissions[0].len() == 1);
         let pr = first_partition(&submissions[0][0]);
-        assert!(pr.replicas == vec![NodeId(1), NodeId(3)]);
-        assert!(pr.partition_epoch == 1);
+        assert!((&pr.replicas, pr.partition_epoch) == (&vec![NodeId(1), NodeId(3)], 1));
     }
 
     #[tokio::test]
@@ -593,8 +614,13 @@ mod tests {
         let updates = compute_reassignment_progress(&img, &l).await;
         assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert!(pr.replicas == vec![NodeId(3), NodeId(4), NodeId(5)]);
-        assert!(pr.isr == vec![NodeId(3), NodeId(4), NodeId(5)]);
+        assert!(
+            (&pr.replicas, &pr.isr)
+                == (
+                    &vec![NodeId(3), NodeId(4), NodeId(5)],
+                    &vec![NodeId(3), NodeId(4), NodeId(5)],
+                )
+        );
     }
 
     #[tokio::test]

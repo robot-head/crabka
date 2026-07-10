@@ -256,16 +256,26 @@ mod tests {
 
     #[test]
     fn leader_predicate_matches_current_node_only() {
-        for (leader, want) in [(Some(1), true), (Some(2), false), (None, false)] {
-            assert!(is_controller_leader(leader, 1) == want, "leader {leader:?}");
+        for (case, leader, want) in [
+            ("local leader", Some(1), true),
+            ("other leader", Some(2), false),
+            ("no leader", None, false),
+        ] {
+            assert!(
+                is_controller_leader(leader, 1) == want,
+                "case: {case}; leader {leader:?}"
+            );
         }
     }
 
     #[test]
     fn not_controller_response_preserves_error_code() {
         let resp = not_controller_response();
-        assert!(resp.error_code == codes::NOT_CONTROLLER, "{resp:?}");
-        assert!(resp.directories.is_empty(), "{resp:?}");
+        let expected = AssignReplicasToDirsResponse {
+            error_code: codes::NOT_CONTROLLER,
+            ..Default::default()
+        };
+        assert!(resp == expected, "{resp:?}");
     }
 
     #[test]
@@ -388,8 +398,23 @@ mod tests {
             .expect("AssignReplicasToDirs handler");
         let resp = decode_response(&bytes);
 
-        assert!(resp.error_code == codes::NONE, "{resp:?}");
-        assert!(resp.directories[0].topics[0].partitions[0].error_code == codes::NONE);
+        let expected = AssignReplicasToDirsResponse {
+            directories: vec![RespDirData {
+                id: ProtocolUuid(dir_uuid.into_bytes()),
+                topics: vec![RespTopicData {
+                    topic_id: ProtocolUuid(topic_uuid.into_bytes()),
+                    partitions: vec![RespPartData {
+                        partition_index: 0,
+                        error_code: codes::NONE,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(resp == expected, "{resp:?}");
         let image = broker.controller.current_image();
         let partition = image.partition("t", 0).expect("partition");
         assert!(partition.directories == vec![dir_uuid]);

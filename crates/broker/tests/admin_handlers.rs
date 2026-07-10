@@ -166,18 +166,16 @@ async fn alter_configs_rejects_unknown_key() {
     let resp = client.send(req).await.expect("alter_configs");
     // 40 = INVALID_CONFIG
     assert!(
-        resp.responses[0].error_code == 40,
-        "expected INVALID_CONFIG(40), got {}",
-        resp.responses[0].error_code
-    );
-    assert!(
+        (
+            resp.responses[0].error_code,
+            resp.responses[0]
+                .error_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("flush.ms"),
+        ) == (40, true),
+        "expected INVALID_CONFIG mentioning flush.ms, got {:?}",
         resp.responses[0]
-            .error_message
-            .as_deref()
-            .unwrap_or("")
-            .contains("flush.ms"),
-        "expected error_message to mention `flush.ms`, got {:?}",
-        resp.responses[0].error_message
     );
 }
 
@@ -461,18 +459,11 @@ async fn delete_records_trims_log_start() {
     let resp = client.send(req).await.expect("delete_records");
     let part_result = &resp.topics[0].partitions[0];
     check!(
-        part_result.error_code == 0,
-        "delete_records error: {:?}",
-        part_result.error_code
-    );
-    // low_watermark must be the resulting log_start_offset after trim.
-    check!(
-        part_result.low_watermark >= 0,
-        "low_watermark should be non-negative, got {}",
-        part_result.low_watermark
-    );
-    check!(
-        part_result.low_watermark <= 50,
+        (
+            part_result.error_code,
+            part_result.low_watermark >= 0,
+            part_result.low_watermark <= 50,
+        ) == (0, true, true),
         "low_watermark {} should be <= requested offset 50",
         part_result.low_watermark
     );
@@ -500,9 +491,7 @@ async fn describe_cluster_lists_brokers() {
         .send(DescribeClusterRequest::default())
         .await
         .expect("describe_cluster");
-    check!(resp.error_code == 0, "describe_cluster error_code");
-    check!(resp.brokers.len() == 1, "expected exactly 1 broker");
-    check!(resp.controller_id == 1, "expected controller_id == 1");
+    check!((resp.error_code, resp.brokers.len(), resp.controller_id) == (0, 1, 1));
 }
 
 /// KIP-919: `DescribeCluster` with `endpoint_type = 2` (CONTROLLERS) projects
@@ -524,27 +513,16 @@ async fn describe_cluster_endpoint_type_controllers_lists_voters() {
         })
         .await
         .expect("describe_cluster controllers");
-    check!(resp.error_code == 0, "describe_cluster error_code");
     check!(
-        resp.endpoint_type == ENDPOINT_TYPE_CONTROLLERS,
-        "response echoes endpoint_type=2; got {}",
-        resp.endpoint_type
-    );
-    assert!(
-        resp.brokers.len() == 1,
-        "1-node quorum has exactly one controller voter; got {}",
-        resp.brokers.len()
-    );
-    check!(
-        resp.brokers[0].broker_id == 1,
-        "bootstrap voter id is 1; got {}",
-        resp.brokers[0].broker_id
-    );
-    check!(
-        !resp.brokers[0].host.is_empty() && resp.brokers[0].port > 0,
-        "controller endpoint host/port populated; got {}:{}",
-        resp.brokers[0].host,
-        resp.brokers[0].port
+        (
+            resp.error_code,
+            resp.endpoint_type,
+            resp.brokers.len(),
+            resp.brokers[0].broker_id,
+            resp.brokers[0].host.is_empty(),
+            resp.brokers[0].port > 0,
+        ) == (0, ENDPOINT_TYPE_CONTROLLERS, 1, 1, false, true),
+        "controller endpoint response mismatch: {resp:?}"
     );
 }
 
@@ -574,39 +552,27 @@ async fn describe_quorum_reports_cluster_metadata_voter_set() {
         ..Default::default()
     };
     let resp = client.send(req).await.expect("describe_quorum");
-    check!(resp.error_code == 0, "top-level error_code");
-    assert!(resp.topics.len() == 1, "exactly one topic row");
-    check!(resp.topics[0].topic_name == "__cluster_metadata");
+    check!(
+        (
+            resp.error_code,
+            resp.topics.len(),
+            resp.topics[0].topic_name.as_str()
+        ) == (0, 1, "__cluster_metadata")
+    );
     let pd = &resp.topics[0].partitions[0];
-    check!(pd.partition_index == 0);
-    check!(pd.error_code == 0, "metadata partition 0 succeeds");
     check!(
-        pd.leader_id == 1,
-        "1-broker cluster: bootstrap voter id=1 is leader"
-    );
-    check!(
-        pd.leader_epoch >= 1,
-        "openraft term must be >= 1 once a leader is elected; got {}",
-        pd.leader_epoch,
-    );
-    check!(
-        pd.high_watermark >= 0,
-        "last_applied_index is non-negative once any record applies; got {}",
-        pd.high_watermark,
-    );
-    assert!(
-        pd.current_voters.len() == 1,
-        "single voter for 1-broker cluster"
-    );
-    check!(pd.current_voters[0].replica_id == 1);
-    check!(
-        pd.current_voters[0].log_end_offset >= 0,
-        "leader knows its own matched index; got {}",
-        pd.current_voters[0].log_end_offset,
-    );
-    check!(
-        pd.observers.is_empty(),
-        "Crabka has no observer-role concept"
+        (
+            pd.partition_index,
+            pd.error_code,
+            pd.leader_id,
+            pd.leader_epoch >= 1,
+            pd.high_watermark >= 0,
+            pd.current_voters.len(),
+            pd.current_voters[0].replica_id,
+            pd.current_voters[0].log_end_offset >= 0,
+            pd.observers.is_empty(),
+        ) == (0, 0, 1, true, true, 1, 1, true, true),
+        "DescribeQuorum partition projection mismatch: {pd:?}"
     );
 }
 

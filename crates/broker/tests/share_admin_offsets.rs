@@ -447,28 +447,8 @@ async fn describe_reflects_spso_after_consume() {
     // Let the persister land the advanced SPSO durably.
     let group = describe_until(&client, "g1", "t", vec![0], 3).await;
     let part = &group.topics[0].partitions[0];
-    check!(
-        group.error_code == NONE,
-        "group error: {}",
-        group.error_code
-    );
-    check!(group.topics[0].topic_name == "t");
-    check!(
-        part.error_code == NONE,
-        "partition error: {}",
-        part.error_code
-    );
-    check!(
-        part.start_offset == 3,
-        "SPSO must be 3 after Accept of 0..2, got {}",
-        part.start_offset
-    );
-    // HWM is 3 (3 produced), SPSO is 3, partition is local ⇒ lag 0.
-    check!(
-        part.lag == 0,
-        "lag must be 0 (HWM 3 − SPSO 3), got {}",
-        part.lag
-    );
+    check!((group.error_code, group.topics[0].topic_name.as_str()) == (NONE, "t"));
+    check!((part.error_code, part.start_offset, part.lag) == (NONE, 3, 0));
 }
 
 /// Poll Describe until the partition reports the expected SPSO (the persister
@@ -649,31 +629,18 @@ async fn delete_removes_topic() {
         .await
         .expect("DeleteShareGroupOffsets");
     check!(
-        resp.error_code == NONE,
-        "delete top-level error: {}",
-        resp.error_code
-    );
-    check!(
-        resp.responses[0].topic_name == "t",
-        "delete response topic name mismatch: {}",
-        resp.responses[0].topic_name
-    );
-    check!(
-        resp.responses[0].error_code == NONE,
-        "delete per-topic error: {}",
-        resp.responses[0].error_code
+        (
+            resp.error_code,
+            resp.responses[0].topic_name.as_str(),
+            resp.responses[0].error_code
+        ) == (NONE, "t", NONE)
     );
 
     // Describe now reads the removed partition as missing → start_offset -1.
     let group = describe_until(&client, "g1", "t", vec![0], -1).await;
     let part = &group.topics[0].partitions[0];
     assert!(
-        part.start_offset == -1,
-        "deleted state must read as missing (start_offset -1), got {}",
-        part.start_offset
-    );
-    assert!(
-        part.error_code == NONE,
+        (part.start_offset, part.error_code) == (-1, NONE),
         "describe of missing partition is not an error, got {}",
         part.error_code
     );

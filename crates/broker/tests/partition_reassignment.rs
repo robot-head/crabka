@@ -130,9 +130,8 @@ async fn create_topic_plaintext(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
     assert!(
-        resp.topics[0].error_code == 0,
+        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
         "CreateTopics({name}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -369,15 +368,14 @@ async fn alter_then_complete_via_isr_catchup() {
     .await;
     let pr_after_alter = h1.partition_record_for_test("foo", 0).expect("partition");
     assert!(
-        pr_after_alter
-            .adding_replicas
-            .contains(&crabka_metadata::NodeId(new_replica as u64)),
-        "adding_replicas should contain new_replica; pr={pr_after_alter:?}"
-    );
-    assert!(
-        pr_after_alter
-            .removing_replicas
-            .contains(&crabka_metadata::NodeId(removing as u64)),
+        (
+            pr_after_alter
+                .adding_replicas
+                .contains(&crabka_metadata::NodeId(new_replica as u64)),
+            pr_after_alter
+                .removing_replicas
+                .contains(&crabka_metadata::NodeId(removing as u64)),
+        ) == (true, true),
         "removing_replicas should contain removing; pr={pr_after_alter:?}"
     );
 
@@ -448,16 +446,10 @@ async fn list_in_flight_returns_pending_rows() {
         .iter()
         .find(|(n, _)| n == "foo")
         .expect("foo should appear in list");
-    assert!(
-        foo.1.len() == 1,
-        "expected 1 partition in-flight; got {:?}",
-        foo.1
-    );
-    check!(foo.1[0].0 == 0, "expected partition_index=0");
     check!(
-        foo.1[0].2 == vec![new_replica],
-        "expected adding_replicas=[new_replica]; got {:?}",
-        foo.1[0].2
+        (foo.1.len(), foo.1[0].0, foo.1[0].2.as_slice()) == (1, 0, &[new_replica][..]),
+        "unexpected in-flight partition: {:?}",
+        foo.1
     );
 
     // Clean up.
@@ -604,9 +596,8 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
     assert!(
-        resp.topics[0].error_code == 0,
+        (resp.topics.len(), resp.topics[0].error_code) == (1, 0),
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );

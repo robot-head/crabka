@@ -511,8 +511,11 @@ mod tests {
     fn whole_error_with_empty_request_returns_empty_topics_list() {
         let req = req_with_topics(&[]);
         let resp = whole_error(&req, codes::GROUP_ID_NOT_FOUND);
-        assert!(resp.error_code == codes::GROUP_ID_NOT_FOUND);
-        assert!(resp.topics.is_empty());
+        let expected = OffsetDeleteResponse {
+            error_code: codes::GROUP_ID_NOT_FOUND,
+            ..Default::default()
+        };
+        assert!(resp == expected);
     }
 
     // ── rewrite_success_as ───────────────────────────────────────────

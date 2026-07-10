@@ -102,8 +102,7 @@ async fn offset_commit_and_fetch_by_topic_id_round_trip() {
         .find(|t| t.topic_id == id)
         .expect("topic by id");
     let part = t.partitions.first().expect("partition 0");
-    check!(part.committed_offset == 42);
-    check!(part.error_code == 0);
+    check!((part.committed_offset, part.error_code) == (42, 0));
     check!(t.topic_id == id); // id echoed
 }
 

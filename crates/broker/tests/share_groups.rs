@@ -105,16 +105,14 @@ async fn single_member_join_assignment() {
     req.subscribed_topic_names = Some(vec!["t1".into()]);
     let resp = client.send(req).await.unwrap();
 
-    check!(resp.error_code == 0, "join failed: {:?}", resp.error_code);
-    check!(resp.member_id.is_some(), "broker must mint a member id");
     check!(
-        resp.member_epoch == 1,
-        "first join advances member to epoch 1, got {}",
-        resp.member_epoch
-    );
-    check!(
-        total_assigned(&resp) == 4,
-        "single member must own all 4 partitions"
+        (
+            resp.error_code,
+            resp.member_id.is_some(),
+            resp.member_epoch,
+            total_assigned(&resp)
+        ) == (0, true, 1, 4),
+        "single-member join response mismatch: {resp:?}"
     );
 }
 
@@ -149,16 +147,9 @@ async fn two_members_then_describe() {
     let desc = describe(&client, "g1").await;
     assert!(desc.groups.len() == 1, "expected exactly one group row");
     let g = &desc.groups[0];
-    check!(g.error_code == 0, "describe error: {:?}", g.error_code);
     check!(
-        g.members.len() == 2,
-        "describe must show both members, got {}",
-        g.members.len()
-    );
-    check!(
-        g.group_epoch >= 1,
-        "group epoch must have advanced, got {}",
-        g.group_epoch
+        (g.error_code, g.members.len(), g.group_epoch >= 1) == (0, 2, true),
+        "two-member describe response mismatch: {g:?}"
     );
 }
 
@@ -188,14 +179,8 @@ async fn member_leave_epoch_minus_one() {
     let g = &desc.groups[0];
     // The empty group is retained (the actor stays alive with 0 members).
     assert!(
-        g.error_code == 0,
-        "retained empty group describe error: {:?}",
-        g.error_code
-    );
-    assert!(
-        g.members.is_empty(),
-        "no members must remain after leave, got {}",
-        g.members.len()
+        (g.error_code, g.members.is_empty()) == (0, true),
+        "retained empty group response mismatch: {g:?}"
     );
 }
 

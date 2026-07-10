@@ -545,86 +545,93 @@ mod tests {
     }
 
     #[test]
-    fn explicit_length_mismatch_returns_invalid_replica_assignment() {
-        let brokers: Vec<NodeId> = vec![
-            crabka_audit::NodeId(0),
-            crabka_audit::NodeId(1),
-            crabka_audit::NodeId(2),
+    fn invalid_explicit_assignments_are_rejected() {
+        let cases = [
+            (
+                "assignment count mismatch",
+                &[0, 1, 2][..],
+                vec![assn(&[0, 1]), assn(&[1, 2])],
+                3,
+                2,
+                "assignments.len()=2 does not match new partition count=3",
+                true,
+            ),
+            (
+                "replication factor mismatch",
+                &[0, 1, 2],
+                vec![assn(&[0, 1, 2])],
+                1,
+                2,
+                "does not match replication_factor=2",
+                false,
+            ),
+            (
+                "duplicate broker",
+                &[0, 1, 2],
+                vec![assn(&[1, 1])],
+                1,
+                2,
+                "duplicate broker id 1",
+                false,
+            ),
+            (
+                "unknown broker",
+                &[0, 1, 2],
+                vec![assn(&[0, 9])],
+                1,
+                2,
+                "unknown broker id 9",
+                false,
+            ),
+            (
+                "negative broker",
+                &[0, 1, 2],
+                vec![assn(&[0, -1])],
+                1,
+                2,
+                "negative broker id -1",
+                false,
+            ),
+            (
+                "empty assignments",
+                &[0, 1],
+                vec![],
+                2,
+                1,
+                "assignments.len()=0",
+                false,
+            ),
         ];
-        let provided = vec![assn(&[0, 1]), assn(&[1, 2])];
-        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
-            .expect_err("2 assignments for 3 new partitions must fail");
-        let expected = (
-            codes::INVALID_REPLICA_ASSIGNMENT,
-            "assignments.len()=2 does not match new partition count=3".to_string(),
-        );
-        assert!(err == expected);
-    }
 
-    #[test]
-    fn explicit_wrong_rf_returns_invalid_replica_assignment() {
-        let brokers: Vec<NodeId> = vec![
-            crabka_audit::NodeId(0),
-            crabka_audit::NodeId(1),
-            crabka_audit::NodeId(2),
-        ];
-        let provided = vec![assn(&[0, 1, 2])]; // 3 replicas, but rf=2
-        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
-            .expect_err("rf mismatch must fail");
-        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
-        assert!(err.1.contains("does not match replication_factor=2"));
-    }
-
-    #[test]
-    fn explicit_duplicate_broker_in_assignment_returns_invalid_replica_assignment() {
-        let brokers: Vec<NodeId> = vec![
-            crabka_audit::NodeId(0),
-            crabka_audit::NodeId(1),
-            crabka_audit::NodeId(2),
-        ];
-        let provided = vec![assn(&[1, 1])]; // duplicate
-        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
-            .expect_err("duplicate broker must fail");
-        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
-        assert!(err.1.contains("duplicate broker id 1"));
-    }
-
-    #[test]
-    fn explicit_unknown_broker_returns_invalid_replica_assignment() {
-        let brokers: Vec<NodeId> = vec![
-            crabka_audit::NodeId(0),
-            crabka_audit::NodeId(1),
-            crabka_audit::NodeId(2),
-        ];
-        let provided = vec![assn(&[0, 9])]; // 9 unknown
-        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
-            .expect_err("unknown broker must fail");
-        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
-        assert!(err.1.contains("unknown broker id 9"));
-    }
-
-    #[test]
-    fn explicit_negative_broker_id_returns_invalid_replica_assignment() {
-        let brokers: Vec<NodeId> = vec![
-            crabka_audit::NodeId(0),
-            crabka_audit::NodeId(1),
-            crabka_audit::NodeId(2),
-        ];
-        let provided = vec![assn(&[0, -1])];
-        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
-            .expect_err("negative broker id must fail");
-        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
-        assert!(err.1.contains("negative broker id -1"));
-    }
-
-    #[test]
-    fn empty_assignments_some_with_new_partitions_fails() {
-        let brokers: Vec<NodeId> = vec![crabka_audit::NodeId(0), crabka_audit::NodeId(1)];
-        let provided: Vec<CreatePartitionsAssignment> = vec![];
-        let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 2, 1)
-            .expect_err("Some(empty) for >0 new partitions must fail");
-        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
-        assert!(err.1.contains("assignments.len()=0"));
+        for (
+            case,
+            broker_ids,
+            provided,
+            new_partition_count,
+            replication_factor,
+            expected_message,
+            exact_message,
+        ) in cases
+        {
+            let brokers: Vec<NodeId> = broker_ids.iter().copied().map(NodeId).collect();
+            let err = resolve_new_partition_assignments(
+                Some(&provided),
+                &brokers,
+                0,
+                new_partition_count,
+                replication_factor,
+            )
+            .unwrap_err();
+            let message_matches = if exact_message {
+                err.1 == expected_message
+            } else {
+                err.1.contains(expected_message)
+            };
+            assert!(
+                (err.0, message_matches) == (codes::INVALID_REPLICA_ASSIGNMENT, true),
+                "case: {case}; error: {err:?}"
+            );
+        }
     }
 
     #[test]
