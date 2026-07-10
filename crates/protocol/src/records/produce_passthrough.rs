@@ -285,7 +285,7 @@ fn skip(buf: &mut Bytes, n: usize) -> Result<(), ProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use bytes::BytesMut;
 
     use super::*;
@@ -309,7 +309,7 @@ mod tests {
     /// Encode a produce request, then assert the captured slices match the
     /// records the full decoder produces — byte-for-byte — for every
     /// (topic, partition).
-    fn check_roundtrip(req: &ProduceRequest, version: i16) {
+    fn check_roundtrip(case: &str, req: &ProduceRequest, version: i16) {
         let mut buf = BytesMut::new();
         req.encode(&mut buf, version).unwrap();
         let body = buf.freeze();
@@ -330,13 +330,15 @@ mod tests {
         }
         assert!(
             slices.len() == expected.len(),
-            "slice count mismatch: got {}, want {}",
+            "case {case}: slice count mismatch: got {}, want {}",
             slices.len(),
             expected.len()
         );
         for (got, want) in slices.iter().zip(expected.iter()) {
             match (&got.records, want) {
-                (Some(g), Some(w)) => assert!(&g[..] == &w[..], "records bytes differ"),
+                (Some(g), Some(w)) => {
+                    assert!(&g[..] == &w[..], "case {case}: records bytes differ");
+                }
                 (None, None) => {}
                 _ => panic!("nullability mismatch"),
             }
@@ -377,18 +379,11 @@ mod tests {
     }
 
     #[test]
-    fn captures_match_decoder_non_flexible() {
-        // v3..=8 are non-flexible (i32 length prefixes, no tagged fields).
-        for version in 3..=8 {
-            check_roundtrip(&multi_partition_request(version), version);
-        }
-    }
-
-    #[test]
-    fn captures_match_decoder_flexible() {
-        // v9..=13 are flexible (compact encodings + tagged fields).
-        for version in 9..=13 {
-            check_roundtrip(&multi_partition_request(version), version);
+    fn captures_match_decoder_encoding_cases() {
+        for (case, versions) in [("non-flexible", 3..=8), ("flexible", 9..=13)] {
+            for version in versions {
+                check_roundtrip(case, &multi_partition_request(version), version);
+            }
         }
     }
 
@@ -446,28 +441,37 @@ mod tests {
 
         let framing = produce_framing(body.clone(), version).unwrap();
 
-        check!(framing.transactional_id == req.transactional_id);
-        check!(framing.acks == req.acks);
-        check!(framing.timeout_ms == req.timeout_ms);
-        assert!(framing.topics.len() == req.topic_data.len());
-        for (ft, rt) in framing.topics.iter().zip(req.topic_data.iter()) {
-            check!(ft.name == rt.name);
-            check!(ft.topic_id.0 == rt.topic_id.0);
-            assert!(ft.partitions.len() == rt.partition_data.len());
-            for (fp, rp) in ft.partitions.iter().zip(rt.partition_data.iter()) {
-                check!(fp.partition == rp.index);
-                let want = rp.records.as_ref().map(|rpld| {
-                    let mut b = BytesMut::new();
-                    <RecordsPayload as Encode>::encode(rpld, &mut b, version).unwrap();
-                    b.freeze()
-                });
-                match (&fp.records, &want) {
-                    (Some(g), Some(w)) => assert!(&g[..] == &w[..], "records bytes differ"),
-                    (None, None) => {}
-                    _ => panic!("nullability mismatch"),
-                }
-            }
-        }
+        let expected = ProduceFraming {
+            transactional_id: req.transactional_id.clone(),
+            acks: req.acks,
+            timeout_ms: req.timeout_ms,
+            topics: req
+                .topic_data
+                .iter()
+                .enumerate()
+                .map(|(topic_index, topic)| ProduceFramingTopic {
+                    name: topic.name.clone(),
+                    topic_id: topic.topic_id,
+                    partitions: topic
+                        .partition_data
+                        .iter()
+                        .enumerate()
+                        .map(|(partition_index, partition)| PartitionRecordSlice {
+                            topic_index,
+                            partition_index,
+                            partition: partition.index,
+                            records: partition.records.as_ref().map(|payload| {
+                                let mut b = BytesMut::new();
+                                <RecordsPayload as Encode>::encode(payload, &mut b, version)
+                                    .unwrap();
+                                b.freeze()
+                            }),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        assert!(framing == expected);
     }
 
     #[test]

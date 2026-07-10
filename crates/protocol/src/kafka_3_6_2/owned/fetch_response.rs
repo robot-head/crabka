@@ -28,29 +28,28 @@ mod tests {
 
     use super::*;
     use crate::{Decode, Encode};
-    fn roundtrip(msg: &FetchResponse, v: i16) {
+    fn roundtrip(case: &str, msg: &FetchResponse, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
-        assert!(msg.encoded_len(v) == buf.len());
+        assert!(msg.encoded_len(v) == buf.len(), "case {case}, version {v}");
         let bytes = buf.freeze();
         let mut cur = &bytes[..];
         let decoded = FetchResponse::decode(&mut cur, v).unwrap();
-        assert!(cur.is_empty());
+        assert!(cur.is_empty(), "case {case}, version {v}");
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
-        assert!(&reencoded[..] == &bytes[..]);
+        assert!(&reencoded[..] == &bytes[..], "case {case}, version {v}");
         let _ = default_json(v);
     }
     #[test]
-    fn default_roundtrips_all_versions() {
+    fn roundtrip_cases_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {
-            roundtrip(&FetchResponse::default(), v);
-        }
-    }
-    #[test]
-    fn populated_roundtrips_all_versions() {
-        for v in MIN_VERSION..=MAX_VERSION {
-            roundtrip(&FetchResponse::populated(v), v);
+            for (case, msg) in [
+                ("default", FetchResponse::default()),
+                ("populated", FetchResponse::populated(v)),
+            ] {
+                roundtrip(case, &msg, v);
+            }
         }
     }
 }

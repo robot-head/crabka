@@ -131,16 +131,22 @@ mod tests {
             ("transaction.version", 2),
         ];
         for (i, (record, (name, level))) in data.records.iter().zip(expected).enumerate() {
-            assert!(record.offset_delta == i32::try_from(i).expect("test index fits"));
             let value = record.value.as_ref().expect("feature value");
             let (decoded, version) =
                 KraftMetadataRecord::decode_value(value).expect("feature record");
-            assert!(version == FEATURE_LEVEL_API_VERSION);
-            let KraftMetadataRecord::FeatureLevel(feature) = decoded else {
-                panic!("expected feature level record");
-            };
-            assert!(feature.name == name);
-            assert!(feature.feature_level == level);
+            let expected_record = KraftMetadataRecord::FeatureLevel(FeatureLevelRecord {
+                name: name.to_string(),
+                feature_level: level,
+                ..Default::default()
+            });
+            assert!(
+                (record.offset_delta, version, decoded)
+                    == (
+                        i32::try_from(i).expect("test index fits"),
+                        FEATURE_LEVEL_API_VERSION,
+                        expected_record,
+                    )
+            );
         }
 
         let footer = RecordBatch::decode(&mut cur).expect("footer batch");

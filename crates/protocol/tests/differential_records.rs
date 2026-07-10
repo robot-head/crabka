@@ -119,17 +119,19 @@ macro_rules! diff_test {
                 let jvm_bytes = o.record_batch_encode(&expected);
                 let mut cur: &[u8] = &jvm_bytes[..];
                 let decoded = RecordBatch::decode(&mut cur).unwrap();
-                prop_assert_eq!(decoded.records.len(), b.records.len());
-                for (i, (a, b_)) in decoded.records.iter().zip(b.records.iter()).enumerate() {
-                    prop_assert_eq!(a.key.as_deref(), b_.key.as_deref(), "record[{}].key", i);
-                    prop_assert_eq!(
-                        a.value.as_deref(),
-                        b_.value.as_deref(),
-                        "record[{}].value",
-                        i
-                    );
-                    prop_assert_eq!(a.offset_delta, b_.offset_delta, "record[{}].offset_delta", i);
-                }
+                let project = |records: &[Record]| {
+                    records
+                        .iter()
+                        .map(|record| {
+                            (
+                                record.key.clone(),
+                                record.value.clone(),
+                                record.offset_delta,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                };
+                prop_assert_eq!(project(&decoded.records), project(&b.records));
             });
         }
     };

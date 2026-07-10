@@ -28,29 +28,42 @@ mod tests {
 
     use super::*;
     use crate::{Decode, Encode};
-    fn roundtrip(msg: &DescribeUserScramCredentialsResponse, v: i16) {
+    fn roundtrip(case_name: &str, msg: &DescribeUserScramCredentialsResponse, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
-        assert!(msg.encoded_len(v) == buf.len());
+        assert!(
+            msg.encoded_len(v) == buf.len(),
+            "{case_name} encoded length differs at version {v}"
+        );
         let bytes = buf.freeze();
         let mut cur = &bytes[..];
         let decoded = DescribeUserScramCredentialsResponse::decode(&mut cur, v).unwrap();
-        assert!(cur.is_empty());
+        assert!(
+            cur.is_empty(),
+            "{case_name} left trailing bytes at version {v}"
+        );
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
-        assert!(&reencoded[..] == &bytes[..]);
+        assert!(
+            &reencoded[..] == &bytes[..],
+            "{case_name} re-encoding differs at version {v}"
+        );
         let _ = default_json(v);
     }
     #[test]
-    fn default_roundtrips_all_versions() {
-        for v in MIN_VERSION..=MAX_VERSION {
-            roundtrip(&DescribeUserScramCredentialsResponse::default(), v);
-        }
-    }
-    #[test]
-    fn populated_roundtrips_all_versions() {
-        for v in MIN_VERSION..=MAX_VERSION {
-            roundtrip(&DescribeUserScramCredentialsResponse::populated(v), v);
+    fn roundtrips_all_versions() {
+        let cases: [(&str, fn(i16) -> DescribeUserScramCredentialsResponse); 2] = [
+            ("default", |_| {
+                DescribeUserScramCredentialsResponse::default()
+            }),
+            ("populated", DescribeUserScramCredentialsResponse::populated),
+        ];
+
+        for (name, make_message) in cases {
+            for v in MIN_VERSION..=MAX_VERSION {
+                let message = make_message(v);
+                roundtrip(name, &message, v);
+            }
         }
     }
 }

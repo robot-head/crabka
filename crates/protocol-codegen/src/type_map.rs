@@ -112,18 +112,44 @@ mod tests {
 
     #[test]
     fn arrays() {
-        check!(owned_type("[]int32", false, None) == "Vec<i32>");
-        check!(owned_type("[]string", true, None) == "Option<Vec<String>>");
-        check!(borrowed_type("[]string", false, None) == "Vec<&'a str>");
+        for (case, got, want) in [
+            (
+                "owned primitive",
+                owned_type("[]int32", false, None),
+                "Vec<i32>",
+            ),
+            (
+                "owned nullable string",
+                owned_type("[]string", true, None),
+                "Option<Vec<String>>",
+            ),
+            (
+                "borrowed string",
+                borrowed_type("[]string", false, None),
+                "Vec<&'a str>",
+            ),
+        ] {
+            check!(got == want, "case {case}");
+        }
     }
 
     #[test]
     fn struct_refs() {
-        check!(owned_type("ProduceTopic", false, Some("ProduceTopic")) == "ProduceTopic");
-        // Caller is responsible for including <'a> in struct_path when needed.
-        check!(
-            borrowed_type("ProduceTopic", false, Some("ProduceTopic<'a>")) == "ProduceTopic<'a>"
-        );
+        for (case, got, want) in [
+            (
+                "owned",
+                owned_type("ProduceTopic", false, Some("ProduceTopic")),
+                "ProduceTopic",
+            ),
+            // Caller is responsible for including <'a> in struct_path when needed.
+            (
+                "borrowed",
+                borrowed_type("ProduceTopic", false, Some("ProduceTopic<'a>")),
+                "ProduceTopic<'a>",
+            ),
+        ] {
+            check!(got == want, "case {case}");
+        }
         check!(borrowed_type("ProduceTopic", false, Some("ProduceTopic")) == "ProduceTopic");
         check!(owned_type("[]ProduceTopic", false, Some("ProduceTopic")) == "Vec<ProduceTopic>");
         check!(

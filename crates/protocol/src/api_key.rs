@@ -41,7 +41,8 @@ mod tests {
         for k in ApiKey::ALL {
             assert!(ApiKey::from_i16(*k as i16) == Some(*k));
         }
-        assert!(ApiKey::from_i16(-1) == None);
-        assert!(ApiKey::from_i16(9999) == None);
+        for (case, raw) in [("negative", -1), ("unknown positive", 9999)] {
+            assert!(ApiKey::from_i16(raw) == None, "case {case}");
+        }
     }
 }

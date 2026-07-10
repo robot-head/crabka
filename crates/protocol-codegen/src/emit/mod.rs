@@ -71,6 +71,10 @@ mod tests {
                 let w_borrowed = wrappers::emit(s, wrappers::Flavor::Borrowed, sha, namespace);
                 check!(w_owned.contains("mod tests"));
                 check!(w_borrowed.contains("mod tests"));
+                check!(w_owned.contains("case {case}, version {v}"));
+                check!(w_borrowed.contains("case {case}, version {v}"));
+                check!(!w_owned.contains("_case , msg"));
+                check!(!w_borrowed.contains("_case , msg"));
                 check!(!name_conv::module_name(&s.name).is_empty());
             }
         }

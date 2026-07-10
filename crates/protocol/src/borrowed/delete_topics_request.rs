@@ -28,35 +28,37 @@ mod tests {
 
     use super::*;
     use crate::{DecodeBorrow, Encode};
-    fn check(msg_bytes: &bytes::Bytes, v: i16) {
-        let mut cur: &[u8] = msg_bytes;
-        let decoded = DeleteTopicsRequest::decode_borrow(&mut cur, v).unwrap();
-        assert!(cur.is_empty());
-        assert!(decoded.encoded_len(v) == msg_bytes.len());
-        let mut reencoded = BytesMut::new();
-        decoded.encode(&mut reencoded, v).unwrap();
-        assert!(&reencoded[..] == &msg_bytes[..]);
-        let owned = decoded.to_owned();
-        let mut owned_buf = BytesMut::new();
-        owned.encode(&mut owned_buf, v).unwrap();
-        assert!(&owned_buf[..] == &msg_bytes[..]);
-    }
     #[test]
-    fn default_roundtrips_all_versions() {
+    fn roundtrips_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {
-            let msg = DeleteTopicsRequest::default();
-            let mut buf = BytesMut::new();
-            msg.encode(&mut buf, v).unwrap();
-            check(&buf.freeze(), v);
-        }
-    }
-    #[test]
-    fn populated_roundtrips_all_versions() {
-        for v in MIN_VERSION..=MAX_VERSION {
-            let msg = DeleteTopicsRequest::populated(v);
-            let mut buf = BytesMut::new();
-            msg.encode(&mut buf, v).unwrap();
-            check(&buf.freeze(), v);
+            let cases = [
+                ("default", DeleteTopicsRequest::default()),
+                ("populated", DeleteTopicsRequest::populated(v)),
+            ];
+
+            for (case, expected) in cases {
+                let mut encoded = BytesMut::new();
+                expected.encode(&mut encoded, v).unwrap();
+                let msg_bytes = encoded.freeze();
+                let mut cur: &[u8] = &msg_bytes;
+                let decoded = DeleteTopicsRequest::decode_borrow(&mut cur, v).unwrap();
+
+                assert!(cur.is_empty(), "{case} at version {v}");
+                assert!(decoded == expected, "{case} at version {v}");
+                assert!(
+                    decoded.encoded_len(v) == msg_bytes.len(),
+                    "{case} at version {v}"
+                );
+
+                let mut reencoded = BytesMut::new();
+                decoded.encode(&mut reencoded, v).unwrap();
+                assert!(&reencoded[..] == &msg_bytes[..], "{case} at version {v}");
+
+                let owned = decoded.to_owned();
+                let mut owned_buf = BytesMut::new();
+                owned.encode(&mut owned_buf, v).unwrap();
+                assert!(&owned_buf[..] == &msg_bytes[..], "{case} at version {v}");
+            }
         }
     }
 }

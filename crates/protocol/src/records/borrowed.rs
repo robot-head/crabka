@@ -508,7 +508,7 @@ impl crate::Encode for RecordBatch<'_> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use bytes::BytesMut;
     use crabka_compression::CompressionType;
 
@@ -521,46 +521,44 @@ mod tests {
         buf.to_vec()
     }
 
-    macro_rules! borrowed_roundtrip {
-        ($name:ident, $codec:expr) => {
-            #[test]
-            fn $name() {
-                let mut owned = super::super::owned::RecordBatch::default();
-                owned.attributes = owned.attributes.with_compression($codec);
-                owned.records.push(super::super::owned::Record {
-                    key: Some(Bytes::from_static(b"key")),
-                    value: Some(Bytes::from_static(b"value")),
-                    ..Default::default()
-                });
+    #[test]
+    fn borrowed_roundtrip_cases() {
+        for (case, codec) in [
+            ("none", CompressionType::None),
+            ("gzip", CompressionType::Gzip),
+            ("snappy", CompressionType::Snappy),
+            ("lz4", CompressionType::Lz4),
+            ("zstd", CompressionType::Zstd),
+        ] {
+            let mut owned = super::super::owned::RecordBatch::default();
+            owned.attributes = owned.attributes.with_compression(codec);
+            owned.records.push(super::super::owned::Record {
+                key: Some(Bytes::from_static(b"key")),
+                value: Some(Bytes::from_static(b"value")),
+                ..Default::default()
+            });
 
-                let encoded = encode_owned_then_borrow(&owned);
-                let mut cur: &[u8] = &encoded[..];
-                let borrowed = RecordBatch::decode_borrow(&mut cur, 0).unwrap();
-                assert!(cur.is_empty());
-                assert!(borrowed.attributes() == owned.attributes);
+            let encoded = encode_owned_then_borrow(&owned);
+            let mut cur: &[u8] = &encoded[..];
+            let borrowed = RecordBatch::decode_borrow(&mut cur, 0).unwrap();
+            assert!(cur.is_empty());
+            assert!(borrowed.attributes() == owned.attributes);
 
-                let records: Vec<_> = borrowed.iter().collect::<Result<_, _>>().unwrap();
-                let expected_records = vec![Record {
-                    attributes: 0,
-                    timestamp_delta: 0,
-                    offset_delta: 0,
-                    key: Some(b"key".as_slice()),
-                    value: Some(b"value".as_slice()),
-                    headers: vec![],
-                }];
-                assert!(records == expected_records);
+            let records: Vec<_> = borrowed.iter().collect::<Result<_, _>>().unwrap();
+            let expected_records = vec![Record {
+                attributes: 0,
+                timestamp_delta: 0,
+                offset_delta: 0,
+                key: Some(b"key".as_slice()),
+                value: Some(b"value".as_slice()),
+                headers: vec![],
+            }];
+            assert!(records == expected_records, "case {case}");
 
-                let back_owned = borrowed.to_owned().unwrap();
-                assert!(back_owned == owned);
-            }
-        };
+            let back_owned = borrowed.to_owned().unwrap();
+            assert!(back_owned == owned, "case {case}");
+        }
     }
-
-    borrowed_roundtrip!(roundtrip_none, CompressionType::None);
-    borrowed_roundtrip!(roundtrip_gzip, CompressionType::Gzip);
-    borrowed_roundtrip!(roundtrip_snappy, CompressionType::Snappy);
-    borrowed_roundtrip!(roundtrip_lz4, CompressionType::Lz4);
-    borrowed_roundtrip!(roundtrip_zstd, CompressionType::Zstd);
 
     #[test]
     fn zero_copy_for_uncompressed() {
@@ -607,14 +605,18 @@ mod tests {
         let encoded = encode_owned_then_borrow(&owned);
 
         let v = validate_one_v2_batch(&encoded).unwrap();
-        check!(v.total_len == encoded.len());
-        check!(v.header.base_offset.get() == 7);
-        check!(v.header.partition_leader_epoch.get() == 3);
-        check!(v.header.producer_id.get() == 99);
-        check!(v.header.producer_epoch.get() == 1);
-        check!(v.header.base_sequence.get() == 5);
-        check!(v.header.max_timestamp.get() == 1_234);
-        check!(v.header.magic == 2);
+        assert!(
+            (
+                v.total_len,
+                v.header.base_offset.get(),
+                v.header.partition_leader_epoch.get(),
+                v.header.producer_id.get(),
+                v.header.producer_epoch.get(),
+                v.header.base_sequence.get(),
+                v.header.max_timestamp.get(),
+                v.header.magic,
+            ) == (encoded.len(), 7, 3, 99, 1, 5, 1_234, 2)
+        );
     }
 
     #[test]
@@ -666,15 +668,16 @@ mod tests {
         both.extend_from_slice(&one);
         both.extend_from_slice(&three);
 
-        assert!(count_records_in_v2_batches(&one) == 1);
-        assert!(count_records_in_v2_batches(&both) == 4);
+        for (case, input, expected) in [("single", &one[..], 1), ("concatenated", &both[..], 4)] {
+            assert!(
+                count_records_in_v2_batches(input) == expected,
+                "case {case}"
+            );
+        }
     }
 
     #[test]
     fn count_records_in_v2_batches_stops_at_bad_or_non_v2_input() {
-        assert!(count_records_in_v2_batches(&[]) == 0);
-        assert!(count_records_in_v2_batches(&[0u8; HEADER_LEN]) == 0);
-
         let encoded = encode_owned_then_borrow(&super::super::owned::RecordBatch {
             records: vec![super::super::owned::Record::default()],
             ..Default::default()
@@ -682,7 +685,16 @@ mod tests {
         let mut with_truncated_tail = encoded.clone();
         with_truncated_tail.extend_from_slice(&encoded[..HEADER_LEN - 1]);
 
-        assert!(count_records_in_v2_batches(&with_truncated_tail) == 1);
+        for (case, input, expected) in [
+            ("empty", &[][..], 0),
+            ("non-v2", &[0u8; HEADER_LEN][..], 0),
+            ("truncated tail", &with_truncated_tail[..], 1),
+        ] {
+            assert!(
+                count_records_in_v2_batches(input) == expected,
+                "case {case}"
+            );
+        }
     }
 
     /// Build a bare 61-byte v2 batch header (magic == 2, all other fields zero)

@@ -264,7 +264,6 @@ mod tests {
     fn comment_strip_preserves_double_slash_in_string() {
         let src = "{ \"default\": \"http://example.com\" } // tail";
         let out = strip_line_comments(src);
-        assert!(out.contains("http://example.com"));
-        assert!(!out.contains("tail"));
+        assert!(out == "{ \"default\": \"http://example.com\" } \n");
     }
 }

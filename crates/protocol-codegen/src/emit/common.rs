@@ -106,8 +106,12 @@ mod tests {
 
     #[test]
     fn hex_positive_normalizes_to_decimal() {
-        assert!(format_int_literal("0x7fffffff", "i32") == "2_147_483_647i32");
-        assert!(format_int_literal("0X10", "i32") == "16i32");
+        for (case, input, want) in [
+            ("lowercase", "0x7fffffff", "2_147_483_647i32"),
+            ("uppercase", "0X10", "16i32"),
+        ] {
+            assert!(format_int_literal(input, "i32") == want, "case {case}");
+        }
     }
 
     #[test]

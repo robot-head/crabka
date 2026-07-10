@@ -119,16 +119,25 @@ mod tests {
 
     #[test]
     fn pascal_to_snake() {
-        assert!(field_name("ZkMigrationReady") == "zk_migration_ready");
-        assert!(field_name("ApiVersionsRequest") == "api_versions_request");
+        for (case, input, want) in [
+            ("initialism", "ZkMigrationReady", "zk_migration_ready"),
+            ("words", "ApiVersionsRequest", "api_versions_request"),
+        ] {
+            assert!(field_name(input) == want, "case {case}");
+        }
     }
 
     #[test]
     fn acronym_runs_stay_together() {
         // KafkaClusterID -> kafka_cluster_id (acronym ID at the end)
-        assert!(field_name("KafkaClusterID") == "kafka_cluster_id");
-        // HTTPSEndpoint -> https_endpoint (acronym followed by Title)
-        assert!(field_name("HTTPSEndpoint") == "https_endpoint");
+        let cases = [
+            ("suffix", "KafkaClusterID", "kafka_cluster_id"),
+            // HTTPSEndpoint -> https_endpoint (acronym followed by Title)
+            ("prefix", "HTTPSEndpoint", "https_endpoint"),
+        ];
+        for (case, input, want) in cases {
+            assert!(field_name(input) == want, "case {case}");
+        }
     }
 
     #[test]
@@ -140,7 +149,11 @@ mod tests {
 
     #[test]
     fn module_name_uses_snake_case() {
-        assert!(module_name("ApiVersionsRequest") == "api_versions_request");
-        assert!(module_name("OffsetCommitResponse") == "offset_commit_response");
+        for (case, input, want) in [
+            ("request", "ApiVersionsRequest", "api_versions_request"),
+            ("response", "OffsetCommitResponse", "offset_commit_response"),
+        ] {
+            assert!(module_name(input) == want, "case {case}");
+        }
     }
 }

@@ -96,19 +96,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn split_banner_separates_leading_comment_block() {
-        let src = "// AUTO-GENERATED foo\n// line two\n\npub struct X;\n";
-        let (banner, body) = split_banner(src);
-        assert_eq!(banner, "// AUTO-GENERATED foo\n// line two\n\n");
-        assert_eq!(body, "pub struct X;\n");
-    }
-
-    #[test]
-    fn split_banner_handles_no_banner() {
-        let src = "pub struct X;\n";
-        let (banner, body) = split_banner(src);
-        assert_eq!(banner, "");
-        assert_eq!(body, src);
+    fn split_banner_cases() {
+        for (case, src, expected) in [
+            (
+                "leading comment block",
+                "// AUTO-GENERATED foo\n// line two\n\npub struct X;\n",
+                ("// AUTO-GENERATED foo\n// line two\n\n", "pub struct X;\n"),
+            ),
+            ("no banner", "pub struct X;\n", ("", "pub struct X;\n")),
+        ] {
+            assert_eq!(split_banner(src), expected, "case {case}");
+        }
     }
 
     /// Regression guard for the ` :: ` / ` . ` spacing bug: a `to_owned` whose
