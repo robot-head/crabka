@@ -386,162 +386,168 @@ mod tests {
     use AclOperation::{Alter, Delete, Describe, Read, Write};
     use ResourceType::{Cluster, Topic};
 
-    const ROUTE_MAPPING_CASES: &[(&str, &str, &str, Option<(ResourceType, &str, AclOperation)>)] =
-        &[
-            (
-                "register",
-                "POST",
-                "/subjects/orders-value/versions",
-                Some((Topic, "orders-value", Write)),
-            ),
-            (
-                "read-version",
-                "GET",
-                "/subjects/orders-value/versions/1",
-                Some((Topic, "orders-value", Read)),
-            ),
-            (
-                "version-schema",
-                "GET",
-                "/subjects/s/versions/1/schema",
-                Some((Topic, "s", Read)),
-            ),
-            (
-                "referenced-by",
-                "GET",
-                "/subjects/s/versions/1/referencedby",
-                Some((Topic, "s", Read)),
-            ),
-            (
-                "delete-subject",
-                "DELETE",
-                "/subjects/orders-value",
-                Some((Topic, "orders-value", Delete)),
-            ),
-            (
-                "delete-version",
-                "DELETE",
-                "/subjects/s/versions/2",
-                Some((Topic, "s", Delete)),
-            ),
-            (
-                "lookup-subject",
-                "POST",
-                "/subjects/s",
-                Some((Topic, "s", Read)),
-            ),
-            (
-                "alter-subject-config",
-                "PUT",
-                "/config/s",
-                Some((Topic, "s", Alter)),
-            ),
-            (
-                "describe-subject-config",
-                "GET",
-                "/config/s",
-                Some((Topic, "s", Describe)),
-            ),
-            (
-                "delete-subject-mode",
-                "DELETE",
-                "/mode/s",
-                Some((Topic, "s", Alter)),
-            ),
-            (
-                "compatibility",
-                "POST",
-                "/compatibility/subjects/s/versions/1",
-                Some((Topic, "s", Read)),
-            ),
-            (
-                "alter-global-config",
-                "PUT",
-                "/config",
-                Some((Cluster, "kafka-cluster", Alter)),
-            ),
-            (
-                "describe-global-config",
-                "GET",
-                "/config",
-                Some((Cluster, "kafka-cluster", Describe)),
-            ),
-            (
-                "describe-global-mode",
-                "GET",
-                "/mode",
-                Some((Cluster, "kafka-cluster", Describe)),
-            ),
-            (
-                "list-subjects",
-                "GET",
-                "/subjects",
-                Some((Cluster, "kafka-cluster", Describe)),
-            ),
-            (
-                "schema-by-id",
-                "GET",
-                "/schemas/ids/1",
-                Some((Cluster, "kafka-cluster", Read)),
-            ),
-            (
-                "list-schemas",
-                "GET",
-                "/schemas",
-                Some((Cluster, "kafka-cluster", Read)),
-            ),
-            (
-                "import-schemas",
-                "POST",
-                "/schemas/import",
-                Some((Cluster, "kafka-cluster", Write)),
-            ),
-            ("get-import-unmapped", "GET", "/schemas/import", None),
-            ("put-import-unmapped", "PUT", "/schemas/import", None),
-            (
-                "schema-types",
-                "GET",
-                "/schemas/types",
-                Some((Cluster, "kafka-cluster", Describe)),
-            ),
-            (
-                "alter-global-mode",
-                "PUT",
-                "/mode",
-                Some((Cluster, "kafka-cluster", Alter)),
-            ),
-            (
-                "alter-subject-mode",
-                "PUT",
-                "/mode/s",
-                Some((Topic, "s", Alter)),
-            ),
-            (
-                "describe-subject-mode",
-                "GET",
-                "/mode/s",
-                Some((Topic, "s", Describe)),
-            ),
-            (
-                "list-versions",
-                "GET",
-                "/subjects/s/versions",
-                Some((Topic, "s", Read)),
-            ),
-            (
-                "schema-id-versions",
-                "GET",
-                "/schemas/ids/1/versions",
-                Some((Cluster, "kafka-cluster", Read)),
-            ),
-            (
-                "percent-decoded-subject",
-                "POST",
-                "/subjects/foo%2Fbar/versions",
-                Some((Topic, "foo/bar", Write)),
-            ),
-            ("root-unmapped", "GET", "/", None),
-        ];
+    type RouteMappingCase = (
+        &'static str,
+        &'static str,
+        &'static str,
+        Option<(ResourceType, &'static str, AclOperation)>,
+    );
+
+    const ROUTE_MAPPING_CASES: &[RouteMappingCase] = &[
+        (
+            "register",
+            "POST",
+            "/subjects/orders-value/versions",
+            Some((Topic, "orders-value", Write)),
+        ),
+        (
+            "read-version",
+            "GET",
+            "/subjects/orders-value/versions/1",
+            Some((Topic, "orders-value", Read)),
+        ),
+        (
+            "version-schema",
+            "GET",
+            "/subjects/s/versions/1/schema",
+            Some((Topic, "s", Read)),
+        ),
+        (
+            "referenced-by",
+            "GET",
+            "/subjects/s/versions/1/referencedby",
+            Some((Topic, "s", Read)),
+        ),
+        (
+            "delete-subject",
+            "DELETE",
+            "/subjects/orders-value",
+            Some((Topic, "orders-value", Delete)),
+        ),
+        (
+            "delete-version",
+            "DELETE",
+            "/subjects/s/versions/2",
+            Some((Topic, "s", Delete)),
+        ),
+        (
+            "lookup-subject",
+            "POST",
+            "/subjects/s",
+            Some((Topic, "s", Read)),
+        ),
+        (
+            "alter-subject-config",
+            "PUT",
+            "/config/s",
+            Some((Topic, "s", Alter)),
+        ),
+        (
+            "describe-subject-config",
+            "GET",
+            "/config/s",
+            Some((Topic, "s", Describe)),
+        ),
+        (
+            "delete-subject-mode",
+            "DELETE",
+            "/mode/s",
+            Some((Topic, "s", Alter)),
+        ),
+        (
+            "compatibility",
+            "POST",
+            "/compatibility/subjects/s/versions/1",
+            Some((Topic, "s", Read)),
+        ),
+        (
+            "alter-global-config",
+            "PUT",
+            "/config",
+            Some((Cluster, "kafka-cluster", Alter)),
+        ),
+        (
+            "describe-global-config",
+            "GET",
+            "/config",
+            Some((Cluster, "kafka-cluster", Describe)),
+        ),
+        (
+            "describe-global-mode",
+            "GET",
+            "/mode",
+            Some((Cluster, "kafka-cluster", Describe)),
+        ),
+        (
+            "list-subjects",
+            "GET",
+            "/subjects",
+            Some((Cluster, "kafka-cluster", Describe)),
+        ),
+        (
+            "schema-by-id",
+            "GET",
+            "/schemas/ids/1",
+            Some((Cluster, "kafka-cluster", Read)),
+        ),
+        (
+            "list-schemas",
+            "GET",
+            "/schemas",
+            Some((Cluster, "kafka-cluster", Read)),
+        ),
+        (
+            "import-schemas",
+            "POST",
+            "/schemas/import",
+            Some((Cluster, "kafka-cluster", Write)),
+        ),
+        ("get-import-unmapped", "GET", "/schemas/import", None),
+        ("put-import-unmapped", "PUT", "/schemas/import", None),
+        (
+            "schema-types",
+            "GET",
+            "/schemas/types",
+            Some((Cluster, "kafka-cluster", Describe)),
+        ),
+        (
+            "alter-global-mode",
+            "PUT",
+            "/mode",
+            Some((Cluster, "kafka-cluster", Alter)),
+        ),
+        (
+            "alter-subject-mode",
+            "PUT",
+            "/mode/s",
+            Some((Topic, "s", Alter)),
+        ),
+        (
+            "describe-subject-mode",
+            "GET",
+            "/mode/s",
+            Some((Topic, "s", Describe)),
+        ),
+        (
+            "list-versions",
+            "GET",
+            "/subjects/s/versions",
+            Some((Topic, "s", Read)),
+        ),
+        (
+            "schema-id-versions",
+            "GET",
+            "/schemas/ids/1/versions",
+            Some((Cluster, "kafka-cluster", Read)),
+        ),
+        (
+            "percent-decoded-subject",
+            "POST",
+            "/subjects/foo%2Fbar/versions",
+            Some((Topic, "foo/bar", Write)),
+        ),
+        ("root-unmapped", "GET", "/", None),
+    ];
 
     #[test]
     fn route_mappings_are_named_and_table_driven() {

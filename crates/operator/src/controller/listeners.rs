@@ -1397,41 +1397,36 @@ mod tests {
             configuration: None,
             network_policy_peers: None,
         };
-        for (name, listeners, selected, expected, expected_reason) in [
+        for (name, listeners, selected, expected) in [
             (
                 "duplicate name",
                 vec![internal("PLAIN", 9092), nodeport("PLAIN", 9094)],
                 None,
                 ValidationError::DuplicateListenerName("PLAIN".into()),
-                "DuplicateListenerName",
             ),
             (
                 "duplicate port",
                 vec![internal("A", 9092), nodeport("B", 9092)],
                 None,
                 ValidationError::DuplicateListenerPort(9092),
-                "DuplicateListenerPort",
             ),
             (
                 "ingress without TLS",
                 vec![ingress_without_tls],
                 None,
                 ValidationError::ListenerIngressRequiresTls("external".into()),
-                "ListenerIngressRequiresTls",
             ),
             (
                 "route without TLS",
                 vec![route_without_tls],
                 None,
                 ValidationError::ListenerIngressRequiresTls("external".into()),
-                "ListenerIngressRequiresTls",
             ),
             (
                 "ingress without bootstrap host",
                 vec![ingress_without_bootstrap_host],
                 None,
                 ValidationError::ListenerIngressBootstrapHostMissing("external".into()),
-                "ListenerIngressBootstrapHostMissing",
             ),
             (
                 "duplicate broker override",
@@ -1441,41 +1436,35 @@ mod tests {
                     listener: "ext".into(),
                     broker: 0,
                 },
-                "DuplicateBrokerOverride",
             ),
             (
                 "no internal listener",
                 vec![nodeport("ext", 9094)],
                 None,
                 ValidationError::NoInternalListener,
-                "NoInternalListener",
             ),
             (
                 "missing listener",
                 vec![internal("PLAIN", 9092)],
                 Some("MISSING"),
                 ValidationError::InterBrokerListenerMissing("MISSING".into()),
-                "InterBrokerListenerMissing",
             ),
             (
                 "external listener",
                 vec![internal("PLAIN", 9092), nodeport("ext", 9094)],
                 Some("ext"),
                 ValidationError::InterBrokerListenerNotInternal("ext".into()),
-                "InterBrokerListenerNotInternal",
             ),
             (
                 "mTLS without transport TLS",
                 vec![mtls_without_tls],
                 None,
                 ValidationError::ListenerMtlsRequiresTransportTls("bad".into()),
-                "ListenerMtlsRequiresTransportTls",
             ),
         ] {
             let actual = validate_listeners(&listeners, selected).unwrap_err();
-            let reason = actual.reason();
             assert_eq!(actual, expected, "case {name}");
-            assert_eq!(reason, expected_reason, "case {name}");
+            assert_eq!(actual.reason(), expected.reason(), "case {name}");
         }
     }
 

@@ -1,7 +1,7 @@
 //! Dedup: ownership consumer reconstructs the claim map from the compacted
 //! topic, so a post-restart duplicate is recognized.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use tempfile::TempDir;
@@ -27,8 +27,6 @@ fn anon() -> crabka_security::Principal {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_idempotency_key_produces_once() {
-    use std::collections::BTreeMap;
-
     use bytes::Bytes;
     use crabka_client_admin::{AdminClient, CreateTopicSpec};
     use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
@@ -106,11 +104,8 @@ async fn duplicate_idempotency_key_produces_once() {
     let second = core.produce(mk(), &anon).await.unwrap();
     assert!(!first.deduplicated);
     assert!(second.deduplicated);
-    assert_eq!(first.partition, first.partition);
     assert_eq!(second.partition, first.partition);
-    assert_eq!(first.offset, first.offset);
     assert_eq!(second.offset, first.offset);
-    // Exactly one record landed in the user topic.
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap.clone())
         .group_id("dedup-count")

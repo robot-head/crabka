@@ -1482,6 +1482,22 @@ mod tests {
         );
     }
 
+    fn role_assignment(active: i32, standby: i32, warmup: i32) -> StreamsAssignment {
+        let task = |partition| TaskAssignment {
+            subtopology_id: "0".into(),
+            partitions: vec![partition],
+            source_topic_partitions: vec![TopicPartition {
+                topic: "in".into(),
+                partition,
+            }],
+        };
+        StreamsAssignment {
+            active: vec![task(active)],
+            standby: vec![task(standby)],
+            warmup: vec![task(warmup)],
+        }
+    }
+
     #[tokio::test]
     async fn reconciles_active_standby_warmup_roles_and_transitions() {
         let producer_c = Arc::new(CollectProducer::default());
@@ -1495,36 +1511,20 @@ mod tests {
             "app".into(),
             0,
         );
+        let task_roles = |thread: &StreamThread| {
+            let mut roles: Vec<_> = thread
+                .tasks
+                .iter()
+                .map(|(key, task)| (key.clone(), task.role))
+                .collect();
+            roles.sort_by(|a, b| a.0.cmp(&b.0));
+            roles
+        };
         // 1. Initial assignment:
         // Subtopology 0 Partition 0 -> Active
         // Subtopology 0 Partition 1 -> Standby
         // Subtopology 0 Partition 2 -> Warmup
-        let assignment1 = StreamsAssignment {
-            active: vec![TaskAssignment {
-                subtopology_id: "0".into(),
-                partitions: vec![0],
-                source_topic_partitions: vec![TopicPartition {
-                    topic: "in".into(),
-                    partition: 0,
-                }],
-            }],
-            standby: vec![TaskAssignment {
-                subtopology_id: "0".into(),
-                partitions: vec![1],
-                source_topic_partitions: vec![TopicPartition {
-                    topic: "in".into(),
-                    partition: 1,
-                }],
-            }],
-            warmup: vec![TaskAssignment {
-                subtopology_id: "0".into(),
-                partitions: vec![2],
-                source_topic_partitions: vec![TopicPartition {
-                    topic: "in".into(),
-                    partition: 2,
-                }],
-            }],
-        };
+        let assignment1 = role_assignment(0, 1, 2);
         thread
             .apply_assignment(
                 &assignment1,
@@ -1536,12 +1536,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let mut roles: Vec<_> = thread
-            .tasks
-            .iter()
-            .map(|(key, task)| (key.clone(), task.role))
-            .collect();
-        roles.sort_by(|a, b| a.0.cmp(&b.0));
+        let roles = task_roles(&thread);
         check!(
             roles
                 == vec![
@@ -1555,32 +1550,7 @@ mod tests {
         // Subtopology 0 Partition 1 -> removed
         // Subtopology 0 Partition 2 -> Active (Promoted)
         // Subtopology 0 Partition 3 -> Warmup (New)
-        let assignment2 = StreamsAssignment {
-            active: vec![TaskAssignment {
-                subtopology_id: "0".into(),
-                partitions: vec![2],
-                source_topic_partitions: vec![TopicPartition {
-                    topic: "in".into(),
-                    partition: 2,
-                }],
-            }],
-            standby: vec![TaskAssignment {
-                subtopology_id: "0".into(),
-                partitions: vec![0],
-                source_topic_partitions: vec![TopicPartition {
-                    topic: "in".into(),
-                    partition: 0,
-                }],
-            }],
-            warmup: vec![TaskAssignment {
-                subtopology_id: "0".into(),
-                partitions: vec![3],
-                source_topic_partitions: vec![TopicPartition {
-                    topic: "in".into(),
-                    partition: 3,
-                }],
-            }],
-        };
+        let assignment2 = role_assignment(2, 0, 3);
         thread
             .apply_assignment(
                 &assignment2,
@@ -1592,12 +1562,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let mut roles: Vec<_> = thread
-            .tasks
-            .iter()
-            .map(|(key, task)| (key.clone(), task.role))
-            .collect();
-        roles.sort_by(|a, b| a.0.cmp(&b.0));
+        let roles = task_roles(&thread);
         check!(
             roles
                 == vec![

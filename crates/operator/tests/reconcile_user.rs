@@ -81,6 +81,29 @@ fn user_body(name: &str, namespace: &str) -> serde_json::Value {
     })
 }
 
+fn expected_orders_acls() -> Vec<AclEntry> {
+    vec![
+        AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "orders".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        },
+        AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "orders".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Describe,
+            permission_type: PermissionType::Allow,
+        },
+    ]
+}
+
 fn secret_body(name: &str, namespace: &str, password: &str) -> serde_json::Value {
     use base64::Engine as _;
     let b64 = base64::engine::general_purpose::STANDARD.encode(password.as_bytes());
@@ -238,7 +261,6 @@ async fn first_reconcile_provisions_scram_and_acls() {
             path_substr: format!("/kafkas/{CLUSTER}"),
             response: json_response(200, &ready_kafka_body(CLUSTER, NS)),
         },
-        // Secret doesn't exist yet.
         MockRule {
             method: Method::GET,
             path_substr: format!("/secrets/{USER}"),
@@ -248,7 +270,6 @@ async fn first_reconcile_provisions_scram_and_acls() {
                 .body(not_found_body("not found"))
                 .expect("404 builds"),
         },
-        // Apply (create) the Secret.
         MockRule {
             method: Method::PATCH,
             path_substr: format!("/secrets/{USER}"),
@@ -296,29 +317,10 @@ async fn first_reconcile_provisions_scram_and_acls() {
         .expect("CreateAcls must have been issued");
     // Two ops fan out into two ACL entries; the BTreeSet diff hands
     // them to CreateAcls in Ord order (Read before Describe).
-    assert!(
-        create
-            == vec![
-                AclEntry {
-                    resource_type: ResourceType::Topic,
-                    resource_name: "orders".into(),
-                    pattern_type: PatternType::Literal,
-                    principal: "User:alice".into(),
-                    host: "*".into(),
-                    operation: AclOperation::Read,
-                    permission_type: PermissionType::Allow,
-                },
-                AclEntry {
-                    resource_type: ResourceType::Topic,
-                    resource_name: "orders".into(),
-                    pattern_type: PatternType::Literal,
-                    principal: "User:alice".into(),
-                    host: "*".into(),
-                    operation: AclOperation::Describe,
-                    permission_type: PermissionType::Allow,
-                },
-            ],
-        "two ops fan out into two ACL entries",
+    assert_eq!(
+        create,
+        expected_orders_acls(),
+        "two ops fan out into two ACL entries"
     );
     // Status patch lands Ready=True.
     let observed = state.take_observed();

@@ -382,6 +382,13 @@ mod tests {
         stores
     }
 
+    fn expected_change(value: i64) -> Change<i64> {
+        Change {
+            old: None,
+            new: Some(value),
+        }
+    }
+
     #[tokio::test]
     async fn merge_within_gap_tombstones_then_updates() {
         let mut stores = registry();
@@ -438,13 +445,7 @@ mod tests {
                 window: Window { start: 0, end: 0 },
             }
         );
-        assert_eq!(
-            *ch,
-            Change {
-                old: None,
-                new: Some(1)
-            }
-        );
+        assert_eq!(*ch, expected_change(1));
         // record 2 @ ts=30 (within gap 60 of session [0,0]) → merge:
         //   tombstone [0,0], update merged [0,30] count 2.
         {
@@ -482,13 +483,7 @@ mod tests {
                 window: Window { start: 0, end: 30 },
             }
         );
-        assert_eq!(
-            *uch,
-            Change {
-                old: None,
-                new: Some(2)
-            }
-        );
+        assert_eq!(*uch, expected_change(2));
     }
 
     #[tokio::test]

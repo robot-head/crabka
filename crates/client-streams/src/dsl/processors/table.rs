@@ -477,14 +477,7 @@ mod tests {
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        check!(
-            *change
-                == Change {
-                    old: None,
-                    new: Some(10i64)
-                },
-            "first record"
-        );
+        check!(*change == Change::update(None, 10i64), "first record");
         // Record 2: k=20 @ts=200
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -507,14 +500,7 @@ mod tests {
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        check!(
-            *change
-                == Change {
-                    old: Some(10i64),
-                    new: Some(20i64)
-                },
-            "record @200"
-        );
+        check!(*change == Change::update(Some(10i64), 20i64), "record @200");
         // Record 3: k=15 @ts=150 (out-of-order)
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -538,11 +524,7 @@ mod tests {
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
         check!(
-            *change
-                == Change {
-                    old: Some(10i64),
-                    new: Some(15i64),
-                },
+            *change == Change::update(Some(10i64), 15i64),
             "record @150: as_of(150) before put = v@100=10"
         );
         // Latest (non-versioned get) must still be 20.
