@@ -512,6 +512,63 @@ pub async fn restore_latest_table_transfer_and_replay_tail(
     Ok((restored, replay))
 }
 
+/// Restore the table-transfer closure from one caller-selected manifest and
+/// replay its bounded WAL tail.
+///
+/// Unlike [`restore_latest_table_transfer_and_replay_tail`], this function
+/// never lists checkpoint objects. The manifest key and covered offset form a
+/// transfer boundary selected by the caller; a later checkpoint must not
+/// change that boundary.
+pub async fn restore_table_transfer_from_manifest_and_replay_tail(
+    objects: &dyn CheckpointStore,
+    manifest_key: &str,
+    tenant: &str,
+    expected_covered_offset: i64,
+    kv: &dyn RestoreKv,
+    tail: RestoreTail,
+    selector: &mut TableTransferSelector,
+) -> Result<(TableTransferRestore, ReplayOutcome), SubstrateError> {
+    let manifest_bytes = objects.get(manifest_key).await?;
+    let manifest = Manifest::decode(&manifest_bytes)?;
+    if manifest.tenant != tenant {
+        return Err(SubstrateError::Checkpoint(format!(
+            "checkpoint manifest {manifest_key} belongs to tenant {}",
+            manifest.tenant
+        )));
+    }
+    if manifest.covered_offset != expected_covered_offset {
+        return Err(SubstrateError::Checkpoint(format!(
+            "checkpoint manifest {manifest_key} covers offset {}, expected {expected_covered_offset}",
+            manifest.covered_offset
+        )));
+    }
+    if manifest.wal_generation != tail.current_generation {
+        return Err(SubstrateError::Checkpoint(format!(
+            "checkpoint manifest {manifest_key} generation {} differs from transfer generation {}",
+            manifest.wal_generation, tail.current_generation
+        )));
+    }
+
+    let restored = restore_manifest_table_transfer(
+        objects,
+        kv,
+        &manifest,
+        tail.current_generation,
+        tail.log_start,
+        selector,
+    )
+    .await?;
+    let replay = replay_committed_frames_from_table_transfer(
+        kv,
+        tail.committed_frames,
+        tail.barrier_offset,
+        restored.restored_from.covered_offset.saturating_add(1),
+        restored.restored_from.journal_seq,
+        selector,
+    )?;
+    Ok((restored, replay))
+}
+
 /// Build prune requests and checkpoint-object deletions after a durable checkpoint.
 pub async fn plan_prune(
     store: &dyn CheckpointStore,

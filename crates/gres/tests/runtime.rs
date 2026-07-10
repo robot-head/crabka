@@ -1,7 +1,12 @@
-use std::{collections::BTreeSet, path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_gres_ranges::RangeId;
+use crabka_gres_ranges::{RangeId, TableId};
+use crabka_pgkv::Kv as _;
 use crabka_pgwire::engine::{Engine as _, Session as _};
 use tokio::net::TcpListener;
 
@@ -310,8 +315,12 @@ async fn runtime_constructs_checkpoint_enabled_substrate_mode() {
     let _ = server.await;
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the transfer integration test keeps its checkpoint-to-tail lifecycle visible"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_multirange_transfer_capability_resumes_after_unsupported_restore() {
+async fn live_multirange_transfer_stages_populated_successor_without_publishing_it() {
     let broker_dir = tempfile::tempdir().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -332,7 +341,7 @@ async fn live_multirange_transfer_capability_resumes_after_unsupported_restore()
             retain_newest: 2,
         }),
         kafka_security: None,
-        ranges: Some("0,200".to_string()),
+        ranges: Some("0,5".to_string()),
         host_ranges: None,
         range_rpc: None,
     })
@@ -342,15 +351,45 @@ async fn live_multirange_transfer_capability_resumes_after_unsupported_restore()
         .range_transfer_capability()
         .expect("live multi-range transfer capability");
     let range = RangeId::COORDINATOR;
+    let target_range = RangeId::new(2);
     let mut session = runtime.engine.connect();
     session
-        .simple_query("CREATE TABLE transfer_source (id int4)")
+        .simple_query("CREATE TABLE t10 (id int4)")
         .await
         .expect("create transfer source");
     session
-        .simple_query("INSERT INTO transfer_source VALUES (7)")
+        .simple_query("CREATE TABLE transfer_unrelated (id int4)")
         .await
-        .expect("write source range");
+        .expect("create unrelated source table");
+    let source_catalog = kv_from_pairs(
+        runtime
+            .inspect_hosted_range_kv(range)
+            .expect("inspect source catalog"),
+    );
+    let table_id = crabka_pgcatalog::get_table(&source_catalog, "t10")
+        .expect("source relation")
+        .id;
+    let unrelated_table_id = crabka_pgcatalog::get_table(&source_catalog, "transfer_unrelated")
+        .expect("unrelated relation")
+        .id;
+    assert_ne!(table_id, unrelated_table_id);
+    let routing_table_id = crabka_gres_ranges::TableId::new(10);
+    assert_ne!(u64::from(table_id), routing_table_id.as_u64());
+
+    for sql in [
+        "INSERT INTO t10 VALUES (7)",
+        "UPDATE t10 SET id = 8 WHERE id = 7",
+        "DELETE FROM t10 WHERE id = 8",
+        "INSERT INTO transfer_unrelated VALUES (99)",
+    ] {
+        session
+            .simple_query(sql)
+            .await
+            .expect("write source MVCC state");
+    }
+    let checkpoint_source = runtime
+        .inspect_hosted_range_kv(range)
+        .expect("inspect source checkpoint state");
 
     let manifest = transfer
         .force_checkpoint(range)
@@ -363,9 +402,16 @@ async fn live_multirange_transfer_capability_resumes_after_unsupported_restore()
             .starts_with(&format!("gres/{tenant}/r0/ckpt/"))
     );
     session
-        .simple_query("INSERT INTO transfer_source VALUES (8)")
+        .simple_query("INSERT INTO t10 VALUES (9)")
         .await
         .expect("write transfer tail before pause");
+    session
+        .simple_query("UPDATE t10 SET id = 10 WHERE id = 9")
+        .await
+        .expect("write transfer update tail before pause");
+    let source_with_tail = runtime
+        .inspect_hosted_range_kv(range)
+        .expect("inspect source tail state");
     let barrier = transfer
         .pause_at_checkpoint(&manifest)
         .await
@@ -385,24 +431,239 @@ async fn live_multirange_transfer_capability_resumes_after_unsupported_restore()
     );
     assert!(tail.iter().any(|record| record.offset < barrier.offset));
 
+    let newer_manifest = transfer
+        .force_checkpoint(range)
+        .await
+        .expect("write newer source checkpoint");
+    assert!(
+        newer_manifest.covered_offset > manifest.covered_offset,
+        "the selected transfer checkpoint is no longer the latest"
+    );
+
     session
-        .simple_query("INSERT INTO transfer_source VALUES (9)")
+        .simple_query("INSERT INTO t10 VALUES (9)")
         .await
         .expect_err("write while paused must be rejected");
 
-    let restore_error = transfer
-        .restore_empty_target(range, &manifest, &tail, barrier)
+    let successor = transfer
+        .stage_empty_successor(
+            crabka_gres_ranges::TableTransferRequest {
+                target_range,
+                routing_table_id,
+                physical_table_id: table_id,
+            },
+            &manifest,
+            &tail,
+            barrier,
+        )
         .await
-        .expect_err("live target restore is unsupported");
-    assert!(matches!(
-        restore_error,
-        crabka_gres_ranges::RangeTransferError::Unavailable { .. }
-    ));
+        .expect("stage populated successor");
+    assert_eq!(successor.range_id, target_range);
+    let hosted_error = runtime
+        .inspect_hosted_range_kv(target_range)
+        .expect_err("staged successor must be absent from the hosted range map");
+    assert_eq!(hosted_error.kind(), std::io::ErrorKind::NotFound);
+    let expected_bootstrap_manifest =
+        crabka_gres_substrate::manifest_key(&crabka_gres_substrate::ckpt_dir_for_range(
+            &crabka_gres_ranges::TenantName::parse(tenant).expect("tenant"),
+            target_range,
+            0,
+            successor.bootstrap_checkpoint.covered_offset,
+            0,
+        ));
+    assert_eq!(
+        successor.bootstrap_checkpoint.manifest_key,
+        expected_bootstrap_manifest
+    );
+
+    let staged = runtime
+        .inspect_staged_successor_kv(target_range)
+        .expect("inspect staged successor")
+        .expect("successor remains staged");
+    assert_selected_table_transfer(
+        &checkpoint_source,
+        &source_with_tail,
+        &staged,
+        table_id,
+        unrelated_table_id,
+    );
     transfer.resume(barrier).await.expect("resume writer");
     session
-        .simple_query("INSERT INTO transfer_source VALUES (10)")
+        .simple_query("INSERT INTO t10 VALUES (10)")
         .await
         .expect("write after resume");
+}
+
+fn kv_from_pairs(pairs: crabka_pgkv::KvScan) -> crabka_pgkv::MemKv {
+    let kv = crabka_pgkv::MemKv::default();
+    for (key, value) in pairs {
+        kv.put(key, value).expect("copy raw KV pair");
+    }
+    kv
+}
+
+fn assert_selected_table_transfer(
+    checkpoint_source: &crabka_pgkv::KvScan,
+    source_with_tail: &crabka_pgkv::KvScan,
+    staged: &crabka_pgkv::KvScan,
+    table_id: u32,
+    unrelated_table_id: u32,
+) {
+    use crabka_pgkv::key::{self, KeyClass};
+    use crabka_pgmvcc::{FROZEN_XID, INVALID_XID, version};
+
+    let source_versions = primary_versions(source_with_tail, table_id);
+    let staged_versions = primary_versions(staged, table_id);
+    assert!(
+        !source_versions.is_empty(),
+        "source has selected MVCC versions"
+    );
+    assert_eq!(
+        staged_versions, source_versions,
+        "all selected versions restored"
+    );
+
+    let checkpoint_versions = primary_versions(checkpoint_source, table_id);
+    let tail_versions: Vec<_> = source_versions
+        .iter()
+        .filter(|(key, _)| !checkpoint_versions.contains_key(*key))
+        .collect();
+    assert!(
+        !tail_versions.is_empty(),
+        "post-checkpoint table tail is staged"
+    );
+
+    let staged_pairs: BTreeMap<_, _> = staged.iter().cloned().collect();
+    assert_eq!(
+        staged_pairs.get(&key::seq_key(table_id)),
+        source_with_tail
+            .iter()
+            .find(|(key, _)| *key == key::seq_key(table_id))
+            .map(|(_, value)| value),
+        "selected table sequence is restored"
+    );
+    assert!(
+        staged
+            .iter()
+            .all(|(key, _)| !matches!(key::classify_key(key), KeyClass::PrimaryVersion { table_id: found, .. } if found == unrelated_table_id)),
+        "unrelated table versions are absent"
+    );
+    assert!(
+        !staged_pairs.contains_key(&key::catalog_key("t10"))
+            && !staged_pairs.contains_key(&key::catalog_key("transfer_unrelated")),
+        "catalog entries are absent"
+    );
+
+    let mut referenced_xids = BTreeSet::new();
+    for tuple in source_versions.values() {
+        let (xmin, xmax, _) = version::decode_tuple(tuple).expect("decode staged MVCC tuple");
+        for xid in [xmin, xmax] {
+            if xid != INVALID_XID && xid != FROZEN_XID {
+                referenced_xids.insert(xid);
+            }
+        }
+    }
+    let expected_clog: BTreeMap<_, _> = referenced_xids
+        .into_iter()
+        .map(|xid| {
+            let clog_key = key::clog_key(xid);
+            let value = source_with_tail
+                .iter()
+                .find(|(key, _)| *key == clog_key)
+                .map(|(_, value)| value.clone())
+                .expect("selected-table XID has source CLOG status");
+            (clog_key, value)
+        })
+        .collect();
+    let staged_clog: BTreeMap<_, _> = staged
+        .iter()
+        .filter(|(key, _)| matches!(key::classify_key(key), KeyClass::Clog { .. }))
+        .cloned()
+        .collect();
+    assert_eq!(
+        staged_clog, expected_clog,
+        "staged CLOG is exactly the selected-table tuple XID closure"
+    );
+}
+
+fn primary_versions(pairs: &crabka_pgkv::KvScan, table_id: u32) -> BTreeMap<Vec<u8>, Vec<u8>> {
+    pairs
+        .iter()
+        .filter(|(key, _)| {
+            matches!(
+                crabka_pgkv::key::classify_key(key),
+                crabka_pgkv::key::KeyClass::PrimaryVersion { table_id: found, .. } if found == table_id
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence() {
+    let broker_dir = tempfile::tempdir().expect("broker tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    let checkpoint_dir = tempfile::tempdir().expect("checkpoint tempdir");
+    let runtime = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
+        bootstrap: broker.listen_addr().to_string(),
+        tenant: "runtime-physical-t10".to_string(),
+        cache_dir: None,
+        checkpoints: Some(crabka_gres::CheckpointRuntimeConfig {
+            object_store: crabka_gres::CheckpointObjectStoreConfig::Local {
+                root: checkpoint_dir.path().to_path_buf(),
+            },
+            frames_threshold: 1,
+            bytes_threshold: 1,
+            part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
+            retain_newest: 2,
+        }),
+        kafka_security: None,
+        ranges: Some("0,5".to_string()),
+        host_ranges: None,
+        range_rpc: None,
+    })
+    .await
+    .expect("open live multi-range runtime");
+    let mut session = runtime.engine.connect();
+    session
+        .simple_query("CREATE TABLE t10 (id int4)")
+        .await
+        .expect("create t10");
+    session
+        .simple_query("INSERT INTO t10 VALUES (10), (11)")
+        .await
+        .expect("insert t10 rows");
+    let source_catalog = kv_from_pairs(
+        runtime
+            .inspect_hosted_range_kv(RangeId::COORDINATOR)
+            .expect("inspect source catalog"),
+    );
+    let physical_table_id = crabka_pgcatalog::get_table(&source_catalog, "t10")
+        .expect("t10 relation")
+        .id;
+    assert_ne!(u64::from(physical_table_id), 10);
+
+    runtime
+        .split_populated_table_successor("physical-t10", RangeId::new(2), TableId::new(10))
+        .await
+        .expect("publish live populated t10 successor");
+
+    let successor = runtime
+        .inspect_hosted_range_kv(RangeId::new(2))
+        .expect("inspect published successor");
+    assert_eq!(
+        primary_versions(&successor, physical_table_id).len(),
+        2,
+        "the published successor contains t10's physical MVCC rows"
+    );
+    assert!(
+        successor
+            .iter()
+            .any(|(key, _)| *key == crabka_pgkv::key::seq_key(physical_table_id)),
+        "the physical table sequence is transferred with t10"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
