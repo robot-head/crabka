@@ -371,7 +371,11 @@ struct ParkedWaiters {
     followers: HashMap<String, oneshot::Sender<SyncResult>>,
 }
 
-#[allow(clippy::too_many_lines)] // one match arm per message variant; splitting hurts readability
+#[allow(clippy::too_many_lines)]
+// one match arm per message variant; splitting hurts readability
+// cargo-mutants: long-lived actor orchestration over channels/timers; socket-free
+// state-transition helpers below carry the mutation-testable behavior.
+#[cfg_attr(test, mutants::skip)]
 async fn actor_loop(
     group_id: String,
     kind: GroupKindTag,

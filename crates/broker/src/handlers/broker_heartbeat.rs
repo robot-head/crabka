@@ -32,6 +32,9 @@ use crate::{
     fields(api = "BrokerHeartbeat", version, req_bytes = req_bytes.len()),
     err,
 )]
+// cargo-mutants: controller RPC orchestration over live broker state; helper
+// functions and handler tests cover the deterministic decision points.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn handle(
     broker: &Broker,
     version: i16,

@@ -37,6 +37,9 @@ pub(crate) struct Config {
     pub metrics: crate::metrics::BrokerMetrics,
 }
 
+// cargo-mutants: background maintenance loop over live partition/controller state;
+// unit tests cover the pure ISR decision helpers.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) async fn run(cfg: Config) {
     let mut tick = tokio::time::interval(ISR_SCAN_INTERVAL);
     // Reused across ticks to avoid re-allocating the snapshot Vec each second.

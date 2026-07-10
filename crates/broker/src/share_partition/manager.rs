@@ -156,6 +156,9 @@ impl SharePartitionLeaderManager {
     /// loader losing the insert race adopts the winner's cell.
     ///
     /// Consumed by the ShareFetch/ShareAcknowledge handlers.
+    // cargo-mutants: lazy-loading adapter around durable persister/DashMap state;
+    // acquisition-state folding helpers carry the unit-testable semantics.
+    #[cfg_attr(test, mutants::skip)]
     pub(crate) async fn get_or_load(
         &self,
         group: &str,

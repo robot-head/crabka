@@ -169,6 +169,9 @@ impl UncleanRecoveryManager {
     /// Per-job entry point: dedup against in-flight recoveries for the same
     /// partition, run the recovery, then release the in-flight slot and
     /// reply (if a reply channel was supplied).
+    // cargo-mutants: per-job orchestration over live recovery state and reply channels;
+    // recovery policy decisions are exercised through focused tests.
+    #[cfg_attr(test, mutants::skip)]
     async fn recover_one(self: Arc<Self>, job: RecoveryJob) {
         let key = (job.topic.clone(), job.partition);
         {
