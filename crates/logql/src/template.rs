@@ -2815,21 +2815,23 @@ mod tests {
 
     #[test]
     fn quoted_template_token_values_require_matching_wrappers() {
-        assert_eq!(quoted_template_token_value("abc").unwrap(), None);
-        assert_eq!(quoted_template_token_value("`").unwrap(), None);
-        assert_eq!(quoted_template_token_value("\"").unwrap(), None);
-        assert_eq!(
-            quoted_template_token_value("``").unwrap(),
-            Some(String::new())
-        );
-        assert_eq!(
-            quoted_template_token_value("\"\"").unwrap(),
-            Some(String::new())
-        );
-        assert_eq!(quoted_template_token_value("`unterminated").unwrap(), None);
-        assert_eq!(quoted_template_token_value("unterminated`").unwrap(), None);
-        assert_eq!(quoted_template_token_value("\"unterminated").unwrap(), None);
-        assert_eq!(quoted_template_token_value("unterminated\"").unwrap(), None);
+        for (name, input, expected) in [
+            ("unquoted", "abc", None),
+            ("single backtick", "`", None),
+            ("single quote", "\"", None),
+            ("empty backticks", "``", Some(String::new())),
+            ("empty quotes", "\"\"", Some(String::new())),
+            ("missing closing backtick", "`unterminated", None),
+            ("missing opening backtick", "unterminated`", None),
+            ("missing closing quote", "\"unterminated", None),
+            ("missing opening quote", "unterminated\"", None),
+        ] {
+            assert_eq!(
+                quoted_template_token_value(input).unwrap(),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -3048,14 +3050,19 @@ mod tests {
             "24|7|8|09|10|11|.123456789|+02:30|-03:15|.",
         )
         .expect("layout value should parse");
-        assert_eq!(parsed.year, 2024);
-        assert_eq!(parsed.month, 7);
-        assert_eq!(parsed.day, 8);
-        assert_eq!(parsed.hour, 9);
-        assert_eq!(parsed.minute, 10);
-        assert_eq!(parsed.second, 11);
-        assert_eq!(parsed.nanosecond, 123_456_789);
-        assert_eq!(parsed.offset_seconds, Some(-11_700));
+        assert_eq!(
+            (
+                parsed.year,
+                parsed.month,
+                parsed.day,
+                parsed.hour,
+                parsed.minute,
+                parsed.second,
+                parsed.nanosecond,
+                parsed.offset_seconds,
+            ),
+            (2024, 7, 8, 9, 10, 11, 123_456_789, Some(-11_700))
+        );
     }
 
     #[test]

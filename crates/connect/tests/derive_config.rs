@@ -30,17 +30,18 @@ async fn derive_builds_def_and_typed_config() {
         .map(|key| (key.name.as_str(), key.kind, key.required))
         .collect::<Vec<_>>();
 
-    for expected in [
-        ("database_url", ConfigKind::String, true),
-        ("password", ConfigKind::Secret, true),
-        ("rotation_token", ConfigKind::Secret, true),
-        ("schema", ConfigKind::String, false),
-        ("max_batch", ConfigKind::UnsignedInteger, false),
-        ("topics", ConfigKind::StringList, true),
-        ("omitted_note", ConfigKind::String, false),
-    ] {
-        assert!(keys.contains(&expected), "missing key {expected:?}");
-    }
+    assert_eq!(
+        keys,
+        vec![
+            ("database_url", ConfigKind::String, true),
+            ("max_batch", ConfigKind::UnsignedInteger, false),
+            ("omitted_note", ConfigKind::String, false),
+            ("password", ConfigKind::Secret, true),
+            ("rotation_token", ConfigKind::Secret, true),
+            ("schema", ConfigKind::String, false),
+            ("topics", ConfigKind::StringList, true),
+        ]
+    );
 
     let raw = serde_json::Map::from_iter([
         (
@@ -64,17 +65,27 @@ async fn derive_builds_def_and_typed_config() {
 
     let config = PostgresSourceConfig::from_resolved(&resolved).unwrap();
 
-    assert_eq!(config.database_url, "postgres://localhost/app");
-    assert_eq!(config.password.expose_secret(), "secret");
     assert_eq!(
-        config
-            .rotation_token
-            .as_ref()
-            .map(SecretString::expose_secret),
-        Some("rotate")
+        (
+            config.database_url.as_str(),
+            config.password.expose_secret(),
+            config
+                .rotation_token
+                .as_ref()
+                .map(SecretString::expose_secret),
+            config.schema.as_str(),
+            config.max_batch,
+            config.topic_names,
+            config.omitted_note,
+        ),
+        (
+            "postgres://localhost/app",
+            "secret",
+            Some("rotate"),
+            "public",
+            500,
+            vec!["a".to_string(), "b".to_string()],
+            None,
+        )
     );
-    assert_eq!(config.schema, "public");
-    assert_eq!(config.max_batch, 500);
-    assert_eq!(config.topic_names, vec!["a", "b"]);
-    assert_eq!(config.omitted_note, None);
 }

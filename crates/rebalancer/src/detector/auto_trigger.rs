@@ -295,8 +295,12 @@ mod tests {
         let h = build_harness(false);
         let a = anomaly(AnomalyKind::BrokerDeath);
         maybe_trigger(&a, &make_ctx(&h, 1000)).await.unwrap();
-        assert!(h.proposal_store.list(0).len() == 0);
-        assert!(h.metrics.auto_trigger_skipped_disabled.get() == 1);
+        assert!(
+            (
+                h.proposal_store.list(0).len(),
+                h.metrics.auto_trigger_skipped_disabled.get()
+            ) == (0, 1)
+        );
     }
 
     #[tokio::test]
@@ -311,8 +315,12 @@ mod tests {
         *h.executor_state.in_flight.lock().await = Some(handle);
         let a = anomaly(AnomalyKind::BrokerDeath);
         maybe_trigger(&a, &make_ctx(&h, 1000)).await.unwrap();
-        assert!(h.proposal_store.list(0).len() == 0);
-        assert!(h.metrics.auto_trigger_skipped_executing.get() == 1);
+        assert!(
+            (
+                h.proposal_store.list(0).len(),
+                h.metrics.auto_trigger_skipped_executing.get()
+            ) == (0, 1)
+        );
     }
 
     #[tokio::test]
@@ -333,25 +341,35 @@ mod tests {
         }
         let a = anomaly(AnomalyKind::BrokerDeath);
         maybe_trigger(&a, &make_ctx(&h, 1000)).await.unwrap();
-        assert!(h.proposal_store.list(0).len() == 0);
-        assert!(h.metrics.auto_trigger_skipped_reassignments.get() == 1);
+        assert!(
+            (
+                h.proposal_store.list(0).len(),
+                h.metrics.auto_trigger_skipped_reassignments.get()
+            ) == (0, 1)
+        );
     }
 
     #[test]
     fn goals_for_kind_lists() {
-        assert!(
-            goals_for_kind(AnomalyKind::BrokerDeath)
-                == vec![
+        for (name, kind, expected) in [
+            (
+                "broker death goals",
+                AnomalyKind::BrokerDeath,
+                vec![
                     "PreferredLeaderIdempotency".to_string(),
                     "RackAware".into(),
                     "ReplicaDistribution".into(),
                     "TopicReplicaDistribution".into(),
-                ]
-        );
-        assert!(
-            goals_for_kind(AnomalyKind::DiskPressure)
-                == vec!["DiskCapacity".to_string(), "DiskUsage".into()]
-        );
+                ],
+            ),
+            (
+                "disk pressure goals",
+                AnomalyKind::DiskPressure,
+                vec!["DiskCapacity".to_string(), "DiskUsage".into()],
+            ),
+        ] {
+            assert!(goals_for_kind(kind) == expected, "case {name}");
+        }
     }
 
     #[tokio::test]
@@ -360,8 +378,12 @@ mod tests {
         let mut a = anomaly(AnomalyKind::BrokerDeath);
         a.mute_until_ms = Some(5000); // muted until 5000ms
         maybe_trigger(&a, &make_ctx(&h, 1000)).await.unwrap();
-        assert!(h.proposal_store.list(0).len() == 0);
-        assert!(h.metrics.auto_trigger_skipped_muted.get() == 1);
+        assert!(
+            (
+                h.proposal_store.list(0).len(),
+                h.metrics.auto_trigger_skipped_muted.get()
+            ) == (0, 1)
+        );
     }
 
     #[tokio::test]

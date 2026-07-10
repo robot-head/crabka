@@ -320,7 +320,7 @@ impl QuerierBackend for MockQuerier {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
     use crate::frontend::{job::JobShard, wire::TraceJson};
@@ -371,9 +371,14 @@ mod tests {
                 },
             }
         );
-        assert!(mock.search_calls().len() == 1);
-        check!(mock.search_calls()[0].tenant == "t1");
-        assert!(matches!(mock.search_calls()[0].shard, JobShard::Live));
+        assert_eq!(
+            (
+                mock.search_calls().len(),
+                mock.search_calls()[0].tenant.as_str(),
+                matches!(mock.search_calls()[0].shard, JobShard::Live),
+            ),
+            (1, "t1", true)
+        );
     }
 
     #[tokio::test]
@@ -389,8 +394,7 @@ mod tests {
             shard: JobShard::Live,
         };
         let out = mock.search_job(&req).await.unwrap();
-        assert!(out.traces.is_empty());
-        assert!(out.metrics == Metrics::default());
+        assert_eq!((out.traces, out.metrics), (vec![], Metrics::default()));
     }
 
     #[test]

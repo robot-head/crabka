@@ -175,25 +175,38 @@ mod tests {
 
     #[test]
     fn limit_errors_carry_pyroscope_code_and_status() {
-        let rate = LimitError::IngestionRateExceeded {
-            rate: 10_000.0,
-            observed: 12_000.0,
-        };
-        assert!(rate.http_status() == 429);
-        assert!(rate.connect_code() == "resource_exhausted");
-
-        let name = LimitError::LabelNameTooLong {
-            limit: 1024,
-            observed: 5000,
-        };
-        assert!(name.http_status() == 400);
-        assert!(name.connect_code() == "invalid_argument");
-
-        let many = LimitError::TooManyLabels {
-            limit: 40,
-            observed: 41,
-        };
-        assert!(many.http_status() == 400);
+        for (name, error, expected) in [
+            (
+                "ingestion rate",
+                LimitError::IngestionRateExceeded {
+                    rate: 10_000.0,
+                    observed: 12_000.0,
+                },
+                (429, "resource_exhausted"),
+            ),
+            (
+                "label name length",
+                LimitError::LabelNameTooLong {
+                    limit: 1024,
+                    observed: 5000,
+                },
+                (400, "invalid_argument"),
+            ),
+            (
+                "label count",
+                LimitError::TooManyLabels {
+                    limit: 40,
+                    observed: 41,
+                },
+                (400, "invalid_argument"),
+            ),
+        ] {
+            assert_eq!(
+                (error.http_status(), error.connect_code()),
+                expected,
+                "case {name}"
+            );
+        }
 
         let duration = LimitError::QueryLengthExceeded {
             limit_secs: 3600,

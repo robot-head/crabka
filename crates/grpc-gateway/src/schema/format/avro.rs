@@ -105,44 +105,30 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_valid_json() {
-        let json = br#"{"id": 42, "name": "hello"}"#;
-        assert!(
-            validate(SCHEMA, json).is_ok(),
-            "valid JSON should pass validation"
-        );
+    fn validation_cases() {
+        for (name, json, valid) in [
+            ("valid", br#"{"id": 42, "name": "hello"}"#.as_slice(), true),
+            (
+                "wrong_type",
+                br#"{"id": "notlong", "name": "a"}"#.as_slice(),
+                false,
+            ),
+            ("missing_field", br#"{"id": 1}"#.as_slice(), false),
+        ] {
+            assert_eq!(validate(SCHEMA, json).is_ok(), valid, "case {name}");
+        }
     }
 
     #[test]
-    fn validate_rejects_wrong_type() {
-        // "id" is declared as `long`; supplying a string should fail.
-        let json = br#"{"id": "notlong", "name": "a"}"#;
-        assert!(
-            validate(SCHEMA, json).is_err(),
-            "wrong type for `id` field should fail validation"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_missing_field() {
-        // Missing the required `name` field (no default).
-        let json = br#"{"id": 1}"#;
-        assert!(
-            validate(SCHEMA, json).is_err(),
-            "missing required field should fail validation"
-        );
-    }
-
-    #[test]
-    fn deserialize_bad_bytes_returns_err() {
-        let result = deserialize(SCHEMA, b"\x00\x01\x02bad");
-        // Malformed datum; error expected (not a panic).
-        assert!(result.is_err(), "corrupt datum should return Err");
-    }
-
-    #[test]
-    fn serialize_bad_schema_returns_err() {
-        let result = serialize("not-a-valid-schema", br#"{"id":1,"name":"a"}"#);
-        assert!(result.is_err(), "invalid schema string should return Err");
+    fn codec_error_cases() {
+        for (name, result) in [
+            ("corrupt_datum", deserialize(SCHEMA, b"\x00\x01\x02bad")),
+            (
+                "invalid_schema",
+                serialize("not-a-valid-schema", br#"{"id":1,"name":"a"}"#),
+            ),
+        ] {
+            assert!(result.is_err(), "case {name}");
+        }
     }
 }

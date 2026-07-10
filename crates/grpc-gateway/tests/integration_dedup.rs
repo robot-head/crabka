@@ -107,9 +107,24 @@ async fn duplicate_idempotency_key_produces_once() {
     let anon = anon();
     let first = core.produce(mk(), &anon).await.unwrap();
     let second = core.produce(mk(), &anon).await.unwrap();
-    assert!(!first.deduplicated && second.deduplicated);
-    assert_eq!(first.partition, second.partition);
-    assert_eq!(first.offset, second.offset);
+    assert_eq!(
+        (
+            first.deduplicated,
+            second.deduplicated,
+            first.partition,
+            second.partition,
+            first.offset,
+            second.offset,
+        ),
+        (
+            false,
+            true,
+            first.partition,
+            first.partition,
+            first.offset,
+            first.offset
+        )
+    );
 
     // Exactly one record landed in the user topic.
     let mut consumer = Consumer::builder()

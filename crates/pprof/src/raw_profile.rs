@@ -157,8 +157,6 @@ fn intern_string(strings: &mut Vec<String>, index: &mut HashMap<String, i64>, va
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
-
     use super::*;
     use crate::{Frame, PprofProfile, ProfileType, Tree};
 
@@ -188,27 +186,37 @@ mod tests {
             .sum();
         let sample_type = inner.sample_type[0];
 
-        check!(total == 10);
-        check!(inner.sample.len() == 2);
-        check!(inner.sample.iter().all(|sample| sample.value != vec![0]));
-        check!(inner.function.iter().all(|function| function.id > 0));
-        check!(inner.location.iter().all(|location| location.id > 0));
-        check!(
-            inner
-                .sample
-                .iter()
-                .flat_map(|sample| sample.location_id.iter())
-                .all(|location_id| *location_id > 0)
-        );
-        check!(
-            sample_paths(inner)
-                == vec![
+        assert_eq!(
+            (
+                total,
+                inner.sample.len(),
+                inner.sample.iter().all(|sample| sample.value != vec![0]),
+                inner.function.iter().all(|function| function.id > 0),
+                inner.location.iter().all(|location| location.id > 0),
+                inner
+                    .sample
+                    .iter()
+                    .flat_map(|sample| sample.location_id.iter())
+                    .all(|location_id| *location_id > 0),
+                sample_paths(inner),
+                inner.string_table[usize::try_from(sample_type.r#type).unwrap()].as_str(),
+                inner.string_table[usize::try_from(sample_type.unit).unwrap()].as_str(),
+            ),
+            (
+                10,
+                2,
+                true,
+                true,
+                true,
+                true,
+                vec![
                     vec!["leaf_a".to_string(), "root_fn".to_string()],
                     vec!["leaf_b".to_string(), "root_fn".to_string()],
-                ]
+                ],
+                "cpu",
+                "nanoseconds",
+            )
         );
-        check!(inner.string_table[usize::try_from(sample_type.r#type).unwrap()] == "cpu");
-        check!(inner.string_table[usize::try_from(sample_type.unit).unwrap()] == "nanoseconds");
     }
 
     #[test]
@@ -228,9 +236,14 @@ mod tests {
             .map(|sample| sample.value.iter().sum::<i64>())
             .sum();
 
-        check!(inner.sample.len() <= 4);
-        check!(total == 10);
-        check!(inner.string_table.iter().any(|value| value == "other"));
+        assert_eq!(
+            (
+                inner.sample.len() <= 4,
+                total,
+                inner.string_table.iter().any(|value| value == "other"),
+            ),
+            (true, 10, true)
+        );
     }
 
     fn sample_paths(profile: &crate::proto::Profile) -> Vec<Vec<String>> {

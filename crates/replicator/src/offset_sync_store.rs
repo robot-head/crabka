@@ -53,8 +53,6 @@ impl OffsetSyncStore {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
-
     use super::*;
     use crate::mm2::OffsetSync;
 
@@ -79,12 +77,13 @@ mod tests {
             (0, 50, None),       // below first sync
             (9, 100, None),      // unknown partition
         ] {
-            check!(
+            assert_eq!(
                 s.translate(
                     "orders",
                     PartitionIndex(partition),
                     CommittedOffset(upstream)
-                ) == want.map(DownstreamOffset),
+                ),
+                want.map(DownstreamOffset),
                 "partition={partition} upstream={upstream}"
             );
         }

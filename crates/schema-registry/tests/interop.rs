@@ -306,18 +306,16 @@ async fn our_store_decodes_cp_schema_registry_records() {
     // Assert GET /schemas/ids/1 returns the schema cp registered.
     let got = get_json(&app, "/schemas/ids/1").await;
     eprintln!("INTEROP GET /schemas/ids/1 = {got}");
-    assert!(
-        got.get("schemaType").is_none(),
-        "AVRO schema must not have schemaType; got: {got}"
-    );
+    let schema_type_omitted = got.get("schemaType").is_none();
     let schema_str = got["schema"].as_str().expect("schema field is a string");
     // Parse both sides as JSON and compare structurally (field order may differ).
     let got_v: serde_json::Value = serde_json::from_str(schema_str)
         .unwrap_or_else(|e| panic!("schema is not valid JSON: {e}\n  raw: {schema_str}"));
     let expected_v: serde_json::Value = serde_json::from_str(avro_schema).unwrap();
     assert_eq!(
-        got_v, expected_v,
-        "GET /schemas/ids/1 schema must structurally match what cp registered"
+        (schema_type_omitted, got_v),
+        (true, expected_v),
+        "complete GET /schemas/ids/1 projection"
     );
 
     // Assert GET /subjects lists "av-value".

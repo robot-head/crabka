@@ -490,18 +490,18 @@ async fn tls_forward_between_two_gateways() {
 
     // Submit through A → forwarded to B over mTLS https → produced (not dedup'd).
     let first = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
-    assert!(
-        !first.deduplicated,
-        "first mTLS forward should produce, got {first:?}"
-    );
-
     // Same key through A again → forwarded to B → B's map hit → deduplicated.
     let second = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
-    assert!(
-        second.deduplicated,
-        "second mTLS forward should dedup, got {second:?}"
+    assert_eq!(
+        (
+            first.deduplicated,
+            second.deduplicated,
+            first.offset,
+            second.offset,
+        ),
+        (false, true, first.offset, first.offset),
+        "first mTLS forward should produce and the second should deduplicate"
     );
-    assert_eq!(first.offset, second.offset);
 
     // Exactly one record with that value landed in the user topic.
     assert_eq!(count_in_user_topic(&bootstrap, &key).await, 1);

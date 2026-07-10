@@ -516,8 +516,7 @@ mod tests {
         handle.await.unwrap();
 
         let recs = sink.records();
-        check!(recs.len() == 3);
-        check!(recs[0].class == AuditEventClass::ApplicationLifecycle);
+        check!((recs.len(), recs[0].class) == (3, AuditEventClass::ApplicationLifecycle));
         // node_id 1,2,3 preserved in order via the OCSF "device.uid" field.
         let v0: serde_json::Value = serde_json::from_slice(&recs[0].value).unwrap();
         check!(v0["device"]["uid"] == "1");
@@ -573,10 +572,14 @@ mod tests {
         // seq headers present and monotonic from 0
         let seq0 = header(&recs[0], "seq");
         let seq1 = header(&recs[1], "seq");
-        check!(seq0 == Some("0".to_string()));
-        check!(seq1 == Some("1".to_string()));
-        // record 0 prev_hash is genesis (all-zero hex)
-        check!(header(&recs[0], "prev_hash") == Some("0".repeat(64)));
+        check!(
+            (seq0, seq1, header(&recs[0], "prev_hash"))
+                == (
+                    Some("0".to_string()),
+                    Some("1".to_string()),
+                    Some("0".repeat(64)),
+                )
+        );
         // record 1 prev_hash == chain_hash(genesis, 0, value0)
         let expect = crate::chain::to_hex(&crate::chain::chain_hash(
             &crate::chain::GENESIS_HEAD,
@@ -631,9 +634,9 @@ mod tests {
             if r.class == AuditEventClass::Checkpoint {
                 let v: serde_json::Value = serde_json::from_slice(&r.value).unwrap();
                 let cp = Checkpoint::from_value(&v).expect("cp");
-                check!(cp.verify(&pubkey));
-                check!(cp.chain_head == head);
-                check!(cp.seq_high == Seq(seq - 1));
+                check!(
+                    (cp.verify(&pubkey), cp.chain_head, cp.seq_high) == (true, head, Seq(seq - 1))
+                );
             } else {
                 head = crate::chain::chain_hash(&head, seq, &r.value);
                 seq += 1;
@@ -679,8 +682,7 @@ mod tests {
         check!(cps.len() == 1); // single final checkpoint at shutdown
         let v: serde_json::Value = serde_json::from_slice(&cps[0].value).unwrap();
         let cp = Checkpoint::from_value(&v).unwrap();
-        check!(cp.verify(&pubkey));
-        check!(cp.seq_high == 2); // last chained seq (records 0,1,2)
+        check!((cp.verify(&pubkey), cp.seq_high) == (true, Seq(2)));
     }
 
     #[tokio::test]
@@ -718,9 +720,14 @@ mod tests {
             .filter(|r| r.class != AuditEventClass::Checkpoint)
             .map(|r| header(r, "seq").unwrap())
             .collect();
-        check!(seqs == vec!["0".to_string(), "1".to_string(), "2".to_string()]);
-        check!(stats.replayed() >= 3);
-        check!(stats.depth() == 0);
+        check!(
+            (seqs, stats.replayed() >= 3, stats.depth())
+                == (
+                    vec!["0".to_string(), "1".to_string(), "2".to_string()],
+                    true,
+                    0
+                )
+        );
     }
 
     #[tokio::test]
@@ -736,9 +743,7 @@ mod tests {
         log.emit(life(2));
         drop(log);
         h.await.unwrap();
-        check!(sink.inner.records().len() == 2);
-        check!(stats.spooled() == 0);
-        check!(stats.depth() == 0);
+        check!((sink.inner.records().len(), stats.spooled(), stats.depth()) == (2, 0, 0));
     }
 
     #[tokio::test]

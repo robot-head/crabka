@@ -523,9 +523,10 @@ mod tests {
         // No principal extension on the request => anonymous => TLS gate fires.
         let (status, result) = post_forward(forward_router(state), &forward_record("t")).await;
 
-        check!(status == StatusCode::FORBIDDEN);
-        check!(result.partition == -1);
-        check!(result.offset == -1);
+        check!(
+            (status, result.partition, result.offset)
+                == (StatusCode::FORBIDDEN, PartitionIndex(-1), Offset(-1))
+        );
         broker.shutdown().await;
     }
 
@@ -544,11 +545,19 @@ mod tests {
 
         let (status, result) = post_forward(forward_router(state), &forward_record("t")).await;
 
-        check!(status == StatusCode::FORBIDDEN);
-        check!(result.partition == -1);
-        check!(result.offset == -1);
-        // Distinguish the deny arm from the TLS arm by its message shape.
-        check!(result.error.unwrap().message == "Write Topic:t");
+        check!(
+            (
+                status,
+                result.partition,
+                result.offset,
+                result.error.as_ref().map(|error| error.message.as_str()),
+            ) == (
+                StatusCode::FORBIDDEN,
+                PartitionIndex(-1),
+                Offset(-1),
+                Some("Write Topic:t"),
+            )
+        );
         broker.shutdown().await;
     }
 
@@ -569,10 +578,14 @@ mod tests {
 
         let (status, result) = post_forward(forward_router(state), &forward_record("t")).await;
 
-        check!(status == StatusCode::OK);
-        check!(result.error.is_some());
-        check!(result.partition == -1);
-        check!(result.offset == -1);
+        check!(
+            (
+                status,
+                result.error.is_some(),
+                result.partition,
+                result.offset
+            ) == (StatusCode::OK, true, PartitionIndex(-1), Offset(-1))
+        );
         broker.shutdown().await;
     }
 }

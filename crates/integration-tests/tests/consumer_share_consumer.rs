@@ -48,7 +48,7 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
         })
         .await
         .expect("CreateTopics");
-    assert!(cr.topics[0].error_code == 0, "create_topic failed: {cr:?}");
+    assert_eq!(cr.topics[0].error_code, 0, "create_topic failed: {cr:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -83,7 +83,7 @@ async fn share_consumer_joins_and_closes() {
         !consumer.member_id().is_empty(),
         "broker must assign a member id on join"
     );
-    assert!(consumer.group_id() == "share-group-1");
+    assert_eq!(consumer.group_id(), "share-group-1");
 
     consumer.close().await.expect("close");
 }
@@ -441,7 +441,7 @@ async fn explicit_release_redelivers() {
     wait_for_share_init(&broker, "relg", tid, 0).await;
 
     let first = poll_until(&mut consumer, 3, Duration::from_secs(15)).await;
-    assert!(first.len() == 3, "must acquire all 3, got {first:?}");
+    assert_eq!(first.len(), 3, "must acquire all 3, got {first:?}");
     assert!(
         first.iter().all(|r| r.delivery_count == 1),
         "first delivery_count must be 1, got {first:?}"
@@ -514,7 +514,7 @@ async fn explicit_reject_not_redelivered() {
     wait_for_share_init(&broker, "rejg", tid, 0).await;
 
     let first = poll_until(&mut consumer, 3, Duration::from_secs(15)).await;
-    assert!(first.len() == 3, "must acquire all 3, got {first:?}");
+    assert_eq!(first.len(), 3, "must acquire all 3, got {first:?}");
 
     // Reject all three, then commit (standalone ShareAcknowledge).
     for r in &first {

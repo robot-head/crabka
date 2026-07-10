@@ -306,14 +306,19 @@ pub struct RunOutput {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn stack_broker_pod_regex_distinguishes_stacks() {
-        assert!(Stack::Crabka.broker_pod_regex() == "^demo-broker");
-        assert!(Stack::Kafka.broker_pod_regex() == "^demo-kafka-");
+        assert_eq!(
+            (
+                Stack::Crabka.broker_pod_regex(),
+                Stack::Kafka.broker_pod_regex()
+            ),
+            ("^demo-broker", "^demo-kafka-")
+        );
         // The crabka prefix must match BOTH the single-pool e2e naming and the
         // multi-pool bench naming (used by failover.rs `starts_with`).
         let p = Stack::Crabka.broker_pod_regex().trim_start_matches('^');
@@ -329,7 +334,7 @@ mod tests {
             (Acks::Leader, P::One),
             (Acks::All, P::All),
         ] {
-            assert!(acks.into_producer() == want);
+            assert_eq!(acks.into_producer(), want, "case {acks:?}");
         }
     }
 
@@ -343,13 +348,13 @@ mod tests {
             (Compression::Lz4, PC::Lz4),
             (Compression::Zstd, PC::Zstd),
         ] {
-            assert!(compression.into_producer() == want);
+            assert_eq!(compression.into_producer(), want, "case {compression:?}");
         }
     }
 
     #[test]
     fn compression_default_is_none() {
-        assert!(Compression::default() == Compression::None);
+        assert_eq!(Compression::default(), Compression::None);
     }
 
     #[test]
@@ -372,8 +377,7 @@ duration_s: 60
 warmup_s: 10
 ";
         let s: Scenario = serde_yaml::from_str(y).expect("parse");
-        check!(s.name == "small-msg-saturate");
-        check!(s.partitions == 6);
+        assert_eq!((s.name.as_str(), s.partitions), ("small-msg-saturate", 6));
         assert!(matches!(s.mode, LoadMode::Saturate));
     }
 
@@ -438,7 +442,9 @@ mode:
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: RunOutput = serde_json::from_str(&s).unwrap();
-        assert!(back.scenario.name == "x");
-        assert!(back.notes == vec!["test"]);
+        assert_eq!(
+            (back.scenario.name.as_str(), back.notes),
+            ("x", vec!["test".to_owned()])
+        );
     }
 }

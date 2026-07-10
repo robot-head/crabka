@@ -241,9 +241,12 @@ mod tests {
     #[test]
     fn next_backoff_doubles_and_caps() {
         // Doubling: 250ms -> 500ms (the `*2`→`/2` mutant gives 125ms).
-        assert!(super::next_backoff(Duration::from_millis(250)) == Duration::from_millis(500));
+        assert_eq!(
+            super::next_backoff(Duration::from_millis(250)),
+            Duration::from_millis(500)
+        );
         // Cap: never exceeds MAX_BACKOFF even when already at the cap.
-        assert!(super::next_backoff(MAX_BACKOFF) == MAX_BACKOFF);
+        assert_eq!(super::next_backoff(MAX_BACKOFF), MAX_BACKOFF);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

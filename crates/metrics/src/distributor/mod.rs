@@ -1793,13 +1793,15 @@ mod tests {
 
         assert!(response.status() == StatusCode::NO_CONTENT);
         let records = sink.records();
-        assert!(records.len() == 1);
-        assert!(
-            sink.append_keys()
-                == vec![crate::wal::partition_key(
+        assert_eq!(
+            (records.len(), sink.append_keys(),),
+            (
+                1,
+                vec![crate::wal::partition_key(
                     "tenant-a",
                     records[0].series_fingerprint()
-                )]
+                )],
+            )
         );
     }
 
@@ -1823,15 +1825,17 @@ mod tests {
             .await
             .unwrap();
 
-        check!(response.status() == StatusCode::NO_CONTENT);
-        check!(
-            response
-                .headers()
-                .get("X-Prometheus-Remote-Write-Samples-Written")
-                .and_then(|value| value.to_str().ok())
-                == Some("1")
+        assert_eq!(
+            (
+                response.status(),
+                response
+                    .headers()
+                    .get("X-Prometheus-Remote-Write-Samples-Written")
+                    .and_then(|value| value.to_str().ok()),
+                sink.records().len(),
+            ),
+            (StatusCode::NO_CONTENT, Some("1"), 1)
         );
-        check!(sink.records().len() == 1);
     }
 
     #[tokio::test]
@@ -2571,22 +2575,21 @@ overrides:
             .iter()
             .find(|record| matches!(record.payload, SamplePayload::Float { .. }))
             .expect("float wal record");
-        check!(sample.tenant == "tenant-a");
-        check!(
-            sample.labels
-                == vec![
+        assert_eq!(
+            (&sample.tenant, &sample.labels, &sample.payload),
+            (
+                &"tenant-a".to_string(),
+                &vec![
                     ("__name__".to_string(), "system_cpu_utilization".to_string()),
                     ("host_name".to_string(), "api-1".to_string())
-                ]
+                ],
+                &SamplePayload::Float {
+                    timestamp_ms: 1,
+                    value: 0.5,
+                    start_timestamp_ms: None,
+                },
+            )
         );
-        assert!(matches!(
-            sample.payload,
-            SamplePayload::Float {
-                timestamp_ms: 1,
-                value: 0.5,
-                ..
-            }
-        ));
         let metadata = records
             .iter()
             .find(|record| matches!(record.payload, SamplePayload::Metadata { .. }))
@@ -2623,13 +2626,15 @@ overrides:
             .iter()
             .find(|record| matches!(record.payload, SamplePayload::Float { .. }))
             .expect("float wal record");
-        assert!(sample.tenant == "tenant-a");
-        assert!(
-            sample.labels
-                == vec![
+        assert_eq!(
+            (sample.tenant.as_str(), &sample.labels),
+            (
+                "tenant-a",
+                &vec![
                     ("__name__".to_string(), "system_cpu_utilization".to_string()),
                     ("host_name".to_string(), "api-1".to_string())
-                ]
+                ],
+            )
         );
     }
 
@@ -2730,23 +2735,28 @@ overrides:
             .iter()
             .filter(|record| matches!(record.payload, SamplePayload::Float { .. }))
             .collect::<Vec<_>>();
-        assert!(float_records.len() == 2);
-        assert!(matches!(
-            float_records[0].payload,
-            SamplePayload::Float {
-                timestamp_ms: 2,
-                value: 7.0,
-                ..
-            }
-        ));
-        assert!(matches!(
-            float_records[1].payload,
-            SamplePayload::Float {
-                timestamp_ms: 3,
-                value: 12.0,
-                ..
-            }
-        ));
+        assert_eq!(
+            (
+                float_records.len(),
+                matches!(
+                    float_records[0].payload,
+                    SamplePayload::Float {
+                        timestamp_ms: 2,
+                        value: 7.0,
+                        ..
+                    }
+                ),
+                matches!(
+                    float_records[1].payload,
+                    SamplePayload::Float {
+                        timestamp_ms: 3,
+                        value: 12.0,
+                        ..
+                    }
+                ),
+            ),
+            (2, true, true)
+        );
     }
 
     #[tokio::test]
@@ -2782,21 +2792,26 @@ overrides:
                         .any(|(name, value)| name == "__name__" && value == "target_info")
             })
             .expect("target_info wal record");
-        assert!(
-            target.labels
-                == vec![
+        assert_eq!(
+            (
+                &target.labels,
+                matches!(
+                    target.payload,
+                    SamplePayload::Float {
+                        timestamp_ms: 1,
+                        value: 1.0,
+                        ..
+                    }
+                ),
+            ),
+            (
+                &vec![
                     ("__name__".to_string(), "target_info".to_string()),
                     ("service_name".to_string(), "checkout".to_string()),
-                ]
+                ],
+                true,
+            )
         );
-        assert!(matches!(
-            target.payload,
-            SamplePayload::Float {
-                timestamp_ms: 1,
-                value: 1.0,
-                ..
-            }
-        ));
     }
 
     #[tokio::test]
@@ -3043,24 +3058,37 @@ overrides:
 
         let records = wal_records_from_series("tenant-a", &series);
 
-        assert!(records.len() == 2);
-        check!(records[0].tenant == "tenant-a");
-        check!(records[0].labels == records[1].labels);
-        assert!(matches!(
-            records[0].payload,
-            SamplePayload::Float {
-                timestamp_ms: 10,
-                value: 1.0,
-                ..
-            }
-        ));
-        assert!(matches!(
-            records[1].payload,
-            SamplePayload::Float {
-                timestamp_ms: 20,
-                value: 2.0,
-                ..
-            }
-        ));
+        assert_eq!(
+            (
+                records.len(),
+                records[0].tenant.as_str(),
+                &records[0].labels,
+                &records[1].labels,
+                matches!(
+                    records[0].payload,
+                    SamplePayload::Float {
+                        timestamp_ms: 10,
+                        value: 1.0,
+                        ..
+                    }
+                ),
+                matches!(
+                    records[1].payload,
+                    SamplePayload::Float {
+                        timestamp_ms: 20,
+                        value: 2.0,
+                        ..
+                    }
+                ),
+            ),
+            (
+                2,
+                "tenant-a",
+                &records[1].labels,
+                &records[1].labels,
+                true,
+                true
+            )
+        );
     }
 }

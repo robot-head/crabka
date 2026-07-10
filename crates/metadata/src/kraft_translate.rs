@@ -1209,18 +1209,21 @@ mod tests {
             panic!("expected RegisterBroker");
         };
 
-        check!(!k.fenced);
-        assert!(k.end_points.len() == 2);
-        for (i, name, protocol) in [
-            (0, "", ListenerProtocol::Plaintext),
-            (1, "EXTERNAL", ListenerProtocol::SaslSsl),
-        ] {
-            check!(k.end_points[i].name == name, "name of endpoint {i}");
-            check!(
-                k.end_points[i].security_protocol == protocol_to_wire(protocol),
-                "protocol of endpoint {i}"
-            );
-        }
+        check!(
+            (
+                k.fenced,
+                k.end_points
+                    .iter()
+                    .map(|endpoint| (endpoint.name.as_str(), endpoint.security_protocol))
+                    .collect::<Vec<_>>(),
+            ) == (
+                false,
+                vec![
+                    ("", protocol_to_wire(ListenerProtocol::Plaintext)),
+                    ("EXTERNAL", protocol_to_wire(ListenerProtocol::SaslSsl),),
+                ],
+            )
+        );
     }
 
     #[test]
@@ -1553,9 +1556,17 @@ mod tests {
         let v = MetadataRecord::V1Voters(VotersRecord {
             voters: crate::voters::VoterSet::default(),
         });
-        assert!(to_kraft(&v, &img()) == Err(TranslateError::NoCounterpart("V1Voters")));
         let k = MetadataRecord::V1KRaftVersion(KRaftVersionRecord { kraft_version: 1 });
-        assert!(to_kraft(&k, &img()) == Err(TranslateError::NoCounterpart("V1KRaftVersion")));
+        for (name, record, expected) in [
+            ("voter record", v, TranslateError::NoCounterpart("V1Voters")),
+            (
+                "KRaft version record",
+                k,
+                TranslateError::NoCounterpart("V1KRaftVersion"),
+            ),
+        ] {
+            assert!(to_kraft(&record, &img()) == Err(expected), "case {name}");
+        }
     }
 
     // ---------- topic / partition / config with image context ----------
@@ -1636,8 +1647,7 @@ mod tests {
             let back = from_kraft(k, &image).unwrap();
             match back {
                 MetadataRecord::V1TopicConfig(tc) => {
-                    assert!(tc.topic == "t");
-                    assert!(tc.overrides.len() == 1);
+                    assert_eq!((tc.topic.as_str(), tc.overrides.len()), ("t", 1));
                 }
                 other => panic!("expected V1TopicConfig singleton, got {other:?}"),
             }
@@ -1662,8 +1672,10 @@ mod tests {
         let KraftMetadataRecord::Config(c) = &records[0] else {
             panic!("expected Config");
         };
-        assert!(c.name == "retention.ms");
-        assert!(c.value == Some("9".to_string()));
+        assert_eq!(
+            (c.name.as_str(), c.value.as_deref()),
+            ("retention.ms", Some("9"))
+        );
     }
 
     /// Seed `image` with topic `t` and the config map `kv`.
@@ -1799,8 +1811,7 @@ mod tests {
             panic!("expected Partition");
         };
 
-        assert!(k.adding_replicas == vec![3]);
-        assert!(k.removing_replicas == vec![2]);
+        assert_eq!((k.adding_replicas, k.removing_replicas), (vec![3], vec![2]));
     }
 
     #[test]

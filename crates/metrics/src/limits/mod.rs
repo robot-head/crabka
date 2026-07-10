@@ -115,38 +115,54 @@ impl LimitError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
-
     use super::*;
 
     #[test]
     fn default_limits_are_generous_and_finite() {
         let l = Limits::default();
-        check!(l.ingestion_rate > 0.0);
-        check!(l.max_global_series_per_user >= 100_000);
-        check!(l.max_label_name_length == 1024);
+        assert_eq!(
+            (
+                l.ingestion_rate > 0.0,
+                l.max_global_series_per_user >= 100_000,
+                l.max_label_name_length,
+            ),
+            (true, true, 1024)
+        );
     }
 
     #[test]
     fn limit_errors_carry_prometheus_status_and_type() {
-        let rate = LimitError::IngestionRateExceeded {
-            rate: 10_000.0,
-            observed: 12_000.0,
-        };
-        assert!(rate.http_status() == 429);
-
-        let series = LimitError::SeriesPerQueryExceeded {
-            limit: 100,
-            observed: 101,
-        };
-        assert!(series.http_status() == 422);
-        assert!(series.error_type() == "execution");
-
-        let label = LimitError::LabelValueTooLong {
-            limit: 2048,
-            observed: 5000,
-        };
-        assert!(label.http_status() == 400);
-        assert!(label.error_type() == "bad_data");
+        for (name, error, expected) in [
+            (
+                "ingestion rate",
+                LimitError::IngestionRateExceeded {
+                    rate: 10_000.0,
+                    observed: 12_000.0,
+                },
+                (429, "bad_data"),
+            ),
+            (
+                "series per query",
+                LimitError::SeriesPerQueryExceeded {
+                    limit: 100,
+                    observed: 101,
+                },
+                (422, "execution"),
+            ),
+            (
+                "label value length",
+                LimitError::LabelValueTooLong {
+                    limit: 2048,
+                    observed: 5000,
+                },
+                (400, "bad_data"),
+            ),
+        ] {
+            assert_eq!(
+                (error.http_status(), error.error_type()),
+                expected,
+                "case {name}"
+            );
+        }
     }
 }

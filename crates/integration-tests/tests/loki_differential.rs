@@ -219,7 +219,7 @@ async fn real_loki_and_crabka_return_same_buildinfo_shape() {
     let loki_result = loki_buildinfo_result(&http, &loki_base).await;
     let crabka_result = crabka_buildinfo_result(querier).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -248,7 +248,7 @@ async fn real_loki_and_crabka_return_same_basic_status_probe_shapes() {
         let loki_result = loki_status_probe_result(&http, &loki_base, path).await;
         let crabka_result = crabka_status_probe_result(querier.clone(), path).await;
 
-        assert!(crabka_result == loki_result);
+        assert_eq!(crabka_result, loki_result);
     }
 }
 
@@ -277,7 +277,7 @@ async fn real_loki_and_crabka_return_same_services_status_shape() {
     let loki_result = loki_status_probe_result(&http, &loki_base, "/services").await;
     let crabka_result = crabka_status_probe_result(querier, "/services").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -305,18 +305,18 @@ async fn real_loki_and_crabka_return_same_stable_config_status_lines() {
     let loki_result = loki_config_result(&http, &loki_base).await;
     let crabka_result = crabka_config_result(querier.clone()).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let loki_diff_result = loki_config_result_with_query(&http, &loki_base, "mode=diff").await;
     let crabka_diff_result = crabka_config_result_with_query(querier.clone(), "mode=diff").await;
 
-    assert!(crabka_diff_result == loki_diff_result);
+    assert_eq!(crabka_diff_result, loki_diff_result);
 
     let loki_defaults_result =
         loki_config_result_with_query(&http, &loki_base, "mode=defaults").await;
     let crabka_defaults_result = crabka_config_result_with_query(querier, "mode=defaults").await;
 
-    assert!(crabka_defaults_result == loki_defaults_result);
+    assert_eq!(crabka_defaults_result, loki_defaults_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -344,7 +344,7 @@ async fn real_loki_and_crabka_expose_same_stable_metrics_families() {
     let loki_result = loki_metrics_result(&http, &loki_base).await;
     let crabka_result = crabka_metrics_result(querier).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -373,13 +373,13 @@ async fn real_loki_and_crabka_return_same_log_level_post_shapes() {
         loki_log_level_post_result(&http, &loki_base, Some("log_level=debug"), None).await;
     let query_param_crabka_result =
         crabka_log_level_post_result(querier.clone(), Some("log_level=debug"), None).await;
-    assert!(query_param_crabka_result == query_param_loki_result);
+    assert_eq!(query_param_crabka_result, query_param_loki_result);
 
     let form_loki_result =
         loki_log_level_post_result(&http, &loki_base, None, Some("log_level=warn")).await;
     let form_crabka_result =
         crabka_log_level_post_result(querier.clone(), None, Some("log_level=warn")).await;
-    assert!(form_crabka_result == form_loki_result);
+    assert_eq!(form_crabka_result, form_loki_result);
 
     let mixed_loki_result = loki_log_level_post_result(
         &http,
@@ -391,7 +391,7 @@ async fn real_loki_and_crabka_return_same_log_level_post_shapes() {
     let mixed_crabka_result =
         crabka_log_level_post_result(querier, Some("log_level=debug"), Some("log_level=warn"))
             .await;
-    assert!(mixed_crabka_result == mixed_loki_result);
+    assert_eq!(mixed_crabka_result, mixed_loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -424,7 +424,7 @@ async fn real_loki_and_crabka_return_same_log_level_post_error_shapes() {
         let loki_result = loki_log_level_post_result(&http, &loki_base, raw_query, form_body).await;
         let crabka_result =
             crabka_log_level_post_result(querier.clone(), raw_query, form_body).await;
-        assert!(crabka_result == loki_result);
+        assert_eq!(crabka_result, loki_result);
     }
 }
 
@@ -460,7 +460,7 @@ async fn real_loki_and_crabka_return_same_ingester_control_shapes() {
         let loki_result = loki_ingester_control_result(&http, &loki_base, method, path).await;
         let crabka_result = crabka_ingester_control_result(crabka.clone(), method, path).await;
 
-        assert!(crabka_result == loki_result);
+        assert_eq!(crabka_result, loki_result);
     }
 }
 
@@ -500,7 +500,7 @@ async fn real_loki_and_crabka_return_same_empty_ruler_inventory_shape() {
         let loki_result = loki_ruler_inventory_result(&http, &loki_base, path).await;
         let crabka_result = crabka_ruler_inventory_result(querier.clone(), path).await;
 
-        assert!(crabka_result == loki_result);
+        assert_eq!(crabka_result, loki_result);
     }
 }
 
@@ -538,7 +538,7 @@ async fn real_loki_and_crabka_return_same_ring_status_page_shapes() {
         let loki_result = loki_ring_status_result(&http, &loki_base, path).await;
         let crabka_result = crabka_ring_status_result(app, path).await;
 
-        assert!(crabka_result == loki_result);
+        assert_eq!(crabka_result, loki_result);
     }
 }
 
@@ -679,7 +679,7 @@ async fn real_loki_and_crabka_return_same_stream_query_range_result() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -700,7 +700,7 @@ async fn real_loki_and_crabka_return_same_stream_query_range_result() {
     let crabka_result =
         crabka_query_range_result(querier.clone(), query, base_ns, base_ns + 2_000_000_000).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let loki_alias_result = loki_api_prom_query_range_result(
         &http,
@@ -725,7 +725,7 @@ async fn real_loki_and_crabka_return_same_stream_query_range_result() {
                 "body": "404 page not found\n",
             })
     );
-    assert!(crabka_alias_result == loki_result);
+    assert_eq!(crabka_alias_result, loki_result);
 
     let query = r#"{app="api",env="prod"}"#;
     let loki_result = loki_query_range_result_with_default_direction_and_limit(
@@ -746,7 +746,7 @@ async fn real_loki_and_crabka_return_same_stream_query_range_result() {
     )
     .await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
     broker.shutdown().await;
 }
 
@@ -826,7 +826,7 @@ async fn real_loki_and_crabka_return_same_matcher_and_line_filter_results() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -847,13 +847,13 @@ async fn real_loki_and_crabka_return_same_matcher_and_line_filter_results() {
     let loki_result = loki_query_range_result(&http, &loki_base, query, base_ns, end_ns).await;
     let crabka_result = crabka_query_range_result(querier.clone(), query, base_ns, end_ns).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"{app=~"api|worker"} | env = "prod" |= "differential error""#;
     let loki_result = loki_query_range_result(&http, &loki_base, query, base_ns, end_ns).await;
     let crabka_result = crabka_query_range_result(querier, query, base_ns, end_ns).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
     broker.shutdown().await;
 }
 
@@ -923,7 +923,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -945,7 +945,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let loki_alias_result =
         loki_api_prom_query_range_result(&http, &loki_base, query, base_ns, end_ns).await;
@@ -973,7 +973,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api",env="prod"} |= "error" [2s]) + on() vector(1)"#;
     let loki_result =
@@ -981,7 +981,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api",env="prod"} |= "error" [2s]) > bool on() vector(0)"#;
     let loki_result =
@@ -989,7 +989,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api",env="prod"} |= "error" [2s]) and on() vector(1)"#;
     let loki_result =
@@ -997,7 +997,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"vector(1) + on() group_right(app, env) count_over_time({app="api",env="prod"} |= "error" [2s])"#;
     let loki_result =
@@ -1005,7 +1005,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"vector(1) or on() count_over_time({app="api",env="prod"} |= "error" [2s])"#;
     let loki_result =
@@ -1013,7 +1013,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"absent_over_time({app="missing",env="prod"} [2s])"#;
     let loki_result =
@@ -1021,7 +1021,7 @@ async fn real_loki_and_crabka_return_same_metric_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier, query, base_ns, end_ns, "1s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     broker.shutdown().await;
 }
@@ -1112,7 +1112,7 @@ async fn real_loki_and_crabka_return_same_vector_aggregation_result() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1148,7 +1148,7 @@ async fn real_loki_and_crabka_return_same_vector_aggregation_result() {
             crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s")
                 .await;
 
-        assert!(crabka_result == loki_result);
+        assert_eq!(crabka_result, loki_result);
     }
     broker.shutdown().await;
 }
@@ -1219,7 +1219,7 @@ async fn real_loki_and_crabka_return_same_byte_metric_results() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1240,14 +1240,14 @@ async fn real_loki_and_crabka_return_same_byte_metric_results() {
         loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"bytes_rate({app="api",env="prod"} [2s])"#;
     let loki_result =
         loki_query_range_result_with_step(&http, &loki_base, query, base_ns, end_ns, "1s").await;
     let crabka_result =
         crabka_query_range_result_with_step(querier, query, base_ns, end_ns, "1s").await;
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     broker.shutdown().await;
 }
@@ -1326,7 +1326,7 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1344,39 +1344,39 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
     let end_ns = base_ns + 2_000_000_000;
     let loki_labels = loki_metadata_result(&http, &loki_base, "labels", base_ns, end_ns).await;
     let crabka_labels = crabka_metadata_result(querier.clone(), "labels", base_ns, end_ns).await;
-    assert!(crabka_labels == loki_labels);
+    assert_eq!(crabka_labels, loki_labels);
 
     let loki_singular_labels =
         loki_metadata_result(&http, &loki_base, "label", base_ns, end_ns).await;
     let crabka_singular_labels =
         crabka_metadata_result(querier.clone(), "label", base_ns, end_ns).await;
-    assert!(crabka_singular_labels == loki_singular_labels);
+    assert_eq!(crabka_singular_labels, loki_singular_labels);
 
     let loki_alias_labels =
         loki_api_prom_metadata_result(&http, &loki_base, "label", base_ns, end_ns).await;
     let crabka_alias_labels =
         crabka_api_prom_metadata_result(querier.clone(), "label", base_ns, end_ns).await;
-    assert!(crabka_alias_labels == loki_alias_labels);
+    assert_eq!(crabka_alias_labels, loki_alias_labels);
 
     let loki_app_values =
         loki_metadata_result(&http, &loki_base, "label/app/values", base_ns, end_ns).await;
     let crabka_app_values =
         crabka_metadata_result(querier.clone(), "label/app/values", base_ns, end_ns).await;
-    assert!(crabka_app_values == loki_app_values);
+    assert_eq!(crabka_app_values, loki_app_values);
 
     let loki_alias_app_values =
         loki_api_prom_metadata_result(&http, &loki_base, "label/app/values", base_ns, end_ns).await;
     let crabka_alias_app_values =
         crabka_api_prom_metadata_result(querier.clone(), "label/app/values", base_ns, end_ns).await;
-    assert!(loki_alias_app_values == loki_alias_labels);
-    assert!(crabka_alias_app_values == loki_alias_app_values);
+    assert_eq!(loki_alias_app_values, loki_alias_labels);
+    assert_eq!(crabka_alias_app_values, loki_alias_app_values);
 
     let detected_labels_path = "detected_labels?query=%7Bapp%3D%22api%22%7D&limit=10";
     let loki_detected_labels =
         loki_detected_labels_result(&http, &loki_base, detected_labels_path, base_ns, end_ns).await;
     let crabka_detected_labels =
         crabka_detected_labels_result(querier.clone(), detected_labels_path, base_ns, end_ns).await;
-    assert!(crabka_detected_labels == loki_detected_labels);
+    assert_eq!(crabka_detected_labels, loki_detected_labels);
 
     let all_detected_labels_path = "detected_labels?limit=10";
     let loki_all_detected_labels =
@@ -1385,7 +1385,7 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
     let crabka_all_detected_labels =
         crabka_detected_labels_result(querier.clone(), all_detected_labels_path, base_ns, end_ns)
             .await;
-    assert!(crabka_all_detected_labels == loki_all_detected_labels);
+    assert_eq!(crabka_all_detected_labels, loki_all_detected_labels);
 
     let lenient_detected_labels_path =
         "detected_labels?query=%7Bapp%3D%22api%22%7D&step=not-a-number&limit=not-a-limit";
@@ -1404,18 +1404,18 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_lenient_detected_labels == loki_lenient_detected_labels);
+    assert_eq!(crabka_lenient_detected_labels, loki_lenient_detected_labels);
 
     let series_path = "series?match%5B%5D=%7Bapp%3D%22api%22%7D";
     let loki_series = loki_metadata_result(&http, &loki_base, series_path, base_ns, end_ns).await;
     let crabka_series = crabka_metadata_result(querier.clone(), series_path, base_ns, end_ns).await;
-    assert!(crabka_series == loki_series);
+    assert_eq!(crabka_series, loki_series);
 
     let loki_alias_series =
         loki_api_prom_metadata_result(&http, &loki_base, series_path, base_ns, end_ns).await;
     let crabka_alias_series =
         crabka_api_prom_metadata_result(querier.clone(), series_path, base_ns, end_ns).await;
-    assert!(crabka_alias_series == loki_alias_series);
+    assert_eq!(crabka_alias_series, loki_alias_series);
 
     let worker_series_path = "series?match%5B%5D=%7Bapp%3D%22worker%22%7D";
     let loki_post_series =
@@ -1424,7 +1424,7 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
     let crabka_post_series =
         crabka_metadata_post_result(querier.clone(), worker_series_path, None, base_ns, end_ns)
             .await;
-    assert!(crabka_post_series == loki_post_series);
+    assert_eq!(crabka_post_series, loki_post_series);
 
     let form_series_path = "series";
     let form_series_body = "match%5B%5D=%7Benv%3D%22prod%22%7D";
@@ -1446,7 +1446,7 @@ async fn real_loki_and_crabka_return_same_metadata_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_form_post_series == loki_form_post_series);
+    assert_eq!(crabka_form_post_series, loki_form_post_series);
 
     broker.shutdown().await;
 }
@@ -1486,7 +1486,7 @@ async fn real_loki_and_crabka_return_same_empty_metadata_shapes() {
         let loki_result = loki_json_path_result(&http, &loki_base, path).await;
         let crabka_result = crabka_json_path_result(querier.clone(), path).await;
 
-        assert!(crabka_result == loki_result, "{path}");
+        assert_eq!(crabka_result, loki_result, "{path}");
     }
 }
 
@@ -1552,13 +1552,13 @@ async fn real_loki_and_crabka_return_same_detected_fields_results() {
         loki_detected_fields_result(&http, &loki_base, fields_path, base_ns, end_ns).await;
     let crabka_fields =
         crabka_detected_fields_result(querier.clone(), fields_path, base_ns, end_ns).await;
-    assert!(crabka_fields == loki_fields);
+    assert_eq!(crabka_fields, loki_fields);
 
     let values_path = "detected_field/status/values?query=%7Bapp%3D%22api%22%7D&limit=10";
     let loki_values =
         loki_detected_fields_result(&http, &loki_base, values_path, base_ns, end_ns).await;
     let crabka_values = crabka_detected_fields_result(querier, values_path, base_ns, end_ns).await;
-    assert!(crabka_values == loki_values);
+    assert_eq!(crabka_values, loki_values);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1778,7 +1778,7 @@ async fn real_loki_and_crabka_return_same_index_volume_shape() {
     let loki_volume =
         loki_index_volume_result(&http, &loki_base, volume_path, base_ns, end_ns).await;
     let crabka_volume = crabka_index_volume_result(querier, volume_path, base_ns, end_ns).await;
-    assert!(crabka_volume == loki_volume);
+    assert_eq!(crabka_volume, loki_volume);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1872,7 +1872,7 @@ async fn real_loki_and_crabka_return_same_index_stats_shape() {
     let stats_path = "index/stats?query=%7Benv%3D%22prod%22%7D";
     let loki_stats = loki_index_stats_result(&http, &loki_base, stats_path, base_ns, end_ns).await;
     let crabka_stats = crabka_index_stats_result(querier, stats_path, base_ns, end_ns).await;
-    assert!(crabka_stats == loki_stats);
+    assert_eq!(crabka_stats, loki_stats);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1977,7 +1977,7 @@ async fn real_loki_and_crabka_return_same_index_volume_range_shape() {
     let loki_volume =
         loki_index_volume_result(&http, &loki_base, volume_path, base_ns, end_ns).await;
     let crabka_volume = crabka_index_volume_result(querier, volume_path, base_ns, end_ns).await;
-    assert!(crabka_volume == loki_volume);
+    assert_eq!(crabka_volume, loki_volume);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2098,7 +2098,7 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -2120,21 +2120,21 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         loki_query_range_result(&http, &loki_base, json_query, base_ns, end_ns).await;
     let crabka_json_result =
         crabka_query_range_result(querier.clone(), json_query, base_ns, end_ns).await;
-    assert!(crabka_json_result == loki_json_result);
+    assert_eq!(crabka_json_result, loki_json_result);
 
     let selected_json_query = r#"{app="api",format="json"} | json method="request.method", status_code="response.status" | status_code >= 500"#;
     let loki_selected_json_result =
         loki_query_range_result(&http, &loki_base, selected_json_query, base_ns, end_ns).await;
     let crabka_selected_json_result =
         crabka_query_range_result(querier.clone(), selected_json_query, base_ns, end_ns).await;
-    assert!(crabka_selected_json_result == loki_selected_json_result);
+    assert_eq!(crabka_selected_json_result, loki_selected_json_result);
 
     let logfmt_query = r#"{app="api",format="logfmt"} | logfmt | status >= 500"#;
     let loki_logfmt_result =
         loki_query_range_result(&http, &loki_base, logfmt_query, base_ns, end_ns).await;
     let crabka_logfmt_result =
         crabka_query_range_result(querier.clone(), logfmt_query, base_ns, end_ns).await;
-    assert!(crabka_logfmt_result == loki_logfmt_result);
+    assert_eq!(crabka_logfmt_result, loki_logfmt_result);
 
     let parameterized_logfmt_query =
         r#"{app="api",format="logfmt"} | logfmt status, message="msg" | status >= 500"#;
@@ -2149,7 +2149,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     let crabka_parameterized_logfmt_result =
         crabka_query_range_result(querier.clone(), parameterized_logfmt_query, base_ns, end_ns)
             .await;
-    assert!(crabka_parameterized_logfmt_result == loki_parameterized_logfmt_result);
+    assert_eq!(
+        crabka_parameterized_logfmt_result,
+        loki_parameterized_logfmt_result
+    );
 
     let logfmt_or_query =
         r#"{app="api",format="logfmt"} | logfmt | status >= 500 or msg = "api parser ok""#;
@@ -2157,7 +2160,7 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         loki_query_range_result(&http, &loki_base, logfmt_or_query, base_ns, end_ns).await;
     let crabka_logfmt_or_result =
         crabka_query_range_result(querier.clone(), logfmt_or_query, base_ns, end_ns).await;
-    assert!(crabka_logfmt_or_result == loki_logfmt_or_result);
+    assert_eq!(crabka_logfmt_or_result, loki_logfmt_or_result);
 
     let logfmt_comma_and_query =
         r#"{app="api",format="logfmt"} | logfmt | status >= 500, msg = "api parser error""#;
@@ -2165,7 +2168,7 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         loki_query_range_result(&http, &loki_base, logfmt_comma_and_query, base_ns, end_ns).await;
     let crabka_logfmt_comma_and_result =
         crabka_query_range_result(querier.clone(), logfmt_comma_and_query, base_ns, end_ns).await;
-    assert!(crabka_logfmt_comma_and_result == loki_logfmt_comma_and_result);
+    assert_eq!(crabka_logfmt_comma_and_result, loki_logfmt_comma_and_result);
 
     let logfmt_adjacent_and_query =
         r#"{app="api",format="logfmt"} | logfmt | status >= 500 msg = "api parser error""#;
@@ -2180,7 +2183,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     let crabka_logfmt_adjacent_and_result =
         crabka_query_range_result(querier.clone(), logfmt_adjacent_and_query, base_ns, end_ns)
             .await;
-    assert!(crabka_logfmt_adjacent_and_result == loki_logfmt_adjacent_and_result);
+    assert_eq!(
+        crabka_logfmt_adjacent_and_result,
+        loki_logfmt_adjacent_and_result
+    );
 
     let backtick_field_filter_query =
         r#"{app="api",format="logfmt"} | logfmt | msg = `api parser error`"#;
@@ -2199,14 +2205,17 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_backtick_field_filter_result == loki_backtick_field_filter_result);
+    assert_eq!(
+        crabka_backtick_field_filter_result,
+        loki_backtick_field_filter_result
+    );
 
     let line_format_query = r#"{app="api",format="logfmt"} | logfmt | line_format `{{.msg}} {{.status}}` |= "api parser error 500""#;
     let loki_line_format_result =
         loki_query_range_result(&http, &loki_base, line_format_query, base_ns, end_ns).await;
     let crabka_line_format_result =
         crabka_query_range_result(querier.clone(), line_format_query, base_ns, end_ns).await;
-    assert!(crabka_line_format_result == loki_line_format_result);
+    assert_eq!(crabka_line_format_result, loki_line_format_result);
 
     let line_format_pipeline_query = r#"{app="api",format="logfmt"} | logfmt | line_format `{{ .msg | replace " " "_" | upper }} {{.status}}` |= "API_PARSER_ERROR 500""#;
     let loki_line_format_pipeline_result = loki_query_range_result(
@@ -2220,7 +2229,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     let crabka_line_format_pipeline_result =
         crabka_query_range_result(querier.clone(), line_format_pipeline_query, base_ns, end_ns)
             .await;
-    assert!(crabka_line_format_pipeline_result == loki_line_format_pipeline_result);
+    assert_eq!(
+        crabka_line_format_pipeline_result,
+        loki_line_format_pipeline_result
+    );
 
     let line_format_with_present_query = r#"{app="api",format="logfmt"} | logfmt | line_format `{{ with .raw }}raw={{ . }}{{ else }}missing{{ end }}` |= "raw= /checkout/ ""#;
     let loki_line_format_with_present_result = loki_query_range_result(
@@ -2238,7 +2250,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_line_format_with_present_result == loki_line_format_with_present_result);
+    assert_eq!(
+        crabka_line_format_with_present_result,
+        loki_line_format_with_present_result
+    );
 
     let line_format_trim_marker_query = r#"{app="api",format="logfmt"} | logfmt | line_format `left {{- .msg -}} right` |= "leftapi parser errorright""#;
     let loki_line_format_trim_marker_result = loki_query_range_result(
@@ -2256,7 +2271,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_line_format_trim_marker_result == loki_line_format_trim_marker_result);
+    assert_eq!(
+        crabka_line_format_trim_marker_result,
+        loki_line_format_trim_marker_result
+    );
 
     let line_format_comment_query = r#"{app="api",format="logfmt"} | logfmt | line_format `before{{/* hidden */}}after {{ .msg }}` |= "beforeafter api parser error""#;
     let loki_line_format_comment_result = loki_query_range_result(
@@ -2270,14 +2288,17 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
     let crabka_line_format_comment_result =
         crabka_query_range_result(querier.clone(), line_format_comment_query, base_ns, end_ns)
             .await;
-    assert!(crabka_line_format_comment_result == loki_line_format_comment_result);
+    assert_eq!(
+        crabka_line_format_comment_result,
+        loki_line_format_comment_result
+    );
 
     let label_format_query = r#"{app="api",format="logfmt"} | logfmt | label_format namespace=env, summary="{{.msg}} {{.status}}" | namespace = "prod" | summary = "api parser error 500""#;
     let loki_label_format_result =
         loki_query_range_result(&http, &loki_base, label_format_query, base_ns, end_ns).await;
     let crabka_label_format_result =
         crabka_query_range_result(querier.clone(), label_format_query, base_ns, end_ns).await;
-    assert!(crabka_label_format_result == loki_label_format_result);
+    assert_eq!(crabka_label_format_result, loki_label_format_result);
 
     let label_format_pipeline_query = r#"{app="api",format="logfmt"} | logfmt | label_format summary=`{{ .msg | replace " " "_" | upper }}` | summary = "API_PARSER_ERROR""#;
     let loki_label_format_pipeline_result = loki_query_range_result(
@@ -2295,7 +2316,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_label_format_pipeline_result == loki_label_format_pipeline_result);
+    assert_eq!(
+        crabka_label_format_pipeline_result,
+        loki_label_format_pipeline_result
+    );
 
     let line_format_string_helper_query = r#"{app="api",format="logfmt"} | logfmt | line_format `{{ .raw | trim | trimPrefix "/" | trimSuffix "/" | title }} {{ .raw | trimAll " /" }} {{ .path | substr 1 10 }} {{ .path | substr 5 -1 }} {{ .path | substr -1 4 }}` |= "Checkout checkout api/items items /api""#;
     let loki_line_format_string_helper_result = loki_query_range_result(
@@ -2313,7 +2337,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_line_format_string_helper_result == loki_line_format_string_helper_result);
+    assert_eq!(
+        crabka_line_format_string_helper_result,
+        loki_line_format_string_helper_result
+    );
 
     let line_format_logical_helper_query = r#"{app="api",format="logfmt"} | logfmt | line_format `{{ contains "helper" .msg }} {{ .path | hasPrefix "/api" }} {{ .path | hasSuffix "items" }} {{ .msg | eq "template helper" }}` |= "true true true true""#;
     let loki_line_format_logical_helper_result = loki_query_range_result(
@@ -2331,7 +2358,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_line_format_logical_helper_result == loki_line_format_logical_helper_result);
+    assert_eq!(
+        crabka_line_format_logical_helper_result,
+        loki_line_format_logical_helper_result
+    );
 
     let line_format_ne_helper_query = r#"{app="api",format="logfmt"} | logfmt | line_format `{{ ne .msg "api parser error" }} {{ .path | ne "/health" }}` |= "true true""#;
     let loki_line_format_ne_helper_result = loki_query_range_result(
@@ -2349,7 +2379,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_line_format_ne_helper_result == loki_line_format_ne_helper_result);
+    assert_eq!(
+        crabka_line_format_ne_helper_result,
+        loki_line_format_ne_helper_result
+    );
 
     let line_format_len_helper_query =
         r#"{app="api",format="logfmt"} | logfmt | line_format `len={{ len .msg }}` |= "len=15""#;
@@ -2368,7 +2401,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_line_format_len_helper_result == loki_line_format_len_helper_result);
+    assert_eq!(
+        crabka_line_format_len_helper_result,
+        loki_line_format_len_helper_result
+    );
 
     let line_format_spacing_helper_query = r#"{app="api",format="logfmt"} | logfmt | line_format `{{ alignLeft 5 .short }}|{{ alignLeft 5 .long }}|{{ alignRight 5 .short }}|{{ alignRight 5 .long }}|{{ repeat 3 .mark }}` |= "hi   |hello|   hi|world|xxx""#;
     let loki_line_format_spacing_helper_result = loki_query_range_result(
@@ -2386,7 +2422,10 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_line_format_spacing_helper_result == loki_line_format_spacing_helper_result);
+    assert_eq!(
+        crabka_line_format_spacing_helper_result,
+        loki_line_format_spacing_helper_result
+    );
 
     let line_format_regex_helper_query = r#"{app="api",format="logfmt"} | logfmt | line_format `{{ count "e" .msg }}|{{ regexReplaceAll "(template) (helper)" .msg "${2}-${1}" }}|{{ .msg | regexReplaceAllLiteral "(template) (helper)" "${2}-${1}" }}` |= "4|helper-template|${2}-${1}""#;
     let loki_line_format_regex_helper_result = loki_query_range_result(
@@ -2404,14 +2443,17 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         end_ns,
     )
     .await;
-    assert!(crabka_line_format_regex_helper_result == loki_line_format_regex_helper_result);
+    assert_eq!(
+        crabka_line_format_regex_helper_result,
+        loki_line_format_regex_helper_result
+    );
 
     let drop_keep_query = r#"{app="api",format="logfmt"} | logfmt | drop env, msg="api parser error" | keep app, format, status="500" | status = "500""#;
     let loki_drop_keep_result =
         loki_query_range_result(&http, &loki_base, drop_keep_query, base_ns, end_ns).await;
     let crabka_drop_keep_result =
         crabka_query_range_result(querier.clone(), drop_keep_query, base_ns, end_ns).await;
-    assert!(crabka_drop_keep_result == loki_drop_keep_result);
+    assert_eq!(crabka_drop_keep_result, loki_drop_keep_result);
 
     let decolorize_query =
         r#"{app="api",format="logfmt"} | decolorize | logfmt | msg = "colored parser error""#;
@@ -2419,14 +2461,14 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         loki_query_range_result(&http, &loki_base, decolorize_query, base_ns, end_ns).await;
     let crabka_decolorize_result =
         crabka_query_range_result(querier.clone(), decolorize_query, base_ns, end_ns).await;
-    assert!(crabka_decolorize_result == loki_decolorize_result);
+    assert_eq!(crabka_decolorize_result, loki_decolorize_result);
 
     let pattern_query = r#"{app="api",format="logfmt"} |> `status=500 msg="api parser error"`"#;
     let loki_pattern_result =
         loki_query_range_result(&http, &loki_base, pattern_query, base_ns, end_ns).await;
     let crabka_pattern_result =
         crabka_query_range_result(querier.clone(), pattern_query, base_ns, end_ns).await;
-    assert!(crabka_pattern_result == loki_pattern_result);
+    assert_eq!(crabka_pattern_result, loki_pattern_result);
 
     let pattern_parser_query =
         r#"{app="api",format="logfmt"} | pattern `status=<status> msg="<msg>"` | status >= 500"#;
@@ -2434,14 +2476,14 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         loki_query_range_result(&http, &loki_base, pattern_parser_query, base_ns, end_ns).await;
     let crabka_pattern_parser_result =
         crabka_query_range_result(querier.clone(), pattern_parser_query, base_ns, end_ns).await;
-    assert!(crabka_pattern_parser_result == loki_pattern_parser_result);
+    assert_eq!(crabka_pattern_parser_result, loki_pattern_parser_result);
 
     let regexp_parser_query = r#"{app="api",format="logfmt"} | regexp `status=(?P<status>\d+) msg="(?P<msg>.*)"` | status >= 500"#;
     let loki_regexp_parser_result =
         loki_query_range_result(&http, &loki_base, regexp_parser_query, base_ns, end_ns).await;
     let crabka_regexp_parser_result =
         crabka_query_range_result(querier.clone(), regexp_parser_query, base_ns, end_ns).await;
-    assert!(crabka_regexp_parser_result == loki_regexp_parser_result);
+    assert_eq!(crabka_regexp_parser_result, loki_regexp_parser_result);
 
     let unpack_parser_query =
         r#"{app="api",format="packed"} | unpack != "container" | pod = "pod-3223f""#;
@@ -2449,7 +2491,7 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         loki_query_range_result(&http, &loki_base, unpack_parser_query, base_ns, end_ns).await;
     let crabka_unpack_parser_result =
         crabka_query_range_result(querier.clone(), unpack_parser_query, base_ns, end_ns).await;
-    assert!(crabka_unpack_parser_result == loki_unpack_parser_result);
+    assert_eq!(crabka_unpack_parser_result, loki_unpack_parser_result);
 
     let commented_query = r#"
         {app="api",format="logfmt"} # selector comment
@@ -2462,7 +2504,7 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         loki_query_range_result(&http, &loki_base, commented_query, base_ns, end_ns).await;
     let crabka_commented_result =
         crabka_query_range_result(querier.clone(), commented_query, base_ns, end_ns).await;
-    assert!(crabka_commented_result == loki_commented_result);
+    assert_eq!(crabka_commented_result, loki_commented_result);
 
     let logfmt_typed_query =
         r#"{app="api",format="logfmt"} | logfmt | duration >= 20ms | bytes_consumed > 20MB"#;
@@ -2470,42 +2512,42 @@ async fn real_loki_and_crabka_return_same_parser_filter_results() {
         loki_query_range_result(&http, &loki_base, logfmt_typed_query, base_ns, end_ns).await;
     let crabka_logfmt_typed_result =
         crabka_query_range_result(querier.clone(), logfmt_typed_query, base_ns, end_ns).await;
-    assert!(crabka_logfmt_typed_result == loki_logfmt_typed_result);
+    assert_eq!(crabka_logfmt_typed_result, loki_logfmt_typed_result);
 
     let ip_filter_query = r#"{app="api",format="logfmt"} |= ip("10.0.0.0/8")"#;
     let loki_ip_filter_result =
         loki_query_range_result(&http, &loki_base, ip_filter_query, base_ns, end_ns).await;
     let crabka_ip_filter_result =
         crabka_query_range_result(querier.clone(), ip_filter_query, base_ns, end_ns).await;
-    assert!(crabka_ip_filter_result == loki_ip_filter_result);
+    assert_eq!(crabka_ip_filter_result, loki_ip_filter_result);
 
     let ip_single_filter_query = r#"{app="api",format="logfmt"} |= ip("10.2.3.4")"#;
     let loki_ip_single_filter_result =
         loki_query_range_result(&http, &loki_base, ip_single_filter_query, base_ns, end_ns).await;
     let crabka_ip_single_filter_result =
         crabka_query_range_result(querier.clone(), ip_single_filter_query, base_ns, end_ns).await;
-    assert!(crabka_ip_single_filter_result == loki_ip_single_filter_result);
+    assert_eq!(crabka_ip_single_filter_result, loki_ip_single_filter_result);
 
     let ip_range_filter_query = r#"{app="api",format="logfmt"} |= ip("10.2.3.0-10.2.3.10")"#;
     let loki_ip_range_filter_result =
         loki_query_range_result(&http, &loki_base, ip_range_filter_query, base_ns, end_ns).await;
     let crabka_ip_range_filter_result =
         crabka_query_range_result(querier.clone(), ip_range_filter_query, base_ns, end_ns).await;
-    assert!(crabka_ip_range_filter_result == loki_ip_range_filter_result);
+    assert_eq!(crabka_ip_range_filter_result, loki_ip_range_filter_result);
 
     let not_ip_filter_query = r#"{app="api",format="logfmt"} != ip("192.168.0.0/16")"#;
     let loki_not_ip_filter_result =
         loki_query_range_result(&http, &loki_base, not_ip_filter_query, base_ns, end_ns).await;
     let crabka_not_ip_filter_result =
         crabka_query_range_result(querier.clone(), not_ip_filter_query, base_ns, end_ns).await;
-    assert!(crabka_not_ip_filter_result == loki_not_ip_filter_result);
+    assert_eq!(crabka_not_ip_filter_result, loki_not_ip_filter_result);
 
     let metadata_query = r#"{app="api",format="metadata"} | trace_id = "abc""#;
     let loki_metadata_result =
         loki_query_range_result(&http, &loki_base, metadata_query, base_ns, end_ns).await;
     let crabka_metadata_result =
         crabka_query_range_result(querier, metadata_query, base_ns, end_ns).await;
-    assert!(crabka_metadata_result == loki_metadata_result);
+    assert_eq!(crabka_metadata_result, loki_metadata_result);
 
     // Sanity-check the Loki-side payloads so the differential comparisons above
     // cannot pass vacuously. Each case pairs a contains-check (in the same
@@ -2894,7 +2936,7 @@ async fn real_loki_and_crabka_return_same_parser_metric_results() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -2917,7 +2959,7 @@ async fn real_loki_and_crabka_return_same_parser_metric_results() {
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, base_ns, end_ns, "1s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     for query in [
         r#"sum_over_time({app="api",format="logfmt"} | logfmt | unwrap cost | __error__ = "" [3s])"#,
@@ -3015,7 +3057,7 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -3036,7 +3078,7 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let loki_result = loki_query_result(&http, &loki_base, query, time_ns).await;
     let crabka_result = crabka_query_result(querier.clone(), query, time_ns).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let parenthesized_scalar_query =
         r#"(count_over_time({app="api",format="json"} | json | response_status >= 500 [5s]) * 2)"#;
@@ -3045,7 +3087,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_parenthesized_scalar_result =
         crabka_query_result(querier.clone(), parenthesized_scalar_query, time_ns).await;
 
-    assert!(crabka_parenthesized_scalar_result == loki_parenthesized_scalar_result);
+    assert_eq!(
+        crabka_parenthesized_scalar_result,
+        loki_parenthesized_scalar_result
+    );
 
     let parenthesized_operand_scalar_query =
         r#"(count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])) * 2"#;
@@ -3059,7 +3104,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_parenthesized_operand_scalar_result =
         crabka_query_result(querier.clone(), parenthesized_operand_scalar_query, time_ns).await;
 
-    assert!(crabka_parenthesized_operand_scalar_result == loki_parenthesized_operand_scalar_result);
+    assert_eq!(
+        crabka_parenthesized_operand_scalar_result,
+        loki_parenthesized_operand_scalar_result
+    );
 
     let metric_vector_query = r#"count_over_time({app="api",format="json"} | json | response_status >= 500 [5s]) + on() vector(1)"#;
     let loki_metric_vector_result =
@@ -3067,7 +3115,7 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_metric_vector_result =
         crabka_query_result(querier.clone(), metric_vector_query, time_ns).await;
 
-    assert!(crabka_metric_vector_result == loki_metric_vector_result);
+    assert_eq!(crabka_metric_vector_result, loki_metric_vector_result);
 
     let vector_metric_group_right_query = r#"vector(1) + on() group_right(app, env) count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
     let loki_vector_metric_group_right_result =
@@ -3075,7 +3123,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_vector_metric_group_right_result =
         crabka_query_result(querier.clone(), vector_metric_group_right_query, time_ns).await;
 
-    assert!(crabka_vector_metric_group_right_result == loki_vector_metric_group_right_result);
+    assert_eq!(
+        crabka_vector_metric_group_right_result,
+        loki_vector_metric_group_right_result
+    );
 
     let metric_vector_comparison_query = r#"count_over_time({app="api",format="json"} | json | response_status >= 500 [5s]) > bool on() vector(0)"#;
     let loki_metric_vector_comparison_result =
@@ -3083,7 +3134,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_metric_vector_comparison_result =
         crabka_query_result(querier.clone(), metric_vector_comparison_query, time_ns).await;
 
-    assert!(crabka_metric_vector_comparison_result == loki_metric_vector_comparison_result);
+    assert_eq!(
+        crabka_metric_vector_comparison_result,
+        loki_metric_vector_comparison_result
+    );
 
     let metric_vector_set_query = r#"count_over_time({app="api",format="json"} | json | response_status >= 500 [5s]) and on() vector(1)"#;
     let loki_metric_vector_set_result =
@@ -3091,7 +3145,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_metric_vector_set_result =
         crabka_query_result(querier.clone(), metric_vector_set_query, time_ns).await;
 
-    assert!(crabka_metric_vector_set_result == loki_metric_vector_set_result);
+    assert_eq!(
+        crabka_metric_vector_set_result,
+        loki_metric_vector_set_result
+    );
 
     let vector_metric_set_query = r#"vector(1) or on() count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
     let loki_vector_metric_set_result =
@@ -3099,7 +3156,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_vector_metric_set_result =
         crabka_query_result(querier.clone(), vector_metric_set_query, time_ns).await;
 
-    assert!(crabka_vector_metric_set_result == loki_vector_metric_set_result);
+    assert_eq!(
+        crabka_vector_metric_set_result,
+        loki_vector_metric_set_result
+    );
 
     let vector_metric_set_and_query = r#"vector(1) and on() count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
     let loki_vector_metric_set_and_result =
@@ -3107,7 +3167,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_vector_metric_set_and_result =
         crabka_query_result(querier.clone(), vector_metric_set_and_query, time_ns).await;
 
-    assert!(crabka_vector_metric_set_and_result == loki_vector_metric_set_and_result);
+    assert_eq!(
+        crabka_vector_metric_set_and_result,
+        loki_vector_metric_set_and_result
+    );
 
     let vector_metric_set_unless_query = r#"vector(1) unless on(app) count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
     let loki_vector_metric_set_unless_result =
@@ -3115,7 +3178,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_vector_metric_set_unless_result =
         crabka_query_result(querier.clone(), vector_metric_set_unless_query, time_ns).await;
 
-    assert!(crabka_vector_metric_set_unless_result == loki_vector_metric_set_unless_result);
+    assert_eq!(
+        crabka_vector_metric_set_unless_result,
+        loki_vector_metric_set_unless_result
+    );
 
     let vector_metric_group_right_comparison_query = r#"vector(2) > bool on() group_right(app, env) count_over_time({app="api",format="json"} | json | response_status >= 500 [5s])"#;
     let loki_vector_metric_group_right_comparison_result = loki_query_result(
@@ -3132,9 +3198,9 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     )
     .await;
 
-    assert!(
-        crabka_vector_metric_group_right_comparison_result
-            == loki_vector_metric_group_right_comparison_result
+    assert_eq!(
+        crabka_vector_metric_group_right_comparison_result,
+        loki_vector_metric_group_right_comparison_result
     );
 
     let label_replace_query = r#"label_replace(count_over_time({app="api",format="json"}[5s]) / count_over_time({app="api",format="json"}[5s]), "service", "$1-api", "app", "(.*)")"#;
@@ -3143,7 +3209,7 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_label_replace_result =
         crabka_query_result(querier.clone(), label_replace_query, time_ns).await;
 
-    assert!(crabka_label_replace_result == loki_label_replace_result);
+    assert_eq!(crabka_label_replace_result, loki_label_replace_result);
 
     let parenthesized_label_replace_query = r#"(label_replace(count_over_time({app="api",format="json"}[5s]), "service", "$1-api", "app", "(.*)"))"#;
     let loki_parenthesized_label_replace_result = loki_query_result(
@@ -3156,7 +3222,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_parenthesized_label_replace_result =
         crabka_query_result(querier.clone(), parenthesized_label_replace_query, time_ns).await;
 
-    assert!(crabka_parenthesized_label_replace_result == loki_parenthesized_label_replace_result);
+    assert_eq!(
+        crabka_parenthesized_label_replace_result,
+        loki_parenthesized_label_replace_result
+    );
 
     let label_replace_operand_query = r#"label_replace(count_over_time({app="api",format="json"}[5s]), "service", "$1-api", "app", "(.*)") / label_replace(count_over_time({app="api",format="json"}[5s]), "service", "$1-api", "app", "(.*)")"#;
     let loki_label_replace_operand_result =
@@ -3164,7 +3233,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_label_replace_operand_result =
         crabka_query_result(querier.clone(), label_replace_operand_query, time_ns).await;
 
-    assert!(crabka_label_replace_operand_result == loki_label_replace_operand_result);
+    assert_eq!(
+        crabka_label_replace_operand_result,
+        loki_label_replace_operand_result
+    );
 
     let label_replace_grouped_operand_query = r#"label_replace(sum by(app, env)(count_over_time({app="api",format="json"}[5s])), "service", "$1-api", "app", "(.*)") / on(env) group_left label_replace(sum by(env)(count_over_time({app="api",format="json"}[5s])), "service", "$1-api", "app", "(.*)")"#;
     let loki_label_replace_grouped_operand_result = loki_query_result(
@@ -3181,8 +3253,9 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     )
     .await;
 
-    assert!(
-        crabka_label_replace_grouped_operand_result == loki_label_replace_grouped_operand_result
+    assert_eq!(
+        crabka_label_replace_grouped_operand_result,
+        loki_label_replace_grouped_operand_result
     );
 
     let label_replace_scalar_operand_query = r#"label_replace(count_over_time({app="api",format="json"}[5s]) + 1, "service", "$1-api", "app", "(.*)") / label_replace(count_over_time({app="api",format="json"}[5s]) + 1, "service", "$1-api", "app", "(.*)")"#;
@@ -3196,7 +3269,10 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
     let crabka_label_replace_scalar_operand_result =
         crabka_query_result(querier.clone(), label_replace_scalar_operand_query, time_ns).await;
 
-    assert!(crabka_label_replace_scalar_operand_result == loki_label_replace_scalar_operand_result);
+    assert_eq!(
+        crabka_label_replace_scalar_operand_result,
+        loki_label_replace_scalar_operand_result
+    );
 
     let loki_alias_result = loki_api_prom_query_result(&http, &loki_base, query, time_ns).await;
     let crabka_alias_result = crabka_api_prom_query_result(querier, query, time_ns).await;
@@ -3208,7 +3284,7 @@ async fn real_loki_and_crabka_return_same_instant_metric_query_result() {
                 "body": "rpc error: code = Code(400) desc = legacy endpoints only support streams result type",
             })
     );
-    assert!(crabka_alias_result == loki_alias_result);
+    assert_eq!(crabka_alias_result, loki_alias_result);
     broker.shutdown().await;
 }
 
@@ -3240,7 +3316,7 @@ async fn real_loki_and_crabka_return_same_scalar_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, 0, 20_000_000_000, "10s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)")"#;
     let loki_result =
@@ -3248,7 +3324,7 @@ async fn real_loki_and_crabka_return_same_scalar_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier.clone(), query, 0, 20_000_000_000, "10s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)") or vector(2)"#;
     let loki_result =
@@ -3256,7 +3332,7 @@ async fn real_loki_and_crabka_return_same_scalar_query_range_result() {
     let crabka_result =
         crabka_query_range_result_with_step(querier, query, 0, 20_000_000_000, "10s").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3285,7 +3361,7 @@ async fn real_loki_and_crabka_return_same_label_replace_vector_function_result()
     let loki_result = loki_query_result(&http, &loki_base, query, 4_000_000_000).await;
     let crabka_result = crabka_query_result(querier.clone(), query, 4_000_000_000).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let arithmetic_query =
         r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)") + on() vector(2)"#;
@@ -3294,20 +3370,20 @@ async fn real_loki_and_crabka_return_same_label_replace_vector_function_result()
     let crabka_arithmetic_result =
         crabka_query_result(querier.clone(), arithmetic_query, 4_000_000_000).await;
 
-    assert!(crabka_arithmetic_result == loki_arithmetic_result);
+    assert_eq!(crabka_arithmetic_result, loki_arithmetic_result);
 
     let set_query =
         r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)") or vector(2)"#;
     let loki_set_result = loki_query_result(&http, &loki_base, set_query, 4_000_000_000).await;
     let crabka_set_result = crabka_query_result(querier.clone(), set_query, 4_000_000_000).await;
 
-    assert!(crabka_set_result == loki_set_result);
+    assert_eq!(crabka_set_result, loki_set_result);
 
     let sort_query = r#"sort(label_replace(vector(1), "service", "api-$1", "missing", "(.*)"))"#;
     let loki_sort_result = loki_query_result(&http, &loki_base, sort_query, 4_000_000_000).await;
     let crabka_sort_result = crabka_query_result(querier.clone(), sort_query, 4_000_000_000).await;
 
-    assert!(crabka_sort_result == loki_sort_result);
+    assert_eq!(crabka_sort_result, loki_sort_result);
 
     let sort_desc_query =
         r#"sort_desc(label_replace(vector(1), "service", "api-$1", "missing", "(.*)"))"#;
@@ -3316,7 +3392,7 @@ async fn real_loki_and_crabka_return_same_label_replace_vector_function_result()
     let crabka_sort_desc_result =
         crabka_query_result(querier, sort_desc_query, 4_000_000_000).await;
 
-    assert!(crabka_sort_desc_result == loki_sort_desc_result);
+    assert_eq!(crabka_sort_desc_result, loki_sort_desc_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3344,12 +3420,12 @@ async fn real_loki_and_crabka_use_same_duplicate_query_param_precedence() {
     let raw_query = "query=vector%281%29&query=vector%282%29";
     let loki_result = loki_raw_query_result(&http, &loki_base, raw_query).await;
     let crabka_result = crabka_raw_query_result(querier.clone(), raw_query).await;
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let raw_query = "query=vector%281%29&time=1&time=2";
     let loki_result = loki_raw_query_result(&http, &loki_base, raw_query).await;
     let crabka_result = crabka_raw_query_result(querier, raw_query).await;
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3420,7 +3496,7 @@ async fn real_loki_and_crabka_return_same_parser_error_labels() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -3440,7 +3516,7 @@ async fn real_loki_and_crabka_return_same_parser_error_labels() {
     let loki_result = loki_query_range_result(&http, &loki_base, query, base_ns, end_ns).await;
     let crabka_result = crabka_query_range_result(querier.clone(), query, base_ns, end_ns).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
     check!(json_contains_string(&loki_result, invalid_line));
     check!(json_contains_string(&loki_result, valid_line));
 
@@ -3448,7 +3524,7 @@ async fn real_loki_and_crabka_return_same_parser_error_labels() {
     let loki_result = loki_query_range_result(&http, &loki_base, query, base_ns, end_ns).await;
     let crabka_result = crabka_query_range_result(querier, query, base_ns, end_ns).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
     check!(!json_contains_string(&loki_result, invalid_line));
     check!(json_contains_string(&loki_result, valid_line));
     broker.shutdown().await;
@@ -3524,7 +3600,7 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -3544,7 +3620,7 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
     let loki_result = loki_query_range_result(&http, &loki_base, query, base_ns, end_ns).await;
     let crabka_result = crabka_query_range_result(querier.clone(), query, base_ns, end_ns).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
     let contains_cases = [
         (invalid_line, true),
         (valid_line, true),
@@ -3562,7 +3638,7 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
         loki_query_range_result(&http, &loki_base, keep_empty_query, base_ns, end_ns).await;
     let crabka_keep_empty_result =
         crabka_query_range_result(querier.clone(), keep_empty_query, base_ns, end_ns).await;
-    assert!(crabka_keep_empty_result == loki_keep_empty_result);
+    assert_eq!(crabka_keep_empty_result, loki_keep_empty_result);
     assert!(json_contains_string(
         &loki_keep_empty_result,
         standalone_key_line
@@ -3574,7 +3650,7 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
         loki_query_range_result(&http, &loki_base, strict_query, base_ns, end_ns).await;
     let crabka_strict_result =
         crabka_query_range_result(querier.clone(), strict_query, base_ns, end_ns).await;
-    assert!(crabka_strict_result == loki_strict_result);
+    assert_eq!(crabka_strict_result, loki_strict_result);
     check!(json_contains_string(&loki_strict_result, invalid_line));
     check!(!json_contains_string(&loki_strict_result, valid_line));
 
@@ -3583,7 +3659,7 @@ async fn real_loki_and_crabka_return_same_logfmt_malformed_field_results() {
         loki_query_range_result(&http, &loki_base, strict_clean_query, base_ns, end_ns).await;
     let crabka_strict_clean_result =
         crabka_query_range_result(querier, strict_clean_query, base_ns, end_ns).await;
-    assert!(crabka_strict_clean_result == loki_strict_clean_result);
+    assert_eq!(crabka_strict_clean_result, loki_strict_clean_result);
     check!(!json_contains_string(
         &loki_strict_clean_result,
         invalid_line
@@ -3625,7 +3701,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_error() {
         let loki_error = loki_query_error(&http, &loki_base, query).await;
         let crabka_error = crabka_query_error(querier.clone(), query).await;
 
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -3670,7 +3746,7 @@ async fn real_loki_and_crabka_use_same_query_post_body_precedence() {
             loki_post_query_precedence_response(&http, &loki_base, path, raw_query, body).await;
         let crabka_response =
             crabka_post_query_precedence_response(querier.clone(), path, raw_query, body).await;
-        assert!(crabka_response == loki_response, "{path}");
+        assert_eq!(crabka_response, loki_response, "{path}");
     }
 }
 
@@ -3699,12 +3775,12 @@ async fn real_loki_and_crabka_return_same_invalid_tail_query_errors() {
     let loki_error = loki_tail_ws_error(&loki_base, Some("{app=")).await;
     let crabka_error = crabka_tail_ws_error(querier.clone(), Some("{app=")).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 
     let loki_error = loki_tail_ws_error(&loki_base, None).await;
     let crabka_error = crabka_tail_ws_error(querier, None).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3733,7 +3809,7 @@ async fn real_loki_and_crabka_return_same_invalid_tail_delay_for_error() {
     let loki_error = loki_tail_ws_raw_error(&loki_base, raw_query).await;
     let crabka_error = crabka_tail_ws_raw_error(querier, raw_query).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3762,7 +3838,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_direction_error() 
     let loki_error = loki_query_range_direction_error(&http, &loki_base, query, "sideways").await;
     let crabka_error = crabka_query_range_direction_error(querier, query, "sideways").await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3791,7 +3867,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_step_error() {
     let loki_error = loki_query_range_step_error(&http, &loki_base, query, "0").await;
     let crabka_error = crabka_query_range_step_error(querier, query, "0").await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3820,7 +3896,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_step_parse_error()
     let loki_error = loki_query_range_step_error(&http, &loki_base, query, "not-a-number").await;
     let crabka_error = crabka_query_range_step_error(querier, query, "not-a-number").await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3849,7 +3925,7 @@ async fn real_loki_and_crabka_return_same_excessive_query_range_resolution_error
     let loki_error = loki_query_range_resolution_error(&http, &loki_base, query).await;
     let crabka_error = crabka_query_range_resolution_error(querier, query).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3878,7 +3954,7 @@ async fn real_loki_and_crabka_return_same_oversized_query_range_error() {
     let loki_error = loki_query_range_range_error(&http, &loki_base, query).await;
     let crabka_error = crabka_query_range_range_error(querier, query).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3906,12 +3982,12 @@ async fn real_loki_and_crabka_return_same_invalid_index_volume_range_step_error(
 
     let loki_error = loki_index_volume_range_step_error(&http, &loki_base, query, "0").await;
     let crabka_error = crabka_index_volume_range_step_error(querier.clone(), query, "0").await;
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 
     let loki_error =
         loki_index_volume_range_step_error(&http, &loki_base, query, "not-a-number").await;
     let crabka_error = crabka_index_volume_range_step_error(querier, query, "not-a-number").await;
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3942,7 +4018,7 @@ async fn real_loki_and_crabka_return_same_invalid_index_volume_aggregate_by_erro
             loki_index_volume_aggregate_by_error(&http, &loki_base, endpoint, query, "bogus").await;
         let crabka_error =
             crabka_index_volume_aggregate_by_error(querier.clone(), endpoint, query, "bogus").await;
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -4036,7 +4112,7 @@ async fn real_loki_and_crabka_return_same_invalid_index_query_error() {
             loki_index_query_error(&http, &loki_base, endpoint, query, start_ns, end_ns).await;
         let crabka_error =
             crabka_index_query_error(querier.clone(), endpoint, query, start_ns, end_ns).await;
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -4111,7 +4187,7 @@ async fn real_loki_and_crabka_return_same_oversized_index_stats_range_error() {
     .await;
     let crabka_error =
         crabka_index_query_error(querier, "index/stats", query, 0, 2_595_601_000_000_000).await;
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4144,7 +4220,7 @@ async fn real_loki_and_crabka_use_same_index_stats_post_body_precedence() {
     let loki_error = loki_index_stats_post_body_precedence_error(&http, &loki_base, &body).await;
     let crabka_error = crabka_index_stats_post_body_precedence_error(querier, &body).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4193,7 +4269,7 @@ async fn real_loki_and_crabka_return_same_missing_query_errors() {
         };
         let loki_error = loki_missing_query_error(&http, &loki_base, path, &params).await;
         let crabka_error = crabka_missing_query_error(querier.clone(), path, &params).await;
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -4222,7 +4298,7 @@ async fn real_loki_and_crabka_return_same_missing_series_matcher_errors() {
     for path in ["/loki/api/v1/series", "/api/prom/series"] {
         let loki_error = loki_raw_path_error(&http, &loki_base, path).await;
         let crabka_error = crabka_raw_path_error(querier.clone(), path).await;
-        assert!(crabka_error == loki_error, "{path}");
+        assert_eq!(crabka_error, loki_error, "{path}");
     }
 }
 
@@ -4251,7 +4327,7 @@ async fn real_loki_and_crabka_return_same_empty_series_post_errors() {
     for path in ["/loki/api/v1/series", "/api/prom/series"] {
         let loki_error = loki_raw_post_path_error(&http, &loki_base, path).await;
         let crabka_error = crabka_raw_post_path_error(querier.clone(), path).await;
-        assert!(crabka_error == loki_error, "{path}");
+        assert_eq!(crabka_error, loki_error, "{path}");
     }
 }
 
@@ -4283,7 +4359,7 @@ async fn real_loki_and_crabka_return_same_invalid_detected_fields_step_error() {
             loki_detected_fields_step_error(&http, &loki_base, endpoint, query, "0").await;
         let crabka_error =
             crabka_detected_fields_step_error(querier.clone(), endpoint, query, "0").await;
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
 
         let loki_error =
             loki_detected_fields_step_error(&http, &loki_base, endpoint, query, "not-a-number")
@@ -4291,7 +4367,7 @@ async fn real_loki_and_crabka_return_same_invalid_detected_fields_step_error() {
         let crabka_error =
             crabka_detected_fields_step_error(querier.clone(), endpoint, query, "not-a-number")
                 .await;
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -4322,7 +4398,7 @@ async fn real_loki_and_crabka_return_same_invalid_detected_fields_query_error() 
         let loki_error = loki_detected_fields_query_error(&http, &loki_base, endpoint, query).await;
         let crabka_error =
             crabka_detected_fields_query_error(querier.clone(), endpoint, query).await;
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -4358,7 +4434,7 @@ async fn real_loki_and_crabka_return_same_oversized_detected_endpoint_range_erro
             loki_detected_endpoint_range_error(&http, &loki_base, endpoint, query).await;
         let crabka_error =
             crabka_detected_endpoint_range_error(querier.clone(), endpoint, query).await;
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -4394,7 +4470,7 @@ async fn real_loki_and_crabka_use_same_detected_endpoint_duplicate_start_precede
             loki_detected_endpoint_duplicate_start_error(&http, &loki_base, endpoint, query).await;
         let crabka_error =
             crabka_detected_endpoint_duplicate_start_error(querier.clone(), endpoint, query).await;
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -4432,7 +4508,7 @@ async fn real_loki_and_crabka_use_same_detected_endpoint_post_body_precedence() 
         let crabka_error =
             crabka_detected_endpoint_post_body_precedence_error(querier.clone(), endpoint, query)
                 .await;
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -4462,7 +4538,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_start_error() {
     let loki_error = loki_query_range_start_error(&http, &loki_base, query, "not-a-number").await;
     let crabka_error = crabka_query_range_start_error(querier, query, "not-a-number").await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4491,7 +4567,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_range_since_error() {
     let loki_error = loki_query_range_since_error(&http, &loki_base, query, "-1").await;
     let crabka_error = crabka_query_range_since_error(querier, query, "-1").await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4524,7 +4600,7 @@ async fn real_loki_and_crabka_return_same_zero_query_range_interval_result() {
     let crabka_result =
         crabka_query_range_interval_result(querier, query, start_ns, end_ns, "0").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4557,7 +4633,7 @@ async fn real_loki_and_crabka_return_same_negative_query_range_interval_result()
     let crabka_result =
         crabka_query_range_interval_result(querier, query, start_ns, end_ns, "-1").await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4586,7 +4662,7 @@ async fn real_loki_and_crabka_return_same_invalid_query_limit_error() {
     let loki_error = loki_query_limit_error(&http, &loki_base, query, "not-a-number").await;
     let crabka_error = crabka_query_limit_error(querier, query, "not-a-number").await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4615,7 +4691,7 @@ async fn real_loki_and_crabka_return_same_negative_query_limit_error() {
     let loki_error = loki_query_limit_error(&http, &loki_base, query, "-1").await;
     let crabka_error = crabka_query_limit_error(querier, query, "-1").await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4644,261 +4720,261 @@ async fn real_loki_and_crabka_return_same_format_query_result() {
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = "(1+2)*3";
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = "vector(1) or vector(2)";
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = "vector(1)+vector(2)";
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api"}[30s])+vector(1)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api"}[30s])+1.25e-1"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api"}[10s] offset 1500ms)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"1>bool count_over_time({app="api"}[30s])"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"quantile_over_time(0.75,{app="api"} | logfmt | unwrap cost [30s])+vector(1)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api"}[30s]) or on(app) vector(1)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"vector(1)+count_over_time({app="api"}[30s])"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api"}[30s])+on(app)vector(1)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"vector(1)+on(app)group_left count_over_time({app="api"}[30s])"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = "vector(1)+on(app,env)vector(2)";
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = "vector(1)+on(app)group_left(env)vector(2)";
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = "vector(1)+on(app)group_left vector(2)";
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api"}[30s])>bool vector(1)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"vector(1)>on(app)group_left count_over_time({app="api"}[30s])"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = "vector(1)>bool vector(2)";
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = "vector(2.5e-1)";
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"sum(rate({app="api"}|="error"[5m])) by (env,status)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query =
         r#"count_over_time({app="api"}[30s]) / count_over_time({app="api"} |= "error" [30s])"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api"}[30s]) > bool count_over_time({app="worker"}[30s])"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"count_over_time({app="api"}[30s]) or count_over_time({app="worker"}[30s])"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query =
         r#"count_over_time({app="api"}[30s]) / ignoring(app) count_over_time({app="worker"}[30s])"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"sum by(app, env)(count_over_time({env="prod"}[30s])) / on(env) group_left sum by(env)(count_over_time({env="prod"}[30s]))"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"sort(count_over_time({app="api"}[30s]) + vector(1))"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"sort(label_replace(vector(1), "service", "api-$1", "missing", "(.*)"))"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"sort_desc(label_replace(count_over_time({app="api"}[30s]) + vector(1), "service", "$1-api", "app", "(.*)"))"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"quantile_over_time(.75,{app="api"}|logfmt|unwrap cost[30s]) by(app)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(count_over_time({app="api"}|="error"[30s]), "service", "$1-api", "app", "(.*)")"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)")"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(vector(1)+vector(2), "service", "api-$1", "missing", "(.*)")"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)") + vector(2)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(vector(1), "service", "api-$1", "missing", "(.*)") or vector(2)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(count_over_time({app="api"}[30s]) + vector(1), "service", "$1-api", "app", "(.*)")"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(count_over_time({app="api"}[30s]), "service", "$1-api", "app", "(.*)") + vector(2)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(count_over_time({app="api"}[30s]) + vector(1), "service", "$1-api", "app", "(.*)") + vector(2)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(count_over_time({app="api"}[30s]) + 1.25e-1, "service", "$1-api", "app", "(.*)") + vector(2)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(count_over_time({app="api"}[30s]), "service", "$1-api", "app", "(.*)") or vector(2)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(count_over_time({app="api"}[30s]) + vector(1), "service", "$1-api", "app", "(.*)") or vector(2)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(count_over_time({app="api"}[30s]), "service", "$1-api", "app", "(.*)") > bool vector(2)"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let query = r#"label_replace(count_over_time({app="api"}[30s]) + 1.25e-1, "service", "$1-api", "app", "(.*)")"#;
     let loki_result = loki_format_query_result(&http, &loki_base, query).await;
     let crabka_result = crabka_format_query_result(querier.clone(), query).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 
     let loki_post_result = loki_format_query_post_result(
         &http,
@@ -4913,7 +4989,7 @@ async fn real_loki_and_crabka_return_same_format_query_result() {
         r#"query=%7Bapp%3D%22worker%22%7D"#,
     )
     .await;
-    assert!(crabka_post_result == loki_post_result);
+    assert_eq!(crabka_post_result, loki_post_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4940,16 +5016,16 @@ async fn real_loki_and_crabka_return_same_format_query_errors() {
 
     let loki_error = loki_format_query_error(&http, &loki_base, Some("{foo=")).await;
     let crabka_error = crabka_format_query_error(querier.clone(), Some("{foo=")).await;
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 
     let loki_error = loki_format_query_error(&http, &loki_base, Some("vector(-2.5e-1)")).await;
     let crabka_error = crabka_format_query_error(querier.clone(), Some("vector(-2.5e-1)")).await;
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 
     let loki_error = loki_format_query_error(&http, &loki_base, Some("vector(1)orvector(2)")).await;
     let crabka_error =
         crabka_format_query_error(querier.clone(), Some("vector(1)orvector(2)")).await;
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 
     let loki_error = loki_format_query_error(
         &http,
@@ -4962,7 +5038,7 @@ async fn real_loki_and_crabka_return_same_format_query_errors() {
         Some(r#"label_join(count_over_time({app="api"}[30s]), "joined", "/", "app")"#),
     )
     .await;
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 
     let loki_error = loki_format_query_error(
         &http,
@@ -4975,11 +5051,11 @@ async fn real_loki_and_crabka_return_same_format_query_errors() {
         Some(r#"label_join(vector(1), "joined", "/", "app")"#),
     )
     .await;
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 
     let loki_error = loki_format_query_error(&http, &loki_base, None).await;
     let crabka_error = crabka_format_query_error(querier, None).await;
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5015,7 +5091,7 @@ async fn real_loki_and_crabka_return_same_invalid_metadata_query_errors() {
         let loki_error = loki_metadata_error(&http, &loki_base, path).await;
         let crabka_error = crabka_metadata_error(querier.clone(), path).await;
 
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -5050,7 +5126,7 @@ async fn real_loki_and_crabka_return_same_oversized_metadata_range_errors() {
         let loki_error = loki_metadata_error(&http, &loki_base, path).await;
         let crabka_error = crabka_metadata_error(querier.clone(), path).await;
 
-        assert!(crabka_error == loki_error);
+        assert_eq!(crabka_error, loki_error);
     }
 }
 
@@ -5090,7 +5166,7 @@ async fn real_loki_and_crabka_use_same_metadata_post_body_precedence() {
         let crabka_error =
             crabka_metadata_post_body_precedence_error(querier.clone(), path, body).await;
 
-        assert!(crabka_error == loki_error, "{path}");
+        assert_eq!(crabka_error, loki_error, "{path}");
     }
 }
 
@@ -5137,7 +5213,7 @@ async fn real_loki_and_crabka_return_same_invalid_push_label_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -5184,7 +5260,7 @@ async fn real_loki_and_crabka_return_same_stale_push_timestamp_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -5231,7 +5307,7 @@ async fn real_loki_and_crabka_return_same_invalid_push_timestamp_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -5265,7 +5341,7 @@ async fn real_loki_and_crabka_return_same_non_string_push_timestamp_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5306,7 +5382,7 @@ async fn real_loki_and_crabka_return_same_deflated_json_push_response() {
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5334,7 +5410,7 @@ async fn real_loki_and_crabka_return_same_malformed_gzip_push_error() {
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5362,7 +5438,7 @@ async fn real_loki_and_crabka_return_same_malformed_deflate_push_error() {
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5401,7 +5477,7 @@ async fn real_loki_and_crabka_return_same_unsupported_content_encoding_push_erro
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5426,7 +5502,7 @@ async fn real_loki_and_crabka_return_same_invalid_snappy_protobuf_push_error() {
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5451,7 +5527,7 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_push_error() {
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5479,7 +5555,7 @@ async fn real_loki_and_crabka_return_same_empty_protobuf_push_response() {
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5521,7 +5597,7 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_label_push_error() {
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5563,7 +5639,7 @@ async fn real_loki_and_crabka_return_same_duplicate_protobuf_label_push_error() 
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5605,7 +5681,7 @@ async fn real_loki_and_crabka_return_same_empty_protobuf_stream_label_push_respo
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5647,7 +5723,7 @@ async fn real_loki_and_crabka_return_same_empty_string_protobuf_stream_label_pus
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5686,7 +5762,7 @@ async fn real_loki_and_crabka_return_same_missing_protobuf_timestamp_push_respon
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5754,7 +5830,7 @@ async fn real_loki_and_crabka_return_same_negative_protobuf_timestamp_push_respo
 
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5805,7 +5881,7 @@ async fn real_loki_and_crabka_return_same_duplicate_protobuf_structured_metadata
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5851,7 +5927,7 @@ async fn real_loki_and_crabka_return_same_invalid_protobuf_structured_metadata_n
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5896,7 +5972,7 @@ async fn real_loki_and_crabka_return_same_empty_protobuf_structured_metadata_nam
     let loki_result = loki_push_body_result(&http, &loki_base, payload.clone(), &headers).await;
     let crabka_result = crabka_push_body_result(distributor, payload, &headers).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -5960,7 +6036,7 @@ async fn real_loki_and_crabka_return_same_protobuf_parsed_label_query_result() {
     .await
     .unwrap();
     let crabka_push = crabka_push_body_result(distributor, payload, &headers).await;
-    assert!(crabka_push == loki_push);
+    assert_eq!(crabka_push, loki_push);
 
     let mut compactor_config = service_config(Role::Compactor, &bootstrap, topic, &data_root);
     compactor_config.object_store_url = Some(object_store_url.clone());
@@ -5973,7 +6049,7 @@ async fn real_loki_and_crabka_return_same_protobuf_parsed_label_query_result() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -5995,7 +6071,7 @@ async fn real_loki_and_crabka_return_same_protobuf_parsed_label_query_result() {
     let crabka_result =
         crabka_query_range_result(querier, query, base_ns, base_ns + 1_000_000_000).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
     broker.shutdown().await;
 }
 
@@ -6029,7 +6105,7 @@ async fn real_loki_and_crabka_return_same_object_push_timestamp_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6062,7 +6138,7 @@ async fn real_loki_and_crabka_return_same_array_push_timestamp_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6108,7 +6184,7 @@ async fn real_loki_and_crabka_return_same_invalid_push_line_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -6143,7 +6219,7 @@ async fn real_loki_and_crabka_return_same_incomplete_push_value_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6189,7 +6265,7 @@ async fn real_loki_and_crabka_return_same_empty_push_value_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -6224,7 +6300,7 @@ async fn real_loki_and_crabka_return_same_non_object_metadata_push_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6258,7 +6334,7 @@ async fn real_loki_and_crabka_return_same_extra_push_value_field_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6295,7 +6371,7 @@ async fn real_loki_and_crabka_return_same_non_array_push_value_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6323,7 +6399,7 @@ async fn real_loki_and_crabka_return_same_non_object_push_stream_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6349,7 +6425,7 @@ async fn real_loki_and_crabka_return_same_non_array_push_streams_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6373,7 +6449,7 @@ async fn real_loki_and_crabka_return_same_array_push_payload_error() {
     let loki_error = loki_push_raw_error(&http, &loki_base, payload).await;
     let crabka_error = crabka_push_raw_error(distributor, payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6397,7 +6473,7 @@ async fn real_loki_and_crabka_return_same_null_push_payload_error() {
     let loki_error = loki_push_raw_error(&http, &loki_base, payload).await;
     let crabka_error = crabka_push_raw_error(distributor, payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6421,7 +6497,7 @@ async fn real_loki_and_crabka_return_same_missing_push_streams_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6447,7 +6523,7 @@ async fn real_loki_and_crabka_return_same_empty_push_streams_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6479,7 +6555,7 @@ async fn real_loki_and_crabka_return_same_missing_push_values_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6512,7 +6588,7 @@ async fn real_loki_and_crabka_return_same_non_array_push_values_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6544,7 +6620,7 @@ async fn real_loki_and_crabka_return_same_non_object_push_labels_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6575,7 +6651,7 @@ async fn real_loki_and_crabka_return_same_missing_push_labels_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6607,7 +6683,7 @@ async fn real_loki_and_crabka_return_same_null_push_labels_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6640,7 +6716,7 @@ async fn real_loki_and_crabka_return_same_null_push_values_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -6687,7 +6763,7 @@ async fn real_loki_and_crabka_return_same_future_push_timestamp_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -6749,7 +6825,7 @@ async fn real_loki_and_crabka_return_same_future_otlp_timestamp_error() {
     let loki_error = loki_otlp_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_otlp_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -6796,7 +6872,7 @@ async fn real_loki_and_crabka_return_same_empty_push_label_error() {
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -6843,7 +6919,7 @@ async fn real_loki_and_crabka_return_same_non_string_structured_metadata_push_er
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -6891,7 +6967,7 @@ async fn real_loki_and_crabka_return_same_invalid_structured_metadata_name_push_
     let loki_error = loki_push_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -6949,7 +7025,7 @@ async fn real_loki_and_crabka_return_same_duplicate_json_structured_metadata_pus
     let loki_result = loki_push_raw_error(&http, &loki_base, &payload).await;
     let crabka_result = crabka_push_raw_error(distributor, &payload).await;
 
-    assert!(crabka_result == loki_result);
+    assert_eq!(crabka_result, loki_result);
     broker.shutdown().await;
 }
 
@@ -7001,7 +7077,7 @@ async fn real_loki_and_crabka_return_same_duplicate_push_label_error() {
     let loki_error = loki_push_raw_error(&http, &loki_base, &payload).await;
     let crabka_error = crabka_push_raw_error(distributor, &payload).await;
 
-    assert!(crabka_error == loki_error);
+    assert_eq!(crabka_error, loki_error);
     broker.shutdown().await;
 }
 
@@ -7054,7 +7130,7 @@ async fn push_crabka_payload(app: axum::Router, payload: &Value) {
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
 async fn loki_push_error(http: &reqwest::Client, base: &str, payload: &Value) -> Value {
@@ -7421,7 +7497,7 @@ async fn crabka_query_result(app: axum::Router, query: &str, time_ns: i64) -> Va
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -7452,7 +7528,7 @@ async fn crabka_raw_query_result(app: axum::Router, raw_query: &str) -> Value {
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -7507,7 +7583,7 @@ async fn crabka_query_range_result(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -7565,7 +7641,7 @@ async fn crabka_query_range_result_with_default_direction_and_limit(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -7594,7 +7670,7 @@ async fn crabka_query_range_result_with_step(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -8798,7 +8874,7 @@ async fn crabka_buildinfo_result(app: axum::Router) -> Value {
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -9264,7 +9340,7 @@ async fn crabka_format_query_result(app: axum::Router, query: &str) -> Value {
         .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -9305,7 +9381,7 @@ async fn crabka_format_query_post_result(app: axum::Router, query: &str, form_bo
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -9537,7 +9613,7 @@ async fn crabka_metadata_result(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -9607,7 +9683,7 @@ async fn crabka_metadata_post_result(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -9636,7 +9712,7 @@ async fn crabka_json_path_result(app: axum::Router, path: &str) -> Value {
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK, "{path}");
+    assert_eq!(response.status(), StatusCode::OK, "{path}");
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -9701,7 +9777,7 @@ async fn crabka_api_prom_metadata_result(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -9759,7 +9835,7 @@ async fn crabka_detected_fields_result(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -9915,7 +9991,7 @@ async fn crabka_index_stats_result(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();
@@ -9973,7 +10049,7 @@ async fn crabka_index_volume_result(
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), MAX_BODY_BYTES)
         .await
         .unwrap();

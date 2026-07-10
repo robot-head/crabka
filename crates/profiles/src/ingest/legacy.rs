@@ -1068,10 +1068,20 @@ mod tests {
             parse_ingest_query("name=myapp{env=\"prod\",team=\"core\"}&format=pprof&sampleRate=97")
                 .unwrap();
 
-        check!(q.name == "myapp");
-        check!(q.labels.contains(&("env".to_string(), "prod".to_string())));
-        assert!(matches!(q.format, IngestFormat::Pprof));
-        check!(q.sample_rate == 97);
+        check!(
+            q == IngestQuery {
+                name: "myapp".to_string(),
+                labels: vec![
+                    ("env".to_string(), "prod".to_string()),
+                    ("team".to_string(), "core".to_string()),
+                ],
+                format: IngestFormat::Pprof,
+                sample_rate: 97,
+                units: "count".to_string(),
+                from_ms: None,
+                until_ms: None,
+            }
+        );
     }
 
     #[test]
@@ -1102,9 +1112,13 @@ mod tests {
         .await
         .unwrap();
 
-        check!(raw.labels.get("__name__") == Some("myapp"));
-        check!(raw.labels.get("env") == Some("prod"));
-        check!(raw.profile.sample_types()[0].0 == "cpu");
+        check!(
+            (
+                raw.labels.get("__name__"),
+                raw.labels.get("env"),
+                raw.profile.sample_types()[0].0.as_str(),
+            ) == (Some("myapp"), Some("prod"), "cpu")
+        );
     }
 
     #[tokio::test]
@@ -1133,9 +1147,15 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(raw.profile.sample_types()[0] == ("wall".to_string(), "nanoseconds".to_string()));
-        assert!(
-            raw.profile.period_type_strings() == ("wall".to_string(), "nanoseconds".to_string())
+        assert_eq!(
+            (
+                &raw.profile.sample_types()[0],
+                raw.profile.period_type_strings(),
+            ),
+            (
+                &("wall".to_string(), "nanoseconds".to_string()),
+                ("wall".to_string(), "nanoseconds".to_string()),
+            )
         );
         let split = crate::ingest::split_sample_types(&raw).unwrap();
         assert!(split[0].profile_type == "myapp:wall:nanoseconds:wall:nanoseconds:delta");
@@ -1162,9 +1182,17 @@ mod tests {
         .await
         .unwrap();
 
-        check!(raw.labels.get("__name__") == Some("myapp"));
-        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "count".to_string()));
-        check!(raw.profile.samples().len() == 2);
+        check!(
+            (
+                raw.labels.get("__name__"),
+                &raw.profile.sample_types()[0],
+                raw.profile.samples().len(),
+            ) == (
+                Some("myapp"),
+                &("samples".to_string(), "count".to_string()),
+                2,
+            )
+        );
     }
 
     #[tokio::test]
@@ -1289,11 +1317,19 @@ mod tests {
             .filter_map(|function| raw.profile.string(function.name))
             .collect::<Vec<_>>();
 
-        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
-        check!(values == vec![1, 2]);
-        for function in ["a", "b", "c"] {
-            check!(functions.contains(&function));
-        }
+        check!(
+            (
+                &raw.profile.sample_types()[0],
+                values,
+                ["a", "b", "c"]
+                    .iter()
+                    .all(|function| functions.contains(function)),
+            ) == (
+                &("samples".to_string(), "samples".to_string()),
+                vec![1, 2],
+                true,
+            )
+        );
     }
 
     #[tokio::test]
@@ -1322,11 +1358,19 @@ mod tests {
             .filter_map(|function| raw.profile.string(function.name))
             .collect::<Vec<_>>();
 
-        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "samples".to_string()));
-        check!(values == vec![1, 2]);
-        for function in ["a", "b", "c"] {
-            check!(functions.contains(&function));
-        }
+        check!(
+            (
+                &raw.profile.sample_types()[0],
+                values,
+                ["a", "b", "c"]
+                    .iter()
+                    .all(|function| functions.contains(function)),
+            ) == (
+                &("samples".to_string(), "samples".to_string()),
+                vec![1, 2],
+                true,
+            )
+        );
     }
 
     #[tokio::test]
@@ -1383,15 +1427,21 @@ mod tests {
         .await
         .unwrap();
 
-        for (name, value) in [
-            ("__name__", "myapp"),
-            ("service_name", "payments"),
-            ("region", "us-east"),
-        ] {
-            check!(raw.labels.get(name) == Some(value));
-        }
-        check!(raw.profile.sample_types()[0] == ("samples".to_string(), "count".to_string()));
-        check!(raw.profile.samples().len() == 2);
+        check!(
+            (
+                raw.labels.get("__name__"),
+                raw.labels.get("service_name"),
+                raw.labels.get("region"),
+                &raw.profile.sample_types()[0],
+                raw.profile.samples().len(),
+            ) == (
+                Some("myapp"),
+                Some("payments"),
+                Some("us-east"),
+                &("samples".to_string(), "count".to_string()),
+                2,
+            )
+        );
     }
 
     #[tokio::test]
@@ -1417,8 +1467,13 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(raw.profile.sample_types()[0] == ("wall".to_string(), "nanoseconds".to_string()));
-        assert!(!raw.profile.samples().is_empty());
+        assert_eq!(
+            (
+                &raw.profile.sample_types()[0],
+                raw.profile.samples().is_empty(),
+            ),
+            (&("wall".to_string(), "nanoseconds".to_string()), false)
+        );
         let functions = raw
             .profile
             .inner()

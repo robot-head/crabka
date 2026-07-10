@@ -439,16 +439,23 @@ mod tests {
         let format = LabelFormat::new(vec![route.clone(), summary.clone()]).unwrap();
 
         assert_eq!(format.assignments(), &[route.clone(), summary]);
-        assert_eq!(route.destination(), "route");
-        assert!(matches!(route.value(), LabelFormatValue::Rename(source) if source == "path"));
+        assert_eq!(
+            (
+                route.destination(),
+                matches!(route.value(), LabelFormatValue::Rename(source) if source == "path"),
+            ),
+            ("route", true)
+        );
     }
 
     #[test]
     fn unwrap_expression_accessors_and_validation_use_label() {
         let expression = UnwrapExpression::bytes("size").unwrap();
 
-        assert_eq!(expression.label(), "size");
-        assert_eq!(expression.conversion(), UnwrapConversion::Bytes);
+        assert_eq!(
+            (expression.label(), expression.conversion()),
+            ("size", UnwrapConversion::Bytes)
+        );
         check!(UnwrapExpression::new("").is_err());
         check!(UnwrapExpression::bytes("").is_err());
         check!(UnwrapExpression::duration("").is_err());
@@ -458,30 +465,54 @@ mod tests {
     fn unwrap_bytes_conversion_accepts_only_integer_bytes_in_range() {
         let expression = UnwrapExpression::bytes("size").unwrap();
 
-        assert_eq!(expression.convert_sample_value("1B"), Some("1".to_string()));
-        assert_eq!(expression.convert_sample_value("1.5B"), None);
+        for (name, input, expected) in [
+            ("integer bytes", "1B", Some("1".to_string())),
+            ("fractional bytes", "1.5B", None),
+        ] {
+            assert_eq!(
+                expression.convert_sample_value(input),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn raw_sample_literals_preserve_zero_and_signs() {
-        assert_eq!(parse_raw_sample_literal("0"), Some("0".to_string()));
-        assert_eq!(parse_raw_sample_literal("+12.5"), Some("12.5".to_string()));
-        assert_eq!(parse_raw_sample_literal("-12.5"), Some("-12.5".to_string()));
+        for (name, input, expected) in [
+            ("zero", "0", Some("0".to_string())),
+            ("explicit positive", "+12.5", Some("12.5".to_string())),
+            ("negative", "-12.5", Some("-12.5".to_string())),
+        ] {
+            assert_eq!(parse_raw_sample_literal(input), expected, "case {name}");
+        }
     }
 
     #[test]
     fn raw_sample_literals_accept_fractional_boundary_forms() {
-        assert_eq!(parse_raw_sample_literal(".5"), Some("0.5".to_string()));
-        assert_eq!(parse_raw_sample_literal("1."), Some("1".to_string()));
-        assert_eq!(parse_raw_sample_literal("1e2"), Some("100".to_string()));
-        assert_eq!(parse_raw_sample_literal("1e-2"), Some("0.01".to_string()));
+        for (name, input, expected) in [
+            ("leading decimal point", ".5", "0.5"),
+            ("trailing decimal point", "1.", "1"),
+            ("positive exponent", "1e2", "100"),
+            ("negative exponent", "1e-2", "0.01"),
+        ] {
+            assert_eq!(
+                parse_raw_sample_literal(input),
+                Some(expected.to_string()),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn raw_sample_literals_reject_invalid_digits() {
-        assert_eq!(parse_raw_sample_literal("12a.3"), None);
-        assert_eq!(parse_raw_sample_literal("12.3a"), None);
-        assert_eq!(parse_raw_sample_literal("1e2e3"), None);
+        for (name, input) in [
+            ("letter before decimal", "12a.3"),
+            ("letter after decimal", "12.3a"),
+            ("repeated exponent", "1e2e3"),
+        ] {
+            assert_eq!(parse_raw_sample_literal(input), None, "case {name}");
+        }
     }
 
     #[test]
@@ -496,9 +527,7 @@ mod tests {
         let mut fields = labels(&[("app", "debug-api"), ("level", "warn"), ("status", "500")]);
         selections.apply_drop(&mut fields);
 
-        assert_eq!(fields.get("status"), Some(&"500".to_string()));
-        assert!(!fields.contains_key("app"));
-        assert!(!fields.contains_key("level"));
+        assert_eq!(fields, labels(&[("status", "500")]));
     }
 
     #[test]

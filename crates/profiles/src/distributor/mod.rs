@@ -1004,11 +1004,14 @@ mod tests {
         process_raw(&state, "tenant-a", raws).await.unwrap();
 
         let recs = sink.0.lock().unwrap();
-        check!(recs.len() == 2);
-        check!(recs.iter().all(|rec| rec.tenant == "tenant-a"));
-        check!(
-            recs.iter()
-                .all(|rec| rec.labels.iter().any(|(name, _)| name == "service_name"))
+        assert_eq!(
+            (
+                recs.len(),
+                recs.iter().all(|rec| rec.tenant == "tenant-a"),
+                recs.iter()
+                    .all(|rec| rec.labels.iter().any(|(name, _)| name == "service_name")),
+            ),
+            (2, true, true)
         );
     }
 
@@ -1090,8 +1093,13 @@ mod tests {
         .unwrap();
 
         let recs = sink.0.lock().unwrap();
-        assert!(recs[0].samples[0].stacktrace_location_refs == vec![1]);
-        assert!(recs[0].symbols.locations[1].lines[0].0 == 1);
+        assert_eq!(
+            (
+                recs[0].samples[0].stacktrace_location_refs.as_slice(),
+                recs[0].symbols.locations[1].lines[0].0,
+            ),
+            (&[1][..], 1)
+        );
     }
 
     #[tokio::test]
@@ -1354,10 +1362,13 @@ overrides:
             .into(),
         );
 
-        assert!(err.code() == Code::ResourceExhausted);
-        assert!(
-            err.message()
-                .is_some_and(|message| message.contains("max series exceeded"))
+        assert_eq!(
+            (
+                err.code(),
+                err.message()
+                    .is_some_and(|message| message.contains("max series exceeded")),
+            ),
+            (Code::ResourceExhausted, true)
         );
     }
 
@@ -1480,11 +1491,16 @@ overrides:
 
         assert!(response.status() == StatusCode::OK, "{response:?}");
         let recs = sink.0.lock().unwrap();
-        assert!(recs.len() == 1);
-        check!(recs[0].tenant == "tenant-a");
-        check!(recs[0].labels.iter().any(|(name, value)| {
-            name == "__profile_type__" && value == "samples:samples:count:samples:count"
-        }));
+        assert_eq!(
+            (
+                recs.len(),
+                recs[0].tenant.as_str(),
+                recs[0].labels.iter().any(|(name, value)| {
+                    name == "__profile_type__" && value == "samples:samples:count:samples:count"
+                }),
+            ),
+            (1, "tenant-a", true)
+        );
     }
 
     #[tokio::test]
@@ -1511,22 +1527,23 @@ overrides:
 
         assert!(response.status() == StatusCode::OK, "{response:?}");
         let recs = sink.0.lock().unwrap();
-        assert!(recs.len() == 1);
-        check!(recs[0].tenant == "tenant-a");
-        for (name, value) in [
-            ("__profile_type__", "myapp:samples:samples:samples:samples"),
-            ("service_name", "api"),
-        ] {
-            check!(
-                recs[0]
-                    .labels
-                    .iter()
-                    .any(|(label_name, label_value)| label_name == name && label_value == value)
-            );
-        }
-        assert!(recs[0].samples.len() == 1);
-        check!(recs[0].samples[0].value == 3);
-        check!(recs[0].samples[0].timestamp_ns == 1_700_000_000_000_000_000);
+        assert_eq!(
+            (
+                recs.len(),
+                recs[0].tenant.as_str(),
+                [
+                    ("__profile_type__", "myapp:samples:samples:samples:samples"),
+                    ("service_name", "api"),
+                ]
+                .map(|(name, value)| recs[0].labels.iter().any(
+                    |(label_name, label_value)| { label_name == name && label_value == value }
+                )),
+                recs[0].samples.len(),
+                recs[0].samples[0].value,
+                recs[0].samples[0].timestamp_ns,
+            ),
+            (1, "tenant-a", [true, true], 1, 3, 1_700_000_000_000_000_000)
+        );
     }
 
     #[tokio::test]
@@ -1605,8 +1622,7 @@ overrides:
 
         assert!(response.status() == StatusCode::OK, "{response:?}");
         let recs = sink.0.lock().unwrap();
-        assert!(recs.len() == 1);
-        assert!(recs[0].tenant == "anonymous");
+        assert_eq!((recs.len(), recs[0].tenant.as_str()), (1, "anonymous"));
     }
 
     #[test]
@@ -1724,8 +1740,10 @@ overrides:
         }
         map.insert("tenant-new".to_string(), 0);
 
-        assert!(map.len() == MAX_TENANTS);
-        assert!(map.contains_key("tenant-new"));
+        assert_eq!(
+            (map.len(), map.contains_key("tenant-new")),
+            (MAX_TENANTS, true)
+        );
     }
 
     #[tokio::test]
@@ -1790,11 +1808,14 @@ overrides:
         assert!(err.status_code() == 500);
 
         let connect = connect_error(ProfilesError::Internal("secret detail".to_string()));
-        assert!(connect.code() == Code::Internal);
-        assert!(
-            connect
-                .message()
-                .is_some_and(|message| message == INTERNAL_ERROR_MESSAGE)
+        assert_eq!(
+            (
+                connect.code(),
+                connect
+                    .message()
+                    .is_some_and(|message| message == INTERNAL_ERROR_MESSAGE),
+            ),
+            (Code::Internal, true)
         );
     }
 
@@ -1874,9 +1895,14 @@ overrides:
 
         let recs = sink.0.lock().unwrap();
         let mapping = &recs[0].symbols.mappings[0];
-        check!(mapping.has_functions);
-        check!(!mapping.has_filenames);
-        check!(mapping.has_line_numbers);
-        check!(!mapping.has_inline_frames);
+        assert_eq!(
+            (
+                mapping.has_functions,
+                mapping.has_filenames,
+                mapping.has_line_numbers,
+                mapping.has_inline_frames,
+            ),
+            (true, false, true, false)
+        );
     }
 }

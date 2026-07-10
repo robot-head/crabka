@@ -1060,8 +1060,11 @@ mod tests {
             let FieldExpr::Comparison { lhs, .. } = fe.as_ref() else {
                 panic!("{key}")
             };
-            assert!(lhs.scope == Scope::Both, "{key}: {:?}", lhs.scope);
-            assert!(lhs.key == key);
+            assert_eq!(
+                (&lhs.scope, lhs.key.as_str()),
+                (&Scope::Both, key),
+                "case {key}"
+            );
         }
     }
 
@@ -1075,8 +1078,7 @@ mod tests {
         let FieldExpr::Comparison { lhs, .. } = fe.as_ref() else {
             panic!()
         };
-        assert!(lhs.scope == Scope::Both);
-        assert!(lhs.key == "duration");
+        assert_eq!((&lhs.scope, lhs.key.as_str()), (&Scope::Both, "duration"));
     }
 
     #[test]
@@ -1502,8 +1504,7 @@ mod tests {
     fn query_hint_multiple_entries_parse() {
         let q = parse("{ .a = 1 } | count_over_time() with (most_recent=true, exemplars=true)")
             .unwrap();
-        assert!(q.hints.most_recent);
-        assert!(q.hints.exemplars == Some(true));
+        assert_eq!((q.hints.most_recent, q.hints.exemplars), (true, Some(true)));
     }
 
     #[test]
@@ -1602,8 +1603,10 @@ mod tests {
         else {
             panic!("histogram pipeline")
         };
-        assert!(field.scope == Scope::Intrinsic(Intrinsic::Duration));
-        assert!(field.key == "duration");
+        assert_eq!(
+            (&field.scope, field.key.as_str()),
+            (&Scope::Intrinsic(Intrinsic::Duration), "duration")
+        );
     }
 
     #[test]
@@ -1776,8 +1779,7 @@ mod tests {
         let FieldExpr::Comparison { lhs, .. } = fe.as_ref() else {
             panic!("comparison")
         };
-        assert!(lhs.scope == Scope::Both);
-        assert!(lhs.key == "foo");
+        assert_eq!((&lhs.scope, lhs.key.as_str()), (&Scope::Both, "foo"));
     }
 
     #[test]

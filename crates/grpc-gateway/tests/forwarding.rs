@@ -273,12 +273,18 @@ async fn keyed_record_forwards_to_owner_and_dedups() {
 
     // Submit through A → forwarded to B → produced (not deduplicated).
     let first = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
-    assert!(!first.deduplicated, "first forward should produce");
 
     // Same key through A again → forwarded to B → B's map hit → deduplicated.
     let second = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
-    assert!(second.deduplicated, "second forward should dedup");
-    assert_eq!(first.offset, second.offset);
+    assert_eq!(
+        (
+            first.deduplicated,
+            second.deduplicated,
+            first.offset,
+            second.offset,
+        ),
+        (false, true, first.offset, first.offset)
+    );
 
     // Exactly one record with that value landed in the user topic.
     assert_eq!(count_in_user_topic(&bootstrap, &key).await, 1);

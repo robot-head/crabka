@@ -76,8 +76,13 @@ fn exposes_recent_spans_as_mem_table_over_span_schema() {
     store.ingest(record("tenant-a", span([2; 16], 1, 20)));
 
     let table = store.mem_table("tenant-a").unwrap();
-    assert!(table.schema() == span_block_schema());
-    assert!(table.schema().index_of(SCOL_TRACE_ID).is_ok());
+    assert_eq!(
+        (
+            table.schema(),
+            table.schema().index_of(SCOL_TRACE_ID).is_ok(),
+        ),
+        (span_block_schema(), true)
+    );
 }
 
 #[tokio::test]
@@ -96,24 +101,31 @@ async fn live_source_exposes_trace_spans_and_tags() {
         .await
         .unwrap()
         .unwrap();
-    check!(trace.root_service_name == "api");
-    check!(trace.root_trace_name == "span-1");
-    check!(trace.spans.len() == 2);
     check!(
-        trace.spans[0].attributes
-            == vec![("http.method".into(), TraceqlAttrValue::Str("GET".into()))]
+        (
+            trace.root_service_name.as_str(),
+            trace.root_trace_name.as_str(),
+            trace.spans.len(),
+            trace.spans[0].attributes.as_slice(),
+        ) == (
+            "api",
+            "span-1",
+            2,
+            [("http.method".into(), TraceqlAttrValue::Str("GET".into()))].as_slice(),
+        )
     );
 
     let names = store.tag_names("tenant-a", None, 0, 100).await.unwrap();
-    assert!(
-        names
-            .iter()
-            .any(|tags| tags.scope == TagScope::Resource && tags.tags == vec!["service.name"])
-    );
-    assert!(
-        names
-            .iter()
-            .any(|tags| tags.scope == TagScope::Span && tags.tags == vec!["http.method"])
+    assert_eq!(
+        (
+            names.iter().any(|tags| {
+                tags.scope == TagScope::Resource && tags.tags == vec!["service.name"]
+            }),
+            names
+                .iter()
+                .any(|tags| tags.scope == TagScope::Span && tags.tags == vec!["http.method"]),
+        ),
+        (true, true)
     );
     assert_tag_scope_contains(
         &names,
@@ -289,8 +301,13 @@ async fn live_source_batches_filter_by_time_range() {
     store.ingest(record("tenant-a", span([1; 16], 2, 200)));
 
     let batches = store.span_batches("tenant-a", 0, 100).await.unwrap();
-    check!(batches.len() == 1);
-    check!(batches[0].num_rows() == 1);
+    check!(
+        batches
+            .iter()
+            .map(|batch| batch.num_rows())
+            .collect::<Vec<_>>()
+            == vec![1]
+    );
     check!(store.block_builder_frontier_ns("tenant-a") == 200);
 }
 
@@ -307,8 +324,13 @@ async fn live_source_window_keeps_trace_level_columns_global() {
 
     // Window [150, 300] includes only the child span.
     let batches = store.span_batches("tenant-a", 150, 300).await.unwrap();
-    assert!(batches.len() == 1);
-    assert!(batches[0].num_rows() == 1);
+    assert!(
+        batches
+            .iter()
+            .map(|batch| batch.num_rows())
+            .collect::<Vec<_>>()
+            == vec![1]
+    );
 
     let trace_start = batches[0]
         .column_by_name(SCOL_TRACE_START_NANO)

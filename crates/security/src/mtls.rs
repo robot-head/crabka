@@ -49,7 +49,11 @@ mod tests {
 
     #[test]
     fn malformed_cert_returns_none() {
-        assert!(extract_principal_from_cert(b"not-a-cert").is_none());
-        assert!(extract_principal_from_cert(&[]).is_none());
+        for (name, input) in [
+            ("garbage", b"not-a-cert".as_slice()),
+            ("empty", b"".as_slice()),
+        ] {
+            assert!(extract_principal_from_cert(input).is_none(), "case {name}");
+        }
     }
 }

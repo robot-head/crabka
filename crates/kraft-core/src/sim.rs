@@ -1144,8 +1144,7 @@ mod tests {
     fn interactive_bootstrap_elects_one_leader() {
         let mut sim = Sim::new(&[NodeId(1), NodeId(2), NodeId(3)]);
         // Fresh cluster: no leader, election timers armed, bus empty.
-        assert!(sim.leaders().is_empty());
-        assert!(sim.snapshot().nodes.len() == 3);
+        assert!((sim.leaders().is_empty(), sim.snapshot().nodes.len()) == (true, 3));
 
         step_until(&mut sim, 10_000, |s| !s.leaders().is_empty());
         sim.run_until_stable(10_000);
@@ -1155,9 +1154,7 @@ mod tests {
         );
 
         let snap = sim.snapshot();
-        check!(snap.leaders.len() == 1);
-        check!(snap.clock_ms > 0);
-        check!(snap.step_count > 0);
+        check!((snap.leaders.len(), snap.clock_ms > 0, snap.step_count > 0) == (1, true, true));
     }
 
     #[test]
@@ -1200,8 +1197,7 @@ mod tests {
     #[test]
     fn accessors_and_bus_faults_report_consistently() {
         let mut sim = Sim::new(&[NodeId(1), NodeId(2), NodeId(3)]);
-        assert!(sim.voter_ids() == vec![NodeId(1), NodeId(2), NodeId(3)]);
-        assert!(sim.clock_ms() == 0);
+        assert!((sim.voter_ids(), sim.clock_ms()) == (vec![NodeId(1), NodeId(2), NodeId(3)], 0));
 
         // Pump until there is election traffic, then exercise the bus-replay faults.
         while sim.in_flight().is_empty() && sim.step_once() {}

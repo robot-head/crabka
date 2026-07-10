@@ -82,13 +82,25 @@ async fn query_endpoint_returns_prometheus_vector_envelope() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["resultType"], "vector");
-    assert_eq!(body["data"]["result"][0]["metric"]["__name__"], "up");
-    assert_eq!(body["data"]["result"][0]["metric"]["job"], "api");
-    // Prometheus MarshalTimestamp emits whole seconds as a bare JSON integer.
-    assert_eq!(body["data"]["result"][0]["value"][0], 10);
-    assert_eq!(body["data"]["result"][0]["value"][1], "1");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["resultType"].as_str(),
+            body["data"]["result"][0]["metric"]["__name__"].as_str(),
+            body["data"]["result"][0]["metric"]["job"].as_str(),
+            // Prometheus MarshalTimestamp emits whole seconds as a bare JSON integer.
+            body["data"]["result"][0]["value"][0].as_i64(),
+            body["data"]["result"][0]["value"][1].as_str(),
+        ),
+        (
+            Some("success"),
+            Some("vector"),
+            Some("up"),
+            Some("api"),
+            Some(10),
+            Some("1")
+        )
+    );
 }
 
 #[tokio::test]
@@ -119,10 +131,15 @@ async fn query_endpoint_accepts_rfc3339_time_parameter() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["resultType"], "vector");
-    assert_eq!(body["data"]["result"][0]["value"][0], 10);
-    assert_eq!(body["data"]["result"][0]["value"][1], "1");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["resultType"].as_str(),
+            body["data"]["result"][0]["value"][0].as_i64(),
+            body["data"]["result"][0]["value"][1].as_str(),
+        ),
+        (Some("success"), Some("vector"), Some(10), Some("1"))
+    );
 }
 
 #[tokio::test]
@@ -167,19 +184,27 @@ async fn query_endpoint_returns_native_histogram_envelope() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["resultType"], "vector");
-    assert!(body["data"]["result"][0].get("value").is_none());
     assert_eq!(
-        body["data"]["result"][0]["metric"]["__name__"],
-        "request_duration_seconds"
-    );
-    assert_eq!(body["data"]["result"][0]["histogram"][0], 10);
-    assert_eq!(body["data"]["result"][0]["histogram"][1]["count"], "4");
-    assert_eq!(body["data"]["result"][0]["histogram"][1]["sum"], "10");
-    assert_eq!(
-        body["data"]["result"][0]["histogram"][1]["buckets"],
-        serde_json::json!([])
+        (
+            body["status"].as_str(),
+            body["data"]["resultType"].as_str(),
+            body["data"]["result"][0].get("value").is_none(),
+            body["data"]["result"][0]["metric"]["__name__"].as_str(),
+            body["data"]["result"][0]["histogram"][0].as_i64(),
+            body["data"]["result"][0]["histogram"][1]["count"].as_str(),
+            body["data"]["result"][0]["histogram"][1]["sum"].as_str(),
+            body["data"]["result"][0]["histogram"][1]["buckets"].clone(),
+        ),
+        (
+            Some("success"),
+            Some("vector"),
+            true,
+            Some("request_duration_seconds"),
+            Some(10),
+            Some("4"),
+            Some("10"),
+            serde_json::json!([])
+        )
     );
 }
 
@@ -327,11 +352,22 @@ async fn query_endpoint_accepts_post_form_body() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["resultType"], "vector");
-    assert_eq!(body["data"]["result"][0]["metric"]["__name__"], "up");
-    assert_eq!(body["data"]["result"][0]["value"][0], 10);
-    assert_eq!(body["data"]["result"][0]["value"][1], "1");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["resultType"].as_str(),
+            body["data"]["result"][0]["metric"]["__name__"].as_str(),
+            body["data"]["result"][0]["value"][0].as_i64(),
+            body["data"]["result"][0]["value"][1].as_str(),
+        ),
+        (
+            Some("success"),
+            Some("vector"),
+            Some("up"),
+            Some(10),
+            Some("1")
+        )
+    );
 }
 
 #[tokio::test]
@@ -472,13 +508,20 @@ async fn query_range_endpoint_is_available_under_mimir_prefix() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["resultType"], "matrix");
-    assert_eq!(body["data"]["result"][0]["metric"]["job"], "api");
-    assert_eq!(body["data"]["result"][0]["values"][0][0], 60);
-    assert_eq!(body["data"]["result"][0]["values"][0][1], "1");
-    assert_eq!(body["data"]["result"][0]["values"][1][0], 120);
-    assert_eq!(body["data"]["result"][0]["values"][1][1], "2");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["resultType"].as_str(),
+            body["data"]["result"][0]["metric"]["job"].as_str(),
+            body["data"]["result"][0]["values"].clone(),
+        ),
+        (
+            Some("success"),
+            Some("matrix"),
+            Some("api"),
+            serde_json::json!([[60, "1"], [120, "2"]])
+        )
+    );
 }
 
 #[tokio::test]
@@ -521,11 +564,6 @@ async fn matrix_integral_second_ts_is_bare_integer() {
 
     let body: Value = serde_json::from_str(&text).expect("json response");
     let ts = &body["data"]["result"][0]["values"][0][0];
-    assert!(
-        ts.is_u64() || ts.is_i64(),
-        "timestamp must be a JSON integer"
-    );
-    assert!(!ts.is_f64(), "timestamp must not be a JSON float");
     assert_eq!(ts, 60);
 }
 
@@ -986,13 +1024,20 @@ async fn query_range_endpoint_accepts_post_form_body() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["resultType"], "matrix");
-    assert_eq!(body["data"]["result"][0]["metric"]["job"], "api");
-    assert_eq!(body["data"]["result"][0]["values"][0][0], 60);
-    assert_eq!(body["data"]["result"][0]["values"][0][1], "1");
-    assert_eq!(body["data"]["result"][0]["values"][1][0], 120);
-    assert_eq!(body["data"]["result"][0]["values"][1][1], "2");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["resultType"].as_str(),
+            body["data"]["result"][0]["metric"]["job"].as_str(),
+            body["data"]["result"][0]["values"].clone(),
+        ),
+        (
+            Some("success"),
+            Some("matrix"),
+            Some("api"),
+            serde_json::json!([[60, "1"], [120, "2"]])
+        )
+    );
 }
 
 #[tokio::test]
@@ -1316,10 +1361,9 @@ async fn series_endpoint_accepts_or_label_matchers() {
     assert_eq!(data.len(), 2);
     let jobs = data
         .iter()
-        .map(|series| series["job"].as_str().expect("job").to_string())
-        .collect::<Vec<_>>();
-    assert!(jobs.contains(&"api".to_string()));
-    assert!(jobs.contains(&"web".to_string()));
+        .map(|series| series["job"].as_str().expect("job"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(jobs, std::collections::BTreeSet::from(["api", "web"]));
 }
 
 #[tokio::test]
@@ -1925,8 +1969,10 @@ async fn rules_endpoint_returns_empty_groups() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["groups"], serde_json::json!([]));
+    assert_eq!(
+        (body["status"].as_str(), body["data"]["groups"].clone()),
+        (Some("success"), serde_json::json!([]))
+    );
 }
 
 #[tokio::test]
@@ -1950,9 +1996,18 @@ async fn rules_endpoint_rejects_invalid_exclude_alerts_parameter_with_prometheus
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert_eq!(body["error"], "invalid exclude_alerts parameter");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"].as_str(),
+        ),
+        (
+            Some("error"),
+            Some("bad_data"),
+            Some("invalid exclude_alerts parameter"),
+        )
+    );
 }
 
 #[tokio::test]
@@ -1990,33 +2045,54 @@ async fn rules_endpoint_returns_loaded_recording_rules() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["groups"][0]["file"], "team-a");
-    assert_eq!(body["data"]["groups"][0]["interval"], 30);
+    let group = &body["data"]["groups"][0];
+    let rule = &group["rules"][0];
     assert_eq!(
-        body["data"]["groups"][0]["lastEvaluation"],
-        "0001-01-01T00:00:00Z"
+        (
+            body["status"].as_str(),
+            (
+                group["file"].as_str(),
+                group["interval"].as_i64(),
+                group["lastEvaluation"].as_str(),
+                group["evaluationTime"].as_f64(),
+                group["lastError"].as_str(),
+                group["limit"].as_i64(),
+                group["name"].as_str(),
+            ),
+            (
+                rule["lastEvaluation"].as_str(),
+                rule["evaluationTime"].as_f64(),
+                rule["lastError"].as_str(),
+                rule["health"].as_str(),
+                rule["name"].as_str(),
+                rule["query"].as_str(),
+                rule["type"].as_str(),
+            ),
+        ),
+        (
+            Some("success"),
+            (
+                Some("team-a"),
+                Some(30),
+                Some("0001-01-01T00:00:00Z"),
+                Some(0.0),
+                Some(""),
+                Some(0),
+                Some("latency")
+            ),
+            (
+                Some("0001-01-01T00:00:00Z"),
+                Some(0.0),
+                Some(""),
+                Some("ok"),
+                Some("job:http_request_duration_seconds:p99"),
+                Some(
+                    "histogram_quantile(0.99, sum by (le, job) (rate(http_request_duration_seconds_bucket[5m])))"
+                ),
+                Some("recording")
+            ),
+        )
     );
-    assert_eq!(body["data"]["groups"][0]["evaluationTime"], 0.0);
-    assert_eq!(body["data"]["groups"][0]["lastError"], "");
-    assert_eq!(body["data"]["groups"][0]["limit"], 0);
-    assert_eq!(body["data"]["groups"][0]["name"], "latency");
-    assert_eq!(
-        body["data"]["groups"][0]["rules"][0]["lastEvaluation"],
-        "0001-01-01T00:00:00Z"
-    );
-    assert_eq!(body["data"]["groups"][0]["rules"][0]["evaluationTime"], 0.0);
-    assert_eq!(body["data"]["groups"][0]["rules"][0]["lastError"], "");
-    assert_eq!(body["data"]["groups"][0]["rules"][0]["health"], "ok");
-    assert_eq!(
-        body["data"]["groups"][0]["rules"][0]["name"],
-        "job:http_request_duration_seconds:p99"
-    );
-    assert_eq!(
-        body["data"]["groups"][0]["rules"][0]["query"],
-        "histogram_quantile(0.99, sum by (le, job) (rate(http_request_duration_seconds_bucket[5m])))"
-    );
-    assert_eq!(body["data"]["groups"][0]["rules"][0]["type"], "recording");
 }
 
 #[tokio::test]
@@ -2104,12 +2180,24 @@ async fn rules_endpoint_filters_by_rule_type() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     let alert_rules = body["data"]["groups"][0]["rules"].as_array().unwrap();
-    assert_eq!(alert_rules.len(), 1);
-    assert_eq!(alert_rules[0]["type"], "alerting");
-    assert_eq!(alert_rules[0]["name"], "HighLatency");
-    assert_eq!(alert_rules[0]["duration"], 300);
-    assert_eq!(alert_rules[0]["labels"]["severity"], "page");
-    assert_eq!(alert_rules[0]["annotations"]["summary"], "high latency");
+    assert_eq!(
+        (
+            alert_rules.len(),
+            alert_rules[0]["type"].as_str(),
+            alert_rules[0]["name"].as_str(),
+            alert_rules[0]["duration"].as_i64(),
+            alert_rules[0]["labels"]["severity"].as_str(),
+            alert_rules[0]["annotations"]["summary"].as_str(),
+        ),
+        (
+            1,
+            Some("alerting"),
+            Some("HighLatency"),
+            Some(300),
+            Some("page"),
+            Some("high latency")
+        )
+    );
 
     let response = app
         .oneshot(
@@ -2124,11 +2212,17 @@ async fn rules_endpoint_filters_by_rule_type() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     let recording_rules = body["data"]["groups"][0]["rules"].as_array().unwrap();
-    assert_eq!(recording_rules.len(), 1);
-    assert_eq!(recording_rules[0]["type"], "recording");
     assert_eq!(
-        recording_rules[0]["name"],
-        "job:http_request_duration_seconds:p99"
+        (
+            recording_rules.len(),
+            recording_rules[0]["type"].as_str(),
+            recording_rules[0]["name"].as_str(),
+        ),
+        (
+            1,
+            Some("recording"),
+            Some("job:http_request_duration_seconds:p99"),
+        )
     );
 }
 
@@ -2153,9 +2247,18 @@ async fn rules_endpoint_rejects_invalid_type_parameter() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert_eq!(body["error"], "invalid type parameter");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"].as_str(),
+        ),
+        (
+            Some("error"),
+            Some("bad_data"),
+            Some("invalid type parameter")
+        )
+    );
 }
 
 #[tokio::test]
@@ -2209,9 +2312,14 @@ async fn rules_endpoint_can_exclude_alert_payloads() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     let alert_rule = &body["data"]["groups"][0]["rules"][0];
-    assert_eq!(alert_rule["type"], "alerting");
-    assert_eq!(alert_rule["name"], "HighLatency");
-    assert!(alert_rule.get("alerts").is_none());
+    assert_eq!(
+        (
+            alert_rule["type"].as_str(),
+            alert_rule["name"].as_str(),
+            alert_rule.get("alerts").is_none(),
+        ),
+        (Some("alerting"), Some("HighLatency"), true)
+    );
 }
 
 #[tokio::test]
@@ -2267,20 +2375,39 @@ rules:
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
     let rule = &body["data"]["groups"][0]["rules"][0];
-    assert_eq!(rule["name"], "InstanceDown");
-    assert_eq!(rule["lastEvaluation"], "1970-01-01T00:00:00Z");
     let alerts = rule["alerts"].as_array().unwrap();
-    assert_eq!(alerts.len(), 1);
-    assert_eq!(alerts[0]["labels"]["alertname"], "InstanceDown");
-    assert_eq!(alerts[0]["labels"]["job"], "api");
-    assert_eq!(alerts[0]["labels"]["instance"], "a");
-    assert_eq!(alerts[0]["labels"]["severity"], "page");
-    assert_eq!(alerts[0]["annotations"]["summary"], "instance down");
-    assert_eq!(alerts[0]["state"], "firing");
-    assert_eq!(alerts[0]["activeAt"], "1970-01-01T00:00:00Z");
-    assert_eq!(alerts[0]["value"], "1");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            (rule["name"].as_str(), rule["lastEvaluation"].as_str()),
+            alerts.len(),
+            (
+                alerts[0]["labels"]["alertname"].as_str(),
+                alerts[0]["labels"]["job"].as_str(),
+                alerts[0]["labels"]["instance"].as_str(),
+                alerts[0]["labels"]["severity"].as_str(),
+            ),
+            (
+                alerts[0]["annotations"]["summary"].as_str(),
+                alerts[0]["state"].as_str(),
+                alerts[0]["activeAt"].as_str(),
+                alerts[0]["value"].as_str(),
+            ),
+        ),
+        (
+            Some("success"),
+            (Some("InstanceDown"), Some("1970-01-01T00:00:00Z")),
+            1,
+            (Some("InstanceDown"), Some("api"), Some("a"), Some("page")),
+            (
+                Some("instance down"),
+                Some("firing"),
+                Some("1970-01-01T00:00:00Z"),
+                Some("1")
+            ),
+        )
+    );
 }
 
 #[tokio::test]
@@ -2340,14 +2467,21 @@ rules:
     let alerts = body["data"]["groups"][0]["rules"][0]["alerts"]
         .as_array()
         .unwrap();
-    assert_eq!(alerts.len(), 1);
     // $labels and $value expanded; unknown actions pass through verbatim.
-    assert_eq!(alerts[0]["annotations"]["summary"], "api is 2");
     assert_eq!(
-        alerts[0]["annotations"]["passthrough"],
-        "{{ humanize $value }}"
+        (
+            alerts.len(),
+            alerts[0]["annotations"]["summary"].as_str(),
+            alerts[0]["annotations"]["passthrough"].as_str(),
+            alerts[0]["labels"]["detail"].as_str(),
+        ),
+        (
+            1,
+            Some("api is 2"),
+            Some("{{ humanize $value }}"),
+            Some("v=2")
+        )
     );
-    assert_eq!(alerts[0]["labels"]["detail"], "v=2");
 }
 
 #[tokio::test]
@@ -2394,10 +2528,22 @@ rules:
     let body = response_json(response).await;
     assert_eq!(body["status"], "success");
     let rule = &body["data"]["groups"][0]["rules"][0];
-    assert_eq!(rule["name"], "UnsupportedAlert");
-    assert_eq!(rule["health"], "err");
-    assert!(rule["lastError"].as_str().unwrap().contains("start"));
-    assert_eq!(rule["alerts"], serde_json::json!([]));
+    assert_eq!(
+        (
+            rule["name"].as_str(),
+            rule["health"].as_str(),
+            rule["lastError"]
+                .as_str()
+                .is_some_and(|error| error.contains("start")),
+            rule["alerts"].clone(),
+        ),
+        (
+            Some("UnsupportedAlert"),
+            Some("err"),
+            true,
+            serde_json::json!([])
+        )
+    );
 }
 
 #[tokio::test]
@@ -2421,8 +2567,10 @@ async fn alerts_endpoint_returns_empty_alerts_under_mimir_prefix() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["alerts"], serde_json::json!([]));
+    assert_eq!(
+        (body["status"].as_str(), body["data"]["alerts"].clone()),
+        (Some("success"), serde_json::json!([]))
+    );
 }
 
 #[tokio::test]
@@ -2518,20 +2666,42 @@ rules:
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
     let alerts = body["data"]["alerts"].as_array().unwrap();
-    assert_eq!(alerts.len(), 1);
-    assert_eq!(alerts[0]["name"], "InstanceDown");
-    assert_eq!(alerts[0]["query"], "up > 0");
-    assert_eq!(alerts[0]["duration"], 0);
-    assert_eq!(alerts[0]["labels"]["alertname"], "InstanceDown");
-    assert_eq!(alerts[0]["labels"]["job"], "api");
-    assert_eq!(alerts[0]["labels"]["instance"], "a");
-    assert_eq!(alerts[0]["labels"]["severity"], "page");
-    assert_eq!(alerts[0]["annotations"]["summary"], "instance down");
-    assert_eq!(alerts[0]["state"], "firing");
-    assert_eq!(alerts[0]["activeAt"], "1970-01-01T00:00:00Z");
-    assert_eq!(alerts[0]["value"], "1");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            alerts.len(),
+            (
+                alerts[0]["name"].as_str(),
+                alerts[0]["query"].as_str(),
+                alerts[0]["duration"].as_i64(),
+            ),
+            (
+                alerts[0]["labels"]["alertname"].as_str(),
+                alerts[0]["labels"]["job"].as_str(),
+                alerts[0]["labels"]["instance"].as_str(),
+                alerts[0]["labels"]["severity"].as_str(),
+            ),
+            (
+                alerts[0]["annotations"]["summary"].as_str(),
+                alerts[0]["state"].as_str(),
+                alerts[0]["activeAt"].as_str(),
+                alerts[0]["value"].as_str(),
+            ),
+        ),
+        (
+            Some("success"),
+            1,
+            (Some("InstanceDown"), Some("up > 0"), Some(0)),
+            (Some("InstanceDown"), Some("api"), Some("a"), Some("page")),
+            (
+                Some("instance down"),
+                Some("firing"),
+                Some("1970-01-01T00:00:00Z"),
+                Some("1")
+            ),
+        )
+    );
 }
 
 #[tokio::test]
@@ -2586,11 +2756,22 @@ rules:
     let body = response_json(response).await;
     assert_eq!(body["status"], "success");
     let alerts = body["data"]["alerts"].as_array().unwrap();
-    assert_eq!(alerts.len(), 1);
-    assert_eq!(alerts[0]["duration"], 300);
-    assert_eq!(alerts[0]["state"], "pending");
-    assert_eq!(alerts[0]["activeAt"], "1970-01-01T00:00:00Z");
-    assert_eq!(alerts[0]["value"], "1");
+    assert_eq!(
+        (
+            alerts.len(),
+            alerts[0]["duration"].as_i64(),
+            alerts[0]["state"].as_str(),
+            alerts[0]["activeAt"].as_str(),
+            alerts[0]["value"].as_str(),
+        ),
+        (
+            1,
+            Some(300),
+            Some("pending"),
+            Some("1970-01-01T00:00:00Z"),
+            Some("1")
+        )
+    );
 }
 
 #[tokio::test]
@@ -2651,9 +2832,14 @@ rules:
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     let alerts = body["data"]["alerts"].as_array().unwrap();
-    assert_eq!(alerts.len(), 1);
-    assert_eq!(alerts[0]["state"], "pending");
-    assert_eq!(alerts[0]["activeAt"], "1970-01-01T00:00:00Z");
+    assert_eq!(
+        (
+            alerts.len(),
+            alerts[0]["state"].as_str(),
+            alerts[0]["activeAt"].as_str(),
+        ),
+        (1, Some("pending"), Some("1970-01-01T00:00:00Z"))
+    );
 
     state.set_ruler_evaluation_time_ms(300_000);
     let response = app
@@ -2669,11 +2855,22 @@ rules:
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     let alerts = body["data"]["alerts"].as_array().unwrap();
-    assert_eq!(alerts.len(), 1);
-    assert_eq!(alerts[0]["duration"], 300);
-    assert_eq!(alerts[0]["state"], "firing");
-    assert_eq!(alerts[0]["activeAt"], "1970-01-01T00:00:00Z");
-    assert_eq!(alerts[0]["value"], "1");
+    assert_eq!(
+        (
+            alerts.len(),
+            alerts[0]["duration"].as_i64(),
+            alerts[0]["state"].as_str(),
+            alerts[0]["activeAt"].as_str(),
+            alerts[0]["value"].as_str(),
+        ),
+        (
+            1,
+            Some(300),
+            Some("firing"),
+            Some("1970-01-01T00:00:00Z"),
+            Some("1")
+        )
+    );
 }
 
 #[tokio::test]
@@ -2741,9 +2938,14 @@ rules:
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     let alerts = body["data"]["alerts"].as_array().unwrap();
-    assert_eq!(alerts.len(), 1);
-    assert_eq!(alerts[0]["state"], "firing");
-    assert_eq!(alerts[0]["activeAt"], "1970-01-01T00:00:00Z");
+    assert_eq!(
+        (
+            alerts.len(),
+            alerts[0]["state"].as_str(),
+            alerts[0]["activeAt"].as_str(),
+        ),
+        (1, Some("firing"), Some("1970-01-01T00:00:00Z"))
+    );
 }
 
 #[tokio::test]
@@ -2766,9 +2968,18 @@ async fn alertmanagers_endpoint_returns_empty_discovery_lists() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["activeAlertmanagers"], serde_json::json!([]));
-    assert_eq!(body["data"]["droppedAlertmanagers"], serde_json::json!([]));
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["activeAlertmanagers"].clone(),
+            body["data"]["droppedAlertmanagers"].clone(),
+        ),
+        (
+            Some("success"),
+            serde_json::json!([]),
+            serde_json::json!([])
+        )
+    );
 }
 
 #[tokio::test]
@@ -2791,10 +3002,20 @@ async fn targets_endpoint_returns_empty_discovery_lists() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["activeTargets"], serde_json::json!([]));
-    assert_eq!(body["data"]["droppedTargets"], serde_json::json!([]));
-    assert_eq!(body["data"]["droppedTargetCounts"], serde_json::json!({}));
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["activeTargets"].clone(),
+            body["data"]["droppedTargets"].clone(),
+            body["data"]["droppedTargetCounts"].clone(),
+        ),
+        (
+            Some("success"),
+            serde_json::json!([]),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        )
+    );
 }
 
 #[tokio::test]
@@ -2817,8 +3038,10 @@ async fn scrape_pools_endpoint_returns_empty_pool_list() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"], serde_json::json!([]));
+    assert_eq!(
+        (body["status"].as_str(), body["data"].clone()),
+        (Some("success"), serde_json::json!([]))
+    );
 }
 
 #[tokio::test]
@@ -2842,8 +3065,10 @@ async fn target_metadata_endpoint_returns_empty_metadata_list() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"], serde_json::json!([]));
+    assert_eq!(
+        (body["status"].as_str(), body["data"].clone()),
+        (Some("success"), serde_json::json!([]))
+    );
 }
 
 #[tokio::test]
@@ -2876,13 +3101,24 @@ async fn target_metadata_endpoint_returns_metric_metadata() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"].as_array().unwrap().len(), 1);
-    assert_eq!(body["data"][0]["target"], serde_json::json!({}));
-    assert_eq!(body["data"][0]["metric"], "http_requests_total");
-    assert_eq!(body["data"][0]["type"], "counter");
-    assert_eq!(body["data"][0]["help"], "Total HTTP requests.");
-    assert_eq!(body["data"][0]["unit"], "requests");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"].as_array().unwrap().len(),
+            body["data"][0].clone(),
+        ),
+        (
+            Some("success"),
+            1,
+            serde_json::json!({
+                "target": {},
+                "metric": "http_requests_total",
+                "type": "counter",
+                "help": "Total HTTP requests.",
+                "unit": "requests",
+            }),
+        )
+    );
 }
 
 #[tokio::test]
@@ -2907,8 +3143,10 @@ async fn format_query_endpoint_accepts_post_form_body() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"], "sum(up)");
+    assert_eq!(
+        (body["status"].as_str(), body["data"].as_str()),
+        (Some("success"), Some("sum(up)"))
+    );
 }
 
 #[tokio::test]
@@ -2933,10 +3171,20 @@ async fn parse_query_endpoint_accepts_post_form_body() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["type"], "vectorSelector");
-    assert_eq!(body["data"]["name"], "up");
-    assert_eq!(body["data"]["matchers"], serde_json::json!([]));
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["type"].as_str(),
+            body["data"]["name"].as_str(),
+            body["data"]["matchers"].clone(),
+        ),
+        (
+            Some("success"),
+            Some("vectorSelector"),
+            Some("up"),
+            serde_json::json!([])
+        )
+    );
 }
 
 #[tokio::test]
@@ -2972,15 +3220,26 @@ async fn ruler_config_rules_crud_round_trips_yaml_groups() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["Content-Type"], "application/yaml");
+    assert_eq!(
+        (
+            response.status(),
+            response.headers()["Content-Type"].to_str().unwrap(),
+        ),
+        (StatusCode::OK, "application/yaml")
+    );
     let yaml: serde_yaml::Value =
         serde_yaml::from_str(&response_text(response).await).expect("ruler yaml");
-    assert_eq!(yaml["team-a"][0]["name"], "latency");
-    assert_eq!(yaml["team-a"][0]["interval"], "30s");
     assert_eq!(
-        yaml["team-a"][0]["rules"][0]["record"],
-        "job:http_request_duration_seconds:p99"
+        (
+            yaml["team-a"][0]["name"].as_str(),
+            yaml["team-a"][0]["interval"].as_str(),
+            yaml["team-a"][0]["rules"][0]["record"].as_str(),
+        ),
+        (
+            Some("latency"),
+            Some("30s"),
+            Some("job:http_request_duration_seconds:p99"),
+        )
     );
 
     let response = app
@@ -3070,9 +3329,16 @@ rules:
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert!(body["error"].as_str().unwrap().contains("expr"));
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("expr")),
+        ),
+        (Some("error"), Some("bad_data"), true)
+    );
 
     let response = app
         .clone()
@@ -3096,9 +3362,16 @@ rules:
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert!(body["error"].as_str().unwrap().contains("PromQL"));
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("PromQL")),
+        ),
+        (Some("error"), Some("bad_data"), true)
+    );
 
     let response = app
         .oneshot(
@@ -3183,17 +3456,28 @@ async fn query_exemplars_endpoint_returns_matching_exemplars() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"].as_array().expect("data array").len(), 1);
     assert_eq!(
-        body["data"][0]["seriesLabels"]["__name__"],
-        "http_requests_total"
+        (
+            body["status"].as_str(),
+            body["data"].as_array().expect("data array").len(),
+            body["data"][0]["seriesLabels"]["__name__"].as_str(),
+            body["data"][0]["seriesLabels"]["job"].as_str(),
+            body["data"][0]["exemplars"][0]["labels"]["trace_id"].as_str(),
+            body["data"][0]["exemplars"][0]["labels"]["span_id"].as_str(),
+            body["data"][0]["exemplars"][0]["value"].as_str(),
+            body["data"][0]["exemplars"][0]["timestamp"].as_f64(),
+        ),
+        (
+            Some("success"),
+            1,
+            Some("http_requests_total"),
+            Some("api"),
+            Some("abc"),
+            Some("def"),
+            Some("7"),
+            Some(10.5)
+        )
     );
-    assert_eq!(body["data"][0]["seriesLabels"]["job"], "api");
-    assert_eq!(body["data"][0]["exemplars"][0]["labels"]["trace_id"], "abc");
-    assert_eq!(body["data"][0]["exemplars"][0]["labels"]["span_id"], "def");
-    assert_eq!(body["data"][0]["exemplars"][0]["value"], "7");
-    assert_eq!(body["data"][0]["exemplars"][0]["timestamp"], 10.5);
 }
 
 #[tokio::test]
@@ -3244,15 +3528,9 @@ async fn query_exemplars_endpoint_accepts_or_label_matchers() {
     assert_eq!(data.len(), 2);
     let jobs = data
         .iter()
-        .map(|series| {
-            series["seriesLabels"]["job"]
-                .as_str()
-                .expect("job")
-                .to_string()
-        })
-        .collect::<Vec<_>>();
-    assert!(jobs.contains(&"api".to_string()));
-    assert!(jobs.contains(&"web".to_string()));
+        .map(|series| series["seriesLabels"]["job"].as_str().expect("job"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(jobs, std::collections::BTreeSet::from(["api", "web"]));
 }
 
 #[tokio::test]
@@ -3294,11 +3572,16 @@ async fn query_exemplars_endpoint_accepts_post_form_body() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"].as_array().expect("data array").len(), 1);
-    assert_eq!(body["data"][0]["seriesLabels"]["job"], "api");
-    assert_eq!(body["data"][0]["exemplars"][0]["labels"]["trace_id"], "abc");
-    assert_eq!(body["data"][0]["exemplars"][0]["timestamp"], 10.5);
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"].as_array().expect("data array").len(),
+            body["data"][0]["seriesLabels"]["job"].as_str(),
+            body["data"][0]["exemplars"][0]["labels"]["trace_id"].as_str(),
+            body["data"][0]["exemplars"][0]["timestamp"].as_f64(),
+        ),
+        (Some("success"), 1, Some("api"), Some("abc"), Some(10.5))
+    );
 }
 
 #[tokio::test]
@@ -3322,9 +3605,18 @@ async fn query_exemplars_endpoint_rejects_end_before_start() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert_eq!(body["error"], "end timestamp must not be before start time");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"].as_str(),
+        ),
+        (
+            Some("error"),
+            Some("bad_data"),
+            Some("end timestamp must not be before start time"),
+        )
+    );
 }
 
 #[tokio::test]
@@ -3356,9 +3648,14 @@ async fn remote_read_endpoint_returns_snappy_protobuf_response() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["Content-Type"], "application/x-protobuf");
-    assert_eq!(response.headers()["Content-Encoding"], "snappy");
+    assert_eq!(
+        (
+            response.status(),
+            response.headers()["Content-Type"].to_str().unwrap(),
+            response.headers()["Content-Encoding"].to_str().unwrap(),
+        ),
+        (StatusCode::OK, "application/x-protobuf", "snappy")
+    );
     let bytes = to_bytes(response.into_body(), 1024 * 1024)
         .await
         .expect("response body");
@@ -3438,9 +3735,18 @@ async fn remote_read_endpoint_rejects_end_before_start() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert_eq!(body["error"], "end timestamp must not be before start time");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"].as_str(),
+        ),
+        (
+            Some("error"),
+            Some("bad_data"),
+            Some("end timestamp must not be before start time"),
+        )
+    );
 }
 
 #[tokio::test]
@@ -3522,20 +3828,29 @@ async fn remote_read_endpoint_returns_matching_float_samples() {
         .expect("snappy response");
     let read_response =
         pb::v1::ReadResponse::decode(decoded.as_slice()).expect("remote read response");
-    assert_eq!(read_response.results.len(), 1);
-    assert_eq!(read_response.results[0].timeseries.len(), 1);
     let series = &read_response.results[0].timeseries[0];
-    assert_eq!(series.labels[0].name, "__name__");
-    assert_eq!(series.labels[0].value, "up");
-    assert_eq!(series.labels[1].name, "instance");
-    assert_eq!(series.labels[1].value, "a");
-    assert_eq!(series.labels[2].name, "job");
-    assert_eq!(series.labels[2].value, "api");
-    assert_eq!(series.samples.len(), 2);
-    assert_eq!(series.samples[0].timestamp, 10_000);
-    assert!((series.samples[0].value - 1.0).abs() < f64::EPSILON);
-    assert_eq!(series.samples[1].timestamp, 20_000);
-    assert!((series.samples[1].value - 2.0).abs() < f64::EPSILON);
+    assert_eq!(
+        (
+            read_response.results.len(),
+            read_response.results[0].timeseries.len(),
+            series
+                .labels
+                .iter()
+                .map(|label| (label.name.as_str(), label.value.as_str()))
+                .collect::<Vec<_>>(),
+            series
+                .samples
+                .iter()
+                .map(|sample| (sample.timestamp, sample.value))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            1,
+            1,
+            vec![("__name__", "up"), ("instance", "a"), ("job", "api")],
+            vec![(10_000, 1.0), (20_000, 2.0)],
+        )
+    );
 }
 
 #[tokio::test]
@@ -3602,13 +3917,15 @@ async fn remote_read_endpoint_rejects_selected_series_over_tenant_limit() {
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "execution");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .contains("series per query exceeded")
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("series per query exceeded")),
+        ),
+        (Some("error"), Some("execution"), true)
     );
 }
 
@@ -3676,13 +3993,15 @@ async fn remote_read_endpoint_rejects_samples_over_tenant_limit() {
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "execution");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap()
-            .contains("samples per query exceeded")
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("samples per query exceeded")),
+        ),
+        (Some("error"), Some("execution"), true)
     );
 }
 
@@ -3756,13 +4075,24 @@ async fn remote_read_endpoint_returns_matching_exemplars() {
     let read_response =
         pb::v1::ReadResponse::decode(decoded.as_slice()).expect("remote read response");
     let series = &read_response.results[0].timeseries[0];
-    assert_eq!(series.exemplars.len(), 1);
-    assert_eq!(series.exemplars[0].timestamp, 10_500);
-    assert!((series.exemplars[0].value - 7.0).abs() < f64::EPSILON);
-    assert_eq!(series.exemplars[0].labels[0].name, "span_id");
-    assert_eq!(series.exemplars[0].labels[0].value, "def");
-    assert_eq!(series.exemplars[0].labels[1].name, "trace_id");
-    assert_eq!(series.exemplars[0].labels[1].value, "abc");
+    assert_eq!(
+        (
+            series.exemplars.len(),
+            series.exemplars[0].timestamp,
+            series.exemplars[0].value,
+            series.exemplars[0]
+                .labels
+                .iter()
+                .map(|label| (label.name.as_str(), label.value.as_str()))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            1,
+            10_500,
+            7.0,
+            vec![("span_id", "def"), ("trace_id", "abc")],
+        )
+    );
 }
 
 #[tokio::test]
@@ -3833,16 +4163,26 @@ async fn remote_read_endpoint_returns_matching_native_histograms() {
         .expect("snappy response");
     let read_response =
         pb::v1::ReadResponse::decode(decoded.as_slice()).expect("remote read response");
-    assert_eq!(read_response.results.len(), 1);
-    assert_eq!(read_response.results[0].timeseries.len(), 1);
     let series = &read_response.results[0].timeseries[0];
-    assert!(series.samples.is_empty());
-    assert_eq!(series.histograms.len(), 1);
-    assert_eq!(series.histograms[0].timestamp, 10_000);
-    assert!((series.histograms[0].sum - 10.0).abs() < f64::EPSILON);
     assert_eq!(
-        series.histograms[0].count,
-        Some(pb::v1::histogram::Count::CountFloat(4.0))
+        (
+            read_response.results.len(),
+            read_response.results[0].timeseries.len(),
+            series.samples.is_empty(),
+            series.histograms.len(),
+            series.histograms[0].timestamp,
+            series.histograms[0].sum,
+            &series.histograms[0].count,
+        ),
+        (
+            1,
+            1,
+            true,
+            1,
+            10_000,
+            10.0,
+            &Some(pb::v1::histogram::Count::CountFloat(4.0)),
+        )
     );
 }
 
@@ -3877,8 +4217,10 @@ async fn remote_read_endpoint_rejects_unsupported_streamed_xor_response_type() {
 
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "execution");
+    assert_eq!(
+        (body["status"].as_str(), body["errorType"].as_str()),
+        (Some("error"), Some("execution"))
+    );
 }
 
 #[tokio::test]
@@ -3922,16 +4264,23 @@ async fn cardinality_label_names_endpoint_returns_label_name_counts() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     // Mimir returns the cardinality object directly, with no status envelope.
-    assert!(body.get("status").is_none());
-    assert_eq!(body["label_names_count"], 3);
-    assert_eq!(body["label_values_count_total"], 4);
     assert_eq!(
-        body["cardinality"],
-        serde_json::json!([
-            {"label_name": "job", "label_values_count": 2},
-            {"label_name": "__name__", "label_values_count": 1},
-            {"label_name": "instance", "label_values_count": 1},
-        ])
+        (
+            body.get("status").is_none(),
+            body["label_names_count"].as_i64(),
+            body["label_values_count_total"].as_i64(),
+            body["cardinality"].clone(),
+        ),
+        (
+            true,
+            Some(3),
+            Some(4),
+            serde_json::json!([
+                {"label_name": "job", "label_values_count": 2},
+                {"label_name": "__name__", "label_values_count": 1},
+                {"label_name": "instance", "label_values_count": 1},
+            ]),
+        )
     );
 }
 
@@ -3969,16 +4318,18 @@ async fn cardinality_label_names_endpoint_honors_limit_parameter() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(
-        body["cardinality"]
-            .as_array()
-            .expect("cardinality array")
-            .len(),
-        1
-    );
     // job has two distinct values, so it sorts first under the limit.
-    assert_eq!(body["cardinality"][0]["label_name"], "job");
-    assert_eq!(body["cardinality"][0]["label_values_count"], 2);
+    assert_eq!(
+        (
+            body["cardinality"]
+                .as_array()
+                .expect("cardinality array")
+                .len(),
+            body["cardinality"][0]["label_name"].as_str(),
+            body["cardinality"][0]["label_values_count"].as_i64(),
+        ),
+        (1, Some("job"), Some(2))
+    );
 }
 
 #[tokio::test]
@@ -4015,15 +4366,21 @@ async fn cardinality_label_names_endpoint_filters_selector_parameter() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["label_names_count"], 3);
-    assert_eq!(body["label_values_count_total"], 3);
     assert_eq!(
-        body["cardinality"],
-        serde_json::json!([
-            {"label_name": "__name__", "label_values_count": 1},
-            {"label_name": "instance", "label_values_count": 1},
-            {"label_name": "job", "label_values_count": 1},
-        ])
+        (
+            body["label_names_count"].as_i64(),
+            body["label_values_count_total"].as_i64(),
+            body["cardinality"].clone(),
+        ),
+        (
+            Some(3),
+            Some(3),
+            serde_json::json!([
+                {"label_name": "__name__", "label_values_count": 1},
+                {"label_name": "instance", "label_values_count": 1},
+                {"label_name": "job", "label_values_count": 1},
+            ]),
+        )
     );
 }
 
@@ -4064,13 +4421,15 @@ async fn cardinality_label_names_endpoint_accepts_post_form_body() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     assert_eq!(
-        body["cardinality"]
-            .as_array()
-            .expect("cardinality array")
-            .len(),
-        1
+        (
+            body["cardinality"]
+                .as_array()
+                .expect("cardinality array")
+                .len(),
+            body["cardinality"][0]["label_name"].as_str(),
+        ),
+        (1, Some("job"))
     );
-    assert_eq!(body["cardinality"][0]["label_name"], "job");
 }
 
 #[tokio::test]
@@ -4094,9 +4453,18 @@ async fn cardinality_label_names_endpoint_rejects_invalid_limit_parameter() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert_eq!(body["error"], "invalid limit parameter");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"].as_str(),
+        ),
+        (
+            Some("error"),
+            Some("bad_data"),
+            Some("invalid limit parameter")
+        )
+    );
 }
 
 #[tokio::test]
@@ -4162,9 +4530,18 @@ async fn cardinality_label_names_endpoint_rejects_invalid_count_method_parameter
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert_eq!(body["error"], "invalid count_method parameter");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"].as_str(),
+        ),
+        (
+            Some("error"),
+            Some("bad_data"),
+            Some("invalid count_method parameter"),
+        )
+    );
 }
 
 #[tokio::test]
@@ -4215,13 +4592,15 @@ async fn cardinality_active_series_endpoint_returns_series_labels_under_mimir_pr
     let body = response_json(response).await;
     // Mimir active_series returns a bare object whose `data` array holds flat
     // label maps -- no status envelope, no seriesLabels/metric wrapper.
-    assert!(body.get("status").is_none());
     assert_eq!(
-        body["data"],
-        serde_json::json!([
-            {"__name__": "up", "instance": "a", "job": "api"},
-            {"__name__": "up", "instance": "b", "job": "web"},
-        ])
+        (body.get("status").is_none(), body["data"].clone()),
+        (
+            true,
+            serde_json::json!([
+                {"__name__": "up", "instance": "a", "job": "api"},
+                {"__name__": "up", "instance": "b", "job": "web"},
+            ]),
+        )
     );
 }
 
@@ -4261,12 +4640,14 @@ async fn cardinality_active_series_endpoint_filters_selector_parameter() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert!(body.get("status").is_none());
     assert_eq!(
-        body["data"],
-        serde_json::json!([
-            {"__name__": "up", "instance": "a", "job": "api"},
-        ])
+        (body.get("status").is_none(), body["data"].clone()),
+        (
+            true,
+            serde_json::json!([
+                {"__name__": "up", "instance": "a", "job": "api"},
+            ]),
+        )
     );
 }
 
@@ -4304,8 +4685,13 @@ async fn cardinality_active_series_endpoint_honors_limit_parameter() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert!(body.get("status").is_none());
-    assert_eq!(body["data"].as_array().expect("data array").len(), 1);
+    assert_eq!(
+        (
+            body.get("status").is_none(),
+            body["data"].as_array().expect("data array").len(),
+        ),
+        (true, 1)
+    );
 }
 
 #[tokio::test]
@@ -4344,12 +4730,14 @@ async fn cardinality_active_series_endpoint_accepts_post_form_body() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert!(body.get("status").is_none());
     assert_eq!(
-        body["data"],
-        serde_json::json!([
-            {"__name__": "up", "instance": "a", "job": "api"},
-        ])
+        (body.get("status").is_none(), body["data"].clone()),
+        (
+            true,
+            serde_json::json!([
+                {"__name__": "up", "instance": "a", "job": "api"},
+            ]),
+        )
     );
 }
 
@@ -4406,11 +4794,16 @@ async fn cardinality_label_values_endpoint_returns_label_value_counts() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
     // Mimir nests per-value cardinality under each label, with no envelope.
-    assert!(body.get("status").is_none());
-    assert_eq!(body["series_count_total"], 3);
     assert_eq!(
-        body["labels"],
-        serde_json::json!([
+        (
+            body.get("status").is_none(),
+            body["series_count_total"].as_i64(),
+            body["labels"].clone(),
+        ),
+        (
+            true,
+            Some(3),
+            serde_json::json!([
             {
                 "label_name": "__name__",
                 "label_values_count": 1,
@@ -4436,7 +4829,8 @@ async fn cardinality_label_values_endpoint_returns_label_value_counts() {
                     {"label_value": "web", "series_count": 1},
                 ],
             },
-        ])
+            ]),
+        )
     );
 }
 
@@ -4474,20 +4868,22 @@ async fn cardinality_label_values_endpoint_filters_label_names_parameter() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["series_count_total"], 2);
     assert_eq!(
-        body["labels"],
-        serde_json::json!([
-            {
-                "label_name": "job",
-                "label_values_count": 2,
-                "series_count": 2,
-                "cardinality": [
-                    {"label_value": "api", "series_count": 1},
-                    {"label_value": "web", "series_count": 1},
-                ],
-            },
-        ])
+        (body["series_count_total"].as_i64(), body["labels"].clone()),
+        (
+            Some(2),
+            serde_json::json!([
+                {
+                    "label_name": "job",
+                    "label_values_count": 2,
+                    "series_count": 2,
+                    "cardinality": [
+                        {"label_value": "api", "series_count": 1},
+                        {"label_value": "web", "series_count": 1},
+                    ],
+                },
+            ]),
+        )
     );
 }
 
@@ -4525,17 +4921,19 @@ async fn cardinality_label_values_endpoint_filters_selector_parameter() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["series_count_total"], 1);
     assert_eq!(
-        body["labels"],
-        serde_json::json!([
-            {
-                "label_name": "job",
-                "label_values_count": 1,
-                "series_count": 1,
-                "cardinality": [{"label_value": "api", "series_count": 1}],
-            },
-        ])
+        (body["series_count_total"].as_i64(), body["labels"].clone()),
+        (
+            Some(1),
+            serde_json::json!([
+                {
+                    "label_name": "job",
+                    "label_values_count": 1,
+                    "series_count": 1,
+                    "cardinality": [{"label_value": "api", "series_count": 1}],
+                },
+            ]),
+        )
     );
 }
 
@@ -4623,12 +5021,17 @@ async fn cardinality_label_values_endpoint_accepts_post_form_body() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert!(body.get("status").is_none());
-    assert_eq!(body["series_count_total"], 2);
     let labels = body["labels"].as_array().expect("labels array");
-    assert_eq!(labels.len(), 3);
     // __name__ has the highest series_count, so it sorts first.
-    assert_eq!(labels[0]["label_name"], "__name__");
+    assert_eq!(
+        (
+            body.get("status").is_none(),
+            body["series_count_total"].as_i64(),
+            labels.len(),
+            labels[0]["label_name"].as_str(),
+        ),
+        (true, Some(2), 3, Some("__name__"))
+    );
 }
 
 #[tokio::test]
@@ -4652,9 +5055,18 @@ async fn cardinality_label_values_endpoint_rejects_invalid_limit_parameter() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert_eq!(body["error"], "invalid limit parameter");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"].as_str(),
+        ),
+        (
+            Some("error"),
+            Some("bad_data"),
+            Some("invalid limit parameter"),
+        )
+    );
 }
 
 #[tokio::test]
@@ -4678,8 +5090,10 @@ async fn format_query_endpoint_returns_formatted_expression() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"], "foo / bar");
+    assert_eq!(
+        (body["status"].as_str(), body["data"].as_str()),
+        (Some("success"), Some("foo / bar"))
+    );
 }
 
 #[tokio::test]
@@ -4703,18 +5117,25 @@ async fn parse_query_endpoint_is_available_under_mimir_prefix() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["type"], "vectorSelector");
-    assert_eq!(body["data"]["name"], "up");
     assert_eq!(
-        body["data"]["matchers"],
-        serde_json::json!([
-            {
-                "name": "job",
-                "type": "=",
-                "value": "api"
-            }
-        ])
+        (
+            body["status"].as_str(),
+            body["data"]["type"].as_str(),
+            body["data"]["name"].as_str(),
+            body["data"]["matchers"].clone(),
+        ),
+        (
+            Some("success"),
+            Some("vectorSelector"),
+            Some("up"),
+            serde_json::json!([
+                {
+                    "name": "job",
+                    "type": "=",
+                    "value": "api"
+                }
+            ]),
+        )
     );
 }
 
@@ -4739,9 +5160,18 @@ async fn parse_query_endpoint_returns_prometheus_error_for_missing_query() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert_eq!(body["error"], "missing query parameter");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"].as_str(),
+        ),
+        (
+            Some("error"),
+            Some("bad_data"),
+            Some("missing query parameter")
+        )
+    );
 }
 
 #[tokio::test]
@@ -4765,10 +5195,20 @@ async fn status_buildinfo_endpoint_returns_prometheus_envelope() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["version"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(body["data"]["branch"], "");
-    assert_eq!(body["data"]["goVersion"], "");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["version"].as_str(),
+            body["data"]["branch"].as_str(),
+            body["data"]["goVersion"].as_str(),
+        ),
+        (
+            Some("success"),
+            Some(env!("CARGO_PKG_VERSION")),
+            Some(""),
+            Some("")
+        )
+    );
 }
 
 #[tokio::test]
@@ -4791,9 +5231,14 @@ async fn status_flags_endpoint_returns_prometheus_flag_strings() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["query.lookback-delta"], "5m");
-    assert!(body["data"]["log.level"].as_str().is_some());
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["query.lookback-delta"].as_str(),
+            body["data"]["log.level"].as_str().is_some(),
+        ),
+        (Some("success"), Some("5m"), true)
+    );
 }
 
 #[tokio::test]
@@ -4816,8 +5261,15 @@ async fn status_config_endpoint_is_available_under_mimir_prefix() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert!(body["data"]["yaml"].as_str().unwrap().contains("global:"));
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["yaml"]
+                .as_str()
+                .is_some_and(|yaml| yaml.contains("global:")),
+        ),
+        (Some("success"), true)
+    );
 }
 
 #[tokio::test]
@@ -4866,30 +5318,34 @@ async fn status_tsdb_endpoint_returns_tenant_cardinality_stats() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["headStats"]["numSeries"], 3);
-    assert_eq!(body["data"]["headStats"]["minTime"], 10_000);
-    assert_eq!(body["data"]["headStats"]["maxTime"], 30_000);
     assert_eq!(
-        body["data"]["seriesCountByMetricName"],
-        serde_json::json!([
-            {"name": "up", "value": 2},
-            {"name": "errors_total", "value": 1},
-        ])
-    );
-    assert_eq!(
-        body["data"]["labelValueCountByLabelName"],
-        serde_json::json!([
-            {"name": "__name__", "value": 2},
-            {"name": "instance", "value": 2},
-        ])
-    );
-    assert_eq!(
-        body["data"]["seriesCountByLabelValuePair"],
-        serde_json::json!([
-            {"name": "__name__=up", "value": 2},
-            {"name": "job=api", "value": 2},
-        ])
+        (
+            body["status"].as_str(),
+            (
+                body["data"]["headStats"]["numSeries"].as_i64(),
+                body["data"]["headStats"]["minTime"].as_i64(),
+                body["data"]["headStats"]["maxTime"].as_i64(),
+            ),
+            body["data"]["seriesCountByMetricName"].clone(),
+            body["data"]["labelValueCountByLabelName"].clone(),
+            body["data"]["seriesCountByLabelValuePair"].clone(),
+        ),
+        (
+            Some("success"),
+            (Some(3), Some(10_000), Some(30_000)),
+            serde_json::json!([
+                {"name": "up", "value": 2},
+                {"name": "errors_total", "value": 1},
+            ]),
+            serde_json::json!([
+                {"name": "__name__", "value": 2},
+                {"name": "instance", "value": 2},
+            ]),
+            serde_json::json!([
+                {"name": "__name__=up", "value": 2},
+                {"name": "job=api", "value": 2},
+            ]),
+        )
     );
 }
 
@@ -4914,9 +5370,18 @@ async fn status_tsdb_endpoint_rejects_invalid_limit_parameter_with_prometheus_er
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert_eq!(body["error"], "invalid limit parameter");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["errorType"].as_str(),
+            body["error"].as_str(),
+        ),
+        (
+            Some("error"),
+            Some("bad_data"),
+            Some("invalid limit parameter")
+        )
+    );
 }
 
 #[tokio::test]
@@ -4940,8 +5405,10 @@ async fn status_tsdb_blocks_endpoint_returns_empty_block_list() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["blocks"], serde_json::json!([]));
+    assert_eq!(
+        (body["status"].as_str(), body["data"]["blocks"].clone()),
+        (Some("success"), serde_json::json!([]))
+    );
 }
 
 #[tokio::test]
@@ -4974,15 +5441,24 @@ async fn status_tsdb_blocks_endpoint_returns_compacted_blocks() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
     assert_eq!(
-        body["data"]["blocks"][0]["ulid"],
-        "metrics/tenant-a/float/0001.parquet"
+        (
+            body["status"].as_str(),
+            body["data"]["blocks"][0]["ulid"].as_str(),
+            body["data"]["blocks"][0]["minTime"].as_i64(),
+            body["data"]["blocks"][0]["maxTime"].as_i64(),
+            body["data"]["blocks"][0]["stats"]["numSamples"].as_i64(),
+            body["data"]["blocks"][0]["stats"]["numSeries"].as_i64(),
+        ),
+        (
+            Some("success"),
+            Some("metrics/tenant-a/float/0001.parquet"),
+            Some(10_000),
+            Some(70_000),
+            Some(42),
+            Some(3)
+        )
     );
-    assert_eq!(body["data"]["blocks"][0]["minTime"], 10_000);
-    assert_eq!(body["data"]["blocks"][0]["maxTime"], 70_000);
-    assert_eq!(body["data"]["blocks"][0]["stats"]["numSamples"], 42);
-    assert_eq!(body["data"]["blocks"][0]["stats"]["numSeries"], 3);
 }
 
 #[tokio::test]
@@ -5005,11 +5481,16 @@ async fn status_walreplay_endpoint_reports_done() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["min"], 0);
-    assert_eq!(body["data"]["max"], 0);
-    assert_eq!(body["data"]["current"], 0);
-    assert_eq!(body["data"]["state"], "done");
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["min"].as_i64(),
+            body["data"]["max"].as_i64(),
+            body["data"]["current"].as_i64(),
+            body["data"]["state"].as_str(),
+        ),
+        (Some("success"), Some(0), Some(0), Some(0), Some("done"))
+    );
 }
 
 #[tokio::test]
@@ -5052,9 +5533,14 @@ async fn status_runtimeinfo_endpoint_is_available_under_mimir_prefix() {
 
     assert_eq!(response.status(), StatusCode::OK);
     let body = response_json(response).await;
-    assert_eq!(body["status"], "success");
-    assert!(body["data"]["startTime"].as_str().is_some());
-    assert!(body["data"]["serverTime"].as_str().is_some());
-    assert_eq!(body["data"]["reloadConfigSuccess"], true);
-    assert_eq!(body["data"]["timeSeriesCount"], 2);
+    assert_eq!(
+        (
+            body["status"].as_str(),
+            body["data"]["startTime"].as_str().is_some(),
+            body["data"]["serverTime"].as_str().is_some(),
+            body["data"]["reloadConfigSuccess"].as_bool(),
+            body["data"]["timeSeriesCount"].as_i64(),
+        ),
+        (Some("success"), true, true, Some(true), Some(2))
+    );
 }

@@ -86,7 +86,7 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
+    assert_eq!(descriptors.len(), 1);
 
     let querier_listener = TcpListener::bind(("0.0.0.0", 0)).await.unwrap();
     let querier_port = querier_listener.local_addr().unwrap().port();
@@ -140,7 +140,7 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
         ],
     )
     .await;
-    assert!(labels["data"] == json!(["app", "env", "service_name"]));
+    assert_eq!(labels["data"], json!(["app", "env", "service_name"]));
 
     let app_values = grafana_proxy_loki_result(
         &http,
@@ -153,7 +153,7 @@ async fn grafana_loki_datasource_queries_crabka_querier_proxy() {
         ],
     )
     .await;
-    assert!(app_values["data"] == json!(["api"]));
+    assert_eq!(app_values["data"], json!(["api"]));
 
     let series = grafana_proxy_loki_result(
         &http,
@@ -313,7 +313,7 @@ async fn push_crabka_payload(app: axum::Router, payload: &Value) {
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
 async fn wait_for_grafana_ready(http: &reqwest::Client, base: &str) {

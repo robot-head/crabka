@@ -280,8 +280,6 @@ pub fn plan_search_jobs(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-
     use super::*;
 
     fn block(id: &str, start: i64, end: i64, rgs: &[u64]) -> BlockMetaInfo {
@@ -377,15 +375,20 @@ mod tests {
             .iter()
             .filter(|j| matches!(j, JobShard::Block { .. }))
             .collect();
-        assert!(rg_jobs.len() == 1);
-        assert!(matches!(
-            rg_jobs[0],
-            JobShard::Block {
-                row_group_start: 0,
-                row_group_end: 3,
-                ..
-            }
-        ));
+        assert_eq!(
+            (
+                rg_jobs.len(),
+                matches!(
+                    rg_jobs[0],
+                    JobShard::Block {
+                        row_group_start: 0,
+                        row_group_end: 3,
+                        ..
+                    }
+                ),
+            ),
+            (1, true)
+        );
     }
 
     #[tokio::test]
@@ -395,7 +398,6 @@ mod tests {
             block("b2", 500, 600, &[500]),
         ]);
         let got = cat.blocks("t1", 0, 200).await.unwrap();
-        assert!(got.len() == 1);
-        assert!(got[0].block_id == "b1");
+        assert_eq!((got.len(), got[0].block_id.as_str()), (1, "b1"));
     }
 }

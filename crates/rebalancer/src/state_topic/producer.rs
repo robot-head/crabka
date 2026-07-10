@@ -223,14 +223,23 @@ mod tests {
 
         let req = produce_request("state-topic", topic_id, &key, value.clone());
 
-        check!(req.transactional_id.is_none());
-        check!(req.acks == -1);
-        check!(req.timeout_ms == 10_000);
-        assert!(req.topic_data.len() == 1);
-        check!(req.topic_data[0].name == "state-topic");
-        check!(req.topic_data[0].topic_id == topic_id);
-        assert!(req.topic_data[0].partition_data.len() == 1);
-        check!(req.topic_data[0].partition_data[0].index == 0);
+        check!(
+            (
+                req.transactional_id.as_ref(),
+                req.acks,
+                req.timeout_ms,
+                req.topic_data.first().map(|topic| {
+                    (
+                        topic.name.as_str(),
+                        topic.topic_id,
+                        topic
+                            .partition_data
+                            .first()
+                            .map(|partition| partition.index),
+                    )
+                }),
+            ) == (None, -1, 10_000, Some(("state-topic", topic_id, Some(0))))
+        );
         let records = req.topic_data[0].partition_data[0]
             .records
             .as_ref()
@@ -238,10 +247,14 @@ mod tests {
         let RecordsPayload::V2(batches) = records else {
             panic!("produce request should use v2 record batches");
         };
-        assert!(batches.len() == 1);
-        assert!(batches[0].records.len() == 1);
-        check!(batches[0].records[0].key.as_ref() == Some(&key));
-        check!(batches[0].records[0].value == value);
+        check!(
+            batches
+                .iter()
+                .flat_map(|batch| &batch.records)
+                .map(|record| (record.key.as_ref(), &record.value))
+                .collect::<Vec<_>>()
+                == vec![(Some(&key), &value)]
+        );
     }
 
     #[test]
@@ -249,8 +262,13 @@ mod tests {
         let req = metadata_request("state-topic");
 
         let topics = req.topics.expect("topics");
-        assert!(topics.len() == 1);
-        assert!(topics[0].name.as_deref() == Some("state-topic"));
+        assert!(
+            topics
+                .iter()
+                .map(|topic| topic.name.as_deref())
+                .collect::<Vec<_>>()
+                == vec![Some("state-topic")]
+        );
     }
 
     #[test]
@@ -312,8 +330,15 @@ mod tests {
 
     #[test]
     fn produce_response_error_scans_partition_responses() {
-        assert!(produce_response_error(&response_with_error(0)).is_none());
-        assert!(produce_response_error(&response_with_error(42)) == Some(42));
+        for (name, code, expected) in [
+            ("successful partition", 0, None),
+            ("failed partition", 42, Some(42)),
+        ] {
+            assert!(
+                produce_response_error(&response_with_error(code)) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[tokio::test]

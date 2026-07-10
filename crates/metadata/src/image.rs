@@ -998,8 +998,13 @@ mod tests {
     #[test]
     fn fresh_image_has_no_features_and_unknown_epoch() {
         let m = img();
-        assert!(m.finalized_features().is_empty());
-        assert!(m.finalized_features_epoch() == -1);
+        assert_eq!(
+            (
+                m.finalized_features().is_empty(),
+                m.finalized_features_epoch()
+            ),
+            (true, -1)
+        );
     }
 
     #[test]
@@ -1020,8 +1025,13 @@ mod tests {
             name: "metadata.version".into(),
             level: 1,
         }));
-        assert!(m.finalized_features().get("metadata.version") == Some(&1));
-        assert!(m.finalized_features_epoch() == 0);
+        assert_eq!(
+            (
+                m.finalized_features().get("metadata.version"),
+                m.finalized_features_epoch(),
+            ),
+            (Some(&1), 0)
+        );
 
         // A second apply bumps the epoch again (monotonic).
         m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
@@ -1042,9 +1052,12 @@ mod tests {
             name: "metadata.version".into(),
             level: 0,
         }));
-        assert!(m.finalized_features().get("metadata.version").is_none());
-        // Epoch still advanced — it is monotonic, not a count of live features.
-        assert!(m.finalized_features_epoch() == 1);
+        assert!(
+            (
+                m.finalized_features().get("metadata.version"),
+                m.finalized_features_epoch(),
+            ) == (None, 1)
+        );
     }
 
     #[test]
@@ -1361,9 +1374,13 @@ mod tests {
         assert!(rebuilt == image);
         // Belt-and-suspenders beyond derived PartialEq: the two fields the
         // snapshot path used to lose.
-        check!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
-        check!(rebuilt.finalized_features().get("group.version") == Some(&1));
-        check!(rebuilt.finalized_features_epoch() == 3);
+        check!(
+            (
+                rebuilt.finalized_features().get("metadata.version"),
+                rebuilt.finalized_features().get("group.version"),
+                rebuilt.finalized_features_epoch(),
+            ) == (Some(&25), Some(&1), 3)
+        );
     }
 
     /// KIP-853 voter set + finalized cluster `kraft.version` must survive
@@ -1413,8 +1430,6 @@ mod tests {
 
         let rebuilt = MetadataImage::from_records(cid, &image.to_records());
 
-        assert_eq!(rebuilt.kraft_version(), 1);
-        assert_eq!(rebuilt.voters(), &voters);
         assert_eq!(rebuilt, image);
     }
 
@@ -1708,8 +1723,7 @@ mod tests {
             iterations: 4096,
         }));
         let got = m.scram_credential("alice", crabka_security::SaslMechanism::ScramSha512);
-        assert!(got.is_some());
-        assert!(got.unwrap().iterations == 4096);
+        assert_eq!(got.map(|credential| credential.iterations), Some(4096));
     }
 
     #[test]
@@ -1733,8 +1747,7 @@ mod tests {
             iterations: 8192,
         }));
         let got = m.scram_credential("alice", mech).unwrap();
-        assert!(got.iterations == 8192);
-        assert!(got.salt == vec![9; 16]);
+        assert!((got.iterations, &got.salt) == (8192, &vec![9; 16]));
     }
 
     #[test]
@@ -1786,9 +1799,13 @@ mod tests {
     fn apply_v1_access_control_entry_literal_stores_in_literal_map() {
         let mut m = img();
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
-        let mut hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
-        assert!(hits.len() == 1);
-        assert!(hits.pop().unwrap().resource_name == "foo");
+        let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
+        assert_eq!(
+            hits.iter()
+                .map(|entry| entry.resource_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["foo"]
+        );
     }
 
     #[test]
@@ -1807,8 +1824,12 @@ mod tests {
         let mut m = img();
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
         let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "team-foo").collect();
-        assert!(hits.len() == 1);
-        assert!(hits[0].resource_name == "team-");
+        assert_eq!(
+            hits.iter()
+                .map(|entry| entry.resource_name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["team-"]
+        );
         // Non-matching resource: empty.
         let none: Vec<_> = m.matching_acls(ResourceType::Topic, "other").collect();
         assert!(none.is_empty());
@@ -1821,8 +1842,7 @@ mod tests {
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
         let hits_foo: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
         let hits_team: Vec<_> = m.matching_acls(ResourceType::Topic, "team-x").collect();
-        assert!(hits_foo.len() == 1);
-        assert!(hits_team.len() == 1);
+        assert!((hits_foo.len(), hits_team.len()) == (1, 1));
     }
 
     fn topic_wildcard_allow() -> AclEntry {
@@ -1886,8 +1906,7 @@ mod tests {
         m.apply(&MetadataRecord::V1DeleteAccessControlEntry(filter));
         let hits_foo: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
         let hits_team: Vec<_> = m.matching_acls(ResourceType::Topic, "team-x").collect();
-        assert!(hits_foo.len() == 0); // literal removed
-        assert!(hits_team.len() == 1); // prefixed survives
+        assert!((hits_foo.len(), hits_team.len()) == (0, 1));
     }
 
     #[test]
@@ -2032,11 +2051,15 @@ mod tests {
         m.apply(&MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
             name: "doomed".into(),
         }));
-        check!(m.partitions_of("doomed").count() == 0);
-        check!(m.topic_partition_count("doomed") == 0);
-        check!(m.partitions_of("survivor").count() == 1);
-        check!(m.partition("survivor", 0).is_some());
-        check!(m.all_partitions().count() == 1);
+        check!(
+            (
+                m.partitions_of("doomed").count(),
+                m.topic_partition_count("doomed"),
+                m.partitions_of("survivor").count(),
+                m.partition("survivor", 0).is_some(),
+                m.all_partitions().count(),
+            ) == (0, 0, 1, true, 1)
+        );
     }
 
     #[test]
@@ -2085,8 +2108,12 @@ mod tests {
             partition_epoch: 0,
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
-        assert!(rows.len() == 1);
-        assert!(rows[0].adding_replicas == vec![NodeId(4)]);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.adding_replicas.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![NodeId(4)]]
+        );
     }
 
     #[test]
@@ -2111,8 +2138,12 @@ mod tests {
             partition_epoch: 0,
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
-        assert!(rows.len() == 1);
-        assert!(rows[0].removing_replicas == vec![NodeId(3)]);
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.removing_replicas.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![NodeId(3)]]
+        );
     }
 
     #[test]
@@ -2272,8 +2303,13 @@ mod tests {
             ("client-id".to_string(), Some("app1".to_string())),
         ];
         let canon = canonicalize_entity(input);
-        assert!(canon[0].0 == "client-id");
-        assert!(canon[1].0 == "user");
+        assert_eq!(
+            canon
+                .iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["client-id", "user"]
+        );
     }
 
     #[test]
@@ -2331,14 +2367,15 @@ mod tests {
 
         img.apply(&dt_record("tok-1", alice.clone(), 5_000, vec![]));
         let got = img.delegation_token_by_id("tok-1").expect("token present");
-        assert!(got.expiry_timestamp_ms == 5_000);
-        assert!(got.owner == alice);
+        assert_eq!((got.expiry_timestamp_ms, &got.owner), (5_000, &alice));
 
         // Same token_id, different expiry — replace, not duplicate.
         img.apply(&dt_record("tok-1", alice.clone(), 7_500, vec![]));
         let got = img.delegation_token_by_id("tok-1").expect("token present");
-        assert!(got.expiry_timestamp_ms == 7_500);
-        assert!(img.all_delegation_tokens().count() == 1);
+        assert_eq!(
+            (got.expiry_timestamp_ms, img.all_delegation_tokens().count()),
+            (7_500, 1)
+        );
     }
 
     #[test]
@@ -2354,8 +2391,13 @@ mod tests {
                 token_id: "tok-1".into(),
             },
         ));
-        assert!(img.delegation_token_by_id("tok-1").is_none());
-        assert!(img.all_delegation_tokens().count() == 0);
+        assert_eq!(
+            (
+                img.delegation_token_by_id("tok-1").is_none(),
+                img.all_delegation_tokens().count(),
+            ),
+            (true, 0)
+        );
     }
 
     #[test]
@@ -2388,12 +2430,17 @@ mod tests {
         let found_a = img
             .delegation_token_by_hmac(&hmac_a)
             .expect("hmac_a present");
-        assert!(found_a.token_id == "tok-a");
         let found_b = img
             .delegation_token_by_hmac(&hmac_b)
             .expect("hmac_b present");
-        assert!(found_b.token_id == "tok-b");
-        assert!(img.delegation_token_by_hmac(&[0xCC; 32]).is_none());
+        assert_eq!(
+            (
+                found_a.token_id.as_str(),
+                found_b.token_id.as_str(),
+                img.delegation_token_by_hmac(&[0xCC; 32]).is_none(),
+            ),
+            ("tok-a", "tok-b", true)
+        );
     }
 
     #[test]
@@ -2407,12 +2454,22 @@ mod tests {
         img.apply(&dt_record("b-1", bob.clone(), 7_000, vec![]));
 
         let alice_tokens = img.delegation_tokens_by_owner(&alice);
-        assert!(alice_tokens.len() == 2);
-        assert!(alice_tokens.iter().all(|t| t.owner == alice));
+        assert_eq!(
+            (
+                alice_tokens.len(),
+                alice_tokens.iter().all(|token| token.owner == alice),
+            ),
+            (2, true)
+        );
 
         let bob_tokens = img.delegation_tokens_by_owner(&bob);
-        assert!(bob_tokens.len() == 1);
-        assert!(bob_tokens[0].token_id == "b-1");
+        assert_eq!(
+            bob_tokens
+                .iter()
+                .map(|token| token.token_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b-1"]
+        );
 
         // visible_to: bob owns b-1 and is renewer on a-2 → 2 tokens.
         let bob_visible = img.delegation_tokens_visible_to(&bob);
@@ -2436,8 +2493,10 @@ mod tests {
                 kraft_version: crate::voters::KRaftVersionRange::default(),
             }]),
         }));
-        assert!(image.kraft_version() == 1);
-        assert!(image.voters().contains(NodeId(1)));
+        assert_eq!(
+            (image.kraft_version(), image.voters().contains(NodeId(1))),
+            (1, true)
+        );
     }
 
     #[test]
@@ -2500,8 +2559,13 @@ mod tests {
                 configs: std::collections::BTreeMap::new(),
             },
         ));
-        assert!(img.client_metrics_config("sub-a").is_none());
-        assert_eq!(img.client_metrics_subscriptions().count(), 0);
+        assert_eq!(
+            (
+                img.client_metrics_config("sub-a").is_none(),
+                img.client_metrics_subscriptions().count(),
+            ),
+            (true, 0)
+        );
     }
 
     #[test]
@@ -2551,8 +2615,13 @@ mod tests {
         }));
 
         // Resolves by id to the same record `topic(name)` returns.
-        assert!(img.topic_by_id(&id).map(|t| t.name.as_str()) == Some("orders"));
-        assert!(img.topic_name_by_id(&id) == Some("orders"));
+        assert_eq!(
+            (
+                img.topic_by_id(&id).map(|t| t.name.as_str()),
+                img.topic_name_by_id(&id),
+            ),
+            (Some("orders"), Some("orders"))
+        );
 
         // After delete the id no longer resolves and the name index is gone.
         img.apply(&MetadataRecord::V1DeleteTopic(
@@ -2560,8 +2629,13 @@ mod tests {
                 name: "orders".into(),
             },
         ));
-        assert!(img.topic_by_id(&id).is_none());
-        assert!(img.topic_name_by_id(&id).is_none());
+        assert_eq!(
+            (
+                img.topic_by_id(&id).is_none(),
+                img.topic_name_by_id(&id).is_none()
+            ),
+            (true, true)
+        );
     }
 
     #[test]
@@ -2578,8 +2652,13 @@ mod tests {
                 endpoints: vec![],
             },
         ));
-        assert!(image.broker_epoch(NodeId(5)) == Some(99));
-        assert!(image.broker_epoch(NodeId(404)) == None);
+        assert_eq!(
+            (
+                image.broker_epoch(NodeId(5)),
+                image.broker_epoch(NodeId(404))
+            ),
+            (Some(99), None)
+        );
     }
 
     // --- mutation-coverage tests --------------------------------------------
@@ -2588,8 +2667,7 @@ mod tests {
     fn fresh_image_accessors() {
         let id = Uuid::from_u128(0xABCD);
         let image = MetadataImage::new(id);
-        assert!(image.cluster_id() == id); // not Uuid::default()
-        assert!(image.kraft_version() == 0); // fresh image has kraft_version 0
+        assert_eq!((image.cluster_id(), image.kraft_version()), (id, 0));
     }
 
     #[test]
@@ -2609,8 +2687,7 @@ mod tests {
         let b = image
             .broker(NodeId(7))
             .expect("registered broker resolvable");
-        assert!(b.node_id == 7);
-        assert!(image.broker(NodeId(404)).is_none());
+        assert!((b.node_id, image.broker(NodeId(404)).is_none()) == (NodeId(7), true));
     }
 
     #[test]

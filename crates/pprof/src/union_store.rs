@@ -315,9 +315,13 @@ mod tests {
             .await
             .unwrap();
 
-        check!(flamegraph.total == 12);
-        check!(flamegraph.names.iter().any(|name| name == "hot"));
-        check!(flamegraph.names.iter().any(|name| name == "cold"));
+        check!(
+            (
+                flamegraph.total,
+                flamegraph.names.iter().any(|name| name == "hot"),
+                flamegraph.names.iter().any(|name| name == "cold"),
+            ) == (12, true, true)
+        );
     }
 
     #[tokio::test]

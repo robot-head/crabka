@@ -143,18 +143,27 @@ mod tests {
         let inner = sample_pprof();
         let profile = PprofProfile::from(inner.clone());
 
-        check!(profile.string(1) == Some("cpu"));
-        check!(profile.string(-1).is_none());
-        check!(profile.string(99).is_none());
-        check!(profile.sample_types() == vec![("cpu".to_string(), "nanoseconds".to_string())]);
-        check!(profile.period_type_strings() == ("wall".to_string(), "milliseconds".to_string()));
-        check!(
-            profile.samples()
-                == vec![crate::proto::Sample {
+        assert_eq!(
+            (
+                profile.string(1),
+                profile.string(-1),
+                profile.string(99),
+                profile.sample_types(),
+                profile.period_type_strings(),
+                profile.samples(),
+            ),
+            (
+                Some("cpu"),
+                None,
+                None,
+                vec![("cpu".to_string(), "nanoseconds".to_string())],
+                ("wall".to_string(), "milliseconds".to_string()),
+                &[crate::proto::Sample {
                     location_id: vec![1],
                     value: vec![42],
                     label: Vec::new(),
-                }]
+                }][..],
+            )
         );
         check!(profile.into_inner() == inner);
     }

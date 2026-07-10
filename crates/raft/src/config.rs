@@ -161,9 +161,13 @@ mod tests {
     fn for_tests_uses_expected_snapshot_defaults() {
         let cfg = ControllerConfig::for_tests(NodeId(7), PathBuf::from("/tmp/raft-test"));
 
-        check!(cfg.max_bytes_between_snapshots == 20 * 1024 * 1024);
-        check!(cfg.max_snapshot_interval == Duration::from_hours(1));
-        check!(cfg.snapshot_interval_records == 0);
+        check!(
+            (
+                cfg.max_bytes_between_snapshots,
+                cfg.max_snapshot_interval,
+                cfg.snapshot_interval_records,
+            ) == (20 * 1024 * 1024, Duration::from_hours(1), 0)
+        );
     }
 
     #[test]

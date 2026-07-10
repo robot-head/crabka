@@ -54,7 +54,7 @@ impl Rule for BrokerDeath {
 mod tests {
     use std::time::Duration;
 
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
     use crate::{
@@ -147,9 +147,12 @@ mod tests {
             cfg: &cfg,
         };
         let hits = BrokerDeath.evaluate(&ctx);
-        assert!(hits.len() == 1);
-        check!(hits[0].key == AnomalyKey::Broker(3));
-        check!(hits[0].severity == AnomalySeverity::Critical);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (&hit.key, hit.severity))
+                .collect::<Vec<_>>(),
+            vec![(&AnomalyKey::Broker(3), AnomalySeverity::Critical)]
+        );
     }
 
     #[test]

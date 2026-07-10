@@ -293,10 +293,12 @@ signature_encoding = "hex"
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let wr = parse_response(resp).await;
-    assert!(!wr.deduplicated);
-    assert!(wr.offset >= 0);
+    assert_eq!(
+        (status, wr.deduplicated, wr.offset >= 0),
+        (StatusCode::OK, false, true)
+    );
 
     // Verify the record landed in the topic.
     assert_eq!(count_topic(&bootstrap, topic, "vhp-verify").await, 1);
@@ -428,12 +430,8 @@ idempotency_source = "json:$.id"
         )
         .await
         .unwrap();
-    assert_eq!(first_resp.status(), StatusCode::OK);
+    let first_status = first_resp.status();
     let first = parse_response(first_resp).await;
-    assert!(
-        !first.deduplicated,
-        "first delivery must not be deduplicated"
-    );
 
     // Provider redelivery (same id) → deduplicated, same offset.
     let second_resp = app
@@ -448,12 +446,26 @@ idempotency_source = "json:$.id"
         )
         .await
         .unwrap();
-    assert_eq!(second_resp.status(), StatusCode::OK);
+    let second_status = second_resp.status();
     let second = parse_response(second_resp).await;
-    assert!(second.deduplicated, "redelivery must be deduplicated");
     assert_eq!(
-        first.offset, second.offset,
-        "deduplicated response must return original offset"
+        (
+            first_status,
+            first.deduplicated,
+            second_status,
+            second.deduplicated,
+            first.offset,
+            second.offset,
+        ),
+        (
+            StatusCode::OK,
+            false,
+            StatusCode::OK,
+            true,
+            first.offset,
+            first.offset,
+        ),
+        "redelivery should deduplicate at the original offset"
     );
 
     // Exactly one record in the topic (EOS guarantee).
@@ -528,9 +540,8 @@ idempotency_source = "header:X-Delivery"
         )
         .await
         .unwrap();
-    assert_eq!(first_resp.status(), StatusCode::OK);
+    let first_status = first_resp.status();
     let first = parse_response(first_resp).await;
-    assert!(!first.deduplicated);
 
     // Second POST with same delivery id → dedup.
     let second_resp = app
@@ -545,13 +556,27 @@ idempotency_source = "header:X-Delivery"
         )
         .await
         .unwrap();
-    assert_eq!(second_resp.status(), StatusCode::OK);
+    let second_status = second_resp.status();
     let second = parse_response(second_resp).await;
-    assert!(
-        second.deduplicated,
-        "second with same X-Delivery must dedup"
+    assert_eq!(
+        (
+            first_status,
+            first.deduplicated,
+            second_status,
+            second.deduplicated,
+            first.offset,
+            second.offset,
+        ),
+        (
+            StatusCode::OK,
+            false,
+            StatusCode::OK,
+            true,
+            first.offset,
+            first.offset,
+        ),
+        "second delivery with the same header should deduplicate"
     );
-    assert_eq!(first.offset, second.offset);
 
     token.cancel();
     broker.shutdown().await;
@@ -602,9 +627,9 @@ async fn generic_produce_route() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let first = parse_response(resp).await;
-    assert!(!first.deduplicated);
+    assert_eq!((status, first.deduplicated), (StatusCode::OK, false));
 
     // Same idempotency key twice → second is deduplicated.
     let idem_key = "gpr-key-1";
@@ -621,9 +646,8 @@ async fn generic_produce_route() {
         )
         .await
         .unwrap();
-    assert_eq!(resp1.status(), StatusCode::OK);
+    let first_status = resp1.status();
     let keyed_first = parse_response(resp1).await;
-    assert!(!keyed_first.deduplicated);
 
     let resp2 = app
         .oneshot(
@@ -636,13 +660,27 @@ async fn generic_produce_route() {
         )
         .await
         .unwrap();
-    assert_eq!(resp2.status(), StatusCode::OK);
+    let second_status = resp2.status();
     let keyed_second = parse_response(resp2).await;
-    assert!(
-        keyed_second.deduplicated,
-        "second with same Idempotency-Key must dedup"
+    assert_eq!(
+        (
+            first_status,
+            keyed_first.deduplicated,
+            second_status,
+            keyed_second.deduplicated,
+            keyed_first.offset,
+            keyed_second.offset,
+        ),
+        (
+            StatusCode::OK,
+            false,
+            StatusCode::OK,
+            true,
+            keyed_first.offset,
+            keyed_first.offset,
+        ),
+        "second keyed request should deduplicate at the original offset"
     );
-    assert_eq!(keyed_first.offset, keyed_second.offset);
 
     token.cancel();
     broker.shutdown().await;

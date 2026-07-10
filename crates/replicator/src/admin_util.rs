@@ -233,8 +233,6 @@ fn is_unknown_topic_error(msg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
-
     #[test]
     fn unknown_topic_error_matches_each_substring() {
         // Each positive exercises exactly one of the OR'd substrings, so the
@@ -248,7 +246,7 @@ mod tests {
             // A message with none of the substrings must not match (kills `-> true`).
             ("connection refused", false),
         ] {
-            check!(super::is_unknown_topic_error(msg) == want, "msg={msg:?}");
+            assert_eq!(super::is_unknown_topic_error(msg), want, "msg={msg:?}");
         }
     }
 
@@ -266,12 +264,12 @@ mod tests {
         crate::test_util::produce(&b, "t", b"k1", b"v1").await;
         crate::test_util::produce(&b, "t", b"k1", b"v2").await;
 
-        assert!(crate::test_util::topic_record_count(&b, "t").await == 2);
+        assert_eq!(crate::test_util::topic_record_count(&b, "t").await, 2);
 
         let last = super::read_last_value_for_key(&b, "t", b"k1", None)
             .await
             .unwrap();
-        assert!(last.as_deref() == Some(b"v2".as_slice()));
+        assert_eq!(last.as_deref(), Some(b"v2".as_slice()));
 
         super::ensure_compacted_topic(&b, "state", None)
             .await

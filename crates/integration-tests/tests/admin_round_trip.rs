@@ -63,7 +63,7 @@ async fn admin_round_trip_create_alter_delete() {
         )
         .await
         .unwrap();
-    assert!(outcomes.len() == 1);
+    assert_eq!(outcomes.len(), 1);
     assert!(
         outcomes[0].error.is_none(),
         "create failed: {:?}",
@@ -74,8 +74,8 @@ async fn admin_round_trip_create_alter_delete() {
     let md = admin.metadata(&["foo"]).await.unwrap();
     let foo = md.topics.iter().find(|t| t.name == "foo").unwrap();
     check!(foo.error.is_none());
-    check!(foo.partition_count == 3);
-    check!(foo.replication_factor == 1);
+    assert_eq!(foo.partition_count, 3);
+    assert_eq!(foo.replication_factor, 1);
 
     // 4. Increase partitions to 5.
     let outcomes = admin
@@ -106,11 +106,11 @@ async fn admin_round_trip_create_alter_delete() {
     .await
     .expect("partition count reached 5 within 10s");
     let foo = md.topics.iter().find(|t| t.name == "foo").unwrap();
-    assert!(foo.partition_count == 5);
+    assert_eq!(foo.partition_count, 5);
 
     // 5. describe_configs reports retention.ms as a dynamic override.
     let overrides = admin.describe_configs(&["foo"]).await.unwrap();
-    assert!(overrides.len() == 1);
+    assert_eq!(overrides.len(), 1);
     assert!(
         overrides[0]
             .overrides

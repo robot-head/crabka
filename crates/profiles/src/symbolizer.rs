@@ -54,8 +54,6 @@ fn build_label(request: &SymbolizeRequest) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-
     use super::*;
 
     #[test]
@@ -68,8 +66,10 @@ mod tests {
             })
             .unwrap();
 
-        assert!(out[0].function == "abc+0x42");
-        assert!(out[0].file == "/bin/app");
+        assert_eq!(
+            (out[0].function.as_str(), out[0].file.as_str()),
+            ("abc+0x42", "/bin/app")
+        );
     }
 
     #[test]
@@ -88,7 +88,9 @@ mod tests {
             })
             .unwrap();
 
-        assert!(out[0].function == "/missing/native+0x99");
-        assert!(out[0].file == "/missing/native");
+        assert_eq!(
+            (out[0].function.as_str(), out[0].file.as_str()),
+            ("/missing/native+0x99", "/missing/native")
+        );
     }
 }

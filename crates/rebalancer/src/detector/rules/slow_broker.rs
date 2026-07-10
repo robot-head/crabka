@@ -80,7 +80,7 @@ impl Rule for SlowBroker {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
     use crate::{
@@ -235,9 +235,12 @@ mod tests {
             cfg: &cfg,
         };
         let hits = SlowBroker.evaluate(&ctx);
-        assert!(hits.len() == 1);
-        check!(hits[0].key == AnomalyKey::Broker(1));
-        check!(hits[0].severity == AnomalySeverity::Warning);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (&hit.key, hit.severity))
+                .collect::<Vec<_>>(),
+            vec![(&AnomalyKey::Broker(1), AnomalySeverity::Warning)]
+        );
     }
 
     #[test]
@@ -264,10 +267,16 @@ mod tests {
 
         let hits = SlowBroker.evaluate(&ctx);
 
-        assert!(hits.len() == 1);
-        check!(hits[0].key == AnomalyKey::Broker(4));
-        check!(hits[0].details.contains("median 4.00"));
-        check!(hits[0].details.contains("threshold 6.00"));
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (
+                    &hit.key,
+                    hit.details.contains("median 4.00"),
+                    hit.details.contains("threshold 6.00"),
+                ))
+                .collect::<Vec<_>>(),
+            vec![(&AnomalyKey::Broker(4), true, true)]
+        );
     }
 
     #[test]

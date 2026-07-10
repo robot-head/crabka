@@ -880,8 +880,6 @@ pub(crate) mod test_support {
     clippy::cast_sign_loss
 )]
 mod tests {
-    use assert2::assert;
-
     use super::*;
     use crate::{
         ids::{TraceIdHigh, TraceIdLow},
@@ -1008,8 +1006,7 @@ mod tests {
     fn compact_thrift_skips_unknown_map_fields() {
         let spans = decode_jaeger_thrift(&encode_sample_batch_with_unknown_map()).unwrap();
 
-        assert!(spans.len() == 1);
-        assert!(spans[0].name == "GET /");
+        assert_eq!((spans.len(), spans[0].name.as_str()), (1, "GET /"));
     }
 
     #[test]
@@ -1017,8 +1014,7 @@ mod tests {
         let spans =
             decode_jaeger_binary_thrift(&encode_binary_sample_batch_with_unknown_map()).unwrap();
 
-        assert!(spans.len() == 1);
-        assert!(spans[0].name == "GET /binary");
+        assert_eq!((spans.len(), spans[0].name.as_str()), (1, "GET /binary"));
     }
 
     fn encode_binary_sample_batch() -> Vec<u8> {

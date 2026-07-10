@@ -33,8 +33,11 @@ mod tests {
     #[tokio::test]
     async fn ok_json_sets_vendor_content_type() {
         let resp = ok_json(&serde_json::json!({"id": 7})).into_response();
-        assert_eq!(resp.headers()["content-type"], crate::error::CONTENT_TYPE);
+        let content_type = resp.headers()["content-type"].clone();
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
-        assert_eq!(&body[..], br#"{"id":7}"#);
+        assert_eq!(
+            (content_type.to_str().unwrap(), body.as_ref()),
+            (crate::error::CONTENT_TYPE, br#"{"id":7}"#.as_slice())
+        );
     }
 }

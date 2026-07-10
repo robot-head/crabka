@@ -135,31 +135,73 @@ mod tests {
     #[test]
     fn sign_then_verify_roundtrips() {
         let (signer, pubkey) = fresh_signer("k1");
-        check!(signer.key_id() == "k1");
-        check!(signer.public_key() == pubkey);
+        check!((signer.key_id(), signer.public_key()) == ("k1", pubkey.clone()));
         let msg = b"the quick brown fox";
         let sig = signer.sign(msg);
-        check!(verify_signature(&pubkey, msg, &sig));
-        // tampered message fails
-        check!(!verify_signature(&pubkey, b"the quick brown FOX", &sig));
-        // wrong key fails
         let (_other, other_pub) = fresh_signer("k2");
-        check!(!verify_signature(&other_pub, msg, &sig));
+        for (name, key, message, expected) in [
+            ("valid signature", pubkey.as_slice(), msg.as_slice(), true),
+            (
+                "tampered message",
+                pubkey.as_slice(),
+                b"the quick brown FOX".as_slice(),
+                false,
+            ),
+            ("wrong key", other_pub.as_slice(), msg.as_slice(), false),
+        ] {
+            check!(
+                verify_signature(key, message, &sig) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn checkpoint_bytes_are_canonical_and_field_sensitive() {
         let head = [9u8; 32];
         let base = checkpoint_signing_bytes("k1", Seq(42), &head, EpochMs(1_700_000_000_000));
-        check!(base == checkpoint_signing_bytes("k1", Seq(42), &head, EpochMs(1_700_000_000_000)));
         check!(base.starts_with(CHECKPOINT_DOMAIN));
-        // any field change changes the bytes
-        check!(checkpoint_signing_bytes("k2", Seq(42), &head, EpochMs(1_700_000_000_000)) != base);
-        check!(checkpoint_signing_bytes("k1", Seq(43), &head, EpochMs(1_700_000_000_000)) != base);
-        check!(
-            checkpoint_signing_bytes("k1", Seq(42), &[8u8; 32], EpochMs(1_700_000_000_000)) != base
-        );
-        check!(checkpoint_signing_bytes("k1", Seq(42), &head, EpochMs(1)) != base);
+        for (name, key_id, seq, candidate_head, time, expected_equal) in [
+            (
+                "identical fields",
+                "k1",
+                Seq(42),
+                head,
+                EpochMs(1_700_000_000_000),
+                true,
+            ),
+            (
+                "different key",
+                "k2",
+                Seq(42),
+                head,
+                EpochMs(1_700_000_000_000),
+                false,
+            ),
+            (
+                "different sequence",
+                "k1",
+                Seq(43),
+                head,
+                EpochMs(1_700_000_000_000),
+                false,
+            ),
+            (
+                "different head",
+                "k1",
+                Seq(42),
+                [8u8; 32],
+                EpochMs(1_700_000_000_000),
+                false,
+            ),
+            ("different time", "k1", Seq(42), head, EpochMs(1), false),
+        ] {
+            check!(
+                (checkpoint_signing_bytes(key_id, seq, &candidate_head, time) == base)
+                    == expected_equal,
+                "case {name}"
+            );
+        }
     }
 
     #[test]

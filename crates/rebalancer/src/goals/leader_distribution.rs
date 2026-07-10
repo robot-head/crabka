@@ -171,9 +171,10 @@ mod tests {
         let mvs = LeaderDistribution.propose(&s, &ctx());
         assert!(!mvs.is_empty());
         for m in &mvs {
-            check!(m.old_replicas == m.new_replicas, "leader-only move");
-            check!(m.old_leader == 1);
-            check!(m.new_leader == 2);
+            check!(
+                (&m.old_replicas, &m.new_replicas, m.old_leader, m.new_leader,)
+                    == (&m.new_replicas, &m.new_replicas, 1, 2)
+            );
         }
     }
 

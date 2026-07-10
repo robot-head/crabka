@@ -143,7 +143,7 @@ impl Goal for CpuCapacity {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
     use crate::{
@@ -242,8 +242,12 @@ mod tests {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2]);
         let ctx = ctx_with(caps(1, 8.0), Arc::new(UsageStore::default()));
-        assert!(CpuCapacity.propose(&s, &ctx).is_empty());
-        assert!(CpuCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert!(
+            (
+                CpuCapacity.propose(&s, &ctx).is_empty(),
+                CpuCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -296,8 +300,12 @@ mod tests {
         let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 600_000.0)).collect();
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(caps(1, f64::NAN), store);
-        assert!(CpuCapacity.propose(&s, &ctx).is_empty());
-        assert!(CpuCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert!(
+            (
+                CpuCapacity.propose(&s, &ctx).is_empty(),
+                CpuCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -308,8 +316,12 @@ mod tests {
         let samples: Vec<_> = (0..2).map(|i| (1, "t", i, 0.0, 500_000.0)).collect();
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(caps(1, 1.0), store);
-        assert!(CpuCapacity.propose(&s, &ctx).is_empty());
-        assert!(CpuCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert!(
+            (
+                CpuCapacity.propose(&s, &ctx).is_empty(),
+                CpuCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -341,10 +353,14 @@ mod tests {
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(caps(1, 1.0), store);
         let mvs = CpuCapacity.propose(&s, &ctx);
-        assert!(!mvs.is_empty());
-        check!(mvs[0].old_leader == 1);
-        check!(mvs[0].new_leader != 1);
-        check!(mvs[0].new_replicas.contains(&mvs[0].new_leader));
+        assert!(
+            (
+                mvs.is_empty(),
+                mvs[0].old_leader,
+                mvs[0].new_leader != 1,
+                mvs[0].new_replicas.contains(&mvs[0].new_leader),
+            ) == (false, 1, true, true)
+        );
     }
 
     #[test]

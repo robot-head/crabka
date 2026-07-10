@@ -805,19 +805,17 @@ mod tests {
 
         collect_tags(&[span()], &mut tag_names, &mut tag_values);
 
-        assert!(
-            tag_names
-                == BTreeSet::from([
+        assert_eq!(
+            (tag_names, tag_values),
+            (
+                BTreeSet::from([
                     "event:name".to_string(),
                     "event:timeSinceStart".to_string(),
                     "link:spanID".to_string(),
                     "link:traceID".to_string(),
                     "service.name".to_string(),
-                ])
-        );
-        assert!(
-            tag_values
-                == BTreeMap::from([
+                ]),
+                BTreeMap::from([
                     (
                         "event:name".to_string(),
                         BTreeSet::from(["exception".to_string()])
@@ -839,6 +837,7 @@ mod tests {
                         BTreeSet::from(["api".to_string()])
                     ),
                 ])
+            )
         );
     }
 
@@ -858,9 +857,10 @@ mod tests {
 
         collect_tags(&[span], &mut tag_names, &mut tag_values);
 
-        assert!(
-            tag_names
-                == BTreeSet::from([
+        assert_eq!(
+            (tag_names, tag_values),
+            (
+                BTreeSet::from([
                     "cache.key".to_string(),
                     "event:name".to_string(),
                     "event:timeSinceStart".to_string(),
@@ -868,11 +868,8 @@ mod tests {
                     "link:spanID".to_string(),
                     "link:traceID".to_string(),
                     "service.name".to_string(),
-                ])
-        );
-        assert!(
-            tag_values
-                == BTreeMap::from([
+                ]),
+                BTreeMap::from([
                     (
                         "cache.key".to_string(),
                         BTreeSet::from(["users".to_string()])
@@ -902,6 +899,7 @@ mod tests {
                         BTreeSet::from(["api".to_string()])
                     ),
                 ])
+            )
         );
     }
 
@@ -915,9 +913,10 @@ mod tests {
 
         collect_tags(&[span], &mut tag_names, &mut tag_values);
 
-        assert!(
-            tag_names
-                == BTreeSet::from([
+        assert_eq!(
+            (tag_names, tag_values),
+            (
+                BTreeSet::from([
                     "event:name".to_string(),
                     "event:timeSinceStart".to_string(),
                     "instrumentation:name".to_string(),
@@ -925,11 +924,8 @@ mod tests {
                     "link:spanID".to_string(),
                     "link:traceID".to_string(),
                     "service.name".to_string(),
-                ])
-        );
-        assert!(
-            tag_values
-                == BTreeMap::from([
+                ]),
+                BTreeMap::from([
                     (
                         "event:name".to_string(),
                         BTreeSet::from(["exception".to_string()])
@@ -959,6 +955,7 @@ mod tests {
                         BTreeSet::from(["api".to_string()])
                     ),
                 ])
+            )
         );
     }
 }

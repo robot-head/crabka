@@ -361,11 +361,17 @@ mod tests {
         let resolved = def.resolve(raw, &EnvSecretResolver).await.unwrap();
 
         assert_eq!(
-            resolved.get_string("database_url").unwrap(),
-            "postgres://localhost/app"
+            (
+                resolved.get_string("database_url").unwrap(),
+                resolved.get_string("schema").unwrap(),
+                resolved.contains_key("missing_optional"),
+            ),
+            (
+                "postgres://localhost/app".to_string(),
+                "public".to_string(),
+                false,
+            )
         );
-        assert_eq!(resolved.get_string("schema").unwrap(), "public");
-        assert!(!resolved.contains_key("missing_optional"));
     }
 
     #[tokio::test]
@@ -510,24 +516,29 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved.get_string("name").unwrap(), "source-a");
-        assert!(resolved.get_bool("enabled").unwrap());
-        assert_eq!(resolved.get_i64("limit").unwrap(), 42);
-        assert_eq!(resolved.get_u64("unsigned_limit").unwrap(), u64::MAX);
-        assert_eq!(resolved.get_u64("timeout_ms").unwrap(), 2500);
+        assert_eq!(
+            (
+                resolved.get_string("name").unwrap(),
+                resolved.get_bool("enabled").unwrap(),
+                resolved.get_i64("limit").unwrap(),
+                resolved.get_u64("unsigned_limit").unwrap(),
+                resolved.get_u64("timeout_ms").unwrap(),
+                resolved.get_string_list("topics").unwrap(),
+                resolved.get_json("metadata").unwrap(),
+                resolved.get_secret("password").unwrap().expose_secret(),
+            ),
+            (
+                "source-a".to_string(),
+                true,
+                42,
+                u64::MAX,
+                2500,
+                vec!["alpha".to_string(), "beta".to_string()],
+                json!({"mode": "snapshot"}),
+                "literal-secret",
+            )
+        );
         assert!((resolved.get_f64("ratio").unwrap() - 0.75).abs() < f64::EPSILON);
-        assert_eq!(
-            resolved.get_string_list("topics").unwrap(),
-            vec!["alpha".to_string(), "beta".to_string()]
-        );
-        assert_eq!(
-            resolved.get_json("metadata").unwrap(),
-            json!({"mode": "snapshot"})
-        );
-        assert_eq!(
-            resolved.get_secret("password").unwrap().expose_secret(),
-            "literal-secret"
-        );
     }
 
     #[tokio::test]
@@ -567,11 +578,15 @@ mod tests {
 
         let debug = format!("{def:?}");
 
-        check!(debug.contains("ConfigDef"));
-        check!(debug.contains("demo"));
-        check!(debug.contains("password"));
-        check!(debug.contains("<redacted>"));
-        check!(!debug.contains("literal-secret"));
+        check!(
+            (
+                debug.contains("ConfigDef"),
+                debug.contains("demo"),
+                debug.contains("password"),
+                debug.contains("<redacted>"),
+                debug.contains("literal-secret"),
+            ) == (true, true, true, true, false)
+        );
     }
 
     #[test]
@@ -589,35 +604,41 @@ mod tests {
     }
 
     #[test]
-    fn secret_defaults_are_redacted_in_debug_defensively() {
-        let key = ConfigKey {
-            name: "password".to_string(),
-            kind: ConfigKind::Secret,
-            required: false,
-            default: Some(json!("literal-secret")),
-            description: None,
-        };
+    fn config_key_debug_secret_and_non_secret_cases() {
+        let cases = [
+            (
+                "secret default",
+                ConfigKey {
+                    name: "password".to_string(),
+                    kind: ConfigKind::Secret,
+                    required: false,
+                    default: Some(json!("literal-secret")),
+                    description: None,
+                },
+                (false, true, false),
+            ),
+            (
+                "non-secret default",
+                ConfigKey {
+                    name: "schema".to_string(),
+                    kind: ConfigKind::String,
+                    required: false,
+                    default: Some(json!("public")),
+                    description: None,
+                },
+                (true, false, false),
+            ),
+        ];
 
-        let debug = format!("{key:?}");
-
-        assert!(!debug.contains("literal-secret"));
-        assert!(debug.contains("<redacted>"));
-    }
-
-    #[test]
-    fn non_secret_defaults_are_not_redacted_in_debug() {
-        let key = ConfigKey {
-            name: "schema".to_string(),
-            kind: ConfigKind::String,
-            required: false,
-            default: Some(json!("public")),
-            description: None,
-        };
-
-        let debug = format!("{key:?}");
-
-        assert!(debug.contains("public"));
-        assert!(!debug.contains("<redacted>"));
+        for (name, key, expected) in cases {
+            let debug = format!("{key:?}");
+            let actual = (
+                debug.contains("public"),
+                debug.contains("<redacted>"),
+                debug.contains("literal-secret"),
+            );
+            assert_eq!(actual, expected, "config key debug case {name}");
+        }
     }
 
     #[test]
@@ -706,10 +727,10 @@ mod tests {
 
         let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-        assert!(matches!(err, ConfigError::SecretResolution { ref key, .. } if key == "password"));
-        assert!(
-            !matches!(err, ConfigError::SecretResolution { ref key, .. } if key == "CRABKA_CONNECT_TEST_MISSING_PASSWORD")
-        );
+        let ConfigError::SecretResolution { key, .. } = err else {
+            panic!("expected secret resolution failure for the config field")
+        };
+        assert_eq!(key, "password");
     }
 
     #[tokio::test]

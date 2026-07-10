@@ -213,8 +213,10 @@ mod tests {
         let mvs = LeaderBytesIn.propose(&s, &ctx);
         assert!(!mvs.is_empty(), "expected leader-only swaps");
         for m in &mvs {
-            check!(m.old_replicas == m.new_replicas, "leader-only");
-            check!(m.new_leader == 2, "cold broker becomes new leader");
+            check!(
+                (&m.old_replicas, &m.new_replicas, m.new_leader)
+                    == (&m.new_replicas, &m.new_replicas, 2)
+            );
         }
     }
 

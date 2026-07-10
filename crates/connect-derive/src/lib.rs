@@ -348,66 +348,65 @@ mod tests {
     }
 
     #[test]
-    fn config_def_marks_secret_required_and_optional_fields() {
-        let expanded = expanded_config_def(
-            r"
-            struct Demo {
-                #[config(secret)]
-                password: SecretString,
-                #[config(secret)]
-                maybe_password: Option<SecretString>,
-                #[config(required, secret)]
-                required_maybe_password: Option<SecretString>,
-            }
-            ",
-        );
+    fn generated_config_def_cases_match_expected_entries() {
+        let cases = [
+            (
+                "secret fields",
+                r#"
+                struct Demo {
+                    #[config(secret)]
+                    password: SecretString,
+                    #[config(secret)]
+                    maybe_password: Option<SecretString>,
+                    #[config(required, secret)]
+                    required_maybe_password: Option<SecretString>,
+                }
+                "#,
+                [
+                    "def=def.secret(\"password\");",
+                    "def=def.optional(\"maybe_password\",",
+                    "def=def.secret(\"required_maybe_password\");",
+                ],
+            ),
+            (
+                "plain fields",
+                r#"
+                struct Demo {
+                    database_url: String,
+                    note: Option<String>,
+                    #[config(required)]
+                    required_note: Option<String>,
+                }
+                "#,
+                [
+                    "def=def.required(\"database_url\",",
+                    "def=def.optional(\"note\",",
+                    "def=def.required(\"required_note\",",
+                ],
+            ),
+        ];
 
-        for needle in [
-            "def=def.secret(\"password\");",
-            "def=def.optional(\"maybe_password\",",
-            "def=def.secret(\"required_maybe_password\");",
-        ] {
-            assert!(
-                expanded.contains(needle),
-                "missing {needle:?} in {expanded}"
-            );
-        }
-    }
-
-    #[test]
-    fn config_def_marks_plain_required_and_optional_fields() {
-        let expanded = expanded_config_def(
-            r"
-            struct Demo {
-                database_url: String,
-                note: Option<String>,
-                #[config(required)]
-                required_note: Option<String>,
-            }
-            ",
-        );
-
-        for needle in [
-            "def=def.required(\"database_url\",",
-            "def=def.optional(\"note\",",
-            "def=def.required(\"required_note\",",
-        ] {
-            assert!(
-                expanded.contains(needle),
-                "missing {needle:?} in {expanded}"
-            );
+        for (name, input, expected) in cases {
+            let expanded = expanded_config_def(input);
+            let actual: Vec<_> = expected
+                .iter()
+                .copied()
+                .filter(|needle| expanded.contains(needle))
+                .collect();
+            assert_eq!(actual, expected, "generated config case {name}");
         }
     }
 
     #[test]
     fn type_info_recognizes_options_secrets_and_duration_paths() {
         let optional_secret = analyze_type(&parse_type("Option<SecretString>")).unwrap();
-        assert!(optional_secret.is_option);
-        assert!(optional_secret.is_secret);
+        assert_eq!(
+            (optional_secret.is_option, optional_secret.is_secret),
+            (true, true)
+        );
 
         let string_vec = analyze_type(&parse_type("Vec<String>")).unwrap();
-        check!(!string_vec.is_option);
-        check!(!string_vec.is_secret);
+        check!((string_vec.is_option, string_vec.is_secret) == (false, false));
         check!(analyze_type(&parse_type("Vec<u8>")).is_err());
 
         for scalar in [
@@ -415,17 +414,24 @@ mod tests {
             "usize", "f32", "f64", "Value",
         ] {
             let info = analyze_type(&parse_type(scalar)).unwrap();
-            assert!(!info.is_option, "{scalar} is not optional");
-            assert!(!info.is_secret, "{scalar} is not secret");
+            assert_eq!(
+                (info.is_option, info.is_secret),
+                (false, false),
+                "case {scalar}"
+            );
         }
 
-        let std_duration = analyze_type(&parse_type("std::time::Duration")).unwrap();
-        assert!(!std_duration.is_option);
-        assert!(!std_duration.is_secret);
-
-        let absolute_duration = analyze_type(&parse_type("::std::time::Duration")).unwrap();
-        assert!(!absolute_duration.is_option);
-        assert!(!absolute_duration.is_secret);
+        for (name, ty) in [
+            ("standard_duration_path", "std::time::Duration"),
+            ("absolute_duration_path", "::std::time::Duration"),
+        ] {
+            let info = analyze_type(&parse_type(ty)).unwrap();
+            assert_eq!(
+                (info.is_option, info.is_secret),
+                (false, false),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -439,13 +445,23 @@ mod tests {
         };
         validate_field_attrs(&explicit_secret, &secret_ty).unwrap();
 
-        let secret_without_attr = FieldAttrs::default();
-        assert!(validate_field_attrs(&secret_without_attr, &secret_ty).is_err());
-
         let secret_attr_on_string = FieldAttrs {
             secret: true,
             ..FieldAttrs::default()
         };
-        assert!(validate_field_attrs(&secret_attr_on_string, &string_ty).is_err());
+        for (name, attrs, ty) in [
+            (
+                "secret_type_without_attribute",
+                FieldAttrs::default(),
+                &secret_ty,
+            ),
+            (
+                "secret_attribute_on_string",
+                secret_attr_on_string,
+                &string_ty,
+            ),
+        ] {
+            assert!(validate_field_attrs(&attrs, ty).is_err(), "case {name}");
+        }
     }
 }

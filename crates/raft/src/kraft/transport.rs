@@ -870,14 +870,18 @@ pub mod wire {
             };
             let mut cur = &req.encode()[..];
             let raw = VoteRequest::decode(&mut cur, VOTE_VERSION).expect("decode vote request");
-            check!(raw.cluster_id.is_none());
-            check!(raw.voter_id == 9);
             let partition = &raw.topics[0].partitions[0];
-            check!(partition.replica_epoch == 3);
-            check!(partition.replica_id == 7);
-            check!(partition.last_offset_epoch == 2);
-            check!(partition.last_offset == 42);
-            check!(partition.pre_vote);
+            check!(
+                (
+                    raw.cluster_id.as_ref(),
+                    raw.voter_id,
+                    partition.replica_epoch,
+                    partition.replica_id,
+                    partition.last_offset_epoch,
+                    partition.last_offset,
+                    partition.pre_vote,
+                ) == (None, 9, 3, 7, 2, 42, true)
+            );
         }
 
         #[test]
@@ -905,11 +909,16 @@ pub mod wire {
             let mut begin_cur = &begin.encode()[..];
             let raw_begin = BeginQuorumEpochRequest::decode(&mut begin_cur, QUORUM_EPOCH_VERSION)
                 .expect("decode begin request");
-            assert!(raw_begin.cluster_id.is_none());
-            assert!(raw_begin.voter_id == -1);
             let begin_partition = &raw_begin.topics[0].partitions[0];
-            assert!(begin_partition.leader_id == 5);
-            assert!(begin_partition.leader_epoch == 9);
+            assert_eq!(
+                (
+                    raw_begin.cluster_id.as_ref(),
+                    raw_begin.voter_id,
+                    begin_partition.leader_id,
+                    begin_partition.leader_epoch,
+                ),
+                (None, -1, 5, 9)
+            );
 
             let end = PeerRequest::EndQuorumEpoch {
                 leader_id: NodeId(1),
@@ -918,10 +927,15 @@ pub mod wire {
             let mut end_cur = &end.encode()[..];
             let raw_end = EndQuorumEpochRequest::decode(&mut end_cur, QUORUM_EPOCH_VERSION)
                 .expect("decode end request");
-            assert!(raw_end.cluster_id.is_none());
             let end_partition = &raw_end.topics[0].partitions[0];
-            assert!(end_partition.leader_id == 1);
-            assert!(end_partition.leader_epoch == 4);
+            assert_eq!(
+                (
+                    raw_end.cluster_id.as_ref(),
+                    end_partition.leader_id,
+                    end_partition.leader_epoch,
+                ),
+                (None, 1, 4)
+            );
         }
 
         #[test]
@@ -945,12 +959,16 @@ pub mod wire {
             };
             let mut cur = &req.encode()[..];
             let raw = FetchRequest::decode(&mut cur, FETCH_VERSION).expect("decode fetch request");
-            check!(raw.replica_state.replica_id == 2);
-            check!(raw.replica_state.replica_epoch == -1);
             let partition = &raw.topics[0].partitions[0];
-            check!(partition.current_leader_epoch == 1);
-            check!(partition.last_fetched_epoch == 1);
-            check!(partition.fetch_offset == 11);
+            check!(
+                (
+                    raw.replica_state.replica_id,
+                    raw.replica_state.replica_epoch,
+                    partition.current_leader_epoch,
+                    partition.last_fetched_epoch,
+                    partition.fetch_offset,
+                ) == (2, -1, 1, 1, 11)
+            );
         }
 
         #[test]
@@ -972,12 +990,16 @@ pub mod wire {
             };
             let mut cur = &resp.encode()[..];
             let raw = VoteResponse::decode(&mut cur, VOTE_VERSION).expect("decode vote response");
-            check!(raw.error_code == 0);
             let partition = &raw.topics[0].partitions[0];
-            check!(partition.partition_index == METADATA_PARTITION);
-            check!(partition.error_code == 0);
-            check!(partition.leader_epoch == 3);
-            check!(partition.vote_granted);
+            check!(
+                (
+                    raw.error_code,
+                    partition.partition_index,
+                    partition.error_code,
+                    partition.leader_epoch,
+                    partition.vote_granted,
+                ) == (0, METADATA_PARTITION, 0, 3, true)
+            );
         }
 
         #[test]
@@ -1028,12 +1050,16 @@ pub mod wire {
             let mut cur = &resp.encode()[..];
             let raw = BeginQuorumEpochResponse::decode(&mut cur, QUORUM_EPOCH_VERSION)
                 .expect("decode ack");
-            check!(raw.error_code == 0);
             let partition = &raw.topics[0].partitions[0];
-            check!(partition.partition_index == METADATA_PARTITION);
-            check!(partition.error_code == 0);
-            check!(partition.leader_id == -1);
-            check!(partition.leader_epoch == 8);
+            check!(
+                (
+                    raw.error_code,
+                    partition.partition_index,
+                    partition.error_code,
+                    partition.leader_id,
+                    partition.leader_epoch,
+                ) == (0, METADATA_PARTITION, 0, -1, 8)
+            );
         }
 
         #[test]
@@ -1073,14 +1099,18 @@ pub mod wire {
             let mut cur = &req.encode()[..];
             let raw = FetchSnapshotRequest::decode(&mut cur, FETCH_SNAPSHOT_VERSION)
                 .expect("decode fetch snapshot request");
-            check!(raw.cluster_id.is_none());
-            check!(raw.replica_id == 2);
-            check!(raw.max_bytes == 4096);
             let partition = &raw.topics[0].partitions[0];
-            check!(partition.current_leader_epoch == 3);
-            check!(partition.snapshot_id.end_offset == 42);
-            check!(partition.snapshot_id.epoch == 3);
-            check!(partition.position == 128);
+            check!(
+                (
+                    raw.cluster_id.as_ref(),
+                    raw.replica_id,
+                    raw.max_bytes,
+                    partition.current_leader_epoch,
+                    partition.snapshot_id.end_offset,
+                    partition.snapshot_id.epoch,
+                    partition.position,
+                ) == (None, 2, 4096, 3, 42, 3, 128)
+            );
         }
 
         #[test]
@@ -1137,11 +1167,15 @@ pub mod wire {
             let raw =
                 FetchResponse::decode(&mut cur, FETCH_VERSION).expect("decode fetch response");
             let partition = &raw.responses[0].partitions[0];
-            check!(partition.partition_index == METADATA_PARTITION);
-            check!(partition.error_code == 0);
-            check!(partition.high_watermark == 7);
-            check!(partition.current_leader.leader_id == 2);
-            check!(partition.current_leader.leader_epoch == 5);
+            check!(
+                (
+                    partition.partition_index,
+                    partition.error_code,
+                    partition.high_watermark,
+                    partition.current_leader.leader_id,
+                    partition.current_leader.leader_epoch,
+                ) == (METADATA_PARTITION, 0, 7, 2, 5)
+            );
         }
 
         #[test]

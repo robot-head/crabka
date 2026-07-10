@@ -82,6 +82,11 @@ fn otlp_payload_uses_seed_dataset() {
     let seed = seed_dataset();
     let payload = to_otlp(&seed);
 
-    assert!(payload.resource_spans.len() == seed.len());
-    assert!(payload.resource_spans[0].scope_spans[0].spans.len() == seed[0].spans.len());
+    assert_eq!(
+        (
+            payload.resource_spans.len(),
+            payload.resource_spans[0].scope_spans[0].spans.len(),
+        ),
+        (seed.len(), seed[0].spans.len())
+    );
 }

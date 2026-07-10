@@ -626,8 +626,10 @@ mod tests {
         }])
         .unwrap();
 
-        assert!(batch.schema() == crabka_blockstore::profile_samples_schema());
-        assert!(batch.num_rows() == 1);
+        assert_eq!(
+            (batch.schema(), batch.num_rows()),
+            (crabka_blockstore::profile_samples_schema(), 1)
+        );
     }
 
     #[tokio::test]
@@ -639,11 +641,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(metas.len() == 1);
-        check!(metas[0].tenant == "t");
-        check!(metas[0].row_count == 2);
-        check!(metas[0].min_ts == 1_700_000_000_000);
-        check!(metas[0].max_ts == 1_700_000_000_000);
+        assert_eq!(
+            (
+                metas.len(),
+                metas[0].tenant.as_str(),
+                metas[0].row_count,
+                metas[0].min_ts,
+                metas[0].max_ts,
+            ),
+            (1, "t", 2, 1_700_000_000_000, 1_700_000_000_000)
+        );
         let symdb_key = format!("{}.symdb", metas[0].object_key);
         assert!(
             store
@@ -669,14 +676,17 @@ mod tests {
             .await
             .unwrap();
 
-        check!(metas.len() == 2);
-        for (tenant, row_count) in [("t", 2), ("u", 1)] {
-            check!(
-                metas
-                    .iter()
-                    .any(|meta| meta.tenant == tenant && meta.row_count == row_count)
-            );
-        }
+        assert_eq!(
+            (
+                metas.len(),
+                [("t", 2), ("u", 1)].map(|(tenant, row_count)| {
+                    metas
+                        .iter()
+                        .any(|meta| meta.tenant == tenant && meta.row_count == row_count)
+                }),
+            ),
+            (2, [true, true])
+        );
         for meta in metas {
             assert!(
                 store

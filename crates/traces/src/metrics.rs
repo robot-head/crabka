@@ -259,7 +259,7 @@ async fn export(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -307,15 +307,17 @@ mod tests {
         let m = ServiceMetrics::new();
         m.record_ingest(true, 100, 3, 0.01);
         m.record_ingest(true, 50, 2, 0.01);
-        check!(m.ingest_bytes.get() == 150);
-        check!(m.ingest_items.get() == 5);
-        check!(
-            m.ingest_requests
-                .get_or_create(&StatusLabel {
-                    status: "ok".into()
-                })
-                .get()
-                == 2
+        assert_eq!(
+            (
+                m.ingest_bytes.get(),
+                m.ingest_items.get(),
+                m.ingest_requests
+                    .get_or_create(&StatusLabel {
+                        status: "ok".into()
+                    })
+                    .get(),
+            ),
+            (150, 5, 2)
         );
     }
 
@@ -341,23 +343,22 @@ mod tests {
         m.record_block_flushed();
         m.record_block_flushed();
 
-        assert!(
-            m.ingest_spans
-                .get_or_create(&TenantLabel {
-                    tenant: "tenant-a".into()
-                })
-                .get()
-                == 5
+        assert_eq!(
+            (
+                m.ingest_spans
+                    .get_or_create(&TenantLabel {
+                        tenant: "tenant-a".into()
+                    })
+                    .get(),
+                m.ingest_spans
+                    .get_or_create(&TenantLabel {
+                        tenant: "tenant-b".into()
+                    })
+                    .get(),
+                m.blocks_flushed.get(),
+            ),
+            (5, 4, 2)
         );
-        assert!(
-            m.ingest_spans
-                .get_or_create(&TenantLabel {
-                    tenant: "tenant-b".into()
-                })
-                .get()
-                == 4
-        );
-        assert!(m.blocks_flushed.get() == 2);
     }
 
     #[test]

@@ -282,8 +282,7 @@ mod tests {
 
         let mvs = RackAware.propose(&s, &ctx());
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![1, 4, 3]);
+        assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![1, 4, 3]]);
     }
 
     #[test]

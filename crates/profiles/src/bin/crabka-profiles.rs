@@ -352,8 +352,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(cli.block_builder_flush_records == 4096);
-        assert!(cli.block_builder_flush_max_age_ms == 60_000);
+        assert_eq!(
+            (
+                cli.block_builder_flush_records,
+                cli.block_builder_flush_max_age_ms,
+            ),
+            (4096, 60_000)
+        );
     }
 
     #[test]
@@ -374,8 +379,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::QueryFrontend));
-        assert!(cli.query_frontend_shard_ms == 30_000);
+        assert_eq!(
+            (
+                matches!(cli.target, Target::QueryFrontend),
+                cli.query_frontend_shard_ms,
+            ),
+            (true, 30_000)
+        );
     }
 
     #[test]
@@ -435,8 +445,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Compactor));
-        assert!(cli.compactor_max_blocks_per_job == 3);
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Compactor),
+                cli.compactor_max_blocks_per_job,
+            ),
+            (true, 3)
+        );
     }
 
     #[test]
@@ -507,8 +522,13 @@ mod tests {
 
         let config = load_tenant_limits_config(Some(&path)).unwrap();
 
-        assert!(config.default.max_label_names_per_series == 10);
-        assert!(config.for_tenant("tenant-a").max_label_value_len == 3);
+        assert_eq!(
+            (
+                config.default.max_label_names_per_series,
+                config.for_tenant("tenant-a").max_label_value_len,
+            ),
+            (10, 3)
+        );
     }
 
     #[test]

@@ -43,8 +43,11 @@ fn schema_key_serialises_byte_exact() {
 fn avro_value_omits_schema_type_and_references() {
     let (_, val_str) = schema_fixture_for("av-value");
     let v: serde_json::Value = serde_json::from_str(&val_str).unwrap();
-    assert!(v.get("schemaType").is_none(), "AVRO value omits schemaType");
-    assert!(v.get("references").is_none(), "AVRO value omits references");
+    assert_eq!(
+        (v.get("schemaType"), v.get("references")),
+        (None, None),
+        "AVRO value omits optional metadata"
+    );
     // Our encode produces a structurally-equal value (field order may differ).
     let (_, our_val) = encode_schema(
         "av-value",
@@ -91,8 +94,22 @@ fn decode_handles_noop_and_schema_and_tombstone() {
     let (k, val) = schema_fixture_for("av-value");
     match SchemaRecord::decode(k.as_bytes(), Some(val.as_bytes())) {
         SchemaRecord::Schema(key, value) => {
-            assert_eq!(key.subject, "av-value");
-            assert_eq!(value.id, SchemaId(1));
+            assert_eq!(
+                (key, value),
+                (
+                    SchemaKey::new("av-value", SchemaVersion(1)),
+                    SchemaValue {
+                        subject: "av-value".into(),
+                        version: SchemaVersion(1),
+                        id: SchemaId(1),
+                        schema_type: None,
+                        message_type: None,
+                        references: vec![],
+                        schema: r#"{"type":"record","name":"User","fields":[{"name":"id","type":"int"}]}"#.into(),
+                        deleted: false,
+                    },
+                )
+            );
         }
         other => panic!("expected Schema, got {other:?}"),
     }

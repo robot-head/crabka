@@ -323,8 +323,6 @@ fn resolve_service_name(rp: &pb::otlp_profiles::ResourceProfiles) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
-
     use super::*;
     use crate::wire::pb;
 
@@ -421,19 +419,28 @@ mod tests {
 
         let out = decode_otlp(&req).unwrap();
 
-        assert!(out.len() == 1);
-        for (name, want) in [
-            ("__name__", "samples"),
-            ("env", "prod"),
-            ("__profile_id__", "abcd"),
-        ] {
-            check!(out[0].labels.get(name) == Some(want));
-        }
-        check!(!out[0].profile.sample_types().is_empty());
+        assert_eq!(
+            (
+                out.len(),
+                ["__name__", "env", "__profile_id__"].map(|name| out[0].labels.get(name)),
+                out[0].profile.sample_types().is_empty(),
+            ),
+            (1, [Some("samples"), Some("prod"), Some("abcd")], false)
+        );
         let split = crate::ingest::split_sample_types(&out[0]).unwrap();
-        check!(split[0].samples[0].timestamp_ns == 1_700_000_000_000_000_123);
-        check!(split[0].samples[0].span_id == Some(42));
-        check!(split[0].samples[0].trace_id == Some(vec![0xaa; 16]));
-        check!(split[0].labels.get("target") == Some("all"));
+        assert_eq!(
+            (
+                split[0].samples[0].timestamp_ns,
+                split[0].samples[0].span_id,
+                &split[0].samples[0].trace_id,
+                split[0].labels.get("target"),
+            ),
+            (
+                1_700_000_000_000_000_123,
+                Some(42),
+                &Some(vec![0xaa; 16]),
+                Some("all"),
+            )
+        );
     }
 }

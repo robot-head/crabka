@@ -432,8 +432,10 @@ mod tests {
     impl NativeResolver for FixedResolver {
         fn symbolize(&self, request: &SymbolizeRequest) -> Option<Vec<NativeSymbol>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            assert!(request.build_id == "build-a");
-            assert!(request.address == self.expected_address);
+            assert_eq!(
+                (request.build_id.as_str(), request.address),
+                ("build-a", self.expected_address)
+            );
             Some(vec![NativeSymbol {
                 function: "native_main".to_string(),
                 file: "main.c".to_string(),
@@ -861,8 +863,6 @@ mod tests {
         let url = DebuginfodResolver::build_url(&base, "deadbeef").unwrap();
 
         assert!(url.as_str() == "https://debuginfod.example/buildid/deadbeef/debuginfo");
-        // Host is untouched and there is exactly one path beyond the prefix.
-        assert!(url.host_str() == Some("debuginfod.example"));
     }
 
     #[test]

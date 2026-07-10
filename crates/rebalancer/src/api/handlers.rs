@@ -708,9 +708,13 @@ mod tests {
         .expect("execute proposal");
 
         let proposal = resp.0.proposal.expect("proposal in response");
-        check!(proposal.status == i32::from(pb::ProposalStatus::Executing));
-        check!(proposal.started_at_ms >= before);
-        check!(proposal.throttle_bytes_per_sec == 12345);
+        check!(
+            (
+                proposal.status,
+                proposal.started_at_ms >= before,
+                proposal.throttle_bytes_per_sec,
+            ) == (i32::from(pb::ProposalStatus::Executing), true, 12345)
+        );
 
         if let Some(handle) = state.executor.in_flight.lock().await.take() {
             handle.cancel.cancel();
@@ -738,35 +742,61 @@ mod tests {
     fn cancel_poll_deadline_and_expiry_are_strict_until_deadline() {
         let now = std::time::Instant::now();
         let deadline = cancel_poll_deadline(now, Duration::from_secs(5));
-        assert!(!cancel_poll_expired(now + Duration::from_secs(4), deadline));
-        assert!(cancel_poll_expired(now + Duration::from_secs(5), deadline));
+        assert_eq!(
+            (
+                cancel_poll_expired(now + Duration::from_secs(4), deadline),
+                cancel_poll_expired(now + Duration::from_secs(5), deadline),
+            ),
+            (false, true)
+        );
     }
 
     #[test]
     fn anomaly_kind_to_proto_covers_all_variants() {
         use crate::detector::AnomalyKind;
-        for (kind, want) in [
-            (AnomalyKind::BrokerDeath, pb::AnomalyKind::BrokerDeath),
+        for (case, kind, want) in [
             (
+                "broker death",
+                AnomalyKind::BrokerDeath,
+                pb::AnomalyKind::BrokerDeath,
+            ),
+            (
+                "under-replicated partitions",
                 AnomalyKind::UnderReplicatedPartitions,
                 pb::AnomalyKind::UnderReplicatedPartitions,
             ),
-            (AnomalyKind::DiskPressure, pb::AnomalyKind::DiskPressure),
-            (AnomalyKind::SlowBroker, pb::AnomalyKind::SlowBroker),
+            (
+                "disk pressure",
+                AnomalyKind::DiskPressure,
+                pb::AnomalyKind::DiskPressure,
+            ),
+            (
+                "slow broker",
+                AnomalyKind::SlowBroker,
+                pb::AnomalyKind::SlowBroker,
+            ),
         ] {
-            assert!(anomaly_kind_to_proto(kind) == want);
+            assert!(anomaly_kind_to_proto(kind) == want, "case {case}");
         }
     }
 
     #[test]
     fn anomaly_severity_to_proto_covers_all_variants() {
         use crate::detector::AnomalySeverity;
-        assert!(
-            anomaly_severity_to_proto(AnomalySeverity::Warning) == pb::AnomalySeverity::Warning
-        );
-        assert!(
-            anomaly_severity_to_proto(AnomalySeverity::Critical) == pb::AnomalySeverity::Critical
-        );
+        for (name, severity, expected) in [
+            (
+                "warning",
+                AnomalySeverity::Warning,
+                pb::AnomalySeverity::Warning,
+            ),
+            (
+                "critical",
+                AnomalySeverity::Critical,
+                pb::AnomalySeverity::Critical,
+            ),
+        ] {
+            assert_eq!(anomaly_severity_to_proto(severity), expected, "case {name}");
+        }
     }
 
     #[test]

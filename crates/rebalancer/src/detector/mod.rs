@@ -440,9 +440,8 @@ mod tests {
         h.push(&make_state(10, &[1, 2]));
         h.push(&make_state(20, &[1, 2]));
         h.push(&make_state(30, &[1, 2, 3]));
-        assert!(h.len() == 2);
         let oldest = h.iter_recent().next().expect("at least one memo");
-        assert!(oldest.snapshot_at_ms == 20);
+        assert_eq!((h.len(), oldest.snapshot_at_ms), (2, 20));
     }
 
     #[test]
@@ -452,8 +451,10 @@ mod tests {
         h.push(&make_state(20, &[1]));
         h.push(&make_state(30, &[1]));
         let got = h.oldest_since(15).expect("memo at 20 satisfies cutoff");
-        assert!(got.snapshot_at_ms == 20);
-        assert!(h.oldest_since(1000).is_none());
+        assert_eq!(
+            (got.snapshot_at_ms, h.oldest_since(1000).is_none()),
+            (20, true)
+        );
     }
 
     #[test]
@@ -525,9 +526,13 @@ mod tests {
         let open = anomaly_store
             .find_open(AnomalyKind::UnderReplicatedPartitions, &key)
             .expect("under-replicated anomaly should be open");
-        check!(open.severity == AnomalySeverity::Critical);
-        check!(metrics.anomalies_detected_under_replicated.get() == 1);
-        check!(metrics.anomalies_open_under_replicated.get() == 1);
+        check!(
+            (
+                open.severity,
+                metrics.anomalies_detected_under_replicated.get(),
+                metrics.anomalies_open_under_replicated.get(),
+            ) == (AnomalySeverity::Critical, 1, 1)
+        );
 
         snapshot.store(Arc::new(Some(make_under_replicated_state(210_000, false))));
         detector.tick_once(210_000).await;
@@ -542,8 +547,12 @@ mod tests {
             .into_iter()
             .find(|a| a.id == open.id)
             .expect("resolved anomaly remains in history");
-        check!(resolved.resolved_at_ms == Some(210_000));
-        check!(metrics.anomalies_resolved_under_replicated.get() == 1);
-        check!(metrics.anomalies_open_under_replicated.get() == 0);
+        check!(
+            (
+                resolved.resolved_at_ms,
+                metrics.anomalies_resolved_under_replicated.get(),
+                metrics.anomalies_open_under_replicated.get(),
+            ) == (Some(210_000), 1, 0)
+        );
     }
 }

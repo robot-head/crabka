@@ -99,12 +99,12 @@ mod tests {
     #[test]
     fn template_size_honoured_above_header() {
         let t = template(1024);
-        assert!(t.len() == 1024);
+        assert_eq!(t.len(), 1024);
     }
 
     #[test]
     fn template_min_size_is_header() {
         let t = template(0);
-        assert!(t.len() == HEADER_LEN);
+        assert_eq!(t.len(), HEADER_LEN);
     }
 }

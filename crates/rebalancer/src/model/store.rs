@@ -178,8 +178,7 @@ mod tests {
     fn get_returns_inserted_proposal() {
         let s = ProposalStore::new(4);
         s.insert(p("a"));
-        assert!(s.get("a").is_some());
-        assert!(s.get("ghost").is_none());
+        assert!((s.get("a").is_some(), s.get("ghost").is_none()) == (true, true));
     }
 
     #[test]
@@ -218,8 +217,7 @@ mod tests {
         let s = ProposalStore::new(0);
         s.insert(p("a"));
         s.insert(p("b"));
-        assert!(s.get("a").is_none());
-        assert!(s.get("b").is_some());
+        assert!((s.get("a").is_none(), s.get("b").is_some()) == (true, true));
     }
 
     #[test]
@@ -281,8 +279,10 @@ mod tests {
             s.mutate("a", |pp| pp.status = ProposalStatus::Executing);
         }
         let s2 = ProposalStore::open(dir.path(), 4).unwrap();
-        assert!(s2.get("a").unwrap().status == ProposalStatus::Executing);
-        assert!(s2.get("b").is_some());
+        assert!(
+            (s2.get("a").map(|p| p.status), s2.get("b").is_some())
+                == (Some(ProposalStatus::Executing), true)
+        );
     }
 
     #[test]

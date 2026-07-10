@@ -876,8 +876,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Distributor));
-        assert!(cli.grpc_listen == "127.0.0.1:4317");
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Distributor),
+                cli.grpc_listen.as_str()
+            ),
+            (true, "127.0.0.1:4317")
+        );
     }
 
     #[test]
@@ -891,8 +896,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Distributor));
-        assert!(cli.jaeger_compact_listen == "127.0.0.1:6831");
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Distributor),
+                cli.jaeger_compact_listen.as_str(),
+            ),
+            (true, "127.0.0.1:6831")
+        );
     }
 
     #[test]
@@ -906,18 +916,33 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Distributor));
-        assert!(cli.jaeger_grpc_listen == "127.0.0.1:14250");
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Distributor),
+                cli.jaeger_grpc_listen.as_str(),
+            ),
+            (true, "127.0.0.1:14250")
+        );
     }
 
     #[test]
     fn distributor_defaults_include_tempo_push_ports() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "distributor"]).unwrap();
 
-        check!(cli.otlp_http_listen == "127.0.0.1:4318");
-        check!(cli.jaeger_grpc_listen == "127.0.0.1:14250");
-        check!(cli.jaeger_http_listen == "127.0.0.1:14268");
-        check!(cli.zipkin_listen == "127.0.0.1:9411");
+        assert_eq!(
+            (
+                cli.otlp_http_listen.as_str(),
+                cli.jaeger_grpc_listen.as_str(),
+                cli.jaeger_http_listen.as_str(),
+                cli.zipkin_listen.as_str(),
+            ),
+            (
+                "127.0.0.1:4318",
+                "127.0.0.1:14250",
+                "127.0.0.1:14268",
+                "127.0.0.1:9411",
+            )
+        );
     }
 
     #[test]
@@ -935,9 +960,14 @@ mod tests {
         ])
         .unwrap();
 
-        check!(cli.max_spans_per_request == 123);
-        check!(cli.max_attr_value_len == 456);
-        check!(cli.max_decompressed_bytes == 789);
+        assert_eq!(
+            (
+                cli.max_spans_per_request,
+                cli.max_attr_value_len,
+                cli.max_decompressed_bytes,
+            ),
+            (123, 456, 789)
+        );
     }
 
     #[test]
@@ -957,22 +987,29 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::BlockBuilder));
-        assert!(cli.block_builder_window_secs == 30);
+        assert_eq!(
+            (
+                matches!(cli.target, Target::BlockBuilder),
+                cli.block_builder_window_secs,
+            ),
+            (true, 30)
+        );
     }
 
     #[test]
     fn block_builder_flush_knobs_default() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
 
-        assert!(
-            cli.block_builder_flush_max_records
-                == crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS
-        );
-        assert!(
-            cli.block_builder_flush_max_age_ms
-                == u64::try_from(crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis())
-                    .unwrap()
+        assert_eq!(
+            (
+                cli.block_builder_flush_max_records,
+                cli.block_builder_flush_max_age_ms,
+            ),
+            (
+                crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS,
+                u64::try_from(crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis())
+                    .unwrap(),
+            )
         );
     }
 
@@ -989,9 +1026,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::BlockBuilder));
-        check!(cli.block_builder_flush_max_records == 1000);
-        check!(cli.block_builder_flush_max_age_ms == 30_000);
+        check!(
+            (
+                cli.target,
+                cli.block_builder_flush_max_records,
+                cli.block_builder_flush_max_age_ms,
+            ) == (Target::BlockBuilder, 1000, 30_000)
+        );
     }
 
     #[test]
@@ -1011,10 +1052,13 @@ mod tests {
 
         let promoted = promoted_attrs_from_cli(&cli).unwrap();
         check!(
-            promoted[0] == crabka_blockstore::PromotedSpanAttr::string("__resource.service.name")
+            promoted
+                == vec![
+                    crabka_blockstore::PromotedSpanAttr::string("__resource.service.name"),
+                    crabka_blockstore::PromotedSpanAttr::int("http.status_code"),
+                    crabka_blockstore::PromotedSpanAttr::string("http.method"),
+                ]
         );
-        check!(promoted[1] == crabka_blockstore::PromotedSpanAttr::int("http.status_code"));
-        check!(promoted[2] == crabka_blockstore::PromotedSpanAttr::string("http.method"));
     }
 
     #[test]
@@ -1046,8 +1090,10 @@ mod tests {
             "42",
         ])
         .unwrap();
-        assert!(matches!(cli.target, Target::LiveStore));
-        assert!(cli.retention_ns == 42);
+        assert_eq!(
+            (matches!(cli.target, Target::LiveStore), cli.retention_ns),
+            (true, 42)
+        );
     }
 
     #[test]
@@ -1062,9 +1108,14 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Querier));
-        check!(cli.querier_live_store);
-        check!(cli.retention_ns == 42);
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Querier),
+                cli.querier_live_store,
+                cli.retention_ns,
+            ),
+            (true, true, 42)
+        );
     }
 
     #[test]
@@ -1078,8 +1129,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Querier));
-        assert!(cli.querier_live_store_url.as_deref() == Some("http://127.0.0.1:3201"));
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Querier),
+                cli.querier_live_store_url.as_deref(),
+            ),
+            (true, Some("http://127.0.0.1:3201"))
+        );
     }
 
     #[tokio::test]
@@ -1307,8 +1363,13 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(index)),
         );
 
-        assert!(source.block_builder_frontier_ns("tenant-a") == 751);
-        assert!(source.block_builder_frontier_ns("tenant-b") == 0);
+        assert_eq!(
+            (
+                source.block_builder_frontier_ns("tenant-a"),
+                source.block_builder_frontier_ns("tenant-b"),
+            ),
+            (751, 0)
+        );
     }
 
     fn test_span(trace_id: [u8; 16], span_id: [u8; 8]) -> crabka_traces::Span {
@@ -1357,14 +1418,27 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::MetricsGenerator));
-        check!(cli.remote_write_url.as_deref() == Some("http://mimir.example/api/v1/push"));
-        check!(cli.collection_interval_secs == Some(30));
-        check!(cli.max_exemplars_per_series == Some(3));
-        check!(cli.edge_ttl_secs == Some(20));
-        check!(cli.edge_store_max_items == Some(1234));
-        check!(cli.histogram_buckets_ns == Some(vec![1000.0, 2000.0, 5000.0]));
-        check!(cli.config.as_deref() == Some("metricsgen.yaml"));
+        check!(
+            (
+                cli.target,
+                cli.remote_write_url.as_deref(),
+                cli.collection_interval_secs,
+                cli.max_exemplars_per_series,
+                cli.edge_ttl_secs,
+                cli.edge_store_max_items,
+                cli.histogram_buckets_ns,
+                cli.config.as_deref(),
+            ) == (
+                Target::MetricsGenerator,
+                Some("http://mimir.example/api/v1/push"),
+                Some(30),
+                Some(3),
+                Some(20),
+                Some(1234),
+                Some(vec![1000.0, 2000.0, 5000.0]),
+                Some("metricsgen.yaml"),
+            )
+        );
     }
 
     #[test]
@@ -1379,9 +1453,13 @@ mod tests {
         ])
         .unwrap();
 
-        check!(cli.enable_target_info);
-        check!(cli.enable_status_message);
-        check!(cli.enable_messaging_system_latency);
+        check!(
+            (
+                cli.enable_target_info,
+                cli.enable_status_message,
+                cli.enable_messaging_system_latency,
+            ) == (true, true, true)
+        );
     }
 
     #[test]
@@ -1399,12 +1477,23 @@ mod tests {
 
         apply_metrics_generator_cli_overrides(&mut cfg, &cli);
 
-        check!(cfg.collection_interval == Duration::from_secs(30));
-        check!(cfg.max_exemplars_per_series == 5);
-        check!(cfg.edge_ttl == Duration::from_mins(1));
-        check!(cfg.edge_store_max_items == 2_000);
-        check!(cfg.histogram_buckets_ns == vec![1_000.0, 2_000.0]);
-        check!(cfg.remote_write_url == "http://metrics.example/api/v1/push");
+        check!(
+            (
+                cfg.collection_interval,
+                cfg.max_exemplars_per_series,
+                cfg.edge_ttl,
+                cfg.edge_store_max_items,
+                cfg.histogram_buckets_ns.as_slice(),
+                cfg.remote_write_url.as_str(),
+            ) == (
+                Duration::from_secs(30),
+                5,
+                Duration::from_mins(1),
+                2_000,
+                &[1_000.0, 2_000.0][..],
+                "http://metrics.example/api/v1/push",
+            )
+        );
 
         let cli = Cli::try_parse_from([
             "crabka-traces",
@@ -1427,12 +1516,23 @@ mod tests {
 
         apply_metrics_generator_cli_overrides(&mut cfg, &cli);
 
-        check!(cfg.collection_interval == Duration::from_secs(45));
-        check!(cfg.max_exemplars_per_series == 2);
-        check!(cfg.edge_ttl == Duration::from_secs(9));
-        check!(cfg.edge_store_max_items == 77);
-        check!(cfg.histogram_buckets_ns == vec![500.0, 1000.0, 2500.0]);
-        check!(cfg.remote_write_url == "http://override.example/api/v1/push");
+        check!(
+            (
+                cfg.collection_interval,
+                cfg.max_exemplars_per_series,
+                cfg.edge_ttl,
+                cfg.edge_store_max_items,
+                cfg.histogram_buckets_ns.as_slice(),
+                cfg.remote_write_url.as_str(),
+            ) == (
+                Duration::from_secs(45),
+                2,
+                Duration::from_secs(9),
+                77,
+                &[500.0, 1_000.0, 2_500.0][..],
+                "http://override.example/api/v1/push",
+            )
+        );
     }
 
     #[tokio::test]
@@ -1453,8 +1553,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Querier));
-        check!(cli.max_trace_spans == 100);
+        assert_eq!(
+            (matches!(cli.target, Target::Querier), cli.max_trace_spans),
+            (true, 100)
+        );
         check!(build_querier_router(&cli).await.is_ok());
     }
 
@@ -1469,8 +1571,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Querier));
-        check!(cli.max_search_traces == 42);
+        assert_eq!(
+            (matches!(cli.target, Target::Querier), cli.max_search_traces),
+            (true, 42)
+        );
         check!(build_querier_router(&cli).await.is_ok());
     }
 
@@ -1485,8 +1589,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Querier));
-        check!(cli.max_metric_exemplars == 7);
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Querier),
+                cli.max_metric_exemplars
+            ),
+            (true, 7)
+        );
         check!(engine_opts_from_cli(&cli).max_exemplars == 7);
     }
 
@@ -1501,8 +1610,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Distributor));
-        assert!(cli.max_spans_per_trace == 42);
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Distributor),
+                cli.max_spans_per_trace
+            ),
+            (true, 42)
+        );
     }
 
     #[test]
@@ -1518,9 +1632,14 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Distributor));
-        check!(cli.max_ingest_spans_per_second == 42);
-        check!(cli.ingest_rate_burst == 7);
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Distributor),
+                cli.max_ingest_spans_per_second,
+                cli.ingest_rate_burst,
+            ),
+            (true, 42, 7)
+        );
     }
 
     #[test]
@@ -1536,9 +1655,14 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Compactor));
-        check!(cli.compaction_start_ns == 100);
-        check!(cli.compaction_end_ns == 200);
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Compactor),
+                cli.compaction_start_ns,
+                cli.compaction_end_ns,
+            ),
+            (true, 100, 200)
+        );
     }
 
     #[test]
@@ -1554,12 +1678,19 @@ mod tests {
 
         check!(cli.object_store_url == "memory:///tempo/traces");
         let configured = build_object_store(&cli).unwrap();
-        check!(configured.root == Url::parse("memory:///tempo/traces").unwrap());
-        check!(configured.prefix.to_string() == "tempo/traces");
-        check!(configured.object_key("index/traces.json") == "tempo/traces/index/traces.json");
-        check!(
-            configured.object_key("traces/tenant-a/block.parquet")
-                == "tempo/traces/traces/tenant-a/block.parquet"
+        assert_eq!(
+            (
+                &configured.root,
+                configured.prefix.to_string(),
+                configured.object_key("index/traces.json"),
+                configured.object_key("traces/tenant-a/block.parquet"),
+            ),
+            (
+                &Url::parse("memory:///tempo/traces").unwrap(),
+                "tempo/traces".to_string(),
+                "tempo/traces/index/traces.json".to_string(),
+                "tempo/traces/traces/tenant-a/block.parquet".to_string(),
+            )
         );
     }
 
@@ -1580,11 +1711,22 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::QueryFrontend));
-        check!(cli.querier_url == "http://querier-a.example:3200,http://querier-b.example:3200");
-        check!(cli.live_frontier_ns == Some(60_000_000_000));
-        check!(cli.query_queue_depth == 4);
-        check!(cli.target_bytes_per_job == 4096);
+        assert_eq!(
+            (
+                matches!(cli.target, Target::QueryFrontend),
+                cli.querier_url.as_str(),
+                cli.live_frontier_ns,
+                cli.query_queue_depth,
+                cli.target_bytes_per_job,
+            ),
+            (
+                true,
+                "http://querier-a.example:3200,http://querier-b.example:3200",
+                Some(60_000_000_000),
+                4,
+                4096,
+            )
+        );
         check!(build_query_frontend_router(&cli).await.is_ok());
     }
 }

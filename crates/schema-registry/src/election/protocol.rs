@@ -108,24 +108,30 @@ mod tests {
 
     #[test]
     fn assignment_round_trips_with_and_without_master() {
-        let a = SchemaRegistryGroupAssignment {
-            error: 0,
-            master: Some("crabka-d7c9d4c3".into()),
-            master_identity: Some(id("sr-node-1", 8081, true)),
-            version: SR_VERSION,
-        };
-        let b: SchemaRegistryGroupAssignment =
-            serde_json::from_slice(&serde_json::to_vec(&a).unwrap()).unwrap();
-        assert_eq!(a, b);
-        let none = SchemaRegistryGroupAssignment {
-            error: 1,
-            master: None,
-            master_identity: None,
-            version: SR_VERSION,
-        };
-        let n: SchemaRegistryGroupAssignment =
-            serde_json::from_slice(&serde_json::to_vec(&none).unwrap()).unwrap();
-        assert_eq!(none, n);
+        for (name, assignment) in [
+            (
+                "with_master",
+                SchemaRegistryGroupAssignment {
+                    error: 0,
+                    master: Some("crabka-d7c9d4c3".into()),
+                    master_identity: Some(id("sr-node-1", 8081, true)),
+                    version: SR_VERSION,
+                },
+            ),
+            (
+                "without_master",
+                SchemaRegistryGroupAssignment {
+                    error: 1,
+                    master: None,
+                    master_identity: None,
+                    version: SR_VERSION,
+                },
+            ),
+        ] {
+            let decoded: SchemaRegistryGroupAssignment =
+                serde_json::from_slice(&serde_json::to_vec(&assignment).unwrap()).unwrap();
+            assert_eq!(decoded, assignment, "case {name}");
+        }
     }
 
     #[test]
@@ -135,9 +141,9 @@ mod tests {
         let c = ("m3".to_string(), id("z", 8081, false)); // ineligible
         let pick1 = select_master(&[a.clone(), b.clone(), c.clone()]);
         let pick2 = select_master(&[c, b.clone(), a]);
-        assert_eq!(pick1, pick2);
-        // `http://a:8081` sorts before `http://b:8081`, so member `m1` wins.
-        assert_eq!(pick1.unwrap().0, "m1");
+        // `http://a:8081` sorts before `http://b:8081`, so member `m1` wins
+        // regardless of input order.
+        assert_eq!((pick1, pick2), (Some(b.clone()), Some(b)));
     }
 
     #[test]
@@ -228,8 +234,10 @@ mod tests {
             vec![node2.clone(), node1.clone()],
         ] {
             let (mid, idn) = select_master(&set).expect("a master");
-            assert_eq!(mid, "crabka-d7c9d4c3-a778-465d-a069-954b68d772f9");
-            assert_eq!(idn.host, "sr-node-1");
+            assert_eq!(
+                (mid.as_str(), idn.host.as_str()),
+                ("crabka-d7c9d4c3-a778-465d-a069-954b68d772f9", "sr-node-1")
+            );
         }
     }
 }

@@ -136,7 +136,17 @@ mod tests {
 
         let heatmap = bin_heatmap(&points, 100, 200, 2, 2);
 
-        assert!(heatmap.min_value == 10 && heatmap.max_value == 30);
-        assert!(heatmap.counts == vec![vec![1, 1], vec![0, 2]]);
+        assert_eq!(
+            heatmap,
+            Heatmap {
+                start_ms: 100,
+                end_ms: 200,
+                time_buckets: 2,
+                value_buckets: 2,
+                min_value: 10,
+                max_value: 30,
+                counts: vec![vec![1, 1], vec![0, 2]],
+            }
+        );
     }
 }

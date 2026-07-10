@@ -75,8 +75,9 @@ async fn server_round_trips_search_and_echo() {
         .send()
         .await
         .unwrap();
-    assert!(echo.status().is_success());
-    assert!(echo.text().await.unwrap() == "echo");
+    let status = echo.status();
+    let body = echo.text().await.unwrap();
+    assert_eq!((status.is_success(), body.as_str()), (true, "echo"));
 
     let url = format!("http://{addr}/api/search?q=%7B%20%7D&start=0&end=100&limit=20&spss=3");
     let resp = client
@@ -88,9 +89,17 @@ async fn server_round_trips_search_and_echo() {
         .unwrap();
     assert!(resp.status().is_success());
     let body: serde_json::Value = resp.json().await.unwrap();
-    check!(body["traces"][0]["traceID"] == "01".repeat(16));
-    check!(body["metrics"]["completedJobs"] == 1);
-    check!(body["metrics"]["totalBlocks"] == 1);
+    check!(
+        (
+            &body["traces"][0]["traceID"],
+            &body["metrics"]["completedJobs"],
+            &body["metrics"]["totalBlocks"],
+        ) == (
+            &serde_json::json!("01".repeat(16)),
+            &serde_json::json!(1),
+            &serde_json::json!(1),
+        )
+    );
 }
 
 #[tokio::test]
@@ -160,9 +169,14 @@ async fn server_by_id_returns_v2_envelope() {
         .unwrap();
     assert!(resp.status().is_success());
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["status"] == "COMPLETE");
     assert!(
-        body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"] == "BgYGBgYGBgY="
+        (
+            &body["status"],
+            &body["trace"]["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["spanId"]
+        ) == (
+            &serde_json::json!("COMPLETE"),
+            &serde_json::json!("BgYGBgYGBgY=")
+        )
     );
 }
 
@@ -222,6 +236,11 @@ async fn server_tags_round_trip() {
         .unwrap();
     assert!(resp.status().is_success());
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["scopes"][0]["name"] == "span");
-    assert!(body["scopes"][0]["tags"][0] == "http.method");
+    assert!(
+        body["scopes"][0]
+            == serde_json::json!({
+                "name": "span",
+                "tags": ["http.method"],
+            })
+    );
 }

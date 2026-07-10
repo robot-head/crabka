@@ -151,8 +151,10 @@ mod tests {
     fn select_by_name() {
         let r = GoalRegistry::default_registry();
         let one = r.select(&["ReplicaDistribution".into()]).unwrap();
-        assert!(one.len() == 1);
-        assert!(one[0].name() == "ReplicaDistribution");
+        assert_eq!(
+            one.iter().map(|goal| goal.name()).collect::<Vec<_>>(),
+            vec!["ReplicaDistribution"]
+        );
     }
 
     #[test]

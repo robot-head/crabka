@@ -276,8 +276,12 @@ mod tests {
         let s = state_with(parts, vec![1, 2]);
         let ctx = ctx_with(caps_with(1, 3));
 
-        assert!(ReplicaCapacity.propose(&s, &ctx).is_empty());
-        assert!(ReplicaCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert!(
+            (
+                ReplicaCapacity.propose(&s, &ctx).is_empty(),
+                ReplicaCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -308,8 +312,7 @@ mod tests {
 
         let mvs = ReplicaCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![3]);
+        assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![3]]);
     }
 
     #[test]
@@ -324,8 +327,7 @@ mod tests {
 
         let mvs = ReplicaCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![3]);
+        assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![3]]);
     }
 
     #[test]

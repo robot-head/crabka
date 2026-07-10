@@ -1388,8 +1388,7 @@ mod tests {
         let pid = out[0]
             .column(0)
             .as_primitive::<datafusion::arrow::datatypes::Int32Type>();
-        assert!(pid.value(0) == -1); // root: Tempo nestedSetParent sentinel
-        assert!(pid.value(1) == 1);
+        assert_eq!((pid.value(0), pid.value(1)), (-1, 1)); // root: Tempo nestedSetParent sentinel
     }
 
     #[tokio::test]
@@ -2044,50 +2043,33 @@ mod tests {
             .await
                 == 1
         );
-        // String regex.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Span,
-                "http.method",
+        for (name, cmp, value, expected) in [
+            (
+                "matching regex",
                 MatchCmp::Re,
                 MatchValue::Str("GE.".into()),
-            )])
-            .await
-                == 1
-        );
-        // Negated regex (no row matches -> 0).
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Span,
-                "http.method",
+                1,
+            ),
+            (
+                "matching negated regex",
                 MatchCmp::Nre,
                 MatchValue::Str("GE.".into()),
-            )])
-            .await
-                == 0
-        );
-        // Eq against Nil on a present attribute -> no match.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Span,
-                "http.method",
-                MatchCmp::Eq,
-                MatchValue::Nil,
-            )])
-            .await
-                == 0
-        );
-        // Neq against Nil on a present attribute -> matches (present).
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Span,
-                "http.method",
+                0,
+            ),
+            ("present equals nil", MatchCmp::Eq, MatchValue::Nil, 0),
+            (
+                "present differs from nil",
                 MatchCmp::Neq,
                 MatchValue::Nil,
-            )])
-            .await
-                == 1
-        );
+                1,
+            ),
+        ] {
+            assert_eq!(
+                scan_matches(&[matcher(MatchScope::Span, "http.method", cmp, value)]).await,
+                expected,
+                "case {name}"
+            );
+        }
         // Eq against Nil on an absent attribute -> matches (absent).
         assert!(
             scan_matches(&[matcher(
@@ -2520,40 +2502,32 @@ mod tests {
 
     #[tokio::test]
     async fn string_attr_ordering_ops_and_negated_regex_are_false() {
-        // Ordering operators against a string attribute are always false.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Span,
-                "http.method",
+        for (name, cmp, value, expected) in [
+            (
+                "string ordering is false",
                 MatchCmp::Lt,
                 MatchValue::Str("Z".into()),
-            )])
-            .await
-                == 0
-        );
-        // Nre that does NOT match the pattern -> the value passes the negated
-        // regex, so the row matches.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Span,
-                "http.method",
+                0,
+            ),
+            (
+                "nonmatching negated regex",
                 MatchCmp::Nre,
                 MatchValue::Str("POST".into()),
-            )])
-            .await
-                == 1
-        );
-        // A non-string expected value against a string attribute does not match.
-        assert!(
-            scan_matches(&[matcher(
-                MatchScope::Span,
-                "http.method",
+                1,
+            ),
+            (
+                "non-string expected value",
                 MatchCmp::Eq,
                 MatchValue::Int(1),
-            )])
-            .await
-                == 0
-        );
+                0,
+            ),
+        ] {
+            assert_eq!(
+                scan_matches(&[matcher(MatchScope::Span, "http.method", cmp, value)]).await,
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     fn span_with_kind_and_status(kind: i32, status: i32) -> InputSpan {

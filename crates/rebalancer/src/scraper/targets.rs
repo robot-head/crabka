@@ -52,8 +52,9 @@ mod tests {
 
     #[test]
     fn empty_input_returns_empty_vec() {
-        assert!(parse_targets("").unwrap().is_empty());
-        assert!(parse_targets("   ").unwrap().is_empty());
+        for (name, input) in [("empty", ""), ("whitespace", "   ")] {
+            assert!(parse_targets(input).unwrap().is_empty(), "case {name}");
+        }
     }
 
     #[test]
@@ -286,8 +287,12 @@ mod target_source_tests {
 
     #[test]
     fn empty_host_warning_is_emitted_once_per_broker_id() {
-        for (broker_id, want) in [(1_000_002, true), (1_000_002, false), (1_000_003, true)] {
-            assert!(should_warn_empty_host(broker_id) == want);
+        for (case, broker_id, want) in [
+            ("first warning for broker", 1_000_002, true),
+            ("duplicate warning suppressed", 1_000_002, false),
+            ("first warning for another broker", 1_000_003, true),
+        ] {
+            assert!(should_warn_empty_host(broker_id) == want, "case {case}");
         }
     }
 

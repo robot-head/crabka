@@ -227,10 +227,7 @@ mod tests {
         let bytes = request.encode_to_vec();
         let decoded = pb::push::v1::PushRequest::decode(bytes.as_slice()).unwrap();
 
-        assert_eq!(decoded.series.len(), 1);
-        assert_eq!(decoded.series[0].samples[0].raw_profile, vec![1, 2, 3]);
-        assert_eq!(decoded.series[0].samples[0].id, "abc");
-        assert_eq!(decoded.series[0].annotations[0].key, "source");
+        assert_eq!(decoded, request);
     }
 
     #[test]
@@ -246,8 +243,7 @@ mod tests {
         let bytes = dictionary.encode_to_vec();
         let decoded = pb::otlp_profiles::ProfilesDictionary::decode(bytes.as_slice()).unwrap();
 
-        assert!(decoded.string_table[0].is_empty());
-        assert_eq!(decoded.stack_table[0].location_indices, vec![0, 1]);
+        assert_eq!(decoded, dictionary);
 
         let sample = pb::otlp_profiles::Sample {
             stack_index: 0,

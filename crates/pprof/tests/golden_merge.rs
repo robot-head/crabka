@@ -126,24 +126,47 @@ async fn full_merge_pins_four_int_levels_and_fold_before_symbolize() {
 #[tokio::test]
 async fn label_selector_filters_series_before_merge() {
     let fg = merge(r#"{service="api"}"#, 2_048).await;
+    let names = fg.names.iter().map(String::as_str).collect::<Vec<_>>();
 
-    check!(fg.total == 17);
-    check!(fg.names == vec!["total", "main", "work", "inline_helper", "alloc"]);
-    check!(fg.levels[2].values == vec![0, 17, 0, 2]);
-    check!(!fg.names.iter().any(|name| name == "other"));
+    check!(
+        (
+            fg.total,
+            names,
+            fg.levels[2].values.as_slice(),
+            fg.names.iter().any(|name| name == "other"),
+        ) == (
+            17,
+            vec!["total", "main", "work", "inline_helper", "alloc"],
+            &[0, 17, 0, 2][..],
+            false,
+        )
+    );
 }
 
 #[tokio::test]
 async fn max_nodes_truncates_to_synthetic_other_and_conserves_total() {
     let fg = merge("{}", 3).await;
+    let names = fg.names.iter().map(String::as_str).collect::<Vec<_>>();
 
-    check!(fg.names == vec!["total", "main", "other", "work"]);
-    check!(fg.total == 21);
-    check!(fg.max_self == 17);
-    check!(fg.levels[0].values == vec![0, 21, 0, 0]);
-    check!(fg.levels[1].values == vec![0, 21, 0, 1]);
-    check!(fg.levels[2].values == vec![4, 17, 0, 3, -4, 4, 4, 2]);
-    check!(fg.levels[3].values == vec![4, 17, 17, 2]);
+    check!(
+        (
+            names,
+            fg.total,
+            fg.max_self,
+            fg.levels[0].values.as_slice(),
+            fg.levels[1].values.as_slice(),
+            fg.levels[2].values.as_slice(),
+            fg.levels[3].values.as_slice(),
+        ) == (
+            vec!["total", "main", "other", "work"],
+            21,
+            17,
+            &[0, 21, 0, 0][..],
+            &[0, 21, 0, 1][..],
+            &[4, 17, 0, 3, -4, 4, 4, 2][..],
+            &[4, 17, 17, 2][..],
+        )
+    );
 }
 
 #[test]

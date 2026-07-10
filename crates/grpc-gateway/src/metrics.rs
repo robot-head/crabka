@@ -458,7 +458,7 @@ mod tests {
 
         let buf = encode(&m);
 
-        for needle in [
+        let expected = [
             "crabka_gateway_sends_total",
             "crabka_gateway_produce_latency_seconds",
             "crabka_gateway_dedup_hits_total",
@@ -473,9 +473,12 @@ mod tests {
             "crabka_gateway_request_duration_seconds_bucket",
             "crabka_gateway_request_duration_seconds_count",
             "crabka_gateway_inflight_requests",
-        ] {
-            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
-        }
+        ];
+        let missing: Vec<_> = expected
+            .into_iter()
+            .filter(|needle| !buf.contains(needle))
+            .collect();
+        assert_eq!(missing, Vec::<&str>::new(), "metrics output:\n{buf}");
     }
 
     #[test]
@@ -486,13 +489,13 @@ mod tests {
         m.observe_request_duration("webhook_in", 0.02);
 
         let buf = encode(&m);
-        assert!(
-            buf.contains("method=\"send\""),
-            "send label missing:\n{buf}"
-        );
-        assert!(
-            buf.contains("method=\"webhook_in\""),
-            "webhook_in label missing:\n{buf}"
+        assert_eq!(
+            (
+                buf.contains("method=\"send\""),
+                buf.contains("method=\"webhook_in\""),
+            ),
+            (true, true),
+            "method labels missing:\n{buf}"
         );
 
         m.inc_inflight();
@@ -515,8 +518,13 @@ mod tests {
         let lbl_err = ResultLabel {
             result: "error".into(),
         };
-        assert!(m.sends_total.get_or_create(&lbl_ok).get() == 2);
-        assert!(m.sends_total.get_or_create(&lbl_err).get() == 1);
+        assert_eq!(
+            (
+                m.sends_total.get_or_create(&lbl_ok).get(),
+                m.sends_total.get_or_create(&lbl_err).get(),
+            ),
+            (2, 1)
+        );
     }
 
     #[test]
@@ -563,8 +571,13 @@ mod tests {
         let unavail = OutcomeLabel {
             outcome: "unavailable".into(),
         };
-        assert!(m.forward_total.get_or_create(&ok).get() == 2);
-        assert!(m.forward_total.get_or_create(&unavail).get() == 1);
+        assert_eq!(
+            (
+                m.forward_total.get_or_create(&ok).get(),
+                m.forward_total.get_or_create(&unavail).get(),
+            ),
+            (2, 1)
+        );
 
         let commit = KindLabel {
             kind: "commit".into(),
@@ -572,8 +585,13 @@ mod tests {
         let abort = KindLabel {
             kind: "abort".into(),
         };
-        assert!(m.txn_total.get_or_create(&commit).get() == 1);
-        assert!(m.txn_total.get_or_create(&abort).get() == 1);
+        assert_eq!(
+            (
+                m.txn_total.get_or_create(&commit).get(),
+                m.txn_total.get_or_create(&abort).get(),
+            ),
+            (1, 1)
+        );
     }
 
     #[test]
@@ -599,11 +617,15 @@ mod tests {
         let dl = ResultLabel {
             result: "dead_letter".into(),
         };
-        check!(m.webhook_in_total.get_or_create(&ok).get() == 1);
-        check!(m.webhook_in_total.get_or_create(&err).get() == 1);
-        check!(m.webhook_out_total.get_or_create(&delivered).get() == 1);
-        check!(m.webhook_out_total.get_or_create(&dl).get() == 1);
-        check!(m.webhook_retries_total.get() == 2);
-        check!(m.dead_letter_total.get() == 1);
+        check!(
+            (
+                m.webhook_in_total.get_or_create(&ok).get(),
+                m.webhook_in_total.get_or_create(&err).get(),
+                m.webhook_out_total.get_or_create(&delivered).get(),
+                m.webhook_out_total.get_or_create(&dl).get(),
+                m.webhook_retries_total.get(),
+                m.dead_letter_total.get(),
+            ) == (1, 1, 1, 1, 2, 1)
+        );
     }
 }

@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use assert2::{assert, check};
+use assert2::assert;
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, TimeRange, labels,
 };
@@ -40,13 +40,18 @@ fn stream_planner_prunes_series_and_blocks_before_line_filters() {
     )
     .unwrap();
 
-    check!(plan.fingerprints == BTreeSet::from([api_prod]));
-    check!(
-        plan.blocks
-            .iter()
-            .map(|block| block.key.object_key())
-            .collect::<Vec<_>>()
-            == ["tenant=tenant-a/partition=0/offsets=10-19/time=100-199.parquet"]
+    assert_eq!(
+        (
+            plan.fingerprints,
+            plan.blocks
+                .iter()
+                .map(|block| block.key.object_key())
+                .collect::<Vec<_>>(),
+        ),
+        (
+            BTreeSet::from([api_prod]),
+            vec!["tenant=tenant-a/partition=0/offsets=10-19/time=100-199.parquet".to_string(),],
+        )
     );
     assert!(matches!(
         &plan.query.pipeline[..],
@@ -80,8 +85,10 @@ fn stream_planner_keeps_regex_and_negative_matchers_in_index_filter() {
     )
     .unwrap();
 
-    assert!(plan.fingerprints == BTreeSet::from([api_prod, web_prod]));
-    assert!(plan.blocks.len() == 1);
+    assert_eq!(
+        (plan.fingerprints, plan.blocks.len()),
+        (BTreeSet::from([api_prod, web_prod]), 1)
+    );
 }
 
 #[test]
@@ -109,8 +116,10 @@ fn stream_planner_treats_empty_compatible_regex_matcher_as_matching_absent_label
     )
     .unwrap();
 
-    assert!(plan.fingerprints == BTreeSet::from([api_without_env, api_prod]));
-    assert!(plan.blocks.len() == 1);
+    assert_eq!(
+        (plan.fingerprints, plan.blocks.len()),
+        (BTreeSet::from([api_without_env, api_prod]), 1)
+    );
 }
 
 #[test]
@@ -137,6 +146,8 @@ fn stream_planner_anchors_regex_label_matchers() {
     )
     .unwrap();
 
-    assert!(plan.fingerprints == BTreeSet::from([api, worker]));
-    assert!(plan.blocks.len() == 1);
+    assert_eq!(
+        (plan.fingerprints, plan.blocks.len()),
+        (BTreeSet::from([api, worker]), 1)
+    );
 }

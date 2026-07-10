@@ -166,7 +166,7 @@ async fn build_producer(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::assert;
     use qubit_clock::{MockTime, MockWaiterKind};
 
     use super::*;
@@ -237,8 +237,8 @@ mod tests {
         // Exactly one heartbeat per advance — no more (no advance fired after
         // the loop) and no fewer (each advance was gated on its write landing).
         let count = crate::test_util::topic_record_count(&target, Heartbeat::TOPIC).await;
-        check!(
-            count == TICKS,
+        assert_eq!(
+            count, TICKS,
             "expected exactly {TICKS} heartbeats, got {count}"
         );
 

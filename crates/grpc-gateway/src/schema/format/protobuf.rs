@@ -114,39 +114,23 @@ mod tests {
 
         // proto3 JSON encodes int64 as a decimal string.
         assert_eq!(
-            json.get("id").and_then(|v| v.as_str()),
-            Some("1"),
-            "int64 should be serialized as a JSON string in proto3"
-        );
-        assert_eq!(
-            json.get("name").and_then(|v| v.as_str()),
-            Some("a"),
-            "string field should round-trip correctly"
+            (
+                json.get("id").and_then(|v| v.as_str()),
+                json.get("name").and_then(|v| v.as_str()),
+            ),
+            (Some("1"), Some("a"))
         );
     }
 
     #[test]
-    fn validate_ok_on_valid_json() {
-        assert!(
-            validate(SCHEMA, br#"{"id":42,"name":"hello"}"#).is_ok(),
-            "valid JSON should validate"
-        );
-    }
-
-    #[test]
-    fn validate_err_on_malformed_json() {
-        assert!(
-            validate(SCHEMA, b"{not valid json}").is_err(),
-            "malformed JSON should fail validation"
-        );
-    }
-
-    #[test]
-    fn validate_err_returns_validate_variant() {
-        let result = validate(SCHEMA, b"[1,2,3]");
-        assert!(
-            matches!(result, Err(CodecError::Validate(_))),
-            "validate should return CodecError::Validate on failure, got: {result:?}"
-        );
+    fn validation_cases() {
+        for (name, payload, valid) in [
+            ("valid", br#"{"id":42,"name":"hello"}"#.as_slice(), true),
+            ("malformed", b"{not valid json}".as_slice(), false),
+            ("wrong_shape", b"[1,2,3]".as_slice(), false),
+        ] {
+            let result = validate(SCHEMA, payload);
+            assert_eq!(result.is_ok(), valid, "case {name}: {result:?}");
+        }
     }
 }

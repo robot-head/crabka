@@ -46,7 +46,7 @@ fn is_internal_label(name: &str) -> bool {
     name == PROFILE_ID_LABEL
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MetadataRange {
     start_ms: i64,
     end_ms: i64,
@@ -2847,9 +2847,14 @@ mod tests {
             .validate(&state, "tenant-a")
             .unwrap();
 
-        assert!(range.start_ms == 0);
-        assert!(range.end_ms == i64::MAX);
-        assert!(range.omitted);
+        assert_eq!(
+            range,
+            MetadataRange {
+                start_ms: 0,
+                end_ms: i64::MAX,
+                omitted: true,
+            }
+        );
     }
 
     #[test]
@@ -2865,9 +2870,14 @@ mod tests {
         let range = MetadataRange::from_request(0, 1_000)
             .validate(&state, "tenant-a")
             .unwrap();
-        assert!(range.start_ms == 0);
-        assert!(range.end_ms == 1_000);
-        assert!(!range.omitted);
+        assert_eq!(
+            range,
+            MetadataRange {
+                start_ms: 0,
+                end_ms: 1_000,
+                omitted: false,
+            }
+        );
 
         let Err(err) = MetadataRange::from_request(0, 2_000).validate(&state, "tenant-a") else {
             panic!("explicit over-limit metadata range should be rejected");
@@ -3592,16 +3602,14 @@ overrides:
             .await
             .unwrap();
 
-        assert!(
-            body.pointer("/flamebearer/leftTicks")
-                .and_then(serde_json::Value::as_i64)
-                == Some(5),
-            "{body}"
-        );
-        assert!(
-            body.pointer("/flamebearer/rightTicks")
-                .and_then(serde_json::Value::as_i64)
-                == Some(7),
+        assert_eq!(
+            (
+                body.pointer("/flamebearer/leftTicks")
+                    .and_then(serde_json::Value::as_i64),
+                body.pointer("/flamebearer/rightTicks")
+                    .and_then(serde_json::Value::as_i64),
+            ),
+            (Some(5), Some(7)),
             "{body}"
         );
     }
@@ -4033,15 +4041,14 @@ overrides:
             .await
             .unwrap();
 
-        assert!(
-            response.pointer("/flamegraph/leftTicks").and_then(json_i64) == Some(7),
-            "{response}"
-        );
-        assert!(
-            response
-                .pointer("/flamegraph/rightTicks")
-                .and_then(json_i64)
-                == Some(10),
+        assert_eq!(
+            (
+                response.pointer("/flamegraph/leftTicks").and_then(json_i64),
+                response
+                    .pointer("/flamegraph/rightTicks")
+                    .and_then(json_i64),
+            ),
+            (Some(7), Some(10)),
             "{response}"
         );
     }
@@ -4166,9 +4173,12 @@ overrides:
             .pointer("/series/0/points")
             .and_then(serde_json::Value::as_array)
             .unwrap();
-        assert!(points.len() == 1, "{response}");
-        assert!(
-            points[0].get("value").and_then(serde_json::Value::as_f64) == Some(7.0),
+        assert_eq!(
+            (
+                points.len(),
+                points[0].get("value").and_then(serde_json::Value::as_f64),
+            ),
+            (1, Some(7.0)),
             "{response}"
         );
     }
@@ -4388,8 +4398,14 @@ overrides:
             })
             .collect();
 
-        assert!(profile_ids.contains(&"profile-a"), "{response}");
-        assert!(profile_ids.contains(&"profile-b"), "{response}");
+        assert_eq!(
+            (
+                profile_ids.contains(&"profile-a"),
+                profile_ids.contains(&"profile-b"),
+            ),
+            (true, true),
+            "{response}"
+        );
     }
 
     #[tokio::test]
@@ -4612,8 +4628,14 @@ overrides:
             })
             .collect();
 
-        assert!(profile_ids.contains(&"profile-a"), "{response}");
-        assert!(profile_ids.contains(&"profile-b"), "{response}");
+        assert_eq!(
+            (
+                profile_ids.contains(&"profile-a"),
+                profile_ids.contains(&"profile-b"),
+            ),
+            (true, true),
+            "{response}"
+        );
     }
 
     #[tokio::test]

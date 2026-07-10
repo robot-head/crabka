@@ -443,10 +443,14 @@ mod tests {
         ])
         .unwrap();
 
-        check!(cli.ha_tracker_topic == "__tenant_a_ha");
-        check!(cli.ha_tracker_group_id == "metrics-ha");
-        check!(cli.ha_tracker_client_id == "metrics-ha-1");
-        check!(cli.ha_tracker_poll_timeout_ms == 250);
+        check!(
+            (
+                cli.ha_tracker_topic.as_str(),
+                cli.ha_tracker_group_id.as_str(),
+                cli.ha_tracker_client_id.as_str(),
+                cli.ha_tracker_poll_timeout_ms,
+            ) == ("__tenant_a_ha", "metrics-ha", "metrics-ha-1", 250)
+        );
     }
 
     #[test]
@@ -574,12 +578,23 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Compactor));
-        check!(cli.bootstrap == "broker:9092");
-        check!(cli.compactor_group_id == "metrics-c");
-        check!(cli.compactor_poll_timeout_ms == 250);
-        check!(cli.compactor_retention_ms == 3_600_000);
-        check!(cli.compactor_retention_sweep_ms == 30_000);
+        check!(
+            (
+                cli.target,
+                cli.bootstrap.as_str(),
+                cli.compactor_group_id.as_str(),
+                cli.compactor_poll_timeout_ms,
+                cli.compactor_retention_ms,
+                cli.compactor_retention_sweep_ms,
+            ) == (
+                Target::Compactor,
+                "broker:9092",
+                "metrics-c",
+                250,
+                3_600_000,
+                30_000,
+            )
+        );
     }
 
     #[test]

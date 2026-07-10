@@ -829,8 +829,10 @@ mod tests {
     #[test]
     fn duration_value_maps_to_integer_nanos() {
         let ms = field_expr_to_matchers(&selector("{ span:duration > 100ms }"));
-        assert!(ms[0].scope == MatchScope::Intrinsic);
-        assert!(ms[0].value == MatchValue::Int(100_000_000));
+        assert_eq!(
+            (ms[0].scope, &ms[0].value),
+            (MatchScope::Intrinsic, &MatchValue::Int(100_000_000))
+        );
     }
 
     #[test]
@@ -1382,8 +1384,7 @@ mod tests {
     #[test]
     fn and_of_comparisons_cross_products_into_single_disjunct() {
         let disjuncts = field_expr_to_matcher_disjuncts(&selector("{ .a = 1 && .b = 2 }")).unwrap();
-        assert!(disjuncts.len() == 1);
-        assert!(disjuncts[0].len() == 2);
+        assert_eq!((disjuncts.len(), disjuncts[0].len()), (1, 2));
     }
 
     #[test]
@@ -1426,8 +1427,13 @@ mod tests {
         let disjuncts =
             field_expr_to_matcher_disjuncts(&selector("{ !(event.a = 1 && event.b = 2) }"))
                 .unwrap();
-        assert!(disjuncts.len() == 2);
-        assert!(disjuncts.iter().all(|d| d.len() == 1 && d[0].negated));
+        assert_eq!(
+            (
+                disjuncts.len(),
+                disjuncts.iter().all(|d| d.len() == 1 && d[0].negated),
+            ),
+            (2, true)
+        );
     }
 
     #[test]

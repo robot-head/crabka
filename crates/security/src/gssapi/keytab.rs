@@ -383,8 +383,7 @@ mod tests {
         ]);
 
         let found = load_service_key(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("found");
-        assert!(found.kvno == 5);
-        assert!(found.key == key_v5);
+        assert_eq!((found.kvno, &found.key), (5, &key_v5));
 
         // Wrong service name -> NotFound.
         let err = load_service_key(&kt, "http", ENCTYPE_AES256_CTS_HMAC_SHA1_96).unwrap_err();
@@ -537,8 +536,11 @@ mod tests {
         kt.extend_from_slice(&good);
 
         let entries = parse_keytab(&kt).expect("parse");
-        assert!(entries.len() == 1, "hole must not produce an entry");
-        assert!(entries[0].key == key);
+        assert_eq!(
+            entries.iter().map(|entry| &entry.key).collect::<Vec<_>>(),
+            vec![&key],
+            "hole must not produce an entry"
+        );
     }
 
     #[test]
@@ -556,8 +558,10 @@ mod tests {
         kt.extend_from_slice(&[0x00, 0x00, 0x00]);
 
         let entries = parse_keytab(&kt).expect("parse");
-        assert!(entries.len() == 1);
-        assert!(entries[0].key == key);
+        assert_eq!(
+            entries.iter().map(|entry| &entry.key).collect::<Vec<_>>(),
+            vec![&key]
+        );
     }
 
     #[test]

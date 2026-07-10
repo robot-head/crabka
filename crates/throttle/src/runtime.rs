@@ -294,9 +294,7 @@ mod tests {
     fn independent_burst_can_exceed_rate() {
         let b = Arc::new(TokenBucket::new());
         b.set_rate_with_burst(100, 1000);
-        check!(b.rate() == 100);
-        check!(b.burst() == 1000);
-        check!(try_consume_with_timeout(&b, 500) == 500);
+        check!((b.rate(), b.burst(), try_consume_with_timeout(&b, 500)) == (100, 1000, 500));
     }
 
     #[test]

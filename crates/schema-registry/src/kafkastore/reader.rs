@@ -224,44 +224,51 @@ mod tests {
         };
         apply_record(&store, SchemaRecord::Schema(k, v));
         apply_record(&store, SchemaRecord::Noop);
+        let snapshot = store.read();
         assert_eq!(
-            store.read().versions("av-value", false).unwrap(),
-            vec![SchemaVersion(1)]
-        );
-        assert_eq!(
-            store.read().schema_by_id(SchemaId(1), false).unwrap().1,
-            "{\"type\":\"int\"}"
+            (
+                snapshot.versions("av-value", false).unwrap(),
+                snapshot.schema_by_id(SchemaId(1), false).unwrap().1,
+            ),
+            (vec![SchemaVersion(1)], "{\"type\":\"int\"}".to_owned())
         );
     }
 
     #[test]
     fn fetch_transport_errors_force_reader_reconnect() {
-        assert_eq!(
-            fetch_error_action(&ClientError::Disconnected),
-            FetchErrorAction::Reconnect
-        );
-        assert_eq!(
-            fetch_error_action(&ClientError::Timeout(Duration::from_millis(1))),
-            FetchErrorAction::Reconnect
-        );
-        assert_eq!(
-            fetch_error_action(&ClientError::Connect {
-                addr: "127.0.0.1:9092".parse().unwrap(),
-                source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
-            }),
-            FetchErrorAction::Reconnect
-        );
-        assert_eq!(
-            fetch_error_action(&ClientError::Io(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "reset",
-            ))),
-            FetchErrorAction::Reconnect
-        );
-        assert_eq!(
-            fetch_error_action(&ClientError::Server { error_code: 6 }),
-            FetchErrorAction::RetrySameConnection
-        );
+        let cases = [
+            (
+                "disconnected",
+                ClientError::Disconnected,
+                FetchErrorAction::Reconnect,
+            ),
+            (
+                "timeout",
+                ClientError::Timeout(Duration::from_millis(1)),
+                FetchErrorAction::Reconnect,
+            ),
+            (
+                "connect",
+                ClientError::Connect {
+                    addr: "127.0.0.1:9092".parse().unwrap(),
+                    source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
+                },
+                FetchErrorAction::Reconnect,
+            ),
+            (
+                "io",
+                ClientError::Io(io::Error::new(io::ErrorKind::ConnectionReset, "reset")),
+                FetchErrorAction::Reconnect,
+            ),
+            (
+                "server",
+                ClientError::Server { error_code: 6 },
+                FetchErrorAction::RetrySameConnection,
+            ),
+        ];
+        for (name, error, expected) in cases {
+            assert_eq!(fetch_error_action(&error), expected, "case {name}");
+        }
     }
 
     #[test]

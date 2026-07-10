@@ -238,7 +238,7 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use crabka_connect::Source;
 
     use super::*;
@@ -278,16 +278,26 @@ mod tests {
         let rec = rec.expect("source did not yield the produced record");
 
         let payload = rec.value.unwrap();
-        check!(payload.topic == "orders");
-        check!(payload.partition == 0);
-        check!(payload.offset == 0);
-        check!(payload.value.as_deref() == Some(b"v".as_slice()));
+        assert_eq!(
+            (
+                payload.topic.as_str(),
+                payload.partition,
+                payload.offset,
+                payload.value.as_deref()
+            ),
+            (
+                "orders",
+                PartitionIndex(0),
+                Offset(0),
+                Some(b"v".as_slice())
+            )
+        );
 
         // The checkpoint position is the NEXT offset to read: `last_offset + 1`.
         // Having consumed offset 0, the position for `orders-0` must be exactly
         // 1 (not 0 from `*1` or -1 from `-1`).
         let off = src.checkpoint().unwrap();
-        assert!(off.position.get("orders-0") == Some(&OffsetValue::Long(1)));
+        assert_eq!(off.position.get("orders-0"), Some(&OffsetValue::Long(1)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

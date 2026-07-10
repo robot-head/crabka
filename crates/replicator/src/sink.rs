@@ -381,8 +381,14 @@ mod tests {
         sink.put(vec![allowed, denied]).await.unwrap();
         sink.flush().await.unwrap();
 
-        assert!(crate::test_util::topic_record_count(&target, "us-east.orders").await == 1);
-        assert!(crate::test_util::topic_record_count(&target, "us-east.secret").await == 0);
+        assert_eq!(
+            crate::test_util::topic_record_count(&target, "us-east.orders").await,
+            1
+        );
+        assert_eq!(
+            crate::test_util::topic_record_count(&target, "us-east.secret").await,
+            0
+        );
 
         let syncs = sink.drain_offset_syncs();
         assert!(
@@ -472,6 +478,6 @@ mod tests {
             .filter_map(|(k, _)| k.map(|b| b.to_vec()))
             .collect();
         keys.sort();
-        assert!(keys == vec![b"b".to_vec(), b"c".to_vec()]);
+        assert_eq!(keys, vec![b"b".to_vec(), b"c".to_vec()]);
     }
 }

@@ -74,7 +74,7 @@ impl Rule for DiskPressure {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
     use crate::{
@@ -190,9 +190,12 @@ mod tests {
             cfg: &cfg,
         };
         let hits = DiskPressure.evaluate(&ctx);
-        assert!(hits.len() == 1);
-        check!(hits[0].key == AnomalyKey::Broker(1));
-        check!(hits[0].severity == AnomalySeverity::Warning);
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (&hit.key, hit.severity))
+                .collect::<Vec<_>>(),
+            vec![(&AnomalyKey::Broker(1), AnomalySeverity::Warning)]
+        );
     }
 
     #[test]
@@ -213,8 +216,10 @@ mod tests {
             cfg: &cfg,
         };
         let hits = DiskPressure.evaluate(&ctx);
-        assert!(hits.len() == 1);
-        assert!(matches!(hits[0].severity, AnomalySeverity::Critical));
+        assert_eq!(
+            hits.iter().map(|hit| hit.severity).collect::<Vec<_>>(),
+            vec![AnomalySeverity::Critical]
+        );
     }
 
     #[test]
@@ -236,8 +241,10 @@ mod tests {
 
         let hits = DiskPressure.evaluate(&ctx);
 
-        assert!(hits.len() == 1);
-        assert!(matches!(hits[0].severity, AnomalySeverity::Warning));
+        assert_eq!(
+            hits.iter().map(|hit| hit.severity).collect::<Vec<_>>(),
+            vec![AnomalySeverity::Warning]
+        );
     }
 
     #[test]

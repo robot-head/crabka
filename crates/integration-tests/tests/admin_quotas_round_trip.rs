@@ -51,7 +51,7 @@ async fn user_quotas_set_change_remove() {
     assert!(outcome.is_none(), "alter must succeed: {outcome:?}");
 
     let after_set = admin.describe_user_quotas(user).await.unwrap();
-    assert!(after_set.len() == 2);
+    assert_eq!(after_set.len(), 2);
     check!((after_set["producer_byte_rate"] - 1_048_576.0).abs() < f64::EPSILON);
     check!((after_set["request_percentage"] - 25.0).abs() < f64::EPSILON);
 
@@ -65,12 +65,12 @@ async fn user_quotas_set_change_remove() {
     let mut desired = std::collections::BTreeMap::new();
     desired.insert("producer_byte_rate".into(), 2_097_152.0);
     let ops = diff_user_quotas(&after_set, &desired);
-    assert!(ops.len() == 2, "set + remove: {ops:?}");
+    assert_eq!(ops.len(), 2, "set + remove: {ops:?}");
     let outcome = admin.alter_user_quotas(user, &ops, false).await.unwrap();
     assert!(outcome.is_none(), "alter must succeed: {outcome:?}");
 
     let after_drift = admin.describe_user_quotas(user).await.unwrap();
-    assert!(after_drift.len() == 1);
+    assert_eq!(after_drift.len(), 1);
     assert!((after_drift["producer_byte_rate"] - 2_097_152.0).abs() < f64::EPSILON);
 
     // 5. Remove the remaining key. Read-back is empty.

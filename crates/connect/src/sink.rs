@@ -157,8 +157,7 @@ mod tests {
         .await
         .unwrap();
         sink.commit().await.unwrap();
-        check!(sink.durable == 1);
-        check!(sink.buffered == 0);
+        check!((sink.durable, sink.buffered) == (1, 0));
     }
 
     #[tokio::test]

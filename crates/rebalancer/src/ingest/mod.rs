@@ -173,13 +173,20 @@ mod tests {
         let g = s.load();
         let inner: &Option<ClusterState> = &g;
         let v = inner.as_ref().expect("Some after swap");
-        assert!(v.snapshot_at_ms == 42);
-        assert!(v.cluster_id.as_deref() == Some("c"));
+        assert_eq!((v.snapshot_at_ms, v.cluster_id.as_deref()), (42, Some("c")));
     }
 
     #[test]
     fn normalize_cluster_id_drops_empty_ids_only() {
-        assert!(normalize_cluster_id("").is_none());
-        assert!(normalize_cluster_id("cluster-a").as_deref() == Some("cluster-a"));
+        for (name, input, expected) in [
+            ("empty", "", None),
+            ("named", "cluster-a", Some("cluster-a")),
+        ] {
+            assert_eq!(
+                normalize_cluster_id(input).as_deref(),
+                expected,
+                "case {name}"
+            );
+        }
     }
 }

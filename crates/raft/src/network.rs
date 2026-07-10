@@ -296,8 +296,13 @@ mod tests {
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
 
-        assert!(controller_addr(&voters, NodeId(7)) == Some("controller-host:9093".to_string()));
-        assert!(controller_addr(&voters, NodeId(8)).is_none());
+        assert_eq!(
+            (
+                controller_addr(&voters, NodeId(7)),
+                controller_addr(&voters, NodeId(8)),
+            ),
+            (Some("controller-host:9093".to_string()), None)
+        );
     }
 
     #[test]
@@ -318,15 +323,15 @@ mod tests {
 
     #[test]
     fn api_version_for_matches_kip595_codecs() {
-        for (key, want) in [
-            (api_key::VOTE, 2),
-            (api_key::BEGIN_QUORUM_EPOCH, 1),
-            (api_key::END_QUORUM_EPOCH, 1),
-            (api_key::FETCH_SNAPSHOT, 1),
-            (api_key::FETCH, 17),
-            (-123, 0),
+        for (case, key, want) in [
+            ("vote", api_key::VOTE, 2),
+            ("begin quorum epoch", api_key::BEGIN_QUORUM_EPOCH, 1),
+            ("end quorum epoch", api_key::END_QUORUM_EPOCH, 1),
+            ("fetch snapshot", api_key::FETCH_SNAPSHOT, 1),
+            ("fetch", api_key::FETCH, 17),
+            ("unknown API", -123, 0),
         ] {
-            assert!(api_version_for(ApiKey(key)) == want, "api_key {key}");
+            assert!(api_version_for(ApiKey(key)) == want, "case {case}");
         }
     }
 
@@ -341,8 +346,7 @@ mod tests {
 
             let api_versions = read_frame(&mut stream).await;
             let (key, _version, corr, client_id, _body) = parse_request_header(&api_versions);
-            assert!(key == 18);
-            assert!(client_id == "raft-client");
+            assert!((key, client_id.as_str()) == (ApiKey(18), "raft-client"));
             write_response_frame(&mut stream, corr, false, &api_versions_response_v0()).await;
 
             let request = read_frame(&mut stream).await;

@@ -219,16 +219,26 @@ async fn merges_duplicate_trace_results_across_shards() {
 
     // Same traceID from both shards reunions into one trace; the two distinct
     // spans (one per shard) merge into one spanSet with matched accumulated.
-    assert!(json["traces"].as_array().unwrap().len() == 1);
-    assert!(json["traces"][0]["traceID"] == "0123456789abcdef0123456789abcdef");
     let span_sets = json["traces"][0]["spanSets"].as_array().unwrap();
-    check!(span_sets.len() == 1);
-    check!(span_sets[0]["matched"] == 2);
-    check!(span_sets[0]["spans"].as_array().unwrap().len() == 2);
-    // totalBlocks is the plan's block count (1 catalog block).
-    check!(json["metrics"]["totalBlocks"] == 1);
-    // inspectedTraces accumulates across shards (5 backend + 7 live).
-    check!(json["metrics"]["inspectedTraces"] == 12);
+    check!(
+        (
+            json["traces"].as_array().unwrap().len(),
+            &json["traces"][0]["traceID"],
+            span_sets.len(),
+            &span_sets[0]["matched"],
+            span_sets[0]["spans"].as_array().unwrap().len(),
+            &json["metrics"]["totalBlocks"],
+            &json["metrics"]["inspectedTraces"],
+        ) == (
+            1,
+            &serde_json::json!("0123456789abcdef0123456789abcdef"),
+            1,
+            &serde_json::json!(2),
+            2,
+            &serde_json::json!(1),
+            &serde_json::json!(12),
+        )
+    );
 }
 
 #[tokio::test]
@@ -257,11 +267,19 @@ async fn deduplicates_spans_across_shards() {
     let span_sets = json["traces"][0]["spanSets"].as_array().unwrap();
     let spans = span_sets[0]["spans"].as_array().unwrap();
 
-    check!(json["traces"].as_array().unwrap().len() == 1);
-    check!(span_sets.len() == 1);
-    check!(span_sets[0]["matched"] == 1);
-    check!(spans.len() == 1);
-    check!(spans[0]["spanID"] == "1111111111111111");
+    check!(
+        (
+            json["traces"].as_array().unwrap().len(),
+            span_sets.len(),
+            &span_sets[0]["matched"],
+            spans.iter().map(|span| &span["spanID"]).collect::<Vec<_>>(),
+        ) == (
+            1,
+            1,
+            &serde_json::json!(1),
+            vec![&serde_json::json!("1111111111111111")],
+        )
+    );
 }
 
 #[tokio::test]
@@ -289,9 +307,13 @@ async fn caps_merged_traces_to_limit_newest_first() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     let traces = json["traces"].as_array().unwrap();
-    check!(traces.len() == 2);
-    check!(traces[0]["startTimeUnixNano"] == "600");
-    check!(traces[1]["startTimeUnixNano"] == "500");
+    check!(
+        traces
+            .iter()
+            .map(|trace| &trace["startTimeUnixNano"])
+            .collect::<Vec<_>>()
+            == vec![&serde_json::json!("600"), &serde_json::json!("500")]
+    );
 }
 
 #[tokio::test]
@@ -364,10 +386,18 @@ async fn caps_span_sets_per_trace_to_spss() {
     let span_sets = json["traces"][0]["spanSets"].as_array().unwrap();
     let spans = span_sets[0]["spans"].as_array().unwrap();
     // spss=2 ⇒ first two spans kept (live shard's pair), matched is the true sum.
-    check!(spans.len() == 2);
-    check!(spans[0]["spanID"] == "1111111111111111");
-    check!(spans[1]["spanID"] == "2222222222222222");
-    check!(span_sets[0]["matched"] == 4);
+    check!(
+        (
+            spans.iter().map(|span| &span["spanID"]).collect::<Vec<_>>(),
+            &span_sets[0]["matched"],
+        ) == (
+            vec![
+                &serde_json::json!("1111111111111111"),
+                &serde_json::json!("2222222222222222"),
+            ],
+            &serde_json::json!(4),
+        )
+    );
 }
 
 #[tokio::test]
@@ -690,12 +720,13 @@ async fn shards_v2_tag_discovery_across_live_frontier() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
     // Both shards' span-scope tags union+dedupe into one scope, sorted.
-    assert!(json["scopes"].as_array().unwrap().len() == 1);
-    assert!(json["scopes"][0]["name"] == "span");
-    let tags = json["scopes"][0]["tags"].as_array().unwrap();
-    check!(tags.len() == 2);
-    check!(tags[0] == "backend.tag");
-    check!(tags[1] == "live.tag");
+    assert!(
+        json["scopes"]
+            == serde_json::json!([{
+                "name": "span",
+                "tags": ["backend.tag", "live.tag"],
+            }])
+    );
 }
 
 #[tokio::test]

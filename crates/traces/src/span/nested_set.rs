@@ -164,8 +164,7 @@ mod tests {
         // matching Tempo so `nestedSetParent < 0` selects them.
         let spans = vec![span(1, None), span(2, Some(99))];
         let ns = assign_nested_set(&spans);
-        assert!(ns[0].parent_id == -1);
-        assert!(ns[1].parent_id == -1);
+        assert_eq!((ns[0].parent_id, ns[1].parent_id), (-1, -1));
     }
 
     #[test]

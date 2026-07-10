@@ -75,13 +75,20 @@ async fn otlp_lands_as_span_block() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
 
-    check!(decoded.len() == 2);
-    check!(decoded.iter().all(|record| record.tenant == "tenant-a"));
-    check!(decoded.iter().all(|record| record.span.trace_id == [1; 16]));
     check!(
-        records
-            .iter()
-            .all(|record| record.partition == records[0].partition)
+        (
+            decoded
+                .iter()
+                .map(|record| (record.tenant.as_str(), record.span.trace_id))
+                .collect::<Vec<_>>(),
+            records
+                .iter()
+                .map(|record| record.partition)
+                .collect::<Vec<_>>(),
+        ) == (
+            vec![("tenant-a", [1; 16]), ("tenant-a", [1; 16])],
+            vec![records[0].partition; 2],
+        )
     );
 
     let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -102,9 +109,13 @@ async fn otlp_lands_as_span_block() {
     .await
     .unwrap();
 
-    check!(metas.len() == 1);
-    check!(metas[0].tenant == "tenant-a");
-    check!(metas[0].row_count == 2);
+    check!(
+        metas
+            .iter()
+            .map(|meta| (meta.tenant.as_str(), meta.row_count))
+            .collect::<Vec<_>>()
+            == vec![("tenant-a", 2)]
+    );
     check!(
         index.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 10_000)
             == vec![metas[0].object_key.clone()]

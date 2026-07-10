@@ -81,7 +81,7 @@ mod tests {
             .iter()
             .find(|p| p.slug == "kafka")
             .expect("kafka page");
-        check!(kafka.title == "Kafka");
+        assert_eq!(kafka.title, "Kafka");
         check!(
             kafka
                 .body
@@ -94,7 +94,7 @@ mod tests {
             "expected kafkaVersion field in kafka spec table:\n{}",
             kafka.body
         );
-        check!(pages.len() == 6);
+        assert_eq!(pages.len(), 6);
         let slugs: Vec<&str> = pages.iter().map(|p| p.slug.as_str()).collect();
         for e in [
             "kafka",

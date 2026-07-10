@@ -423,8 +423,10 @@ mod tests {
         let (k, v) = encode_config(None, "FULL");
         match SchemaRecord::decode(&k, Some(&v)) {
             SchemaRecord::Config(key, Some(val)) => {
-                assert!(key.subject.is_none());
-                assert_eq!(val.compatibility_level, "FULL");
+                assert_eq!(
+                    (key.subject, val.compatibility_level),
+                    (None, "FULL".to_string())
+                );
             }
             other => panic!("expected Config, got {other:?}"),
         }
@@ -435,8 +437,10 @@ mod tests {
         let (k, v) = encode_mode(Some("s"), "READONLY");
         match SchemaRecord::decode(&k, Some(&v)) {
             SchemaRecord::Mode(key, Some(val)) => {
-                assert_eq!(key.subject.as_deref(), Some("s"));
-                assert_eq!(val.mode, "READONLY");
+                assert_eq!(
+                    (key.subject, val.mode),
+                    (Some("s".to_string()), "READONLY".to_string())
+                );
             }
             other => panic!("expected Mode, got {other:?}"),
         }
@@ -462,8 +466,10 @@ mod tests {
         );
         match SchemaRecord::decode(&k, Some(&v)) {
             SchemaRecord::DeleteSubject(key, val) => {
-                assert_eq!(key.subject, "s");
-                assert_eq!((val.subject.as_str(), val.version), ("s", sv(3)));
+                assert_eq!(
+                    (key.subject.as_str(), val.subject.as_str(), val.version),
+                    ("s", "s", sv(3))
+                );
             }
             other => panic!("expected DeleteSubject, got {other:?}"),
         }
@@ -493,8 +499,7 @@ mod tests {
             &[],
         );
         let val: SchemaValue = serde_json::from_slice(&v).unwrap();
-        assert!(val.deleted);
-        assert_eq!(val.id, sid(7));
+        assert_eq!((val.deleted, val.id), (true, sid(7)));
     }
 
     #[test]
@@ -538,77 +543,96 @@ mod tests {
     /// ref is `{name,subject,version}`, and it is omitted entirely when empty.
     #[test]
     fn references_value_shape_matches_cp_capture() {
-        // Avro referrer (no schemaType) — records.json offset 3.
-        let refs = vec![SchemaReference {
-            name: "Money".into(),
-            subject: "av_money".into(),
-            version: sv(1),
-        }];
-        let (_k, v) = encode_schema("av_order", sv(1), sid(2), SchemaType::Avro, "S", &refs);
-        assert_eq!(
-            String::from_utf8(v).unwrap(),
-            r#"{"subject":"av_order","version":1,"id":2,"references":[{"name":"Money","subject":"av_money","version":1}],"schema":"S","deleted":false}"#
-        );
-        // Protobuf referrer (schemaType before references) — records.json offset 5.
-        let pbrefs = vec![SchemaReference {
-            name: "money.proto".into(),
-            subject: "pb_money".into(),
-            version: sv(1),
-        }];
-        let (_k, pv) = encode_schema(
-            "pb_order",
-            sv(1),
-            sid(4),
-            SchemaType::Protobuf,
-            "S",
-            &pbrefs,
-        );
-        assert_eq!(
-            String::from_utf8(pv).unwrap(),
-            r#"{"subject":"pb_order","version":1,"id":4,"schemaType":"PROTOBUF","references":[{"name":"money.proto","subject":"pb_money","version":1}],"schema":"S","deleted":false}"#
-        );
-        // Empty references → field omitted (cp base schemas carry no `references`).
-        let (_k, ev) = encode_schema("av_money", sv(1), sid(1), SchemaType::Avro, "S", &[]);
-        assert!(!String::from_utf8(ev).unwrap().contains("references"));
+        for (name, subject, id, schema_type, references, expected) in [
+            (
+                "avro_referrer",
+                "av_order",
+                sid(2),
+                SchemaType::Avro,
+                vec![SchemaReference {
+                    name: "Money".into(),
+                    subject: "av_money".into(),
+                    version: sv(1),
+                }],
+                r#"{"subject":"av_order","version":1,"id":2,"references":[{"name":"Money","subject":"av_money","version":1}],"schema":"S","deleted":false}"#,
+            ),
+            (
+                "protobuf_referrer",
+                "pb_order",
+                sid(4),
+                SchemaType::Protobuf,
+                vec![SchemaReference {
+                    name: "money.proto".into(),
+                    subject: "pb_money".into(),
+                    version: sv(1),
+                }],
+                r#"{"subject":"pb_order","version":1,"id":4,"schemaType":"PROTOBUF","references":[{"name":"money.proto","subject":"pb_money","version":1}],"schema":"S","deleted":false}"#,
+            ),
+            (
+                "empty_references_omitted",
+                "av_money",
+                sid(1),
+                SchemaType::Avro,
+                vec![],
+                r#"{"subject":"av_money","version":1,"id":1,"schema":"S","deleted":false}"#,
+            ),
+        ] {
+            let (_, value) = encode_schema(subject, sv(1), id, schema_type, "S", &references);
+            assert_eq!(String::from_utf8(value).unwrap(), expected, "case {name}");
+        }
     }
 
     #[test]
     fn clear_subjects_and_delete_subject_tombstone_are_noop() {
-        let cs = br#"{"keytype":"CLEAR_SUBJECTS","subject":"s","magic":0}"#;
-        assert!(matches!(SchemaRecord::decode(cs, None), SchemaRecord::Noop));
-        // cp 7.4.0 emits the SINGULAR `CLEAR_SUBJECT` (with a `{"subject":..}` value).
-        let cs1 = br#"{"keytype":"CLEAR_SUBJECT","subject":"i","magic":0}"#;
-        assert!(matches!(
-            SchemaRecord::decode(cs1, Some(br#"{"subject":"i"}"#)),
-            SchemaRecord::Noop
-        ));
         let (dk, _dv) = encode_delete_subject("s", sv(1));
-        assert!(matches!(
-            SchemaRecord::decode(&dk, None),
-            SchemaRecord::Noop
-        ));
+        for (name, key, value) in [
+            (
+                "clear_subjects",
+                br#"{"keytype":"CLEAR_SUBJECTS","subject":"s","magic":0}"#.as_slice(),
+                None,
+            ),
+            (
+                "clear_subject",
+                br#"{"keytype":"CLEAR_SUBJECT","subject":"i","magic":0}"#.as_slice(),
+                Some(br#"{"subject":"i"}"#.as_slice()),
+            ),
+            ("delete_subject_tombstone", dk.as_slice(), None),
+        ] {
+            assert!(
+                matches!(SchemaRecord::decode(key, value), SchemaRecord::Noop),
+                "case {name}"
+            );
+        }
     }
 
     /// The `_schemas` keys we emit must match cp-schema-registry 7.4.0 byte-for-byte
     /// (the compaction keys); confirmed against `tests/fixtures/admin/records.json`.
     #[test]
     fn encoders_match_cp_captured_keys() {
-        assert_eq!(
-            &encode_schema("t", sv(1), sid(1), SchemaType::Avro, "{}", &[]).0,
-            br#"{"keytype":"SCHEMA","subject":"t","version":1,"magic":1}"#
-        );
-        assert_eq!(
-            &encode_delete_subject("d", sv(1)).0,
-            br#"{"keytype":"DELETE_SUBJECT","subject":"d","magic":0}"#
-        );
-        assert_eq!(
-            &encode_mode(Some("r"), "READONLY").0,
-            br#"{"keytype":"MODE","subject":"r","magic":0}"#
-        );
-        assert_eq!(
-            &encode_tombstone("t", sv(1)),
-            br#"{"keytype":"SCHEMA","subject":"t","version":1,"magic":1}"#
-        );
+        for (name, actual, expected) in [
+            (
+                "schema",
+                encode_schema("t", sv(1), sid(1), SchemaType::Avro, "{}", &[]).0,
+                br#"{"keytype":"SCHEMA","subject":"t","version":1,"magic":1}"#.as_slice(),
+            ),
+            (
+                "delete_subject",
+                encode_delete_subject("d", sv(1)).0,
+                br#"{"keytype":"DELETE_SUBJECT","subject":"d","magic":0}"#.as_slice(),
+            ),
+            (
+                "mode",
+                encode_mode(Some("r"), "READONLY").0,
+                br#"{"keytype":"MODE","subject":"r","magic":0}"#.as_slice(),
+            ),
+            (
+                "tombstone",
+                encode_tombstone("t", sv(1)),
+                br#"{"keytype":"SCHEMA","subject":"t","version":1,"magic":1}"#.as_slice(),
+            ),
+        ] {
+            assert_eq!(actual, expected, "case {name}");
+        }
         // soft-delete value: cp's SCHEMA value field order with `deleted:true`.
         let (_k, v) = encode_schema_deleted("t", sv(1), sid(1), SchemaType::Avro, "{}", &[]);
         assert_eq!(
@@ -618,20 +642,26 @@ mod tests {
     }
 
     #[test]
-    fn config_key_serializes_subject() {
-        let k = config_key(Some("my-subject"));
-        let v: serde_json::Value = serde_json::from_slice(&k).unwrap();
-        assert_eq!(v["keytype"], "CONFIG");
-        assert_eq!(v["subject"], "my-subject");
-        assert_eq!(v["magic"], 0);
-    }
-
-    #[test]
-    fn config_key_global_has_null_subject() {
-        let k = config_key(None);
-        let v: serde_json::Value = serde_json::from_slice(&k).unwrap();
-        assert_eq!(v["keytype"], "CONFIG");
-        assert_eq!(v["subject"], serde_json::Value::Null);
-        assert_eq!(v["magic"], 0);
+    fn config_key_subject_cases() {
+        for (name, subject, expected_subject) in [
+            (
+                "subject",
+                Some("my-subject"),
+                serde_json::json!("my-subject"),
+            ),
+            ("global", None, serde_json::Value::Null),
+        ] {
+            let key = config_key(subject);
+            let value: serde_json::Value = serde_json::from_slice(&key).unwrap();
+            assert_eq!(
+                value,
+                serde_json::json!({
+                    "keytype": "CONFIG",
+                    "subject": expected_subject,
+                    "magic": 0,
+                }),
+                "case {name}"
+            );
+        }
     }
 }

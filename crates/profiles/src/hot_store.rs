@@ -378,8 +378,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(flamegraph.total == 9);
-        assert!(flamegraph.names.iter().any(|name| name == "hot_fn"));
+        assert_eq!(
+            (
+                flamegraph.total,
+                flamegraph.names.iter().any(|name| name == "hot_fn"),
+            ),
+            (9, true)
+        );
     }
 
     #[tokio::test]
@@ -402,8 +407,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(series.len() == 1);
-        assert!(series[0].points == vec![(1_700_000, 9.0)]);
+        assert_eq!(
+            (series.len(), series[0].points.as_slice()),
+            (1, &[(1_700_000, 9.0)][..])
+        );
     }
 
     #[tokio::test]
@@ -442,8 +449,10 @@ mod tests {
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
-        assert!(!trace_ids.is_null(0));
-        assert!(trace_ids.value(0) == &[0xaa; 16]);
+        assert_eq!(
+            (trace_ids.is_null(0), trace_ids.value(0)),
+            (false, &[0xaa; 16][..])
+        );
     }
 
     fn record_at(value: i64, timestamp_ns: i64) -> ProfileRecord {
@@ -469,8 +478,11 @@ mod tests {
 
         // Querying the full range must see only the surviving fresh sample.
         let stats = store.stats("tenant-a", 0, i64::MAX).await.unwrap();
-        assert!(stats.oldest_profile_time == Some(10_000), "{stats:?}");
-        assert!(stats.newest_profile_time == Some(10_000), "{stats:?}");
+        assert_eq!(
+            (stats.oldest_profile_time, stats.newest_profile_time),
+            (Some(10_000), Some(10_000)),
+            "{stats:?}"
+        );
 
         let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
         let fg = engine
@@ -549,8 +561,11 @@ mod tests {
 
         // The pre-append snapshot still sees only the original sample.
         let before = snapshot.stats("tenant-a", 0, i64::MAX).await.unwrap();
-        assert!(before.oldest_profile_time == Some(1), "{before:?}");
-        assert!(before.newest_profile_time == Some(1), "{before:?}");
+        assert_eq!(
+            (before.oldest_profile_time, before.newest_profile_time),
+            (Some(1), Some(1)),
+            "{before:?}"
+        );
 
         // A fresh snapshot sees both samples.
         let after = store

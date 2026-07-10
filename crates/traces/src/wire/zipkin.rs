@@ -213,12 +213,18 @@ mod tests {
 
         let spans = decode_zipkin(body.as_bytes()).unwrap();
 
-        assert!(spans[0].status == StatusCode::Error);
         assert!(
-            spans[0]
-                .span_attrs
-                .iter()
-                .any(|attr| attr.key == "error" && attr.value == AttrValue::Str("true".into()))
+            (
+                spans[0].status,
+                spans[0]
+                    .span_attrs
+                    .iter()
+                    .map(|attr| (attr.key.as_str(), &attr.value))
+                    .collect::<Vec<_>>(),
+            ) == (
+                StatusCode::Error,
+                vec![("error", &AttrValue::Str("true".into()))]
+            )
         );
     }
 
@@ -234,8 +240,10 @@ mod tests {
 
         let spans = decode_zipkin(body.as_bytes()).unwrap();
 
-        assert!(spans[0].status == StatusCode::Error);
-        assert!(spans[0].status_message == "deadline exceeded");
+        assert!(
+            (spans[0].status, spans[0].status_message.as_str())
+                == (StatusCode::Error, "deadline exceeded")
+        );
     }
 
     #[test]

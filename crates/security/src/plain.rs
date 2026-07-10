@@ -53,8 +53,10 @@ mod tests {
     #[test]
     fn correct_creds_pass() {
         let p = verify_plain(&creds(), "alice", b"wonderland").unwrap();
-        assert!(p.name == "alice");
-        assert!(p.auth_method == AuthMethod::SaslPlain);
+        assert_eq!(
+            (p.name.as_str(), p.auth_method),
+            ("alice", AuthMethod::SaslPlain)
+        );
     }
 
     #[test]

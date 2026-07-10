@@ -142,7 +142,7 @@ async fn idempotent_produce_then_consume() {
             .await
             .expect("oneshot")
             .unwrap_or_else(|e| panic!("record {i} failed: {e:?}"));
-        assert!(m.partition == 0, "single-partition topic");
+        assert_eq!(m.partition, 0, "single-partition topic");
     }
 
     // Consume them back through a group.

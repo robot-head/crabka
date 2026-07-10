@@ -183,8 +183,10 @@ async fn compactor_writes_block_then_tenant_index_manifest() {
     .await
     .unwrap();
 
-    check!(descriptor.key == key);
-    check!(descriptor.fingerprints == BTreeSet::from([api]));
+    assert_eq!(
+        (&descriptor.key, &descriptor.fingerprints),
+        (&key, &BTreeSet::from([api]))
+    );
     check!(
         block_index.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == vec![descriptor.clone()]
@@ -1252,13 +1254,12 @@ async fn compactor_runtime_splits_mixed_tenant_wal_batch_into_tenant_blocks() {
         .await
         .unwrap();
 
-    assert!(descriptors.len() == 2);
-    assert!(
+    assert_eq!(
         descriptors
             .iter()
             .map(|descriptor| descriptor.key.tenant.as_str())
-            .collect::<Vec<_>>()
-            == vec!["tenant-a", "tenant-b"]
+            .collect::<Vec<_>>(),
+        vec!["tenant-a", "tenant-b"]
     );
 
     let prefix = ObjectPath::from("observability/logs");
@@ -1722,9 +1723,12 @@ async fn compactor_service_accumulates_adjacent_small_wal_polls_into_one_block()
     .await
     .unwrap();
 
-    assert!(descriptors.len() == 1);
-    assert!(
-        descriptors[0].key == BlockKey::new("tenant-a", 6, 42, 43, TimeRange::new(10, 20).unwrap())
+    assert_eq!(
+        (descriptors.len(), descriptors[0].key.clone()),
+        (
+            1,
+            BlockKey::new("tenant-a", 6, 42, 43, TimeRange::new(10, 20).unwrap()),
+        )
     );
 
     let prefix = ObjectPath::from("observability/logs");

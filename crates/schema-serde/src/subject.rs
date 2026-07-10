@@ -57,14 +57,22 @@ mod tests {
     #[test]
     fn topic_name_strategy() {
         let s = TopicNameStrategy;
-        check!(s.subject("orders", Role::Value) == "orders-value");
-        check!(s.subject("orders", Role::Key) == "orders-key");
+        for (name, role, expected) in [
+            ("value", Role::Value, "orders-value"),
+            ("key", Role::Key, "orders-key"),
+        ] {
+            check!(s.subject("orders", role) == expected, "case {name}");
+        }
     }
 
     #[test]
     fn schema_kind_wire_names() {
-        check!(SchemaKind::Avro.wire_name().is_none());
-        check!(SchemaKind::Protobuf.wire_name() == Some("PROTOBUF"));
-        check!(SchemaKind::Json.wire_name() == Some("JSON"));
+        for (name, kind, expected) in [
+            ("avro", SchemaKind::Avro, None),
+            ("protobuf", SchemaKind::Protobuf, Some("PROTOBUF")),
+            ("json", SchemaKind::Json, Some("JSON")),
+        ] {
+            check!(kind.wire_name() == expected, "case {name}");
+        }
     }
 }

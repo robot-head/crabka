@@ -438,7 +438,7 @@ fn load_runtime_overrides(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
     use clap::Parser;
 
     use super::*;
@@ -465,10 +465,15 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::QueryFrontend));
-        check!(cli.query_frontend_split_ms == 30_000);
-        check!(cli.query_frontend_shards == 4);
-        check!(cli.query_frontend_cache_prefix == "tenant-a-query-cache");
+        assert_eq!(
+            (
+                matches!(cli.target, Target::QueryFrontend),
+                cli.query_frontend_split_ms,
+                cli.query_frontend_shards,
+                cli.query_frontend_cache_prefix.as_str(),
+            ),
+            (true, 30_000, 4, "tenant-a-query-cache")
+        );
     }
 
     #[test]
@@ -492,16 +497,26 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(matches!(cli.target, Target::Ruler));
-        check!(cli.ruler_tenant == "tenant-a");
-        check!(cli.ruler_eval_interval_ms == 15_000);
-        check!(cli.ruler_shard_index == 2);
-        check!(cli.ruler_shard_total == 4);
-        check!(
-            cli.ruler_alertmanager_url.as_deref()
-                == Some("http://alertmanager.example/api/v2/alerts")
+        assert_eq!(
+            (
+                matches!(cli.target, Target::Ruler),
+                cli.ruler_tenant.as_str(),
+                cli.ruler_eval_interval_ms,
+                cli.ruler_shard_index,
+                cli.ruler_shard_total,
+                cli.ruler_alertmanager_url.as_deref(),
+                cli.ruler_state_topic.as_str(),
+            ),
+            (
+                true,
+                "tenant-a",
+                15_000,
+                2,
+                4,
+                Some("http://alertmanager.example/api/v2/alerts"),
+                "__tenant_a_ruler_state",
+            )
         );
-        check!(cli.ruler_state_topic == "__tenant_a_ruler_state");
     }
 
     #[test]
@@ -531,8 +546,13 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(cli.object_store_url == "file:///tmp/crabka-metrics");
-        assert!(cli.manifest_prefix == "metrics/tenant-a");
+        assert_eq!(
+            (&cli.object_store_url, &cli.manifest_prefix),
+            (
+                &"file:///tmp/crabka-metrics".to_string(),
+                &"metrics/tenant-a".to_string()
+            )
+        );
     }
 
     #[test]
@@ -570,11 +590,22 @@ mod tests {
         ])
         .unwrap();
 
-        check!(cli.wal_bootstrap.as_deref() == Some("127.0.0.1:9092"));
-        check!(cli.wal_group_id == "metrics-querier");
-        check!(cli.wal_client_id == "querier-a");
-        check!(cli.wal_topic == "__crabka_metrics_wal");
-        check!(cli.wal_head_retention_ms == 600_000);
+        assert_eq!(
+            (
+                cli.wal_bootstrap.as_deref(),
+                cli.wal_group_id.as_str(),
+                cli.wal_client_id.as_str(),
+                cli.wal_topic.as_str(),
+                cli.wal_head_retention_ms,
+            ),
+            (
+                Some("127.0.0.1:9092"),
+                "metrics-querier",
+                "querier-a",
+                "__crabka_metrics_wal",
+                600_000,
+            )
+        );
     }
 
     #[test]

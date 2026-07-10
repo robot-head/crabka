@@ -766,15 +766,24 @@ mod tests {
             super::RaftError::Storage(crabka_log::LogError::Io(std::io::Error::new(kind, "io")))
         };
         let cases = [
-            (io_error(std::io::ErrorKind::UnexpectedEof), true),
-            (io_error(std::io::ErrorKind::BrokenPipe), false),
             (
+                "unexpected EOF",
+                io_error(std::io::ErrorKind::UnexpectedEof),
+                true,
+            ),
+            (
+                "broken pipe",
+                io_error(std::io::ErrorKind::BrokenPipe),
+                false,
+            ),
+            (
+                "protocol error",
                 super::RaftError::Protocol(crabka_protocol::ProtocolError::InvalidValue("not io")),
                 false,
             ),
         ];
-        for (err, want) in cases {
-            assert!(super::is_eof(&err) == want, "err: {err:?}");
+        for (case, err, want) in cases {
+            assert!(super::is_eof(&err) == want, "case {case}");
         }
     }
 
@@ -801,10 +810,11 @@ mod tests {
             let (api_key, api_version, correlation_id, body) =
                 super::read_one_request(&mut server).await.expect("decode");
 
-            check!(api_key == 52, "case: {case}");
-            check!(api_version == 2, "case: {case}");
-            check!(correlation_id == 123, "case: {case}");
-            check!(body.as_ref() == want_body, "case: {case}");
+            check!(
+                (api_key, api_version, correlation_id, body.as_ref())
+                    == (ApiKey(52), ApiVersion(2), 123, want_body),
+                "case: {case}"
+            );
             writer.await.unwrap();
         }
     }
@@ -967,8 +977,7 @@ mod tests {
         .await
         .expect("submit dispatch");
         let ok = decode_submit_change_response(&ok_body);
-        assert!(ok.error_code == 0);
-        assert!(ok.leader_hint == -1);
+        assert_eq!((ok.error_code, ok.leader_hint), (0, -1));
 
         let bad_req = CrabkaSubmitChangeRequest {
             records: Bytes::from_static(b"not-wincode"),
@@ -983,8 +992,7 @@ mod tests {
         .await
         .expect("decode failure dispatch");
         let err = decode_submit_change_response(&err_body);
-        assert!(err.error_code == 2);
-        assert!(err.leader_hint == -1);
+        assert_eq!((err.error_code, err.leader_hint), (2, -1));
     }
 
     #[tokio::test]
@@ -1010,8 +1018,7 @@ mod tests {
         .await
         .expect("duplicate submit");
         let duplicate = decode_submit_change_response(&duplicate);
-        assert!(duplicate.error_code == 2);
-        assert!(duplicate.leader_hint == -1);
+        assert_eq!((duplicate.error_code, duplicate.leader_hint), (2, -1));
     }
 
     #[tokio::test]
@@ -1027,10 +1034,14 @@ mod tests {
         .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
-        check!(resp.error_code == 0);
-        check!(resp.leader_hint == -1);
-        check!(resp.high_watermark == 0);
-        check!(resp.records.is_empty());
+        check!(
+            (
+                resp.error_code,
+                resp.leader_hint,
+                resp.high_watermark,
+                resp.records.is_empty(),
+            ) == (0, -1, 0, true)
+        );
     }
 
     #[tokio::test]
@@ -1051,10 +1062,14 @@ mod tests {
         .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
-        check!(resp.error_code == 0);
-        check!(resp.leader_hint == 1);
-        check!(resp.high_watermark >= 1);
-        check!(!resp.records.is_empty());
+        check!(
+            (
+                resp.error_code,
+                resp.leader_hint,
+                resp.high_watermark >= 1,
+                resp.records.is_empty(),
+            ) == (0, 1, true, false)
+        );
     }
 
     #[tokio::test]
@@ -1069,11 +1084,15 @@ mod tests {
         let mut cur = &body[..];
         let resp = DescribeClusterResponse::decode(&mut cur, 1).expect("describe response");
         check!(cur.is_empty());
-        check!(resp.controller_id == -1);
-        check!(resp.brokers.len() == 1);
-        check!(resp.brokers[0].broker_id == -1);
-        check!(resp.brokers[0].host.as_str() == "");
-        check!(resp.brokers[0].port == -1);
+        check!(
+            (
+                resp.controller_id,
+                resp.brokers
+                    .iter()
+                    .map(|broker| (broker.broker_id, broker.host.as_str(), broker.port))
+                    .collect::<Vec<_>>(),
+            ) == (-1, vec![(-1, "", -1)])
+        );
     }
 
     #[test]
@@ -1134,13 +1153,17 @@ mod tests {
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
             assert!(cur.is_empty(), "no trailing bytes (v={version})");
-            check!(resp.endpoint_type == 2);
-            check!(resp.cluster_id.as_str() == "clusterX");
-            check!(resp.controller_id == 1);
-            check!(resp.brokers.len() == 2);
-            check!(resp.brokers[0].broker_id == 1);
-            check!(resp.brokers[0].host.as_str() == "c1");
-            check!(resp.brokers[0].port == 9093);
+            check!(
+                (
+                    resp.endpoint_type,
+                    resp.cluster_id.as_str(),
+                    resp.controller_id,
+                    resp.brokers
+                        .iter()
+                        .map(|broker| (broker.broker_id, broker.host.as_str(), broker.port))
+                        .collect::<Vec<_>>(),
+                ) == (2, "clusterX", 1, vec![(1, "c1", 9093), (2, "c2", 9093)])
+            );
 
             // endpoint_type = BROKERS (1) → broker projection (rack preserved).
             let body =
@@ -1148,12 +1171,20 @@ mod tests {
                     .unwrap();
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
-            check!(resp.endpoint_type == 1);
-            check!(resp.brokers.len() == 1);
-            check!(resp.brokers[0].broker_id == 10);
-            check!(resp.brokers[0].host.as_str() == "b10");
-            check!(resp.brokers[0].port == 9092);
-            check!(resp.brokers[0].rack.as_deref() == Some("rack-a"));
+            check!(
+                (
+                    resp.endpoint_type,
+                    resp.brokers
+                        .iter()
+                        .map(|broker| (
+                            broker.broker_id,
+                            broker.host.as_str(),
+                            broker.port,
+                            broker.rack.as_deref(),
+                        ))
+                        .collect::<Vec<_>>(),
+                ) == (1, vec![(10, "b10", 9092, Some("rack-a"))])
+            );
         }
     }
 }

@@ -312,13 +312,13 @@ mod tests {
     #[test]
     fn metadata_version_default_is_the_bootstrap_level_clamped() {
         let f = feature("metadata.version").unwrap();
-        for (bootstrap, want) in [
-            (25, 25),
-            (7, 7),
-            (99, 25), // clamped to MAX
-            (1, 7),   // clamped to MIN
+        for (case, bootstrap, want) in [
+            ("maximum bootstrap", 25, 25),
+            ("minimum bootstrap", 7, 7),
+            ("above maximum", 99, 25),
+            ("below minimum", 1, 7),
         ] {
-            assert!(f.default_level(bootstrap) == want, "bootstrap {bootstrap}");
+            assert!(f.default_level(bootstrap) == want, "case {case}");
         }
     }
 
@@ -338,8 +338,12 @@ mod tests {
     #[test]
     fn metadata_version_level_name() {
         let f = feature("metadata.version").unwrap();
-        for (level, want) in [(25, Some("4.0-IV3")), (7, Some("3.3-IV3")), (99, None)] {
-            assert!(f.level_name(level) == want, "level {level}");
+        for (case, level, want) in [
+            ("latest level", 25, Some("4.0-IV3")),
+            ("earliest level", 7, Some("3.3-IV3")),
+            ("unknown level", 99, None),
+        ] {
+            assert!(f.level_name(level) == want, "case {case}");
         }
     }
 
@@ -362,29 +366,41 @@ mod tests {
 
         for (name, range, default_at_25, floor) in expected {
             let f = feature(name).expect("registered");
-            check!(f.supported_range() == range, "range for {name}");
-            check!(f.default_level(25) == default_at_25, "default for {name}");
-            check!(f.min_required_floor(&image) == floor, "floor for {name}");
+            check!(
+                (
+                    f.supported_range(),
+                    f.default_level(25),
+                    f.min_required_floor(&image),
+                ) == (range, default_at_25, floor),
+                "feature {name}"
+            );
         }
     }
 
     #[test]
     fn group_version_default_follows_release() {
         let f = feature("group.version").unwrap();
-        for (bootstrap, want) in [
-            (crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL - 1, 0),
-            (crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL, 1),
-            (25, 1),
+        for (case, bootstrap, want) in [
+            (
+                "before GA threshold",
+                crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL - 1,
+                0,
+            ),
+            (
+                "at GA threshold",
+                crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL,
+                1,
+            ),
+            ("after GA threshold", 25, 1),
         ] {
-            assert!(f.default_level(bootstrap) == want, "bootstrap {bootstrap}");
+            assert!(f.default_level(bootstrap) == want, "case {case}");
         }
     }
 
     #[test]
     fn group_version_declares_no_hard_dependencies() {
         let f = feature("group.version").unwrap();
-        assert!(f.dependencies(0).is_empty());
-        assert!(f.dependencies(1).is_empty());
+        assert!((f.dependencies(0).is_empty(), f.dependencies(1).is_empty()) == (true, true));
     }
 
     #[test]
@@ -396,21 +412,25 @@ mod tests {
     #[test]
     fn streams_version_registered_opt_in() {
         let f = feature("streams.version").expect("registered");
-        check!(f.supported_range() == (0, 1));
         // KIP-1071 is early access: never auto-enabled by any release level.
-        check!(f.default_level(25) == 0);
-        check!(f.dependencies(1).is_empty());
+        check!(
+            (
+                f.supported_range(),
+                f.default_level(25),
+                f.dependencies(1).is_empty(),
+            ) == ((0, 1), 0, true)
+        );
     }
 
     #[test]
     fn transaction_version_default_jumps_to_two_at_4_0_iv2() {
         let f = feature("transaction.version").unwrap();
-        for (bootstrap, want) in [
-            (23, 0), // below 4.0-IV2
-            (24, 2), // at 4.0-IV2 → jumps to 2
-            (25, 2),
+        for (case, bootstrap, want) in [
+            ("below activation", 23, 0),
+            ("at activation", 24, 2),
+            ("after activation", 25, 2),
         ] {
-            assert!(f.default_level(bootstrap) == want, "bootstrap {bootstrap}");
+            assert!(f.default_level(bootstrap) == want, "case {case}");
         }
     }
 
@@ -573,9 +593,14 @@ mod tests {
         // The override returns the image's min_required_metadata_version.
         let img = MetadataImage::new(uuid::Uuid::nil());
         let mv = feature("metadata.version").unwrap();
-        assert!(mv.min_required_floor(&img) == img.min_required_metadata_version());
         // Empty image floor is METADATA_VERSION_MIN (7), distinct from 0/1/-1.
-        assert!(mv.min_required_floor(&img) == 7);
+        assert_eq!(
+            (
+                mv.min_required_floor(&img),
+                img.min_required_metadata_version()
+            ),
+            (7, 7)
+        );
     }
 
     #[test]
@@ -593,9 +618,9 @@ mod tests {
     #[test]
     fn share_version_accessors() {
         let f = feature("share.version").expect("registered");
-        check!(f.name() == "share.version");
-        check!(f.supported_range() == (0, 1));
         // Opt-in (KIP-932 early access): never auto-enabled by any release.
-        check!(f.default_level(25) == 0);
+        check!(
+            (f.name(), f.supported_range(), f.default_level(25)) == ("share.version", (0, 1), 0)
+        );
     }
 }

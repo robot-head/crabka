@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::assert;
 use crabka_traces::frontend::{
     QueryFrontend,
     backend::{MockQuerier, TracePartial},
@@ -85,10 +85,15 @@ async fn trace_split_across_queriers_reassembles() {
     // One by-id job per querier.
     assert!(qf.backend_ref().trace_calls().len() == 2);
     let trace = trace.expect("assembled trace");
-    check!(trace.span_count() == 3);
-    check!(metrics.completed_jobs == 2);
-    check!(metrics.total_jobs == 2);
-    assert!(matches!(status, TraceStatus::Complete));
+    assert_eq!(
+        (
+            trace.span_count(),
+            metrics.completed_jobs,
+            metrics.total_jobs,
+            matches!(status, TraceStatus::Complete),
+        ),
+        (3, 2, 2, true)
+    );
 }
 
 #[tokio::test]

@@ -91,8 +91,9 @@ mod tests {
     fn bcrypt_verify() {
         let hash = bcrypt::hash("pw", 4).unwrap();
         let s = BasicAuthStore::from_users([("alice".to_string(), hash)].into_iter().collect());
-        assert!(s.verify("alice", "pw"));
-        assert!(!s.verify("alice", "bad"));
+        for (name, password, expected) in [("matching", "pw", true), ("wrong", "bad", false)] {
+            assert_eq!(s.verify("alice", password), expected, "case {name}");
+        }
     }
 
     #[test]

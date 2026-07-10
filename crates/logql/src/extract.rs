@@ -310,8 +310,7 @@ mod tests {
     fn logfmt_flags_preserve_non_strict_keep_empty_config() {
         let config = LogfmtParserConfig::flags(false, true).unwrap();
 
-        assert!(!config.strict());
-        assert!(config.keep_empty());
+        assert_eq!((config.strict(), config.keep_empty()), (false, true));
     }
 
     #[test]

@@ -225,23 +225,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn anonymous_when_no_creds_and_not_required() {
-        let st = state_with_basic(false);
-        let decision = resolve(&header_map(None), None, &st, 0).await;
-        match decision {
-            AuthDecision::Authn(p) => {
-                assert_eq!(p.name, "ANONYMOUS");
-                assert_eq!(p.auth_method, AuthMethod::Anonymous);
-            }
-            AuthDecision::Unauthorized => panic!("expected anonymous Authn"),
+    async fn no_credentials_cases_respect_auth_requirement() {
+        for (name, require_auth, expected) in [
+            (
+                "optional_auth_is_anonymous",
+                false,
+                AuthDecision::Authn(anonymous()),
+            ),
+            (
+                "required_auth_is_unauthorized",
+                true,
+                AuthDecision::Unauthorized,
+            ),
+        ] {
+            let state = state_with_basic(require_auth);
+            let decision = resolve(&header_map(None), None, &state, 0).await;
+            assert_eq!(decision, expected, "case {name}");
         }
-    }
-
-    #[tokio::test]
-    async fn unauthorized_when_required_and_no_creds() {
-        let st = state_with_basic(true);
-        let decision = resolve(&header_map(None), None, &st, 0).await;
-        assert_eq!(decision, AuthDecision::Unauthorized);
     }
 
     #[tokio::test]
@@ -262,28 +262,14 @@ mod tests {
     async fn good_basic_authenticates() {
         let st = state_with_basic(false);
         let decision = resolve(&header_map(Some(&basic_b64("alice", "pw"))), None, &st, 0).await;
-        match decision {
-            AuthDecision::Authn(p) => {
-                assert_eq!(p.name, "alice");
-                assert_eq!(p.auth_method, AuthMethod::SaslPlain);
-            }
-            AuthDecision::Unauthorized => panic!("expected alice Authn"),
-        }
-    }
-
-    #[tokio::test]
-    async fn bearer_presented_but_not_configured_is_unauthorized() {
-        // bearer=None but the request carries `Authorization: Bearer …` → 401
-        // (a presented credential whose scheme isn't configured is rejected,
-        // even with require_auth off).
-        let st = AuthState {
-            basic: None,
-            bearer: None,
-            require_auth: false,
-            realm: "schema-registry".to_string(),
-        };
-        let decision = resolve(&header_map(Some("Bearer some.jwt.token")), None, &st, 0).await;
-        assert_eq!(decision, AuthDecision::Unauthorized);
+        assert_eq!(
+            decision,
+            AuthDecision::Authn(Principal {
+                name: "alice".to_string(),
+                auth_method: AuthMethod::SaslPlain,
+                groups: Vec::new(),
+            })
+        );
     }
 
     #[tokio::test]
@@ -318,40 +304,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn basic_presented_but_not_configured_is_unauthorized() {
-        // basic=None but the request carries `Authorization: Basic …` → 401.
-        let st = AuthState {
+    async fn presented_but_unconfigured_credential_cases_are_unauthorized() {
+        let state = AuthState {
             basic: None,
             bearer: None,
             require_auth: false,
             realm: "schema-registry".to_string(),
         };
-        let decision = resolve(&header_map(Some(&basic_b64("alice", "pw"))), None, &st, 0).await;
-        assert_eq!(decision, AuthDecision::Unauthorized);
+        for (name, authorization) in [
+            ("bearer", "Bearer some.jwt.token".to_string()),
+            ("basic", basic_b64("alice", "pw")),
+        ] {
+            let decision =
+                resolve(&header_map(Some(authorization.as_str())), None, &state, 0).await;
+            assert_eq!(decision, AuthDecision::Unauthorized, "case {name}");
+        }
     }
 
     #[tokio::test]
-    async fn malformed_basic_base64_is_unauthorized() {
-        // `Basic <not-valid-base64>` → decode fails → 401.
-        let st = state_with_basic(false);
-        let decision = resolve(&header_map(Some("Basic !!!not-base64!!!")), None, &st, 0).await;
-        assert_eq!(decision, AuthDecision::Unauthorized);
-    }
-
-    #[tokio::test]
-    async fn basic_without_colon_is_unauthorized() {
-        // Valid base64 but the decoded text has no `user:pass` separator → 401.
+    async fn invalid_basic_credential_cases_are_unauthorized() {
         use base64::Engine as _;
         let no_colon = base64::engine::general_purpose::STANDARD.encode("justauser");
+        let cases = [
+            ("malformed base64", "Basic !!!not-base64!!!".to_string()),
+            ("missing colon", format!("Basic {no_colon}")),
+        ];
         let st = state_with_basic(false);
-        let decision = resolve(
-            &header_map(Some(&format!("Basic {no_colon}"))),
-            None,
-            &st,
-            0,
-        )
-        .await;
-        assert_eq!(decision, AuthDecision::Unauthorized);
+        for (name, authorization) in cases {
+            let decision = resolve(&header_map(Some(&authorization)), None, &st, 0).await;
+            assert_eq!(
+                decision,
+                AuthDecision::Unauthorized,
+                "invalid Basic case {name}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -395,27 +381,21 @@ mod tests {
             axum::middleware::from_fn_with_state(Arc::new(st), auth_layer),
         );
 
-        // WITH the forward header, no Authorization → handler runs (200), NOT 401.
-        let req = Request::builder()
-            .uri("/")
-            .header(crate::rest::forward::FORWARD_HEADER, "ingress-node")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.clone().oneshot(req).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "forwarded request must bypass require_auth"
-        );
-
-        // WITHOUT the forward header and no credentials → 401.
-        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::UNAUTHORIZED,
-            "non-forwarded credential-less request must 401"
-        );
+        for (name, forwarded, expected) in [
+            ("forwarded_request", true, StatusCode::OK),
+            ("non_forwarded_request", false, StatusCode::UNAUTHORIZED),
+        ] {
+            let mut request = Request::builder().uri("/");
+            if forwarded {
+                request = request.header(crate::rest::forward::FORWARD_HEADER, "ingress-node");
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "case {name}");
+        }
     }
 
     /// cp-byte-exact pin: drive `auth_layer` (Basic configured) over a tiny
@@ -461,32 +441,34 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
 
-        // Status.
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-
-        // WWW-Authenticate — the exact captured string.
+        let status = resp.status();
         let www = resp
             .headers()
             .get(header::WWW_AUTHENTICATE)
             .expect("WWW-Authenticate present when Basic configured")
             .to_str()
-            .unwrap();
-        assert_eq!(www, r#"basic realm="SchemaRegistry-Props""#);
-
-        // Content-type — cp's vendor envelope.
-        assert_eq!(
-            resp.headers()
-                .get(header::CONTENT_TYPE)
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            crate::error::CONTENT_TYPE,
-        );
+            .unwrap()
+            .to_owned();
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
 
         // Body — the exact captured bytes.
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
-        assert_eq!(&body[..], br#"{"error_code":401,"message":"Unauthorized"}"#);
+        assert_eq!(
+            (status, www.as_str(), content_type.as_str(), body.as_ref()),
+            (
+                StatusCode::UNAUTHORIZED,
+                r#"basic realm="SchemaRegistry-Props""#,
+                crate::error::CONTENT_TYPE,
+                br#"{"error_code":401,"message":"Unauthorized"}"#.as_slice(),
+            )
+        );
     }
 }

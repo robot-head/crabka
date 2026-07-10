@@ -524,8 +524,13 @@ mod tests {
         ];
         let p = partial(vec![trace("01", "a", 1, spans)], 10);
         let resp = merge_search(vec![p], 20, 2);
-        assert!(resp.traces[0].span_sets[0].spans.len() == 2);
-        assert!(resp.traces[0].span_sets[0].matched == 4);
+        assert_eq!(
+            (
+                resp.traces[0].span_sets[0].spans.len(),
+                resp.traces[0].span_sets[0].matched,
+            ),
+            (2, 4)
+        );
     }
 
     fn otlp_span(id: &str) -> OtlpSpanJson {

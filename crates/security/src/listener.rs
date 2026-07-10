@@ -22,8 +22,6 @@ impl ListenerProtocol {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-
     use super::*;
 
     #[test]
@@ -34,10 +32,10 @@ mod tests {
             (ListenerProtocol::SaslPlaintext, false, true),
             (ListenerProtocol::SaslSsl, true, true),
         ] {
-            assert!(protocol.requires_tls() == tls, "requires_tls {protocol:?}");
-            assert!(
-                protocol.requires_sasl() == sasl,
-                "requires_sasl {protocol:?}"
+            assert_eq!(
+                (protocol.requires_tls(), protocol.requires_sasl()),
+                (tls, sasl),
+                "case {protocol:?}"
             );
         }
     }

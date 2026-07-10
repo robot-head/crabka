@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use assert2::{assert, check};
+use assert2::assert;
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
@@ -218,7 +218,7 @@ async fn observability_kafka_wal_sink_feeds_live_consumer_hot_tail() {
             .expect("poll live wal");
     }
 
-    assert!(decoded == 1, "expected one live WAL record");
+    assert_eq!(decoded, 1, "expected one live WAL record");
     assert!(
         hot_tail.records()
             == vec![WalLogRecord {
@@ -283,7 +283,7 @@ async fn config_built_distributor_writes_loki_push_to_live_wal() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let mut consumer =
         KafkaLogWalConsumer::connect(&bootstrap, "observability-wal-config-distributor", topic)
@@ -292,7 +292,7 @@ async fn config_built_distributor_writes_loki_push_to_live_wal() {
     let hot_tail = BufferedLogHotTail::default();
     let decoded = poll_until_decoded(&mut consumer, &hot_tail).await;
 
-    assert!(decoded == 1, "expected one config-produced WAL record");
+    assert_eq!(decoded, 1, "expected one config-produced WAL record");
     assert!(
         hot_tail.records()
             == vec![WalLogRecord {
@@ -379,10 +379,10 @@ async fn config_built_distributor_enforces_broker_user_producer_byte_rate_quota_
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(body["errorType"] == "rate_limited");
+    assert_eq!(body["errorType"], "rate_limited");
     assert!(
         body["error"]
             .as_str()
@@ -470,10 +470,10 @@ async fn config_built_distributor_enforces_tenant_write_acl_before_wal_append() 
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(body["errorType"] == "forbidden");
+    assert_eq!(body["errorType"], "forbidden");
     assert!(body["error"].as_str().unwrap().contains("tenant write ACL"));
 
     let mut consumer =
@@ -484,7 +484,7 @@ async fn config_built_distributor_enforces_tenant_write_acl_before_wal_append() 
     let decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, Duration::from_millis(250))
         .await
         .expect("poll live wal");
-    assert!(decoded == 0, "ACL rejection must happen before WAL append");
+    assert_eq!(decoded, 0, "ACL rejection must happen before WAL append");
     assert!(hot_tail.records().is_empty());
     broker.shutdown().await;
 }
@@ -564,7 +564,7 @@ async fn config_built_distributor_allows_tenant_with_write_acl_to_append_wal() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let mut consumer =
         KafkaLogWalConsumer::connect(&bootstrap, "observability-wal-acl-allow-distributor", topic)
@@ -572,7 +572,7 @@ async fn config_built_distributor_allows_tenant_with_write_acl_to_append_wal() {
             .expect("wal consumer");
     let hot_tail = BufferedLogHotTail::default();
     let decoded = poll_until_decoded(&mut consumer, &hot_tail).await;
-    assert!(decoded == 1, "expected one ACL-authorized WAL record");
+    assert_eq!(decoded, 1, "expected one ACL-authorized WAL record");
     assert!(
         hot_tail.records()
             == vec![WalLogRecord {
@@ -656,10 +656,10 @@ async fn config_built_querier_enforces_tenant_read_acl_before_query() {
         tokio::task::yield_now().await;
     };
 
-    assert!(response.status() == StatusCode::FORBIDDEN);
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(body["errorType"] == "forbidden");
+    assert_eq!(body["errorType"], "forbidden");
     assert!(body["error"].as_str().unwrap().contains("tenant read ACL"));
     broker.shutdown().await;
 }
@@ -772,7 +772,7 @@ async fn configured_listener_tails_live_wal_over_websocket() {
         .headers_mut()
         .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
     let (mut socket, response) = connect_async(request).await.unwrap();
-    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
 
     push_api_log(distributor, &timestamp, "api live websocket tail error").await;
 
@@ -858,7 +858,7 @@ async fn config_built_distributor_compactor_querier_loop_serves_compacted_logs()
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let mut compactor_config = service_config(Role::Compactor, &bootstrap, topic, &data_root);
     compactor_config.object_store_url = Some(object_store_url.clone());
@@ -871,10 +871,10 @@ async fn config_built_distributor_compactor_querier_loop_serves_compacted_logs()
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
-    check!(descriptors[0].key.partition == 0);
-    check!(descriptors[0].key.first_offset == 0);
-    check!(descriptors[0].key.last_offset == 1);
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].key.partition, 0);
+    assert_eq!(descriptors[0].key.first_offset, 0);
+    assert_eq!(descriptors[0].key.last_offset, 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -986,7 +986,7 @@ async fn otlp_http_log_flows_through_configured_distributor_compactor_and_querie
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let mut compactor_config = service_config(Role::Compactor, &bootstrap, topic, &data_root);
     compactor_config.object_store_url = Some(object_store_url.clone());
@@ -999,9 +999,9 @@ async fn otlp_http_log_flows_through_configured_distributor_compactor_and_querie
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
-    check!(descriptors[0].key.first_offset == 0);
-    check!(descriptors[0].key.last_offset == 0);
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].key.first_offset, 0);
+    assert_eq!(descriptors[0].key.last_offset, 0);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1085,7 +1085,7 @@ async fn configured_loop_isolates_tenants_sharing_one_wal_topic() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 2);
+    assert_eq!(descriptors.len(), 2);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1165,9 +1165,9 @@ async fn config_built_querier_merges_compacted_blocks_with_uncompacted_live_tail
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
-    check!(descriptors[0].key.first_offset == 0);
-    check!(descriptors[0].key.last_offset == 0);
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].key.first_offset, 0);
+    assert_eq!(descriptors[0].key.last_offset, 0);
 
     push_api_log(distributor, &live_timestamp, "api live tail error").await;
 
@@ -1233,9 +1233,9 @@ async fn config_built_compactor_restart_resumes_from_committed_live_wal_offset()
     first_compactor.wal_group_id = compactor_group.to_string();
     let first_descriptors =
         run_configured_compactor_for(&first_compactor, Duration::from_millis(750)).await;
-    assert!(first_descriptors.len() == 1);
-    check!(first_descriptors[0].key.first_offset == 0);
-    check!(first_descriptors[0].key.last_offset == 0);
+    assert_eq!(first_descriptors.len(), 1);
+    assert_eq!(first_descriptors[0].key.first_offset, 0);
+    assert_eq!(first_descriptors[0].key.last_offset, 0);
 
     push_api_log(distributor, &second_timestamp, "api second restart error").await;
 
@@ -1245,9 +1245,9 @@ async fn config_built_compactor_restart_resumes_from_committed_live_wal_offset()
     restarted_compactor.wal_group_id = compactor_group.to_string();
     let second_descriptors =
         run_configured_compactor_for(&restarted_compactor, Duration::from_millis(750)).await;
-    assert!(second_descriptors.len() == 1);
-    check!(second_descriptors[0].key.first_offset == 1);
-    check!(second_descriptors[0].key.last_offset == 1);
+    assert_eq!(second_descriptors.len(), 1);
+    assert_eq!(second_descriptors[0].key.first_offset, 1);
+    assert_eq!(second_descriptors[0].key.last_offset, 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1304,9 +1304,9 @@ async fn native_kafka_produced_log_flows_through_configured_compactor_and_querie
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
-    check!(descriptors[0].key.first_offset == 0);
-    check!(descriptors[0].key.last_offset == 0);
+    assert_eq!(descriptors.len(), 1);
+    assert_eq!(descriptors[0].key.first_offset, 0);
+    assert_eq!(descriptors[0].key.last_offset, 0);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1441,7 +1441,7 @@ async fn push_tenant_api_log(app: axum::Router, tenant: &str, timestamp_ns: &str
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
 async fn query_until_api_error(app: axum::Router) -> serde_json::Value {
@@ -1461,7 +1461,7 @@ async fn query_until_api_error(app: axum::Router) -> serde_json::Value {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body
@@ -1536,7 +1536,7 @@ async fn query_until_hot_cold_errors(
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1572,7 +1572,7 @@ async fn query_until_native_kafka_error(app: axum::Router) -> serde_json::Value 
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1606,7 +1606,7 @@ async fn query_until_otlp_loop_error(app: axum::Router, timestamp_ns: &str) -> s
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1643,7 +1643,7 @@ async fn query_until_tenant_shared_error(
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if !body["data"]["result"].as_array().unwrap().is_empty() {
@@ -1679,7 +1679,7 @@ async fn query_until_restart_errors(
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1715,7 +1715,7 @@ async fn query_until_loop_error(app: axum::Router, timestamp: &str) -> serde_jso
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = serde_json::from_slice(&body).unwrap();
         if body

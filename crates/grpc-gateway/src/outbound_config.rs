@@ -215,23 +215,51 @@ filter         = "json:$.type"
     fn compile_valid_subscription() {
         let file: OutboundFile = toml::from_str(VALID_TOML).expect("parse TOML");
         let compiled = file.compile().expect("compile");
-        assert_eq!(compiled.len(), 1);
         let sub = &compiled[0];
-        assert_eq!(sub.name, "my-sub");
-        assert_eq!(sub.source_topics, ["events"]);
-        assert_eq!(sub.target_url, "https://hooks.example.com/deliver");
-        assert_eq!(sub.signing_secret.as_deref(), Some(b"s3cr3t".as_slice()));
-        assert!(sub.filter.is_some(), "filter should be compiled");
-        // Default values clamped correctly.
-        assert_eq!(sub.max_attempts, 5);
-        assert_eq!(sub.base_backoff_ms, 500);
-        assert_eq!(sub.max_backoff_ms, 30_000);
-        assert_eq!(sub.request_timeout_ms, 10_000);
+        assert_eq!(
+            (
+                compiled.len(),
+                (
+                    sub.name.as_str(),
+                    sub.source_topics
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                    sub.target_url.as_str(),
+                    sub.signing_secret.as_deref(),
+                    sub.filter.is_some(),
+                    sub.dead_letter_topic.as_deref(),
+                    sub.max_attempts,
+                    sub.base_backoff_ms,
+                    sub.max_backoff_ms,
+                    sub.request_timeout_ms,
+                    sub.headers.is_empty(),
+                    sub.decode_to_json,
+                ),
+            ),
+            (
+                1,
+                (
+                    "my-sub",
+                    vec!["events"],
+                    "https://hooks.example.com/deliver",
+                    Some(b"s3cr3t".as_slice()),
+                    true,
+                    None,
+                    5,
+                    500,
+                    30_000,
+                    10_000,
+                    true,
+                    false,
+                ),
+            )
+        );
     }
 
     #[test]
-    fn ssrf_target_not_in_allowed_targets_errors() {
-        let toml = r#"
+    fn compile_error_cases() {
+        let ssrf_mismatch = r#"
 [[allowed_targets]]
 scheme = "https"
 host   = "allowed.example.com"
@@ -241,34 +269,13 @@ name          = "bad"
 source_topics = ["t"]
 target_url    = "https://evil.attacker.com/exfil"
 "#;
-        let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
-        let err = file.compile().expect_err("must fail SSRF check");
-        assert!(
-            err.contains("SSRF guard"),
-            "error must mention SSRF guard, got: {err}"
-        );
-    }
-
-    #[test]
-    fn ssrf_empty_allowed_targets_denies_all() {
-        // No `[[allowed_targets]]` at all → deny everything (fail-closed).
-        let toml = r#"
+        let ssrf_empty = r#"
 [[subscriptions]]
 name          = "bad"
 source_topics = ["t"]
 target_url    = "https://hooks.example.com/deliver"
 "#;
-        let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
-        let err = file.compile().expect_err("empty allow-list must deny");
-        assert!(
-            err.contains("SSRF guard"),
-            "error must mention SSRF guard, got: {err}"
-        );
-    }
-
-    #[test]
-    fn header_filter_is_rejected() {
-        let toml = r#"
+        let header_filter = r#"
 [[allowed_targets]]
 scheme = "https"
 host   = "hooks.example.com"
@@ -279,12 +286,26 @@ source_topics = ["t"]
 target_url    = "https://hooks.example.com/deliver"
 filter        = "header:X-Custom"
 "#;
-        let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
-        let err = file.compile().expect_err("header: filter must be rejected");
-        assert!(
-            err.contains("records carry no headers"),
-            "error must mention missing headers, got: {err}"
-        );
+        let invalid_url = r#"
+[[allowed_targets]]
+scheme = "https"
+host   = "hooks.example.com"
+
+[[subscriptions]]
+name          = "bad-url"
+source_topics = ["t"]
+target_url    = "not a valid url %%"
+"#;
+        for (name, input, needle) in [
+            ("ssrf_mismatch", ssrf_mismatch, "SSRF guard"),
+            ("ssrf_empty", ssrf_empty, "SSRF guard"),
+            ("header_filter", header_filter, "records carry no headers"),
+            ("invalid_url", invalid_url, "invalid target_url"),
+        ] {
+            let file: OutboundFile = toml::from_str(input).expect("parse TOML");
+            let err = file.compile().expect_err("case must fail");
+            assert!(err.contains(needle), "case {name}: {err}");
+        }
     }
 
     #[test]
@@ -305,26 +326,6 @@ filter        = "json:$.type"
         assert!(
             compiled[0].filter.is_some(),
             "json:$.type filter must compile to Some(JpQuery)"
-        );
-    }
-
-    #[test]
-    fn unparseable_target_url_errors() {
-        let toml = r#"
-[[allowed_targets]]
-scheme = "https"
-host   = "hooks.example.com"
-
-[[subscriptions]]
-name          = "bad-url"
-source_topics = ["t"]
-target_url    = "not a valid url %%"
-"#;
-        let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
-        let err = file.compile().expect_err("invalid URL must fail");
-        assert!(
-            err.contains("invalid target_url"),
-            "error must mention invalid target_url, got: {err}"
         );
     }
 

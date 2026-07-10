@@ -219,8 +219,6 @@ pub fn check_against_version(
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
-
     use super::*;
     use crate::{format::SchemaType, store::StoreState};
 
@@ -231,17 +229,26 @@ mod tests {
 
     #[test]
     fn level_parse_and_props() {
-        assert_eq!(
-            CompatibilityLevel::parse("BACKWARD"),
-            CompatibilityLevel::Backward
-        );
-        assert_eq!(
-            CompatibilityLevel::parse("FULL_TRANSITIVE"),
-            CompatibilityLevel::FullTransitive
-        );
-        check!(CompatibilityLevel::FullTransitive.is_transitive());
-        check!(!CompatibilityLevel::Backward.is_transitive());
-        check!(CompatibilityLevel::None.directions().is_empty());
+        for (name, input, expected) in [
+            (
+                "backward",
+                "BACKWARD",
+                (CompatibilityLevel::Backward, false, 1),
+            ),
+            (
+                "full_transitive",
+                "FULL_TRANSITIVE",
+                (CompatibilityLevel::FullTransitive, true, 2),
+            ),
+            ("none", "NONE", (CompatibilityLevel::None, false, 0)),
+        ] {
+            let level = CompatibilityLevel::parse(input);
+            assert_eq!(
+                (level, level.is_transitive(), level.directions().len()),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -256,15 +263,26 @@ mod tests {
         snap.set_subject_compat("s", "BACKWARD".into());
         snap.register("s", SchemaType::Avro, &av(ID), &[], None)
             .unwrap();
-        let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
-        assert!(matches!(
-            check_registration(&snap, "s", SchemaType::Avro, &bad, &[]),
-            Err(crate::error::SrError::Incompatible(_))
-        ));
-        let good = av(&format!(
-            "{ID},{{\"name\":\"x\",\"type\":\"int\",\"default\":0}}"
-        ));
-        assert!(check_registration(&snap, "s", SchemaType::Avro, &good, &[]).is_ok());
+        for (name, candidate, compatible) in [
+            (
+                "required_field",
+                av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}")),
+                false,
+            ),
+            (
+                "defaulted_field",
+                av(&format!(
+                    "{ID},{{\"name\":\"x\",\"type\":\"int\",\"default\":0}}"
+                )),
+                true,
+            ),
+        ] {
+            assert_eq!(
+                check_registration(&snap, "s", SchemaType::Avro, &candidate, &[]).is_ok(),
+                compatible,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -284,17 +302,19 @@ mod tests {
         snap.register("s", SchemaType::Avro, &av(ID), &[], None)
             .unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
-        let v = check_against_version(&snap, "s", SchemaType::Avro, &bad, &[], None).unwrap();
-        assert!(!v.is_compatible);
-        assert!(!v.messages.is_empty());
         let good = av(&format!(
             "{ID},{{\"name\":\"x\",\"type\":\"int\",\"default\":0}}"
         ));
-        assert!(
-            check_against_version(&snap, "s", SchemaType::Avro, &good, &[], None)
-                .unwrap()
-                .is_compatible
-        );
-        assert!(check_against_version(&snap, "nope", SchemaType::Avro, &good, &[], None).is_err());
+        for (name, subject, candidate, expected) in [
+            ("incompatible", "s", bad.as_str(), Some((false, false))),
+            ("compatible", "s", good.as_str(), Some((true, true))),
+            ("missing_subject", "nope", good.as_str(), None),
+        ] {
+            let actual =
+                check_against_version(&snap, subject, SchemaType::Avro, candidate, &[], None)
+                    .ok()
+                    .map(|verdict| (verdict.is_compatible, verdict.messages.is_empty()));
+            assert_eq!(actual, expected, "case {name}");
+        }
     }
 }

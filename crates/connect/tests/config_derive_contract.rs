@@ -74,16 +74,31 @@ async fn manual_connector_config_contract_builds_typed_config() {
         .unwrap();
     let config = ManualConfig::from_resolved(&resolved).unwrap();
 
-    assert_eq!(config.database_url, "postgres://localhost/app");
-    assert_eq!(config.password.expose_secret(), "secret");
-    assert!(config.enabled);
-    assert_eq!(config.signed_limit, -12);
-    assert_eq!(config.max_batch, 500);
+    assert_eq!(
+        (
+            config.database_url.as_str(),
+            config.password.expose_secret(),
+            config.enabled,
+            config.signed_limit,
+            config.max_batch,
+            config.topics,
+            config.metadata,
+            config.optional_label,
+            config.poll_interval,
+        ),
+        (
+            "postgres://localhost/app",
+            "secret",
+            true,
+            -12,
+            500,
+            vec!["alpha".to_string(), "beta".to_string()],
+            json!({"mode": "snapshot"}),
+            None,
+            Duration::from_millis(1500),
+        )
+    );
     assert!((config.ratio - 0.75).abs() < f32::EPSILON);
-    assert_eq!(config.topics, vec!["alpha".to_string(), "beta".to_string()]);
-    assert_eq!(config.metadata, json!({"mode": "snapshot"}));
-    assert_eq!(config.optional_label, None);
-    assert_eq!(config.poll_interval, Duration::from_millis(1500));
 }
 
 #[tokio::test]

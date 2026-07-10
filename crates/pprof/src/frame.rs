@@ -15,8 +15,6 @@ pub trait SymbolSource: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-
     use super::*;
 
     struct Fixed(Vec<Frame>);
@@ -35,7 +33,6 @@ mod tests {
             line: 10,
         }]));
         let frames = src.resolve(0, 1);
-        assert!(frames.len() == 1);
-        assert!(frames[0].function == "main");
+        assert_eq!((frames.len(), frames[0].function.as_str()), (1, "main"));
     }
 }

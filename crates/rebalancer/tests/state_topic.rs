@@ -98,8 +98,7 @@ async fn write_load_round_trip_via_real_broker() {
 
     drive_loader_until_loaded(state.clone(), Duration::from_secs(10)).await;
     let loaded = state.current().expect("non-tombstone");
-    assert!(loaded.proposal_id == "p-1");
-    assert!(loaded.phase == Phase::Wait);
+    assert!((loaded.proposal_id.as_str(), loaded.phase) == ("p-1", Phase::Wait));
     shutdown.cancel();
     handle.await.unwrap();
 

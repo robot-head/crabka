@@ -244,15 +244,29 @@ mod tests {
             time_ms: 1_700_000_000_000,
         };
         let j = to_ocsf(&ev, &product());
-        check!(j["class_uid"] == 3002);
-        check!(j["category_uid"] == 3);
-        check!(j["status_id"] == 2);
-        check!(j["time"] == 1_700_000_000_000_i64);
-        check!(j["actor"]["user"]["name"] == "alice");
-        check!(j["src_endpoint"]["ip"] == "10.0.0.1");
-        check!(j["src_endpoint"]["port"] == 51120);
-        check!(j["auth_protocol"] == "SASL/PLAIN");
-        check!(j["metadata"]["product"]["vendor_name"] == "Crabka");
+        check!(
+            (
+                j["class_uid"].clone(),
+                j["category_uid"].clone(),
+                j["status_id"].clone(),
+                j["time"].clone(),
+                j["actor"]["user"]["name"].clone(),
+                j["src_endpoint"]["ip"].clone(),
+                j["src_endpoint"]["port"].clone(),
+                j["auth_protocol"].clone(),
+                j["metadata"]["product"]["vendor_name"].clone(),
+            ) == (
+                serde_json::json!(3002),
+                serde_json::json!(3),
+                serde_json::json!(2),
+                serde_json::json!(1_700_000_000_000_i64),
+                serde_json::json!("alice"),
+                serde_json::json!("10.0.0.1"),
+                serde_json::json!(51120),
+                serde_json::json!("SASL/PLAIN"),
+                serde_json::json!("Crabka"),
+            )
+        );
     }
 
     #[test]
@@ -272,13 +286,25 @@ mod tests {
             time_ms: 5,
         };
         let j = to_ocsf(&ev, &product());
-        check!(j["class_uid"] == 3003);
-        check!(j["status_id"] == 2);
-        check!(j["type_uid"] == 300_302_i64);
-        check!(j["actor"]["user"]["name"] == "bob");
-        check!(j["resources"][0]["type"] == "Topic");
-        check!(j["resources"][0]["name"] == "secrets");
-        check!(j["operation"] == "Write");
+        check!(
+            (
+                j["class_uid"].clone(),
+                j["status_id"].clone(),
+                j["type_uid"].clone(),
+                j["actor"]["user"]["name"].clone(),
+                j["resources"][0]["type"].clone(),
+                j["resources"][0]["name"].clone(),
+                j["operation"].clone(),
+            ) == (
+                serde_json::json!(3003),
+                serde_json::json!(2),
+                serde_json::json!(300_302_i64),
+                serde_json::json!("bob"),
+                serde_json::json!("Topic"),
+                serde_json::json!("secrets"),
+                serde_json::json!("Write"),
+            )
+        );
     }
 
     #[test]
@@ -301,11 +327,21 @@ mod tests {
             time_ms: 6,
         };
         let j = to_ocsf(&ev, &product());
-        check!(j["class_uid"] == 6003);
-        check!(j["category_uid"] == 6);
-        check!(j["status_id"] == 1);
-        check!(j["api"]["operation"] == "CreateTopics");
-        check!(j["resources"][0]["name"] == "orders");
+        check!(
+            (
+                j["class_uid"].clone(),
+                j["category_uid"].clone(),
+                j["status_id"].clone(),
+                j["api"]["operation"].clone(),
+                j["resources"][0]["name"].clone(),
+            ) == (
+                serde_json::json!(6003),
+                serde_json::json!(6),
+                serde_json::json!(1),
+                serde_json::json!("CreateTopics"),
+                serde_json::json!("orders"),
+            )
+        );
     }
 
     #[test]
@@ -316,9 +352,18 @@ mod tests {
             time_ms: 7,
         };
         let j = to_ocsf(&ev, &product());
-        check!(j["class_uid"] == 6002);
-        check!(j["status_id"] == 1);
-        check!(j["activity_name"] == "BrokerStarted");
-        check!(j["device"]["uid"] == "1");
+        check!(
+            (
+                j["class_uid"].clone(),
+                j["status_id"].clone(),
+                j["activity_name"].clone(),
+                j["device"]["uid"].clone(),
+            ) == (
+                serde_json::json!(6002),
+                serde_json::json!(1),
+                serde_json::json!("BrokerStarted"),
+                serde_json::json!("1"),
+            )
+        );
     }
 }

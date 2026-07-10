@@ -1300,9 +1300,14 @@ mod tests {
             .await
             .unwrap();
 
-        check!(diff.left_ticks == 10);
-        check!(diff.right_ticks == 15);
-        check!(diff.names.iter().any(|name| name == "b"));
+        assert_eq!(
+            (
+                diff.left_ticks,
+                diff.right_ticks,
+                diff.names.iter().any(|name| name == "b"),
+            ),
+            (10, 15, true)
+        );
     }
 
     #[tokio::test]
@@ -1460,8 +1465,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(heatmap.counts[0][0] == 1);
-        assert!(heatmap.counts[1][1] == 1);
+        assert_eq!((heatmap.counts[0][0], heatmap.counts[1][1]), (1, 1));
     }
 
     #[tokio::test]
@@ -1486,9 +1490,14 @@ mod tests {
             .await
             .unwrap();
 
-        check!(fg.names.iter().any(|name| name == "alpha"));
-        check!(fg.names.iter().any(|name| name == "beta"));
-        check!(fg.total == 12);
+        assert_eq!(
+            (
+                fg.names.iter().any(|name| name == "alpha"),
+                fg.names.iter().any(|name| name == "beta"),
+                fg.total,
+            ),
+            (true, true, 12)
+        );
     }
 
     #[tokio::test]
@@ -1498,9 +1507,10 @@ mod tests {
             .await
             .unwrap();
 
-        check!(fg.total == 18);
-        check!(fg.levels[0].values == vec![0, 18, 0, 0]);
-        check!(self_value_for(&fg, "work") == 15);
+        assert_eq!(
+            (fg.total, &fg.levels[0].values, self_value_for(&fg, "work")),
+            (18, &vec![0, 18, 0, 0], 15)
+        );
     }
 
     #[tokio::test]
@@ -1510,10 +1520,15 @@ mod tests {
             .await
             .unwrap();
 
-        check!(fg.total == 15);
-        check!(fg.names[0] == "total");
-        check!(self_value_for(&fg, "work") == 15);
-        check!(!fg.names.iter().any(|name| name == "other"));
+        assert_eq!(
+            (
+                fg.total,
+                fg.names[0].as_str(),
+                self_value_for(&fg, "work"),
+                fg.names.iter().any(|name| name == "other"),
+            ),
+            (15, "total", 15, false)
+        );
     }
 
     #[tokio::test]
@@ -1531,9 +1546,14 @@ mod tests {
             .await
             .unwrap();
 
-        check!(fg.total == 15);
-        check!(fg.names.iter().any(|name| name == "work"));
-        check!(!fg.names.iter().any(|name| name == "other"));
+        assert_eq!(
+            (
+                fg.total,
+                fg.names.iter().any(|name| name == "work"),
+                fg.names.iter().any(|name| name == "other"),
+            ),
+            (15, true, false)
+        );
     }
 
     #[tokio::test]
@@ -1881,9 +1901,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(got.len() == 1);
-        check!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
-        check!(got[0].heatmap.counts.iter().flatten().sum::<u64>() == 1);
+        check!(
+            (
+                got.len(),
+                got[0].labels.as_slice(),
+                got[0].heatmap.counts.iter().flatten().sum::<u64>(),
+            ) == (1, &[("service".to_string(), "api".to_string())][..], 1,)
+        );
     }
 
     fn series_fixture() -> FlameEngine<InMemoryProfileStore> {

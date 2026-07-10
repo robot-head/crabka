@@ -188,10 +188,19 @@ mod tests {
         let result = series_to_timeseries(vec![(labels, vec![(2_i64, 2.0_f64), (1, 1.0)])]);
 
         let ts = &result.timeseries[0];
-        check!(ts.labels[0].name == "__name__");
-        check!(ts.labels[1].name == "job");
-        check!(ts.samples[0].timestamp == 1);
-        check!(ts.samples[1].timestamp == 2);
+        assert_eq!(
+            (
+                ts.labels
+                    .iter()
+                    .map(|label| label.name.as_str())
+                    .collect::<Vec<_>>(),
+                ts.samples
+                    .iter()
+                    .map(|sample| sample.timestamp)
+                    .collect::<Vec<_>>(),
+            ),
+            (vec!["__name__", "job"], vec![1, 2])
+        );
     }
 
     #[test]

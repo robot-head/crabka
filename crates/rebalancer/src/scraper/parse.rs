@@ -82,7 +82,7 @@ fn parse_line(line: &str) -> Option<ParsedSample> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
 
@@ -99,10 +99,13 @@ mod tests {
 crabka_broker_partition_bytes_in_total{topic="kept",partition="1"} 7
 "#;
         let out = parse(txt);
-        assert!(out.len() == 1);
-        check!(out[0].topic == "kept");
-        check!(out[0].partition == 1);
-        check!((out[0].value - 7.0).abs() < 1e-9);
+        assert!(
+            (
+                out.len(),
+                out.first()
+                    .map(|s| (s.topic.as_str(), s.partition, s.value))
+            ) == (1, Some(("kept", 1, 7.0)))
+        );
     }
 
     #[test]
@@ -118,11 +121,13 @@ crabka_broker_partition_bytes_in_total{topic="kept",partition="1"} 7
             ),
         ] {
             let out = parse(txt);
-            assert!(out.len() == 1);
-            check!(out[0].metric == want_metric);
-            check!(out[0].topic == "t");
-            check!(out[0].partition == 0);
-            check!((out[0].value - 1024.0).abs() < 1e-9);
+            assert!(
+                (
+                    out.len(),
+                    out.first()
+                        .map(|s| (s.metric, s.topic.as_str(), s.partition, s.value))
+                ) == (1, Some((want_metric, "t", 0, 1024.0)))
+            );
         }
     }
 
@@ -131,10 +136,13 @@ crabka_broker_partition_bytes_in_total{topic="kept",partition="1"} 7
         let txt = r#"crabka_broker_partition_disk_bytes{topic="t",partition="5"} 1234567
 "#;
         let out = parse(txt);
-        assert!(out.len() == 1);
-        check!(out[0].metric == MetricKind::DiskBytes);
-        check!(out[0].partition == 5);
-        check!((out[0].value - 1_234_567.0).abs() < 1e-3);
+        assert!(
+            (
+                out.len(),
+                out.first()
+                    .map(|s| { (s.metric, s.partition, (s.value - 1_234_567.0).abs() < 1e-3) }),
+            ) == (1, Some((MetricKind::DiskBytes, 5, true)))
+        );
     }
 
     #[test]
@@ -148,10 +156,14 @@ crabka_broker_partition_bytes_out_total{topic="t",partition="0"} 2
 crabka_broker_partition_cpu_micros_total{topic="t",partition="0"} 42
 "#;
         let out = parse(txt);
-        assert!(out.len() == 3);
-        check!(out[0].metric == MetricKind::BytesIn);
-        check!(out[1].metric == MetricKind::BytesOut);
-        check!(out[2].metric == MetricKind::CpuMicros);
+        assert!(
+            out.iter().map(|sample| sample.metric).collect::<Vec<_>>()
+                == vec![
+                    MetricKind::BytesIn,
+                    MetricKind::BytesOut,
+                    MetricKind::CpuMicros
+                ]
+        );
     }
 
     #[test]

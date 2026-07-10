@@ -46,14 +46,18 @@ fn out_of_bounds_window_is_rejected() {
 fn basic_accessors_report_empty_state_and_exact_ranges() {
     let values = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef;
     let empty = RangeArray::from_ranges(values.clone(), []).unwrap();
-    check!(empty.len() == 0);
-    check!(empty.is_empty());
-    check!(empty.ranges().is_empty());
-
     let range_array = RangeArray::from_ranges(values, [(1_u32, 0_u32), (0, 2), (2, 1)]).unwrap();
-    check!(range_array.len() == 3);
-    check!(!range_array.is_empty());
-    check!(range_array.ranges() == [(1, 0), (0, 2), (2, 1)]);
+    assert_eq!(
+        (
+            empty.len(),
+            empty.is_empty(),
+            empty.ranges(),
+            range_array.len(),
+            range_array.is_empty(),
+            range_array.ranges(),
+        ),
+        (0, true, &[][..], 3, false, &[(1, 0), (0, 2), (2, 1)][..],)
+    );
 }
 
 #[test]
@@ -84,8 +88,10 @@ fn paired_builder_shares_window_offsets_across_value_and_timestamp() {
     let (value_ranges, ts_ranges) =
         RangeArray::from_paired_ranges(values, timestamps, [(0_u32, 3_u32), (2, 3)]).unwrap();
 
-    assert!(value_ranges.ranges() == ts_ranges.ranges());
-    assert!(value_ranges.len() == 2);
+    assert_eq!(
+        (value_ranges.ranges(), value_ranges.len()),
+        (ts_ranges.ranges(), 2)
+    );
 
     for (index, want_values, want_timestamps) in [
         (0, [10.0, 11.0, 12.0], [0_i64, 15, 30]),

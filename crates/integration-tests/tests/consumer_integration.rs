@@ -125,7 +125,7 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
         })
         .await
         .expect("CreateTopics");
-    assert!(cr.topics[0].error_code == 0, "create_topic failed: {cr:?}");
+    assert_eq!(cr.topics[0].error_code, 0, "create_topic failed: {cr:?}");
 }
 
 /// Produce records to a specific partition index (the plain `produce` helper
@@ -188,7 +188,7 @@ async fn create_topic(client: &Client, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    assert!(cr.topics[0].error_code == 0, "create_topic failed: {cr:?}");
+    assert_eq!(cr.topics[0].error_code, 0, "create_topic failed: {cr:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -229,7 +229,7 @@ async fn rust_producer_to_rust_consumer_through_group() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
         }
     }
-    assert!(seen == vec!["a", "b", "c"]);
+    assert_eq!(seen, vec!["a", "b", "c"]);
 
     consumer.commit_sync().await.unwrap();
     consumer.close().await.unwrap();
@@ -276,7 +276,7 @@ async fn offsets_survive_broker_restart() {
                 .unwrap()
                 .len();
         }
-        assert!(seen == 3);
+        assert_eq!(seen, 3);
         consumer.commit_sync().await.unwrap();
         consumer.close().await.unwrap();
         broker.shutdown().await;
@@ -525,7 +525,7 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
             }
         }
     }
-    assert!(seen.len() == 2, "m1 delivered both records: {seen:?}");
+    assert_eq!(seen.len(), 2, "m1 delivered both records: {seen:?}");
 
     m1.commit_sync()
         .await
@@ -609,8 +609,11 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
 
     // Trim log_start to 5; the consumer (starting at 0) is now below the log.
     let low = delete_records_before(&producer, "oor-latest", 0, 5).await;
-    assert!(low == 5, "expected low_watermark 5, got {low}");
-    assert!(broker.partition_log_start_for_test("oor-latest", 0) == Some(5));
+    assert_eq!(low, 5, "expected low_watermark 5, got {low}");
+    assert_eq!(
+        broker.partition_log_start_for_test("oor-latest", 0),
+        Some(5)
+    );
 
     let mut consumer = Consumer::builder()
         .bootstrap(&bootstrap)
@@ -702,8 +705,11 @@ async fn consumer_resets_on_offset_out_of_range_earliest() {
 
     // Trim log_start to 5; a consumer starting at 0 is now below the log.
     let low = delete_records_before(&producer, "oor-earliest", 0, 5).await;
-    assert!(low == 5, "expected low_watermark 5, got {low}");
-    assert!(broker.partition_log_start_for_test("oor-earliest", 0) == Some(5));
+    assert_eq!(low, 5, "expected low_watermark 5, got {low}");
+    assert_eq!(
+        broker.partition_log_start_for_test("oor-earliest", 0),
+        Some(5)
+    );
 
     let mut consumer = Consumer::builder()
         .bootstrap(&bootstrap)
@@ -828,7 +834,7 @@ async fn consumer_none_policy_surfaces_log_truncation() {
 
     // Now trim past offset 0; the group's committed 0 is now below log_start.
     let low = delete_records_before(&producer, "oor-none", 0, 4).await;
-    assert!(low == 4, "expected low_watermark 4, got {low}");
+    assert_eq!(low, 4, "expected low_watermark 4, got {low}");
 
     let mut consumer = Consumer::builder()
         .bootstrap(&bootstrap)
@@ -862,8 +868,8 @@ async fn consumer_none_policy_surfaces_log_truncation() {
                 fetch_offset,
                 ..
             }) => {
-                check!(topic == "oor-none");
-                check!(partition == 0);
+                assert_eq!(topic, "oor-none");
+                assert_eq!(partition, 0);
                 check!(
                     fetch_offset == 0,
                     "fetch_offset should be the out-of-range offset 0, got {fetch_offset}"
@@ -1115,7 +1121,7 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
         .into_iter()
         .map(String::from)
         .collect();
-    assert!(seen == expected, "expected {expected:?}, got {seen:?}");
+    assert_eq!(seen, expected, "expected {expected:?}, got {seen:?}");
 
     consumer.close().await.unwrap();
     broker.shutdown().await;

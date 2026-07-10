@@ -247,8 +247,12 @@ mod tests {
             caps_with_disk(1, 1_000_000),
             Arc::new(UsageStore::default()),
         );
-        assert!(DiskCapacity.propose(&s, &ctx).is_empty());
-        assert!(DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert!(
+            (
+                DiskCapacity.propose(&s, &ctx).is_empty(),
+                DiskCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -285,8 +289,12 @@ mod tests {
         let samples: Vec<_> = (0..2).map(|i| (1, "t", i, 500.0)).collect();
         let store = store_with_disk(samples);
         let ctx = ctx_with(caps_with_disk(1, 1000), store);
-        assert!(DiskCapacity.propose(&s, &ctx).is_empty());
-        assert!(DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert!(
+            (
+                DiskCapacity.propose(&s, &ctx).is_empty(),
+                DiskCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -320,8 +328,7 @@ mod tests {
 
         let mvs = DiskCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![3]);
+        assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![3]]);
     }
 
     #[test]
@@ -348,8 +355,7 @@ mod tests {
 
         let mvs = DiskCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![2]);
+        assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![2]]);
     }
 
     #[test]
@@ -383,8 +389,7 @@ mod tests {
 
         let mvs = DiskCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![3]);
+        assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![3]]);
     }
 
     #[test]

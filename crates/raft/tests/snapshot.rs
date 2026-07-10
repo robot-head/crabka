@@ -67,9 +67,13 @@ async fn snapshot_then_restart_recovers_image() {
             ])
             .await
             .expect("submit records");
-        check!(controller.current_image().topic("t").is_some());
-        check!(controller.current_image().finalized_metadata_version() == Some(25));
-        check!(controller.current_image().voters().contains(NodeId(1)));
+        check!(
+            (
+                controller.current_image().topic("t").is_some(),
+                controller.current_image().finalized_metadata_version(),
+                controller.current_image().voters().contains(NodeId(1)),
+            ) == (true, Some(25), true)
+        );
 
         controller
             .trigger_snapshot()

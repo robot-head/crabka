@@ -375,20 +375,30 @@ async fn delivers_2xx() {
 
         // Signature verifies over the exact body bytes.
         let sig = r.signature.as_deref().expect("X-Crabka-Signature present");
-        assert!(
-            verify_sig_hex(&secret, &r.body, sig),
-            "signature must verify for event {event_id}"
-        );
-        assert!(r.timestamp.is_some(), "X-Crabka-Timestamp present");
+        let signature_valid = verify_sig_hex(&secret, &r.body, sig);
 
         // Envelope is well-formed: topic + offset + embedded JSON value.
         let v: Value = serde_json::from_slice(&r.body).expect("body is a JSON envelope");
-        assert_eq!(v["topic"], topic);
-        assert_eq!(v["partition"], 0);
-        assert_eq!(v["offset"], off);
-        assert_eq!(v["event_id"], event_id);
-        // The produced value was raw JSON {"n":k}, embedded as an object.
-        assert!(v["value"]["n"].is_number(), "value embedded as raw JSON");
+        assert_eq!(
+            (
+                signature_valid,
+                r.timestamp.is_some(),
+                v["topic"].as_str(),
+                v["partition"].as_i64(),
+                v["offset"].as_i64(),
+                v["event_id"].as_str(),
+                v["value"]["n"].is_number(),
+            ),
+            (
+                true,
+                true,
+                Some(topic),
+                Some(0),
+                Some(off),
+                Some(event_id),
+                true,
+            )
+        );
     }
     offsets_seen.sort_unstable();
     assert_eq!(

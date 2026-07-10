@@ -1224,25 +1224,26 @@ fn kafka_wal_record_encodes_tenant_series_key_headers_and_json_payload() {
     let producer_record = build_kafka_wal_record("__crabka_observability_logs_wal", &record)
         .expect("producer record");
 
-    check!(producer_record.topic == "__crabka_observability_logs_wal");
-    check!(
-        producer_record.key.as_deref()
-            == Some(format!("tenant-a:{}", series_fingerprint(&labels)).as_bytes())
-    );
-    check!(producer_record.timestamp_ms == Some(1));
-    check!(
-        producer_record
-            .headers
-            .iter()
-            .any(|header| header.key == "crabka-wal-record-type"
-                && header.value.as_deref() == Some(b"log".as_slice()))
-    );
-    check!(
-        producer_record
-            .headers
-            .iter()
-            .any(|header| header.key == "crabka-tenant"
-                && header.value.as_deref() == Some(b"tenant-a".as_slice()))
+    assert_eq!(
+        (
+            producer_record.topic.as_str(),
+            producer_record.key.as_deref(),
+            producer_record.timestamp_ms,
+            producer_record
+                .headers
+                .iter()
+                .map(|header| (header.key.as_str(), header.value.as_deref()))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "__crabka_observability_logs_wal",
+            Some(format!("tenant-a:{}", series_fingerprint(&labels)).as_bytes()),
+            Some(1),
+            vec![
+                ("crabka-wal-record-type", Some(b"log".as_slice())),
+                ("crabka-tenant", Some(b"tenant-a".as_slice())),
+            ],
+        )
     );
 
     let payload: serde_json::Value =
@@ -3422,14 +3423,16 @@ async fn loki_push_endpoint_accepts_duplicate_json_labels_using_last_value() {
 
     assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert!(records.len() == 1);
-    assert!(
-        records[0].labels
-            == labels([
+    assert_eq!(
+        (records.len(), records[0].labels.clone()),
+        (
+            1,
+            labels([
                 ("app", "worker"),
                 ("detected_level", "error"),
                 ("service_name", "worker"),
-            ])
+            ]),
+        )
     );
 }
 
@@ -3465,13 +3468,15 @@ async fn loki_push_endpoint_accepts_empty_json_labels_with_unknown_service() {
 
     assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert!(records.len() == 1);
-    assert!(
-        records[0].labels
-            == labels([
+    assert_eq!(
+        (records.len(), records[0].labels.clone()),
+        (
+            1,
+            labels([
                 ("detected_level", "info"),
                 ("service_name", "unknown_service"),
-            ])
+            ]),
+        )
     );
 }
 
@@ -3788,14 +3793,16 @@ async fn otlp_logs_endpoint_preserves_severity_fields_as_structured_metadata() {
 
     assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert!(records.len() == 1);
-    assert!(
-        records[0].structured_metadata
-            == BTreeMap::from([
+    assert_eq!(
+        (records.len(), records[0].structured_metadata.clone()),
+        (
+            1,
+            BTreeMap::from([
                 ("severity_number".to_string(), "17".to_string()),
                 ("severity_text".to_string(), "ERROR".to_string()),
                 ("trace_id".to_string(), "abc".to_string()),
-            ])
+            ]),
+        )
     );
 }
 
@@ -4057,14 +4064,16 @@ async fn otlp_logs_endpoint_discovers_service_name_label_from_resource_attribute
 
     assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert!(records.len() == 1);
-    assert!(
-        records[0].labels
-            == labels([
+    assert_eq!(
+        (records.len(), records[0].labels.clone()),
+        (
+            1,
+            labels([
                 ("app", "checkout"),
                 ("deployment_environment", "prod"),
                 ("service_name", "checkout"),
-            ])
+            ]),
+        )
     );
 }
 
@@ -4106,8 +4115,10 @@ async fn otlp_logs_endpoint_uses_unknown_service_when_no_service_name_candidate_
 
     assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert!(records.len() == 1);
-    assert!(records[0].labels == labels([("service_name", "unknown_service")]));
+    assert_eq!(
+        (records.len(), records[0].labels.clone()),
+        (1, labels([("service_name", "unknown_service")]))
+    );
 }
 
 #[tokio::test]
@@ -4270,17 +4281,19 @@ async fn otlp_logs_endpoint_maps_proto_trace_and_span_ids_to_structured_metadata
 
     assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert!(records.len() == 1);
-    assert!(
-        records[0].structured_metadata
-            == BTreeMap::from([
+    assert_eq!(
+        (records.len(), records[0].structured_metadata.clone()),
+        (
+            1,
+            BTreeMap::from([
                 ("status".to_string(), "500".to_string()),
                 (
                     "trace_id".to_string(),
                     "0102030405060708090a0b0c0d0e0f10".to_string(),
                 ),
                 ("span_id".to_string(), "1112131415161718".to_string()),
-            ])
+            ]),
+        )
     );
 }
 
@@ -4312,14 +4325,16 @@ async fn otlp_logs_endpoint_maps_proto_severity_fields_to_structured_metadata() 
 
     assert!(response.status() == StatusCode::NO_CONTENT);
     let records = sink.records();
-    assert!(records.len() == 1);
-    assert!(
-        records[0].structured_metadata
-            == BTreeMap::from([
+    assert_eq!(
+        (records.len(), records[0].structured_metadata.clone()),
+        (
+            1,
+            BTreeMap::from([
                 ("severity_number".to_string(), "17".to_string()),
                 ("severity_text".to_string(), "ERROR".to_string()),
                 ("trace_id".to_string(), "abc".to_string()),
-            ])
+            ]),
+        )
     );
 }
 
@@ -5449,9 +5464,13 @@ async fn compactor_delete_requests_filter_querier_stream_results() {
 
     assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert!(
-        body["data"]["result"]
-            == json!([
+    assert_eq!(
+        (
+            body["data"]["result"].clone(),
+            body["data"]["stats"].clone(),
+        ),
+        (
+            json!([
                 {
                     "stream": {
                         "app": "api",
@@ -5463,9 +5482,10 @@ async fn compactor_delete_requests_filter_querier_stream_results() {
                         ["17000000000", "api later secret"]
                     ]
                 }
-            ])
+            ]),
+            expected_loki_stats_with(block_bytes, 2, 1),
+        )
     );
-    assert!(body["data"]["stats"] == expected_loki_stats_with(block_bytes, 2, 1));
 }
 
 #[tokio::test]
@@ -5567,9 +5587,13 @@ async fn compactor_delete_requests_persist_for_configured_querier() {
 
     assert!(response.status() == StatusCode::OK);
     let body = json_body(response).await;
-    assert!(
-        body["data"]["result"]
-            == json!([
+    assert_eq!(
+        (
+            body["data"]["result"].clone(),
+            body["data"]["stats"].clone(),
+        ),
+        (
+            json!([
                 {
                     "stream": {
                         "app": "api",
@@ -5581,9 +5605,10 @@ async fn compactor_delete_requests_persist_for_configured_querier() {
                         ["17000000000", "api later secret"]
                     ]
                 }
-            ])
+            ]),
+            expected_loki_stats_with(block_bytes, 2, 1),
+        )
     );
-    assert!(body["data"]["stats"] == expected_loki_stats_with(block_bytes, 2, 1));
 }
 
 #[tokio::test]
@@ -6436,10 +6461,13 @@ rules:
 
     let rules_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=19&type=alert").await;
-    assert!(rules_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "firing");
-    assert!(
-        rules_body["data"]["groups"][0]["rules"][0]["alerts"][0]["labels"]["alertname"]
-            == "ApiErrors"
+    assert_eq!(
+        (
+            rules_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"].as_str(),
+            rules_body["data"]["groups"][0]["rules"][0]["alerts"][0]["labels"]["alertname"]
+                .as_str(),
+        ),
+        (Some("firing"), Some("ApiErrors"))
     );
 }
 
@@ -6559,10 +6587,12 @@ rules:
 
     let firing_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=40&type=alert").await;
-    assert!(firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "firing");
-    assert!(
-        firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["activeAt"]
-            == "1970-01-01T00:00:00.000000019Z"
+    assert_eq!(
+        (
+            firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"].as_str(),
+            firing_body["data"]["groups"][0]["rules"][0]["alerts"][0]["activeAt"].as_str(),
+        ),
+        (Some("firing"), Some("1970-01-01T00:00:00.000000019Z"))
     );
 }
 
@@ -6654,10 +6684,12 @@ rules:
     post_loki_rule_group_for_test(&app, "default", rule_group).await;
     let recreated_body =
         prometheus_rules_body_for_test(&app, "/prometheus/api/v1/rules?time=40&type=alert").await;
-    assert!(recreated_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"] == "pending");
-    assert!(
-        recreated_body["data"]["groups"][0]["rules"][0]["alerts"][0]["activeAt"]
-            == "1970-01-01T00:00:00.00000004Z"
+    assert_eq!(
+        (
+            recreated_body["data"]["groups"][0]["rules"][0]["alerts"][0]["state"].as_str(),
+            recreated_body["data"]["groups"][0]["rules"][0]["alerts"][0]["activeAt"].as_str(),
+        ),
+        (Some("pending"), Some("1970-01-01T00:00:00.00000004Z"))
     );
 }
 
@@ -9346,13 +9378,15 @@ async fn query_endpoint_returns_vector_metrics_as_parquet_when_requested() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            == Some("application/vnd.apache.parquet")
+    assert_eq!(
+        (
+            response.status(),
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+        ),
+        (StatusCode::OK, Some("application/vnd.apache.parquet"))
     );
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let mut reader = ParquetRecordBatchReader::try_new(body, 1024).unwrap();
@@ -11649,17 +11683,21 @@ async fn tail_endpoint_rejects_delay_for_over_five_seconds() {
     let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
         panic!("expected HTTP websocket error");
     };
-    assert!(response.status() == StatusCode::BAD_REQUEST);
-    assert!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("text/plain"))
-    );
     assert_eq!(
-        response.body().as_deref(),
-        Some("delay_for can't be greater than 5".as_bytes())
+        (
+            response.status(),
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with("text/plain")),
+            response.body().as_deref(),
+        ),
+        (
+            StatusCode::BAD_REQUEST,
+            true,
+            Some("delay_for can't be greater than 5".as_bytes()),
+        )
     );
 }
 
@@ -11911,28 +11949,39 @@ async fn query_range_endpoint_returns_streams_as_parquet_when_requested() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            == Some("application/vnd.apache.parquet")
+    assert_eq!(
+        (
+            response.status(),
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+        ),
+        (StatusCode::OK, Some("application/vnd.apache.parquet"))
     );
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let mut reader = ParquetRecordBatchReader::try_new(body, 1024).unwrap();
     let batch = reader.next().unwrap().unwrap();
     assert!(reader.next().is_none());
 
-    assert!(batch.num_rows() == 1);
-    check!(batch.schema().field(0).name() == "timestamp");
-    check!(
-        batch.schema().field(0).data_type()
-            == &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+    assert_eq!(
+        (
+            batch.num_rows(),
+            batch.schema().field(0).name().as_str(),
+            batch.schema().field(0).data_type(),
+            batch.schema().field(1).name().as_str(),
+            batch.schema().field(2).name().as_str(),
+            batch.schema().field(2).data_type(),
+        ),
+        (
+            1,
+            "timestamp",
+            &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            "labels",
+            "line",
+            &DataType::Utf8,
+        )
     );
-    check!(batch.schema().field(1).name() == "labels");
-    check!(batch.schema().field(2).name() == "line");
-    check!(batch.schema().field(2).data_type() == &DataType::Utf8);
 
     let timestamps = batch
         .column(0)
@@ -12073,28 +12122,39 @@ async fn query_range_endpoint_returns_metrics_as_parquet_when_requested() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::OK);
-    assert!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            == Some("application/vnd.apache.parquet")
+    assert_eq!(
+        (
+            response.status(),
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+        ),
+        (StatusCode::OK, Some("application/vnd.apache.parquet"))
     );
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let mut reader = ParquetRecordBatchReader::try_new(body, 1024).unwrap();
     let batch = reader.next().unwrap().unwrap();
     assert!(reader.next().is_none());
 
-    assert!(batch.num_rows() == 3);
-    check!(batch.schema().field(0).name() == "timestamp");
-    check!(
-        batch.schema().field(0).data_type()
-            == &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into()))
+    assert_eq!(
+        (
+            batch.num_rows(),
+            batch.schema().field(0).name().as_str(),
+            batch.schema().field(0).data_type(),
+            batch.schema().field(1).name().as_str(),
+            batch.schema().field(2).name().as_str(),
+            batch.schema().field(2).data_type(),
+        ),
+        (
+            3,
+            "timestamp",
+            &DataType::Timestamp(TimeUnit::Nanosecond, Some("UTC".into())),
+            "labels",
+            "value",
+            &DataType::Float64,
+        )
     );
-    check!(batch.schema().field(1).name() == "labels");
-    check!(batch.schema().field(2).name() == "value");
-    check!(batch.schema().field(2).data_type() == &DataType::Float64);
 
     let timestamps = batch
         .column(0)

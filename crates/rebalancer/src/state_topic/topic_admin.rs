@@ -156,20 +156,25 @@ mod tests {
 
         ensure_topic(&mut admin, "__crabka_state", 3).await.unwrap();
 
-        assert!(admin.calls.len() == 1);
-        let (specs, timeout_ms) = &admin.calls[0];
-        check!(*timeout_ms == 10_000);
-        assert!(specs.len() == 1);
-        check!(specs[0].name == "__crabka_state");
-        check!(specs[0].partitions == 1);
-        check!(specs[0].replicas == 3);
-        check!(
-            specs[0].configs
-                == BTreeMap::from([
-                    ("cleanup.policy".to_string(), "compact".to_string()),
-                    ("min.cleanable.dirty.ratio".to_string(), "0.01".to_string()),
-                    ("segment.ms".to_string(), "60000".to_string()),
-                ])
+        let expected_configs = BTreeMap::from([
+            ("cleanup.policy".to_string(), "compact".to_string()),
+            ("min.cleanable.dirty.ratio".to_string(), "0.01".to_string()),
+            ("segment.ms".to_string(), "60000".to_string()),
+        ]);
+        assert!(
+            admin.calls.first().map(|(specs, timeout_ms)| {
+                (
+                    *timeout_ms,
+                    specs.first().map(|spec| {
+                        (
+                            spec.name.as_str(),
+                            spec.partitions,
+                            spec.replicas,
+                            &spec.configs,
+                        )
+                    }),
+                )
+            }) == Some((10_000, Some(("__crabka_state", 1, 3, &expected_configs))))
         );
     }
 
@@ -220,10 +225,16 @@ mod tests {
             .await
             .unwrap();
 
-        check!(effective == 1);
-        assert!(admin.calls.len() == 2);
-        check!(admin.calls[0].0[0].replicas == 3);
-        check!(admin.calls[1].0[0].replicas == 1);
+        check!(
+            (
+                effective,
+                admin
+                    .calls
+                    .iter()
+                    .filter_map(|(specs, _)| specs.first().map(|spec| spec.replicas))
+                    .collect::<Vec<_>>(),
+            ) == (1, vec![3, 1])
+        );
     }
 
     #[tokio::test]

@@ -950,16 +950,26 @@ mod tests {
 
     #[test]
     fn bytes_to_mb_is_proper_mebibyte() {
-        assert!((bytes_to_mb(1_048_576) - 1.0).abs() < 1e-9);
-        assert!(bytes_to_mb(0).abs() < 1e-9);
+        assert_eq!(bytes_to_mb(1_048_576), 1.0);
+        assert_eq!(bytes_to_mb(0), 0.0);
     }
 
     #[test]
     fn request_timeout_policy_bounds_producers_and_only_crabka_consumers() {
-        check!(producer_request_timeout() == Duration::from_secs(2));
-        check!(consumer_request_timeout(Stack::Crabka) == Duration::from_secs(5));
-        check!(consumer_request_timeout(Stack::Kafka) == Duration::from_secs(30));
-        check!(CONSUMER_BUILD_ATTEMPTS == 6);
+        assert_eq!(
+            (
+                producer_request_timeout(),
+                consumer_request_timeout(Stack::Crabka),
+                consumer_request_timeout(Stack::Kafka),
+                CONSUMER_BUILD_ATTEMPTS
+            ),
+            (
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+                Duration::from_secs(30),
+                6
+            )
+        );
     }
 
     // TLS enabled: a CA path + server_name must build a `ClientSecurity` whose
@@ -974,13 +984,24 @@ mod tests {
             client_identity: None,
         };
         let sec = params.to_security();
-        check!(sec.protocol == ListenerProtocol::Ssl);
-        check!(sec.protocol.requires_tls());
-        check!(sec.sasl.is_none());
+        assert_eq!(
+            (sec.protocol, sec.protocol.requires_tls()),
+            (ListenerProtocol::Ssl, true)
+        );
+        assert!(sec.sasl.is_none());
         let tls = sec.tls.expect("Ssl security carries a TLS config");
-        check!(tls.server_name == "demo-broker-headless.default.svc.cluster.local");
-        check!(tls.trust_roots_pem == Some(std::path::PathBuf::from("/etc/bench-ca/ca.crt")));
-        check!(tls.client_identity.is_none());
+        assert_eq!(
+            (
+                tls.server_name.as_str(),
+                tls.trust_roots_pem,
+                tls.client_identity
+            ),
+            (
+                "demo-broker-headless.default.svc.cluster.local",
+                Some(std::path::PathBuf::from("/etc/bench-ca/ca.crt")),
+                None
+            )
+        );
     }
 
     // mTLS variant: a client identity threads through to the TLS config.
@@ -993,12 +1014,12 @@ mod tests {
         };
         let sec = params.to_security();
         let tls = sec.tls.expect("TLS config present");
-        assert!(
-            tls.client_identity
-                == Some((
-                    std::path::PathBuf::from("/c/tls.crt"),
-                    std::path::PathBuf::from("/c/tls.key"),
-                ))
+        assert_eq!(
+            tls.client_identity,
+            Some((
+                std::path::PathBuf::from("/c/tls.crt"),
+                std::path::PathBuf::from("/c/tls.key"),
+            ))
         );
     }
 
@@ -1017,13 +1038,25 @@ mod tests {
         let s = scenario(1);
         let c = cfg(1);
         let out = empty_output(&s, &c, 42, vec!["a-note".into()], vec!["an-error".into()]);
-        check!(out.wallclock_start_unix_ms == 42);
-        check!(out.wallclock_end_unix_ms == 42);
-        check!(out.topology.broker_count == 1);
-        check!(out.notes == vec!["a-note"]);
-        check!(out.errors == vec!["an-error"]);
-        check!(out.first_ack_ms == 0);
-        check!(out.disturbance.is_none());
+        assert_eq!(
+            (
+                out.wallclock_start_unix_ms,
+                out.wallclock_end_unix_ms,
+                out.topology.broker_count,
+                out.notes,
+                out.errors,
+                out.first_ack_ms
+            ),
+            (
+                WallclockMs(42),
+                WallclockMs(42),
+                1,
+                vec!["a-note".to_owned()],
+                vec!["an-error".to_owned()],
+                0
+            )
+        );
+        assert!(out.disturbance.is_none());
     }
 
     // The state byte is shared across producer/consumer tasks; verify the
@@ -1041,7 +1074,7 @@ mod tests {
         let mut s = scenario(3);
         s.mode_tag = ModeTag::Cluster;
         let out = run(s, cfg(1)).await.expect("run returned");
-        assert!(out.throughput.msgs_produced == 0);
+        assert_eq!(out.throughput.msgs_produced, 0);
         assert!(out.notes.iter().any(|n| n.contains("topology-mismatch")));
     }
 

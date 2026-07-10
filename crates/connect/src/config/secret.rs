@@ -119,9 +119,18 @@ mod tests {
     fn secret_string_redacts_debug_and_display() {
         let secret = SecretString::new("super-secret");
 
-        assert_eq!(format!("{secret:?}"), "SecretString([REDACTED])");
-        assert_eq!(secret.to_string(), "[REDACTED]");
-        assert_eq!(secret.expose_secret(), "super-secret");
+        assert_eq!(
+            (
+                format!("{secret:?}"),
+                secret.to_string(),
+                secret.expose_secret(),
+            ),
+            (
+                "SecretString([REDACTED])".to_string(),
+                "[REDACTED]".to_string(),
+                "super-secret",
+            )
+        );
     }
 
     #[test]

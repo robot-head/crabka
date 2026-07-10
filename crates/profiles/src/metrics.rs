@@ -361,8 +361,7 @@ mod tests {
         // A positive body/item count must flow through to the cumulative
         // counters. This pins the `> 0` guards: flipping to `< 0` or `== 0`
         // would skip `inc_by` for positive inputs, leaving these at zero.
-        check!(m.ingest_bytes.get() == 1024);
-        check!(m.ingest_items.get() == 3);
+        assert_eq!((m.ingest_bytes.get(), m.ingest_items.get()), (1024, 3));
     }
 
     #[test]

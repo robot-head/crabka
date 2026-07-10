@@ -317,59 +317,100 @@ mod tests {
         let value = encoder.encode_value(&diff).expect("value encodes");
 
         let (key_id, key_index, key_body) = decode_protobuf(&key).expect("key frame decodes");
-        assert_eq!(key_id, KEY_SCHEMA_ID);
-        assert_eq!(key_index, vec![1]);
-        assert!(!key_body.is_empty());
+        let key_frame = (key_id, key_index, key_body.is_empty());
 
         let (value_id, value_index, value_body) =
             decode_protobuf(&value).expect("value frame decodes");
-        assert_eq!(value_id, VALUE_SCHEMA_ID);
-        assert_eq!(value_index, vec![2]);
-        assert!(!value_body.is_empty());
+        let value_frame = (value_id, value_index, value_body.is_empty());
 
         let key_message = DynamicMessage::decode(
             message_descriptor(&pool, ENTITY_KEY).expect("key descriptor"),
             key_body,
         )
         .expect("key body decodes");
-        assert_eq!(string_field(&key_message, "table"), "public.accounts");
         let key_columns = list_field(&key_message, "columns");
         let id_column = message_value(&key_columns[0]);
-        assert_eq!(string_field(id_column, "name"), "id");
-        assert_eq!(string_field(id_column, "kind"), "int");
-        assert_eq!(i64_field(id_column, "int_value"), 42);
+        let key_projection = (
+            string_field(&key_message, "table"),
+            string_field(id_column, "name"),
+            string_field(id_column, "kind"),
+            i64_field(id_column, "int_value"),
+        );
 
         let value_message = DynamicMessage::decode(
             message_descriptor(&pool, ENTITY_DIFFERENCE).expect("value descriptor"),
             value_body,
         )
         .expect("value body decodes");
-        assert_eq!(string_field(&value_message, "table"), "public.accounts");
-        assert_eq!(string_field(&value_message, "operation"), "update");
-        assert_eq!(string_field(&value_message, "lsn"), "0/2A");
+        let value_projection = (
+            string_field(&value_message, "table"),
+            string_field(&value_message, "operation"),
+            string_field(&value_message, "lsn"),
+        );
 
         let after = list_field(&value_message, "after");
         let name_column = message_value(&after[0]);
-        assert_eq!(string_field(name_column, "name"), "name");
-        assert_eq!(string_field(name_column, "kind"), "text");
-        assert_eq!(string_field(name_column, "string_value"), "new");
+        let name_projection = (
+            string_field(name_column, "name"),
+            string_field(name_column, "kind"),
+            string_field(name_column, "string_value"),
+        );
 
         let before = list_field(&value_message, "before");
         let null_column = message_value(&before[1]);
-        assert_eq!(string_field(null_column, "name"), "nickname");
-        assert_eq!(string_field(null_column, "kind"), "null");
-        assert!(bool_field(null_column, "is_null"));
+        let null_projection = (
+            string_field(null_column, "name"),
+            string_field(null_column, "kind"),
+            bool_field(null_column, "is_null"),
+        );
 
         let avatar_column = message_value(&after[1]);
-        assert_eq!(string_field(avatar_column, "name"), "avatar");
-        assert_eq!(string_field(avatar_column, "kind"), "bytes");
-        assert_eq!(bytes_field(avatar_column, "bytes_value").as_ref(), b"abc");
+        let avatar_projection = (
+            string_field(avatar_column, "name"),
+            string_field(avatar_column, "kind"),
+            bytes_field(avatar_column, "bytes_value"),
+        );
 
         let unchanged_toast_column = message_value(&after[2]);
-        assert_eq!(string_field(unchanged_toast_column, "name"), "details");
-        assert_eq!(
+        let unchanged_projection = (
+            string_field(unchanged_toast_column, "name"),
             string_field(unchanged_toast_column, "kind"),
-            "unchanged_toast"
+        );
+
+        assert_eq!(
+            (
+                key_frame,
+                value_frame,
+                key_projection,
+                value_projection,
+                name_projection,
+                null_projection,
+                avatar_projection,
+                unchanged_projection,
+            ),
+            (
+                (KEY_SCHEMA_ID, vec![1], false),
+                (VALUE_SCHEMA_ID, vec![2], false),
+                (
+                    "public.accounts".to_string(),
+                    "id".to_string(),
+                    "int".to_string(),
+                    42,
+                ),
+                (
+                    "public.accounts".to_string(),
+                    "update".to_string(),
+                    "0/2A".to_string(),
+                ),
+                ("name".to_string(), "text".to_string(), "new".to_string()),
+                ("nickname".to_string(), "null".to_string(), true),
+                (
+                    "avatar".to_string(),
+                    "bytes".to_string(),
+                    Bytes::from_static(b"abc"),
+                ),
+                ("details".to_string(), "unchanged_toast".to_string()),
+            )
         );
     }
 
@@ -400,7 +441,37 @@ mod tests {
                 }],
             })
             .expect("decoded row should translate");
-        assert_eq!(difference.key.columns[0].value, ScalarValue::Int(42));
+        assert_eq!(
+            &difference,
+            &EntityDifference {
+                table: "public.orders".into(),
+                key: EntityKey {
+                    table: "public.orders".into(),
+                    columns: vec![ColumnValue {
+                        name: "id".into(),
+                        value: ScalarValue::Int(42),
+                    }],
+                },
+                op: Operation::Insert,
+                before: vec![],
+                after: vec![ColumnValue {
+                    name: "id".into(),
+                    value: ScalarValue::Int(42),
+                }],
+                lsn: PgLsn(0x2a),
+                txid: None,
+                commit_timestamp_ms: None,
+                schema: TableSchema {
+                    schema: "public".into(),
+                    table: "orders".into(),
+                    columns: vec![ColumnSchema {
+                        name: "id".into(),
+                        type_name: "int8".into(),
+                        key: true,
+                    }],
+                },
+            }
+        );
 
         let encoder = PostgresProtoEncoder::new().expect("encoder builds descriptors");
         let key = encoder.encode_key(&difference.key).expect("key encodes");
@@ -415,8 +486,13 @@ mod tests {
         let key_columns = list_field(&key_message, "columns");
         let id_column = message_value(&key_columns[0]);
 
-        assert_eq!(string_field(id_column, "kind"), "int");
-        assert_eq!(i64_field(id_column, "int_value"), 42);
+        assert_eq!(
+            (
+                string_field(id_column, "kind"),
+                i64_field(id_column, "int_value")
+            ),
+            ("int".to_string(), 42)
+        );
     }
 
     #[test]
@@ -440,28 +516,28 @@ mod tests {
             .expect("entity difference message");
 
         assert_eq!(
-            column_value
-                .field
-                .iter()
-                .find(|field| field.name.as_deref() == Some("name"))
-                .and_then(|field| field.label),
-            Some(prost_reflect::prost_types::field_descriptor_proto::Label::Optional as i32)
-        );
-        assert_eq!(
-            entity_key
-                .field
-                .iter()
-                .find(|field| field.name.as_deref() == Some("columns"))
-                .and_then(|field| field.label),
-            Some(prost_reflect::prost_types::field_descriptor_proto::Label::Repeated as i32)
-        );
-        assert_eq!(
-            entity_difference
-                .field
-                .iter()
-                .find(|field| field.name.as_deref() == Some("key"))
-                .and_then(|field| field.label),
-            Some(prost_reflect::prost_types::field_descriptor_proto::Label::Optional as i32)
+            [
+                column_value
+                    .field
+                    .iter()
+                    .find(|field| field.name.as_deref() == Some("name"))
+                    .and_then(|field| field.label),
+                entity_key
+                    .field
+                    .iter()
+                    .find(|field| field.name.as_deref() == Some("columns"))
+                    .and_then(|field| field.label),
+                entity_difference
+                    .field
+                    .iter()
+                    .find(|field| field.name.as_deref() == Some("key"))
+                    .and_then(|field| field.label),
+            ],
+            [
+                Some(prost_reflect::prost_types::field_descriptor_proto::Label::Optional as i32),
+                Some(prost_reflect::prost_types::field_descriptor_proto::Label::Repeated as i32),
+                Some(prost_reflect::prost_types::field_descriptor_proto::Label::Optional as i32),
+            ]
         );
     }
 

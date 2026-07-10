@@ -130,12 +130,15 @@ overrides:
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
         let tenant_b = provider.for_tenant("tenant-b");
 
-        assert!(tenant_b.max_attribute_bytes == 64);
-        assert!(
-            (tenant_b.ingestion_rate_spans_per_sec
-                - Limits::default().ingestion_rate_spans_per_sec)
-                .abs()
-                < f64::EPSILON
+        assert_eq!(
+            (
+                tenant_b.max_attribute_bytes,
+                (tenant_b.ingestion_rate_spans_per_sec
+                    - Limits::default().ingestion_rate_spans_per_sec)
+                    .abs()
+                    < f64::EPSILON,
+            ),
+            (64, true)
         );
     }
 

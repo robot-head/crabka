@@ -857,8 +857,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!(m.quorum_state().voted_key.is_none()); // pre-vote does NOT persist
-        assert!(m.quorum_state().leader_epoch == 0); // epoch unchanged
+        assert!((m.quorum_state().voted_key, m.quorum_state().leader_epoch) == (None, 0));
     }
 
     #[test]
@@ -975,9 +974,13 @@ mod tests {
             &log,
             SimInstant(2001),
         );
-        assert!(matches!(m.role(), Role::Candidate { .. }));
-        check!(m.quorum_state().leader_epoch == 1);
-        check!(m.quorum_state().voted_key.map(|k| k.id) == Some(NodeId(1))); // self-vote
+        check!(
+            (
+                matches!(m.role(), Role::Candidate { .. }),
+                m.quorum_state().leader_epoch,
+                m.quorum_state().voted_key.map(|k| k.id),
+            ) == (true, 1, Some(NodeId(1)))
+        );
         assert!(actions.iter().any(|a| matches!(
             a,
             Action::SendVoteRequest {
@@ -1013,17 +1016,17 @@ mod tests {
             &log,
             SimInstant(2002),
         );
-        check!(m.role().is_leader());
-        check!(m.quorum_state().leader_id == Some(NodeId(1)));
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, Action::AppendLeaderChange { epoch: 1 }))
-        );
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, Action::SendBeginQuorumEpoch { epoch: 1 }))
+        check!(
+            (
+                m.role().is_leader(),
+                m.quorum_state().leader_id,
+                actions
+                    .iter()
+                    .any(|a| matches!(a, Action::AppendLeaderChange { epoch: 1 })),
+                actions
+                    .iter()
+                    .any(|a| matches!(a, Action::SendBeginQuorumEpoch { epoch: 1 })),
+            ) == (true, Some(NodeId(1)), true, true)
         );
     }
 
@@ -1058,25 +1061,27 @@ mod tests {
             &log,
             SimInstant(10),
         );
-        assert!(matches!(
-            m.role(),
-            Role::Follower {
-                leader_id: NodeId(2),
-                ..
-            }
-        ));
-        check!(m.quorum_state().leader_epoch == 4);
-        check!(m.quorum_state().leader_id == Some(NodeId(2)));
-        assert!(actions.iter().any(|a| matches!(
-            a,
-            Action::SendFetch {
-                leader_id: NodeId(2)
-            }
-        )));
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, Action::PersistQuorumState))
+        check!(
+            (
+                matches!(
+                    m.role(),
+                    Role::Follower {
+                        leader_id: NodeId(2),
+                        ..
+                    }
+                ),
+                m.quorum_state().leader_epoch,
+                m.quorum_state().leader_id,
+                actions.iter().any(|a| matches!(
+                    a,
+                    Action::SendFetch {
+                        leader_id: NodeId(2)
+                    }
+                )),
+                actions
+                    .iter()
+                    .any(|a| matches!(a, Action::PersistQuorumState)),
+            ) == (true, 4, Some(NodeId(2)), true, true)
         );
     }
 
@@ -1129,8 +1134,7 @@ mod tests {
             &log,
             SimInstant(10),
         );
-        assert!(actions.is_empty()); // lower epoch → ignored
-        assert!(m.quorum_state().leader_id.is_none());
+        assert!((actions.is_empty(), m.quorum_state().leader_id) == (true, None));
     }
 
     #[test]
@@ -1456,14 +1460,17 @@ mod tests {
             SimInstant(2002),
         );
         // Epoch guard (0 != 1) drops it: we stay Candidate, do NOT become leader.
-        assert!(matches!(m.role(), Role::Candidate { .. }));
-        check!(!m.role().is_leader());
-        check!(actions.is_empty());
+        check!(
+            (
+                matches!(m.role(), Role::Candidate { .. }),
+                m.role().is_leader(),
+                actions.is_empty()
+            ) == (true, false, true)
+        );
         // The ignored stale grant must not have entered the real-vote tally:
         // after promotion the Candidate's grant set holds only our self-vote.
         if let Role::Candidate { granted, .. } = m.role() {
-            assert!(granted.len() == 1);
-            assert!(!granted.contains(&NodeId(3)));
+            assert!((granted.len(), granted.contains(&NodeId(3))) == (1, false));
         } else {
             panic!("expected Candidate");
         }
@@ -1487,10 +1494,14 @@ mod tests {
             &log,
             SimInstant(10),
         );
-        check!(actions.is_empty());
-        check!(m.quorum_state().leader_id.is_none());
-        check!(m.quorum_state().leader_epoch == 0); // epoch not advanced
-        assert!(!matches!(m.role(), Role::Follower { .. }));
+        check!(
+            (
+                actions.is_empty(),
+                m.quorum_state().leader_id,
+                m.quorum_state().leader_epoch,
+                matches!(m.role(), Role::Follower { .. }),
+            ) == (true, None, 0, false)
+        );
     }
 
     #[test]
@@ -1549,8 +1560,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!(actions.is_empty());
-        assert!(m.quorum_state().voted_key.is_none());
+        assert!((actions.is_empty(), m.quorum_state().voted_key) == (true, None));
     }
 
     #[test]
@@ -1577,8 +1587,7 @@ mod tests {
             &log,
             SimInstant(0),
         );
-        assert!(actions.is_empty());
-        assert!(m.quorum_state().voted_key.is_none());
+        assert!((actions.is_empty(), m.quorum_state().voted_key) == (true, None));
     }
 
     #[test]
@@ -1658,12 +1667,16 @@ mod tests {
         // (no jitter at all → split-vote livelock) is caught. The values are the
         // integer hash of (node, epoch) mod base_ms; they are non-zero and
         // node-dependent, so both "always 0" and "always 1" are distinguished.
-        check!(election_jitter_ms(NodeId(1), 0, 1000) == 485);
-        check!(election_jitter_ms(NodeId(2), 0, 1000) == 354); // different node → different spread
-        check!(election_jitter_ms(NodeId(1), 1, 1000) == 446); // same node, next epoch → re-spread
-        // Jitter must always stay strictly inside [0, base_ms).
-        check!(election_jitter_ms(NodeId(1), 0, 1000) < 1000);
-        // A zero base disables jitter entirely (guard branch): returns 0, not 1.
-        check!(election_jitter_ms(NodeId(1), 0, 0) == 0);
+        for (name, node, epoch, base_ms, expected) in [
+            ("first node", NodeId(1), 0, 1000, 485),
+            ("different node", NodeId(2), 0, 1000, 354),
+            ("next epoch", NodeId(1), 1, 1000, 446),
+            ("zero base", NodeId(1), 0, 0, 0),
+        ] {
+            check!(
+                election_jitter_ms(node, epoch, base_ms) == expected,
+                "case {name}"
+            );
+        }
     }
 }

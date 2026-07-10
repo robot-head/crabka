@@ -737,12 +737,14 @@ async fn grafana_accepts_pyroscope_datasource_pointing_at_crabka() -> TestResult
     };
 
     assert_eq!(
-        fetched.get("type").and_then(Value::as_str),
-        Some("grafana-pyroscope-datasource")
-    );
-    assert_eq!(
-        fetched.get("url").and_then(Value::as_str),
-        Some(crabka.querier_base.as_str())
+        (
+            fetched.get("type").and_then(Value::as_str),
+            fetched.get("url").and_then(Value::as_str),
+        ),
+        (
+            Some("grafana-pyroscope-datasource"),
+            Some(crabka.querier_base.as_str()),
+        )
     );
 
     crabka.shutdown();

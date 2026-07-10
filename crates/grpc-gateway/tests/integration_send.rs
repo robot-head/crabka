@@ -66,8 +66,7 @@ async fn produce_plain_then_read_back() {
         )
         .await
         .expect("produce");
-    check!(outcome.partition == 0);
-    check!(outcome.deduplicated == false);
+    check!((outcome.partition.0, outcome.deduplicated) == (0, false));
 
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap.clone())

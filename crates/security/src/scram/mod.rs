@@ -176,11 +176,15 @@ mod tests {
     fn hash_scram_password_produces_expected_keys() {
         let password = b"pencil";
         let cred = hash_scram_password(password, SaslMechanism::ScramSha512, 4096);
-        check!(cred.mechanism == SaslMechanism::ScramSha512);
-        check!(cred.salt.len() == 16, "salt must be 16 bytes");
-        check!(cred.stored_key.len() == 64, "SHA-512 output is 64 bytes");
-        check!(cred.server_key.len() == 64);
-        check!(cred.iterations == 4096);
+        check!(
+            (
+                cred.mechanism,
+                cred.salt.len(),
+                cred.stored_key.len(),
+                cred.server_key.len(),
+                cred.iterations,
+            ) == (SaslMechanism::ScramSha512, 16, 64, 64, 4096)
+        );
         let salted =
             pbkdf2::pbkdf2_hmac_array::<sha2::Sha512, 64>(password, &cred.salt, cred.iterations);
         let client_key = {
@@ -200,10 +204,14 @@ mod tests {
     fn hash_scram_password_sha256_produces_expected_keys() {
         let password = b"pencil";
         let cred = hash_scram_password(password, SaslMechanism::ScramSha256, 4096);
-        check!(cred.mechanism == SaslMechanism::ScramSha256);
-        check!(cred.salt.len() == 16);
-        check!(cred.stored_key.len() == 32, "SHA-256 output is 32 bytes");
-        check!(cred.server_key.len() == 32);
+        check!(
+            (
+                cred.mechanism,
+                cred.salt.len(),
+                cred.stored_key.len(),
+                cred.server_key.len(),
+            ) == (SaslMechanism::ScramSha256, 16, 32, 32)
+        );
         let salted =
             pbkdf2::pbkdf2_hmac_array::<sha2::Sha256, 32>(password, &cred.salt, cred.iterations);
         let client_key = {
@@ -261,8 +269,10 @@ mod tests {
             StepResult::Done(p, b) => (p, b),
             other => panic!("server step 2 must Done, got {other:?}"),
         };
-        assert!(principal.name == "alice");
-        assert!(principal.auth_method == crate::AuthMethod::SaslScramSha512);
+        assert_eq!(
+            (principal.name.as_str(), principal.auth_method),
+            ("alice", crate::AuthMethod::SaslScramSha512)
+        );
         // Client verifies server signature. `verify_server_final` consumes
         // `client`, so a second verification attempt (the old "server final
         // must only verify once" regression test) is now a compile-time
@@ -301,8 +311,10 @@ mod tests {
             StepResult::Done(p, b) => (p, b),
             other => panic!("server step 2 must Done, got {other:?}"),
         };
-        assert!(principal.name == "alice");
-        assert!(principal.auth_method == crate::AuthMethod::SaslScramSha256);
+        assert_eq!(
+            (principal.name.as_str(), principal.auth_method),
+            ("alice", crate::AuthMethod::SaslScramSha256)
+        );
         let final_check = client.verify_server_final(&s2);
         assert!(final_check.is_ok(), "server signature must verify");
     }
@@ -407,35 +419,26 @@ mod tests {
     }
 
     #[test]
-    fn pbkdf2_salted_matches_hash_scram_password_intermediate_sha512() {
+    fn pbkdf2_salted_matches_hash_scram_password_intermediate() {
         // `pbkdf2_salted` exposes the PBKDF2 intermediate so the
         // operator can produce the KIP-554 wire `salted_password`. It
         // must equal the value `hash_scram_password_with_salt` feeds
         // into `derive_keys_from_salted` internally.
         let password = b"pencil";
         let salt: Vec<u8> = (0..16).collect();
-        let cred =
-            hash_scram_password_with_salt(password, SaslMechanism::ScramSha512, 4096, salt.clone());
-        let salted = pbkdf2_salted(password, SaslMechanism::ScramSha512, 4096, &salt);
-        assert!(salted.len() == 64);
-        // Re-derive keys from the helper output → must match the
-        // credential the slow path computed.
-        let (stored_key, server_key) = derive_keys_from_salted(SaslMechanism::ScramSha512, &salted);
-        assert!(stored_key == cred.stored_key);
-        assert!(server_key == cred.server_key);
-    }
-
-    #[test]
-    fn pbkdf2_salted_matches_hash_scram_password_intermediate_sha256() {
-        let password = b"pencil";
-        let salt: Vec<u8> = (0..16).collect();
-        let cred =
-            hash_scram_password_with_salt(password, SaslMechanism::ScramSha256, 4096, salt.clone());
-        let salted = pbkdf2_salted(password, SaslMechanism::ScramSha256, 4096, &salt);
-        assert!(salted.len() == 32);
-        let (stored_key, server_key) = derive_keys_from_salted(SaslMechanism::ScramSha256, &salted);
-        assert!(stored_key == cred.stored_key);
-        assert!(server_key == cred.server_key);
+        for (case, mechanism, expected_len) in [
+            ("SCRAM SHA-512", SaslMechanism::ScramSha512, 64),
+            ("SCRAM SHA-256", SaslMechanism::ScramSha256, 32),
+        ] {
+            let cred = hash_scram_password_with_salt(password, mechanism, 4096, salt.clone());
+            let salted = pbkdf2_salted(password, mechanism, 4096, &salt);
+            let (stored_key, server_key) = derive_keys_from_salted(mechanism, &salted);
+            assert_eq!(
+                (salted.len(), stored_key, server_key),
+                (expected_len, cred.stored_key, cred.server_key),
+                "case {case}"
+            );
+        }
     }
 
     #[test]
@@ -446,10 +449,10 @@ mod tests {
             hash_scram_password_with_salt(password, SaslMechanism::ScramSha512, 4096, salt.clone());
         let salted: [u8; 64] = pbkdf2::pbkdf2_hmac_array::<sha2::Sha512, 64>(password, &salt, 4096);
         let (stored_key, server_key) = derive_keys_from_salted(SaslMechanism::ScramSha512, &salted);
-        check!(stored_key == cred.stored_key);
-        check!(server_key == cred.server_key);
-        check!(stored_key.len() == 64);
-        check!(server_key.len() == 64);
+        check!(
+            (&stored_key, &server_key, stored_key.len(), server_key.len())
+                == (&cred.stored_key, &cred.server_key, 64, 64)
+        );
     }
 
     #[test]
@@ -460,10 +463,10 @@ mod tests {
             hash_scram_password_with_salt(password, SaslMechanism::ScramSha256, 4096, salt.clone());
         let salted: [u8; 32] = pbkdf2::pbkdf2_hmac_array::<sha2::Sha256, 32>(password, &salt, 4096);
         let (stored_key, server_key) = derive_keys_from_salted(SaslMechanism::ScramSha256, &salted);
-        check!(stored_key == cred.stored_key);
-        check!(server_key == cred.server_key);
-        check!(stored_key.len() == 32);
-        check!(server_key.len() == 32);
+        check!(
+            (&stored_key, &server_key, stored_key.len(), server_key.len())
+                == (&cred.stored_key, &cred.server_key, 32, 32)
+        );
     }
 
     /// KIP-48: `new_with_principal` stamps an override
@@ -510,7 +513,6 @@ mod tests {
         };
         // Override wins: principal is the token owner, NOT "tok-uuid".
         assert!(principal == override_principal);
-        assert!(principal.name == "alice");
     }
 
     #[test]

@@ -124,11 +124,22 @@ mod tests {
     #[test]
     fn order_at_populates_rich_fields_with_aligned_warehouse() {
         let o = order_at(0);
-        assert_eq!(o.region, "us-east");
-        assert_eq!(o.warehouse, "wh-atl", "warehouse serves the order's region");
-        assert_eq!(o.payment_method, "card");
-        assert_eq!(o.customer_tier, "free");
-        assert!((1..=5).contains(&o.quantity));
+        assert_eq!(
+            o,
+            Order {
+                order_id: "o-0000000000".to_string(),
+                category: "books".to_string(),
+                amount: 0.0,
+                currency: "USD".to_string(),
+                ts_ms: 0,
+                region: "us-east".to_string(),
+                payment_method: "card".to_string(),
+                quantity: 1,
+                customer_tier: "free".to_string(),
+                warehouse: "wh-atl".to_string(),
+            },
+            "warehouse must serve the order's region"
+        );
 
         // The warehouse index tracks the region index for every order.
         for i in [1_u64, 2, 3, 7, 42, 199] {
@@ -140,22 +151,29 @@ mod tests {
 
     #[test]
     fn outcome_classification_covers_the_three_paths() {
-        // Anomalous (zero amount) wins over everything.
-        assert_eq!(classify_outcome(&order_at(17)), "anomalous");
-
-        // A high-value crypto order is flagged as fraud.
+        let anomalous = order_at(17);
         let mut fraud = order_at(1);
         fraud.payment_method = "crypto".to_string();
         fraud.amount = 199.99;
-        assert!(is_suspicious(&fraud));
-        assert_eq!(classify_outcome(&fraud), "fraud_rejected");
-
-        // A normal card order is fulfilled.
         let mut ok = order_at(1);
         ok.payment_method = "card".to_string();
         ok.amount = 42.0;
-        assert!(!is_suspicious(&ok));
-        assert_eq!(classify_outcome(&ok), "fulfilled");
+
+        for (name, order, expected) in [
+            ("zero amount is anomalous", anomalous, (false, "anomalous")),
+            (
+                "high-value crypto is fraud",
+                fraud,
+                (true, "fraud_rejected"),
+            ),
+            ("normal card is fulfilled", ok, (false, "fulfilled")),
+        ] {
+            assert_eq!(
+                (is_suspicious(&order), classify_outcome(&order)),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]

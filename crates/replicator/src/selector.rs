@@ -63,7 +63,7 @@ impl Selector {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
 
@@ -80,7 +80,7 @@ mod tests {
             ("payments", false),
             ("telemetry.internal", false), // excluded wins
         ] {
-            check!(s.matches(name) == want, "name={name:?}");
+            assert_eq!(s.matches(name), want, "name={name:?}");
         }
     }
 

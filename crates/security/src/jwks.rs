@@ -483,18 +483,14 @@ mod tests {
     #[test]
     fn empty_jwks_has_no_keys() {
         let jwks = Jwks::empty();
-        check!(jwks.is_empty());
-        check!(jwks.len() == 0);
-        check!(!jwks.contains_kid("k1"));
+        check!((jwks.is_empty(), jwks.len(), jwks.contains_kid("k1")) == (true, 0, false));
     }
 
     #[test]
     fn jwks_with_key_is_not_empty() {
         let (_token, jwks_json) = rs256("k1", "{\"sub\":\"alice\",\"exp\":9999999999}");
         let jwks = Jwks::from_json(&jwks_json, false).expect("parse jwks");
-        check!(!jwks.is_empty());
-        check!(jwks.len() == 1);
-        check!(jwks.contains_kid("k1"));
+        check!((jwks.is_empty(), jwks.len(), jwks.contains_kid("k1")) == (false, 1, true));
     }
 
     #[test]
@@ -502,8 +498,10 @@ mod tests {
         assert!(left_pad_32(&[0xAA; 33]).is_none());
 
         let short = left_pad_32(&[0x01, 0x02]).expect("short coordinate padded");
-        assert!(short[..30] == [0u8; 30]);
-        assert!(short[30..] == [0x01, 0x02]);
+        assert_eq!(
+            (&short[..30], &short[30..]),
+            (&[0u8; 30][..], &[0x01, 0x02][..])
+        );
 
         let exact = [0x7Fu8; 32];
         assert!(left_pad_32(&exact).expect("exact coordinate") == exact);
@@ -539,8 +537,12 @@ mod tests {
 
     #[test]
     fn rejects_non_json_and_missing_keys_array() {
-        assert!(Jwks::from_json("not json", false) == Err(AuthError::MalformedMessage));
-        assert!(Jwks::from_json("{}", false) == Err(AuthError::MalformedMessage));
+        for (name, input) in [("invalid JSON", "not json"), ("missing keys array", "{}")] {
+            assert!(
+                Jwks::from_json(input, false) == Err(AuthError::MalformedMessage),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -650,8 +652,7 @@ mod tests {
             ]
         }"#;
         let jwks = Jwks::from_json(json, false).expect("parses");
-        assert!(jwks.contains_kid("sig-key"));
-        assert!(!jwks.contains_kid("enc-key"));
+        assert!((jwks.contains_kid("sig-key"), jwks.contains_kid("enc-key")) == (true, false));
     }
 
     #[test]
@@ -663,8 +664,7 @@ mod tests {
             ]
         }"#;
         let jwks = Jwks::from_json(json, true).expect("parses");
-        assert!(jwks.contains_kid("sig-key"));
-        assert!(jwks.contains_kid("enc-key"));
+        assert!((jwks.contains_kid("sig-key"), jwks.contains_kid("enc-key")) == (true, true));
     }
 
     #[test]

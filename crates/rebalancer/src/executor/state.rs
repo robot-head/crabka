@@ -140,8 +140,10 @@ mod tests {
         f.target_terminal_status = Some(ProposalStatus::Completed);
         f.write(dir.path()).unwrap();
         let loaded2 = InFlightFile::load(dir.path()).unwrap().unwrap();
-        assert!(loaded2.phase == Phase::ClearThrottle);
-        assert!(loaded2.target_terminal_status == Some(ProposalStatus::Completed));
+        assert!(
+            (loaded2.phase, loaded2.target_terminal_status)
+                == (Phase::ClearThrottle, Some(ProposalStatus::Completed))
+        );
     }
 
     #[test]

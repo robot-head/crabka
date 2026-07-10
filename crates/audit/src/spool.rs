@@ -332,12 +332,9 @@ mod tests {
         check!(s.is_empty());
         let r0 = chained_record(0, &GENESIS_HEAD, b"{\"i\":0}");
         let r1 = chained_record(1, &chain_hash(&GENESIS_HEAD, 0, b"{\"i\":0}"), b"{\"i\":1}");
-        check!(s.append(&r0).unwrap());
-        check!(s.append(&r1).unwrap());
-        check!(s.count() == 2);
-        check!(!s.is_empty());
+        check!((s.append(&r0).unwrap(), s.append(&r1).unwrap()) == (true, true));
         let read = s.read_all().unwrap();
-        check!(read == vec![r0.clone(), r1.clone()]);
+        check!((s.count().0, s.is_empty(), read) == (2, false, vec![r0.clone(), r1.clone()]));
     }
 
     #[test]
@@ -354,8 +351,7 @@ mod tests {
         let mut s = Spool::open(dir2.path(), one.0).unwrap(); // exactly one record fits
         check!(s.append(&r).unwrap()); // accepted
         check!(!s.append(&r).unwrap()); // rejected (would exceed max_bytes)
-        check!(s.count() == 1);
-        check!(s.read_all().unwrap().len() == 1); // not corrupted
+        check!((s.count().0, s.read_all().unwrap().len()) == (1, 1)); // not corrupted
     }
 
     #[test]
@@ -370,11 +366,9 @@ mod tests {
         s.append(&r2).unwrap();
         s.rewrite(&[r1.clone(), r2.clone()]).unwrap(); // drop r0 (replayed)
         check!(s.bytes() > 0); // `*=` mutant would leave bytes at 0
-        check!(s.count() == 2);
-        check!(s.read_all().unwrap() == vec![r1.clone(), r2.clone()]);
+        check!((s.count().0, s.read_all().unwrap()) == (2, vec![r1.clone(), r2.clone()]));
         s.truncate().unwrap();
-        check!(s.is_empty());
-        check!(s.read_all().unwrap().is_empty());
+        check!((s.is_empty(), s.read_all().unwrap().is_empty()) == (true, true));
     }
 
     #[test]
@@ -415,10 +409,8 @@ mod tests {
         s.append(&r1).unwrap();
         s.append(&cp).unwrap();
         let (next_seq, head) = s.resume_point().unwrap().unwrap();
-        check!(next_seq == 2); // after seq 1
-        check!(head == head1);
-        // sanity: hex of head1 matches r1's chain math
-        check!(to_hex(&head) == to_hex(&head1));
+        // after seq 1; the hex projection also checks r1's chain math.
+        check!((next_seq, head, to_hex(&head)) == (2, head1, to_hex(&head1)));
         let _ = (HEADER_SEQ, HEADER_PREV_HASH); // used by impl
     }
 
@@ -442,8 +434,7 @@ mod tests {
         }
         // Reopen heals the torn tail; the good record survives and appends continue contiguously.
         let mut s = Spool::open(dir.path(), 1 << 20).unwrap();
-        assert2::check!(s.count() == 1);
-        assert2::check!(s.read_all().unwrap() == vec![r0.clone()]);
+        assert2::check!((s.count().0, s.read_all().unwrap()) == (1, vec![r0.clone()]));
         let r1 = chained_record(1, &GENESIS_HEAD, b"more");
         assert2::check!(s.append(&r1).unwrap());
         assert2::check!(s.read_all().unwrap() == vec![r0, r1]);
@@ -458,7 +449,6 @@ mod tests {
             s.append(&r0).unwrap();
         }
         let s2 = Spool::open(dir.path(), 1 << 20).unwrap();
-        check!(s2.count() == 1);
-        check!(s2.read_all().unwrap() == vec![r0]);
+        check!((s2.count().0, s2.read_all().unwrap()) == (1, vec![r0]));
     }
 }

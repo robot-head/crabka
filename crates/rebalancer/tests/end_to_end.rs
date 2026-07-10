@@ -108,11 +108,11 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
         .await
         .expect("CreateTopics");
     assert!(
-        resp.topics.len() == 1,
-        "expected exactly one topic result, got {resp:?}"
-    );
-    assert!(
-        resp.topics[0].error_code == 0,
+        resp.topics
+            .iter()
+            .map(|topic| topic.error_code)
+            .collect::<Vec<_>>()
+            == vec![0],
         "create_topic({name}) failed: {resp:?}"
     );
 }
@@ -230,8 +230,14 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     // GetState — must reflect the topics we just created.
     let gs =
         unwrap_ok(handlers::get_state(Extension(state.clone()), req(pb::GetStateRequest {})).await);
-    assert!(gs.brokers.len() == 1, "single-broker cluster");
-    assert!(gs.brokers[0].id == 1, "broker id matches for_tests config");
+    assert_eq!(
+        gs.brokers
+            .iter()
+            .map(|broker| broker.id)
+            .collect::<Vec<_>>(),
+        vec![1],
+        "single-broker cluster"
+    );
     let topic_names: std::collections::BTreeSet<String> =
         gs.topics.iter().map(|t| t.name.clone()).collect();
     for t in &["topic-a", "topic-b", "topic-c"] {
@@ -259,21 +265,20 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         .await,
     );
     check!(
-        proposal.movements.is_empty(),
-        "expected empty movements on a single-broker balanced cluster, got {:?}",
-        proposal.movements
-    );
-    check!(!proposal.id.is_empty(), "proposal must have an id");
-    check!(
-        proposal.status == i32::from(pb::ProposalStatus::Computed),
-        "fresh proposal must be Computed"
+        (
+            proposal.movements.is_empty(),
+            proposal.id.is_empty(),
+            proposal.status,
+        ) == (true, false, i32::from(pb::ProposalStatus::Computed))
     );
     let summary = proposal
         .summary
         .as_ref()
         .expect("proposal must carry a summary");
-    assert!(summary.replica_movements == 0);
-    assert!(summary.leader_movements == 0);
+    assert_eq!(
+        (summary.replica_movements, summary.leader_movements),
+        (0, 0)
+    );
 
     // GetProposal — round-trips by id.
     let fetched = unwrap_ok(
@@ -296,10 +301,13 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         .await,
     );
     assert!(
-        listed.proposals.len() == 1,
-        "expected the single proposal in the list"
+        listed
+            .proposals
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>()
+            == vec![proposal.id.as_str()]
     );
-    assert!(listed.proposals[0].id == proposal.id);
 
     // DryRunProposal — empty proposal → 0 bytes moved estimate.
     let dry = unwrap_ok(
@@ -311,8 +319,10 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert!(dry.id == proposal.id);
-    assert!(dry.estimated_bytes_moved == 0);
+    assert_eq!(
+        (dry.id.as_str(), dry.estimated_bytes_moved),
+        (proposal.id.as_str(), 0)
+    );
 
     // GetProposal on a missing id → NotFound.
     let missing = unwrap_err(

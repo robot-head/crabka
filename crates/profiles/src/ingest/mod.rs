@@ -309,8 +309,13 @@ mod tests {
             },
         );
 
-        assert!(config.for_tenant("tenant-a").max_label_value_len == 5);
-        assert!(config.for_tenant("tenant-b") == &TenantLimits::default());
+        assert_eq!(
+            (
+                config.for_tenant("tenant-a").max_label_value_len,
+                config.for_tenant("tenant-b"),
+            ),
+            (5, &TenantLimits::default())
+        );
     }
 
     #[test]

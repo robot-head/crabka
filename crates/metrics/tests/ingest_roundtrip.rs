@@ -64,21 +64,24 @@ async fn remote_write_v1_lands_as_block() {
 
     let wal_record = inspect_wal_record(&bootstrap).await;
     let fingerprint = wal_record.series_fingerprint();
-    check!(wal_record.tenant == "tenant-a");
-    check!(
-        wal_record
-            .labels
-            .iter()
-            .any(|(name, value)| name == "__name__" && value == "up")
+    assert_eq!(
+        (
+            wal_record.tenant.as_str(),
+            wal_record
+                .labels
+                .iter()
+                .any(|(name, value)| name == "__name__" && value == "up"),
+            matches!(
+                wal_record.payload,
+                SamplePayload::Float {
+                    timestamp_ms: 100,
+                    value,
+                    start_timestamp_ms: None,
+                } if (value - 1.0).abs() < f64::EPSILON
+            ),
+        ),
+        ("tenant-a", true, true)
     );
-    assert!(matches!(
-        wal_record.payload,
-        SamplePayload::Float {
-            timestamp_ms: 100,
-            value,
-            start_timestamp_ms: None,
-        } if (value - 1.0).abs() < f64::EPSILON
-    ));
 
     let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
     let mut config = MetricsCompactorConfig::new(bootstrap);
@@ -99,14 +102,20 @@ async fn remote_write_v1_lands_as_block() {
     .await
     .expect("run compactor");
 
-    check!(result.compacted_records == 1);
-    check!(result.writes == 1);
-    check!(
-        result.committed_offsets
-            == vec![CompactionPartitionOffset {
+    assert_eq!(
+        (
+            result.compacted_records,
+            result.writes,
+            result.committed_offsets,
+        ),
+        (
+            1,
+            1,
+            vec![CompactionPartitionOffset {
                 partition: PartitionIndex(0),
                 offset: Offset(1),
-            }]
+            }],
+        )
     );
 
     let block_key = compaction_partition_object_key(
@@ -131,9 +140,14 @@ async fn remote_write_v1_lands_as_block() {
         .read_manifest(&expected_manifest_key)
         .await
         .expect("read compaction manifest");
-    check!(manifest.tenant == "tenant-a");
-    check!(manifest.block_key == block_key);
-    check!(manifest.row_count == 1);
+    assert_eq!(
+        (
+            manifest.tenant.as_str(),
+            manifest.block_key.as_str(),
+            manifest.row_count,
+        ),
+        ("tenant-a", block_key.as_str(), 1)
+    );
     check!(fingerprint != 0);
 }
 
@@ -172,8 +186,7 @@ async fn inspect_wal_record(bootstrap: &str) -> WalRecord {
             .await
             .expect("poll inspect consumer");
         if let Some(record) = records.into_iter().find(|record| record.topic == WAL_TOPIC) {
-            assert!(record.partition == 0);
-            assert!(record.offset == 0);
+            assert_eq!((record.partition, record.offset), (0, 0));
             let value = record.value.expect("wal record value");
             return WalRecord::decode(&value).expect("decode wal record");
         }

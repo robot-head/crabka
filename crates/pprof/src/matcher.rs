@@ -167,8 +167,11 @@ mod tests {
             r#"{ , service_name="broker" , }"#,
         ] {
             let ms = parse_label_selector(sel).unwrap();
-            assert!(ms.len() == 1, "{sel}");
-            assert!(ms[0].name == "service_name" && ms[0].value == "broker");
+            assert_eq!(
+                (ms.len(), ms[0].name.as_str(), ms[0].value.as_str()),
+                (1, "service_name", "broker"),
+                "{sel}"
+            );
         }
         // Real matchers on either side of a double comma are both kept.
         assert!(

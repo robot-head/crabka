@@ -311,8 +311,8 @@ async fn container_start_retry_retries_transient_errors_without_docker() {
     })
     .await;
 
-    assert!(value == "started");
-    assert!(attempts.get() == 3);
+    assert_eq!(value, "started");
+    assert_eq!(attempts.get(), 3);
 }
 
 async fn push_to_loki(http: &reqwest::Client, base: &str, payload: &Value) {

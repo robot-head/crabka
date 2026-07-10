@@ -632,14 +632,24 @@ mod tests {
 
     #[test]
     fn state_topic_load_warning_only_before_loaded() {
-        assert!(should_warn_state_topic_load(false));
-        assert!(!should_warn_state_topic_load(true));
+        for (name, loaded, expected) in [("not loaded", false, true), ("loaded", true, false)] {
+            assert_eq!(
+                should_warn_state_topic_load(loaded),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn recovery_load_wait_continues_only_before_loaded() {
-        assert!(should_continue_recovery_load_wait(false));
-        assert!(!should_continue_recovery_load_wait(true));
+        for (name, loaded, expected) in [("not loaded", false, true), ("loaded", true, false)] {
+            assert_eq!(
+                should_continue_recovery_load_wait(loaded),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -654,7 +664,8 @@ mod tests {
 
     #[test]
     fn detector_is_disabled_only_at_zero_interval() {
-        assert!(!detector_enabled(0));
-        assert!(detector_enabled(1));
+        for (name, interval, expected) in [("disabled", 0, false), ("enabled", 1, true)] {
+            assert_eq!(detector_enabled(interval), expected, "case {name}");
+        }
     }
 }

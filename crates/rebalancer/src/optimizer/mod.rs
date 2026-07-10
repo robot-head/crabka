@@ -326,16 +326,17 @@ mod tests {
         // Soft first in `goals` list — but optimizer must call hard first.
         let goals: Vec<&dyn Goal> = vec![&soft, &hard];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
-        assert!(out.proposal.goals_applied[0] == "hard");
-        assert!(out.proposal.goals_applied[1] == "soft");
+        assert_eq!(out.proposal.goals_applied, vec!["hard", "soft"]);
     }
 
     #[test]
     fn empty_goals_returns_no_movements() {
         let goals: Vec<&dyn Goal> = vec![];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
-        assert!(out.proposal.movements.is_empty());
-        assert!(out.proposal.status == ProposalStatus::Computed);
+        assert_eq!(
+            (out.proposal.movements.is_empty(), out.proposal.status),
+            (true, ProposalStatus::Computed)
+        );
     }
 
     #[test]
@@ -371,8 +372,14 @@ mod tests {
         };
         let goals: Vec<&dyn Goal> = vec![&g1, &g2];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
-        assert!(out.proposal.movements.len() == 1);
-        assert!(out.proposal.movements[0].new_leader == 2);
+        assert_eq!(
+            out.proposal
+                .movements
+                .iter()
+                .map(|movement| movement.new_leader)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
     }
 
     #[test]
@@ -487,7 +494,6 @@ mod tests {
         let goals: Vec<&dyn Goal> = vec![&hard, &soft];
         let out = optimize(&s, &goals, &ctx).unwrap();
 
-        check!(out.proposal.movements.len() == 3);
         let z_count = out
             .proposal
             .movements
@@ -501,12 +507,8 @@ mod tests {
             .filter(|m| m.topic == "a")
             .count();
         // Both hard movements must survive.
-        check!(z_count == 2, "both hard ('z', _) movements must be kept");
-        // Exactly one soft movement fits in the remaining slot.
-        check!(
-            a_count == 1,
-            "exactly one soft ('a', _) movement should fit"
-        );
+        // Both hard movements survive and exactly one soft movement fills the cap.
+        check!((out.proposal.movements.len(), z_count, a_count) == (3, 2, 1));
     }
 
     #[test]

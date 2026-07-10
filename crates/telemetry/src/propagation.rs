@@ -121,7 +121,10 @@ mod tests {
         let sc = cx.span().span_context().clone();
 
         assert!(sc.is_valid());
-        assert!(sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap());
+        assert_eq!(
+            sc.trace_id(),
+            TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+        );
         assert!(sc.is_sampled());
     }
 
@@ -162,7 +165,7 @@ mod tests {
         // would silently drop the trace headers.
         let mut out = Vec::new();
         VecInjector(&mut out).set(TRACEPARENT, "abc".to_owned());
-        assert!(out == vec![(TRACEPARENT.to_owned(), "abc".to_owned())]);
+        assert_eq!(out, vec![(TRACEPARENT.to_owned(), "abc".to_owned())]);
     }
 
     #[test]
@@ -173,9 +176,9 @@ mod tests {
             .into_iter()
             .collect();
         let ex = MapExtractor(&map);
-        assert!(ex.get(TRACEPARENT) == Some("v"));
+        assert_eq!(ex.get(TRACEPARENT), Some("v"));
         assert!(ex.get("absent").is_none());
-        assert!(ex.keys() == vec![TRACEPARENT]);
+        assert_eq!(ex.keys(), vec![TRACEPARENT]);
     }
 
     #[test]
@@ -217,8 +220,9 @@ mod tests {
 
             // The span now belongs to the producer's trace (shares its trace id).
             let sc = span.context().span().span_context().clone();
-            assert!(
-                sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
+            assert_eq!(
+                sc.trace_id(),
+                TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
             );
         });
     }

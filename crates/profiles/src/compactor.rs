@@ -760,8 +760,10 @@ mod tests {
 
         let jobs = plan_compactions(&index, 2);
 
-        assert!(jobs.len() == 1);
-        assert!(jobs[0].input_keys == vec!["a.parquet".to_string(), "b.parquet".to_string()]);
+        assert_eq!(
+            (jobs.len(), jobs[0].input_keys.as_slice()),
+            (1, &["a.parquet".to_string(), "b.parquet".to_string()][..])
+        );
     }
 
     fn record(tenant: &str, service: &str, value: i64, function: &str) -> ProfileRecord {

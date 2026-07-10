@@ -139,17 +139,17 @@ mod tests {
     fn chunk_overshooting_declared_size_restarts() {
         let mut s = SnapshotFetchState::new((10, 1), NodeId(2));
         // Leader declares size 3 but streams 5 bytes in one chunk.
-        assert!(s.on_chunk((10, 1), 3, 0, b"abcde") == SnapshotFetchStep::Restart);
+        let step = s.on_chunk((10, 1), 3, 0, b"abcde");
         // buf must not have been blown past the declared size.
-        assert!(s.next_position() == 0);
+        assert_eq!((step, s.next_position()), (SnapshotFetchStep::Restart, 0));
     }
 
     #[test]
     fn declared_size_over_cap_restarts() {
         let mut s = SnapshotFetchState::new((10, 1), NodeId(2));
         let too_big = i64::try_from(MAX_SNAPSHOT_BYTES).unwrap() + 1;
-        assert!(s.on_chunk((10, 1), too_big, 0, b"abc") == SnapshotFetchStep::Restart);
-        assert!(s.next_position() == 0);
+        let step = s.on_chunk((10, 1), too_big, 0, b"abc");
+        assert_eq!((step, s.next_position()), (SnapshotFetchStep::Restart, 0));
     }
 
     #[test]

@@ -120,35 +120,21 @@ async fn forward_maps_owner_responses() {
         (PartitionIndex(7), Offset(11), true)
     );
 
-    // error: Some{retriable:true} => Unavailable (origin retries / re-resolves).
-    assert!(matches!(
-        fwd.forward(&addr, &rec("retriable"), &anon())
-            .await
-            .unwrap_err(),
-        GatewayError::Unavailable
-    ));
-
-    // error: Some{retriable:false} => Forward(message).
-    assert!(matches!(
-        fwd.forward(&addr, &rec("fatal"), &anon()).await.unwrap_err(),
-        GatewayError::Forward(m) if m == "boom"
-    ));
-
-    // non-2xx HTTP status => Unavailable.
-    assert!(matches!(
-        fwd.forward(&addr, &rec("http500"), &anon())
-            .await
-            .unwrap_err(),
-        GatewayError::Unavailable
-    ));
-
-    // 200 OK but non-JSON body => Forward (decode error).
-    assert!(matches!(
-        fwd.forward(&addr, &rec("badjson"), &anon())
-            .await
-            .unwrap_err(),
-        GatewayError::Forward(_)
-    ));
+    for (name, key, expected) in [
+        ("retriable_owner_error", "retriable", "unavailable"),
+        ("fatal_owner_error", "fatal", "forward_boom"),
+        ("http_500", "http500", "unavailable"),
+        ("malformed_success_body", "badjson", "forward"),
+    ] {
+        let error = fwd.forward(&addr, &rec(key), &anon()).await.unwrap_err();
+        let actual = match error {
+            GatewayError::Unavailable => "unavailable",
+            GatewayError::Forward(message) if message == "boom" => "forward_boom",
+            GatewayError::Forward(_) => "forward",
+            other => panic!("unexpected error for {name}: {other:?}"),
+        };
+        assert_eq!(actual, expected, "case {name}");
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -234,7 +220,7 @@ async fn forward_handler_error_arm_returns_retriable() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -242,10 +228,22 @@ async fn forward_handler_error_arm_returns_retriable() {
 
     // produce_local => dedup_produce => DedupStore owns nothing => Unavailable
     // => forward_handler wraps it with retriable: true.
-    assert!(result.error.is_some(), "expected an error in ForwardResult");
-    assert!(
-        result.error.unwrap().retriable,
-        "Unavailable from produce_local must be retriable"
+    assert_eq!(
+        (
+            status,
+            result.partition,
+            result.offset,
+            result.deduplicated,
+            result.error.map(|error| error.retriable),
+        ),
+        (
+            StatusCode::OK,
+            PartitionIndex(-1),
+            Offset(-1),
+            false,
+            Some(true)
+        ),
+        "complete forward error result"
     );
 
     broker.shutdown().await;
@@ -346,18 +344,29 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let status = resp.status();
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
     let result: ForwardResult = serde_json::from_slice(&bytes).unwrap();
 
     // The gate returns an error with retriable: false — no broker round-trip.
-    assert!(result.error.is_some(), "expected an error in ForwardResult");
-    let err = result.error.unwrap();
-    assert!(
-        !err.retriable,
-        "anonymous-reject must be non-retriable (permanent auth failure)"
+    assert_eq!(
+        (
+            status,
+            result.partition,
+            result.offset,
+            result.deduplicated,
+            result.error.map(|error| error.retriable),
+        ),
+        (
+            StatusCode::FORBIDDEN,
+            PartitionIndex(-1),
+            Offset(-1),
+            false,
+            Some(false),
+        ),
+        "complete anonymous-rejection result"
     );
 
     broker.shutdown().await;

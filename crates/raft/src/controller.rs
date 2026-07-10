@@ -791,9 +791,15 @@ mod bootstrap_mode_tests {
             }],
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         }]);
-        assert!(controller_endpoint_addr(&voters, NodeId(2)) == Some(format!("{host}:9093")));
-        // Unknown voter id resolves to None (no panic, no empty address).
-        assert!(controller_endpoint_addr(&voters, NodeId(99)).is_none());
+        for (name, node_id, expected) in [
+            ("registered voter", NodeId(2), Some(format!("{host}:9093"))),
+            ("unknown voter", NodeId(99), None),
+        ] {
+            assert!(
+                controller_endpoint_addr(&voters, node_id) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -1012,11 +1018,13 @@ mod bootstrap_mode_tests {
         wait_for_leader(&ctrl).await;
 
         let voters = <ControllerHandle as crate::reconfig::ReconfigOps>::current_voters(&ctrl);
-        check!(voters.contains(NodeId(1)));
         check!(
-            <ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl) == Some(NodeId(1))
+            (
+                voters.contains(NodeId(1)),
+                <ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl),
+                <ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl),
+            ) == (true, Some(NodeId(1)), true)
         );
-        check!(<ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl));
 
         tokio::time::timeout(
             TEST_OP_TIMEOUT,
@@ -1039,8 +1047,12 @@ mod bootstrap_mode_tests {
         .expect("submit ops-b timed out")
         .expect("submit ops-b");
 
-        assert!(ctrl.current_image().topic("ops-a").is_some());
-        assert!(ctrl.current_image().topic("ops-b").is_some());
+        assert!(
+            (
+                ctrl.current_image().topic("ops-a").is_some(),
+                ctrl.current_image().topic("ops-b").is_some(),
+            ) == (true, true)
+        );
         let leader_last =
             <ControllerHandle as crate::reconfig::ReconfigOps>::leader_last_index(&ctrl);
         assert!(leader_last >= 2);
@@ -1061,8 +1073,12 @@ mod bootstrap_mode_tests {
         };
         let ctrl = Controller::start(cfg).await.expect("join start");
 
-        assert!(<ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl).is_none());
-        assert!(!<ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl));
+        assert!(
+            (
+                <ControllerHandle as crate::reconfig::ReconfigOps>::leader(&ctrl),
+                <ControllerHandle as crate::reconfig::ReconfigOps>::is_leader(&ctrl),
+            ) == (None, false)
+        );
         ctrl.shutdown().await;
     }
 
@@ -1095,20 +1111,30 @@ mod bootstrap_mode_tests {
 
     #[test]
     fn metadata_log_nonempty_detects_quorum_state_and_log_segments_only() {
-        let empty = TempDir::new().unwrap();
-        assert!(!metadata_log_nonempty(empty.path()));
-
-        let quorum_state = TempDir::new().unwrap();
-        std::fs::write(quorum_state.path().join("quorum-state"), b"state").unwrap();
-        assert!(metadata_log_nonempty(quorum_state.path()));
-
-        let segment = TempDir::new().unwrap();
-        std::fs::write(segment.path().join("00000000000000000000.log"), b"log").unwrap();
-        assert!(metadata_log_nonempty(segment.path()));
-
-        let not_segment = TempDir::new().unwrap();
-        std::fs::write(not_segment.path().join("00000000000000000000.txt"), b"log").unwrap();
-        assert!(!metadata_log_nonempty(not_segment.path()));
+        for (case, file, expected) in [
+            ("empty directory", None, false),
+            (
+                "quorum state file",
+                Some(("quorum-state", b"state".as_slice())),
+                true,
+            ),
+            (
+                "log segment",
+                Some(("00000000000000000000.log", b"log".as_slice())),
+                true,
+            ),
+            (
+                "non-log extension",
+                Some(("00000000000000000000.txt", b"log".as_slice())),
+                false,
+            ),
+        ] {
+            let dir = TempDir::new().unwrap();
+            if let Some((name, contents)) = file {
+                std::fs::write(dir.path().join(name), contents).unwrap();
+            }
+            assert!(metadata_log_nonempty(dir.path()) == expected, "case {case}");
+        }
     }
 
     #[test]

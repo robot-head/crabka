@@ -15,7 +15,7 @@ use axum::{
 };
 use bytes::Bytes;
 use crabka_grpc_gateway::{
-    codec::{EncodeBody, RecordCodec, SchemaFormat, SchemaSelector},
+    codec::{EncodeBody, RecordCodec, SchemaFormat, SchemaMeta, SchemaSelector},
     schema::{client::SchemaRegistryClient, codec::SchemaRegistryCodec},
 };
 use serde_json::{Value, json};
@@ -158,17 +158,13 @@ fn codec_for(port: u16) -> SchemaRegistryCodec {
 
 /// Assert the 5-byte Confluent frame header at the start of `framed`.
 fn assert_confluent_header(framed: &Bytes, expected_id: i32) {
-    assert!(
-        framed.len() >= 5,
-        "framed payload must be at least 5 bytes, got {}",
-        framed.len()
-    );
-    assert_eq!(framed[0], 0x00, "magic byte must be 0x00");
+    assert!(framed.len() >= 5, "framed payload too short: {framed:?}");
     let id_bytes = [framed[1], framed[2], framed[3], framed[4]];
     let actual_id = i32::from_be_bytes(id_bytes);
     assert_eq!(
-        actual_id, expected_id,
-        "schema id in header: expected {expected_id}, got {actual_id}"
+        (framed[0], actual_id),
+        (0x00, expected_id),
+        "complete Confluent header projection"
     );
 }
 
@@ -180,8 +176,7 @@ fn assert_confluent_header(framed: &Bytes, expected_id: i32) {
 /// as Avro binary, prepends the 5-byte Confluent header, then decodes back to
 /// JSON. Because Avro long fields round-trip as JSON numbers, the JSON output
 /// matches the input exactly.
-#[tokio::test]
-async fn avro_round_trip_via_mock_registry() {
+async fn assert_avro_round_trip_via_mock_registry() {
     let port = start_mock_server().await;
     let codec = codec_for(port);
 
@@ -210,21 +205,31 @@ async fn avro_round_trip_via_mock_registry() {
     assert_confluent_header(&framed, 1);
 
     // ── Decode ──────────────────────────────────────────────────────────────
+    let expected_value = framed.slice(5..);
     let decoded = codec
         .decode("orders-avro", framed)
         .await
         .expect("Avro decode must succeed");
 
-    let meta = decoded
-        .schema
-        .expect("Avro framed value carries schema meta");
-    assert_eq!(meta.id, 1);
-    assert_eq!(meta.format, SchemaFormat::Avro);
-
-    let json_out = decoded.json.expect("Avro decode must produce a JSON view");
+    let json_out = decoded
+        .json
+        .as_deref()
+        .expect("Avro decode must produce a JSON view");
     let expected: Value = serde_json::from_slice(json_in).unwrap();
-    let actual: Value = serde_json::from_slice(&json_out).unwrap();
-    assert_eq!(actual, expected, "Avro round-trip JSON mismatch");
+    let actual: Value = serde_json::from_slice(json_out).unwrap();
+    assert_eq!(
+        (decoded.value, decoded.schema, actual),
+        (
+            expected_value,
+            Some(SchemaMeta {
+                subject: "orders-avro-value".to_owned(),
+                id: 1,
+                format: SchemaFormat::Avro,
+            }),
+            expected,
+        ),
+        "Avro decoded value"
+    );
 }
 
 /// JSON Schema encode→frame→decode round-trip against the mock registry (schema id 2).
@@ -232,8 +237,7 @@ async fn avro_round_trip_via_mock_registry() {
 /// For JSON Schema the wire payload IS JSON (no binary transcoding). The framed
 /// bytes are: `[0x00][id=2 BE][raw JSON]`. The decode path validates and
 /// returns the JSON bytes unchanged.
-#[tokio::test]
-async fn json_schema_round_trip_via_mock_registry() {
+async fn assert_json_schema_round_trip_via_mock_registry() {
     let port = start_mock_server().await;
     let codec = codec_for(port);
 
@@ -259,23 +263,31 @@ async fn json_schema_round_trip_via_mock_registry() {
     assert_confluent_header(&framed, 2);
 
     // ── Decode ──────────────────────────────────────────────────────────────
+    let expected_value = framed.slice(5..);
     let decoded = codec
         .decode("orders-json", framed)
         .await
         .expect("JSON Schema decode must succeed");
 
-    let meta = decoded
-        .schema
-        .expect("JSON framed value carries schema meta");
-    assert_eq!(meta.id, 2);
-    assert_eq!(meta.format, SchemaFormat::Json);
-
     let json_out = decoded
         .json
+        .as_deref()
         .expect("JSON Schema decode must produce a JSON view");
     let expected: Value = serde_json::from_slice(json_in).unwrap();
-    let actual: Value = serde_json::from_slice(&json_out).unwrap();
-    assert_eq!(actual, expected, "JSON Schema round-trip JSON mismatch");
+    let actual: Value = serde_json::from_slice(json_out).unwrap();
+    assert_eq!(
+        (decoded.value, decoded.schema, actual),
+        (
+            expected_value,
+            Some(SchemaMeta {
+                subject: "orders-json-value".to_owned(),
+                id: 2,
+                format: SchemaFormat::Json,
+            }),
+            expected,
+        ),
+        "JSON Schema decoded value"
+    );
 }
 
 /// Protobuf encode→frame→decode round-trip against the mock registry (schema id 3).
@@ -285,8 +297,7 @@ async fn json_schema_round_trip_via_mock_registry() {
 /// the proto3 JSON mapping encodes `int64` fields as decimal **strings**
 /// (e.g. `"1"` not `1`) — this is spec-correct and the test explicitly checks
 /// for this behavior.
-#[tokio::test]
-async fn protobuf_round_trip_via_mock_registry() {
+async fn assert_protobuf_round_trip_via_mock_registry() {
     let port = start_mock_server().await;
     let codec = codec_for(port);
 
@@ -325,32 +336,43 @@ async fn protobuf_round_trip_via_mock_registry() {
     );
 
     // ── Decode ──────────────────────────────────────────────────────────────
+    let expected_value = framed.slice(6..);
     let decoded = codec
         .decode("orders-proto", framed)
         .await
         .expect("Protobuf decode must succeed");
 
-    let meta = decoded
-        .schema
-        .expect("Protobuf framed value carries schema meta");
-    assert_eq!(meta.id, 3);
-    assert_eq!(meta.format, SchemaFormat::Protobuf);
-
     let json_out = decoded
         .json
+        .as_deref()
         .expect("Protobuf decode must produce a JSON view");
-    let actual: Value = serde_json::from_slice(&json_out).unwrap();
+    let actual: Value = serde_json::from_slice(json_out).unwrap();
 
     // proto3 JSON: int64 fields are encoded as decimal STRINGS (not numbers),
     // per https://protobuf.dev/programming-guides/proto3/#json.
     assert_eq!(
-        actual.get("id").and_then(Value::as_str),
-        Some("1"),
-        "proto3 int64 'id' must round-trip as a JSON string"
+        (decoded.value, decoded.schema, actual),
+        (
+            expected_value,
+            Some(SchemaMeta {
+                subject: "orders-proto-value".to_owned(),
+                id: 3,
+                format: SchemaFormat::Protobuf,
+            }),
+            json!({"id": "1", "k": "a"}),
+        ),
+        "Protobuf decoded value"
     );
-    assert_eq!(
-        actual.get("k").and_then(Value::as_str),
-        Some("a"),
-        "proto3 string 'k' must round-trip correctly"
-    );
+}
+
+#[tokio::test]
+async fn schema_formats_round_trip_via_mock_registry() {
+    for name in ["avro", "json_schema", "protobuf"] {
+        match name {
+            "avro" => assert_avro_round_trip_via_mock_registry().await,
+            "json_schema" => assert_json_schema_round_trip_via_mock_registry().await,
+            "protobuf" => assert_protobuf_round_trip_via_mock_registry().await,
+            other => unreachable!("unknown case {other}"),
+        }
+    }
 }

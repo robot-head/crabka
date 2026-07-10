@@ -520,12 +520,11 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
         .await?;
 
     assert_eq!(
-        fetched.get("type").and_then(JsonValue::as_str),
-        Some("tempo")
-    );
-    assert_eq!(
-        fetched.get("url").and_then(JsonValue::as_str),
-        Some(crabka.container_base_url.as_str())
+        (
+            fetched.get("type").and_then(JsonValue::as_str),
+            fetched.get("url").and_then(JsonValue::as_str),
+        ),
+        (Some("tempo"), Some(crabka.container_base_url.as_str()))
     );
 
     let echo = client

@@ -372,81 +372,55 @@ mod tests {
     }
 
     #[test]
-    fn subscribe_predicate_matches_string_field() {
-        let predicates = compile_subscribe_predicates(vec![pb::FieldPredicate {
-            path: "$.entity_type".to_string(),
-            op: pb::PredicateOp::Equals as i32,
-            value: Some(pb::field_predicate::Value::StringValue(
-                "NETWORK_NODE".to_string(),
-            )),
-        }])
-        .expect("predicate compiles");
+    fn subscribe_predicate_matching_cases() {
+        use pb::field_predicate::Value;
 
-        assert!(decoded_record_matches(
-            &predicates,
-            &decoded_json(br#"{"entity_type":"NETWORK_NODE"}"#)
-        ));
-        assert!(!decoded_record_matches(
-            &predicates,
-            &decoded_json(br#"{"entity_type":"TOPIC"}"#)
-        ));
-    }
+        for (name, path, value, matching, nonmatching) in [
+            (
+                "string_field",
+                "$.entity_type",
+                Value::StringValue("NETWORK_NODE".to_string()),
+                br#"{"entity_type":"NETWORK_NODE"}"#.as_slice(),
+                br#"{"entity_type":"TOPIC"}"#.as_slice(),
+            ),
+            (
+                "protobuf_int64_json_string",
+                "$.node_id",
+                Value::Int64Value(7),
+                br#"{"node_id":"7"}"#.as_slice(),
+                br#"{"node_id":"8"}"#.as_slice(),
+            ),
+            (
+                "bool_field",
+                "$.ready",
+                Value::BoolValue(true),
+                br#"{"ready":true}"#.as_slice(),
+                br#"{"ready":false}"#.as_slice(),
+            ),
+            (
+                "finite_double_field",
+                "$.load",
+                Value::DoubleValue(1.5),
+                br#"{"load":1.5}"#.as_slice(),
+                br#"{"load":2.5}"#.as_slice(),
+            ),
+        ] {
+            let predicates = compile_subscribe_predicates(vec![pb::FieldPredicate {
+                path: path.to_string(),
+                op: pb::PredicateOp::Equals as i32,
+                value: Some(value),
+            }])
+            .expect("predicate compiles");
 
-    #[test]
-    fn subscribe_predicate_matches_proto_int64_json_string() {
-        let predicates = compile_subscribe_predicates(vec![pb::FieldPredicate {
-            path: "$.node_id".to_string(),
-            op: pb::PredicateOp::Equals as i32,
-            value: Some(pb::field_predicate::Value::Int64Value(7)),
-        }])
-        .expect("predicate compiles");
-
-        assert!(decoded_record_matches(
-            &predicates,
-            &decoded_json(br#"{"node_id":"7"}"#)
-        ));
-        assert!(!decoded_record_matches(
-            &predicates,
-            &decoded_json(br#"{"node_id":"8"}"#)
-        ));
-    }
-
-    #[test]
-    fn subscribe_predicate_matches_bool_field() {
-        let predicates = compile_subscribe_predicates(vec![pb::FieldPredicate {
-            path: "$.ready".to_string(),
-            op: pb::PredicateOp::Equals as i32,
-            value: Some(pb::field_predicate::Value::BoolValue(true)),
-        }])
-        .expect("predicate compiles");
-
-        assert!(decoded_record_matches(
-            &predicates,
-            &decoded_json(br#"{"ready":true}"#)
-        ));
-        assert!(!decoded_record_matches(
-            &predicates,
-            &decoded_json(br#"{"ready":false}"#)
-        ));
-    }
-
-    #[test]
-    fn subscribe_predicate_matches_finite_double_field() {
-        let predicates = compile_subscribe_predicates(vec![pb::FieldPredicate {
-            path: "$.load".to_string(),
-            op: pb::PredicateOp::Equals as i32,
-            value: Some(pb::field_predicate::Value::DoubleValue(1.5)),
-        }])
-        .expect("finite double predicate compiles");
-
-        assert!(decoded_record_matches(
-            &predicates,
-            &decoded_json(br#"{"load":1.5}"#)
-        ));
-        assert!(!decoded_record_matches(
-            &predicates,
-            &decoded_json(br#"{"load":2.5}"#)
-        ));
+            assert_eq!(
+                (
+                    decoded_record_matches(&predicates, &decoded_json(matching)),
+                    decoded_record_matches(&predicates, &decoded_json(nonmatching)),
+                ),
+                (true, false),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -501,18 +475,25 @@ mod tests {
 
         let inbound = inbound_from_decoded_record(record);
 
-        assert_eq!(inbound.topic, "metadata");
-        assert_eq!(inbound.partition, 2);
-        assert_eq!(inbound.offset, 9);
-        assert_eq!(inbound.key.as_deref(), Some(&b"k"[..]));
-        assert_eq!(inbound.value, b"\x08\x07");
         assert_eq!(
-            inbound.structured.expect("structured JSON").json,
-            br#"{"entity_type":"NETWORK_NODE"}"#
+            inbound,
+            pb::Inbound {
+                topic: "metadata".to_string(),
+                partition: 2,
+                offset: 9,
+                key: Some(b"k".to_vec()),
+                value: b"\x08\x07".to_vec(),
+                headers: std::collections::HashMap::new(),
+                timestamp_ms: 1234,
+                structured: Some(pb::StructuredValue {
+                    json: br#"{"entity_type":"NETWORK_NODE"}"#.to_vec(),
+                }),
+                schema: Some(pb::SchemaSelector {
+                    subject: "metadata-value".to_string(),
+                    id: 17,
+                    format: pb::SchemaFormat::Protobuf as i32,
+                }),
+            }
         );
-        let schema = inbound.schema.expect("schema metadata");
-        assert_eq!(schema.subject, "metadata-value");
-        assert_eq!(schema.id, 17);
-        assert_eq!(schema.format, pb::SchemaFormat::Protobuf as i32);
     }
 }

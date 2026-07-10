@@ -120,8 +120,13 @@ async fn send_stream_produces_all_records() {
     check!(acks.len() == 2);
     for a in &acks {
         let ack = a.as_ref().expect("ack ok");
-        check!(ack.results.len() == 1);
-        check!(ack.results[0].error.is_none());
+        check!(
+            ack.results
+                .iter()
+                .map(|result| result.error.is_none())
+                .collect::<Vec<_>>()
+                == vec![true]
+        );
     }
 
     let mut consumer = Consumer::builder()
@@ -232,8 +237,7 @@ async fn subscribe_streams_records_then_commits() {
     // subscription closing.
     drop(tx);
     let msg = got.expect("received an Inbound record");
-    check!(msg.topic == "sub-topic");
-    check!(msg.value == b"hello");
+    check!((msg.topic.as_str(), msg.value.as_slice()) == ("sub-topic", b"hello".as_slice()));
 
     broker.shutdown().await;
 }

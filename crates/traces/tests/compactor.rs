@@ -90,10 +90,14 @@ async fn compact_block_keys_merges_late_spans_and_replaces_index_entries() {
     .await
     .unwrap();
 
-    check!(meta.object_key == output_key);
-    check!(meta.row_count == 2);
-    check!(meta.min_ts == 100);
-    check!(meta.max_ts == 200);
+    check!(
+        (
+            meta.object_key.as_str(),
+            meta.row_count,
+            meta.min_ts,
+            meta.max_ts
+        ) == (output_key.as_str(), 2, 100, 200)
+    );
     check!(
         index.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000)
             == vec![output_key.clone()]

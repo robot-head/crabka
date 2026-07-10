@@ -151,13 +151,9 @@ fn check(super_users: &HashSet<String>, entries: &[AclEntry], req: &Authorizatio
     let got_image = auth.authorize(&image, req);
     let got_cache = auth.authorize(&cache, req);
     assert!(
-        got_image == want,
-        "image decision {got_image:?} != oracle {want:?} for {req:?} with {} entries",
+        (got_image, got_cache) == (want, want),
+        "image/cache decisions ({got_image:?}, {got_cache:?}) != oracle {want:?} for {req:?} with {} entries",
         entries.len()
-    );
-    assert!(
-        got_cache == want,
-        "cache decision {got_cache:?} != oracle {want:?} for {req:?}"
     );
 }
 

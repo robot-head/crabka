@@ -56,7 +56,11 @@ mod tests {
     #[test]
     fn display_messages() {
         for (name, error, expected) in [
-            ("not subscribed", ConsumerError::NotSubscribed, "not subscribed to any topic"),
+            (
+                "not subscribed",
+                ConsumerError::NotSubscribed,
+                "not subscribed to any topic",
+            ),
             ("server", ConsumerError::Server(25), "broker error_code 25"),
             (
                 "log truncation",

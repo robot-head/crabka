@@ -190,9 +190,12 @@ async fn send_as(
     )
     .await
     .expect("handler returned Err");
-    let mut results = resp.0.results;
-    assert_eq!(results.len(), 1, "expected exactly one record result");
-    results.pop().unwrap()
+    let [result]: [pb::RecordResult; 1] = resp
+        .0
+        .results
+        .try_into()
+        .unwrap_or_else(|results: Vec<_>| panic!("expected one result, got {results:?}"));
+    result
 }
 
 /// Spawn `run_acl_refresh` (short interval) and poll until an authorization
@@ -239,12 +242,11 @@ async fn allow_all_default_is_unrestricted() {
     let state = app_state(&bootstrap, "aa", authz).await;
 
     let result = send_as(&state, &anonymous(), "aa-topic", b"hello").await;
-    assert!(
-        result.error.is_none(),
-        "AllowAll must not deny: {:?}",
-        result.error
+    assert_eq!(
+        (result.error.as_ref(), result.partition, result.offset >= 0),
+        (None, 0, true),
+        "complete deterministic result projection"
     );
-    assert_eq!(result.partition, 0);
 
     broker.shutdown().await;
 }
@@ -268,9 +270,11 @@ async fn simpleacl_denies_unauthorized_produce() {
     let err = result
         .error
         .expect("expected a per-record PERMISSION_DENIED");
-    assert_eq!(err.code, PERMISSION_DENIED, "wrong error code: {err:?}");
-    assert_eq!(result.partition, -1);
-    assert_eq!(result.offset, -1);
+    assert_eq!(
+        (err.code, result.partition, result.offset),
+        (PERMISSION_DENIED, -1, -1),
+        "complete denied result projection: {err:?}"
+    );
 
     // The record must NOT have landed in the topic.
     assert_eq!(count_value(&bootstrap, "t", b"nope").await, 0);
@@ -331,8 +335,10 @@ async fn simpleacl_allows_authorized_produce() {
 
     // Granted topic → produced, no error, present in the topic.
     let ok = send_as(&state, &alice, "t", b"yes").await;
-    assert!(ok.error.is_none(), "granted produce denied: {:?}", ok.error);
-    assert_eq!(ok.partition, 0);
+    assert_eq!(
+        (ok.error.as_ref(), ok.partition, ok.offset >= 0),
+        (None, 0, true)
+    );
     assert_eq!(count_value(&bootstrap, "t", b"yes").await, 1);
 
     // Ungranted topic → PERMISSION_DENIED, not produced.
@@ -371,8 +377,14 @@ async fn bearer_token_resolves_principal() {
         .validate(&token, now_ms)
         .await
         .expect("token validates");
-    assert_eq!(outcome.principal.name, "alice");
-    assert_eq!(outcome.principal.auth_method, AuthMethod::SaslOAuthBearer);
+    assert_eq!(
+        (
+            outcome.principal.name.as_str(),
+            outcome.principal.auth_method,
+            outcome.principal.groups.as_slice(),
+        ),
+        ("alice", AuthMethod::SaslOAuthBearer, [].as_slice())
+    );
 }
 
 /// 5. Forwarding re-authorizes the ORIGINAL caller against the OWNER's cache.
@@ -496,10 +508,6 @@ async fn forwarding_owner_reauthorizes_caller() {
         .produce
         .produce(mk("mallory-val"), &mallory)
         .await;
-    assert!(
-        denied.is_err(),
-        "ungranted forwarded caller must be rejected, got {denied:?}"
-    );
     assert!(
         matches!(denied, Err(GatewayError::Unauthorized(_))),
         "denied forward surfaces as non-retriable Unauthorized, got {denied:?}"

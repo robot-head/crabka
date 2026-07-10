@@ -201,8 +201,10 @@ mod tests {
         hist.push(&mid);
         let ctx = ctx(&now_snap, &hist, &cfg, &usages, &capacities, 200_000);
         let hits = UnderReplicatedPartitions.evaluate(&ctx);
-        assert!(hits.len() == 1);
-        assert!(matches!(hits[0].severity, AnomalySeverity::Critical));
+        assert_eq!(
+            hits.iter().map(|hit| hit.severity).collect::<Vec<_>>(),
+            vec![AnomalySeverity::Critical]
+        );
     }
 
     #[test]
@@ -225,8 +227,10 @@ mod tests {
         hist.push(&mid);
         let ctx = ctx(&now_snap, &hist, &cfg, &usages, &capacities, 200_000);
         let hits = UnderReplicatedPartitions.evaluate(&ctx);
-        assert!(hits.len() == 1);
-        assert!(matches!(hits[0].severity, AnomalySeverity::Warning));
+        assert_eq!(
+            hits.iter().map(|hit| hit.severity).collect::<Vec<_>>(),
+            vec![AnomalySeverity::Warning]
+        );
     }
 
     #[test]
@@ -250,10 +254,12 @@ mod tests {
 
         let hits = UnderReplicatedPartitions.evaluate(&ctx);
 
-        assert!(hits.len() == 2);
         assert!(
-            hits.iter()
-                .all(|hit| { matches!(hit.severity, AnomalySeverity::Warning) })
+            (
+                hits.len(),
+                hits.iter()
+                    .all(|hit| matches!(hit.severity, AnomalySeverity::Warning))
+            ) == (2, true)
         );
     }
 

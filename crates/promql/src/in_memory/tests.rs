@@ -392,9 +392,14 @@ async fn wal_head_delegates_metadata_cardinality_stats_and_blocks() {
             == expected_label_value_cardinality()
     );
     let stats = head.tsdb_stats("tenant-a").await.unwrap();
-    check!(stats.head_stats.num_series == 3);
-    check!(stats.head_stats.num_samples == 3);
-    check!(stats.series_count_by_metric_name == expected_metric_name_stats());
+    assert_eq!(
+        (
+            stats.head_stats.num_series,
+            stats.head_stats.num_samples,
+            stats.series_count_by_metric_name,
+        ),
+        (3, 3, expected_metric_name_stats())
+    );
     check!(head.tsdb_blocks("tenant-a").await.unwrap()[0].id == "block-a");
 }
 
@@ -490,8 +495,13 @@ async fn scan_with_no_match_returns_none_tables() {
     store.push_float("t", lbls(&[("__name__", "up")]), 1000, 1.0);
     let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "absent")];
     let result = store.scan("t", &matchers, 0, 5000).await.unwrap();
-    assert!(result.float_table.is_none());
-    assert!(result.histogram_table.is_none());
+    assert_eq!(
+        (
+            result.float_table.is_none(),
+            result.histogram_table.is_none()
+        ),
+        (true, true)
+    );
 }
 
 #[tokio::test]
@@ -636,8 +646,7 @@ async fn prune_drops_old_samples() {
 
     // now = 10_000, retention = 1_000 -> cutoff = 9_000; ts < 9_000 dropped.
     let stats = store.prune(10_000);
-    assert!(stats.samples_dropped == 3);
-    assert!(stats.series_dropped == 0);
+    assert_eq!((stats.samples_dropped, stats.series_dropped), (3, 0));
 
     let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "up")];
     let remaining = store
@@ -711,8 +720,7 @@ async fn prune_removes_emptied_series_from_index() {
     store.push_float("t", fresh.clone(), 9_900, 2.0);
 
     let stats = store.prune(10_000);
-    assert!(stats.samples_dropped == 1);
-    assert!(stats.series_dropped == 1);
+    assert_eq!((stats.samples_dropped, stats.series_dropped), (1, 1));
 
     let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "up")];
     let series = store
@@ -743,19 +751,26 @@ async fn store_cardinality_and_tsdb_stats_include_float_and_hist_series() {
     );
 
     let stats = store.tsdb_stats("tenant-a").await.unwrap();
-    check!(
-        stats.head_stats
-            == TsdbHeadStats {
+    assert_eq!(
+        (
+            stats.head_stats,
+            stats.label_value_count_by_label_name,
+            stats.memory_in_bytes_by_label_name,
+            stats.series_count_by_label_value_pair,
+        ),
+        (
+            TsdbHeadStats {
                 num_series: 3,
                 num_samples: 3,
                 num_chunks: 3,
                 min_time: 1_000,
                 max_time: 3_000,
-            }
+            },
+            expected_label_value_count_stats(),
+            expected_label_memory_stats(),
+            expected_label_pair_stats(),
+        )
     );
-    check!(stats.label_value_count_by_label_name == expected_label_value_count_stats());
-    check!(stats.memory_in_bytes_by_label_name == expected_label_memory_stats());
-    check!(stats.series_count_by_label_value_pair == expected_label_pair_stats());
 }
 
 #[test]
@@ -773,8 +788,13 @@ fn offsets_track_low_and_high_water() {
     };
 
     // No offsets ingested yet.
-    assert!(head.high_water_offset(PartitionIndex(0)).is_none());
-    assert!(head.low_water_offset(PartitionIndex(0)).is_none());
+    assert_eq!(
+        (
+            head.high_water_offset(PartitionIndex(0)),
+            head.low_water_offset(PartitionIndex(0)),
+        ),
+        (None, None)
+    );
 
     head.apply_wal_record_at(&record(10), PartitionIndex(0), Offset(5));
     head.apply_wal_record_at(&record(20), PartitionIndex(0), Offset(6));
@@ -787,18 +807,23 @@ fn offsets_track_low_and_high_water() {
         (1, Some(100), Some(100)),
         (2, None, None),
     ] {
-        assert!(
-            head.high_water_offset(PartitionIndex(partition)) == want_high.map(Offset),
-            "high water case {partition}"
-        );
-        assert!(
-            head.low_water_offset(PartitionIndex(partition)) == want_low.map(Offset),
-            "low water case {partition}"
+        assert_eq!(
+            (
+                head.high_water_offset(PartitionIndex(partition)),
+                head.low_water_offset(PartitionIndex(partition)),
+            ),
+            (want_high.map(Offset), want_low.map(Offset)),
+            "case partition {partition}"
         );
     }
 
     // Pruning does not move offsets (they track ingestion, not retention).
     head.prune(i64::MAX);
-    assert!(head.high_water_offset(PartitionIndex(0)) == Some(Offset(6)));
-    assert!(head.low_water_offset(PartitionIndex(0)) == Some(Offset(5)));
+    assert_eq!(
+        (
+            head.high_water_offset(PartitionIndex(0)),
+            head.low_water_offset(PartitionIndex(0)),
+        ),
+        (Some(Offset(6)), Some(Offset(5)))
+    );
 }

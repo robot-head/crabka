@@ -198,8 +198,7 @@ mod tests {
         .await
         .unwrap();
         sink.abort().await.unwrap();
-        check!(sink.committed.len() == 1);
-        check!(sink.staged.is_empty());
+        check!((sink.committed.len(), sink.staged.is_empty()) == (1, true));
     }
 
     #[tokio::test]
@@ -233,15 +232,14 @@ mod tests {
             pos: 0,
         };
         // An offset with no `index` component names no position to resume from.
-        check!(src.seek(SourceOffset::default()).await.is_err());
+        let missing = SourceOffset::default();
         // A negative index cannot map to a vector position.
         let mut position = OffsetMap::new();
         position.insert("index".into(), OffsetValue::Long(-1));
-        check!(
-            src.seek(SourceOffset::new(OffsetMap::new().into(), position.into()))
-                .await
-                .is_err()
-        );
+        let negative = SourceOffset::new(OffsetMap::new().into(), position.into());
+        for (name, offset) in [("missing_index", missing), ("negative_index", negative)] {
+            check!(src.seek(offset).await.is_err(), "case {name}");
+        }
     }
 
     #[tokio::test]
@@ -252,8 +250,9 @@ mod tests {
             records: vec![],
             pos: 0,
         };
-        check!(src.close().await.is_ok());
+        let source_close = src.close().await;
         let mut sink = VecSink::default();
-        check!(sink.close().await.is_ok());
+        let sink_close = sink.close().await;
+        check!((source_close.is_ok(), sink_close.is_ok()) == (true, true));
     }
 }

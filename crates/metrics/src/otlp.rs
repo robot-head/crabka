@@ -1457,8 +1457,7 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert!(series.len() == 1);
-        assert!(series[0].exemplars.is_empty());
+        assert_eq!((series.len(), series[0].exemplars.is_empty()), (1, true));
     }
 
     #[test]
@@ -1475,8 +1474,16 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert!(series[0].labels.get("__name__") == Some("http_server_requests_total"));
-        assert!(series[0].samples == vec![(2, 7.0)]);
+        assert_eq!(
+            (
+                series[0].labels.get("__name__"),
+                series[0].samples.as_slice(),
+            ),
+            (
+                Some("http_server_requests_total"),
+                &[DecodedSample::new(2, 7.0)][..],
+            )
+        );
     }
 
     #[test]
@@ -1511,10 +1518,19 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert!(series[0].labels.get("__name__") == Some("k8s_pod_cpu_time_seconds_total"));
-        assert!(series[0].metadata.as_ref().is_some_and(
-            |metadata| metadata.metric_family_name == "k8s_pod_cpu_time_seconds_total"
-        ));
+        assert_eq!(
+            (
+                series[0].labels.get("__name__"),
+                series[0]
+                    .metadata
+                    .as_ref()
+                    .map(|metadata| metadata.metric_family_name.as_str()),
+            ),
+            (
+                Some("k8s_pod_cpu_time_seconds_total"),
+                Some("k8s_pod_cpu_time_seconds_total"),
+            )
+        );
     }
 
     #[test]
@@ -1733,13 +1749,17 @@ mod tests {
                     && series.labels.get("le") == Some("1")
             })
             .expect("matching bucket series");
-        assert!(matching_bucket.exemplars.len() == 1);
         let exemplar = &matching_bucket.exemplars[0];
-        check!(exemplar.timestamp_ms == 1);
-        check!((exemplar.value - 0.9).abs() < f64::EPSILON);
-        check!(exemplar.labels.get("trace_id") == Some("01234567"));
-        check!(exemplar.labels.get("span_id") == Some("abcd"));
-        check!(exemplar.labels.get("http_route") == Some("/v1"));
+        check!(
+            (
+                matching_bucket.exemplars.len(),
+                exemplar.timestamp_ms,
+                (exemplar.value - 0.9).abs() < f64::EPSILON,
+                exemplar.labels.get("trace_id"),
+                exemplar.labels.get("span_id"),
+                exemplar.labels.get("http_route"),
+            ) == (1, 1, true, Some("01234567"), Some("abcd"), Some("/v1"),)
+        );
 
         for series in &series {
             if series.labels.get("le") != Some("1") {
@@ -1885,15 +1905,17 @@ mod tests {
             .iter()
             .find(|series| series.labels.get("__name__") == Some("target_info"))
             .expect("target_info series");
-        assert!(
-            target.labels
-                == labels(&[
+        assert_eq!(
+            (&target.labels, &target.samples),
+            (
+                &labels(&[
                     ("__name__", "target_info"),
                     ("service_name", "checkout"),
-                    ("telemetry_sdk_language", "rust")
-                ])
+                    ("telemetry_sdk_language", "rust"),
+                ]),
+                &vec![DecodedSample::new(1, 1.0)],
+            )
         );
-        assert!(target.samples == vec![(1, 1.0)]);
     }
 
     #[test]
@@ -2075,20 +2097,31 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        check!(series.len() == 1);
-        check!(series[0].labels.get("__name__") == Some("rpc_server_duration"));
-        check!(series[0].histograms.len() == 1);
         let (timestamp_ms, hist) = &series[0].histograms[0];
-        check!(*timestamp_ms == 3);
-        check!(hist.schema == 3);
-        check!((hist.count - 6.0).abs() < f64::EPSILON);
-        check!((hist.sum - 12.0).abs() < f64::EPSILON);
-        check!((hist.zero_count - 1.0).abs() < f64::EPSILON);
-        check!(hist.positive_spans[0].offset == 0);
-        check!(hist.positive_counts == vec![2.0, 3.0]);
-        check!(hist.negative_spans[0].offset == 5);
-        check!(hist.negative_counts == vec![1.0]);
-        check!(hist.start_timestamp_ms == Some(1));
+        check!(
+            (
+                series.len(),
+                series[0].labels.get("__name__"),
+                series[0].histograms.len(),
+                (
+                    *timestamp_ms,
+                    hist.schema,
+                    (hist.count - 6.0).abs() < f64::EPSILON,
+                    (hist.sum - 12.0).abs() < f64::EPSILON,
+                    (hist.zero_count - 1.0).abs() < f64::EPSILON,
+                    hist.positive_spans[0].offset,
+                    hist.positive_counts.as_slice() == [2.0, 3.0],
+                    hist.negative_spans[0].offset,
+                    hist.negative_counts.as_slice() == [1.0],
+                    hist.start_timestamp_ms,
+                ),
+            ) == (
+                1,
+                Some("rpc_server_duration"),
+                1,
+                (3, 3, true, true, true, 0, true, 5, true, Some(1)),
+            )
+        );
     }
 
     #[test]
@@ -2121,14 +2154,26 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert!(series.len() == 1);
-        assert!(series[0].exemplars.len() == 1);
         let exemplar = &series[0].exemplars[0];
-        check!(exemplar.timestamp_ms == 2);
-        check!((exemplar.value - 2.5).abs() < f64::EPSILON);
-        check!(exemplar.labels.get("trace_id") == Some("01234567"));
-        check!(exemplar.labels.get("span_id") == Some("abcd"));
-        check!(exemplar.labels.get("span_kind") == Some("server"));
+        check!(
+            (
+                series.len(),
+                series[0].exemplars.len(),
+                exemplar.timestamp_ms,
+                (exemplar.value - 2.5).abs() < f64::EPSILON,
+                exemplar.labels.get("trace_id"),
+                exemplar.labels.get("span_id"),
+                exemplar.labels.get("span_kind"),
+            ) == (
+                1,
+                1,
+                2,
+                true,
+                Some("01234567"),
+                Some("abcd"),
+                Some("server"),
+            )
+        );
     }
 
     #[test]
@@ -2182,17 +2227,27 @@ mod tests {
                 .unwrap();
 
         let first_hist = &first_series[0].histograms[0].1;
-        check!((first_hist.count - 4.0).abs() < f64::EPSILON);
-        check!((first_hist.sum - 6.0).abs() < f64::EPSILON);
-        check!((first_hist.zero_count - 1.0).abs() < f64::EPSILON);
-        check!(first_hist.positive_counts == vec![2.0, 1.0]);
-
         let second_hist = &second_series[0].histograms[0].1;
-        check!((second_hist.count - 7.0).abs() < f64::EPSILON);
-        check!((second_hist.sum - 11.0).abs() < f64::EPSILON);
-        check!((second_hist.zero_count - 3.0).abs() < f64::EPSILON);
-        check!(second_hist.positive_counts == vec![3.0, 3.0]);
-        check!(second_hist.start_timestamp_ms == Some(1));
+        check!(
+            (
+                (
+                    (first_hist.count - 4.0).abs() < f64::EPSILON,
+                    (first_hist.sum - 6.0).abs() < f64::EPSILON,
+                    (first_hist.zero_count - 1.0).abs() < f64::EPSILON,
+                    first_hist.positive_counts.as_slice(),
+                ),
+                (
+                    (second_hist.count - 7.0).abs() < f64::EPSILON,
+                    (second_hist.sum - 11.0).abs() < f64::EPSILON,
+                    (second_hist.zero_count - 3.0).abs() < f64::EPSILON,
+                    second_hist.positive_counts.as_slice(),
+                    second_hist.start_timestamp_ms,
+                ),
+            ) == (
+                (true, true, true, &[2.0, 1.0][..]),
+                (true, true, true, &[3.0, 3.0][..], Some(1)),
+            )
+        );
     }
 
     #[test]
@@ -2245,14 +2300,16 @@ mod tests {
         let second_hist = &second_series[0].histograms[0].1;
         check!((second_hist.count - 5.0).abs() < f64::EPSILON);
         check!((second_hist.sum - 8.0).abs() < f64::EPSILON);
-        check!(
-            second_hist.positive_spans
-                == vec![BucketSpan {
+        assert_eq!(
+            (&second_hist.positive_spans, &second_hist.positive_counts),
+            (
+                &vec![BucketSpan {
                     offset: 1,
                     length: 2
-                }]
+                }],
+                &vec![2.0, 3.0],
+            )
         );
-        check!(second_hist.positive_counts == vec![2.0, 3.0]);
     }
 
     #[test]
@@ -2281,8 +2338,10 @@ mod tests {
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
         let hist = &series[0].histograms[0].1;
 
-        assert!(hist.positive_spans[0].offset == 1);
-        assert!(hist.negative_spans[0].offset == 4);
+        assert_eq!(
+            (hist.positive_spans[0].offset, hist.negative_spans[0].offset),
+            (1, 4)
+        );
     }
 
     #[test]

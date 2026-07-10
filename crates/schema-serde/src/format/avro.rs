@@ -140,8 +140,7 @@ mod tests {
             total: 9.5,
         };
         let framed = serde.serialize("orders", &order).unwrap();
-        check!(framed[0] == 0x00);
-        check!(u32::from_be_bytes([framed[1], framed[2], framed[3], framed[4]]) == 11);
+        check!((&framed[..5]) == [0x00, 0x00, 0x00, 0x00, 0x0b]);
         let back: Order = serde.deserialize("orders", &framed).unwrap();
         check!(back == order);
     }

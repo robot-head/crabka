@@ -499,71 +499,53 @@ mod tests {
     }
 
     #[test]
-    fn envelope_embeds_raw_json_value() {
-        let rec = rec_with_value(Some(br#"{"type":"order","n":7}"#));
-        let body = render_envelope("events-3-42", &rec);
-        let v: Value = serde_json::from_slice(&body).expect("envelope is JSON");
-        assert_eq!(v["event_id"], "events-3-42");
-        assert_eq!(v["topic"], "events");
-        assert_eq!(v["partition"], 3);
-        assert_eq!(v["offset"], 42);
-        assert_eq!(v["timestamp_ms"], 1_700_000_000_000_i64);
-        // Raw JSON is embedded as an object, not a base64 string.
-        assert_eq!(v["value"]["type"], "order");
-        assert_eq!(v["value"]["n"], 7);
-        // Key is base64-encoded.
-        assert_eq!(v["key"], B64STD.encode(b"k1"));
+    fn envelope_renders_each_value_shape() {
+        for (name, value, expected_value) in [
+            (
+                "raw-json",
+                Some(br#"{"type":"order","n":7}"#.as_slice()),
+                serde_json::json!({"type": "order", "n": 7}),
+            ),
+            (
+                "binary-base64",
+                Some([0xff, 0x00, 0x10].as_slice()),
+                serde_json::json!({"_base64": B64STD.encode([0xff, 0x00, 0x10])}),
+            ),
+            ("empty-null", None, Value::Null),
+        ] {
+            let rec = rec_with_value(value);
+            let body = render_envelope("events-3-42", &rec);
+            let actual: Value = serde_json::from_slice(&body).expect("envelope is JSON");
+            let expected = serde_json::json!({
+                "event_id": "events-3-42",
+                "topic": "events",
+                "partition": 3,
+                "offset": 42,
+                "timestamp_ms": 1_700_000_000_000_i64,
+                "key": B64STD.encode(b"k1"),
+                "value": expected_value,
+            });
+            assert_eq!(actual, expected, "case {name}");
+        }
     }
 
     #[test]
-    fn envelope_wraps_non_json_value_as_base64() {
-        let rec = rec_with_value(Some(&[0xff, 0x00, 0x10]));
-        let body = render_envelope("events-3-42", &rec);
-        let v: Value = serde_json::from_slice(&body).expect("envelope is JSON");
-        assert_eq!(v["value"]["_base64"], B64STD.encode([0xff, 0x00, 0x10]));
-    }
-
-    #[test]
-    fn envelope_null_value_when_empty() {
-        let rec = rec_with_value(None);
-        let body = render_envelope("events-3-42", &rec);
-        let v: Value = serde_json::from_slice(&body).expect("envelope is JSON");
-        assert_eq!(v["value"], Value::Null);
-    }
-
-    #[test]
-    fn filter_matches_truthy_path() {
+    fn filter_cases() {
         let q = parse_json_path("$.deliver").expect("compile");
-        let rec = rec_with_value(Some(br#"{"deliver":true}"#));
-        assert!(passes_filter(&q, &rec));
-    }
-
-    #[test]
-    fn filter_rejects_false_path() {
-        let q = parse_json_path("$.deliver").expect("compile");
-        let rec = rec_with_value(Some(br#"{"deliver":false}"#));
-        assert!(!passes_filter(&q, &rec));
-    }
-
-    #[test]
-    fn filter_rejects_missing_path() {
-        let q = parse_json_path("$.deliver").expect("compile");
-        let rec = rec_with_value(Some(br#"{"other":1}"#));
-        assert!(!passes_filter(&q, &rec));
-    }
-
-    #[test]
-    fn filter_rejects_non_json_body() {
-        let q = parse_json_path("$.deliver").expect("compile");
-        let rec = rec_with_value(Some(b"not json at all"));
-        assert!(!passes_filter(&q, &rec));
-    }
-
-    #[test]
-    fn filter_rejects_empty_value() {
-        let q = parse_json_path("$.deliver").expect("compile");
-        let rec = rec_with_value(None);
-        assert!(!passes_filter(&q, &rec));
+        for (name, value, expected) in [
+            ("truthy_path", Some(br#"{"deliver":true}"#.as_slice()), true),
+            (
+                "false_path",
+                Some(br#"{"deliver":false}"#.as_slice()),
+                false,
+            ),
+            ("missing_path", Some(br#"{"other":1}"#.as_slice()), false),
+            ("non_json_body", Some(b"not json at all".as_slice()), false),
+            ("empty_value", None, false),
+        ] {
+            let rec = rec_with_value(value);
+            assert_eq!(passes_filter(&q, &rec), expected, "case {name}");
+        }
     }
 
     #[test]
@@ -588,69 +570,60 @@ mod tests {
     // decoded_body: decode_to_json delivery path
     // -----------------------------------------------------------------------
 
-    /// `decode_to_json = true` + a codec yielding `json: Some(..)` ⇒ the
-    /// delivered body IS that JSON (not the wrapping envelope).
+    /// Every decode-to-JSON outcome is checked as one named table: successful
+    /// JSON delivery, and each envelope fallback reason.
     #[tokio::test]
-    async fn decode_to_json_delivers_decoded_json() {
+    async fn decode_to_json_delivery_cases() {
         let json = br#"{"decoded":true,"n":7}"#;
-        let codec = StubCodec(Some(decoded_with_json(json)));
-        let sub = sub_with_decode(true);
-        let rec = rec_with_value(Some(b"\x00\x00\x00\x00\x01raw-framed-bytes"));
-        let body = decoded_body(&codec, &sub, &rec)
-            .await
-            .expect("decode_to_json + Some(json) ⇒ decoded body");
-        assert_eq!(body, json, "delivered body is the decoded JSON verbatim");
-    }
+        let cases: [(
+            &str,
+            Box<dyn RecordCodec>,
+            bool,
+            Option<&'static [u8]>,
+            Option<Vec<u8>>,
+        ); 5] = [
+            (
+                "decoded JSON",
+                Box::new(StubCodec(Some(decoded_with_json(json)))),
+                true,
+                Some(b"\x00\x00\x00\x00\x01raw-framed-bytes"),
+                Some(json.to_vec()),
+            ),
+            (
+                "decode disabled",
+                Box::new(StubCodec(Some(decoded_with_json(b"{}")))),
+                false,
+                Some(br#"{"n":1}"#),
+                None,
+            ),
+            (
+                "raw codec",
+                Box::new(RawCodec),
+                true,
+                Some(br#"{"n":1}"#),
+                None,
+            ),
+            (
+                "decode error",
+                Box::new(StubCodec(None)),
+                true,
+                Some(br#"{"n":1}"#),
+                None,
+            ),
+            (
+                "empty value",
+                Box::new(StubCodec(Some(decoded_with_json(b"{}")))),
+                true,
+                None,
+                None,
+            ),
+        ];
 
-    /// `decode_to_json = false` ⇒ `decoded_body` is `None` (envelope path), so
-    /// the codec is never consulted (default behavior unchanged).
-    #[tokio::test]
-    async fn decode_to_json_false_falls_back_to_envelope() {
-        // A stub that would panic if `decode` were called proves it isn't.
-        let codec = StubCodec(Some(decoded_with_json(b"{}")));
-        let sub = sub_with_decode(false);
-        let rec = rec_with_value(Some(br#"{"n":1}"#));
-        assert!(
-            decoded_body(&codec, &sub, &rec).await.is_none(),
-            "decode_to_json=false must skip decode and use the envelope",
-        );
-    }
-
-    /// `decode_to_json = true` but the codec yields no JSON view (as `RawCodec`
-    /// does) ⇒ `None` (envelope path) — inert without a registry.
-    #[tokio::test]
-    async fn decode_to_json_raw_codec_is_inert() {
-        let sub = sub_with_decode(true);
-        let rec = rec_with_value(Some(br#"{"n":1}"#));
-        assert!(
-            decoded_body(&RawCodec, &sub, &rec).await.is_none(),
-            "RawCodec yields json: None ⇒ envelope delivery (inert)",
-        );
-    }
-
-    /// A decode error is non-fatal: `decoded_body` returns `None` so the record
-    /// is still delivered as the envelope (at-least-once preserved).
-    #[tokio::test]
-    async fn decode_to_json_error_falls_back_to_envelope() {
-        let codec = StubCodec(None); // decode → Err(Registry)
-        let sub = sub_with_decode(true);
-        let rec = rec_with_value(Some(br#"{"n":1}"#));
-        assert!(
-            decoded_body(&codec, &sub, &rec).await.is_none(),
-            "decode error must fall back to the envelope (non-fatal)",
-        );
-    }
-
-    /// An empty (None) record value ⇒ `None` (envelope path) even with
-    /// `decode_to_json` on; there's nothing to decode.
-    #[tokio::test]
-    async fn decode_to_json_empty_value_falls_back() {
-        let codec = StubCodec(Some(decoded_with_json(b"{}")));
-        let sub = sub_with_decode(true);
-        let rec = rec_with_value(None);
-        assert!(
-            decoded_body(&codec, &sub, &rec).await.is_none(),
-            "empty value ⇒ envelope path",
-        );
+        for (name, codec, decode_to_json, value, expected) in cases {
+            let sub = sub_with_decode(decode_to_json);
+            let rec = rec_with_value(value);
+            let actual = decoded_body(codec.as_ref(), &sub, &rec).await;
+            assert_eq!(actual, expected, "decode-to-JSON case {name}");
+        }
     }
 }

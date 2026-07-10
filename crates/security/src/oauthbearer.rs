@@ -931,8 +931,12 @@ mod tests {
     #[test]
     fn parse_happy_path_empty_authzid() {
         let r = parse_client_initial_response(&client_resp("tok.en.")).unwrap();
-        assert!(r.token == "tok.en.");
-        assert!(r.authzid == None);
+        assert!(
+            r == ClientInitialResponse {
+                token: "tok.en.".into(),
+                authzid: None,
+            }
+        );
     }
 
     #[test]
@@ -940,26 +944,37 @@ mod tests {
         let bytes =
             b"n,a=alice,\x01host=example.com\x01auth=Bearer abc\x01port=443\x01\x01".to_vec();
         let r = parse_client_initial_response(&bytes).unwrap();
-        assert!(r.token == "abc");
-        assert!(r.authzid == Some("alice".to_string()));
+        assert!(
+            r == ClientInitialResponse {
+                token: "abc".into(),
+                authzid: Some("alice".into()),
+            }
+        );
     }
 
     #[test]
-    fn parse_rejects_missing_auth_kvpair() {
-        let bytes = b"n,,\x01host=example.com\x01\x01".to_vec();
-        assert!(parse_client_initial_response(&bytes) == Err(AuthError::MalformedMessage));
-    }
-
-    #[test]
-    fn parse_rejects_missing_bearer_prefix() {
-        let bytes = b"n,,\x01auth=Basic abc\x01\x01".to_vec();
-        assert!(parse_client_initial_response(&bytes) == Err(AuthError::MalformedMessage));
-    }
-
-    #[test]
-    fn parse_rejects_bad_gs2_header() {
-        let bytes = b"z,,\x01auth=Bearer abc\x01\x01".to_vec();
-        assert!(parse_client_initial_response(&bytes) == Err(AuthError::MalformedMessage));
+    fn parse_rejects_malformed_client_initial_responses() {
+        let cases = [
+            (
+                "missing auth kvpair",
+                b"n,,\x01host=example.com\x01\x01".as_slice(),
+            ),
+            (
+                "missing bearer prefix",
+                b"n,,\x01auth=Basic abc\x01\x01".as_slice(),
+            ),
+            (
+                "bad gs2 header",
+                b"z,,\x01auth=Bearer abc\x01\x01".as_slice(),
+            ),
+        ];
+        for (name, bytes) in cases {
+            assert_eq!(
+                parse_client_initial_response(bytes),
+                Err(AuthError::MalformedMessage),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -968,8 +983,12 @@ mod tests {
         let now = 1_000_000_000_000;
         let token = unsecured("admin", 999_999_000, 1_000_000_900); // seconds
         let outcome = v.validate(&token, now).unwrap();
-        assert!(outcome.principal.name == "admin");
-        assert!(outcome.principal.auth_method == AuthMethod::SaslOAuthBearer);
+        assert!(
+            (
+                outcome.principal.name.as_str(),
+                outcome.principal.auth_method
+            ) == ("admin", AuthMethod::SaslOAuthBearer)
+        );
     }
 
     #[test]
@@ -980,8 +999,10 @@ mod tests {
         let token = unsecured("alice", 999, exp_secs);
         let v = UnsecuredJwsValidator::default();
         let outcome = v.validate(&token, now_ms).expect("token valid");
-        assert!(outcome.principal.name == "alice");
-        assert!(outcome.expires_at_ms == Some(exp_secs * 1000));
+        assert!(
+            (outcome.principal.name.as_str(), outcome.expires_at_ms)
+                == ("alice", Some(exp_secs * 1000))
+        );
     }
 
     #[test]
@@ -1088,14 +1109,14 @@ mod tests {
 
     #[test]
     fn custom_claim_check_rejects_false_and_null_matches() {
-        for (claims, want) in [
-            (serde_json::json!({"enabled": false}), false),
-            (serde_json::json!({"enabled": null}), false),
-            (serde_json::json!({"enabled": true}), true),
+        for (case, claims, want) in [
+            ("false claim", serde_json::json!({"enabled": false}), false),
+            ("null claim", serde_json::json!({"enabled": null}), false),
+            ("true claim", serde_json::json!({"enabled": true}), true),
         ] {
             assert!(
                 evaluate_custom_claim_check(&parse_jp("$.enabled"), &claims) == want,
-                "case {claims}"
+                "case {case}"
             );
         }
     }
@@ -1366,8 +1387,12 @@ mod tests {
         let (token, jwks) = mint_rs256("k1", "{\"sub\":\"admin\",\"exp\":9999999999}");
         let (v, _h) = signed(&jwks);
         let outcome = v.validate(&token, 1_000_000_000_000).unwrap();
-        assert!(outcome.principal.name == "admin");
-        assert!(outcome.principal.auth_method == AuthMethod::SaslOAuthBearer);
+        assert!(
+            (
+                outcome.principal.name.as_str(),
+                outcome.principal.auth_method
+            ) == ("admin", AuthMethod::SaslOAuthBearer)
+        );
     }
 
     #[test]
@@ -1377,8 +1402,10 @@ mod tests {
         let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
         let (v, _h) = signed(&jwks);
         let outcome = v.validate(&token, now_ms).expect("token valid");
-        assert!(outcome.principal.name == "alice");
-        assert!(outcome.expires_at_ms == Some(exp_secs * 1000));
+        assert!(
+            (outcome.principal.name.as_str(), outcome.expires_at_ms)
+                == ("alice", Some(exp_secs * 1000))
+        );
     }
 
     #[test]
@@ -1399,10 +1426,16 @@ mod tests {
         let payload = B64URL.encode(b"{\"sub\":\"a\",\"exp\":9999999999}");
 
         let empty_signature = format!("{header}.{payload}.");
-        assert!(v.validate(&empty_signature, 1_000_000_000_000).is_err());
-
         let extra_segment = format!("{token}.extra");
-        assert!(v.validate(&extra_segment, 1_000_000_000_000).is_err());
+        for (name, malformed) in [
+            ("empty signature", empty_signature.as_str()),
+            ("extra segment", extra_segment.as_str()),
+        ] {
+            assert!(
+                v.validate(malformed, 1_000_000_000_000).is_err(),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -1563,13 +1596,12 @@ mod tests {
         // verifies; a token under the new key does. Same validator instance.
         let (token_b, jwks_b) = mint_es256("k1", "{\"sub\":\"b\",\"exp\":9999999999}");
         handle.store(Jwks::from_json(&jwks_b, false).unwrap());
-        assert!(v.validate(&token_a, 1_000_000_000_000) == Err(AuthError::InvalidToken));
         assert!(
-            v.validate(&token_b, 1_000_000_000_000)
-                .unwrap()
-                .principal
-                .name
-                == "b"
+            (
+                v.validate(&token_a, 1_000_000_000_000),
+                v.validate(&token_b, 1_000_000_000_000)
+                    .map(|outcome| outcome.principal.name),
+            ) == (Err(AuthError::InvalidToken), Ok("b".to_string()))
         );
     }
 
@@ -1583,13 +1615,12 @@ mod tests {
         let (token_b, jwks_b) = mint_es256("k1", "{\"sub\":\"b\",\"exp\":9999999999}");
         handle.store(Jwks::from_json(&jwks_b, false).expect("parse rotated jwks"));
 
-        assert!(v.validate(&token_a, 1_000_000_000_000).is_err());
         assert!(
-            v.validate(&token_b, 1_000_000_000_000)
-                .expect("rotated key validates")
-                .principal
-                .name
-                == "b"
+            (
+                v.validate(&token_a, 1_000_000_000_000),
+                v.validate(&token_b, 1_000_000_000_000)
+                    .map(|outcome| outcome.principal.name),
+            ) == (Err(AuthError::InvalidToken), Ok("b".to_string()))
         );
     }
 
@@ -1768,10 +1799,9 @@ mod tests {
         let mismatched_jwks =
             r#"{"keys":[{"kty":"RSA","kid":"other","n":"AQAB","e":"AQAB"}]}"#.to_string();
         let (v, mut rx) = signed_with_handles(&mismatched_jwks, now_ms);
-        assert!(v.validate(&token, now_ms) == Err(AuthError::InvalidToken));
         assert!(
-            rx.try_recv().is_ok(),
-            "validator should signal refresh on verify failure",
+            (v.validate(&token, now_ms), rx.try_recv().is_ok())
+                == (Err(AuthError::InvalidToken), true)
         );
     }
 
@@ -1781,34 +1811,33 @@ mod tests {
         let exp_secs: i64 = (now_ms / 1000) + 60;
         let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
         let (v, mut rx) = signed_with_handles(&jwks, now_ms);
-        assert!(v.validate(&token, now_ms).is_ok());
-        assert!(
-            rx.try_recv().is_err(),
-            "happy-path verification should not signal a refresh",
-        );
+        assert!((v.validate(&token, now_ms).is_ok(), rx.try_recv().is_err()) == (true, true));
     }
 
     #[tokio::test]
     async fn enum_dispatches_unsecured_and_signed() {
         // Unsecured default.
         let unsecured = OAuthBearerValidator::default();
-        assert!(unsecured.jwks_handle().is_none());
         let tok = unsecured_token("admin", 999_999_000, 9_999_999_999);
-        assert!(unsecured.validate(&tok, 1_000_000_000_000).await.is_ok());
+        assert!(
+            (
+                unsecured.jwks_handle().is_none(),
+                unsecured.validate(&tok, 1_000_000_000_000).await.is_ok(),
+            ) == (true, true)
+        );
 
         // Signed.
         let (token, jwks) = mint_rs256("k1", "{\"sub\":\"x\",\"exp\":9999999999}");
         let (sv, _h) = signed(&jwks);
         let signed_enum = OAuthBearerValidator::Signed(sv);
-        assert!(signed_enum.jwks_handle().is_some());
         assert!(
-            signed_enum
-                .validate(&token, 1_000_000_000_000)
-                .await
-                .unwrap()
-                .principal
-                .name
-                == "x"
+            (
+                signed_enum.jwks_handle().is_some(),
+                signed_enum
+                    .validate(&token, 1_000_000_000_000)
+                    .await
+                    .map(|outcome| outcome.principal.name),
+            ) == (true, Ok("x".to_string()))
         );
     }
 
@@ -1845,20 +1874,38 @@ mod introspection_tests {
     fn temporal_claims_exp_boundary_is_inclusive() {
         // now - skew == exp_ms is NOT expired (the guard is `>`, not `>=`).
         let claims = json!({ "exp": 10 }); // exp_ms = 10_000
-        assert!(check_temporal_claims(&claims, 10_000, 0).is_ok());
-        assert!(check_temporal_claims(&claims, 10_001, 0).is_err());
+        for (name, now_ms, expected) in [
+            ("at boundary", 10_000, true),
+            ("past expiry", 10_001, false),
+        ] {
+            assert_eq!(
+                check_temporal_claims(&claims, now_ms, 0).is_ok(),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn temporal_claims_iat_and_nbf_future_rejected() {
         // iat: at the boundary it's valid; issued in the future is rejected.
         let iat = json!({ "iat": 10 }); // iat_ms = 10_000
-        assert!(check_temporal_claims(&iat, 10_000, 0).is_ok());
-        assert!(check_temporal_claims(&iat, 9_999, 0).is_err());
+        assert_eq!(
+            (
+                check_temporal_claims(&iat, 10_000, 0).is_ok(),
+                check_temporal_claims(&iat, 9_999, 0).is_err(),
+            ),
+            (true, true)
+        );
         // nbf (not-before): same shape.
         let nbf = json!({ "nbf": 10 });
-        assert!(check_temporal_claims(&nbf, 10_000, 0).is_ok());
-        assert!(check_temporal_claims(&nbf, 9_999, 0).is_err());
+        assert_eq!(
+            (
+                check_temporal_claims(&nbf, 10_000, 0).is_ok(),
+                check_temporal_claims(&nbf, 9_999, 0).is_err(),
+            ),
+            (true, true)
+        );
     }
 
     #[test]
@@ -1870,8 +1917,15 @@ mod introspection_tests {
     #[test]
     fn audience_contains_array_membership() {
         // `aud` array membership: `any(a == expected)` (kills `==` -> `!=`).
-        assert!(audience_contains(&json!({ "aud": ["svc-a"] }), "svc-a"));
-        assert!(!audience_contains(&json!({ "aud": ["svc-a"] }), "svc-b"));
+        for (name, audience, expected) in [
+            ("present audience", "svc-a", true),
+            ("absent audience", "svc-b", false),
+        ] {
+            assert!(
+                audience_contains(&json!({ "aud": ["svc-a"] }), audience) == expected,
+                "case {name}"
+            );
+        }
     }
 
     /// Per-token canned responses. `introspect` returns the entry for
@@ -1951,8 +2005,13 @@ mod introspection_tests {
         );
         let v = validator(mock.clone());
         let outcome = v.validate("tok", NOW_MS).await.unwrap();
-        assert!(outcome.principal.name == "alice");
-        assert!(outcome.principal.auth_method == AuthMethod::SaslOAuthBearer);
+        assert_eq!(
+            (
+                outcome.principal.name.as_str(),
+                outcome.principal.auth_method
+            ),
+            ("alice", AuthMethod::SaslOAuthBearer)
+        );
     }
 
     #[tokio::test]
@@ -2261,8 +2320,10 @@ mod introspection_tests {
             .validate("opaque-token", now_ms)
             .await
             .expect("token valid");
-        assert!(outcome.principal.name == "alice");
-        assert!(outcome.expires_at_ms == Some(exp_secs * 1000));
+        assert_eq!(
+            (outcome.principal.name.as_str(), outcome.expires_at_ms),
+            ("alice", Some(exp_secs * 1000))
+        );
     }
 
     // ---- introspection parity -----------------------------------

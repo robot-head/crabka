@@ -431,7 +431,7 @@ async fn single_node_enforces_authn_and_authz() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r.status(), 401, "no credentials → 401");
+    let status = r.status();
     let www = r
         .headers()
         .get(reqwest::header::WWW_AUTHENTICATE)
@@ -439,30 +439,23 @@ async fn single_node_enforces_authn_and_authz() {
         .unwrap_or_default();
     // cp-calibrated form: lowercase `basic` scheme + the configured realm
     // (this node uses `realm: "test"`). See tests/fixtures/auth/basic.json.
-    assert_eq!(
-        www, r#"basic realm="test""#,
-        "WWW-Authenticate must match cp's `basic realm=\"…\"` form"
-    );
+    assert_eq!((status.as_u16(), www), (401, r#"basic realm="test""#));
 
     // ── 401: wrong password, and an unknown user. ────────────────────────────
-    let r = http
-        .post(&register_url)
-        .header("content-type", SR_CONTENT_TYPE)
-        .basic_auth("alice", Some("wrong"))
-        .body(SCHEMA_BODY)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 401, "alice:wrong → 401");
-    let r = http
-        .post(&register_url)
-        .header("content-type", SR_CONTENT_TYPE)
-        .basic_auth("bob", Some("pw"))
-        .body(SCHEMA_BODY)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(r.status(), 401, "bob:pw (unknown user) → 401");
+    for (name, user, password) in [
+        ("wrong_password", "alice", "wrong"),
+        ("unknown_user", "bob", "pw"),
+    ] {
+        let response = http
+            .post(&register_url)
+            .header("content-type", SR_CONTENT_TYPE)
+            .basic_auth(user, Some(password))
+            .body(SCHEMA_BODY)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401, "case {name}");
+    }
 
     // ── 200: alice has Write on `s` → authorized register (poll: ACL cache). ─
     await_register_200(&http, port, "s", 15).await;
@@ -557,17 +550,22 @@ async fn https_round_trip_enforces_auth_over_tls() {
     let base = format!("https://127.0.0.1:{port}/");
 
     // No credentials over TLS → 401, confirming auth runs on the HTTPS path.
-    let r = client.get(&base).send().await.unwrap();
-    assert_eq!(r.status(), 401, "anonymous GET over TLS → 401");
+    let anonymous_status = client.get(&base).send().await.unwrap().status();
 
     // alice:pw over TLS → 200 (the registry root, no authz requirement).
-    let r = client
+    let authenticated_status = client
         .get(&base)
         .basic_auth("alice", Some("pw"))
         .send()
         .await
-        .unwrap();
-    assert_eq!(r.status(), 200, "alice:pw GET / over TLS → 200");
+        .unwrap()
+        .status();
+    for (name, actual, expected) in [
+        ("anonymous", anonymous_status, 401),
+        ("authenticated", authenticated_status, 200),
+    ] {
+        assert_eq!(actual, expected, "case {name}");
+    }
 
     cancel.cancel();
     broker.shutdown().await;

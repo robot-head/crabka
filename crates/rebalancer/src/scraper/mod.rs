@@ -224,34 +224,24 @@ mod tests {
     }
 
     #[test]
-    fn first_failure_warns() {
-        assert!(classify(None, false) == ScrapeLogLevel::Warn);
-    }
-
-    #[test]
-    fn ok_to_fail_warns() {
-        assert!(classify(Some(true), false) == ScrapeLogLevel::Warn);
-    }
-
-    #[test]
-    fn repeated_failure_is_quiet() {
-        assert!(classify(Some(false), false) == ScrapeLogLevel::Debug);
-    }
-
-    #[test]
-    fn recovery_is_info() {
-        assert!(classify(Some(false), true) == ScrapeLogLevel::Recovered);
-    }
-
-    #[test]
-    fn first_success_is_quiet() {
-        // No prior failure → no "recovered" log on first scrape.
-        assert!(classify(None, true) == ScrapeLogLevel::Debug);
-    }
-
-    #[test]
-    fn ok_to_ok_is_quiet() {
-        assert!(classify(Some(true), true) == ScrapeLogLevel::Debug);
+    fn classify_transitions_have_expected_log_levels() {
+        let cases = [
+            ("first failure", None, false, ScrapeLogLevel::Warn),
+            ("ok to failure", Some(true), false, ScrapeLogLevel::Warn),
+            (
+                "repeated failure",
+                Some(false),
+                false,
+                ScrapeLogLevel::Debug,
+            ),
+            ("recovery", Some(false), true, ScrapeLogLevel::Recovered),
+            // No prior failure means a first success is not a recovery.
+            ("first success", None, true, ScrapeLogLevel::Debug),
+            ("repeated success", Some(true), true, ScrapeLogLevel::Debug),
+        ];
+        for (name, previous, current, expected) in cases {
+            assert_eq!(classify(previous, current), expected, "case {name}");
+        }
     }
 
     #[test]

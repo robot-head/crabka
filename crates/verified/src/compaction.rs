@@ -166,9 +166,13 @@ mod tests {
 
     #[test]
     fn compute_horizon_saturates_at_i64_bounds() {
-        assert!(compute_horizon(100, 50) == 150);
-        assert!(compute_horizon(i64::MAX - 1, 50) == i64::MAX);
-        assert!(compute_horizon(i64::MIN + 1, -50) == i64::MIN);
+        for (name, timestamp, lag, expected) in [
+            ("ordinary addition", 100, 50, 150),
+            ("upper saturation", i64::MAX - 1, 50, i64::MAX),
+            ("lower saturation", i64::MIN + 1, -50, i64::MIN),
+        ] {
+            assert_eq!(compute_horizon(timestamp, lag), expected, "case {name}");
+        }
     }
 
     #[test]

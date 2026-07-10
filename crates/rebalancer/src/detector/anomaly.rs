@@ -120,7 +120,6 @@ mod tests {
             mute_until_ms: None,
             details: "broker 1 down".into(),
         };
-        assert!(a.resolved_at_ms == None);
-        assert!(a.mute_until_ms == None);
+        assert!((a.resolved_at_ms, a.mute_until_ms) == (None, None));
     }
 }

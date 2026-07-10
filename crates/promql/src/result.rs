@@ -159,19 +159,18 @@ mod tests {
 
         annotations.extend(&other);
 
-        assert!(
-            annotations.warnings
-                == vec![
+        assert_eq!(
+            annotations,
+            Annotations {
+                warnings: vec![
                     "mixed float and histogram samples".to_string(),
                     "counter reset detected".to_string(),
-                ]
-        );
-        assert!(
-            annotations.infos
-                == vec![
+                ],
+                infos: vec![
                     "histogram ignored".to_string(),
                     "stale sample skipped".to_string(),
-                ]
+                ],
+            }
         );
     }
 

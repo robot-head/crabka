@@ -279,11 +279,10 @@ async fn capture_group() {
         group.protocol_data,
         group.members.len()
     );
-    assert_eq!(group.error_code, 0, "DescribeGroups returned a group error");
     assert_eq!(
-        group.members.len(),
-        2,
-        "expected exactly two `sr` members (both cp nodes joined)"
+        (group.error_code, group.members.len()),
+        (0, 2),
+        "DescribeGroups should return exactly two successful `sr` members"
     );
 
     // cp's assignment carries `master` (the elected master's MEMBER_ID string)

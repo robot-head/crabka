@@ -71,9 +71,14 @@ async fn http_querier_search_job_sends_scan_params_and_parses() {
         .await
         .unwrap();
 
-    check!(out.traces.len() == 1);
-    check!(out.metrics.inspected_bytes == 64);
-    check!(out.metrics.total_blocks == 1);
+    assert_eq!(
+        (
+            out.traces.len(),
+            out.metrics.inspected_bytes,
+            out.metrics.total_blocks,
+        ),
+        (1, 64, 1)
+    );
 
     let log = seen.lock().unwrap();
     assert!(log.len() == 1);
@@ -180,8 +185,7 @@ async fn http_querier_by_id_parses_v2_envelope() {
         .await
         .unwrap();
 
-    assert!(out.trace.span_count() == 1);
-    assert!(out.trace.status == "COMPLETE");
+    assert!((out.trace.span_count(), out.trace.status.as_str()) == (1, "COMPLETE"));
 }
 
 #[tokio::test]
@@ -218,8 +222,7 @@ async fn http_querier_tag_values_encodes_tag_path_segment() {
         .unwrap();
 
     let log = seen.lock().unwrap();
-    assert!(log.len() == 1);
-    assert!(log[0] == "a#b");
+    assert!(log.as_slice() == ["a#b"]);
 }
 
 async fn spawn(app: Router) -> SocketAddr {

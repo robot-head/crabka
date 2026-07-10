@@ -674,7 +674,7 @@ mod tests {
             ("2.8", None),     // below MIN / unknown
             ("9.9-IV0", None), // unknown
         ] {
-            assert!(resolve_release_level(input).ok() == want);
+            assert_eq!(resolve_release_level(input).ok(), want, "release {input}");
         }
     }
 
@@ -723,7 +723,10 @@ mod tests {
 
     #[test]
     fn parse_feature_spec_happy_path() {
-        assert!(parse_feature_spec("group.version=1").unwrap() == ("group.version".to_string(), 1));
+        assert_eq!(
+            parse_feature_spec("group.version=1").unwrap(),
+            ("group.version".to_string(), 1)
+        );
         assert!(
             parse_feature_spec("metadata.version=20").unwrap()
                 == ("metadata.version".to_string(), 20)
@@ -751,22 +754,22 @@ mod tests {
         // an explicit non-metadata feature becomes an override.
         let (mv, ov) =
             resolve_format_features(None, &[("group.version".into(), 1)]).expect("resolve");
-        assert!(mv == crabka_metadata::metadata_version::METADATA_VERSION_MAX);
-        assert!(ov.get("group.version") == Some(&1));
+        assert_eq!(mv, crabka_metadata::metadata_version::METADATA_VERSION_MAX);
+        assert_eq!(ov.get("group.version"), Some(&1));
     }
 
     #[test]
     fn resolve_features_metadata_version_feature_sets_bootstrap_mv() {
         let (mv, ov) =
             resolve_format_features(None, &[("metadata.version".into(), 20)]).expect("resolve");
-        assert!(mv == 20);
-        assert!(ov.get("metadata.version") == Some(&20));
+        assert_eq!(mv, 20);
+        assert_eq!(ov.get("metadata.version"), Some(&20));
     }
 
     #[test]
     fn resolve_features_release_version_sets_bootstrap_mv() {
         let (mv, ov) = resolve_format_features(Some("4.0-IV0"), &[]).expect("resolve");
-        assert!(mv == 22);
+        assert_eq!(mv, 22);
         assert!(ov.is_empty());
     }
 
@@ -776,8 +779,8 @@ mod tests {
         let (mv, ov) =
             resolve_format_features(Some("4.0-IV0"), &[("transaction.version".into(), 2)])
                 .expect("resolve");
-        assert!(mv == 22);
-        assert!(ov.get("transaction.version") == Some(&2));
+        assert_eq!(mv, 22);
+        assert_eq!(ov.get("transaction.version"), Some(&2));
     }
 
     #[test]
@@ -818,8 +821,9 @@ mod tests {
     fn parse_scram_spec_happy_path() {
         let spec = parse_scram_spec("SCRAM-SHA-512=[name=alice,password=hunter2,iterations=8192]")
             .unwrap();
-        assert!(
-            spec == ScramSpec {
+        assert_eq!(
+            spec,
+            ScramSpec {
                 mechanism: SaslMechanism::ScramSha512,
                 name: "alice".to_string(),
                 password: "hunter2".to_string(),
@@ -831,15 +835,17 @@ mod tests {
     #[test]
     fn parse_scram_spec_iterations_default() {
         let spec = parse_scram_spec("SCRAM-SHA-512=[name=bob,password=p]").unwrap();
-        assert!(spec.iterations == 4096);
+        assert_eq!(spec.iterations, 4096);
     }
 
     #[test]
     fn parse_scram_spec_sha256_prefix() {
         let spec = parse_scram_spec("SCRAM-SHA-256=[name=alice,password=hunter2,iterations=8192]")
             .unwrap();
-        assert!(spec.name == "alice");
-        assert!(spec.mechanism == SaslMechanism::ScramSha256);
+        assert_eq!(
+            (spec.name.as_str(), spec.mechanism),
+            ("alice", SaslMechanism::ScramSha256)
+        );
     }
 
     #[test]
@@ -861,17 +867,17 @@ mod tests {
     fn parse_acl_spec_minimal() {
         let s = "principal=User:admin,host=*,operation=All,permission=Allow,resource=Cluster:kafka-cluster";
         let entry = parse_acl_spec(s).unwrap();
-        assert!(
-            entry
-                == AclEntry {
-                    resource_type: crabka_metadata::ResourceType::Cluster,
-                    resource_name: "kafka-cluster".to_string(),
-                    pattern_type: crabka_metadata::PatternType::Literal,
-                    principal: "User:admin".to_string(),
-                    host: "*".to_string(),
-                    operation: crabka_metadata::AclOperation::All,
-                    permission_type: crabka_metadata::PermissionType::Allow,
-                }
+        assert_eq!(
+            entry,
+            AclEntry {
+                resource_type: crabka_metadata::ResourceType::Cluster,
+                resource_name: "kafka-cluster".to_string(),
+                pattern_type: crabka_metadata::PatternType::Literal,
+                principal: "User:admin".to_string(),
+                host: "*".to_string(),
+                operation: crabka_metadata::AclOperation::All,
+                permission_type: crabka_metadata::PermissionType::Allow,
+            }
         );
     }
 
@@ -879,8 +885,10 @@ mod tests {
     fn parse_acl_spec_with_prefixed_pattern() {
         let s = "principal=User:alice,host=*,operation=Read,permission=Allow,resource=Topic:team-:Prefixed";
         let entry = parse_acl_spec(s).unwrap();
-        assert!(entry.pattern_type == crabka_metadata::PatternType::Prefixed);
-        assert!(entry.resource_name == "team-");
+        assert_eq!(
+            (entry.pattern_type, entry.resource_name.as_str()),
+            (crabka_metadata::PatternType::Prefixed, "team-")
+        );
     }
 
     #[test]
@@ -893,8 +901,9 @@ mod tests {
     fn parses_initial_controller_spec() {
         let v =
             parse_initial_controller("3@host:9093:00000000-0000-0000-0000-000000000003").unwrap();
-        assert!(
-            v == Voter {
+        assert_eq!(
+            v,
+            Voter {
                 id: crabka_metadata::NodeId(3),
                 directory_id: Uuid::from_u128(3),
                 endpoints: vec![VoterEndpoint {
@@ -936,7 +945,11 @@ mod tests {
         ] {
             let spec =
                 format!("principal=User:u,host=*,operation={s},permission=Allow,resource=Topic:t");
-            assert!(parse_acl_spec(&spec).unwrap().operation == op);
+            assert_eq!(
+                parse_acl_spec(&spec).unwrap().operation,
+                op,
+                "operation {s}"
+            );
         }
     }
 
@@ -952,8 +965,11 @@ mod tests {
             let spec =
                 format!("principal=User:u,host=*,operation=All,permission=Deny,resource={s}:n");
             let entry = parse_acl_spec(&spec).unwrap();
-            assert!(entry.resource_type == rt);
-            assert!(entry.permission_type == PermissionType::Deny);
+            assert_eq!(
+                (entry.resource_type, entry.permission_type),
+                (rt, PermissionType::Deny),
+                "resource {s}"
+            );
         }
     }
 
@@ -1015,7 +1031,7 @@ mod tests {
             (b"fooba".as_slice(), "Zm9vYmE="),
             (b"foobar".as_slice(), "Zm9vYmFy"),
         ] {
-            assert!(base64_encode(input) == want);
+            assert_eq!(base64_encode(input), want, "input {input:?}");
         }
     }
 }

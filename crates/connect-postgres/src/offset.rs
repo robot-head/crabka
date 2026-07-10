@@ -97,11 +97,17 @@ mod tests {
     fn lsn_round_trips_postgres_text_form() {
         let lsn: PgLsn = "16/B374D848".parse().expect("valid LSN");
 
-        assert_eq!(lsn, PgLsn(0x16_b374_d848));
-        assert_eq!(lsn.to_string(), "16/B374D848");
         assert_eq!(
-            "FFFFFFFF/FFFFFFFF".parse::<PgLsn>().expect("max LSN"),
-            PgLsn(u64::MAX)
+            (
+                lsn,
+                lsn.to_string(),
+                "FFFFFFFF/FFFFFFFF".parse::<PgLsn>().expect("max LSN"),
+            ),
+            (
+                PgLsn(0x16_b374_d848),
+                "16/B374D848".to_owned(),
+                PgLsn(u64::MAX),
+            )
         );
     }
 
@@ -133,10 +139,10 @@ mod tests {
             .0
             .insert("slot".to_owned(), OffsetValue::Long(7));
 
-        for offset in [missing, non_string] {
+        for (name, offset) in [("missing", missing), ("non_string", non_string)] {
             match PgLsn::from_source_offset(&offset, "slot_a").expect_err("slot should fail") {
                 PostgresConnectError::Offset(message) => {
-                    assert_eq!(message, "source offset missing string slot");
+                    assert_eq!(message, "source offset missing string slot", "case {name}");
                 }
                 error => panic!("expected offset error, got {error:?}"),
             }
@@ -145,11 +151,15 @@ mod tests {
 
     #[test]
     fn malformed_lsn_is_offset_error() {
-        for input in ["not-a-lsn", "1/XYZ", "100000000/0"] {
-            assert!(matches!(
-                input.parse::<PgLsn>(),
-                Err(PostgresConnectError::Offset(_))
-            ));
+        for (name, input) in [
+            ("missing_separator", "not-a-lsn"),
+            ("invalid_hex", "1/XYZ"),
+            ("component_overflow", "100000000/0"),
+        ] {
+            assert!(
+                matches!(input.parse::<PgLsn>(), Err(PostgresConnectError::Offset(_))),
+                "case {name}"
+            );
         }
     }
 }

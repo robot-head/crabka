@@ -164,8 +164,13 @@ mod tests {
             events: Vec::new(),
             links: Vec::new(),
         };
-        assert!(s.attributes[0].1 == AttrValue::Int(200));
-        assert!(s.attributes[1].1 == AttrValue::Bool(true));
+        assert_eq!(
+            s.attributes,
+            vec![
+                ("http.status_code".into(), AttrValue::Int(200)),
+                ("ok".into(), AttrValue::Bool(true)),
+            ]
+        );
     }
 
     #[test]
@@ -186,10 +191,25 @@ mod tests {
             inspected_traces: 1,
             inspected_bytes: 4096,
         };
-        assert!(resp.traces[0].span_sets[0].matched == 3);
-        assert!(resp.traces[0].trace_id == [0xAB; 16]);
-        assert!(resp.inspected_traces == 1);
-        assert!(resp.inspected_bytes == 4096);
+        assert_eq!(
+            resp,
+            SearchResponse {
+                traces: vec![TraceResult {
+                    trace_id: [0xAB; 16],
+                    root_service_name: "checkout".into(),
+                    root_trace_name: "POST /pay".into(),
+                    start_time_unix_nano: 5,
+                    duration_nanos: 12_000_000,
+                    duration_ms: 12,
+                    span_sets: vec![SpanSet {
+                        spans: vec![],
+                        matched: 3,
+                    }],
+                }],
+                inspected_traces: 1,
+                inspected_bytes: 4096,
+            }
+        );
     }
 
     #[test]

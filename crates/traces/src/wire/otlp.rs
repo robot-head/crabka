@@ -292,8 +292,13 @@ mod tests {
             .map(|attr| &attr.value)
             .collect::<Vec<_>>();
 
-        assert!(methods.contains(&&AttrValue::Str("GET".into())));
-        assert!(methods.contains(&&AttrValue::Str("POST".into())));
+        assert_eq!(
+            (
+                methods.contains(&&AttrValue::Str("GET".into())),
+                methods.contains(&&AttrValue::Str("POST".into())),
+            ),
+            (true, true)
+        );
     }
 
     #[test]
@@ -307,8 +312,12 @@ mod tests {
 
         let spans = decode_otlp(&data).unwrap();
 
-        assert!(spans[0].instrumentation_scope == "tracer");
-        assert!(spans[0].instrumentation_version == "1.2.3");
+        assert!(
+            (
+                spans[0].instrumentation_scope.as_str(),
+                spans[0].instrumentation_version.as_str(),
+            ) == ("tracer", "1.2.3")
+        );
     }
 
     #[test]

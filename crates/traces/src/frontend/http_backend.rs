@@ -429,7 +429,7 @@ pub async fn run_query_frontend(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -455,7 +455,6 @@ mod tests {
             metrics: crate::frontend::wire::Metrics::default(),
         };
         let values = body.into_typed_values();
-        assert!(values.len() == 1);
-        assert!(values[0].value == "GET");
+        assert_eq!((values.len(), values[0].value.as_str()), (1, "GET"));
     }
 }

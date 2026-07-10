@@ -556,8 +556,16 @@ mod tests {
     fn field_filter_matches_returns_candidate_result() {
         let filter = number_filter("status", ComparisonOp::GreaterEqual, 500.0);
 
-        assert!(filter.matches(&labels(&[("status", "500")])));
-        assert!(!filter.matches(&labels(&[("status", "499")])));
+        for (name, status, expected) in [
+            ("boundary matches", "500", true),
+            ("below boundary does not match", "499", false),
+        ] {
+            assert_eq!(
+                filter.matches(&labels(&[("status", status)])),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -593,8 +601,16 @@ mod tests {
             vec![(FieldFilterLogicOp::And, rest_filter.clone())],
         );
 
-        assert!(chain.matches(&labels(&[("status", "500"), ("path", "/checkout")])));
-        assert!(!chain.matches(&labels(&[("status", "500"), ("path", "/health")])));
+        for (name, path, expected) in [
+            ("non-health path", "/checkout", true),
+            ("excluded health path", "/health", false),
+        ] {
+            assert_eq!(
+                chain.matches(&labels(&[("status", "500"), ("path", path)])),
+                expected,
+                "case {name}"
+            );
+        }
         assert_eq!(chain.rest(), &[(FieldFilterLogicOp::And, rest_filter)]);
     }
 
@@ -709,13 +725,22 @@ mod tests {
 
     #[test]
     fn ip_matcher_accepts_single_address_ranges_and_host_prefixes() {
-        let range = IpMatcher::parse("192.168.1.1-192.168.1.1").unwrap();
-        assert!(range.matches_ip_text("192.168.1.1"));
-        assert!(!range.matches_ip_text("192.168.1.2"));
-
-        let cidr = IpMatcher::parse("192.168.1.1/32").unwrap();
-        assert!(cidr.matches_ip_text("192.168.1.1"));
-        assert!(!cidr.matches_ip_text("192.168.1.2"));
+        for (name, matcher) in [
+            (
+                "single-address range",
+                IpMatcher::parse("192.168.1.1-192.168.1.1").unwrap(),
+            ),
+            ("host prefix", IpMatcher::parse("192.168.1.1/32").unwrap()),
+        ] {
+            assert_eq!(
+                (
+                    matcher.matches_ip_text("192.168.1.1"),
+                    matcher.matches_ip_text("192.168.1.2"),
+                ),
+                (true, false),
+                "case {name}"
+            );
+        }
     }
 
     #[test]

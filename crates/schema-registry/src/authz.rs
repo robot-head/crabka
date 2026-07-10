@@ -370,252 +370,184 @@ mod tests {
         };
         let meta = acl_entry_from_admin(admin);
         assert_eq!(
-            meta.operation,
-            crabka_metadata::AclOperation::TwoPhaseCommit
-        );
-        assert_eq!(
-            meta.resource_type,
-            crabka_metadata::ResourceType::TransactionalId
-        );
-    }
-
-    #[test]
-    fn register_is_write_on_topic_subject() {
-        assert_eq!(
-            t("POST", "/subjects/orders-value/versions"),
-            Some((
-                ResourceType::Topic,
-                "orders-value".to_string(),
-                AclOperation::Write
-            ))
+            meta,
+            crabka_metadata::AclEntry {
+                resource_type: crabka_metadata::ResourceType::TransactionalId,
+                resource_name: "my-txn".to_string(),
+                pattern_type: crabka_metadata::PatternType::Literal,
+                principal: "User:flink".to_string(),
+                host: "*".to_string(),
+                operation: crabka_metadata::AclOperation::TwoPhaseCommit,
+                permission_type: crabka_metadata::PermissionType::Allow,
+            }
         );
     }
 
     #[test]
-    fn read_version_is_read_on_topic() {
-        assert_eq!(
-            t("GET", "/subjects/orders-value/versions/1"),
-            Some((
-                ResourceType::Topic,
-                "orders-value".to_string(),
-                AclOperation::Read
-            ))
-        );
-    }
+    fn route_mappings_are_named_and_table_driven() {
+        use AclOperation::{Alter, Delete, Describe, Read, Write};
+        use ResourceType::{Cluster, Topic};
 
-    #[test]
-    fn version_schema_and_referencedby_are_read() {
-        assert_eq!(
-            t("GET", "/subjects/s/versions/1/schema"),
-            Some((ResourceType::Topic, "s".to_string(), AclOperation::Read))
-        );
-        assert_eq!(
-            t("GET", "/subjects/s/versions/1/referencedby"),
-            Some((ResourceType::Topic, "s".to_string(), AclOperation::Read))
-        );
-    }
-
-    #[test]
-    fn delete_subject_is_delete() {
-        assert_eq!(
-            t("DELETE", "/subjects/orders-value"),
-            Some((
-                ResourceType::Topic,
-                "orders-value".to_string(),
-                AclOperation::Delete
-            ))
-        );
-    }
-
-    #[test]
-    fn delete_version_is_delete() {
-        assert_eq!(
-            t("DELETE", "/subjects/s/versions/2"),
-            Some((ResourceType::Topic, "s".to_string(), AclOperation::Delete))
-        );
-    }
-
-    #[test]
-    fn lookup_post_subject_is_read() {
-        assert_eq!(
-            t("POST", "/subjects/s"),
-            Some((ResourceType::Topic, "s".to_string(), AclOperation::Read))
-        );
-    }
-
-    #[test]
-    fn subject_config_put_is_alter_get_is_describe() {
-        assert_eq!(
-            t("PUT", "/config/s"),
-            Some((ResourceType::Topic, "s".to_string(), AclOperation::Alter))
-        );
-        assert_eq!(
-            t("GET", "/config/s"),
-            Some((ResourceType::Topic, "s".to_string(), AclOperation::Describe))
-        );
-    }
-
-    #[test]
-    fn subject_mode_delete_is_alter() {
-        assert_eq!(
-            t("DELETE", "/mode/s"),
-            Some((ResourceType::Topic, "s".to_string(), AclOperation::Alter))
-        );
-    }
-
-    #[test]
-    fn compatibility_is_read() {
-        assert_eq!(
-            t("POST", "/compatibility/subjects/s/versions/1"),
-            Some((ResourceType::Topic, "s".to_string(), AclOperation::Read))
-        );
-    }
-
-    #[test]
-    fn global_config_put_is_alter_cluster() {
-        assert_eq!(
-            t("PUT", "/config"),
-            Some((
-                ResourceType::Cluster,
-                "kafka-cluster".to_string(),
-                AclOperation::Alter
-            ))
-        );
-    }
-
-    #[test]
-    fn global_config_get_and_mode_get_are_describe_cluster() {
-        assert_eq!(
-            t("GET", "/config"),
-            Some((
-                ResourceType::Cluster,
-                "kafka-cluster".to_string(),
-                AclOperation::Describe
-            ))
-        );
-        assert_eq!(
-            t("GET", "/mode"),
-            Some((
-                ResourceType::Cluster,
-                "kafka-cluster".to_string(),
-                AclOperation::Describe
-            ))
-        );
-    }
-
-    #[test]
-    fn list_subjects_is_describe_cluster() {
-        assert_eq!(
-            t("GET", "/subjects"),
-            Some((
-                ResourceType::Cluster,
-                "kafka-cluster".to_string(),
-                AclOperation::Describe
-            ))
-        );
-    }
-
-    #[test]
-    fn schemas_endpoints_are_read_cluster() {
-        assert_eq!(
-            t("GET", "/schemas/ids/1"),
-            Some((
-                ResourceType::Cluster,
-                "kafka-cluster".to_string(),
-                AclOperation::Read
-            ))
-        );
-        assert_eq!(
-            t("GET", "/schemas"),
-            Some((
-                ResourceType::Cluster,
-                "kafka-cluster".to_string(),
-                AclOperation::Read
-            ))
-        );
-    }
-
-    #[test]
-    fn schemas_import_post_is_write_cluster_only() {
-        assert_eq!(
-            t("POST", "/schemas/import"),
-            Some((
-                ResourceType::Cluster,
-                "kafka-cluster".to_string(),
-                AclOperation::Write
-            ))
-        );
-        assert_eq!(t("GET", "/schemas/import"), None);
-        assert_eq!(t("PUT", "/schemas/import"), None);
-    }
-
-    #[test]
-    fn schemas_types_is_describe_cluster() {
-        assert_eq!(
-            t("GET", "/schemas/types"),
-            Some((
-                ResourceType::Cluster,
-                "kafka-cluster".to_string(),
-                AclOperation::Describe
-            ))
-        );
-    }
-
-    #[test]
-    fn put_global_mode_is_alter_cluster() {
-        assert_eq!(
-            t("PUT", "/mode"),
-            Some((
-                ResourceType::Cluster,
-                "kafka-cluster".into(),
-                AclOperation::Alter
-            ))
-        );
-    }
-
-    #[test]
-    fn subject_mode_put_is_alter_get_is_describe() {
-        assert_eq!(
-            t("PUT", "/mode/s"),
-            Some((ResourceType::Topic, "s".into(), AclOperation::Alter))
-        );
-        assert_eq!(
-            t("GET", "/mode/s"),
-            Some((ResourceType::Topic, "s".into(), AclOperation::Describe))
-        );
-    }
-
-    #[test]
-    fn list_versions_is_read_topic() {
-        assert_eq!(
-            t("GET", "/subjects/s/versions"),
-            Some((ResourceType::Topic, "s".into(), AclOperation::Read))
-        );
-    }
-
-    #[test]
-    fn schemas_id_versions_is_read_cluster() {
-        assert_eq!(
-            t("GET", "/schemas/ids/1/versions"),
-            Some((
-                ResourceType::Cluster,
-                "kafka-cluster".into(),
-                AclOperation::Read
-            ))
-        );
-    }
-
-    #[test]
-    fn subject_is_percent_decoded() {
-        assert_eq!(
-            t("POST", "/subjects/foo%2Fbar/versions"),
-            Some((ResourceType::Topic, "foo/bar".into(), AclOperation::Write))
-        );
-    }
-
-    #[test]
-    fn root_is_none() {
-        assert_eq!(t("GET", "/"), None);
+        for (name, method, path, expected) in [
+            (
+                "register",
+                "POST",
+                "/subjects/orders-value/versions",
+                Some((Topic, "orders-value", Write)),
+            ),
+            (
+                "read-version",
+                "GET",
+                "/subjects/orders-value/versions/1",
+                Some((Topic, "orders-value", Read)),
+            ),
+            (
+                "version-schema",
+                "GET",
+                "/subjects/s/versions/1/schema",
+                Some((Topic, "s", Read)),
+            ),
+            (
+                "referenced-by",
+                "GET",
+                "/subjects/s/versions/1/referencedby",
+                Some((Topic, "s", Read)),
+            ),
+            (
+                "delete-subject",
+                "DELETE",
+                "/subjects/orders-value",
+                Some((Topic, "orders-value", Delete)),
+            ),
+            (
+                "delete-version",
+                "DELETE",
+                "/subjects/s/versions/2",
+                Some((Topic, "s", Delete)),
+            ),
+            (
+                "lookup-subject",
+                "POST",
+                "/subjects/s",
+                Some((Topic, "s", Read)),
+            ),
+            (
+                "alter-subject-config",
+                "PUT",
+                "/config/s",
+                Some((Topic, "s", Alter)),
+            ),
+            (
+                "describe-subject-config",
+                "GET",
+                "/config/s",
+                Some((Topic, "s", Describe)),
+            ),
+            (
+                "delete-subject-mode",
+                "DELETE",
+                "/mode/s",
+                Some((Topic, "s", Alter)),
+            ),
+            (
+                "compatibility",
+                "POST",
+                "/compatibility/subjects/s/versions/1",
+                Some((Topic, "s", Read)),
+            ),
+            (
+                "alter-global-config",
+                "PUT",
+                "/config",
+                Some((Cluster, "kafka-cluster", Alter)),
+            ),
+            (
+                "describe-global-config",
+                "GET",
+                "/config",
+                Some((Cluster, "kafka-cluster", Describe)),
+            ),
+            (
+                "describe-global-mode",
+                "GET",
+                "/mode",
+                Some((Cluster, "kafka-cluster", Describe)),
+            ),
+            (
+                "list-subjects",
+                "GET",
+                "/subjects",
+                Some((Cluster, "kafka-cluster", Describe)),
+            ),
+            (
+                "schema-by-id",
+                "GET",
+                "/schemas/ids/1",
+                Some((Cluster, "kafka-cluster", Read)),
+            ),
+            (
+                "list-schemas",
+                "GET",
+                "/schemas",
+                Some((Cluster, "kafka-cluster", Read)),
+            ),
+            (
+                "import-schemas",
+                "POST",
+                "/schemas/import",
+                Some((Cluster, "kafka-cluster", Write)),
+            ),
+            ("get-import-unmapped", "GET", "/schemas/import", None),
+            ("put-import-unmapped", "PUT", "/schemas/import", None),
+            (
+                "schema-types",
+                "GET",
+                "/schemas/types",
+                Some((Cluster, "kafka-cluster", Describe)),
+            ),
+            (
+                "alter-global-mode",
+                "PUT",
+                "/mode",
+                Some((Cluster, "kafka-cluster", Alter)),
+            ),
+            (
+                "alter-subject-mode",
+                "PUT",
+                "/mode/s",
+                Some((Topic, "s", Alter)),
+            ),
+            (
+                "describe-subject-mode",
+                "GET",
+                "/mode/s",
+                Some((Topic, "s", Describe)),
+            ),
+            (
+                "list-versions",
+                "GET",
+                "/subjects/s/versions",
+                Some((Topic, "s", Read)),
+            ),
+            (
+                "schema-id-versions",
+                "GET",
+                "/schemas/ids/1/versions",
+                Some((Cluster, "kafka-cluster", Read)),
+            ),
+            (
+                "percent-decoded-subject",
+                "POST",
+                "/subjects/foo%2Fbar/versions",
+                Some((Topic, "foo/bar", Write)),
+            ),
+            ("root-unmapped", "GET", "/", None),
+        ] {
+            let expected = expected.map(|(resource_type, resource_name, operation)| {
+                (resource_type, resource_name.to_string(), operation)
+            });
+            assert_eq!(t(method, path), expected, "case {name}");
+        }
     }
 
     // ---- SchemaRegistryAuthz::authorize ----------------------------------
@@ -658,63 +590,81 @@ mod tests {
     }
 
     #[test]
-    fn enabled_allows_matching_acl() {
-        let az = with_acls(HashSet::new(), true, vec![alice_write_s()]);
-        assert!(az.authorize(
-            &alice(),
-            &host(),
-            ResourceType::Topic,
-            "s",
-            AclOperation::Write
-        ));
-    }
-
-    #[test]
-    fn enabled_denies_other_subject() {
-        let az = with_acls(HashSet::new(), true, vec![alice_write_s()]);
-        // Same principal/op, but a different topic name → no matching ACL → deny.
-        assert!(!az.authorize(
-            &alice(),
-            &host(),
-            ResourceType::Topic,
-            "other",
-            AclOperation::Write
-        ));
-    }
-
-    #[test]
-    fn super_user_is_allowed_without_acls() {
-        let supers: HashSet<String> = ["alice".to_string()].into_iter().collect();
-        // No ACLs at all, yet the super-user is allowed.
-        let az = with_acls(supers, true, vec![]);
-        assert!(az.authorize(
-            &alice(),
-            &host(),
-            ResourceType::Topic,
-            "s",
-            AclOperation::Write
-        ));
-    }
-
-    #[test]
-    fn disabled_allows_everything() {
-        // enabled=false → allow-all, even with no matching ACL and no super-user.
-        let az = with_acls(HashSet::new(), false, vec![]);
-        assert!(az.authorize(
-            &alice(),
-            &host(),
-            ResourceType::Topic,
-            "s",
-            AclOperation::Write
-        ));
-        // Cluster-scoped op is also allowed when disabled.
-        assert!(az.authorize(
-            &crate::auth::anonymous(),
-            &host(),
-            ResourceType::Cluster,
-            "kafka-cluster",
-            AclOperation::Describe
-        ));
+    fn authorize_decisions_are_named_and_table_driven() {
+        for (
+            name,
+            super_users,
+            enabled,
+            acls,
+            principal,
+            resource_type,
+            resource_name,
+            operation,
+            expected,
+        ) in [
+            (
+                "matching-acl",
+                HashSet::new(),
+                true,
+                vec![alice_write_s()],
+                alice(),
+                ResourceType::Topic,
+                "s",
+                AclOperation::Write,
+                true,
+            ),
+            (
+                "different-subject",
+                HashSet::new(),
+                true,
+                vec![alice_write_s()],
+                alice(),
+                ResourceType::Topic,
+                "other",
+                AclOperation::Write,
+                false,
+            ),
+            (
+                "super-user-without-acl",
+                ["alice".to_string()].into_iter().collect(),
+                true,
+                Vec::new(),
+                alice(),
+                ResourceType::Topic,
+                "s",
+                AclOperation::Write,
+                true,
+            ),
+            (
+                "disabled-topic",
+                HashSet::new(),
+                false,
+                Vec::new(),
+                alice(),
+                ResourceType::Topic,
+                "s",
+                AclOperation::Write,
+                true,
+            ),
+            (
+                "disabled-cluster",
+                HashSet::new(),
+                false,
+                Vec::new(),
+                crate::auth::anonymous(),
+                ResourceType::Cluster,
+                "kafka-cluster",
+                AclOperation::Describe,
+                true,
+            ),
+        ] {
+            let authz = with_acls(super_users, enabled, acls);
+            assert_eq!(
+                authz.authorize(&principal, &host(), resource_type, resource_name, operation,),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     // ---- authz_layer middleware ------------------------------------------
@@ -747,68 +697,53 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authz_layer_denies_principal_without_acl() {
-        // enabled, no ACLs, non-super-user, non-forwarded → 403 on a gated path.
-        let app = authz_app(with_acls(HashSet::new(), true, vec![]));
-        let req = Request::builder()
-            .method("POST")
-            .uri("/subjects/orders-value/versions")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    }
-
-    #[tokio::test]
-    async fn authz_layer_allows_matching_acl() {
-        // An ACL granting Write on Topic:"orders-value" → the principal passes.
-        // The middleware falls back to the anonymous principal (no auth layer in
-        // this router), so the ACL is written for "User:ANONYMOUS".
-        let acl = AclEntry {
-            resource_type: ResourceType::Topic,
-            resource_name: "orders-value".into(),
-            pattern_type: PatternType::Literal,
-            principal: "User:ANONYMOUS".into(),
-            host: "*".into(),
-            operation: AclOperation::Write,
-            permission_type: PermissionType::Allow,
-        };
-        let app = authz_app(with_acls(HashSet::new(), true, vec![acl]));
-        let req = Request::builder()
-            .method("POST")
-            .uri("/subjects/orders-value/versions")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn authz_layer_passes_path_with_no_target() {
-        // `GET /` maps to `None` in authz_target → no authz requirement → passes
-        // even when enabled with no ACLs.
-        let app = authz_app(with_acls(HashSet::new(), true, vec![]));
-        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn authz_layer_skips_forwarded_request() {
-        // A trusted intra-cluster forward (FORWARD_HEADER present) skips authz
-        // entirely — even on a gated path that would otherwise 403.
-        let app = authz_app(with_acls(HashSet::new(), true, vec![]));
-        let req = Request::builder()
-            .method("POST")
-            .uri("/subjects/orders-value/versions")
-            .header(crate::rest::forward::FORWARD_HEADER, "ingress-node")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(
-            resp.status(),
-            StatusCode::OK,
-            "forwarded request must skip authz"
-        );
+    async fn middleware_statuses_are_named_and_table_driven() {
+        for (name, matching_acl, method, path, forwarded, expected) in [
+            (
+                "deny-without-acl",
+                false,
+                "POST",
+                "/subjects/orders-value/versions",
+                false,
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "allow-matching-acl",
+                true,
+                "POST",
+                "/subjects/orders-value/versions",
+                false,
+                StatusCode::OK,
+            ),
+            ("ungated-root", false, "GET", "/", false, StatusCode::OK),
+            (
+                "trusted-forward",
+                false,
+                "POST",
+                "/subjects/orders-value/versions",
+                true,
+                StatusCode::OK,
+            ),
+        ] {
+            let acls = matching_acl.then(|| AclEntry {
+                resource_type: ResourceType::Topic,
+                resource_name: "orders-value".into(),
+                pattern_type: PatternType::Literal,
+                principal: "User:ANONYMOUS".into(),
+                host: "*".into(),
+                operation: AclOperation::Write,
+                permission_type: PermissionType::Allow,
+            });
+            let app = authz_app(with_acls(HashSet::new(), true, acls.into_iter().collect()));
+            let mut request = Request::builder().method(method).uri(path);
+            if forwarded {
+                request = request.header(crate::rest::forward::FORWARD_HEADER, "ingress-node");
+            }
+            let response = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "case {name}");
+        }
     }
 }

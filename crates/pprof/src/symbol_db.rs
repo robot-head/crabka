@@ -515,9 +515,7 @@ mod tests {
         let mut db = SymbolDb::new();
         let name = db.intern_string("name");
 
-        check!(db.string(0) == "");
-        check!(name == 1);
-        check!(db.string(name) == "name");
+        check!((db.string(0), name, db.string(name)) == ("", 1, "name"));
     }
 
     #[test]
@@ -534,9 +532,7 @@ mod tests {
         let id = db.intern_stacktrace(0, &[a, b]);
         let part = db.partitions.get(&0).unwrap();
 
-        check!(id == 1);
-        check!(part.nodes[0].parent == -1);
-        check!(part.nodes[1].parent == 0);
+        check!((id, part.nodes[0].parent, part.nodes[1].parent) == (1, -1, 0));
     }
 
     #[test]
@@ -709,9 +705,12 @@ mod tests {
         let id = db.intern_stacktrace(0, &[a, b, c]);
         let bytes = db.encode();
         let mut back = SymbolDb::decode(&bytes).unwrap();
-        check!(back.resolve(0, id) == db.resolve(0, id));
-        check!(back.intern_string("a") == db.intern_string("a"));
-        check!(back.intern_stacktrace(0, &[a, b, c]) == id);
+        let decoded_stack = back.resolve(0, id);
+        let source_stack = db.resolve(0, id);
+        let decoded_a = back.intern_string("a");
+        let source_a = db.intern_string("a");
+        let decoded_id = back.intern_stacktrace(0, &[a, b, c]);
+        check!((decoded_stack, decoded_a, decoded_id) == (source_stack, source_a, id));
     }
 
     #[test]

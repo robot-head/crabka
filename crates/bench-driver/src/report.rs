@@ -1505,7 +1505,7 @@ mod tests {
             ("Per run", true),
             ("small-msg-saturate", true),
         ] {
-            assert!(frag.contains(needle) == want, "{needle:?} in:\n{frag}");
+            assert_eq!(frag.contains(needle), want, "{needle:?} in:\n{frag}");
         }
     }
 
@@ -1520,7 +1520,7 @@ mod tests {
         .unwrap();
         let csv = render_csv(dir.path(), true).unwrap();
         let lines: Vec<&str> = csv.lines().collect();
-        assert!(lines.len() == 2); // header + 1 run (index guard)
+        assert_eq!(lines.len(), 2); // header + 1 run (index guard)
         check!(lines[0].starts_with("scenario,stack,run_tag,"));
         // run_tag parsed from the filename
         check!(lines[1].contains(",run01,"));
@@ -1568,7 +1568,7 @@ mod tests {
                 .ends_with("t_offset_ms,metric,value")
         );
         // 2 samples × 5 client metrics + 1 broker sample × 2 metrics = 12 rows.
-        assert!(csv.lines().count() == 1 + 12);
+        assert_eq!(csv.lines().count(), 1 + 12);
         for needle in [
             ",run03,0,producer_msgs_per_sec,1000.000",
             ",run03,0,broker_cpu_cores,2.5000",

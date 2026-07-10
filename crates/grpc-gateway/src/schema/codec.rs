@@ -239,8 +239,8 @@ mod tests {
             .unwrap();
         // Confluent frame: 0x00 then id=5 big-endian, then the payload verbatim
         // (Avro adds no message-index prefix).
-        assert_eq!(&out[..5], &[0x00, 0x00, 0x00, 0x00, 0x05]);
-        assert_eq!(&out[5..], &input[..]);
+        let expected = [&[0x00, 0x00, 0x00, 0x00, 0x05][..], input.as_ref()].concat();
+        assert_eq!(out, Bytes::from(expected));
     }
 
     #[tokio::test]
@@ -285,17 +285,27 @@ mod tests {
             .await
             .unwrap();
 
+        let expected_value = framed.slice(5..);
         let decoded = codec.decode("orders", framed).await.unwrap();
-
-        let meta = decoded.schema.expect("framed value carries schema meta");
-        assert_eq!(meta.id, 5);
-        assert_eq!(meta.subject, "orders-value");
-        assert_eq!(meta.format, SchemaFormat::Avro);
-
-        let json_out = decoded.json.expect("framed value carries a JSON view");
+        let json_out = decoded
+            .json
+            .as_deref()
+            .expect("framed value carries a JSON view");
         let expected: serde_json::Value = serde_json::from_slice(json_in).unwrap();
-        let actual: serde_json::Value = serde_json::from_slice(&json_out).unwrap();
-        assert_eq!(expected, actual, "round-tripped JSON should match input");
+        let actual: serde_json::Value = serde_json::from_slice(json_out).unwrap();
+        assert_eq!(
+            (decoded.value, decoded.schema, actual),
+            (
+                expected_value,
+                Some(SchemaMeta {
+                    subject: "orders-value".to_string(),
+                    id: 5,
+                    format: SchemaFormat::Avro,
+                }),
+                expected,
+            ),
+            "complete decoded value should match"
+        );
     }
 
     #[tokio::test]
@@ -320,23 +330,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn decode_unframed_passes_through() {
-        let codec = avro_codec(false);
-        // First byte is not 0x00 → treated as unframed.
-        let value = Bytes::from_static(b"\x01not-confluent-framed");
-        let decoded = codec.decode("orders", value.clone()).await.unwrap();
-        assert_eq!(decoded.value, value);
-        assert!(decoded.schema.is_none());
-        assert!(decoded.json.is_none());
-    }
-
-    #[tokio::test]
-    async fn decode_empty_passes_through() {
-        let codec = avro_codec(false);
-        let value = Bytes::new();
-        let decoded = codec.decode("orders", value.clone()).await.unwrap();
-        assert_eq!(decoded.value, value);
-        assert!(decoded.schema.is_none());
-        assert!(decoded.json.is_none());
+    async fn decode_unframed_values_pass_through() {
+        for (name, value) in [
+            ("non-magic", Bytes::from_static(b"\x01not-confluent-framed")),
+            ("empty", Bytes::new()),
+        ] {
+            let codec = avro_codec(false);
+            let decoded = codec.decode("orders", value.clone()).await.unwrap();
+            assert_eq!(
+                (decoded.value, decoded.schema, decoded.json),
+                (value, None, None),
+                "case {name}"
+            );
+        }
     }
 }

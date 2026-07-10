@@ -226,7 +226,7 @@ impl FlowSupervisor {
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::{assert, check};
+    use assert2::assert;
 
     use super::*;
     use crate::config::{
@@ -244,7 +244,7 @@ mod tests {
             ("orders", false),
             ("telemetry.cpu", false),
         ] {
-            check!(is_internal(topic) == want, "topic={topic:?}");
+            assert_eq!(is_internal(topic), want, "topic={topic:?}");
         }
     }
 
@@ -320,6 +320,9 @@ mod tests {
         assert!(crate::test_util::topic_record_count(&tb, "us-east.orders").await >= 1);
         // `noise` was excluded by the selector, so it must never have been
         // replicated to the target.
-        assert!(crate::test_util::topic_record_count(&tb, "us-east.noise").await == 0);
+        assert_eq!(
+            crate::test_util::topic_record_count(&tb, "us-east.noise").await,
+            0
+        );
     }
 }

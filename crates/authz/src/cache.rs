@@ -164,8 +164,7 @@ mod tests {
     #[test]
     fn len_and_is_empty_track_entries() {
         let empty = AclCache::default();
-        assert!(empty.is_empty());
-        assert!(empty.len() == 0);
+        assert_eq!((empty.is_empty(), empty.len()), (true, 0));
 
         let cache = AclCache::new(vec![entry(
             ResourceType::Topic,
@@ -173,7 +172,6 @@ mod tests {
             "foo",
             AclOperation::Read,
         )]);
-        assert!(!cache.is_empty());
-        assert!(cache.len() == 1);
+        assert_eq!((cache.is_empty(), cache.len()), (false, 1));
     }
 }

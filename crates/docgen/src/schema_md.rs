@@ -390,7 +390,7 @@ mod tests {
             .match_indices('|')
             .filter(|(i, _)| *i == 0 || row.as_bytes()[i - 1] != b'\\')
             .count();
-        assert!(unescaped_bars == 6, "{row}");
+        assert_eq!(unescaped_bars, 6, "{row}");
     }
 
     #[test]
@@ -456,6 +456,6 @@ mod tests {
             .match_indices('|')
             .filter(|(i, _)| *i == 0 || row.as_bytes()[i - 1] != b'\\')
             .count();
-        assert!(unescaped_bars == 6, "{row}");
+        assert_eq!(unescaped_bars, 6, "{row}");
     }
 }

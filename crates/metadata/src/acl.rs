@@ -175,7 +175,6 @@ mod tests {
             resource_type: ResourceType::Group,
             ..topic_entry.clone()
         };
-        assert!(f.matches(&topic_entry));
-        assert!(!f.matches(&group_entry));
+        assert!((f.matches(&topic_entry), f.matches(&group_entry)) == (true, false));
     }
 }

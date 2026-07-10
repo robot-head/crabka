@@ -145,11 +145,20 @@ fn decode_consumer_records_groups_by_partition_and_tracks_offsets() {
     ])
     .unwrap();
 
-    check!(windows.len() == 2);
-    check!(windows[&1].offset_range == (11, 12));
-    check!(windows[&1].records.len() == 2);
-    check!(windows[&2].offset_range == (7, 7));
-    check!(windows[&2].records[0].tenant == "tenant-b");
+    check!(
+        windows
+            .iter()
+            .map(|(partition, window)| {
+                (
+                    *partition,
+                    window.offset_range,
+                    window.records.len(),
+                    window.records[0].tenant.as_str(),
+                )
+            })
+            .collect::<Vec<_>>()
+            == vec![(1, (11, 12), 2, "tenant-a"), (2, (7, 7), 1, "tenant-b")]
+    );
 }
 
 #[tokio::test]
@@ -167,11 +176,18 @@ async fn build_blocks_writes_span_block_and_updates_trace_index() {
         .await
         .unwrap();
 
-    check!(metas.len() == 1);
-    check!(metas[0].tenant == "tenant-a");
-    check!(metas[0].row_count == 2);
-    check!(metas[0].min_ts == 100);
-    check!(metas[0].max_ts == 200);
+    check!(
+        metas
+            .iter()
+            .map(|meta| (
+                meta.tenant.as_str(),
+                meta.row_count,
+                meta.min_ts,
+                meta.max_ts
+            ))
+            .collect::<Vec<_>>()
+            == vec![("tenant-a", 2, 100, 200)]
+    );
 
     let batches = read_block(store, &metas[0].object_key).await.unwrap();
     check!(
@@ -497,8 +513,7 @@ async fn merged_buffer_offset_range_is_stable_for_idempotent_keying() {
 
     let windows = accumulator.take();
     let window = &windows[&7];
-    assert!(window.offset_range == (10, 12));
-    assert!(window.records.len() == 3);
+    assert!((window.offset_range, window.records.len()) == ((10, 12), 3));
 }
 
 #[tokio::test]
@@ -520,10 +535,14 @@ async fn build_blocks_with_prefix_scopes_block_keys() {
     .await
     .unwrap();
 
-    check!(metas.len() == 1);
     check!(
-        metas[0].object_key
-            == "tempo/traces/traces/tenant-a/00007/00000000000000000010-00000000000000000020-100.parquet"
+        metas
+            .iter()
+            .map(|meta| meta.object_key.as_str())
+            .collect::<Vec<_>>()
+            == vec![
+                "tempo/traces/traces/tenant-a/00007/00000000000000000010-00000000000000000020-100.parquet"
+            ]
     );
     check!(read_block(store, &metas[0].object_key).await.is_ok());
     check!(

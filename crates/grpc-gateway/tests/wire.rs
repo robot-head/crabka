@@ -183,12 +183,13 @@ async fn send_handler_ok_and_error_arms() {
             .await
             .expect("handler returned Err");
     let body = resp.0;
-    assert_eq!(body.results.len(), 2);
-    // Unkeyed record produced successfully.
-    assert!(body.results[0].error.is_none());
-    assert_eq!(body.results[0].partition, 0);
-    // Keyed record hit the unowned dedup store → per-record error, no panic.
-    assert!(body.results[1].error.is_some());
+    assert_eq!(
+        body.results
+            .iter()
+            .map(|result| (result.partition, result.error.is_some()))
+            .collect::<Vec<_>>(),
+        vec![(0, false), (-1, true)]
+    );
 
     broker.shutdown().await;
 }
