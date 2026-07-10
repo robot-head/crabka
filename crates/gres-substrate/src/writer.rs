@@ -1,8 +1,11 @@
 //! Transactional WAL writer primitives and pgexec adapters.
 
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    future::Future,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use bytes::Bytes;
@@ -226,32 +229,25 @@ impl ProducerWalWriter {
         &self,
         generation: WriterGeneration,
     ) -> Result<PausedWalWriter, SubstrateError> {
-        let pause = PauseReservation::reserve(Arc::clone(&self.pause_state))?;
-        let permit = Arc::clone(&self.commit_gate)
-            .acquire_owned()
-            .await
-            .map_err(|_| SubstrateError::Unavailable("WAL commit gate closed".into()))?;
-        let barrier = self
-            .commit_group_while_permitted(GroupCommitRequest {
-                generation,
-                frames: vec![WalFrame {
-                    journal_seq: crate::frame::BARRIER_SEQ,
-                    ops: Vec::new(),
-                }],
-            })
-            .await;
-        let barrier_offset = match barrier {
-            Ok(ack) => ack.frames.first().map(|ack| ack.offset).ok_or_else(|| {
-                SubstrateError::Unavailable("pause barrier did not produce an ack".into())
-            })?,
-            Err(error) => return Err(error),
-        };
-        pause.mark_paused();
-        Ok(PausedWalWriter {
-            pause,
-            permit: Some(permit),
-            barrier_offset,
-        })
+        pause_and_commit_barrier(
+            Arc::clone(&self.pause_state),
+            Arc::clone(&self.commit_gate),
+            || async {
+                let ack = self
+                    .commit_group_while_permitted(GroupCommitRequest {
+                        generation,
+                        frames: vec![WalFrame {
+                            journal_seq: crate::frame::BARRIER_SEQ,
+                            ops: Vec::new(),
+                        }],
+                    })
+                    .await?;
+                ack.frames.first().map(|ack| ack.offset).ok_or_else(|| {
+                    SubstrateError::Unavailable("pause barrier did not produce an ack".into())
+                })
+            },
+        )
+        .await
     }
 
     async fn commit_group_while_permitted(
@@ -308,6 +304,29 @@ impl ProducerWalWriter {
             .map_err(|error| self.map_producer_error(&error.source))?;
         Ok(GroupCommitAck { frames })
     }
+}
+
+async fn pause_and_commit_barrier<F, Barrier>(
+    pause_state: Arc<Mutex<WriterPauseState>>,
+    commit_gate: Arc<Semaphore>,
+    commit_barrier: F,
+) -> Result<PausedWalWriter, SubstrateError>
+where
+    F: FnOnce() -> Barrier,
+    Barrier: Future<Output = Result<i64, SubstrateError>>,
+{
+    let pause = PauseReservation::reserve(pause_state)?;
+    let permit = commit_gate
+        .acquire_owned()
+        .await
+        .map_err(|_| SubstrateError::Unavailable("WAL commit gate closed".into()))?;
+    let barrier_offset = commit_barrier().await?;
+    pause.mark_paused();
+    Ok(PausedWalWriter {
+        pause,
+        permit: Some(permit),
+        barrier_offset,
+    })
 }
 
 #[async_trait::async_trait]
@@ -714,6 +733,7 @@ mod tests {
     use assert2::assert;
     use crabka_gres_ranges::tso::{GrantLease, TsoOracle};
     use crabka_pgkv::{Kv, MemKv};
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::recovery::RecoveryFencer;
@@ -779,6 +799,100 @@ mod tests {
         }
 
         assert!(*pause_state.lock().expect("pause state") == WriterPauseState::Idle);
+    }
+
+    #[tokio::test]
+    async fn cancelling_while_waiting_for_the_commit_permit_reopens_the_writer() {
+        let pause_state = Arc::new(Mutex::new(WriterPauseState::Idle));
+        let commit_gate = Arc::new(Semaphore::new(1));
+        let held_permit = Arc::clone(&commit_gate)
+            .acquire_owned()
+            .await
+            .expect("hold commit permit");
+        let task_pause_state = Arc::clone(&pause_state);
+        let task_commit_gate = Arc::clone(&commit_gate);
+        let task = tokio::spawn(async move {
+            pause_and_commit_barrier(task_pause_state, task_commit_gate, || async { Ok(7) }).await
+        });
+
+        while *pause_state.lock().expect("pause state") != WriterPauseState::Pausing {
+            tokio::task::yield_now().await;
+        }
+        task.abort();
+        let Err(cancellation) = task.await else {
+            panic!("task must be cancelled");
+        };
+        assert!(cancellation.is_cancelled());
+        assert!(*pause_state.lock().expect("pause state") == WriterPauseState::Idle);
+
+        drop(held_permit);
+        let paused = pause_and_commit_barrier(pause_state.clone(), commit_gate, || async { Ok(8) })
+            .await
+            .expect("retry pause");
+        assert!(paused.barrier_offset == 8);
+    }
+
+    #[tokio::test]
+    async fn barrier_failure_reopens_the_writer_for_retry() {
+        let pause_state = Arc::new(Mutex::new(WriterPauseState::Idle));
+        let commit_gate = Arc::new(Semaphore::new(1));
+
+        let result = pause_and_commit_barrier(
+            Arc::clone(&pause_state),
+            Arc::clone(&commit_gate),
+            || async {
+                Err(SubstrateError::Unavailable(
+                    "injected barrier failure".into(),
+                ))
+            },
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("barrier must fail");
+        };
+
+        assert!(matches!(error, SubstrateError::Unavailable(_)));
+        assert!(*pause_state.lock().expect("pause state") == WriterPauseState::Idle);
+        let paused = pause_and_commit_barrier(pause_state.clone(), commit_gate, || async { Ok(9) })
+            .await
+            .expect("retry pause");
+        assert!(paused.barrier_offset == 9);
+    }
+
+    #[tokio::test]
+    async fn second_pause_while_first_is_pausing_is_rejected() {
+        let pause_state = Arc::new(Mutex::new(WriterPauseState::Idle));
+        let commit_gate = Arc::new(Semaphore::new(1));
+        let barrier_started = Arc::new(Notify::new());
+        let release_barrier = Arc::new(Notify::new());
+        let first_pause_state = Arc::clone(&pause_state);
+        let first_commit_gate = Arc::clone(&commit_gate);
+        let first_barrier_started = Arc::clone(&barrier_started);
+        let first_release_barrier = Arc::clone(&release_barrier);
+        let first = tokio::spawn(async move {
+            pause_and_commit_barrier(first_pause_state, first_commit_gate, move || async move {
+                first_barrier_started.notify_one();
+                first_release_barrier.notified().await;
+                Ok(10)
+            })
+            .await
+        });
+
+        barrier_started.notified().await;
+        let result = pause_and_commit_barrier(
+            Arc::clone(&pause_state),
+            Arc::clone(&commit_gate),
+            || async { Ok(11) },
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("second pause must fail");
+        };
+
+        assert!(matches!(error, SubstrateError::AlreadyPaused));
+        release_barrier.notify_one();
+        let paused = first.await.expect("first pause task").expect("first pause");
+        assert!(paused.barrier_offset == 10);
     }
 
     #[test]
