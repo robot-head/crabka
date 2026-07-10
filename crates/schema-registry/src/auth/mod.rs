@@ -461,14 +461,12 @@ mod tests {
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(www.as_str(), r#"basic realm="SchemaRegistry-Props""#);
+        assert_eq!(content_type.as_str(), crate::error::CONTENT_TYPE);
         assert_eq!(
-            (status, www.as_str(), content_type.as_str(), body.as_ref()),
-            (
-                StatusCode::UNAUTHORIZED,
-                r#"basic realm="SchemaRegistry-Props""#,
-                crate::error::CONTENT_TYPE,
-                br#"{"error_code":401,"message":"Unauthorized"}"#.as_slice(),
-            )
+            body.as_ref(),
+            br#"{"error_code":401,"message":"Unauthorized"}"#.as_slice()
         );
     }
 }

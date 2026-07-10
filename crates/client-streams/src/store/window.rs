@@ -773,21 +773,22 @@ mod tests {
             .unwrap();
         // Value downcasts to Change<i64> { old = committed (1), new = latest (3) }.
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(*child, 7);
+        assert_eq!(rec.timestamp, 7);
         assert_eq!(
-            (buffer.len(), *child, rec.timestamp, key, change),
-            (
-                1,
-                7,
-                7,
-                &Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 10 },
-                },
-                &Change {
-                    old: Some(1),
-                    new: Some(3)
-                },
-            )
+            key,
+            &Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 10 },
+            }
+        );
+        assert_eq!(
+            change,
+            &Change {
+                old: Some(1),
+                new: Some(3)
+            }
         );
 
         // Changelog buffered the RAW windowed store-key + the latest wrapped value.
@@ -844,24 +845,25 @@ mod tests {
             .unwrap();
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
         // end == ws + D (10), NOT ws + 2*D (20).
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(*child, 0);
+        assert_eq!(rec.timestamp, 7);
         assert_eq!(
-            (buffer.len(), *child, rec.timestamp, key, change),
-            (
-                1,
-                0,
-                7,
-                &Windowed {
-                    key: "a".into(),
-                    window: Window {
-                        start: ws,
-                        end: ws + D,
-                    },
+            key,
+            &Windowed {
+                key: "a".into(),
+                window: Window {
+                    start: ws,
+                    end: ws + D,
                 },
-                &Change {
-                    old: None,
-                    new: Some(1),
-                },
-            )
+            }
+        );
+        assert_eq!(
+            change,
+            &Change {
+                old: None,
+                new: Some(1),
+            }
         );
     }
 

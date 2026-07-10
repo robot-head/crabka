@@ -269,10 +269,8 @@ mod tests {
             StepResult::Done(p, b) => (p, b),
             other => panic!("server step 2 must Done, got {other:?}"),
         };
-        assert_eq!(
-            (principal.name.as_str(), principal.auth_method),
-            ("alice", crate::AuthMethod::SaslScramSha512)
-        );
+        assert_eq!(principal.name.as_str(), "alice");
+        assert_eq!(principal.auth_method, crate::AuthMethod::SaslScramSha512);
         // Client verifies server signature. `verify_server_final` consumes
         // `client`, so a second verification attempt (the old "server final
         // must only verify once" regression test) is now a compile-time
@@ -311,10 +309,8 @@ mod tests {
             StepResult::Done(p, b) => (p, b),
             other => panic!("server step 2 must Done, got {other:?}"),
         };
-        assert_eq!(
-            (principal.name.as_str(), principal.auth_method),
-            ("alice", crate::AuthMethod::SaslScramSha256)
-        );
+        assert_eq!(principal.name.as_str(), "alice");
+        assert_eq!(principal.auth_method, crate::AuthMethod::SaslScramSha256);
         let final_check = client.verify_server_final(&s2);
         assert!(final_check.is_ok(), "server signature must verify");
     }
@@ -433,11 +429,9 @@ mod tests {
             let cred = hash_scram_password_with_salt(password, mechanism, 4096, salt.clone());
             let salted = pbkdf2_salted(password, mechanism, 4096, &salt);
             let (stored_key, server_key) = derive_keys_from_salted(mechanism, &salted);
-            assert_eq!(
-                (salted.len(), stored_key, server_key),
-                (expected_len, cred.stored_key, cred.server_key),
-                "case {case}"
-            );
+            assert_eq!(salted.len(), expected_len, "case {case}");
+            assert_eq!(stored_key, cred.stored_key, "case {case}");
+            assert_eq!(server_key, cred.server_key, "case {case}");
         }
     }
 

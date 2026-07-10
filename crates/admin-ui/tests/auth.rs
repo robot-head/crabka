@@ -24,14 +24,9 @@ fn build_security_uses_scram_sha512_only() {
 
     let security = build_scram_sha512_security(&cfg, "alice", SCRAM_PLAINTEXT_PASSWORD);
 
-    assert_eq!(
-        (
-            &security.protocol,
-            security.tls.is_some(),
-            security.sasl_host.as_deref()
-        ),
-        (&ListenerProtocol::SaslPlaintext, false, None)
-    );
+    assert_eq!(&security.protocol, &ListenerProtocol::SaslPlaintext);
+    assert_eq!(security.tls.is_some(), false);
+    assert_eq!(security.sasl_host.as_deref(), None);
     assert_scram_sha512_credentials(security.sasl.as_ref(), "alice", SCRAM_PLAINTEXT_PASSWORD);
 }
 
@@ -50,22 +45,14 @@ fn build_security_preserves_sasl_ssl_tls_material() {
     let security = build_scram_sha512_security(&cfg, "carol", SCRAM_SSL_PASSWORD);
     let tls = security.tls.expect("SASL_SSL carries TLS config");
 
+    assert_eq!(&security.protocol, &ListenerProtocol::SaslSsl);
+    assert_eq!(tls.trust_roots_pem, Some(PathBuf::from("ca.pem")));
+    assert_eq!(tls.server_name, "broker.example.test".to_string());
     assert_eq!(
-        (
-            &security.protocol,
-            tls.trust_roots_pem,
-            tls.server_name,
-            tls.client_identity,
-            security.sasl_host.as_deref(),
-        ),
-        (
-            &ListenerProtocol::SaslSsl,
-            Some(PathBuf::from("ca.pem")),
-            "broker.example.test".to_string(),
-            Some((PathBuf::from("client.crt"), PathBuf::from("client.key"))),
-            None,
-        )
+        tls.client_identity,
+        Some((PathBuf::from("client.crt"), PathBuf::from("client.key")))
     );
+    assert_eq!(security.sasl_host.as_deref(), None);
     assert_scram_sha512_credentials(security.sasl.as_ref(), "carol", SCRAM_SSL_PASSWORD);
 }
 
@@ -104,10 +91,8 @@ async fn login_uses_broker_probe_and_creates_session() {
         .await
         .expect("broker probe succeeds");
 
-    assert_eq!(
-        (success.username.as_str(), success.principal.as_str()),
-        ("alice", "User:alice")
-    );
+    assert_eq!(success.username.as_str(), "alice");
+    assert_eq!(success.principal.as_str(), "User:alice");
     let calls = broker.calls.lock().expect("calls lock is not poisoned");
     assert_eq!(
         calls.as_slice(),
@@ -171,12 +156,18 @@ fn assert_scram_sha512_credentials(
     };
 
     assert_eq!(
-        (*mechanism, username.as_str(), password.as_str()),
-        (
-            SaslMechanism::ScramSha512,
-            expected_username,
-            expected_password
-        ),
+        *mechanism,
+        SaslMechanism::ScramSha512,
+        "SCRAM credentials did not match expected test values"
+    );
+    assert_eq!(
+        username.as_str(),
+        expected_username,
+        "SCRAM credentials did not match expected test values"
+    );
+    assert_eq!(
+        password.as_str(),
+        expected_password,
         "SCRAM credentials did not match expected test values"
     );
 }

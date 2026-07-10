@@ -323,13 +323,14 @@ mod tests {
     fn join_windows_before_after_size() {
         let w = JoinWindows::of(10);
         let a = JoinWindows::of(10).before(3).after(7).grace(5);
-        assert_eq!(
-            (
-                (w.before_ms, w.after_ms, w.grace_ms, w.size()),
-                (a.before_ms, a.after_ms, a.grace_ms, a.size())
-            ),
-            ((10, 10, 0, 20), (3, 7, 5, 10))
-        );
+        assert_eq!(w.before_ms, 10);
+        assert_eq!(w.after_ms, 10);
+        assert_eq!(w.grace_ms, 0);
+        assert_eq!(w.size(), 20);
+        assert_eq!(a.before_ms, 3);
+        assert_eq!(a.after_ms, 7);
+        assert_eq!(a.grace_ms, 5);
+        assert_eq!(a.size(), 10);
     }
 
     #[test]
@@ -350,9 +351,11 @@ mod tests {
     #[test]
     fn session_windows_gap_and_grace() {
         let w = SessionWindows::of_inactivity_gap(60_000);
-        assert_eq!((w.gap_ms, w.grace_ms), (60_000, 0));
+        assert_eq!(w.gap_ms, 60_000);
+        assert_eq!(w.grace_ms, 0);
         let g = SessionWindows::of_inactivity_gap(60_000).grace(5);
-        assert_eq!((g.gap_ms, g.grace_ms), (60_000, 5));
+        assert_eq!(g.gap_ms, 60_000);
+        assert_eq!(g.grace_ms, 5);
     }
 
     #[test]
@@ -374,9 +377,11 @@ mod tests {
     #[test]
     fn sliding_windows_constructors() {
         let w = SlidingWindows::of_time_difference_with_no_grace(100);
-        assert_eq!((w.time_difference_ms, w.grace_ms), (100, 0));
+        assert_eq!(w.time_difference_ms, 100);
+        assert_eq!(w.grace_ms, 0);
         let g = SlidingWindows::of_time_difference_and_grace(100, 50);
-        assert_eq!((g.time_difference_ms, g.grace_ms), (100, 50));
+        assert_eq!(g.time_difference_ms, 100);
+        assert_eq!(g.grace_ms, 50);
     }
 
     #[test]

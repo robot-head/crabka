@@ -289,10 +289,9 @@ mod tests {
         let (_, rec) = buffer.pop_front().unwrap();
         let k = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(
-            (actual_len, k.window, change.new),
-            (1, Window { start: 0, end: 10 }, Some(2))
-        );
+        assert_eq!(actual_len, 1);
+        assert_eq!(k.window, Window { start: 0, end: 10 });
+        assert_eq!(change.new, Some(2));
     }
 
     #[tokio::test]
@@ -635,6 +634,8 @@ mod tests {
         let key = rec.key.unwrap().downcast::<String>().unwrap();
         // The newest value (2), not the stale 1 → the reset kept the latest update.
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!((actual_len, key.as_str(), change.new), (1, "a", Some(2)));
+        assert_eq!(actual_len, 1);
+        assert_eq!(key.as_str(), "a");
+        assert_eq!(change.new, Some(2));
     }
 }

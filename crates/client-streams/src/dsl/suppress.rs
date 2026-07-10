@@ -252,15 +252,10 @@ mod tests {
                 (Some(99), Some(3), false),
             ),
         ] {
-            assert_eq!(
-                (
-                    config.byte_cap(),
-                    config.record_cap(),
-                    config.is_emit_early()
-                ),
-                expected,
-                "case {name}"
-            );
+            let (expected_byte_cap, expected_record_cap, expected_emit_early) = expected;
+            assert_eq!(config.byte_cap(), expected_byte_cap, "case {name}");
+            assert_eq!(config.record_cap(), expected_record_cap, "case {name}");
+            assert_eq!(config.is_emit_early(), expected_emit_early, "case {name}");
         }
     }
 

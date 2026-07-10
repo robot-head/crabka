@@ -71,14 +71,9 @@ async fn http_querier_search_job_sends_scan_params_and_parses() {
         .await
         .unwrap();
 
-    assert_eq!(
-        (
-            out.traces.len(),
-            out.metrics.inspected_bytes,
-            out.metrics.total_blocks,
-        ),
-        (1, 64, 1)
-    );
+    assert_eq!(out.traces.len(), 1);
+    assert_eq!(out.metrics.inspected_bytes, 64);
+    assert_eq!(out.metrics.total_blocks, 1);
 
     let log = seen.lock().unwrap();
     assert!(log.len() == 1);

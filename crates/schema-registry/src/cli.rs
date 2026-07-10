@@ -381,7 +381,8 @@ mod tests {
             realm: "MyRealm".to_string(),
             ..input()
         });
-        assert_eq!((s.require_auth, s.realm.as_str()), (true, "MyRealm"));
+        assert_eq!(s.require_auth, true);
+        assert_eq!(s.realm.as_str(), "MyRealm");
     }
 
     // ---- basic -----------------------------------------------------------
@@ -394,17 +395,15 @@ mod tests {
         });
         let b = s.basic.expect("Basic enabled by inline users");
         assert_eq!(
-            (b.users, b.file),
-            (
-                [
-                    ("alice".to_string(), "pw".to_string()),
-                    ("bob".to_string(), "bpw".to_string())
-                ]
-                .into_iter()
-                .collect(),
-                None,
-            )
+            b.users,
+            [
+                ("alice".to_string(), "pw".to_string()),
+                ("bob".to_string(), "bpw".to_string())
+            ]
+            .into_iter()
+            .collect()
         );
+        assert_eq!(b.file, None);
     }
 
     #[test]
@@ -431,10 +430,8 @@ mod tests {
             ..input()
         });
         let b = s.basic.expect("Basic enabled by file");
-        assert_eq!(
-            (b.users, b.file),
-            (std::collections::HashMap::new(), Some(path))
-        );
+        assert_eq!(b.users, std::collections::HashMap::new());
+        assert_eq!(b.file, Some(path));
     }
 
     #[test]
@@ -447,14 +444,12 @@ mod tests {
         });
         let b = s.basic.expect("Basic enabled");
         assert_eq!(
-            (b.users, b.file),
-            (
-                [("alice".to_string(), "pw".to_string())]
-                    .into_iter()
-                    .collect(),
-                Some(path),
-            )
+            b.users,
+            [("alice".to_string(), "pw".to_string())]
+                .into_iter()
+                .collect()
         );
+        assert_eq!(b.file, Some(path));
     }
 
     // ---- bearer ----------------------------------------------------------
@@ -510,23 +505,19 @@ mod tests {
                 ..input()
             });
             let tls = s.tls.unwrap_or_else(|| panic!("TLS enabled for {mode}"));
+            assert_eq!(tls.cert_chain_path, PathBuf::from("/c.pem"), "case {mode}");
+            assert_eq!(tls.private_key_path, PathBuf::from("/k.pem"), "case {mode}");
             assert_eq!(
-                (
-                    tls.cert_chain_path,
-                    tls.private_key_path,
-                    tls.client_ca_path,
-                    tls.trust_roots_path,
-                    tls.client_auth,
-                ),
-                (
-                    PathBuf::from("/c.pem"),
-                    PathBuf::from("/k.pem"),
-                    Some(PathBuf::from("/ca.pem")),
-                    Some(PathBuf::from("/ca.pem")),
-                    expected,
-                ),
+                tls.client_ca_path,
+                Some(PathBuf::from("/ca.pem")),
                 "case {mode}"
             );
+            assert_eq!(
+                tls.trust_roots_path,
+                Some(PathBuf::from("/ca.pem")),
+                "case {mode}"
+            );
+            assert_eq!(tls.client_auth, expected, "case {mode}");
         }
     }
 
@@ -630,22 +621,11 @@ mod tests {
         });
         let c = s.client.expect("SSL ⇒ Some(ClientSecurity)");
         let tls = c.tls.expect("SSL requires TLS");
-        assert_eq!(
-            (
-                c.protocol,
-                tls.trust_roots_pem,
-                tls.server_name,
-                tls.client_identity,
-                c.sasl.is_none(),
-            ),
-            (
-                ListenerProtocol::Ssl,
-                Some(PathBuf::from("/broker-ca.pem")),
-                "broker.internal".to_string(),
-                None,
-                true,
-            )
-        );
+        assert_eq!(c.protocol, ListenerProtocol::Ssl);
+        assert_eq!(tls.trust_roots_pem, Some(PathBuf::from("/broker-ca.pem")));
+        assert_eq!(tls.server_name, "broker.internal".to_string());
+        assert_eq!(tls.client_identity, None);
+        assert_eq!(c.sasl.is_none(), true);
     }
 
     #[test]
@@ -655,10 +635,9 @@ mod tests {
             ..input()
         });
         let tls = s.client.unwrap().tls.unwrap();
-        assert_eq!(
-            (tls.server_name, tls.trust_roots_pem, tls.client_identity),
-            ("localhost".to_string(), None, None)
-        );
+        assert_eq!(tls.server_name, "localhost".to_string());
+        assert_eq!(tls.trust_roots_pem, None);
+        assert_eq!(tls.client_identity, None);
     }
 
     #[test]
@@ -675,15 +654,10 @@ mod tests {
             SaslCredentials::Plain { username, password } => (username, password),
             other => panic!("expected PLAIN, got {other:?}"),
         };
-        assert_eq!(
-            (
-                c.protocol,
-                c.tls.is_none(),
-                credentials.0.as_str(),
-                credentials.1.as_str(),
-            ),
-            (ListenerProtocol::SaslPlaintext, true, "u", "p")
-        );
+        assert_eq!(c.protocol, ListenerProtocol::SaslPlaintext);
+        assert_eq!(c.tls.is_none(), true);
+        assert_eq!(credentials.0.as_str(), "u");
+        assert_eq!(credentials.1.as_str(), "p");
     }
 
     #[test]
@@ -696,14 +670,9 @@ mod tests {
             ..input()
         });
         let c = s.client.expect("SASL_SSL ⇒ Some");
-        assert_eq!(
-            (
-                c.protocol,
-                c.tls.is_some(),
-                matches!(c.sasl, Some(SaslCredentials::Scram { .. })),
-            ),
-            (ListenerProtocol::SaslSsl, true, true)
-        );
+        assert_eq!(c.protocol, ListenerProtocol::SaslSsl);
+        assert_eq!(c.tls.is_some(), true);
+        assert_eq!(matches!(c.sasl, Some(SaslCredentials::Scram { .. })), true);
     }
 
     #[test]
@@ -783,20 +752,13 @@ mod tests {
         let out = build_security(&i).unwrap();
         let bearer_configured = out.bearer.is_some();
         let h = out.jwks_handle.unwrap();
+        assert_eq!(bearer_configured, true);
         assert_eq!(
-            (
-                bearer_configured,
-                h.endpoint_uri.as_str(),
-                h.ca_path,
-                h.refresh_ms,
-            ),
-            (
-                true,
-                "https://idp.example.com/.well-known/jwks.json",
-                None,
-                60_000,
-            )
+            h.endpoint_uri.as_str(),
+            "https://idp.example.com/.well-known/jwks.json"
         );
+        assert_eq!(h.ca_path, None);
+        assert_eq!(h.refresh_ms, 60_000);
     }
 
     #[test]
@@ -827,20 +789,10 @@ mod tests {
             _ => panic!("expected signed validator"),
         };
         let h = out.jwks_handle.as_ref().unwrap();
-        assert_eq!(
-            (
-                h.endpoint_uri.as_str(),
-                validator.valid_issuer.as_deref(),
-                validator.expected_audience.as_deref(),
-                validator.principal_claim_name.as_str(),
-            ),
-            (
-                "https://idp/jwks",
-                Some("https://idp"),
-                Some("kafka-sr"),
-                "email",
-            )
-        );
+        assert_eq!(h.endpoint_uri.as_str(), "https://idp/jwks");
+        assert_eq!(validator.valid_issuer.as_deref(), Some("https://idp"));
+        assert_eq!(validator.expected_audience.as_deref(), Some("kafka-sr"));
+        assert_eq!(validator.principal_claim_name.as_str(), "email");
     }
 
     #[test]

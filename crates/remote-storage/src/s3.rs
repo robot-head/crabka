@@ -528,10 +528,8 @@ mod tests {
     fn multipart_size_constants() {
         // Pin the multipart threshold/part-size (mutants flip the `*` in the
         // `N * 1024 * 1024` products to `+`/`/`).
-        assert_eq!(
-            (DEFAULT_MULTIPART_THRESHOLD, DEFAULT_MULTIPART_CHUNK_SIZE),
-            (104_857_600, 16_777_216)
-        );
+        assert_eq!(DEFAULT_MULTIPART_THRESHOLD, 104_857_600);
+        assert_eq!(DEFAULT_MULTIPART_CHUNK_SIZE, 16_777_216);
     }
 
     #[test]

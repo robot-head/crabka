@@ -275,10 +275,8 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         .summary
         .as_ref()
         .expect("proposal must carry a summary");
-    assert_eq!(
-        (summary.replica_movements, summary.leader_movements),
-        (0, 0)
-    );
+    assert_eq!(summary.replica_movements, 0);
+    assert_eq!(summary.leader_movements, 0);
 
     // GetProposal — round-trips by id.
     let fetched = unwrap_ok(
@@ -319,10 +317,8 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert_eq!(
-        (dry.id.as_str(), dry.estimated_bytes_moved),
-        (proposal.id.as_str(), 0)
-    );
+    assert_eq!(dry.id.as_str(), proposal.id.as_str());
+    assert_eq!(dry.estimated_bytes_moved, 0);
 
     // GetProposal on a missing id → NotFound.
     let missing = unwrap_err(

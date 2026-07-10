@@ -179,11 +179,8 @@ mod tests {
                 .unwrap();
             let status = resp.status();
             let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
-            assert_eq!(
-                (status, body.as_ref()),
-                (StatusCode::OK, expected),
-                "case {name}"
-            );
+            assert_eq!(status, StatusCode::OK, "case {name}");
+            assert_eq!(body.as_ref(), expected, "case {name}");
         }
     }
 

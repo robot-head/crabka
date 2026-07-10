@@ -159,16 +159,14 @@ mod tests {
         let mut merged = Vec::new();
         merge_metric_series(&mut merged, a);
         merge_metric_series(&mut merged, b);
+        assert_eq!(merged.len(), 1);
         assert_eq!(
-            (merged.len(), merged[0].samples.as_slice()),
-            (
-                1,
-                &[
-                    sample("1000", 5.0),
-                    sample("2000", 4.0),
-                    sample("3000", 5.0)
-                ][..],
-            )
+            merged[0].samples.as_slice(),
+            &[
+                sample("1000", 5.0),
+                sample("2000", 4.0),
+                sample("3000", 5.0)
+            ][..]
         );
     }
 

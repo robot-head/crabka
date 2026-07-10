@@ -128,14 +128,12 @@ async fn register_then_get_round_trips_all_three_formats() {
 
     // GET by id round-trips, with schemaType for pb/js and none for avro
     let got_av = get_json(&app, "/schemas/ids/1").await;
+    assert_eq!(got_av.get("schemaType"), None);
     assert_eq!(
-        (
-            got_av.get("schemaType"),
-            got_av["schema"]
-                .as_str()
-                .is_some_and(|schema| schema.contains("record")),
-        ),
-        (None, true)
+        got_av["schema"]
+            .as_str()
+            .is_some_and(|schema| schema.contains("record")),
+        true
     );
     let got_pb = get_json(&app, "/schemas/ids/2").await;
     assert_eq!(got_pb["schemaType"], "PROTOBUF");
@@ -153,10 +151,8 @@ async fn register_then_get_round_trips_all_three_formats() {
 
     // GET subject version 1
     let v1 = get_json(&app, "/subjects/av-value/versions/1").await;
-    assert_eq!(
-        (&v1["version"], &v1["id"]),
-        (&serde_json::json!(1), &serde_json::json!(1))
-    );
+    assert_eq!(&v1["version"], &serde_json::json!(1));
+    assert_eq!(&v1["id"], &serde_json::json!(1));
 
     // idempotent re-register returns same id
     let again = register(
@@ -184,10 +180,8 @@ async fn register_then_get_round_trips_all_three_formats() {
         .unwrap();
     let nf_status = nf.status();
     let nf_body = body_json(nf).await;
-    assert_eq!(
-        (nf_status, nf_body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40401))
-    );
+    assert_eq!(nf_status, StatusCode::NOT_FOUND);
+    assert_eq!(nf_body["error_code"].as_i64(), Some(40401));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -292,52 +286,38 @@ async fn config_endpoints() {
 
     // Default global compat is BACKWARD
     let (status, body) = get_status_json(&app, "/config").await;
-    assert_eq!(
-        (status, &body["compatibilityLevel"]),
-        (StatusCode::OK, &serde_json::json!("BACKWARD"))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["compatibilityLevel"], &serde_json::json!("BACKWARD"));
 
     // PUT /config -> FULL
     let (status, body) = put_json(&app, "/config", r#"{"compatibility":"FULL"}"#).await;
-    assert_eq!(
-        (status, &body["compatibility"]),
-        (StatusCode::OK, &serde_json::json!("FULL"))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["compatibility"], &serde_json::json!("FULL"));
 
     // GET /config reflects the change (read-your-writes)
     let (status, body) = get_status_json(&app, "/config").await;
-    assert_eq!(
-        (status, &body["compatibilityLevel"]),
-        (StatusCode::OK, &serde_json::json!("FULL"))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["compatibilityLevel"], &serde_json::json!("FULL"));
 
     // PUT /config with invalid level -> 422 / error_code 42203
     let (status, body) = put_json(&app, "/config", r#"{"compatibility":"BOGUS"}"#).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42203))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42203));
 
     // PUT /config/{subject}
     let (status, body) = put_json(&app, "/config/av-value", r#"{"compatibility":"NONE"}"#).await;
-    assert_eq!(
-        (status, &body["compatibility"]),
-        (StatusCode::OK, &serde_json::json!("NONE"))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["compatibility"], &serde_json::json!("NONE"));
 
     // GET /config/{subject} reflects it
     let (status, body) = get_status_json(&app, "/config/av-value").await;
-    assert_eq!(
-        (status, &body["compatibilityLevel"]),
-        (StatusCode::OK, &serde_json::json!("NONE"))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["compatibilityLevel"], &serde_json::json!("NONE"));
 
     // GET /config/{subject} for a subject with no override -> 404 / 40401
     let (status, body) = get_status_json(&app, "/config/no-such-subject").await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40401))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40401));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -362,10 +342,8 @@ async fn compatibility_endpoint() {
     .await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(
-        (status, &body),
-        (StatusCode::OK, &serde_json::json!({"is_compatible": true}))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body, &serde_json::json!({"is_compatible": true}));
 
     // Unparseable schema -> 422 / error_code 42201
     let resp = post_raw(
@@ -376,10 +354,8 @@ async fn compatibility_endpoint() {
     .await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42201))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42201));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -400,23 +376,15 @@ async fn lookup_endpoint() {
     let resp = post_raw(&app, "/subjects/av-value", AVRO_BODY).await;
     let status = resp.status();
     let body = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["subject"], &serde_json::json!("av-value"));
+    assert_eq!(&body["id"], &serde_json::json!(1));
+    assert_eq!(&body["version"], &serde_json::json!(1));
     assert_eq!(
-        (
-            status,
-            &body["subject"],
-            &body["id"],
-            &body["version"],
-            body["schema"]
-                .as_str()
-                .is_some_and(|s| s.contains("record")),
-        ),
-        (
-            StatusCode::OK,
-            &serde_json::json!("av-value"),
-            &serde_json::json!(1),
-            &serde_json::json!(1),
-            true,
-        )
+        body["schema"]
+            .as_str()
+            .is_some_and(|s| s.contains("record")),
+        true
     );
 
     // Lookup a schema not registered under the subject -> 404 / 40403
@@ -424,19 +392,15 @@ async fn lookup_endpoint() {
     let resp = post_raw(&app, "/subjects/av-value", other).await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40403))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40403));
 
     // Lookup against a missing subject -> 404 / 40401
     let resp = post_raw(&app, "/subjects/no-such-subject", AVRO_BODY).await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40401))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40401));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -505,35 +469,31 @@ async fn import_file_descriptor_set_registers_dependencies_first() {
     let resp = post_bytes(&app, "/schemas/import", bytes).await;
     let status = resp.status();
     let body = body_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
     assert_eq!(
-        (status, body),
-        (
-            StatusCode::OK,
-            serde_json::json!([
-                {"subject":"common/money.proto","id":1,"version":1},
-                {"subject":"orders/order.proto","id":2,"version":1}
-            ]),
-        )
+        body,
+        serde_json::json!([
+            {"subject":"common/money.proto","id":1,"version":1},
+            {"subject":"orders/order.proto","id":2,"version":1}
+        ])
     );
 
     let imported = get_json(&app, "/subjects/orders%2Forder.proto/versions/1").await;
+    assert_eq!(&imported["schemaType"], &serde_json::json!("PROTOBUF"));
     assert_eq!(
-        (
-            &imported["schemaType"],
-            &imported["references"][0]["name"],
-            &imported["references"][0]["subject"],
-            &imported["references"][0]["version"],
-            imported["schema"]
-                .as_str()
-                .is_some_and(|schema| schema.contains("service OrderService")),
-        ),
-        (
-            &serde_json::json!("PROTOBUF"),
-            &serde_json::json!("common/money.proto"),
-            &serde_json::json!("common/money.proto"),
-            &serde_json::json!(1),
-            true,
-        )
+        &imported["references"][0]["name"],
+        &serde_json::json!("common/money.proto")
+    );
+    assert_eq!(
+        &imported["references"][0]["subject"],
+        &serde_json::json!("common/money.proto")
+    );
+    assert_eq!(&imported["references"][0]["version"], &serde_json::json!(1));
+    assert_eq!(
+        imported["schema"]
+            .as_str()
+            .is_some_and(|schema| schema.contains("service OrderService")),
+        true
     );
 
     cancel.cancel();
@@ -573,21 +533,19 @@ async fn version_and_error_paths() {
 
     // GET / -> 200 {}
     let (status, body) = get_status_json(&app, "/").await;
-    assert_eq!((status, body), (StatusCode::OK, serde_json::json!({})));
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, serde_json::json!({}));
 
     // GET /schemas/ids/9999 -> 404 / 40403
     let (status, body) = get_status_json(&app, "/schemas/ids/9999").await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40403))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40403));
 
     // GET /subjects/{s}/versions/latest -> resolves to version object
     let (status, body) = get_status_json(&app, "/subjects/av-value/versions/latest").await;
-    assert_eq!(
-        (status, &body["version"], &body["id"]),
-        (StatusCode::OK, &serde_json::json!(1), &serde_json::json!(1))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["version"], &serde_json::json!(1));
+    assert_eq!(&body["id"], &serde_json::json!(1));
 
     // GET /subjects/{s}/versions/{n}/schema -> raw schema text (not JSON-wrapped)
     let resp = app
@@ -618,17 +576,13 @@ async fn version_and_error_paths() {
 
     // GET /subjects/{s}/versions/0 -> 422 / 42202 (version 0 is invalid)
     let (status, body) = get_status_json(&app, "/subjects/av-value/versions/0").await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42202))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42202));
 
     // GET /subjects/{s}/versions/99 -> 404 / 40402 (valid number, absent version)
     let (status, body) = get_status_json(&app, "/subjects/av-value/versions/99").await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40402))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40402));
 
     // POST /subjects/{s}/versions with an invalid schema -> 422 / 42201
     let resp = post_raw(
@@ -639,10 +593,8 @@ async fn version_and_error_paths() {
     .await;
     let status = resp.status();
     let body = body_json(resp).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42201))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42201));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -669,11 +621,13 @@ async fn compatibility_endpoint_nonverbose_and_compatible() {
         .unwrap();
     let status = r.status();
     let b = body_json(r).await;
+    assert_eq!(status, StatusCode::OK, "non-verbose response");
     assert_eq!(
-        (status, &b["is_compatible"], b.get("messages")),
-        (StatusCode::OK, &serde_json::json!(true), None),
+        &b["is_compatible"],
+        &serde_json::json!(true),
         "non-verbose response"
     );
+    assert_eq!(b.get("messages"), None, "non-verbose response");
 
     cancel.cancel();
     broker.shutdown().await;
@@ -696,9 +650,10 @@ async fn compatibility_endpoint_error_paths() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "case missing_subject");
     assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40401)),
+        body["error_code"].as_i64(),
+        Some(40401),
         "case missing_subject"
     );
 
@@ -718,11 +673,8 @@ async fn compatibility_endpoint_error_paths() {
         let response = app.clone().oneshot(req_post(uri, AVRO_BODY)).await.unwrap();
         let status = response.status();
         let body = body_json(response).await;
-        assert_eq!(
-            (status, body["error_code"].as_i64()),
-            (expected.0, Some(expected.1)),
-            "case {name}"
-        );
+        assert_eq!(status, expected.0, "case {name}");
+        assert_eq!(body["error_code"].as_i64(), Some(expected.1), "case {name}");
     }
 
     cancel.cancel();
@@ -754,10 +706,8 @@ async fn forward_compat_enforced() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::CONFLICT, Some(409))
-    );
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error_code"].as_i64(), Some(409));
 
     // v2b: keep y, add z with default 0 — old reader ignores extra z → FORWARD compatible.
     let v2b = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"y\",\"type\":\"int\"},{\"name\":\"z\",\"type\":\"int\",\"default\":0}]}"}"#;
@@ -798,10 +748,8 @@ async fn compat_enforced_on_register() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::CONFLICT, Some(409))
-    );
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error_code"].as_i64(), Some(409));
 
     // Adding a field with a default is compatible.
     let good = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\",\"default\":0}]}"}"#;
@@ -846,10 +794,8 @@ async fn protobuf_compat_enforced_on_register() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::CONFLICT, Some(409))
-    );
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error_code"].as_i64(), Some(409));
 
     // Adding a new field is compatible.
     let good = r#"{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\"; message U { int32 id = 1; int32 x = 2; }"}"#;
@@ -893,10 +839,8 @@ async fn json_schema_compat_enforced_on_register() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::CONFLICT, Some(409))
-    );
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error_code"].as_i64(), Some(409));
 
     // Removing a numeric bound loosens the schema (cp-calibrated:
     // `maximum_removed` BACKWARD=true) — compatible, expect 200.
@@ -968,15 +912,13 @@ async fn compatibility_endpoint_real_verdict() {
         .unwrap();
     let status = r.status();
     let b = body_json(r).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&b["is_compatible"], &serde_json::json!(false));
     assert_eq!(
-        (
-            status,
-            &b["is_compatible"],
-            b["messages"]
-                .as_array()
-                .is_some_and(|messages| !messages.is_empty()),
-        ),
-        (StatusCode::OK, &serde_json::json!(false), true)
+        b["messages"]
+            .as_array()
+            .is_some_and(|messages| !messages.is_empty()),
+        true
     );
 
     cancel.cancel();
@@ -1101,7 +1043,8 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
         })
         .await
         .unwrap();
-    assert_eq!((reg.id, reg.version), (SchemaId(42), SchemaVersion(5)));
+    assert_eq!(reg.id, SchemaId(42));
+    assert_eq!(reg.version, SchemaVersion(5));
     assert_eq!(
         store
             .store
@@ -1168,10 +1111,8 @@ async fn rest_delete_version_lifecycle_and_deleted_query() {
         .await
         .unwrap();
     let status = r.status();
-    assert_eq!(
-        (status, body_json(r).await),
-        (StatusCode::OK, serde_json::json!(1))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body_json(r).await, serde_json::json!(1));
     assert_eq!(
         get_json(&app, "/subjects/av/versions").await,
         serde_json::json!([2])
@@ -1252,10 +1193,8 @@ async fn rest_mode_and_lookup_endpoints() {
         .unwrap();
     let status = blocked.status();
     let body = body_json(blocked).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42205))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42205));
     // GET /mode/a → READONLY ; DELETE clears
     assert_eq!(
         get_json(&app, "/mode/a").await,
@@ -1297,10 +1236,8 @@ async fn rest_subject_soft_then_permanent_and_soft_before_hard() {
         .unwrap();
     let status = early.status();
     let body = body_json(early).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40405))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40405));
     // soft delete → returns the version array, subject disappears from the live list
     let soft = app
         .clone()
@@ -1308,10 +1245,8 @@ async fn rest_subject_soft_then_permanent_and_soft_before_hard() {
         .await
         .unwrap();
     let status = soft.status();
-    assert_eq!(
-        (status, body_json(soft).await),
-        (StatusCode::OK, serde_json::json!([1, 2]))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body_json(soft).await, serde_json::json!([1, 2]));
     assert!(
         get_json(&app, "/subjects")
             .await
@@ -1351,10 +1286,8 @@ async fn rest_version_permanent_before_soft_is_rejected() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40407))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40407));
     // soft then permanent succeeds
     assert_eq!(
         app.clone()
@@ -1396,15 +1329,11 @@ async fn rest_import_mode_registers_explicit_id() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(
-        (status, &body["id"]),
-        (StatusCode::OK, &serde_json::json!(42))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["id"], &serde_json::json!(42));
     let got = get_json(&app, "/subjects/imp/versions/5").await;
-    assert_eq!(
-        (&got["id"], &got["version"]),
-        (&serde_json::json!(42), &serde_json::json!(5))
-    );
+    assert_eq!(&got["id"], &serde_json::json!(42));
+    assert_eq!(&got["version"], &serde_json::json!(5));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1432,10 +1361,8 @@ async fn rest_cp_calibrated_admin_error_codes() {
         .unwrap();
     let status = again.status();
     let body = body_json(again).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40404))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40404));
     // GET /mode/{subject} with no override -> cp 404 / 40409
     let nomode = app
         .clone()
@@ -1449,10 +1376,8 @@ async fn rest_cp_calibrated_admin_error_codes() {
         .unwrap();
     let status = nomode.status();
     let body = body_json(nomode).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40409))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40409));
     // GET /schemas/ids/{unknown}/versions -> cp 404 / 40403
     let noid = app
         .clone()
@@ -1466,10 +1391,8 @@ async fn rest_cp_calibrated_admin_error_codes() {
         .unwrap();
     let status = noid.status();
     let body = body_json(noid).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40403))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40403));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1504,10 +1427,8 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = cfg.status();
     let body = body_json(cfg).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42205))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42205));
     // back to READWRITE
     assert_eq!(
         app.clone()
@@ -1526,11 +1447,8 @@ async fn rest_admin_edge_and_error_branches() {
             .unwrap();
         let status = bad.status();
         let body = body_json(bad).await;
-        assert_eq!(
-            (status, body["error_code"].as_i64()),
-            (StatusCode::UNPROCESSABLE_ENTITY, Some(42204)),
-            "case {uri}"
-        );
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "case {uri}");
+        assert_eq!(body["error_code"].as_i64(), Some(42204), "case {uri}");
     }
     // Every DELETE form on a missing subject has the same complete response.
     let missing_subject_delete_cases = [
@@ -1560,10 +1478,8 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = pv.status();
     let body = body_json(pv).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40402))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40402));
     // DELETE /versions/latest soft-deletes the latest live version
     let dl = app
         .clone()
@@ -1571,10 +1487,8 @@ async fn rest_admin_edge_and_error_branches() {
         .await
         .unwrap();
     let status = dl.status();
-    assert_eq!(
-        (status, body_json(dl).await),
-        (StatusCode::OK, serde_json::json!(1))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body_json(dl).await, serde_json::json!(1));
     // non-numeric version -> 422/42202
     let dbad = app
         .clone()
@@ -1583,10 +1497,8 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = dbad.status();
     let body = body_json(dbad).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42202))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42202));
     // IMPORT requires an empty subject / empty registry -> 422/42205
     let import_subject = app
         .clone()
@@ -1595,10 +1507,8 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = import_subject.status();
     let body = body_json(import_subject).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42205))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42205));
     let import_global = app
         .clone()
         .oneshot(req_put("/mode", r#"{"mode":"IMPORT"}"#))
@@ -1606,10 +1516,8 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = import_global.status();
     let body = body_json(import_global).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42205))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42205));
     // READONLY blocks a delete (ensure_writable) -> 422/42205
     assert_eq!(
         app.clone()
@@ -1626,10 +1534,8 @@ async fn rest_admin_edge_and_error_branches() {
         .unwrap();
     let status = rod.status();
     let body = body_json(rod).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42205))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42205));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -1667,24 +1573,16 @@ async fn rest_references_lifecycle_avro() {
         .unwrap();
     let status = r.status();
     let dep_id = body_json(r).await["id"].as_i64().unwrap();
-    assert_eq!((status, dep_id), (StatusCode::OK, 2));
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(dep_id, 2);
     // referencedby lists the referrer's id
     let refby = get_json(&app, "/subjects/base/versions/1/referencedby").await;
     assert_eq!(refby, serde_json::json!([dep_id]));
     // GET the referrer includes references
     let got = get_json(&app, "/subjects/dep/versions/1").await;
-    assert_eq!(
-        (
-            &got["references"][0]["name"],
-            &got["references"][0]["subject"],
-            &got["references"][0]["version"],
-        ),
-        (
-            &serde_json::json!("Base"),
-            &serde_json::json!("base"),
-            &serde_json::json!(1),
-        )
-    );
+    assert_eq!(&got["references"][0]["name"], &serde_json::json!("Base"));
+    assert_eq!(&got["references"][0]["subject"], &serde_json::json!("base"));
+    assert_eq!(&got["references"][0]["version"], &serde_json::json!(1));
     // delete-protection: deleting base v1 while referenced is rejected (422/42206)
     let blocked = app
         .clone()
@@ -1693,10 +1591,8 @@ async fn rest_references_lifecycle_avro() {
         .unwrap();
     let status = blocked.status();
     let body = body_json(blocked).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42206))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42206));
     // remove the referrer, then base deletes fine
     assert_eq!(
         app.clone()
@@ -1733,10 +1629,8 @@ async fn rest_reference_not_found_rejected() {
         .unwrap();
     let status = r.status();
     let body = body_json(r).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42201))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42201));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1926,12 +1820,10 @@ async fn rest_references_get_by_id_list_and_subject_delete_protection() {
         .unwrap();
     // GET /schemas/ids/{referrer_id} includes the references array.
     let by_id = get_json(&app, &format!("/schemas/ids/{dep_id}")).await;
+    assert_eq!(&by_id["references"][0]["name"], &serde_json::json!("Base"));
     assert_eq!(
-        (
-            &by_id["references"][0]["name"],
-            &by_id["references"][0]["subject"]
-        ),
-        (&serde_json::json!("Base"), &serde_json::json!("base"))
+        &by_id["references"][0]["subject"],
+        &serde_json::json!("base")
     );
     // GET /schemas surfaces a non-Avro schema's schemaType.
     register(
@@ -1956,10 +1848,8 @@ async fn rest_references_get_by_id_list_and_subject_delete_protection() {
         .unwrap();
     let status = blocked.status();
     let body = body_json(blocked).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42206))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42206));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -1974,32 +1864,31 @@ async fn delete_subject_compat_reverts_to_global() {
     // Set a per-subject override to FULL
     let (status, body) =
         put_json(&app, "/config/test-subject", r#"{"compatibility":"FULL"}"#).await;
-    assert_eq!(
-        (status, &body["compatibility"]),
-        (StatusCode::OK, &serde_json::json!("FULL"))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["compatibility"], &serde_json::json!("FULL"));
 
     // GET confirms the override is set
     let (status, body) = get_status_json(&app, "/config/test-subject").await;
-    assert_eq!(
-        (status, &body["compatibilityLevel"]),
-        (StatusCode::OK, &serde_json::json!("FULL"))
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body["compatibilityLevel"], &serde_json::json!("FULL"));
 
     // DELETE returns the deleted level
     let (status, body) = delete_req(&app, "/config/test-subject").await;
     assert_eq!(
-        (status, &body["compatibility"]),
-        (StatusCode::OK, &serde_json::json!("FULL")),
+        status,
+        StatusCode::OK,
+        "DELETE should return the deleted level"
+    );
+    assert_eq!(
+        &body["compatibility"],
+        &serde_json::json!("FULL"),
         "DELETE should return the deleted level"
     );
 
     // GET now returns 404 (no per-subject override remains)
     let (status, body) = get_status_json(&app, "/config/test-subject").await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40401))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40401));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2012,10 +1901,8 @@ async fn delete_subject_compat_no_override_returns_404() {
 
     // No per-subject override was ever set
     let (status, body) = delete_req(&app, "/config/no-override-subject").await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40401))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40401));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2064,10 +1951,8 @@ async fn get_by_id_schema_returns_raw_string() {
 
     // Non-existent id → 404 / 40403
     let (status, body) = get_status_json(&app, "/schemas/ids/9999/schema").await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40403))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40403));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2101,10 +1986,8 @@ async fn get_by_id_subjects_returns_all_subjects() {
 
     // Non-existent id → 404 / 40403
     let (status, body) = get_status_json(&app, "/schemas/ids/9999/subjects").await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::NOT_FOUND, Some(40403))
-    );
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"].as_i64(), Some(40403));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2157,8 +2040,13 @@ async fn normalize_true_deduplicates_avro_schemas() {
     let status = resp_b.status();
     let reg_b = body_json(resp_b).await;
     assert_eq!(
-        (status, reg_b["id"].as_i64()),
-        (StatusCode::OK, Some(id_a)),
+        status,
+        StatusCode::OK,
+        "second normalize=true registration of same schema must be idempotent (same id)"
+    );
+    assert_eq!(
+        reg_b["id"].as_i64(),
+        Some(id_a),
         "second normalize=true registration of same schema must be idempotent (same id)"
     );
 
@@ -2177,10 +2065,8 @@ async fn normalize_true_deduplicates_avro_schemas() {
         .unwrap();
     let status = resp_bad.status();
     let err_body = body_json(resp_bad).await;
-    assert_eq!(
-        (status, err_body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42201))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(err_body["error_code"].as_i64(), Some(42201));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2225,7 +2111,8 @@ async fn normalize_true_json_schema_deduplicates_and_errors() {
         .unwrap();
     let status = resp_b.status();
     let actual_id = body_json(resp_b).await["id"].as_i64();
-    assert_eq!((status, actual_id), (StatusCode::OK, Some(id_a)));
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(actual_id, Some(id_a));
 
     // Invalid JSON with normalize=true → 422 / 42201 (exercises JSON error path in normalize_schema)
     let resp_bad = app
@@ -2244,10 +2131,8 @@ async fn normalize_true_json_schema_deduplicates_and_errors() {
         .unwrap();
     let status = resp_bad.status();
     let body = body_json(resp_bad).await;
-    assert_eq!(
-        (status, body["error_code"].as_i64()),
-        (StatusCode::UNPROCESSABLE_ENTITY, Some(42201))
-    );
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error_code"].as_i64(), Some(42201));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2292,7 +2177,8 @@ async fn normalize_true_protobuf_is_noop() {
         .unwrap();
     let status = resp2.status();
     let actual_id = body_json(resp2).await["id"].as_i64();
-    assert_eq!((status, actual_id), (StatusCode::OK, Some(id)));
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(actual_id, Some(id));
 
     cancel.cancel();
     broker.shutdown().await;
@@ -2336,14 +2222,9 @@ async fn normalize_true_lookup_finds_normalized_schema() {
         .unwrap();
     let status = lookup_resp.status();
     let found = body_json(lookup_resp).await;
-    assert_eq!(
-        (status, found["id"].as_i64(), &found["subject"]),
-        (
-            StatusCode::OK,
-            Some(stored_id),
-            &serde_json::json!("norm-lookup")
-        )
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(found["id"].as_i64(), Some(stored_id));
+    assert_eq!(&found["subject"], &serde_json::json!("norm-lookup"));
 
     cancel.cancel();
     broker.shutdown().await;

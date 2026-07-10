@@ -95,14 +95,9 @@ async fn span_block_promotes_configured_attribute_columns() {
         .as_any()
         .downcast_ref::<Int64Array>()
         .unwrap();
-    assert_eq!(
-        (
-            batch.schema(),
-            method_values.value(method_key),
-            statuses.value(0),
-        ),
-        (schema, "GET", 200)
-    );
+    assert_eq!(batch.schema(), schema);
+    assert_eq!(method_values.value(method_key), "GET");
+    assert_eq!(statuses.value(0), 200);
 
     validate_against(&batch.schema(), &span_block_decl()).unwrap();
 }
@@ -133,5 +128,6 @@ async fn span_block_validates_and_round_trips() {
         .as_any()
         .downcast_ref::<FixedSizeBinaryArray>()
         .unwrap();
-    assert_eq!((total, tids.value(0)), (2, [1_u8; 16].as_slice()));
+    assert_eq!(total, 2);
+    assert_eq!(tids.value(0), [1_u8; 16].as_slice());
 }

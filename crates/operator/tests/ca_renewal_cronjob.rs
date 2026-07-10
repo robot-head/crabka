@@ -293,8 +293,13 @@ async fn cronjob_reissues_aging_broker_leafs() {
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
     assert_eq!(
-        (event_body["reason"].as_str(), event_body["type"].as_str()),
-        (Some("BrokerCertRenewed"), Some("Normal")),
+        event_body["reason"].as_str(),
+        Some("BrokerCertRenewed"),
+        "body = {event_body}"
+    );
+    assert_eq!(
+        event_body["type"].as_str(),
+        Some("Normal"),
         "body = {event_body}"
     );
 
@@ -451,8 +456,13 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
     assert_eq!(
-        (event_body["reason"].as_str(), event_body["type"].as_str()),
-        (Some("CaRenewalScheduled"), Some("Normal")),
+        event_body["reason"].as_str(),
+        Some("CaRenewalScheduled"),
+        "body = {event_body}"
+    );
+    assert_eq!(
+        event_body["type"].as_str(),
+        Some("Normal"),
         "body = {event_body}"
     );
 
@@ -638,8 +648,13 @@ async fn cronjob_byo_ca_expiring_emits_byo_event() {
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
     assert_eq!(
-        (event_body["reason"].as_str(), event_body["type"].as_str()),
-        (Some("ByoCaExpiringSoon"), Some("Warning")),
+        event_body["reason"].as_str(),
+        Some("ByoCaExpiringSoon"),
+        "body = {event_body}"
+    );
+    assert_eq!(
+        event_body["type"].as_str(),
+        Some("Warning"),
         "body = {event_body}"
     );
 

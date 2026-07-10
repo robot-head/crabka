@@ -439,7 +439,8 @@ async fn single_node_enforces_authn_and_authz() {
         .unwrap_or_default();
     // cp-calibrated form: lowercase `basic` scheme + the configured realm
     // (this node uses `realm: "test"`). See tests/fixtures/auth/basic.json.
-    assert_eq!((status.as_u16(), www), (401, r#"basic realm="test""#));
+    assert_eq!(status.as_u16(), 401);
+    assert_eq!(www, r#"basic realm="test""#);
 
     // ── 401: wrong password, and an unknown user. ────────────────────────────
     for (name, user, password) in [

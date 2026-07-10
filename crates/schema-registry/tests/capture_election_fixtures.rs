@@ -280,8 +280,12 @@ async fn capture_group() {
         group.members.len()
     );
     assert_eq!(
-        (group.error_code, group.members.len()),
-        (0, 2),
+        group.error_code, 0,
+        "DescribeGroups should return exactly two successful `sr` members"
+    );
+    assert_eq!(
+        group.members.len(),
+        2,
         "DescribeGroups should return exactly two successful `sr` members"
     );
 

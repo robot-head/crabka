@@ -1647,7 +1647,8 @@ mod tests {
             let back = from_kraft(k, &image).unwrap();
             match back {
                 MetadataRecord::V1TopicConfig(tc) => {
-                    assert_eq!((tc.topic.as_str(), tc.overrides.len()), ("t", 1));
+                    assert_eq!(tc.topic.as_str(), "t");
+                    assert_eq!(tc.overrides.len(), 1);
                 }
                 other => panic!("expected V1TopicConfig singleton, got {other:?}"),
             }
@@ -1672,10 +1673,8 @@ mod tests {
         let KraftMetadataRecord::Config(c) = &records[0] else {
             panic!("expected Config");
         };
-        assert_eq!(
-            (c.name.as_str(), c.value.as_deref()),
-            ("retention.ms", Some("9"))
-        );
+        assert_eq!(c.name.as_str(), "retention.ms");
+        assert_eq!(c.value.as_deref(), Some("9"));
     }
 
     /// Seed `image` with topic `t` and the config map `kv`.
@@ -1811,7 +1810,8 @@ mod tests {
             panic!("expected Partition");
         };
 
-        assert_eq!((k.adding_replicas, k.removing_replicas), (vec![3], vec![2]));
+        assert_eq!(k.adding_replicas, vec![3]);
+        assert_eq!(k.removing_replicas, vec![2]);
     }
 
     #[test]

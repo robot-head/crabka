@@ -315,7 +315,8 @@ mod tests {
                     .map(|a| a.value(0))
             })
             .expect("line column is utf8");
-        assert_eq!((total, first), (2, "hello"));
+        assert_eq!(total, 2);
+        assert_eq!(first, "hello");
     }
 
     #[tokio::test]
@@ -343,22 +344,19 @@ mod tests {
         web.insert("app", "web");
         mutated.index_mut().add_series("t", web.fingerprint(), &web);
 
+        assert_eq!(Arc::ptr_eq(&bs.index, &mutated.index), false);
         assert_eq!(
-            (
-                Arc::ptr_eq(&bs.index, &mutated.index),
-                bs.index()
-                    .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
-                    .unwrap(),
-                mutated
-                    .index()
-                    .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
-                    .unwrap(),
-            ),
-            (
-                false,
-                std::collections::BTreeSet::new(),
-                std::collections::BTreeSet::from([web.fingerprint()]),
-            )
+            bs.index()
+                .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
+                .unwrap(),
+            std::collections::BTreeSet::new()
+        );
+        assert_eq!(
+            mutated
+                .index()
+                .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
+                .unwrap(),
+            std::collections::BTreeSet::from([web.fingerprint()])
         );
     }
 

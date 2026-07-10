@@ -971,10 +971,8 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            (out[0].function.as_str(), out[0].file.as_str()),
-            ("/missing/native+0x99", "/missing/native")
-        );
+        assert_eq!(out[0].function.as_str(), "/missing/native+0x99");
+        assert_eq!(out[0].file.as_str(), "/missing/native");
     }
 
     #[test]

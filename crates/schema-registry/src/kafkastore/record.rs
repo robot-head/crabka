@@ -423,10 +423,8 @@ mod tests {
         let (k, v) = encode_config(None, "FULL");
         match SchemaRecord::decode(&k, Some(&v)) {
             SchemaRecord::Config(key, Some(val)) => {
-                assert_eq!(
-                    (key.subject, val.compatibility_level),
-                    (None, "FULL".to_string())
-                );
+                assert_eq!(key.subject, None);
+                assert_eq!(val.compatibility_level, "FULL".to_string());
             }
             other => panic!("expected Config, got {other:?}"),
         }
@@ -437,10 +435,8 @@ mod tests {
         let (k, v) = encode_mode(Some("s"), "READONLY");
         match SchemaRecord::decode(&k, Some(&v)) {
             SchemaRecord::Mode(key, Some(val)) => {
-                assert_eq!(
-                    (key.subject, val.mode),
-                    (Some("s".to_string()), "READONLY".to_string())
-                );
+                assert_eq!(key.subject, Some("s".to_string()));
+                assert_eq!(val.mode, "READONLY".to_string());
             }
             other => panic!("expected Mode, got {other:?}"),
         }
@@ -466,10 +462,9 @@ mod tests {
         );
         match SchemaRecord::decode(&k, Some(&v)) {
             SchemaRecord::DeleteSubject(key, val) => {
-                assert_eq!(
-                    (key.subject.as_str(), val.subject.as_str(), val.version),
-                    ("s", "s", sv(3))
-                );
+                assert_eq!(key.subject.as_str(), "s");
+                assert_eq!(val.subject.as_str(), "s");
+                assert_eq!(val.version, sv(3));
             }
             other => panic!("expected DeleteSubject, got {other:?}"),
         }
@@ -483,7 +478,10 @@ mod tests {
             br#"{"keytype":"SCHEMA","subject":"s","version":2,"magic":1}"#
         );
         match SchemaRecord::decode(&key, None) {
-            SchemaRecord::Tombstone(k) => assert_eq!((k.subject.as_str(), k.version), ("s", sv(2))),
+            SchemaRecord::Tombstone(k) => {
+                assert_eq!(k.subject.as_str(), "s");
+                assert_eq!(k.version, sv(2));
+            }
             other => panic!("expected Tombstone, got {other:?}"),
         }
     }
@@ -499,7 +497,8 @@ mod tests {
             &[],
         );
         let val: SchemaValue = serde_json::from_slice(&v).unwrap();
-        assert_eq!((val.deleted, val.id), (true, sid(7)));
+        assert_eq!(val.deleted, true);
+        assert_eq!(val.id, sid(7));
     }
 
     #[test]

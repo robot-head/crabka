@@ -364,11 +364,12 @@ mod tests {
         c.append(LeaderEpoch(1), Offset(50)).unwrap();
         c.append(LeaderEpoch(2), Offset(100)).unwrap();
         assert_eq!(
-            (
-                c.end_offset_for_epoch(LeaderEpoch(0), Offset(200)),
-                c.end_offset_for_epoch(LeaderEpoch(1), Offset(200)),
-            ),
-            (Offset(50), Offset(100))
+            c.end_offset_for_epoch(LeaderEpoch(0), Offset(200)),
+            Offset(50)
+        );
+        assert_eq!(
+            c.end_offset_for_epoch(LeaderEpoch(1), Offset(200)),
+            Offset(100)
         );
     }
 
@@ -387,14 +388,12 @@ mod tests {
         c.append(LeaderEpoch(1), Offset(0)).unwrap();
         c.append(LeaderEpoch(7), Offset(4)).unwrap();
         c.truncate_from_end(Offset(4)).unwrap();
+        assert_eq!(c.latest_epoch(), Some(LeaderEpoch(1)));
         assert_eq!(
-            (
-                c.latest_epoch(),
-                c.end_offset_for_epoch(LeaderEpoch(7), Offset(4)),
-                c.end_offset_for_epoch(LeaderEpoch(1), Offset(4)),
-            ),
-            (Some(LeaderEpoch(1)), Offset(-1), Offset(4))
+            c.end_offset_for_epoch(LeaderEpoch(7), Offset(4)),
+            Offset(-1)
         );
+        assert_eq!(c.end_offset_for_epoch(LeaderEpoch(1), Offset(4)), Offset(4));
     }
 
     #[test]
@@ -404,7 +403,8 @@ mod tests {
         c.append(LeaderEpoch(1), Offset(0)).unwrap();
         c.append(LeaderEpoch(2), Offset(50)).unwrap();
         c.clear().unwrap();
-        assert_eq!((c.entries(), c.latest_epoch()), (&[][..], None));
+        assert_eq!(c.entries(), &[][..]);
+        assert_eq!(c.latest_epoch(), None);
         // Persisted: a reopen sees no entries.
         let reopened = LeaderEpochCheckpoint::open(path).unwrap();
         assert!(reopened.entries().is_empty());
@@ -426,7 +426,8 @@ mod tests {
     fn missing_file_yields_empty() {
         let (_d, path) = fresh();
         let c = LeaderEpochCheckpoint::open(path).unwrap();
-        assert_eq!((c.entries(), c.latest_epoch()), (&[][..], None));
+        assert_eq!(c.entries(), &[][..]);
+        assert_eq!(c.latest_epoch(), None);
     }
 
     #[test]
@@ -532,13 +533,8 @@ mod tests {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
         c.append(LeaderEpoch(0), Offset(0)).unwrap();
-        assert_eq!(
-            (
-                c.epoch_for_offset(Offset(0)),
-                c.epoch_for_offset(Offset(1000)),
-            ),
-            (Some(LeaderEpoch(0)), Some(LeaderEpoch(0)))
-        );
+        assert_eq!(c.epoch_for_offset(Offset(0)), Some(LeaderEpoch(0)));
+        assert_eq!(c.epoch_for_offset(Offset(1000)), Some(LeaderEpoch(0)));
     }
 
     // ── epoch_and_offset_for (KIP-320) ────────────────────────────────────────

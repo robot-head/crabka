@@ -325,6 +325,7 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!((total, lines.value(0)), (1, "second"));
+        assert_eq!(total, 1);
+        assert_eq!(lines.value(0), "second");
     }
 }

@@ -173,7 +173,8 @@ mod tests {
         let g = s.load();
         let inner: &Option<ClusterState> = &g;
         let v = inner.as_ref().expect("Some after swap");
-        assert_eq!((v.snapshot_at_ms, v.cluster_id.as_deref()), (42, Some("c")));
+        assert_eq!(v.snapshot_at_ms, 42);
+        assert_eq!(v.cluster_id.as_deref(), Some("c"));
     }
 
     #[test]

@@ -244,15 +244,13 @@ async fn query_range_rejects_ranges_over_tenant_limit() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["status"].as_str(), Some("error"));
+    assert_eq!(body["errorType"].as_str(), Some("execution"));
     assert_eq!(
-        (
-            body["status"].as_str(),
-            body["errorType"].as_str(),
-            body["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("query range too long")),
-        ),
-        (Some("error"), Some("execution"), true)
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("query range too long")),
+        true
     );
 }
 
@@ -280,19 +278,13 @@ async fn query_range_rejects_resolution_over_point_cap_without_limits() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["status"].as_str(), Some("error"));
+    assert_eq!(body["errorType"].as_str(), Some("bad_data"));
     assert_eq!(
-        (
-            body["status"].as_str(),
-            body["errorType"].as_str(),
-            body["error"].as_str(),
-        ),
-        (
-            Some("error"),
-            Some("bad_data"),
-            Some(
-                "exceeded maximum resolution of 11,000 points per timeseries. \
+        body["error"].as_str(),
+        Some(
+            "exceeded maximum resolution of 11,000 points per timeseries. \
                  Try decreasing the query resolution (?step=XX)"
-            ),
         )
     );
 }
@@ -324,14 +316,12 @@ async fn instant_query_without_time_defaults_to_current_time() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["status"].as_str(), Some("success"));
     assert_eq!(
-        (
-            body["status"].as_str(),
-            body["data"]["result"][0]["metric"]["job"].as_str(),
-            body["data"]["result"][0]["value"][1].as_str(),
-        ),
-        (Some("success"), Some("api"), Some("1"))
+        body["data"]["result"][0]["metric"]["job"].as_str(),
+        Some("api")
     );
+    assert_eq!(body["data"]["result"][0]["value"][1].as_str(), Some("1"));
 }
 
 #[tokio::test]
@@ -394,18 +384,11 @@ async fn rejects_tenant_id_with_unsupported_character() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["status"].as_str(), Some("error"));
+    assert_eq!(body["errorType"].as_str(), Some("bad_data"));
     assert_eq!(
-        (
-            body["status"].as_str(),
-            body["errorType"].as_str(),
-            body["error"].as_str(),
-        ),
-        (
-            Some("error"),
-            Some("bad_data"),
-            // The reason comes from the shared `crabka_metrics::validate_tenant`.
-            Some("tenant ID contains unsupported character `/`"),
-        )
+        body["error"].as_str(), // The reason comes from the shared `crabka_metrics::validate_tenant`.
+        Some("tenant ID contains unsupported character `/`")
     );
 }
 
@@ -444,15 +427,13 @@ async fn series_rejects_selected_series_over_tenant_limit() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["status"].as_str(), Some("error"));
+    assert_eq!(body["errorType"].as_str(), Some("execution"));
     assert_eq!(
-        (
-            body["status"].as_str(),
-            body["errorType"].as_str(),
-            body["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("series per query exceeded")),
-        ),
-        (Some("error"), Some("execution"), true)
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("series per query exceeded")),
+        true
     );
 }
 
@@ -491,14 +472,12 @@ async fn cardinality_active_series_rejects_over_tenant_limit() {
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["status"].as_str(), Some("error"));
+    assert_eq!(body["errorType"].as_str(), Some("execution"));
     assert_eq!(
-        (
-            body["status"].as_str(),
-            body["errorType"].as_str(),
-            body["error"]
-                .as_str()
-                .is_some_and(|error| error.contains("series per query exceeded")),
-        ),
-        (Some("error"), Some("execution"), true)
+        body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("series per query exceeded")),
+        true
     );
 }

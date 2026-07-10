@@ -1148,14 +1148,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            (
-                &raw.profile.sample_types()[0],
-                raw.profile.period_type_strings(),
-            ),
-            (
-                &("wall".to_string(), "nanoseconds".to_string()),
-                ("wall".to_string(), "nanoseconds".to_string()),
-            )
+            &raw.profile.sample_types()[0],
+            &("wall".to_string(), "nanoseconds".to_string())
+        );
+        assert_eq!(
+            raw.profile.period_type_strings(),
+            ("wall".to_string(), "nanoseconds".to_string())
         );
         let split = crate::ingest::split_sample_types(&raw).unwrap();
         assert!(split[0].profile_type == "myapp:wall:nanoseconds:wall:nanoseconds:delta");
@@ -1468,12 +1466,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            (
-                &raw.profile.sample_types()[0],
-                raw.profile.samples().is_empty(),
-            ),
-            (&("wall".to_string(), "nanoseconds".to_string()), false)
+            &raw.profile.sample_types()[0],
+            &("wall".to_string(), "nanoseconds".to_string())
         );
+        assert_eq!(raw.profile.samples().is_empty(), false);
         let functions = raw
             .profile
             .inner()

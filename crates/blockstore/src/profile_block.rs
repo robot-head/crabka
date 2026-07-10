@@ -128,25 +128,12 @@ mod tests {
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
-        assert_eq!(
-            (
-                batch.schema(),
-                batch.num_rows(),
-                stacks.value(0),
-                stacks.value(1),
-                values.value(0),
-                traces.value(0),
-                traces.is_null(1),
-            ),
-            (
-                profile_samples_schema(),
-                2,
-                7,
-                9,
-                50,
-                [0xAB; 16].as_slice(),
-                true,
-            )
-        );
+        assert_eq!(batch.schema(), profile_samples_schema());
+        assert_eq!(batch.num_rows(), 2);
+        assert_eq!(stacks.value(0), 7);
+        assert_eq!(stacks.value(1), 9);
+        assert_eq!(values.value(0), 50);
+        assert_eq!(traces.value(0), [0xAB; 16].as_slice());
+        assert_eq!(traces.is_null(1), true);
     }
 }

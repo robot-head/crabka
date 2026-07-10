@@ -74,13 +74,11 @@ mod tests {
             ],
         };
         let res = assemble::<Option<i64>>(outcome);
+        assert_eq!(res.partition_results().len(), 2);
+        assert_eq!(res.partition_results()[&0].result(), Some(&Some(7)));
         assert_eq!(
-            (
-                res.partition_results().len(),
-                res.partition_results()[&0].result(),
-                res.partition_results()[&1].failure_reason(),
-            ),
-            (2, Some(&Some(7)), Some(FailureReason::NotUpToBound))
+            res.partition_results()[&1].failure_reason(),
+            Some(FailureReason::NotUpToBound)
         );
     }
 

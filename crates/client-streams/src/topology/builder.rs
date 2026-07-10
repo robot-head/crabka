@@ -2181,16 +2181,14 @@ mod tests {
             .downcast_ref::<Windowed<String>>()
             .unwrap();
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(buffer.len(), 1);
         assert_eq!(
-            (buffer.len(), key, change.new),
-            (
-                1,
-                &Windowed {
-                    key: "a".to_string(),
-                    window: Window { start: 0, end: D },
-                },
-                Some(1),
-            )
+            key,
+            &Windowed {
+                key: "a".to_string(),
+                window: Window { start: 0, end: D },
+            }
         );
+        assert_eq!(change.new, Some(1));
     }
 }

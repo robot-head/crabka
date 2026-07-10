@@ -430,25 +430,17 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaUser::crd();
+        assert_eq!(crd.spec.group.as_str(), "crabka.io");
+        assert_eq!(crd.spec.names.kind.as_str(), "KafkaUser");
+        assert_eq!(crd.spec.names.plural.as_str(), "kafkausers");
+        assert_eq!(crd.spec.names.short_names, Some(vec!["ku".to_string()]));
         assert_eq!(
-            (
-                crd.spec.group.as_str(),
-                crd.spec.names.kind.as_str(),
-                crd.spec.names.plural.as_str(),
-                crd.spec.names.short_names,
-                crd.spec
-                    .versions
-                    .iter()
-                    .map(|v| v.name.as_str())
-                    .collect::<Vec<_>>(),
-            ),
-            (
-                "crabka.io",
-                "KafkaUser",
-                "kafkausers",
-                Some(vec!["ku".to_string()]),
-                vec!["v1alpha1"]
-            )
+            crd.spec
+                .versions
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v1alpha1"]
         );
     }
 

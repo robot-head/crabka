@@ -114,25 +114,17 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaRebalance::crd();
+        assert_eq!(crd.spec.group.as_str(), "crabka.io");
+        assert_eq!(crd.spec.names.kind.as_str(), "KafkaRebalance");
+        assert_eq!(crd.spec.names.plural.as_str(), "kafkarebalances");
+        assert_eq!(crd.spec.names.short_names, Some(vec!["kr".to_string()]));
         assert_eq!(
-            (
-                crd.spec.group.as_str(),
-                crd.spec.names.kind.as_str(),
-                crd.spec.names.plural.as_str(),
-                crd.spec.names.short_names,
-                crd.spec
-                    .versions
-                    .iter()
-                    .map(|v| v.name.as_str())
-                    .collect::<Vec<_>>(),
-            ),
-            (
-                "crabka.io",
-                "KafkaRebalance",
-                "kafkarebalances",
-                Some(vec!["kr".to_string()]),
-                vec!["v1alpha1"]
-            )
+            crd.spec
+                .versions
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v1alpha1"]
         );
     }
 

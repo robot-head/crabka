@@ -235,10 +235,11 @@ async fn stateful_count_and_restart_restore() {
         .map(|(_, v)| *v)
         .collect();
     assert_eq!(
-        (a_counts, b_counts),
-        (vec![1, 2], vec![1]),
+        a_counts,
+        vec![1, 2],
         "counts must match by key; got {got:?}"
     );
+    assert_eq!(b_counts, vec![1], "counts must match by key; got {got:?}");
 
     // ── 4. Close the first instance ───────────────────────────────────────────
     streams.close().await.unwrap();

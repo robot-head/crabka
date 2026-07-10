@@ -178,15 +178,10 @@ mod tests {
 
         let decoded = decode_v1(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
 
-        assert_eq!(
-            (
-                decoded.len(),
-                decoded[0].histograms.len(),
-                decoded[0].histograms[0].0,
-                &decoded[0].histograms[0].1.positive_counts,
-            ),
-            (1, 1, 10, &vec![1.0, 3.0])
-        );
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].histograms.len(), 1);
+        assert_eq!(decoded[0].histograms[0].0, 10);
+        assert_eq!(&decoded[0].histograms[0].1.positive_counts, &vec![1.0, 3.0]);
     }
 
     #[test]

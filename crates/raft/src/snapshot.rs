@@ -299,10 +299,11 @@ mod tests {
         );
         for (i, record) in data.records.iter().enumerate() {
             assert_eq!(
-                (record.offset_delta, record.value.is_some()),
-                (i32::try_from(i).expect("index fits"), true),
+                record.offset_delta,
+                i32::try_from(i).expect("index fits"),
                 "record {i}"
             );
+            assert_eq!(record.value.is_some(), true, "record {i}");
         }
 
         let footer = RecordBatch::decode(&mut cur).expect("footer batch");

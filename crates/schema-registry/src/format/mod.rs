@@ -118,11 +118,8 @@ mod tests {
             ("protobuf", SchemaType::Protobuf, Some("PROTOBUF")),
             ("json", SchemaType::Json, Some("JSON")),
         ] {
-            assert_eq!(
-                (ty.wire_name(), SchemaType::from_wire(wire)),
-                (wire, ty),
-                "case {name}"
-            );
+            assert_eq!(ty.wire_name(), wire, "case {name}");
+            assert_eq!(SchemaType::from_wire(wire), ty, "case {name}");
         }
     }
 
@@ -148,10 +145,8 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(
-            (a_form == b_form, a_form != c.canonical_form()),
-            (true, true)
-        );
+        assert_eq!(a_form == b_form, true);
+        assert_eq!(a_form != c.canonical_form(), true);
     }
 
     #[test]

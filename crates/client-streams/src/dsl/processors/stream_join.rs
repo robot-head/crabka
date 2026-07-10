@@ -319,14 +319,9 @@ mod tests {
 
         // exactly one forward: "ab1" at max(5,3)=5
         let (_, rec) = buffer.pop_front().unwrap();
-        assert_eq!(
-            (
-                buffer.len(),
-                *rec.value.downcast::<String>().unwrap(),
-                rec.timestamp
-            ),
-            (0, "ab1".to_string(), 5)
-        );
+        assert_eq!(buffer.len(), 0);
+        assert_eq!(*rec.value.downcast::<String>().unwrap(), "ab1".to_string());
+        assert_eq!(rec.timestamp, 5);
     }
 
     #[tokio::test]
@@ -376,16 +371,11 @@ mod tests {
         // Two forwards: "ax" and "ay", both at max(5,4)=5
         let (_, rec1) = buffer.pop_front().unwrap();
         let (_, rec2) = buffer.pop_front().unwrap();
-        assert_eq!(
-            (
-                buffer.len(),
-                *rec1.value.downcast::<String>().unwrap(),
-                rec1.timestamp,
-                *rec2.value.downcast::<String>().unwrap(),
-                rec2.timestamp,
-            ),
-            (0, "ax".to_string(), 5, "ay".to_string(), 5)
-        );
+        assert_eq!(buffer.len(), 0);
+        assert_eq!(*rec1.value.downcast::<String>().unwrap(), "ax".to_string());
+        assert_eq!(rec1.timestamp, 5);
+        assert_eq!(*rec2.value.downcast::<String>().unwrap(), "ay".to_string());
+        assert_eq!(rec2.timestamp, 5);
     }
 
     /// A left-side processor with no matching right record buffers the record into
@@ -485,14 +475,12 @@ mod tests {
         // The close-scan emitted the buffered ts=5 record as a null-padded left
         // result ("a") at ts=5.
         let (_, rec) = buffer.pop_front().unwrap();
+        assert_eq!(buffer.len(), 0, "expected one close-emitted record");
         assert_eq!(
-            (
-                buffer.len(),
-                *rec.value.downcast::<String>().unwrap(),
-                rec.timestamp
-            ),
-            (0, "a".to_string(), 5),
+            *rec.value.downcast::<String>().unwrap(),
+            "a".to_string(),
             "expected one close-emitted record"
         );
+        assert_eq!(rec.timestamp, 5, "expected one close-emitted record");
     }
 }

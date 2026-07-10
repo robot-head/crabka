@@ -479,36 +479,18 @@ key_source = "header:X-Delivery"
         let compiled = file.compile().expect("compile");
         let ep = compiled.get("github").expect("key present");
 
-        assert_eq!(
-            (
-                ep.target_topic.as_str(),
-                ep.principal.as_str(),
-                ep.secret.as_deref(),
-                ep.signature_header.as_deref(),
-                ep.signature_prefix.as_deref(),
-                ep.timestamp_header.as_deref(),
-                ep.timestamp_tolerance_secs,
-                ep.idempotency_source.is_some(),
-                ep.key_source.is_some(),
-                ep.max_body_bytes,
-                ep.schema_subject.as_deref(),
-                ep.schema_format,
-            ),
-            (
-                "events",
-                "webhook:github",
-                Some(b"s3cr3t".as_slice()),
-                Some("X-Hub-Signature-256"),
-                Some("sha256="),
-                None,
-                300,
-                true,
-                true,
-                1024 * 1024,
-                None,
-                SchemaFormat::Json,
-            )
-        );
+        assert_eq!(ep.target_topic.as_str(), "events");
+        assert_eq!(ep.principal.as_str(), "webhook:github");
+        assert_eq!(ep.secret.as_deref(), Some(b"s3cr3t".as_slice()));
+        assert_eq!(ep.signature_header.as_deref(), Some("X-Hub-Signature-256"));
+        assert_eq!(ep.signature_prefix.as_deref(), Some("sha256="));
+        assert_eq!(ep.timestamp_header.as_deref(), None);
+        assert_eq!(ep.timestamp_tolerance_secs, 300);
+        assert_eq!(ep.idempotency_source.is_some(), true);
+        assert_eq!(ep.key_source.is_some(), true);
+        assert_eq!(ep.max_body_bytes, 1024 * 1024);
+        assert_eq!(ep.schema_subject.as_deref(), None);
+        assert_eq!(ep.schema_format, SchemaFormat::Json);
     }
 
     #[test]
@@ -522,36 +504,18 @@ principal = "svc:stripe-ingest"
         let file: WebhooksFile = toml::from_str(toml).expect("parse");
         let compiled = file.compile().expect("compile");
         let ep = &compiled["stripe"];
-        assert_eq!(
-            (
-                ep.target_topic.as_str(),
-                ep.principal.as_str(),
-                ep.secret.as_deref(),
-                ep.signature_header.as_deref(),
-                ep.signature_prefix.as_deref(),
-                ep.timestamp_header.as_deref(),
-                ep.timestamp_tolerance_secs,
-                ep.idempotency_source.is_none(),
-                ep.key_source.is_none(),
-                ep.max_body_bytes,
-                ep.schema_subject.as_deref(),
-                ep.schema_format,
-            ),
-            (
-                "payments",
-                "svc:stripe-ingest",
-                None,
-                None,
-                None,
-                None,
-                300,
-                true,
-                true,
-                1024 * 1024,
-                None,
-                SchemaFormat::Json,
-            )
-        );
+        assert_eq!(ep.target_topic.as_str(), "payments");
+        assert_eq!(ep.principal.as_str(), "svc:stripe-ingest");
+        assert_eq!(ep.secret.as_deref(), None);
+        assert_eq!(ep.signature_header.as_deref(), None);
+        assert_eq!(ep.signature_prefix.as_deref(), None);
+        assert_eq!(ep.timestamp_header.as_deref(), None);
+        assert_eq!(ep.timestamp_tolerance_secs, 300);
+        assert_eq!(ep.idempotency_source.is_none(), true);
+        assert_eq!(ep.key_source.is_none(), true);
+        assert_eq!(ep.max_body_bytes, 1024 * 1024);
+        assert_eq!(ep.schema_subject.as_deref(), None);
+        assert_eq!(ep.schema_format, SchemaFormat::Json);
     }
 
     #[test]

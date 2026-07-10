@@ -433,7 +433,8 @@ mod tests {
         assert_eq!(s.find_sessions(&"k".to_string(), -5, 35).await, vec![]);
         // changelog: put, put, remove → 3 entries (last is a tombstone)
         let cl = s.take_changelog();
-        assert_eq!((cl.len(), cl[2].1.is_none()), (3, true));
+        assert_eq!(cl.len(), 3);
+        assert_eq!(cl[2].1.is_none(), true);
     }
 
     #[tokio::test]
@@ -562,21 +563,22 @@ mod tests {
             .unwrap();
         // Value downcasts to Change<i64> { old = committed (1), new = latest (3) }.
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(*child, 7);
+        assert_eq!(rec.timestamp, 7);
         assert_eq!(
-            (buffer.len(), *child, rec.timestamp, key, change),
-            (
-                1,
-                7,
-                7,
-                &Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 10 },
-                },
-                &Change {
-                    old: Some(1),
-                    new: Some(3)
-                },
-            )
+            key,
+            &Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 10 },
+            }
+        );
+        assert_eq!(
+            change,
+            &Change {
+                old: Some(1),
+                new: Some(3)
+            }
         );
 
         // Changelog buffered the RAW session store-key + the latest value.
@@ -644,18 +646,17 @@ mod tests {
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
         let change = buffer[0].1.value.downcast_ref::<Change<i64>>().unwrap();
+        assert_eq!(buffer.len(), 1);
         assert_eq!(
-            (buffer.len(), change),
-            (
-                1,
-                &Change {
-                    old: Some(1),
-                    new: None
-                }
-            )
+            change,
+            &Change {
+                old: Some(1),
+                new: None
+            }
         );
         let cl = s.take_changelog();
-        assert_eq!((cl.len(), cl[0].1.is_none()), (1, true)); // changelog tombstone
+        assert_eq!(cl.len(), 1);
+        assert_eq!(cl[0].1.is_none(), true); // changelog tombstone
     }
 
     /// `apply_changelog` on a cached store writes BELOW the cache (no dirty entry

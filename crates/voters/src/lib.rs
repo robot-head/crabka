@@ -130,13 +130,14 @@ mod tests {
         let base = VoterSet::from_voters([sample(NodeId(1))]);
         let added = base.with_voter(sample(NodeId(2)));
         let removed = added.without_voter(NodeId(1));
+        assert_eq!(base.ids().into_iter().collect::<Vec<_>>(), vec![NodeId(1)]);
         assert_eq!(
-            (
-                base.ids().into_iter().collect::<Vec<_>>(),
-                added.ids().into_iter().collect::<Vec<_>>(),
-                removed.ids().into_iter().collect::<Vec<_>>(),
-            ),
-            (vec![NodeId(1)], vec![NodeId(1), NodeId(2)], vec![NodeId(2)],)
+            added.ids().into_iter().collect::<Vec<_>>(),
+            vec![NodeId(1), NodeId(2)]
+        );
+        assert_eq!(
+            removed.ids().into_iter().collect::<Vec<_>>(),
+            vec![NodeId(2)]
         );
     }
 

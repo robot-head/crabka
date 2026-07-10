@@ -498,10 +498,8 @@ mod tests {
         assert!(left_pad_32(&[0xAA; 33]).is_none());
 
         let short = left_pad_32(&[0x01, 0x02]).expect("short coordinate padded");
-        assert_eq!(
-            (&short[..30], &short[30..]),
-            (&[0u8; 30][..], &[0x01, 0x02][..])
-        );
+        assert_eq!(&short[..30], &[0u8; 30][..]);
+        assert_eq!(&short[30..], &[0x01, 0x02][..]);
 
         let exact = [0x7Fu8; 32];
         assert!(left_pad_32(&exact).expect("exact coordinate") == exact);

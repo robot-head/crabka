@@ -97,17 +97,11 @@ mod tests {
     fn lsn_round_trips_postgres_text_form() {
         let lsn: PgLsn = "16/B374D848".parse().expect("valid LSN");
 
+        assert_eq!(lsn, PgLsn(0x16_b374_d848));
+        assert_eq!(lsn.to_string(), "16/B374D848".to_owned());
         assert_eq!(
-            (
-                lsn,
-                lsn.to_string(),
-                "FFFFFFFF/FFFFFFFF".parse::<PgLsn>().expect("max LSN"),
-            ),
-            (
-                PgLsn(0x16_b374_d848),
-                "16/B374D848".to_owned(),
-                PgLsn(u64::MAX),
-            )
+            "FFFFFFFF/FFFFFFFF".parse::<PgLsn>().expect("max LSN"),
+            PgLsn(u64::MAX)
         );
     }
 

@@ -230,9 +230,10 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
+    assert_eq!(valid["status"].as_str(), Some("False"), "body = {body}");
     assert_eq!(
-        (valid["status"].as_str(), valid["reason"].as_str()),
-        (Some("False"), Some("ListenerMtlsRequiresTransportTls")),
+        valid["reason"].as_str(),
+        Some("ListenerMtlsRequiresTransportTls"),
         "body = {body}"
     );
 

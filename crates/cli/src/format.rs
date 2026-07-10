@@ -842,10 +842,8 @@ mod tests {
     fn parse_scram_spec_sha256_prefix() {
         let spec = parse_scram_spec("SCRAM-SHA-256=[name=alice,password=hunter2,iterations=8192]")
             .unwrap();
-        assert_eq!(
-            (spec.name.as_str(), spec.mechanism),
-            ("alice", SaslMechanism::ScramSha256)
-        );
+        assert_eq!(spec.name.as_str(), "alice");
+        assert_eq!(spec.mechanism, SaslMechanism::ScramSha256);
     }
 
     #[test]
@@ -885,10 +883,8 @@ mod tests {
     fn parse_acl_spec_with_prefixed_pattern() {
         let s = "principal=User:alice,host=*,operation=Read,permission=Allow,resource=Topic:team-:Prefixed";
         let entry = parse_acl_spec(s).unwrap();
-        assert_eq!(
-            (entry.pattern_type, entry.resource_name.as_str()),
-            (crabka_metadata::PatternType::Prefixed, "team-")
-        );
+        assert_eq!(entry.pattern_type, crabka_metadata::PatternType::Prefixed);
+        assert_eq!(entry.resource_name.as_str(), "team-");
     }
 
     #[test]
@@ -965,11 +961,8 @@ mod tests {
             let spec =
                 format!("principal=User:u,host=*,operation=All,permission=Deny,resource={s}:n");
             let entry = parse_acl_spec(&spec).unwrap();
-            assert_eq!(
-                (entry.resource_type, entry.permission_type),
-                (rt, PermissionType::Deny),
-                "resource {s}"
-            );
+            assert_eq!(entry.resource_type, rt, "resource {s}");
+            assert_eq!(entry.permission_type, PermissionType::Deny, "resource {s}");
         }
     }
 

@@ -998,13 +998,8 @@ mod tests {
     #[test]
     fn fresh_image_has_no_features_and_unknown_epoch() {
         let m = img();
-        assert_eq!(
-            (
-                m.finalized_features().is_empty(),
-                m.finalized_features_epoch()
-            ),
-            (true, -1)
-        );
+        assert_eq!(m.finalized_features().is_empty(), true);
+        assert_eq!(m.finalized_features_epoch(), -1);
     }
 
     #[test]
@@ -1025,13 +1020,8 @@ mod tests {
             name: "metadata.version".into(),
             level: 1,
         }));
-        assert_eq!(
-            (
-                m.finalized_features().get("metadata.version"),
-                m.finalized_features_epoch(),
-            ),
-            (Some(&1), 0)
-        );
+        assert_eq!(m.finalized_features().get("metadata.version"), Some(&1));
+        assert_eq!(m.finalized_features_epoch(), 0);
 
         // A second apply bumps the epoch again (monotonic).
         m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
@@ -2367,15 +2357,14 @@ mod tests {
 
         img.apply(&dt_record("tok-1", alice.clone(), 5_000, vec![]));
         let got = img.delegation_token_by_id("tok-1").expect("token present");
-        assert_eq!((got.expiry_timestamp_ms, &got.owner), (5_000, &alice));
+        assert_eq!(got.expiry_timestamp_ms, 5_000);
+        assert_eq!(&got.owner, &alice);
 
         // Same token_id, different expiry — replace, not duplicate.
         img.apply(&dt_record("tok-1", alice.clone(), 7_500, vec![]));
         let got = img.delegation_token_by_id("tok-1").expect("token present");
-        assert_eq!(
-            (got.expiry_timestamp_ms, img.all_delegation_tokens().count()),
-            (7_500, 1)
-        );
+        assert_eq!(got.expiry_timestamp_ms, 7_500);
+        assert_eq!(img.all_delegation_tokens().count(), 1);
     }
 
     #[test]
@@ -2391,13 +2380,8 @@ mod tests {
                 token_id: "tok-1".into(),
             },
         ));
-        assert_eq!(
-            (
-                img.delegation_token_by_id("tok-1").is_none(),
-                img.all_delegation_tokens().count(),
-            ),
-            (true, 0)
-        );
+        assert_eq!(img.delegation_token_by_id("tok-1").is_none(), true);
+        assert_eq!(img.all_delegation_tokens().count(), 0);
     }
 
     #[test]
@@ -2433,14 +2417,9 @@ mod tests {
         let found_b = img
             .delegation_token_by_hmac(&hmac_b)
             .expect("hmac_b present");
-        assert_eq!(
-            (
-                found_a.token_id.as_str(),
-                found_b.token_id.as_str(),
-                img.delegation_token_by_hmac(&[0xCC; 32]).is_none(),
-            ),
-            ("tok-a", "tok-b", true)
-        );
+        assert_eq!(found_a.token_id.as_str(), "tok-a");
+        assert_eq!(found_b.token_id.as_str(), "tok-b");
+        assert_eq!(img.delegation_token_by_hmac(&[0xCC; 32]).is_none(), true);
     }
 
     #[test]
@@ -2454,13 +2433,8 @@ mod tests {
         img.apply(&dt_record("b-1", bob.clone(), 7_000, vec![]));
 
         let alice_tokens = img.delegation_tokens_by_owner(&alice);
-        assert_eq!(
-            (
-                alice_tokens.len(),
-                alice_tokens.iter().all(|token| token.owner == alice),
-            ),
-            (2, true)
-        );
+        assert_eq!(alice_tokens.len(), 2);
+        assert_eq!(alice_tokens.iter().all(|token| token.owner == alice), true);
 
         let bob_tokens = img.delegation_tokens_by_owner(&bob);
         assert_eq!(
@@ -2493,10 +2467,8 @@ mod tests {
                 kraft_version: crate::voters::KRaftVersionRange::default(),
             }]),
         }));
-        assert_eq!(
-            (image.kraft_version(), image.voters().contains(NodeId(1))),
-            (1, true)
-        );
+        assert_eq!(image.kraft_version(), 1);
+        assert_eq!(image.voters().contains(NodeId(1)), true);
     }
 
     #[test]
@@ -2559,13 +2531,8 @@ mod tests {
                 configs: std::collections::BTreeMap::new(),
             },
         ));
-        assert_eq!(
-            (
-                img.client_metrics_config("sub-a").is_none(),
-                img.client_metrics_subscriptions().count(),
-            ),
-            (true, 0)
-        );
+        assert_eq!(img.client_metrics_config("sub-a").is_none(), true);
+        assert_eq!(img.client_metrics_subscriptions().count(), 0);
     }
 
     #[test]
@@ -2616,12 +2583,10 @@ mod tests {
 
         // Resolves by id to the same record `topic(name)` returns.
         assert_eq!(
-            (
-                img.topic_by_id(&id).map(|t| t.name.as_str()),
-                img.topic_name_by_id(&id),
-            ),
-            (Some("orders"), Some("orders"))
+            img.topic_by_id(&id).map(|t| t.name.as_str()),
+            Some("orders")
         );
+        assert_eq!(img.topic_name_by_id(&id), Some("orders"));
 
         // After delete the id no longer resolves and the name index is gone.
         img.apply(&MetadataRecord::V1DeleteTopic(
@@ -2629,13 +2594,8 @@ mod tests {
                 name: "orders".into(),
             },
         ));
-        assert_eq!(
-            (
-                img.topic_by_id(&id).is_none(),
-                img.topic_name_by_id(&id).is_none()
-            ),
-            (true, true)
-        );
+        assert_eq!(img.topic_by_id(&id).is_none(), true);
+        assert_eq!(img.topic_name_by_id(&id).is_none(), true);
     }
 
     #[test]
@@ -2652,13 +2612,8 @@ mod tests {
                 endpoints: vec![],
             },
         ));
-        assert_eq!(
-            (
-                image.broker_epoch(NodeId(5)),
-                image.broker_epoch(NodeId(404))
-            ),
-            (Some(99), None)
-        );
+        assert_eq!(image.broker_epoch(NodeId(5)), Some(99));
+        assert_eq!(image.broker_epoch(NodeId(404)), None);
     }
 
     // --- mutation-coverage tests --------------------------------------------
@@ -2667,7 +2622,8 @@ mod tests {
     fn fresh_image_accessors() {
         let id = Uuid::from_u128(0xABCD);
         let image = MetadataImage::new(id);
-        assert_eq!((image.cluster_id(), image.kraft_version()), (id, 0));
+        assert_eq!(image.cluster_id(), id);
+        assert_eq!(image.kraft_version(), 0);
     }
 
     #[test]

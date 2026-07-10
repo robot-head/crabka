@@ -476,11 +476,13 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
         .find(|m| m["name"] == "oauth-introspection-secret")
         .unwrap_or_else(|| panic!("oauth-introspection-secret mount present; body = {body}"));
     assert_eq!(
-        (
-            intro_mount["mountPath"].as_str(),
-            intro_mount["readOnly"].as_bool(),
-        ),
-        (Some("/etc/crabka/oauth-introspection"), Some(true)),
+        intro_mount["mountPath"].as_str(),
+        Some("/etc/crabka/oauth-introspection"),
+        "body = {body}"
+    );
+    assert_eq!(
+        intro_mount["readOnly"].as_bool(),
+        Some(true),
         "body = {body}"
     );
 }

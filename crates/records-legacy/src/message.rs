@@ -274,11 +274,8 @@ mod tests {
             let mut buffer = BytesMut::new();
             message.encode_into(&mut buffer);
             let decoded = Message::decode_from(&mut &buffer[..], message.encoded_len()).unwrap();
-            assert_eq!(
-                (buffer.len(), decoded),
-                (message.encoded_len(), message),
-                "case {name}"
-            );
+            assert_eq!(buffer.len(), message.encoded_len(), "case {name}");
+            assert_eq!(decoded, message, "case {name}");
         }
     }
 
@@ -356,10 +353,8 @@ mod tests {
     #[test]
     fn attribute_bit_constants() {
         // `1 << 3`; a `>>` flip would zero the timestamp-type bit.
-        assert_eq!(
-            (attrs::TIMESTAMP_TYPE_BIT, attrs::COMPRESSION_MASK),
-            (0b0000_1000, 0b0000_0111)
-        );
+        assert_eq!(attrs::TIMESTAMP_TYPE_BIT, 0b0000_1000);
+        assert_eq!(attrs::COMPRESSION_MASK, 0b0000_0111);
     }
 
     #[test]

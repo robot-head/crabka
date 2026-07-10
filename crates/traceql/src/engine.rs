@@ -2707,16 +2707,11 @@ mod tests {
             .search("t", "{ .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].root_service_name.as_str(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], "a", 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].root_service_name.as_str(), "a");
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -2758,17 +2753,15 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
         assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0]
-                    .spans
-                    .iter()
-                    .map(|span| span.span_id)
-                    .collect::<Vec<_>>(),
-            ),
-            (1, 1, vec![[1; 8]])
+            r.traces[0].span_sets[0]
+                .spans
+                .iter()
+                .map(|span| span.span_id)
+                .collect::<Vec<_>>(),
+            vec![[1; 8]]
         );
     }
 
@@ -2790,7 +2783,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!((r.traces.len(), r.traces[0].trace_id), (1, [2; 16]));
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [2; 16]);
     }
 
     #[tokio::test]
@@ -2807,15 +2801,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -2825,14 +2814,9 @@ mod tests {
             .search("t", "{ .svc = \"a\" } && { .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-            ),
-            (1, [9; 16], 2)
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 2);
     }
 
     #[tokio::test]
@@ -2861,18 +2845,16 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 2);
         assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0]
-                    .spans
-                    .iter()
-                    .map(|span| span.span_id)
-                    .collect::<Vec<_>>(),
-            ),
-            (1, [9; 16], 2, vec![[1; 8], [2; 8]])
+            r.traces[0].span_sets[0]
+                .spans
+                .iter()
+                .map(|span| span.span_id)
+                .collect::<Vec<_>>(),
+            vec![[1; 8], [2; 8]]
         );
     }
 
@@ -2883,14 +2865,9 @@ mod tests {
             .search("t", "{ .svc = \"a\" } >> { .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -2900,15 +2877,10 @@ mod tests {
             .search("t", "{ span:childCount = 1 }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], 1, [1; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
     }
 
     #[tokio::test]
@@ -2956,10 +2928,8 @@ mod tests {
             .iter()
             .find(|trace| trace.trace_id == [8; 16])
             .unwrap();
-        assert_eq!(
-            (first.span_sets[0].matched, second.span_sets[0].matched),
-            (2, 1)
-        );
+        assert_eq!(first.span_sets[0].matched, 2);
+        assert_eq!(second.span_sets[0].matched, 1);
     }
 
     #[tokio::test]
@@ -2970,10 +2940,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (r.traces.len(), r.traces[0].root_service_name.as_str()),
-            (1, "a")
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].root_service_name.as_str(), "a");
     }
 
     #[tokio::test]
@@ -2990,14 +2958,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-            ),
-            (1, [9; 16], 2),
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 2);
     }
 
     #[tokio::test]
@@ -3008,15 +2971,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -3033,15 +2991,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -3061,15 +3014,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], 1, [1; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
     }
 
     #[tokio::test]
@@ -3090,14 +3038,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, 1, [1; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
     }
 
     #[tokio::test]
@@ -3118,14 +3061,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -3146,14 +3084,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -3186,14 +3119,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, 1, [3; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [3; 8]);
     }
 
     #[tokio::test]
@@ -3231,17 +3159,15 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 2);
         assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0]
-                    .spans
-                    .iter()
-                    .map(|span| span.span_id)
-                    .collect::<Vec<_>>(),
-            ),
-            (1, 2, vec![[2; 8], [3; 8]])
+            r.traces[0].span_sets[0]
+                .spans
+                .iter()
+                .map(|span| span.span_id)
+                .collect::<Vec<_>>(),
+            vec![[2; 8], [3; 8]]
         );
     }
 
@@ -3281,14 +3207,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -3316,17 +3237,15 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 2);
         assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0]
-                    .spans
-                    .iter()
-                    .map(|span| span.span_id)
-                    .collect::<Vec<_>>(),
-            ),
-            (1, 2, vec![[1; 8], [2; 8]])
+            r.traces[0].span_sets[0]
+                .spans
+                .iter()
+                .map(|span| span.span_id)
+                .collect::<Vec<_>>(),
+            vec![[1; 8], [2; 8]]
         );
     }
 
@@ -3357,27 +3276,17 @@ mod tests {
             .search("t", "{ span.http.method = \"POST\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, 1, [1; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
 
         let r = e
             .search("t", "{ span.http.method != \"POST\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -3397,15 +3306,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], 1, [1; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
     }
 
     #[tokio::test]
@@ -3416,15 +3320,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -3448,15 +3347,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], 1, [1; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
     }
 
     #[tokio::test]
@@ -3480,15 +3374,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], 1, [1; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [1; 8]);
     }
 
     #[tokio::test]
@@ -3499,10 +3388,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (r.traces.len(), r.traces[0].root_service_name.as_str()),
-            (1, "a")
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].root_service_name.as_str(), "a");
     }
 
     #[tokio::test]
@@ -3513,14 +3400,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -3537,14 +3419,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -3577,15 +3454,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                r.traces.len(),
-                r.traces[0].trace_id,
-                r.traces[0].span_sets[0].matched,
-                r.traces[0].span_sets[0].spans[0].span_id,
-            ),
-            (1, [9; 16], 1, [2; 8])
-        );
+        assert_eq!(r.traces.len(), 1);
+        assert_eq!(r.traces[0].trace_id, [9; 16]);
+        assert_eq!(r.traces[0].span_sets[0].matched, 1);
+        assert_eq!(r.traces[0].span_sets[0].spans[0].span_id, [2; 8]);
     }
 
     #[tokio::test]
@@ -4995,10 +4867,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (got.series.len(), got.series[0].exemplars.is_empty()),
-            (1, true)
-        );
+        assert_eq!(got.series.len(), 1);
+        assert_eq!(got.series[0].exemplars.is_empty(), true);
     }
 
     #[tokio::test]
@@ -5024,10 +4894,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (got.series.len(), got.series[0].exemplars.is_empty()),
-            (1, true)
-        );
+        assert_eq!(got.series.len(), 1);
+        assert_eq!(got.series[0].exemplars.is_empty(), true);
     }
 
     #[test]
@@ -6645,12 +6513,10 @@ mod tests {
 
         let row = compare_row(&batch, 0, UnixNano(0)).unwrap();
 
+        assert_eq!(&row.attrs, &vec![("span.http.method".into(), "GET".into())]);
         assert_eq!(
-            (&row.attrs, &row.raw_span_attrs),
-            (
-                &vec![("span.http.method".into(), "GET".into())],
-                &vec![("http.method".into(), AttrValue::Str("GET".into()))],
-            )
+            &row.raw_span_attrs,
+            &vec![("http.method".into(), AttrValue::Str("GET".into()))]
         );
     }
 

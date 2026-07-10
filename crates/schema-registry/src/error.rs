@@ -125,14 +125,9 @@ mod tests {
     #[test]
     fn incompatible_is_409_conflict() {
         let e = SrError::Incompatible(vec!["reader missing default".into()]);
-        assert_eq!(
-            (
-                e.error_code(),
-                e.http_status(),
-                e.to_string().contains("incompatible")
-            ),
-            (409, StatusCode::CONFLICT, true)
-        );
+        assert_eq!(e.error_code(), 409);
+        assert_eq!(e.http_status(), StatusCode::CONFLICT);
+        assert_eq!(e.to_string().contains("incompatible"), true);
     }
 
     #[test]
@@ -217,11 +212,8 @@ mod tests {
                 StatusCode::UNPROCESSABLE_ENTITY,
             ),
         ] {
-            assert_eq!(
-                (error.error_code(), error.http_status()),
-                (code, status),
-                "case {name}"
-            );
+            assert_eq!(error.error_code(), code, "case {name}");
+            assert_eq!(error.http_status(), status, "case {name}");
         }
     }
 
@@ -233,15 +225,13 @@ mod tests {
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(v["error_code"].as_i64(), Some(40401));
         assert_eq!(
-            (
-                status,
-                v["error_code"].as_i64(),
-                v["message"]
-                    .as_str()
-                    .is_some_and(|message| message.contains("av-value")),
-            ),
-            (StatusCode::NOT_FOUND, Some(40401), true)
+            v["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("av-value")),
+            true
         );
     }
 }

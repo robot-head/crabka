@@ -191,7 +191,8 @@ async fn rest_conformance_vs_cp_fixtures() {
         let response = post_register(&app, subject, body).await;
         let status = response.status();
         let actual = body_json(response).await;
-        assert_eq!((status, actual), (StatusCode::OK, expected), "case {name}");
+        assert_eq!(status, StatusCode::OK, "case {name}");
+        assert_eq!(actual, expected, "case {name}");
     }
 
     // ── 2. Register response: `{"id":N}` matches fixtures ────────────────────
@@ -287,8 +288,12 @@ async fn rest_conformance_vs_cp_fixtures() {
 
     let (fix_status, fix_err_body) = fixture_error_body("rest_err_subject_not_found.json");
     assert_eq!(
-        (nf_status.as_u16(), &nf_body["error_code"]),
-        (fix_status, &fix_err_body["error_code"]),
+        nf_status.as_u16(),
+        fix_status,
+        "subject-not-found response matches fixture"
+    );
+    assert_eq!(
+        &nf_body["error_code"], &fix_err_body["error_code"],
         "subject-not-found response matches fixture"
     );
 
@@ -304,8 +309,12 @@ async fn rest_conformance_vs_cp_fixtures() {
 
     let (fix_bad_status, fix_bad_body) = fixture_error_body("rest_err_invalid_schema.json");
     assert_eq!(
-        (bad_status.as_u16(), &bad_body["error_code"]),
-        (fix_bad_status, &fix_bad_body["error_code"]),
+        bad_status.as_u16(),
+        fix_bad_status,
+        "invalid-schema response matches fixture"
+    );
+    assert_eq!(
+        &bad_body["error_code"], &fix_bad_body["error_code"],
         "invalid-schema response matches fixture"
     );
 
@@ -332,18 +341,9 @@ async fn message_type_extension_round_trips_through_rest() {
     let by_id = get_json(&app, "/schemas/ids/1").await;
     let version = get_json(&app, "/subjects/orders-value/versions/1").await;
     let lookup = body_json(post_lookup(&app, "orders-value", &body).await).await;
-    assert_eq!(
-        (
-            &by_id["messageType"],
-            &version["messageType"],
-            &lookup["messageType"],
-        ),
-        (
-            &serde_json::json!("demo.Order"),
-            &serde_json::json!("demo.Order"),
-            &serde_json::json!("demo.Order"),
-        )
-    );
+    assert_eq!(&by_id["messageType"], &serde_json::json!("demo.Order"));
+    assert_eq!(&version["messageType"], &serde_json::json!("demo.Order"));
+    assert_eq!(&lookup["messageType"], &serde_json::json!("demo.Order"));
 
     cancel.cancel();
     broker.shutdown().await;

@@ -1183,7 +1183,8 @@ mod tests {
         desired.insert(add.clone());
 
         let (adds, dels) = diff_acls(&current, &desired);
-        assert_eq!((adds, dels), (vec![add], vec![drop]));
+        assert_eq!(adds, vec![add]);
+        assert_eq!(dels, vec![drop]);
     }
 
     #[test]
@@ -1200,7 +1201,8 @@ mod tests {
         };
         s.insert(e);
         let (adds, dels) = diff_acls(&s, &s);
-        assert_eq!((adds, dels), (vec![], vec![]));
+        assert_eq!(adds, vec![]);
+        assert_eq!(dels, vec![]);
     }
 
     #[test]

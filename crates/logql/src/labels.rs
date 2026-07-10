@@ -439,12 +439,10 @@ mod tests {
         let format = LabelFormat::new(vec![route.clone(), summary.clone()]).unwrap();
 
         assert_eq!(format.assignments(), &[route.clone(), summary]);
+        assert_eq!(route.destination(), "route");
         assert_eq!(
-            (
-                route.destination(),
-                matches!(route.value(), LabelFormatValue::Rename(source) if source == "path"),
-            ),
-            ("route", true)
+            matches!(route.value(), LabelFormatValue::Rename(source) if source == "path"),
+            true
         );
     }
 
@@ -452,10 +450,8 @@ mod tests {
     fn unwrap_expression_accessors_and_validation_use_label() {
         let expression = UnwrapExpression::bytes("size").unwrap();
 
-        assert_eq!(
-            (expression.label(), expression.conversion()),
-            ("size", UnwrapConversion::Bytes)
-        );
+        assert_eq!(expression.label(), "size");
+        assert_eq!(expression.conversion(), UnwrapConversion::Bytes);
         check!(UnwrapExpression::new("").is_err());
         check!(UnwrapExpression::bytes("").is_err());
         check!(UnwrapExpression::duration("").is_err());

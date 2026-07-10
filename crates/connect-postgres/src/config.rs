@@ -65,22 +65,16 @@ mod tests {
         let config = PostgresSourceConfig::from_resolved(&resolved).unwrap();
 
         assert_eq!(
-            (
-                config.database_url.expose_secret(),
-                config.slot_name.as_str(),
-                config.publication_name.as_str(),
-                config.schema.as_str(),
-                config.table_names.as_slice(),
-                config.max_messages_per_poll,
-            ),
-            (
-                "postgres://localhost/app",
-                "crabka_slot",
-                "crabka_connect",
-                "public",
-                ["accounts".to_string(), "transactions".to_string()].as_slice(),
-                1000,
-            )
+            config.database_url.expose_secret(),
+            "postgres://localhost/app"
         );
+        assert_eq!(config.slot_name.as_str(), "crabka_slot");
+        assert_eq!(config.publication_name.as_str(), "crabka_connect");
+        assert_eq!(config.schema.as_str(), "public");
+        assert_eq!(
+            config.table_names.as_slice(),
+            ["accounts".to_string(), "transactions".to_string()].as_slice()
+        );
+        assert_eq!(config.max_messages_per_poll, 1000);
     }
 }

@@ -304,13 +304,14 @@ mod tests {
         let from = inter.from.as_ref().unwrap();
         let pod = from[0].pod_selector.as_ref().unwrap();
         let labels = pod.match_labels.as_ref().unwrap();
+        assert_eq!(from.len(), 1);
         assert_eq!(
-            (
-                from.len(),
-                labels.get("app.kubernetes.io/name").map(String::as_str),
-                labels.get("app.kubernetes.io/instance").map(String::as_str),
-            ),
-            (1, Some(APP_LABEL), Some("demo"))
+            labels.get("app.kubernetes.io/name").map(String::as_str),
+            Some(APP_LABEL)
+        );
+        assert_eq!(
+            labels.get("app.kubernetes.io/instance").map(String::as_str),
+            Some("demo")
         );
     }
 
@@ -385,11 +386,10 @@ mod tests {
                     })
                 })
             });
-            assert_eq!(
-                (rules.len(), allow_all, restricted),
-                expected,
-                "case {name}"
-            );
+            let (expected_rule_count, expected_allow_all, expected_restricted) = expected;
+            assert_eq!(rules.len(), expected_rule_count, "case {name}");
+            assert_eq!(allow_all, expected_allow_all, "case {name}");
+            assert_eq!(restricted, expected_restricted, "case {name}");
         }
     }
 
@@ -432,11 +432,12 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(
-            (
-                sel.get("app.kubernetes.io/name").map(String::as_str),
-                sel.get("app.kubernetes.io/instance").map(String::as_str),
-            ),
-            (Some(APP_LABEL), Some("demo"))
+            sel.get("app.kubernetes.io/name").map(String::as_str),
+            Some(APP_LABEL)
+        );
+        assert_eq!(
+            sel.get("app.kubernetes.io/instance").map(String::as_str),
+            Some("demo")
         );
     }
 
@@ -446,22 +447,18 @@ mod tests {
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
         let spec = np.spec.as_ref().unwrap();
         assert_eq!(
-            (spec.policy_types.as_deref(), spec.egress.as_deref()),
-            (Some(["Ingress".to_string()].as_slice()), None)
+            spec.policy_types.as_deref(),
+            Some(["Ingress".to_string()].as_slice())
         );
+        assert_eq!(spec.egress.as_deref(), None);
     }
 
     #[test]
     fn render_name_and_namespace() {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
-        assert_eq!(
-            (
-                np.metadata.name.as_deref(),
-                np.metadata.namespace.as_deref()
-            ),
-            (Some("demo-broker-policy"), Some("default"))
-        );
+        assert_eq!(np.metadata.name.as_deref(), Some("demo-broker-policy"));
+        assert_eq!(np.metadata.namespace.as_deref(), Some("default"));
     }
 
     #[test]

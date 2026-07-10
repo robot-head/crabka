@@ -51,10 +51,8 @@ async fn single_node_becomes_primary() {
     let c = cfg(&broker.listen_addr().to_string(), 8081);
     let mut rx = Election::start(&c, cancel.clone()).await.unwrap();
     let st = await_state(&mut rx, 20, |s| s.is_primary).await;
-    assert_eq!(
-        (st.is_primary, st.primary_url.as_deref()),
-        (true, Some("http://127.0.0.1:8081"))
-    );
+    assert_eq!(st.is_primary, true);
+    assert_eq!(st.primary_url.as_deref(), Some("http://127.0.0.1:8081"));
     cancel.cancel();
     broker.shutdown().await;
 }

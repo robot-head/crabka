@@ -120,14 +120,9 @@ mod tests {
     #[test]
     fn default_limits_are_generous_and_finite() {
         let l = Limits::default();
-        assert_eq!(
-            (
-                l.ingestion_rate > 0.0,
-                l.max_global_series_per_user >= 100_000,
-                l.max_label_name_length,
-            ),
-            (true, true, 1024)
-        );
+        assert_eq!(l.ingestion_rate > 0.0, true);
+        assert_eq!(l.max_global_series_per_user >= 100_000, true);
+        assert_eq!(l.max_label_name_length, 1024);
     }
 
     #[test]
@@ -158,11 +153,9 @@ mod tests {
                 (400, "bad_data"),
             ),
         ] {
-            assert_eq!(
-                (error.http_status(), error.error_type()),
-                expected,
-                "case {name}"
-            );
+            let (expected_status, expected_type) = expected;
+            assert_eq!(error.http_status(), expected_status, "case {name}");
+            assert_eq!(error.error_type(), expected_type, "case {name}");
         }
     }
 }

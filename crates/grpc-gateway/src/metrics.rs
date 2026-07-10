@@ -490,11 +490,13 @@ mod tests {
 
         let buf = encode(&m);
         assert_eq!(
-            (
-                buf.contains("method=\"send\""),
-                buf.contains("method=\"webhook_in\""),
-            ),
-            (true, true),
+            buf.contains("method=\"send\""),
+            true,
+            "method labels missing:\n{buf}"
+        );
+        assert_eq!(
+            buf.contains("method=\"webhook_in\""),
+            true,
             "method labels missing:\n{buf}"
         );
 
@@ -518,13 +520,8 @@ mod tests {
         let lbl_err = ResultLabel {
             result: "error".into(),
         };
-        assert_eq!(
-            (
-                m.sends_total.get_or_create(&lbl_ok).get(),
-                m.sends_total.get_or_create(&lbl_err).get(),
-            ),
-            (2, 1)
-        );
+        assert_eq!(m.sends_total.get_or_create(&lbl_ok).get(), 2);
+        assert_eq!(m.sends_total.get_or_create(&lbl_err).get(), 1);
     }
 
     #[test]
@@ -571,13 +568,8 @@ mod tests {
         let unavail = OutcomeLabel {
             outcome: "unavailable".into(),
         };
-        assert_eq!(
-            (
-                m.forward_total.get_or_create(&ok).get(),
-                m.forward_total.get_or_create(&unavail).get(),
-            ),
-            (2, 1)
-        );
+        assert_eq!(m.forward_total.get_or_create(&ok).get(), 2);
+        assert_eq!(m.forward_total.get_or_create(&unavail).get(), 1);
 
         let commit = KindLabel {
             kind: "commit".into(),
@@ -585,13 +577,8 @@ mod tests {
         let abort = KindLabel {
             kind: "abort".into(),
         };
-        assert_eq!(
-            (
-                m.txn_total.get_or_create(&commit).get(),
-                m.txn_total.get_or_create(&abort).get(),
-            ),
-            (1, 1)
-        );
+        assert_eq!(m.txn_total.get_or_create(&commit).get(), 1);
+        assert_eq!(m.txn_total.get_or_create(&abort).get(), 1);
     }
 
     #[test]

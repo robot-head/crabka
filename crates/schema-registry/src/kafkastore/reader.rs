@@ -226,11 +226,12 @@ mod tests {
         apply_record(&store, SchemaRecord::Noop);
         let snapshot = store.read();
         assert_eq!(
-            (
-                snapshot.versions("av-value", false).unwrap(),
-                snapshot.schema_by_id(SchemaId(1), false).unwrap().1,
-            ),
-            (vec![SchemaVersion(1)], "{\"type\":\"int\"}".to_owned())
+            snapshot.versions("av-value", false).unwrap(),
+            vec![SchemaVersion(1)]
+        );
+        assert_eq!(
+            snapshot.schema_by_id(SchemaId(1), false).unwrap().1,
+            "{\"type\":\"int\"}".to_owned()
         );
     }
 

@@ -540,24 +540,12 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(
-            (
-                cfg.endpoint.as_str(),
-                cfg.protocol,
-                cfg.sample_ratio,
-                cfg.service_name.as_str(),
-                cfg.service_instance_id.as_str(),
-                cfg.service_version.as_str()
-            ),
-            (
-                "http://collector:4317",
-                OtlpProtocol::Grpc,
-                1.0,
-                "crabka-broker",
-                "7",
-                "0.1.1"
-            )
-        );
+        assert_eq!(cfg.endpoint.as_str(), "http://collector:4317");
+        assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
+        assert_eq!(cfg.sample_ratio, 1.0);
+        assert_eq!(cfg.service_name.as_str(), "crabka-broker");
+        assert_eq!(cfg.service_instance_id.as_str(), "7");
+        assert_eq!(cfg.service_version.as_str(), "0.1.1");
     }
 
     #[test]
@@ -572,10 +560,8 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(
-            (cfg.protocol, cfg.endpoint.as_str()),
-            (OtlpProtocol::HttpProtobuf, "http://localhost:4318")
-        );
+        assert_eq!(cfg.protocol, OtlpProtocol::HttpProtobuf);
+        assert_eq!(cfg.endpoint.as_str(), "http://localhost:4318");
     }
 
     #[test]
@@ -587,10 +573,8 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(
-            (cfg.protocol, cfg.endpoint.as_str()),
-            (OtlpProtocol::Grpc, "http://localhost:4317")
-        );
+        assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
+        assert_eq!(cfg.endpoint.as_str(), "http://localhost:4317");
     }
 
     #[test]
@@ -757,10 +741,8 @@ mod tests {
             "crabka-broker",
         )
         .expect("enabled");
-        assert_eq!(
-            (cfg.service_name.as_str(), cfg.timeout),
-            ("my-kafka", Duration::from_secs(3))
-        );
+        assert_eq!(cfg.service_name.as_str(), "my-kafka");
+        assert_eq!(cfg.timeout, Duration::from_secs(3));
     }
 
     #[test]

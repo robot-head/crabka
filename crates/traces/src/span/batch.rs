@@ -319,7 +319,8 @@ mod tests {
     fn builds_batch_with_identity_and_nested_set() {
         let spans = vec![span(1, None, "api"), span(2, Some(1), "api")];
         let batch = span_batch(&spans).unwrap();
-        assert_eq!((batch.schema(), batch.num_rows()), (span_block_schema(), 2));
+        assert_eq!(batch.schema(), span_block_schema());
+        assert_eq!(batch.num_rows(), 2);
 
         let trace_ids = col::<FixedSizeBinaryArray>(&batch, SCOL_TRACE_ID);
         assert!(trace_ids.value(0) == [1; 16]);
@@ -387,10 +388,8 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!(
-            (method_values.value(0), method_values.value(1)),
-            ("GET", "POST")
-        );
+        assert_eq!(method_values.value(0), "GET");
+        assert_eq!(method_values.value(1), "POST");
     }
 
     fn attr_keys_of_row(batch: &RecordBatch, row: usize) -> Vec<String> {
@@ -463,7 +462,8 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert_eq!((service_values.len(), service_values.value(0)), (1, "api"));
+        assert_eq!(service_values.len(), 1);
+        assert_eq!(service_values.value(0), "api");
     }
 
     #[test]
@@ -484,19 +484,20 @@ mod tests {
         });
 
         let batch = span_batch(&[s]).unwrap();
+        assert_eq!(batch.num_rows(), 1);
         assert_eq!(
-            (
-                batch.num_rows(),
-                batch
-                    .column_by_name(crabka_blockstore::SCOL_EVENTS)
-                    .unwrap()
-                    .len(),
-                batch
-                    .column_by_name(crabka_blockstore::SCOL_LINKS)
-                    .unwrap()
-                    .len(),
-            ),
-            (1, 1, 1)
+            batch
+                .column_by_name(crabka_blockstore::SCOL_EVENTS)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            batch
+                .column_by_name(crabka_blockstore::SCOL_LINKS)
+                .unwrap()
+                .len(),
+            1
         );
     }
 }

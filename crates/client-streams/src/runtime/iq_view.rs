@@ -312,14 +312,9 @@ mod tests {
             view.all().await.unwrap().len(),
             view.approximate_num_entries().await.unwrap(),
         );
-        assert_eq!(
-            (hits, r, counts),
-            (
-                (Some(2), None),
-                vec![("a".to_string(), 1), ("b".to_string(), 2)],
-                (3, 3)
-            )
-        );
+        assert_eq!(hits, (Some(2), None));
+        assert_eq!(r, vec![("a".to_string(), 1), ("b".to_string(), 2)]);
+        assert_eq!(counts, (3, 3));
     }
 
     async fn window_registry() -> StoreRegistry {

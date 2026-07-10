@@ -760,9 +760,10 @@ mod tests {
 
         let jobs = plan_compactions(&index, 2);
 
+        assert_eq!(jobs.len(), 1);
         assert_eq!(
-            (jobs.len(), jobs[0].input_keys.as_slice()),
-            (1, &["a.parquet".to_string(), "b.parquet".to_string()][..])
+            jobs[0].input_keys.as_slice(),
+            &["a.parquet".to_string(), "b.parquet".to_string()][..]
         );
     }
 

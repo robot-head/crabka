@@ -1526,14 +1526,12 @@ mod tests {
             ("service".to_string(), "api".to_string()),
         ]);
 
+        assert_eq!(label_set, expected);
+        assert_eq!(series_fingerprint(&expected) != 0, true);
         assert_eq!(
-            (
-                label_set,
-                series_fingerprint(&expected) != 0,
-                series_fingerprint(&labels([("a", "bc")]))
-                    != series_fingerprint(&labels([("ab", "c")])),
-            ),
-            (expected, true, true)
+            series_fingerprint(&labels([("a", "bc")]))
+                != series_fingerprint(&labels([("ab", "c")])),
+            true
         );
     }
 
@@ -1620,29 +1618,29 @@ mod tests {
         expected_tenant_a_series.sort_by_key(|(fingerprint, _)| *fingerprint);
 
         assert_eq!(
-            (
-                index.labels_for("tenant-a", api_prod).cloned(),
-                index.labels_for("tenant-b", api_prod).cloned(),
-                index.labels_for("tenant-b", other_tenant).cloned(),
-                index.label_names("tenant-a"),
-                index.label_names("missing"),
-                index.label_values("tenant-a", "service"),
-                index.label_values("tenant-b", "service"),
-                index.label_values("tenant-a", "missing"),
-                index.tenant_series("tenant-a"),
-            ),
-            (
-                Some(api_prod_labels),
-                None,
-                Some(other_tenant_labels),
-                BTreeSet::from(["env".into(), "region".into(), "service".into()]),
-                BTreeSet::new(),
-                BTreeSet::from(["api".into(), "worker".into()]),
-                BTreeSet::from(["api".into()]),
-                BTreeSet::new(),
-                expected_tenant_a_series,
-            )
+            index.labels_for("tenant-a", api_prod).cloned(),
+            Some(api_prod_labels)
         );
+        assert_eq!(index.labels_for("tenant-b", api_prod).cloned(), None);
+        assert_eq!(
+            index.labels_for("tenant-b", other_tenant).cloned(),
+            Some(other_tenant_labels)
+        );
+        assert_eq!(
+            index.label_names("tenant-a"),
+            BTreeSet::from(["env".into(), "region".into(), "service".into()])
+        );
+        assert_eq!(index.label_names("missing"), BTreeSet::new());
+        assert_eq!(
+            index.label_values("tenant-a", "service"),
+            BTreeSet::from(["api".into(), "worker".into()])
+        );
+        assert_eq!(
+            index.label_values("tenant-b", "service"),
+            BTreeSet::from(["api".into()])
+        );
+        assert_eq!(index.label_values("tenant-a", "missing"), BTreeSet::new());
+        assert_eq!(index.tenant_series("tenant-a"), expected_tenant_a_series);
 
         let exact_api_prod = [
             LabelPredicate::new("service", MatchOp::Equal, "api").unwrap(),
@@ -1717,17 +1715,11 @@ mod tests {
             assert_eq!(first.overlaps(other), expected, "case {name}");
         }
         check!(TimeRange::new(21, 20).is_err());
+        assert_eq!(key.object_key(), object_key.to_string());
+        assert_eq!(block_path(root, &key), root.join(object_key));
         assert_eq!(
-            (
-                key.object_key(),
-                block_path(root, &key),
-                log_block_object_path(&prefix, &key).to_string(),
-            ),
-            (
-                object_key.to_string(),
-                root.join(object_key),
-                format!("observability/logs/{object_key}"),
-            )
+            log_block_object_path(&prefix, &key).to_string(),
+            format!("observability/logs/{object_key}")
         );
     }
 

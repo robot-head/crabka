@@ -823,14 +823,12 @@ authentication:
             panic!("expected OAuth authentication");
         };
         assert_eq!(
-            (
-                oauth.valid_issuer_uri.as_str(),
-                oauth.jwks_endpoint_uri.as_deref(),
-            ),
-            (
-                "https://issuer.example.com/",
-                Some("https://issuer.example.com/jwks"),
-            )
+            oauth.valid_issuer_uri.as_str(),
+            "https://issuer.example.com/"
+        );
+        assert_eq!(
+            oauth.jwks_endpoint_uri.as_deref(),
+            Some("https://issuer.example.com/jwks")
         );
     }
 

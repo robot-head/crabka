@@ -1890,22 +1890,12 @@ mod introspection_tests {
     fn temporal_claims_iat_and_nbf_future_rejected() {
         // iat: at the boundary it's valid; issued in the future is rejected.
         let iat = json!({ "iat": 10 }); // iat_ms = 10_000
-        assert_eq!(
-            (
-                check_temporal_claims(&iat, 10_000, 0).is_ok(),
-                check_temporal_claims(&iat, 9_999, 0).is_err(),
-            ),
-            (true, true)
-        );
+        assert_eq!(check_temporal_claims(&iat, 10_000, 0).is_ok(), true);
+        assert_eq!(check_temporal_claims(&iat, 9_999, 0).is_err(), true);
         // nbf (not-before): same shape.
         let nbf = json!({ "nbf": 10 });
-        assert_eq!(
-            (
-                check_temporal_claims(&nbf, 10_000, 0).is_ok(),
-                check_temporal_claims(&nbf, 9_999, 0).is_err(),
-            ),
-            (true, true)
-        );
+        assert_eq!(check_temporal_claims(&nbf, 10_000, 0).is_ok(), true);
+        assert_eq!(check_temporal_claims(&nbf, 9_999, 0).is_err(), true);
     }
 
     #[test]
@@ -2005,13 +1995,8 @@ mod introspection_tests {
         );
         let v = validator(mock.clone());
         let outcome = v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(
-            (
-                outcome.principal.name.as_str(),
-                outcome.principal.auth_method
-            ),
-            ("alice", AuthMethod::SaslOAuthBearer)
-        );
+        assert_eq!(outcome.principal.name.as_str(), "alice");
+        assert_eq!(outcome.principal.auth_method, AuthMethod::SaslOAuthBearer);
     }
 
     #[tokio::test]
@@ -2320,10 +2305,8 @@ mod introspection_tests {
             .validate("opaque-token", now_ms)
             .await
             .expect("token valid");
-        assert_eq!(
-            (outcome.principal.name.as_str(), outcome.expires_at_ms),
-            ("alice", Some(exp_secs * 1000))
-        );
+        assert_eq!(outcome.principal.name.as_str(), "alice");
+        assert_eq!(outcome.expires_at_ms, Some(exp_secs * 1000));
     }
 
     // ---- introspection parity -----------------------------------

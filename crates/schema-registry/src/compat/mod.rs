@@ -243,9 +243,12 @@ mod tests {
             ("none", "NONE", (CompatibilityLevel::None, false, 0)),
         ] {
             let level = CompatibilityLevel::parse(input);
+            let (expected_level, expected_transitive, expected_direction_count) = expected;
+            assert_eq!(level, expected_level, "case {name}");
+            assert_eq!(level.is_transitive(), expected_transitive, "case {name}");
             assert_eq!(
-                (level, level.is_transitive(), level.directions().len()),
-                expected,
+                level.directions().len(),
+                expected_direction_count,
                 "case {name}"
             );
         }

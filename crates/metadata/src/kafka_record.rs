@@ -81,7 +81,8 @@ mod tests {
     #[test]
     fn key_is_none_and_value_is_present() {
         let kafka = to_kafka_record(&sample_topic()).expect("encode");
-        assert_eq!((kafka.key, kafka.value.is_some()), (None, true));
+        assert_eq!(kafka.key, None);
+        assert_eq!(kafka.value.is_some(), true);
     }
 
     #[test]

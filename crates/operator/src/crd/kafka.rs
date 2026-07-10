@@ -856,18 +856,16 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = Kafka::crd();
+        assert_eq!(crd.spec.group.as_str(), "crabka.io");
+        assert_eq!(crd.spec.names.kind.as_str(), "Kafka");
+        assert_eq!(crd.spec.names.plural.as_str(), "kafkas");
         assert_eq!(
-            (
-                crd.spec.group.as_str(),
-                crd.spec.names.kind.as_str(),
-                crd.spec.names.plural.as_str(),
-                crd.spec
-                    .versions
-                    .iter()
-                    .map(|v| v.name.as_str())
-                    .collect::<Vec<_>>(),
-            ),
-            ("crabka.io", "Kafka", "kafkas", vec!["v1alpha1"])
+            crd.spec
+                .versions
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["v1alpha1"]
         );
     }
 
@@ -953,7 +951,8 @@ mod tests {
     fn spec_only_carries_kafka_version() {
         let json = r#"{"kafkaVersion":"0.1.1"}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert_eq!((spec.kafka_version.as_str(), spec.config), ("0.1.1", None));
+        assert_eq!(spec.kafka_version.as_str(), "0.1.1");
+        assert_eq!(spec.config, None);
     }
 
     #[test]
@@ -975,30 +974,26 @@ mod tests {
         }"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         assert_eq!(
-            (spec.listeners, spec.inter_broker_listener_name),
-            (
-                vec![Listener {
-                    name: "PLAIN".to_string(),
-                    port: 9092,
-                    type_: ListenerType::Internal,
-                    tls: false,
-                    authentication: None,
-                    configuration: None,
-                    network_policy_peers: None,
-                }],
-                Some("PLAIN".to_string()),
-            )
+            spec.listeners,
+            vec![Listener {
+                name: "PLAIN".to_string(),
+                port: 9092,
+                type_: ListenerType::Internal,
+                tls: false,
+                authentication: None,
+                configuration: None,
+                network_policy_peers: None,
+            }]
         );
+        assert_eq!(spec.inter_broker_listener_name, Some("PLAIN".to_string()));
     }
 
     #[test]
     fn spec_defaults_listeners_to_empty() {
         let json = r#"{"kafkaVersion":"0.1.1"}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            (spec.listeners, spec.inter_broker_listener_name),
-            (vec![], None)
-        );
+        assert_eq!(spec.listeners, vec![]);
+        assert_eq!(spec.inter_broker_listener_name, None);
     }
 
     #[test]
@@ -1062,12 +1057,10 @@ mod tests {
         let json = r#"{"kafkaVersion":"0.1.1","logging":{"loggers":{"root":"info","crabka_broker":"debug"}}}"#;
         let spec: KafkaSpec = serde_json::from_str(json).unwrap();
         let lg = spec.logging.expect("logging present");
+        assert_eq!(lg.r#type, LoggingType::Inline);
         assert_eq!(
-            (
-                lg.r#type,
-                lg.loggers.get("crabka_broker").map(String::as_str)
-            ),
-            (LoggingType::Inline, Some("debug"))
+            lg.loggers.get("crabka_broker").map(String::as_str),
+            Some("debug")
         );
     }
 
@@ -1077,7 +1070,8 @@ mod tests {
             "kafkaVersion": "3.7.0",
         }))
         .expect("parse minimal spec");
-        assert_eq!((v.cluster_ca, v.clients_ca), (None, None));
+        assert_eq!(v.cluster_ca, None);
+        assert_eq!(v.clients_ca, None);
     }
 
     #[test]
@@ -1115,15 +1109,13 @@ mod tests {
             "clientsCa": { "generateCertificateAuthority": false },
         }))
         .expect("parse with CAs");
+        assert_eq!(v.cluster_ca.as_ref().unwrap().validity_days, 30);
         assert_eq!(
-            (
-                v.cluster_ca.as_ref().unwrap().validity_days,
-                v.clients_ca
-                    .as_ref()
-                    .unwrap()
-                    .generate_certificate_authority,
-            ),
-            (30, false)
+            v.clients_ca
+                .as_ref()
+                .unwrap()
+                .generate_certificate_authority,
+            false
         );
     }
 

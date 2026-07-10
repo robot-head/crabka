@@ -364,13 +364,8 @@ mod tests {
         let names = idx.tag_names("t", 0, 1_000);
         let mut vals = idx.tag_values("t", "service.name", 0, 1_000);
         vals.sort();
-        assert_eq!(
-            (names, vals),
-            (
-                vec!["service.name".to_string()],
-                vec!["api".to_string(), "web".to_string()],
-            )
-        );
+        assert_eq!(names, vec!["service.name".to_string()]);
+        assert_eq!(vals, vec!["api".to_string(), "web".to_string()]);
     }
 
     #[test]
@@ -379,10 +374,8 @@ mod tests {
         idx.add_trace_block("zeta", stats("b1", 0, 100, &[1], &[]));
         idx.add_trace_block("alpha", stats("b2", 0, 100, &[2], &[]));
         idx.add_trace_block("alpha", stats("b3", 0, 100, &[3], &[]));
-        assert_eq!(
-            (idx.tenants(), TraceIndex::new().tenants()),
-            (vec!["alpha".to_string(), "zeta".to_string()], Vec::new())
-        );
+        assert_eq!(idx.tenants(), vec!["alpha".to_string(), "zeta".to_string()]);
+        assert!(TraceIndex::new().tenants().is_empty());
     }
 
     #[test]
@@ -441,10 +434,8 @@ mod tests {
         let idx = seed();
         let mut got = BlockIndex::candidate_blocks(&idx, "t", 0, 1_000);
         got.sort();
-        assert_eq!(
-            (got, idx.block_count("t")),
-            (vec!["b1".to_string(), "b2".to_string()], 2)
-        );
+        assert_eq!(got, vec!["b1".to_string(), "b2".to_string()]);
+        assert_eq!(idx.block_count("t"), 2);
     }
 
     #[test]
@@ -464,15 +455,10 @@ mod tests {
         BlockIndex::add_block(&mut idx, &meta);
         BlockIndex::add_block(&mut idx, &meta);
 
+        assert_eq!(idx.block_count("t"), 1);
         assert_eq!(
-            (
-                idx.block_count("t"),
-                BlockIndex::candidate_blocks(&idx, "t", 0, 100),
-            ),
-            (
-                1,
-                vec!["traces/t/00000/00000000000000000001.parquet".to_string()],
-            )
+            BlockIndex::candidate_blocks(&idx, "t", 0, 100),
+            vec!["traces/t/00000/00000000000000000001.parquet".to_string()]
         );
     }
 

@@ -1138,9 +1138,10 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &format!("{grafana_base}/api/datasources/uid/{GRAFANA_TEMPO_DATASOURCE_UID}"),
     )
     .await?;
+    assert_eq!(fetched["type"].as_str(), Some("tempo"));
     assert_eq!(
-        (fetched["type"].as_str(), fetched["url"].as_str()),
-        (Some("tempo"), Some(crabka.container_base_url.as_str()))
+        fetched["url"].as_str(),
+        Some(crabka.container_base_url.as_str())
     );
 
     let proxy = |path: &str| {
@@ -1206,9 +1207,10 @@ async fn grafana_e2e_full_surface() -> TestResult {
         &proxy(&format!("api/v2/traces/{TRACE_B_HEX}?{range}")),
     )
     .await?;
+    assert_eq!(trace_b["status"].as_str(), Some("PARTIAL"));
     assert_eq!(
-        (trace_b["status"].as_str(), trace_b["message"].as_str()),
-        (Some("PARTIAL"), Some("trace truncated after 4 spans"))
+        trace_b["message"].as_str(),
+        Some("trace truncated after 4 spans")
     );
     let returned_spans: usize = trace_b["trace"]["resourceSpans"]
         .as_array()
@@ -1238,13 +1240,15 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .send()
         .await?;
     assert_eq!(
-        (
-            pb.status(),
-            pb.headers()
-                .get("content-type")
-                .and_then(|value| value.to_str().ok()),
-        ),
-        (ReqwestStatusCode::OK, Some("application/protobuf")),
+        pb.status(),
+        ReqwestStatusCode::OK,
+        "protobuf negotiation should set content-type"
+    );
+    assert_eq!(
+        pb.headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("application/protobuf"),
         "protobuf negotiation should set content-type"
     );
     let decoded = TraceByIdResponse::decode(pb.bytes().await?)?
@@ -1281,14 +1285,12 @@ async fn grafana_e2e_full_surface() -> TestResult {
     // E8 — TraceQL selector search.
     let q = enc("{ resource.service.name = \"checkout-frontend\" }");
     let search = get_json(&client, &proxy(&format!("api/search?q={q}&{range}"))).await?;
+    assert_eq!(search["traces"][0]["traceID"].as_str(), Some(TRACE_A_HEX));
     assert_eq!(
-        (
-            search["traces"][0]["traceID"].as_str(),
-            search["metrics"]["inspectedSpans"]
-                .as_u64()
-                .is_some_and(|n| n > 0),
-        ),
-        (Some(TRACE_A_HEX), true)
+        search["metrics"]["inspectedSpans"]
+            .as_u64()
+            .is_some_and(|n| n > 0),
+        true
     );
 
     // E9 — legacy logfmt `tags=` search (no `q`).
@@ -1433,13 +1435,11 @@ async fn grafana_e2e_full_surface() -> TestResult {
     // bulk-svc (Trace B) are both roots. cart-backend is a non-root service, so
     // it appears as a span attribute, not a resource value.
     assert_eq!(
-        (
-            typed.contains(&("string", "checkout-frontend")),
-            typed.contains(&("string", "bulk-svc")),
-        ),
-        (true, true),
+        typed.contains(&("string", "checkout-frontend")),
+        true,
         "{values}"
     );
+    assert_eq!(typed.contains(&("string", "bulk-svc")), true, "{values}");
 
     // E17 — v2 typed values for the intrinsic span:duration (type "duration").
     let values = get_json(
@@ -1528,19 +1528,21 @@ async fn grafana_e2e_full_surface() -> TestResult {
     )
     .await?;
     assert_eq!(
-        (
-            metrics["series"]
+        metrics["series"]
+            .as_array()
+            .is_some_and(|series| !series.is_empty()),
+        true,
+        "instant query must collapse each series to one sample: {metrics}"
+    );
+    assert_eq!(
+        metrics["series"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .all(|series| series["samples"]
                 .as_array()
-                .is_some_and(|series| !series.is_empty()),
-            metrics["series"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .all(|series| series["samples"]
-                    .as_array()
-                    .is_some_and(|samples| samples.len() == 1)),
-        ),
-        (true, true),
+                .is_some_and(|samples| samples.len() == 1)),
+        true,
         "instant query must collapse each series to one sample: {metrics}"
     );
 

@@ -432,10 +432,8 @@ mod tests {
     impl NativeResolver for FixedResolver {
         fn symbolize(&self, request: &SymbolizeRequest) -> Option<Vec<NativeSymbol>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            assert_eq!(
-                (request.build_id.as_str(), request.address),
-                ("build-a", self.expected_address)
-            );
+            assert_eq!(request.build_id.as_str(), "build-a");
+            assert_eq!(request.address, self.expected_address);
             Some(vec![NativeSymbol {
                 function: "native_main".to_string(),
                 file: "main.c".to_string(),

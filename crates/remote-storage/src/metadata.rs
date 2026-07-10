@@ -435,10 +435,8 @@ mod tests {
             epochs(),
         )
         .unwrap();
-        assert_eq!(
-            (md.max_timestamp_ms(), md.segment_size_in_bytes()),
-            (777, 4096)
-        );
+        assert_eq!(md.max_timestamp_ms(), 777);
+        assert_eq!(md.segment_size_in_bytes(), 4096);
     }
 
     #[test]

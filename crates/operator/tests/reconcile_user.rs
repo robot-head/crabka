@@ -335,21 +335,16 @@ async fn first_reconcile_provisions_scram_and_acls() {
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
     assert_eq!(
-        (
-            body["status"]["conditions"][0]["status"].as_str(),
-            body["status"]["conditions"][0]["reason"].as_str(),
-            body["status"]["username"].as_str(),
-            body["status"]["secret"].as_str(),
-            body["status"]["scramSha512"].as_bool(),
-        ),
-        (
-            Some("True"),
-            Some("Ready"),
-            Some(USER),
-            Some(USER),
-            Some(true)
-        )
+        body["status"]["conditions"][0]["status"].as_str(),
+        Some("True")
     );
+    assert_eq!(
+        body["status"]["conditions"][0]["reason"].as_str(),
+        Some("Ready")
+    );
+    assert_eq!(body["status"]["username"].as_str(), Some(USER));
+    assert_eq!(body["status"]["secret"].as_str(), Some(USER));
+    assert_eq!(body["status"]["scramSha512"].as_bool(), Some(true));
 }
 
 /// Reconcile with existing matching ACLs → no `CreateAcls` /
@@ -591,30 +586,28 @@ async fn first_reconcile_sets_declared_quotas() {
         })
         .expect("AlterUserQuotas must have been issued");
     let (ops, validate_only) = alter;
+    assert_eq!(described, true);
+    assert_eq!(validate_only, false);
     assert_eq!(
-        (described, validate_only, ops),
-        (
-            true,
-            false,
-            vec![
-                QuotaOp::Set {
-                    key: "consumer_byte_rate".into(),
-                    value: 2_097_152.0,
-                },
-                QuotaOp::Set {
-                    key: "controller_mutation_rate".into(),
-                    value: 10.0,
-                },
-                QuotaOp::Set {
-                    key: "producer_byte_rate".into(),
-                    value: 1_048_576.0,
-                },
-                QuotaOp::Set {
-                    key: "request_percentage".into(),
-                    value: 55.0,
-                },
-            ],
-        )
+        ops,
+        vec![
+            QuotaOp::Set {
+                key: "consumer_byte_rate".into(),
+                value: 2_097_152.0,
+            },
+            QuotaOp::Set {
+                key: "controller_mutation_rate".into(),
+                value: 10.0,
+            },
+            QuotaOp::Set {
+                key: "producer_byte_rate".into(),
+                value: 1_048_576.0,
+            },
+            QuotaOp::Set {
+                key: "request_percentage".into(),
+                value: 55.0,
+            },
+        ]
     );
 
     // Final status: quotasInSync=true.
@@ -1195,14 +1188,12 @@ async fn tls_user_with_quotas_alters_quotas_by_dn() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
+    assert_eq!(username, "CN=alice".to_string());
     assert_eq!(
-        (username, ops),
-        (
-            "CN=alice".to_string(),
-            vec![QuotaOp::Set {
-                key: "producer_byte_rate".to_string(),
-                value: 1_048_576.0,
-            }],
-        )
+        ops,
+        vec![QuotaOp::Set {
+            key: "producer_byte_rate".to_string(),
+            value: 1_048_576.0,
+        }]
     );
 }

@@ -390,17 +390,18 @@ mod tests {
         let change = rec.value.downcast::<Change<i64>>().unwrap();
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         assert_eq!(
-            (*key, *change),
-            (
-                Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 10 },
-                },
-                Change {
-                    old: None,
-                    new: Some(1)
-                },
-            )
+            *key,
+            Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 10 },
+            }
+        );
+        assert_eq!(
+            *change,
+            Change {
+                old: None,
+                new: Some(1)
+            }
         );
 
         // record at ts=7 → same window [0,10), count 2
@@ -425,10 +426,8 @@ mod tests {
             .unwrap()
             .window;
         let change = rec3.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(
-            (window, change.new),
-            (Window { start: 10, end: 20 }, Some(1))
-        );
+        assert_eq!(window, Window { start: 10, end: 20 });
+        assert_eq!(change.new, Some(1));
     }
 
     #[tokio::test]
@@ -506,17 +505,18 @@ mod tests {
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
         assert_eq!(
-            (*key, *change),
-            (
-                Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 10 },
-                },
-                Change {
-                    old: None,
-                    new: Some(2)
-                },
-            )
+            *key,
+            Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 10 },
+            }
+        );
+        assert_eq!(
+            *change,
+            Change {
+                old: None,
+                new: Some(2)
+            }
         );
     }
 
@@ -595,17 +595,18 @@ mod tests {
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
         assert_eq!(
-            (*key, *ch),
-            (
-                Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 10 },
-                },
-                Change {
-                    old: None,
-                    new: Some(10)
-                },
-            )
+            *key,
+            Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 10 },
+            }
+        );
+        assert_eq!(
+            *ch,
+            Change {
+                old: None,
+                new: Some(10)
+            }
         );
     }
 
@@ -712,17 +713,19 @@ mod tests {
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
         assert_eq!(
-            (*key, *ch),
-            (
-                Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 10 },
-                },
-                Change {
-                    old: None,
-                    new: Some(2)
-                },
-            ),
+            *key,
+            Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 10 },
+            },
+            "deduped to the latest window count"
+        );
+        assert_eq!(
+            *ch,
+            Change {
+                old: None,
+                new: Some(2)
+            },
             "deduped to the latest window count"
         );
     }

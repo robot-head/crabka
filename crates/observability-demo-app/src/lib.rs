@@ -168,11 +168,9 @@ mod tests {
             ),
             ("normal card is fulfilled", ok, (false, "fulfilled")),
         ] {
-            assert_eq!(
-                (is_suspicious(&order), classify_outcome(&order)),
-                expected,
-                "case {name}"
-            );
+            let (expected_suspicious, expected_outcome) = expected;
+            assert_eq!(is_suspicious(&order), expected_suspicious, "case {name}");
+            assert_eq!(classify_outcome(&order), expected_outcome, "case {name}");
         }
     }
 

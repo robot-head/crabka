@@ -910,15 +910,10 @@ pub mod wire {
             let raw_begin = BeginQuorumEpochRequest::decode(&mut begin_cur, QUORUM_EPOCH_VERSION)
                 .expect("decode begin request");
             let begin_partition = &raw_begin.topics[0].partitions[0];
-            assert_eq!(
-                (
-                    raw_begin.cluster_id.as_ref(),
-                    raw_begin.voter_id,
-                    begin_partition.leader_id,
-                    begin_partition.leader_epoch,
-                ),
-                (None, -1, 5, 9)
-            );
+            assert_eq!(raw_begin.cluster_id.as_ref(), None);
+            assert_eq!(raw_begin.voter_id, -1);
+            assert_eq!(begin_partition.leader_id, 5);
+            assert_eq!(begin_partition.leader_epoch, 9);
 
             let end = PeerRequest::EndQuorumEpoch {
                 leader_id: NodeId(1),
@@ -928,14 +923,9 @@ pub mod wire {
             let raw_end = EndQuorumEpochRequest::decode(&mut end_cur, QUORUM_EPOCH_VERSION)
                 .expect("decode end request");
             let end_partition = &raw_end.topics[0].partitions[0];
-            assert_eq!(
-                (
-                    raw_end.cluster_id.as_ref(),
-                    end_partition.leader_id,
-                    end_partition.leader_epoch,
-                ),
-                (None, 1, 4)
-            );
+            assert_eq!(raw_end.cluster_id.as_ref(), None);
+            assert_eq!(end_partition.leader_id, 1);
+            assert_eq!(end_partition.leader_epoch, 4);
         }
 
         #[test]

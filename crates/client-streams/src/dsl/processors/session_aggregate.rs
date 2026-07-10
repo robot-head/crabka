@@ -434,17 +434,18 @@ mod tests {
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
         let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         assert_eq!(
-            (*wk, *ch),
-            (
-                Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 0 },
-                },
-                Change {
-                    old: None,
-                    new: Some(1)
-                },
-            )
+            *wk,
+            Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 0 },
+            }
+        );
+        assert_eq!(
+            *ch,
+            Change {
+                old: None,
+                new: Some(1)
+            }
         );
 
         // record 2 @ ts=30 (within gap 60 of session [0,0]) → merge:
@@ -472,25 +473,24 @@ mod tests {
         let (_, tomb) = buffer.pop_front().unwrap();
         let tch = tomb.value.downcast::<Change<i64>>().unwrap();
         let tkey = tomb.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(
-            (tkey.window, tch.is_tombstone()),
-            (Window { start: 0, end: 0 }, true)
-        );
+        assert_eq!(tkey.window, Window { start: 0, end: 0 });
+        assert_eq!(tch.is_tombstone(), true);
         let (_, upd) = buffer.pop_front().unwrap();
         let uch = upd.value.downcast::<Change<i64>>().unwrap();
         let ukey = upd.key.unwrap().downcast::<Windowed<String>>().unwrap();
         assert_eq!(
-            (*ukey, *uch),
-            (
-                Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 30 },
-                },
-                Change {
-                    old: None,
-                    new: Some(2)
-                },
-            )
+            *ukey,
+            Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 30 },
+            }
+        );
+        assert_eq!(
+            *uch,
+            Change {
+                old: None,
+                new: Some(2)
+            }
         );
     }
 
@@ -727,17 +727,18 @@ mod tests {
         let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
         assert_eq!(
-            (*wk, *ch),
-            (
-                Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 4 },
-                },
-                Change {
-                    old: None,
-                    new: Some(2)
-                },
-            )
+            *wk,
+            Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 4 },
+            }
+        );
+        assert_eq!(
+            *ch,
+            Change {
+                old: None,
+                new: Some(2)
+            }
         );
     }
 
@@ -800,10 +801,9 @@ mod tests {
             .unwrap()
             .window;
         let change = last.value.downcast::<Change<String>>().unwrap();
-        assert_eq!(
-            (buffer.len(), window, change.new),
-            (2, Window { start: 0, end: 30 }, Some("xy".to_string()))
-        );
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(window, Window { start: 0, end: 30 });
+        assert_eq!(change.new, Some("xy".to_string()));
     }
 
     #[tokio::test]
@@ -893,17 +893,18 @@ mod tests {
         let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
         let ch = rec.value.downcast::<Change<String>>().unwrap();
         assert_eq!(
-            (*wk, *ch),
-            (
-                Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 4 },
-                },
-                Change {
-                    old: None,
-                    new: Some("xy".to_string())
-                },
-            )
+            *wk,
+            Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 4 },
+            }
+        );
+        assert_eq!(
+            *ch,
+            Change {
+                old: None,
+                new: Some("xy".to_string())
+            }
         );
     }
 

@@ -375,19 +375,17 @@ mod tests {
             .iter()
             .filter(|j| matches!(j, JobShard::Block { .. }))
             .collect();
+        assert_eq!(rg_jobs.len(), 1);
         assert_eq!(
-            (
-                rg_jobs.len(),
-                matches!(
-                    rg_jobs[0],
-                    JobShard::Block {
-                        row_group_start: 0,
-                        row_group_end: 3,
-                        ..
-                    }
-                ),
+            matches!(
+                rg_jobs[0],
+                JobShard::Block {
+                    row_group_start: 0,
+                    row_group_end: 3,
+                    ..
+                }
             ),
-            (1, true)
+            true
         );
     }
 
@@ -398,6 +396,7 @@ mod tests {
             block("b2", 500, 600, &[500]),
         ]);
         let got = cat.blocks("t1", 0, 200).await.unwrap();
-        assert_eq!((got.len(), got[0].block_id.as_str()), (1, "b1"));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].block_id.as_str(), "b1");
     }
 }

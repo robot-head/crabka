@@ -65,27 +65,17 @@ async fn derive_builds_def_and_typed_config() {
 
     let config = PostgresSourceConfig::from_resolved(&resolved).unwrap();
 
+    assert_eq!(config.database_url.as_str(), "postgres://localhost/app");
+    assert_eq!(config.password.expose_secret(), "secret");
     assert_eq!(
-        (
-            config.database_url.as_str(),
-            config.password.expose_secret(),
-            config
-                .rotation_token
-                .as_ref()
-                .map(SecretString::expose_secret),
-            config.schema.as_str(),
-            config.max_batch,
-            config.topic_names,
-            config.omitted_note,
-        ),
-        (
-            "postgres://localhost/app",
-            "secret",
-            Some("rotate"),
-            "public",
-            500,
-            vec!["a".to_string(), "b".to_string()],
-            None,
-        )
+        config
+            .rotation_token
+            .as_ref()
+            .map(SecretString::expose_secret),
+        Some("rotate")
     );
+    assert_eq!(config.schema.as_str(), "public");
+    assert_eq!(config.max_batch, 500);
+    assert_eq!(config.topic_names, vec!["a".to_string(), "b".to_string()]);
+    assert_eq!(config.omitted_note, None);
 }

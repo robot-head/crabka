@@ -74,19 +74,20 @@ mod tests {
     fn mandatory_columns_match_blockstore() {
         let schema = profile_samples_schema();
         assert_eq!(
-            (
-                schema
-                    .column_with_name(COL_FINGERPRINT)
-                    .unwrap()
-                    .1
-                    .data_type(),
-                schema
-                    .column_with_name(COL_TIMESTAMP)
-                    .unwrap()
-                    .1
-                    .data_type(),
-            ),
-            (&DataType::UInt64, &DataType::Int64)
+            schema
+                .column_with_name(COL_FINGERPRINT)
+                .unwrap()
+                .1
+                .data_type(),
+            &DataType::UInt64
+        );
+        assert_eq!(
+            schema
+                .column_with_name(COL_TIMESTAMP)
+                .unwrap()
+                .1
+                .data_type(),
+            &DataType::Int64
         );
     }
 
@@ -96,10 +97,8 @@ mod tests {
         let (_, field) = schema.column_with_name(PCOL_PROFILE_TYPE).unwrap();
         match field.data_type() {
             DataType::Dictionary(key, value) => {
-                assert_eq!(
-                    (key.as_ref(), value.as_ref()),
-                    (&DataType::Int32, &DataType::Utf8)
-                );
+                assert_eq!(key.as_ref(), &DataType::Int32);
+                assert_eq!(value.as_ref(), &DataType::Utf8);
             }
             other => panic!("expected Dictionary<Int32,Utf8>, got {other:?}"),
         }
@@ -109,19 +108,20 @@ mod tests {
     fn raw_stacktrace_slot_columns_are_unsigned() {
         let schema = profile_samples_schema();
         assert_eq!(
-            (
-                schema
-                    .column_with_name(PCOL_STACKTRACE_ID)
-                    .unwrap()
-                    .1
-                    .data_type(),
-                schema
-                    .column_with_name(PCOL_STACKTRACE_PARTITION)
-                    .unwrap()
-                    .1
-                    .data_type(),
-            ),
-            (&DataType::UInt64, &DataType::UInt64)
+            schema
+                .column_with_name(PCOL_STACKTRACE_ID)
+                .unwrap()
+                .1
+                .data_type(),
+            &DataType::UInt64
+        );
+        assert_eq!(
+            schema
+                .column_with_name(PCOL_STACKTRACE_PARTITION)
+                .unwrap()
+                .1
+                .data_type(),
+            &DataType::UInt64
         );
     }
 
@@ -129,15 +129,16 @@ mod tests {
     fn value_and_total_value_are_int64() {
         let schema = profile_samples_schema();
         assert_eq!(
-            (
-                schema.column_with_name(PCOL_VALUE).unwrap().1.data_type(),
-                schema
-                    .column_with_name(PCOL_TOTAL_VALUE)
-                    .unwrap()
-                    .1
-                    .data_type(),
-            ),
-            (&DataType::Int64, &DataType::Int64)
+            schema.column_with_name(PCOL_VALUE).unwrap().1.data_type(),
+            &DataType::Int64
+        );
+        assert_eq!(
+            schema
+                .column_with_name(PCOL_TOTAL_VALUE)
+                .unwrap()
+                .1
+                .data_type(),
+            &DataType::Int64
         );
     }
 
@@ -146,15 +147,10 @@ mod tests {
         let schema = profile_samples_schema();
         let span = schema.column_with_name(PCOL_SPAN_ID).unwrap().1;
         let trace = schema.column_with_name(PCOL_TRACE_ID).unwrap().1;
-        assert_eq!(
-            (
-                span.data_type(),
-                span.is_nullable(),
-                trace.data_type(),
-                trace.is_nullable(),
-            ),
-            (&DataType::UInt64, true, &DataType::Binary, true)
-        );
+        assert_eq!(span.data_type(), &DataType::UInt64);
+        assert_eq!(span.is_nullable(), true);
+        assert_eq!(trace.data_type(), &DataType::Binary);
+        assert_eq!(trace.is_nullable(), true);
     }
 
     #[test]

@@ -907,15 +907,10 @@ mod tests {
             .remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42)
             .unwrap()
             .expect("segment found");
+        assert_eq!(got, started(10, 0, 99).with_update(&finish(10)).unwrap());
         assert_eq!(
-            (
-                got,
-                m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
-            ),
-            (
-                started(10, 0, 99).with_update(&finish(10)).unwrap(),
-                Some(99),
-            )
+            m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
+            Some(99)
         );
         m.shutdown();
     }
@@ -929,13 +924,8 @@ mod tests {
         let m2 = m.clone();
         let err = on_blocking(move || m2.add_remote_log_segment_metadata(bad).unwrap_err()).await;
         // Eager rejection means nothing was published.
-        assert_eq!(
-            (
-                matches!(err, RemoteStorageError::InvalidAdd { .. }),
-                log.high_water_marks().await.unwrap(),
-            ),
-            (true, vec![0; 2])
-        );
+        assert_eq!(matches!(err, RemoteStorageError::InvalidAdd { .. }), true);
+        assert_eq!(log.high_water_marks().await.unwrap(), vec![0; 2]);
         m.shutdown();
     }
 
@@ -969,15 +959,10 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            (
-                b.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
-                got,
-            ),
-            (
-                Some(99),
-                started(10, 0, 99).with_update(&finish(10)).unwrap(),
-            )
+            b.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
+            Some(99)
         );
+        assert_eq!(got, started(10, 0, 99).with_update(&finish(10)).unwrap());
 
         a.shutdown();
         b.shutdown();
@@ -1010,14 +995,12 @@ mod tests {
             .into_iter()
             .map(|(id, start, end)| started(id, start, end).with_update(&finish(id)).unwrap())
             .collect::<Vec<_>>();
+        assert_eq!(listed, expected);
         assert_eq!(
-            (
-                listed,
-                fresh
-                    .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
-                    .unwrap(),
-            ),
-            (expected, Some(299))
+            fresh
+                .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
+                .unwrap(),
+            Some(299)
         );
         fresh.shutdown();
     }
@@ -1157,10 +1140,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            (resumed_committed, assignment),
-            (snap.committed_offsets.clone(), expected_assignment),
+            resumed_committed,
+            snap.committed_offsets.clone(),
             "resume from N+1, not 0"
         );
+        assert_eq!(assignment, expected_assignment, "resume from N+1, not 0");
 
         // Second lifetime against the SAME log + dir: must resume, not replay.
         let fresh = TopicBasedRemoteLogMetadataManager::start(
@@ -1191,13 +1175,14 @@ mod tests {
         }
         let post_cache = fresh.list_remote_log_segments(&tp()).unwrap();
         assert_eq!(
-            (
-                post_cache,
-                fresh
-                    .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
-                    .unwrap(),
-            ),
-            (pre_cache, Some(299)),
+            post_cache, pre_cache,
+            "post-load state equals pre-restart state"
+        );
+        assert_eq!(
+            fresh
+                .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
+                .unwrap(),
+            Some(299),
             "post-load state equals pre-restart state"
         );
         fresh.shutdown();
@@ -1273,14 +1258,15 @@ mod tests {
         let m = start_manager(log).await;
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
         assert_eq!(
-            (
-                m.remote_log_segment_metadata(&other, LeaderEpoch(0), 0)
-                    .unwrap(),
-                m.highest_offset_for_epoch(&other, LeaderEpoch(0)).unwrap(),
-                m.list_remote_log_segments(&other).unwrap(),
-            ),
-            (None, None, Vec::new())
+            m.remote_log_segment_metadata(&other, LeaderEpoch(0), 0)
+                .unwrap(),
+            None
         );
+        assert_eq!(
+            m.highest_offset_for_epoch(&other, LeaderEpoch(0)).unwrap(),
+            None
+        );
+        assert_eq!(m.list_remote_log_segments(&other).unwrap(), Vec::new());
         m.shutdown();
     }
 
@@ -1339,13 +1325,8 @@ mod tests {
         a.reconcile_assignment(&[mp_a]).await;
         b.reconcile_assignment(&[mp_b]).await;
 
-        assert_eq!(
-            (
-                a.assigned_metadata_partitions(),
-                b.assigned_metadata_partitions(),
-            ),
-            (vec![mp_a], vec![mp_b])
-        );
+        assert_eq!(a.assigned_metadata_partitions(), vec![mp_a]);
+        assert_eq!(b.assigned_metadata_partitions(), vec![mp_b]);
 
         // Poll until each is caught up and serves its own partition.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -1432,11 +1413,13 @@ mod tests {
 
         let listed = m.list_remote_log_segments(&tp()).unwrap();
         assert_eq!(
-            (
-                listed,
-                m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
-            ),
-            (vec![expected], Some(99)),
+            listed,
+            vec![expected],
+            "remove + re-add must preserve one finished segment"
+        );
+        assert_eq!(
+            m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
+            Some(99),
             "remove + re-add must preserve one finished segment"
         );
 
@@ -1491,11 +1474,13 @@ mod tests {
             let read = m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42);
             let list = m.list_remote_log_segments(&tp());
             assert_eq!(
-                (
-                    matches!(read, Err(RemoteStorageError::NotReady { partition }) if partition == mp),
-                    matches!(list, Err(RemoteStorageError::NotReady { partition }) if partition == mp),
-                ),
-                (true, true),
+                matches!(read, Err(RemoteStorageError::NotReady { partition }) if partition == mp),
+                true,
+                "HWM-unknown read and list paths must both return NotReady"
+            );
+            assert_eq!(
+                matches!(list, Err(RemoteStorageError::NotReady { partition }) if partition == mp),
+                true,
                 "HWM-unknown read and list paths must both return NotReady"
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1527,12 +1512,10 @@ mod tests {
             }
         }
         // The list path is now Ready too.
+        assert_eq!(m.list_remote_log_segments(&tp()).unwrap(), vec![expected]);
         assert_eq!(
-            (
-                m.list_remote_log_segments(&tp()).unwrap(),
-                m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
-            ),
-            (vec![expected], Some(99))
+            m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
+            Some(99)
         );
 
         m.shutdown();

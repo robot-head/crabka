@@ -927,7 +927,8 @@ mod tests {
             .await
             .unwrap();
         check!(resp.status() == StatusCode::OK);
-        assert_eq!((sink.count(), sink.tenant(0)), (1, "tenant-a".to_string()));
+        assert_eq!(sink.count(), 1);
+        assert_eq!(sink.tenant(0), "tenant-a".to_string());
     }
 
     #[tokio::test]
@@ -945,14 +946,12 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            (
-                resp.status(),
-                resp.headers()
-                    .get("content-type")
-                    .and_then(|value| value.to_str().ok()),
-            ),
-            (StatusCode::OK, Some("application/x-protobuf"))
+            resp.headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/x-protobuf")
         );
         let body = resp.into_body().collect().await.unwrap().to_bytes();
         let response = ExportTraceServiceResponse::decode(body.as_ref()).unwrap();
@@ -1032,7 +1031,8 @@ mod tests {
         let resp = service.export(req).await.unwrap();
 
         check!(resp.into_inner().partial_success.is_none());
-        assert_eq!((sink.count(), sink.tenant(0)), (1, "tenant-a".to_string()));
+        assert_eq!(sink.count(), 1);
+        assert_eq!(sink.tenant(0), "tenant-a".to_string());
     }
 
     #[tokio::test]
@@ -1080,10 +1080,9 @@ mod tests {
 
         let resp = service.post_spans(req).await.unwrap();
 
-        assert_eq!(
-            (sink.count(), sink.tenant(0), sink.span_name(0)),
-            (1, "tenant-a".to_string(), "GET /grpc".to_string())
-        );
+        assert_eq!(sink.count(), 1);
+        assert_eq!(sink.tenant(0), "tenant-a".to_string());
+        assert_eq!(sink.span_name(0), "GET /grpc".to_string());
         check!(resp.into_inner() == crate::wire::jaeger_grpc::api_v2::PostSpansResponse {});
     }
 
@@ -1141,7 +1140,8 @@ mod tests {
             .await
             .unwrap();
         check!(resp.status() == StatusCode::ACCEPTED);
-        assert_eq!((sink.count(), sink.span_name(0)), (1, "GET /".to_string()));
+        assert_eq!(sink.count(), 1);
+        assert_eq!(sink.span_name(0), "GET /".to_string());
     }
 
     #[tokio::test]
@@ -1161,10 +1161,8 @@ mod tests {
             .unwrap();
 
         check!(resp.status() == StatusCode::ACCEPTED);
-        assert_eq!(
-            (sink.count(), sink.span_name(0)),
-            (1, "GET /binary".to_string())
-        );
+        assert_eq!(sink.count(), 1);
+        assert_eq!(sink.span_name(0), "GET /binary".to_string());
     }
 
     #[tokio::test]
@@ -1179,10 +1177,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            (sink.count(), sink.tenant(0), sink.span_name(0)),
-            (1, "tenant-a".to_string(), "GET /".to_string())
-        );
+        assert_eq!(sink.count(), 1);
+        assert_eq!(sink.tenant(0), "tenant-a".to_string());
+        assert_eq!(sink.span_name(0), "GET /".to_string());
     }
 
     #[tokio::test]
@@ -1298,10 +1295,9 @@ overrides:
 
         check!(tight.status() == StatusCode::BAD_REQUEST);
         check!(loose.status() == StatusCode::OK);
-        assert_eq!(
-            (sink.count(), sink.tenant(0), sink.tenant(1)),
-            (2, "tenant-loose".to_string(), "tenant-loose".to_string())
-        );
+        assert_eq!(sink.count(), 2);
+        assert_eq!(sink.tenant(0), "tenant-loose".to_string());
+        assert_eq!(sink.tenant(1), "tenant-loose".to_string());
     }
 
     #[tokio::test]
@@ -1361,10 +1357,9 @@ overrides:
                 .is_some_and(|message| message.contains("ingestion rate"))
         );
         check!(other_tenant.status() == StatusCode::OK);
-        assert_eq!(
-            (sink.count(), sink.tenant(0), sink.tenant(1)),
-            (2, "tenant-a".to_string(), "tenant-b".to_string())
-        );
+        assert_eq!(sink.count(), 2);
+        assert_eq!(sink.tenant(0), "tenant-a".to_string());
+        assert_eq!(sink.tenant(1), "tenant-b".to_string());
     }
 
     #[tokio::test]
@@ -1416,10 +1411,9 @@ overrides:
         check!(first.status() == StatusCode::OK);
         check!(second.status() == StatusCode::TOO_MANY_REQUESTS);
         check!(other_tenant.status() == StatusCode::OK);
-        assert_eq!(
-            (sink.count(), sink.tenant(0), sink.tenant(1)),
-            (2, "tenant-a".to_string(), "tenant-b".to_string())
-        );
+        assert_eq!(sink.count(), 2);
+        assert_eq!(sink.tenant(0), "tenant-a".to_string());
+        assert_eq!(sink.tenant(1), "tenant-b".to_string());
     }
 
     #[tokio::test]

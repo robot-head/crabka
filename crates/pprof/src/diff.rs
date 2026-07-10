@@ -286,7 +286,8 @@ mod tests {
         right.add_stack(&[frame("b")], 5);
 
         let diff = diff_trees(left, right, 0);
-        assert_eq!((diff.left_ticks, diff.right_ticks), (10, 15));
+        assert_eq!(diff.left_ticks, 10);
+        assert_eq!(diff.right_ticks, 15);
         for level in &diff.levels {
             assert!(level.values.len() % 7 == 0);
         }
@@ -324,17 +325,16 @@ mod tests {
 
         let diff = diff_trees(left, right, 3);
 
-        assert_eq!((diff.left_ticks, diff.right_ticks), (15, 12));
+        assert_eq!(diff.left_ticks, 15);
+        assert_eq!(diff.right_ticks, 12);
         let parent = name_index(&diff, "m_parent");
         let leaf = name_index(&diff, "hot_leaf");
         let other = name_index(&diff, "other");
         assert_eq!(
-            (&diff.levels[1].values, &diff.levels[2].values),
-            (
-                &vec![2, 10, 0, 0, 8, 0, parent, -2, 5, 5, 0, 4, 4, other],
-                &vec![2, 10, 10, 0, 8, 8, leaf],
-            )
+            &diff.levels[1].values,
+            &vec![2, 10, 0, 0, 8, 0, parent, -2, 5, 5, 0, 4, 4, other]
         );
+        assert_eq!(&diff.levels[2].values, &vec![2, 10, 10, 0, 8, 8, leaf]);
     }
 
     #[test]

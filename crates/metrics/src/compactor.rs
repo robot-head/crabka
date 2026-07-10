@@ -2528,7 +2528,8 @@ mod tests {
         let persisted = crabka_blockstore::read_block(object_store, &writes[0].manifest.block_key)
             .await
             .expect("read persisted block");
-        assert_eq!((persisted.len(), persisted[0].num_rows()), (1, 2));
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].num_rows(), 2);
 
         let manifests = sink.manifests.lock().expect("manifest lock");
         check!(
@@ -2581,7 +2582,8 @@ mod tests {
         let persisted = crabka_blockstore::read_block(object_store, &writes[0].manifest.block_key)
             .await
             .expect("read persisted metadata block");
-        assert_eq!((persisted.len(), persisted[0].num_rows()), (1, 1));
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].num_rows(), 1);
 
         let manifests = sink.manifests.lock().expect("manifest lock");
         check!(
@@ -3502,27 +3504,25 @@ mod tests {
 
         let compacted = compact_wal_records(&[record.clone(), hist_record]);
 
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[0].histogram_rows.len(), 1);
+        assert_eq!(compacted[0].histogram_rows[0].timestamp_ms, 21);
+        assert_eq!(compacted[0].exemplar_rows.len(), 1);
         assert_eq!(
-            (
-                compacted.len(),
-                compacted[0].histogram_rows.len(),
-                compacted[0].histogram_rows[0].timestamp_ms,
-                compacted[0].exemplar_rows.len(),
-                compacted[0].exemplar_rows[0].fingerprint,
-                compacted[0].exemplar_rows[0].trace_id.as_deref(),
-                compacted[0].exemplar_rows[0].span_id.as_deref(),
-                compacted[0].exemplar_rows[0].labels.as_slice(),
-            ),
-            (
-                1,
-                1,
-                21,
-                1,
-                record.series_fingerprint(),
-                Some("abc"),
-                Some("def"),
-                &[("kind".into(), "slow".into())][..],
-            )
+            compacted[0].exemplar_rows[0].fingerprint,
+            record.series_fingerprint()
+        );
+        assert_eq!(
+            compacted[0].exemplar_rows[0].trace_id.as_deref(),
+            Some("abc")
+        );
+        assert_eq!(
+            compacted[0].exemplar_rows[0].span_id.as_deref(),
+            Some("def")
+        );
+        assert_eq!(
+            compacted[0].exemplar_rows[0].labels.as_slice(),
+            &[("kind".into(), "slow".into())][..]
         );
     }
 
@@ -3551,15 +3551,16 @@ mod tests {
 
         let compacted = compact_wal_records(&records);
 
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[0].float_rows.len(), 2);
+        assert_eq!(compacted[0].exemplar_rows.len(), 1);
         assert_eq!(
-            (
-                compacted.len(),
-                compacted[0].float_rows.len(),
-                compacted[0].exemplar_rows.len(),
-                compacted[0].exemplar_rows[0].fingerprint,
-                compacted[0].exemplar_rows[0].trace_id.as_deref(),
-            ),
-            (1, 2, 1, labels.fingerprint(), Some("abc"))
+            compacted[0].exemplar_rows[0].fingerprint,
+            labels.fingerprint()
+        );
+        assert_eq!(
+            compacted[0].exemplar_rows[0].trace_id.as_deref(),
+            Some("abc")
         );
     }
 
@@ -3579,18 +3580,16 @@ mod tests {
 
         let compacted = compact_wal_records(std::slice::from_ref(&record));
 
+        assert_eq!(compacted.len(), 1);
         assert_eq!(
-            (compacted.len(), compacted[0].metadata_rows.as_slice()),
-            (
-                1,
-                &[super::MetadataRow {
-                    fingerprint: record.series_fingerprint(),
-                    metric_family_name: "http_requests_total".to_string(),
-                    metric_type: "counter".to_string(),
-                    help: "Total HTTP requests.".to_string(),
-                    unit: "requests".to_string(),
-                }][..],
-            )
+            compacted[0].metadata_rows.as_slice(),
+            &[super::MetadataRow {
+                fingerprint: record.series_fingerprint(),
+                metric_family_name: "http_requests_total".to_string(),
+                metric_type: "counter".to_string(),
+                help: "Total HTTP requests.".to_string(),
+                unit: "requests".to_string(),
+            }][..]
         );
     }
 
@@ -3673,13 +3672,8 @@ mod tests {
 
         let batches = encode_tenant_batches(&compacted[0]).unwrap();
 
-        assert_eq!(
-            (
-                batches.float.as_ref().unwrap().num_rows(),
-                batches.native_histograms.as_ref().unwrap().num_rows(),
-            ),
-            (1, 1)
-        );
+        assert_eq!(batches.float.as_ref().unwrap().num_rows(), 1);
+        assert_eq!(batches.native_histograms.as_ref().unwrap().num_rows(), 1);
     }
 
     #[test]
@@ -3699,10 +3693,8 @@ mod tests {
         let batches = encode_tenant_batches(&compacted[0]).unwrap();
 
         let batch = batches.exemplars.as_ref().expect("exemplar sidecar");
-        assert_eq!(
-            (batch.num_rows(), batch.schema()),
-            (1, crate::exemplar_schema())
-        );
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.schema(), crate::exemplar_schema());
 
         let trace_ids = batch
             .column_by_name("trace_id")

@@ -491,11 +491,13 @@ async fn statefulset_mounts_oauth_jwks_trust_secret_when_trust_certs_present() {
         .find(|m| m["name"] == "oauth-jwks-trust")
         .unwrap_or_else(|| panic!("oauth-jwks-trust mount present; body = {body}"));
     assert_eq!(
-        (
-            trust_mount["mountPath"].as_str(),
-            trust_mount["readOnly"].as_bool(),
-        ),
-        (Some("/etc/crabka/oauth-jwks-trust"), Some(true)),
+        trust_mount["mountPath"].as_str(),
+        Some("/etc/crabka/oauth-jwks-trust"),
+        "body = {body}"
+    );
+    assert_eq!(
+        trust_mount["readOnly"].as_bool(),
+        Some(true),
         "body = {body}"
     );
 }

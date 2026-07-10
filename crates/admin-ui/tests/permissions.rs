@@ -257,18 +257,19 @@ fn derive_capabilities_for_host_matches_exact_or_wildcard_host() {
     let nonmatching = derive_capabilities_for_host("User:alice", "10.0.0.2", &entries);
 
     assert_eq!(
-        (matching, nonmatching),
-        (
-            Capabilities {
-                can_view_topics: true,
-                can_create_topics: true,
-                ..Capabilities::default()
-            },
-            Capabilities {
-                can_create_topics: true,
-                ..Capabilities::default()
-            },
-        )
+        matching,
+        Capabilities {
+            can_view_topics: true,
+            can_create_topics: true,
+            ..Capabilities::default()
+        }
+    );
+    assert_eq!(
+        nonmatching,
+        Capabilities {
+            can_create_topics: true,
+            ..Capabilities::default()
+        }
     );
 }
 
@@ -282,14 +283,12 @@ fn host_matching_controls_deny_precedence() {
     let matching_deny = derive_capabilities_for_host("User:alice", "10.0.0.2", &entries);
     let nonmatching_deny = derive_capabilities_for_host("User:alice", "10.0.0.1", &entries);
 
+    assert_eq!(matching_deny, Capabilities::default());
     assert_eq!(
-        (matching_deny, nonmatching_deny),
-        (
-            Capabilities::default(),
-            Capabilities {
-                can_view_topics: true,
-                ..Capabilities::default()
-            },
-        )
+        nonmatching_deny,
+        Capabilities {
+            can_view_topics: true,
+            ..Capabilities::default()
+        }
     );
 }

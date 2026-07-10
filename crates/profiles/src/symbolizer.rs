@@ -66,10 +66,8 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            (out[0].function.as_str(), out[0].file.as_str()),
-            ("abc+0x42", "/bin/app")
-        );
+        assert_eq!(out[0].function.as_str(), "abc+0x42");
+        assert_eq!(out[0].file.as_str(), "/bin/app");
     }
 
     #[test]
@@ -88,9 +86,7 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(
-            (out[0].function.as_str(), out[0].file.as_str()),
-            ("/missing/native+0x99", "/missing/native")
-        );
+        assert_eq!(out[0].function.as_str(), "/missing/native+0x99");
+        assert_eq!(out[0].file.as_str(), "/missing/native");
     }
 }

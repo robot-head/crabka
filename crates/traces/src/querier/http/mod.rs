@@ -3328,13 +3328,8 @@ overrides:
             String::from_utf8_lossy(&bytes)
         );
         let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            (
-                body["traces"].as_array().unwrap().len(),
-                body["traces"][0]["rootTraceName"].as_str(),
-            ),
-            (1, Some("inside"))
-        );
+        assert_eq!(body["traces"].as_array().unwrap().len(), 1);
+        assert_eq!(body["traces"][0]["rootTraceName"].as_str(), Some("inside"));
     }
 
     #[tokio::test]
@@ -3362,12 +3357,10 @@ overrides:
         );
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
+        assert_eq!(body["traces"].as_array().unwrap().len(), 1);
         assert_eq!(
-            (
-                body["traces"].as_array().unwrap().len(),
-                body["traces"][0]["traceID"].as_str(),
-            ),
-            (1, Some("09090909090909090909090909090909"))
+            body["traces"][0]["traceID"].as_str(),
+            Some("09090909090909090909090909090909")
         );
     }
 
@@ -3938,7 +3931,8 @@ overrides:
         let data = TracesData::decode(bytes.as_slice()).unwrap();
         let attrs = &data.resource_spans[0].resource.as_ref().unwrap().attributes;
 
-        assert_eq!((attrs.len(), attrs[0].key.as_str()), (2, "deployment.zone"));
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs[0].key.as_str(), "deployment.zone");
         let Some(OtlpValue::ArrayValue(array)) = attrs[0]
             .value
             .as_ref()
@@ -3985,13 +3979,8 @@ overrides:
 
         check!(status == StatusCode::OK);
         check!(content_type.as_deref() == Some("application/protobuf"));
-        assert_eq!(
-            (
-                data.resource_spans.len(),
-                data.resource_spans[0].scope_spans[0].spans.len(),
-            ),
-            (1, 2)
-        );
+        assert_eq!(data.resource_spans.len(), 1);
+        assert_eq!(data.resource_spans[0].scope_spans[0].spans.len(), 2);
         check!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
     }
 

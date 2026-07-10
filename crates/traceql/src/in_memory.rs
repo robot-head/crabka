@@ -1388,7 +1388,8 @@ mod tests {
         let pid = out[0]
             .column(0)
             .as_primitive::<datafusion::arrow::datatypes::Int32Type>();
-        assert_eq!((pid.value(0), pid.value(1)), (-1, 1)); // root: Tempo nestedSetParent sentinel
+        assert_eq!(pid.value(0), -1);
+        assert_eq!(pid.value(1), 1); // root: Tempo nestedSetParent sentinel
     }
 
     #[tokio::test]

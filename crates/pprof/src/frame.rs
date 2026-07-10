@@ -33,6 +33,7 @@ mod tests {
             line: 10,
         }]));
         let frames = src.resolve(0, 1);
-        assert_eq!((frames.len(), frames[0].function.as_str()), (1, "main"));
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].function.as_str(), "main");
     }
 }

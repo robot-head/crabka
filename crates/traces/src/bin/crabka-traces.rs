@@ -876,13 +876,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                matches!(cli.target, Target::Distributor),
-                cli.grpc_listen.as_str()
-            ),
-            (true, "127.0.0.1:4317")
-        );
+        assert_eq!(matches!(cli.target, Target::Distributor), true);
+        assert_eq!(cli.grpc_listen.as_str(), "127.0.0.1:4317");
     }
 
     #[test]
@@ -896,13 +891,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                matches!(cli.target, Target::Distributor),
-                cli.jaeger_compact_listen.as_str(),
-            ),
-            (true, "127.0.0.1:6831")
-        );
+        assert_eq!(matches!(cli.target, Target::Distributor), true);
+        assert_eq!(cli.jaeger_compact_listen.as_str(), "127.0.0.1:6831");
     }
 
     #[test]
@@ -916,33 +906,18 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                matches!(cli.target, Target::Distributor),
-                cli.jaeger_grpc_listen.as_str(),
-            ),
-            (true, "127.0.0.1:14250")
-        );
+        assert_eq!(matches!(cli.target, Target::Distributor), true);
+        assert_eq!(cli.jaeger_grpc_listen.as_str(), "127.0.0.1:14250");
     }
 
     #[test]
     fn distributor_defaults_include_tempo_push_ports() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "distributor"]).unwrap();
 
-        assert_eq!(
-            (
-                cli.otlp_http_listen.as_str(),
-                cli.jaeger_grpc_listen.as_str(),
-                cli.jaeger_http_listen.as_str(),
-                cli.zipkin_listen.as_str(),
-            ),
-            (
-                "127.0.0.1:4318",
-                "127.0.0.1:14250",
-                "127.0.0.1:14268",
-                "127.0.0.1:9411",
-            )
-        );
+        assert_eq!(cli.otlp_http_listen.as_str(), "127.0.0.1:4318");
+        assert_eq!(cli.jaeger_grpc_listen.as_str(), "127.0.0.1:14250");
+        assert_eq!(cli.jaeger_http_listen.as_str(), "127.0.0.1:14268");
+        assert_eq!(cli.zipkin_listen.as_str(), "127.0.0.1:9411");
     }
 
     #[test]
@@ -960,14 +935,9 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                cli.max_spans_per_request,
-                cli.max_attr_value_len,
-                cli.max_decompressed_bytes,
-            ),
-            (123, 456, 789)
-        );
+        assert_eq!(cli.max_spans_per_request, 123);
+        assert_eq!(cli.max_attr_value_len, 456);
+        assert_eq!(cli.max_decompressed_bytes, 789);
     }
 
     #[test]
@@ -987,13 +957,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                matches!(cli.target, Target::BlockBuilder),
-                cli.block_builder_window_secs,
-            ),
-            (true, 30)
-        );
+        assert_eq!(matches!(cli.target, Target::BlockBuilder), true);
+        assert_eq!(cli.block_builder_window_secs, 30);
     }
 
     #[test]
@@ -1001,15 +966,12 @@ mod tests {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
 
         assert_eq!(
-            (
-                cli.block_builder_flush_max_records,
-                cli.block_builder_flush_max_age_ms,
-            ),
-            (
-                crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS,
-                u64::try_from(crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis())
-                    .unwrap(),
-            )
+            cli.block_builder_flush_max_records,
+            crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS
+        );
+        assert_eq!(
+            cli.block_builder_flush_max_age_ms,
+            u64::try_from(crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis()).unwrap()
         );
     }
 
@@ -1090,10 +1052,8 @@ mod tests {
             "42",
         ])
         .unwrap();
-        assert_eq!(
-            (matches!(cli.target, Target::LiveStore), cli.retention_ns),
-            (true, 42)
-        );
+        assert_eq!(matches!(cli.target, Target::LiveStore), true);
+        assert_eq!(cli.retention_ns, 42);
     }
 
     #[test]
@@ -1108,14 +1068,9 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                matches!(cli.target, Target::Querier),
-                cli.querier_live_store,
-                cli.retention_ns,
-            ),
-            (true, true, 42)
-        );
+        assert_eq!(matches!(cli.target, Target::Querier), true);
+        assert_eq!(cli.querier_live_store, true);
+        assert_eq!(cli.retention_ns, 42);
     }
 
     #[test]
@@ -1129,12 +1084,10 @@ mod tests {
         ])
         .unwrap();
 
+        assert_eq!(matches!(cli.target, Target::Querier), true);
         assert_eq!(
-            (
-                matches!(cli.target, Target::Querier),
-                cli.querier_live_store_url.as_deref(),
-            ),
-            (true, Some("http://127.0.0.1:3201"))
+            cli.querier_live_store_url.as_deref(),
+            Some("http://127.0.0.1:3201")
         );
     }
 
@@ -1363,13 +1316,8 @@ mod tests {
             Arc::new(ArcSwap::from_pointee(index)),
         );
 
-        assert_eq!(
-            (
-                source.block_builder_frontier_ns("tenant-a"),
-                source.block_builder_frontier_ns("tenant-b"),
-            ),
-            (751, 0)
-        );
+        assert_eq!(source.block_builder_frontier_ns("tenant-a"), 751);
+        assert_eq!(source.block_builder_frontier_ns("tenant-b"), 0);
     }
 
     fn test_span(trace_id: [u8; 16], span_id: [u8; 8]) -> crabka_traces::Span {
@@ -1553,10 +1501,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (matches!(cli.target, Target::Querier), cli.max_trace_spans),
-            (true, 100)
-        );
+        assert_eq!(matches!(cli.target, Target::Querier), true);
+        assert_eq!(cli.max_trace_spans, 100);
         check!(build_querier_router(&cli).await.is_ok());
     }
 
@@ -1571,10 +1517,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (matches!(cli.target, Target::Querier), cli.max_search_traces),
-            (true, 42)
-        );
+        assert_eq!(matches!(cli.target, Target::Querier), true);
+        assert_eq!(cli.max_search_traces, 42);
         check!(build_querier_router(&cli).await.is_ok());
     }
 
@@ -1589,13 +1533,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                matches!(cli.target, Target::Querier),
-                cli.max_metric_exemplars
-            ),
-            (true, 7)
-        );
+        assert_eq!(matches!(cli.target, Target::Querier), true);
+        assert_eq!(cli.max_metric_exemplars, 7);
         check!(engine_opts_from_cli(&cli).max_exemplars == 7);
     }
 
@@ -1610,13 +1549,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                matches!(cli.target, Target::Distributor),
-                cli.max_spans_per_trace
-            ),
-            (true, 42)
-        );
+        assert_eq!(matches!(cli.target, Target::Distributor), true);
+        assert_eq!(cli.max_spans_per_trace, 42);
     }
 
     #[test]
@@ -1632,14 +1566,9 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                matches!(cli.target, Target::Distributor),
-                cli.max_ingest_spans_per_second,
-                cli.ingest_rate_burst,
-            ),
-            (true, 42, 7)
-        );
+        assert_eq!(matches!(cli.target, Target::Distributor), true);
+        assert_eq!(cli.max_ingest_spans_per_second, 42);
+        assert_eq!(cli.ingest_rate_burst, 7);
     }
 
     #[test]
@@ -1655,14 +1584,9 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                matches!(cli.target, Target::Compactor),
-                cli.compaction_start_ns,
-                cli.compaction_end_ns,
-            ),
-            (true, 100, 200)
-        );
+        assert_eq!(matches!(cli.target, Target::Compactor), true);
+        assert_eq!(cli.compaction_start_ns, 100);
+        assert_eq!(cli.compaction_end_ns, 200);
     }
 
     #[test]
@@ -1679,18 +1603,17 @@ mod tests {
         check!(cli.object_store_url == "memory:///tempo/traces");
         let configured = build_object_store(&cli).unwrap();
         assert_eq!(
-            (
-                &configured.root,
-                configured.prefix.to_string(),
-                configured.object_key("index/traces.json"),
-                configured.object_key("traces/tenant-a/block.parquet"),
-            ),
-            (
-                &Url::parse("memory:///tempo/traces").unwrap(),
-                "tempo/traces".to_string(),
-                "tempo/traces/index/traces.json".to_string(),
-                "tempo/traces/traces/tenant-a/block.parquet".to_string(),
-            )
+            &configured.root,
+            &Url::parse("memory:///tempo/traces").unwrap()
+        );
+        assert_eq!(configured.prefix.to_string(), "tempo/traces".to_string());
+        assert_eq!(
+            configured.object_key("index/traces.json"),
+            "tempo/traces/index/traces.json".to_string()
+        );
+        assert_eq!(
+            configured.object_key("traces/tenant-a/block.parquet"),
+            "tempo/traces/traces/tenant-a/block.parquet".to_string()
         );
     }
 
@@ -1711,22 +1634,14 @@ mod tests {
         ])
         .unwrap();
 
+        assert_eq!(matches!(cli.target, Target::QueryFrontend), true);
         assert_eq!(
-            (
-                matches!(cli.target, Target::QueryFrontend),
-                cli.querier_url.as_str(),
-                cli.live_frontier_ns,
-                cli.query_queue_depth,
-                cli.target_bytes_per_job,
-            ),
-            (
-                true,
-                "http://querier-a.example:3200,http://querier-b.example:3200",
-                Some(60_000_000_000),
-                4,
-                4096,
-            )
+            cli.querier_url.as_str(),
+            "http://querier-a.example:3200,http://querier-b.example:3200"
         );
+        assert_eq!(cli.live_frontier_ns, Some(60_000_000_000));
+        assert_eq!(cli.query_queue_depth, 4);
+        assert_eq!(cli.target_bytes_per_job, 4096);
         check!(build_query_frontend_router(&cli).await.is_ok());
     }
 }

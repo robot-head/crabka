@@ -806,38 +806,39 @@ mod tests {
         collect_tags(&[span()], &mut tag_names, &mut tag_values);
 
         assert_eq!(
-            (tag_names, tag_values),
-            (
-                BTreeSet::from([
+            tag_names,
+            BTreeSet::from([
+                "event:name".to_string(),
+                "event:timeSinceStart".to_string(),
+                "link:spanID".to_string(),
+                "link:traceID".to_string(),
+                "service.name".to_string(),
+            ])
+        );
+        assert_eq!(
+            tag_values,
+            BTreeMap::from([
+                (
                     "event:name".to_string(),
+                    BTreeSet::from(["exception".to_string()])
+                ),
+                (
                     "event:timeSinceStart".to_string(),
+                    BTreeSet::from(["50".to_string()])
+                ),
+                (
                     "link:spanID".to_string(),
+                    BTreeSet::from(["0808080808080808".to_string()])
+                ),
+                (
                     "link:traceID".to_string(),
+                    BTreeSet::from(["09090909090909090909090909090909".to_string()])
+                ),
+                (
                     "service.name".to_string(),
-                ]),
-                BTreeMap::from([
-                    (
-                        "event:name".to_string(),
-                        BTreeSet::from(["exception".to_string()])
-                    ),
-                    (
-                        "event:timeSinceStart".to_string(),
-                        BTreeSet::from(["50".to_string()])
-                    ),
-                    (
-                        "link:spanID".to_string(),
-                        BTreeSet::from(["0808080808080808".to_string()])
-                    ),
-                    (
-                        "link:traceID".to_string(),
-                        BTreeSet::from(["09090909090909090909090909090909".to_string()])
-                    ),
-                    (
-                        "service.name".to_string(),
-                        BTreeSet::from(["api".to_string()])
-                    ),
-                ])
-            )
+                    BTreeSet::from(["api".to_string()])
+                ),
+            ])
         );
     }
 
@@ -858,48 +859,49 @@ mod tests {
         collect_tags(&[span], &mut tag_names, &mut tag_values);
 
         assert_eq!(
-            (tag_names, tag_values),
-            (
-                BTreeSet::from([
+            tag_names,
+            BTreeSet::from([
+                "cache.key".to_string(),
+                "event:name".to_string(),
+                "event:timeSinceStart".to_string(),
+                "link.kind".to_string(),
+                "link:spanID".to_string(),
+                "link:traceID".to_string(),
+                "service.name".to_string(),
+            ])
+        );
+        assert_eq!(
+            tag_values,
+            BTreeMap::from([
+                (
                     "cache.key".to_string(),
+                    BTreeSet::from(["users".to_string()])
+                ),
+                (
                     "event:name".to_string(),
+                    BTreeSet::from(["exception".to_string()])
+                ),
+                (
                     "event:timeSinceStart".to_string(),
+                    BTreeSet::from(["50".to_string()])
+                ),
+                (
                     "link.kind".to_string(),
+                    BTreeSet::from(["retry".to_string()])
+                ),
+                (
                     "link:spanID".to_string(),
+                    BTreeSet::from(["0808080808080808".to_string()])
+                ),
+                (
                     "link:traceID".to_string(),
+                    BTreeSet::from(["09090909090909090909090909090909".to_string()])
+                ),
+                (
                     "service.name".to_string(),
-                ]),
-                BTreeMap::from([
-                    (
-                        "cache.key".to_string(),
-                        BTreeSet::from(["users".to_string()])
-                    ),
-                    (
-                        "event:name".to_string(),
-                        BTreeSet::from(["exception".to_string()])
-                    ),
-                    (
-                        "event:timeSinceStart".to_string(),
-                        BTreeSet::from(["50".to_string()])
-                    ),
-                    (
-                        "link.kind".to_string(),
-                        BTreeSet::from(["retry".to_string()])
-                    ),
-                    (
-                        "link:spanID".to_string(),
-                        BTreeSet::from(["0808080808080808".to_string()])
-                    ),
-                    (
-                        "link:traceID".to_string(),
-                        BTreeSet::from(["09090909090909090909090909090909".to_string()])
-                    ),
-                    (
-                        "service.name".to_string(),
-                        BTreeSet::from(["api".to_string()])
-                    ),
-                ])
-            )
+                    BTreeSet::from(["api".to_string()])
+                ),
+            ])
         );
     }
 
@@ -914,48 +916,49 @@ mod tests {
         collect_tags(&[span], &mut tag_names, &mut tag_values);
 
         assert_eq!(
-            (tag_names, tag_values),
-            (
-                BTreeSet::from([
+            tag_names,
+            BTreeSet::from([
+                "event:name".to_string(),
+                "event:timeSinceStart".to_string(),
+                "instrumentation:name".to_string(),
+                "instrumentation:version".to_string(),
+                "link:spanID".to_string(),
+                "link:traceID".to_string(),
+                "service.name".to_string(),
+            ])
+        );
+        assert_eq!(
+            tag_values,
+            BTreeMap::from([
+                (
                     "event:name".to_string(),
+                    BTreeSet::from(["exception".to_string()])
+                ),
+                (
                     "event:timeSinceStart".to_string(),
+                    BTreeSet::from(["50".to_string()])
+                ),
+                (
                     "instrumentation:name".to_string(),
+                    BTreeSet::from(["otel-rust".to_string()])
+                ),
+                (
                     "instrumentation:version".to_string(),
+                    BTreeSet::from(["1.2.3".to_string()])
+                ),
+                (
                     "link:spanID".to_string(),
+                    BTreeSet::from(["0808080808080808".to_string()])
+                ),
+                (
                     "link:traceID".to_string(),
+                    BTreeSet::from(["09090909090909090909090909090909".to_string()])
+                ),
+                (
                     "service.name".to_string(),
-                ]),
-                BTreeMap::from([
-                    (
-                        "event:name".to_string(),
-                        BTreeSet::from(["exception".to_string()])
-                    ),
-                    (
-                        "event:timeSinceStart".to_string(),
-                        BTreeSet::from(["50".to_string()])
-                    ),
-                    (
-                        "instrumentation:name".to_string(),
-                        BTreeSet::from(["otel-rust".to_string()])
-                    ),
-                    (
-                        "instrumentation:version".to_string(),
-                        BTreeSet::from(["1.2.3".to_string()])
-                    ),
-                    (
-                        "link:spanID".to_string(),
-                        BTreeSet::from(["0808080808080808".to_string()])
-                    ),
-                    (
-                        "link:traceID".to_string(),
-                        BTreeSet::from(["09090909090909090909090909090909".to_string()])
-                    ),
-                    (
-                        "service.name".to_string(),
-                        BTreeSet::from(["api".to_string()])
-                    ),
-                ])
-            )
+                    BTreeSet::from(["api".to_string()])
+                ),
+            ])
         );
     }
 }

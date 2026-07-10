@@ -46,11 +46,8 @@ fn route_exposes_first_slice_paths_and_labels() {
     ];
 
     for (route, expected_path, expected_label) in routes {
-        assert_eq!(
-            (route.path(), route.label()),
-            (expected_path, expected_label),
-            "case {route:?}"
-        );
+        assert_eq!(route.path(), expected_path, "case {route:?}");
+        assert_eq!(route.label(), expected_label, "case {route:?}");
     }
 }
 
@@ -77,10 +74,8 @@ fn sidebar_links_include_operations_routes_in_order() {
 
 #[test]
 fn login_route_is_outside_operations_sidebar() {
-    assert_eq!(
-        (Route::Login.path(), Route::Login.label()),
-        ("/login", "Login")
-    );
+    assert_eq!(Route::Login.path(), "/login");
+    assert_eq!(Route::Login.label(), "Login");
     assert!(
         sidebar_links()
             .iter()

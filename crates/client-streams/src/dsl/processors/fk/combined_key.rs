@@ -72,11 +72,15 @@ mod tests {
             let fk = e["fk"].as_str().unwrap().as_bytes();
             let pk = e["pk"].as_str().unwrap().as_bytes();
             assert_eq!(
-                (combined_key(fk, pk), foreign_prefix(fk)),
-                (
-                    Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
-                    Bytes::from(hex(e["prefix_hex"].as_str().unwrap()))
-                ),
+                combined_key(fk, pk),
+                Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
+                "fixture fk={:?} pk={:?}",
+                e["fk"],
+                e["pk"]
+            );
+            assert_eq!(
+                foreign_prefix(fk),
+                Bytes::from(hex(e["prefix_hex"].as_str().unwrap())),
                 "fixture fk={:?} pk={:?}",
                 e["fk"],
                 e["pk"]

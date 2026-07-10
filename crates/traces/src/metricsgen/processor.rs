@@ -147,28 +147,30 @@ mod tests {
 
         let a = payloads.iter().find(|p| p.tenant == "A").unwrap();
         assert_eq!(
-            (
-                a.series
-                    .iter()
-                    .any(|s| s.name == "traces_service_graph_request_total"),
-                a.series
-                    .iter()
-                    .any(|s| s.name == "traces_spanmetrics_calls_total"),
-            ),
-            (true, true)
+            a.series
+                .iter()
+                .any(|s| s.name == "traces_service_graph_request_total"),
+            true
+        );
+        assert_eq!(
+            a.series
+                .iter()
+                .any(|s| s.name == "traces_spanmetrics_calls_total"),
+            true
         );
 
         let b = payloads.iter().find(|p| p.tenant == "B").unwrap();
         assert_eq!(
-            (
-                b.series
-                    .iter()
-                    .any(|s| s.name == "traces_spanmetrics_calls_total"),
-                b.series
-                    .iter()
-                    .any(|s| s.name == "traces_service_graph_request_total"),
-            ),
-            (true, false)
+            b.series
+                .iter()
+                .any(|s| s.name == "traces_spanmetrics_calls_total"),
+            true
+        );
+        assert_eq!(
+            b.series
+                .iter()
+                .any(|s| s.name == "traces_service_graph_request_total"),
+            false
         );
     }
 

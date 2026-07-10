@@ -333,10 +333,8 @@ mod tests {
     fn empty_goals_returns_no_movements() {
         let goals: Vec<&dyn Goal> = vec![];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
-        assert_eq!(
-            (out.proposal.movements.is_empty(), out.proposal.status),
-            (true, ProposalStatus::Computed)
-        );
+        assert_eq!(out.proposal.movements.is_empty(), true);
+        assert_eq!(out.proposal.status, ProposalStatus::Computed);
     }
 
     #[test]

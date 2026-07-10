@@ -419,18 +419,16 @@ mod orch_tests {
         let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
 
         let resp = qf.search("t1", "{ }", 0, 300, 20, 3).await.unwrap();
+        assert_eq!(qf.backend_ref().search_calls().len(), 3);
         assert_eq!(
-            (
-                qf.backend_ref().search_calls().len(),
-                qf.backend_ref()
-                    .search_calls()
-                    .iter()
-                    .map(|call| call.tenant.as_str())
-                    .collect::<Vec<_>>(),
-                resp.traces.len(),
-            ),
-            (3, vec!["t1", "t1", "t1"], 3)
+            qf.backend_ref()
+                .search_calls()
+                .iter()
+                .map(|call| call.tenant.as_str())
+                .collect::<Vec<_>>(),
+            vec!["t1", "t1", "t1"]
         );
+        assert_eq!(resp.traces.len(), 3);
         // A successful multi-job search folds real per-job accounting:
         // completedJobs == totalJobs, and non-zero inspected traces/spans (not
         // the all-zero block that the querier used to emit).
@@ -468,13 +466,8 @@ mod orch_tests {
         };
         let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
         let resp = qf.search("t1", "{ }", 0, 300, 1, 3).await.unwrap();
-        assert_eq!(
-            (
-                resp.traces.len(),
-                resp.traces[0].start_time_unix_nano.as_str()
-            ),
-            (1, "300")
-        );
+        assert_eq!(resp.traces.len(), 1);
+        assert_eq!(resp.traces[0].start_time_unix_nano.as_str(), "300");
     }
 
     #[tokio::test]

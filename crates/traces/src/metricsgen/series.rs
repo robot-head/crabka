@@ -96,12 +96,7 @@ mod tests {
             }],
         };
 
-        assert_eq!(
-            (
-                payload.tenant.as_str(),
-                (payload.series[0].exemplars[0].value - 0.25).abs() < 1e-9,
-            ),
-            ("acme", true)
-        );
+        assert_eq!(payload.tenant.as_str(), "acme");
+        assert!((payload.series[0].exemplars[0].value - 0.25).abs() < 1e-9);
     }
 }

@@ -441,7 +441,8 @@ mod tests {
         h.push(&make_state(20, &[1, 2]));
         h.push(&make_state(30, &[1, 2, 3]));
         let oldest = h.iter_recent().next().expect("at least one memo");
-        assert_eq!((h.len(), oldest.snapshot_at_ms), (2, 20));
+        assert_eq!(h.len(), 2);
+        assert_eq!(oldest.snapshot_at_ms, 20);
     }
 
     #[test]
@@ -451,10 +452,8 @@ mod tests {
         h.push(&make_state(20, &[1]));
         h.push(&make_state(30, &[1]));
         let got = h.oldest_since(15).expect("memo at 20 satisfies cutoff");
-        assert_eq!(
-            (got.snapshot_at_ms, h.oldest_since(1000).is_none()),
-            (20, true)
-        );
+        assert_eq!(got.snapshot_at_ms, 20);
+        assert_eq!(h.oldest_since(1000).is_none(), true);
     }
 
     #[test]

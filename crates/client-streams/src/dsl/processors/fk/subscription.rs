@@ -158,11 +158,8 @@ mod tests {
             let name = e["name"].as_str().unwrap();
             let byte = u8::try_from(e["byte"].as_u64().unwrap()).unwrap();
             let instruction = Instruction::from_byte(byte).unwrap();
-            assert_eq!(
-                (instruction.name(), instruction.to_byte()),
-                (name, byte),
-                "case {name}"
-            );
+            assert_eq!(instruction.name(), name, "case {name}");
+            assert_eq!(instruction.to_byte(), byte, "case {name}");
         }
     }
 
@@ -184,14 +181,13 @@ mod tests {
                 primary_partition: pp,
             };
             assert_eq!(
-                (
-                    w.serialize(),
-                    SubscriptionWrapper::deserialize(&w.serialize())
-                ),
-                (
-                    Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
-                    w.clone()
-                ),
+                w.serialize(),
+                Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
+                "subscription wrapper fixture: {e}"
+            );
+            assert_eq!(
+                SubscriptionWrapper::deserialize(&w.serialize()),
+                w.clone(),
                 "subscription wrapper fixture: {e}"
             );
         }
@@ -208,14 +204,13 @@ mod tests {
                 foreign_value: fv.clone(),
             };
             assert_eq!(
-                (
-                    w.serialize(),
-                    SubscriptionResponseWrapper::deserialize(&w.serialize())
-                ),
-                (
-                    Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
-                    w.clone()
-                ),
+                w.serialize(),
+                Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
+                "response wrapper fixture: {e}"
+            );
+            assert_eq!(
+                SubscriptionResponseWrapper::deserialize(&w.serialize()),
+                w.clone(),
                 "response wrapper fixture: {e}"
             );
         }

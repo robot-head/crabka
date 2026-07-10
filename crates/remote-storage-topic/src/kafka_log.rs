@@ -588,16 +588,11 @@ mod tests {
     #[test]
     fn config_defaults_match_kafka() {
         let cfg = KafkaMetadataLogConfig::new("127.0.0.1:9092");
-        assert_eq!(
-            (
-                cfg.topic.as_str(),
-                cfg.num_partitions,
-                cfg.replication,
-                cfg.bootstrap.as_str(),
-                cfg.security.is_none(),
-            ),
-            (METADATA_TOPIC, 50, 3, "127.0.0.1:9092", true)
-        );
+        assert_eq!(cfg.topic.as_str(), METADATA_TOPIC);
+        assert_eq!(cfg.num_partitions, 50);
+        assert_eq!(cfg.replication, 3);
+        assert_eq!(cfg.bootstrap.as_str(), "127.0.0.1:9092");
+        assert_eq!(cfg.security.is_none(), true);
     }
 
     #[test]

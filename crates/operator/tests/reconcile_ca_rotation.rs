@@ -288,9 +288,10 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
+    assert_eq!(rot["status"].as_str(), Some("True"), "body = {sbody}");
     assert_eq!(
-        (rot["status"].as_str(), rot["reason"].as_str()),
-        (Some("True"), Some("RenewingCert")),
+        rot["reason"].as_str(),
+        Some("RenewingCert"),
         "body = {sbody}"
     );
 
@@ -405,11 +406,13 @@ async fn force_replace_key_starts_staged_rotation() {
         .expect("cluster-ca-cert PATCH");
     let cbody: Value = serde_json::from_slice(cert_patch.body()).expect("cert PATCH JSON");
     assert_eq!(
-        (
-            count_cert_blocks(cbody["data"]["ca.crt"].as_str().expect("ca.crt")),
-            cbody["metadata"]["annotations"]["crabka.io/ca-rotation-phase"].as_str(),
-        ),
-        (2, Some("key-replace-trust")),
+        count_cert_blocks(cbody["data"]["ca.crt"].as_str().expect("ca.crt")),
+        2,
+        "body = {cbody}"
+    );
+    assert_eq!(
+        cbody["metadata"]["annotations"]["crabka.io/ca-rotation-phase"].as_str(),
+        Some("key-replace-trust"),
         "body = {cbody}"
     );
 
@@ -439,9 +442,10 @@ async fn force_replace_key_starts_staged_rotation() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
+    assert_eq!(rot["status"].as_str(), Some("True"), "body = {sbody}");
     assert_eq!(
-        (rot["status"].as_str(), rot["reason"].as_str()),
-        (Some("True"), Some("DistributingTrust")),
+        rot["reason"].as_str(),
+        Some("DistributingTrust"),
         "body = {sbody}"
     );
 

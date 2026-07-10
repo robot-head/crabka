@@ -193,7 +193,8 @@ mod tests {
             idx.flush().unwrap();
         }
         let idx = OffsetIndex::open(&path).unwrap();
-        assert_eq!((idx.entry_count(), idx.lookup(100)), (2, 4096));
+        assert_eq!(idx.entry_count(), 2);
+        assert_eq!(idx.lookup(100), 4096);
     }
 
     #[test]
@@ -218,10 +219,9 @@ mod tests {
         drop(f);
 
         let idx = OffsetIndex::open(&path).unwrap();
-        assert_eq!(
-            (idx.entry_count(), idx.last_entry(), idx.lookup(150)),
-            (2, Some((100, 4096)), 4096)
-        );
+        assert_eq!(idx.entry_count(), 2);
+        assert_eq!(idx.last_entry(), Some((100, 4096)));
+        assert_eq!(idx.lookup(150), 4096);
     }
 
     #[test]
@@ -254,10 +254,8 @@ mod tests {
         idx.append(100, 4096).unwrap();
         idx.append(200, 8192).unwrap();
         idx.truncate_by_position(8192).unwrap();
-        assert_eq!(
-            (idx.entry_count(), idx.last_entry()),
-            (2, Some((100, 4096)))
-        );
+        assert_eq!(idx.entry_count(), 2);
+        assert_eq!(idx.last_entry(), Some((100, 4096)));
     }
 }
 
@@ -434,9 +432,8 @@ mod time_tests {
         drop(f);
 
         let idx = TimeIndex::open(&path).unwrap();
-        assert_eq!(
-            (idx.entry_count(), idx.last_entry(), idx.lookup(2_500)),
-            (2, Some((2_000, 100)), 100)
-        );
+        assert_eq!(idx.entry_count(), 2);
+        assert_eq!(idx.last_entry(), Some((2_000, 100)));
+        assert_eq!(idx.lookup(2_500), 100);
     }
 }

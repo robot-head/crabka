@@ -111,9 +111,10 @@ async fn add_voter_succeeds_when_caught_up() {
     assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
     assert_eq!(
-        (&st.membership, st.submitted.len()),
-        (&Some(BTreeSet::from([NodeId(1), NodeId(2)])), 1)
+        &st.membership,
+        &Some(BTreeSet::from([NodeId(1), NodeId(2)]))
     );
+    assert_eq!(st.submitted.len(), 1);
 }
 
 #[tokio::test]
@@ -140,9 +141,10 @@ async fn add_voter_accepts_observer_at_lag_bound() {
     assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
     assert_eq!(
-        (&st.membership, st.submitted.len()),
-        (&Some(BTreeSet::from([NodeId(1), NodeId(2)])), 1)
+        &st.membership,
+        &Some(BTreeSet::from([NodeId(1), NodeId(2)]))
     );
+    assert_eq!(st.submitted.len(), 1);
 }
 
 #[tokio::test]
@@ -223,7 +225,8 @@ async fn update_voter_submits_record_without_membership_change() {
         .unwrap();
     assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert_eq!((st.membership.is_none(), st.submitted.len()), (true, 1));
+    assert_eq!(st.membership.is_none(), true);
+    assert_eq!(st.submitted.len(), 1);
 }
 
 #[tokio::test]
@@ -244,10 +247,8 @@ async fn remove_non_last_voter_succeeds() {
         .unwrap();
     assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert_eq!(
-        (&st.membership, st.submitted.len()),
-        (&Some(BTreeSet::from([NodeId(1)])), 1)
-    );
+    assert_eq!(&st.membership, &Some(BTreeSet::from([NodeId(1)])));
+    assert_eq!(st.submitted.len(), 1);
 }
 
 #[tokio::test]
@@ -269,8 +270,6 @@ async fn remove_voter_with_mismatched_directory_id_is_noop() {
         .unwrap();
     assert!(out == ReconfigOutcome::Committed); // idempotent no-op
     let st = mock.0.lock().unwrap();
-    assert_eq!(
-        (st.membership.is_none(), st.submitted.is_empty()),
-        (true, true)
-    );
+    assert_eq!(st.membership.is_none(), true);
+    assert_eq!(st.submitted.is_empty(), true);
 }

@@ -215,9 +215,10 @@ fn assert_ready_false_with_reason(
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition present; body = {body}"));
+    assert_eq!(ready["status"].as_str(), Some("False"), "body = {body}");
     assert_eq!(
-        (ready["status"].as_str(), ready["reason"].as_str()),
-        (Some("False"), Some(expected_reason)),
+        ready["reason"].as_str(),
+        Some(expected_reason),
         "body = {body}"
     );
 }
@@ -485,22 +486,24 @@ async fn gssapi_listener_statefulset_mounts_keytab_volume() {
         .find(|m| m["name"] == "gssapi-keytab")
         .unwrap_or_else(|| panic!("gssapi-keytab mount present; body = {body}"));
     assert_eq!(
-        (kt_vol, kt_mount),
-        (
-            &serde_json::json!({
-                "name": "gssapi-keytab",
-                "secret": {
-                    "defaultMode": 256,
-                    "secretName": KEYTAB_SECRET_NAME,
-                    "items": [{ "key": KEYTAB_KEY, "path": "keytab" }],
-                },
-            }),
-            &serde_json::json!({
-                "mountPath": "/etc/crabka/gssapi-keytab",
-                "name": "gssapi-keytab",
-                "readOnly": true,
-            }),
-        ),
+        kt_vol,
+        &serde_json::json!({
+            "name": "gssapi-keytab",
+            "secret": {
+                "defaultMode": 256,
+                "secretName": KEYTAB_SECRET_NAME,
+                "items": [{ "key": KEYTAB_KEY, "path": "keytab" }],
+            },
+        }),
+        "body = {body}"
+    );
+    assert_eq!(
+        kt_mount,
+        &serde_json::json!({
+            "mountPath": "/etc/crabka/gssapi-keytab",
+            "name": "gssapi-keytab",
+            "readOnly": true,
+        }),
         "body = {body}"
     );
 }
@@ -657,21 +660,13 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
 
     // [gssapi] survives the round trip with every field intact.
     let g = bc.gssapi.expect("bc.gssapi must be Some after round trip");
+    assert_eq!(g.service_name.as_str(), "kafka");
+    assert_eq!(g.principal_to_local_rules.len(), 2);
+    assert_eq!(g.realm.as_deref(), Some("EXAMPLE.COM"));
+    assert_eq!(g.kdc.as_deref(), Some("tcp://kdc:88"));
     assert_eq!(
-        (
-            g.service_name.as_str(),
-            g.principal_to_local_rules.len(),
-            g.realm.as_deref(),
-            g.kdc.as_deref(),
-            g.keytab_path.as_path(),
-        ),
-        (
-            "kafka",
-            2,
-            Some("EXAMPLE.COM"),
-            Some("tcp://kdc:88"),
-            std::path::Path::new("/etc/crabka/gssapi-keytab/keytab")
-        )
+        g.keytab_path.as_path(),
+        std::path::Path::new("/etc/crabka/gssapi-keytab/keytab")
     );
 
     // [inter_broker_credentials] survives as the Gssapi variant with the
@@ -743,26 +738,32 @@ async fn krb5_conf_statefulset_mounts_volume_and_sets_env() {
         .find(|e| e["name"] == "KRB5_CONFIG")
         .unwrap_or_else(|| panic!("KRB5_CONFIG env present; body = {body}"));
     assert_eq!(
-        (krb5_vol, krb5_mount, krb5_config),
-        (
-            &serde_json::json!({
-                "name": "krb5-conf",
-                "secret": {
-                    "defaultMode": 256,
-                    "items": [{ "key": KRB5_KEY, "path": "krb5.conf" }],
-                    "secretName": KRB5_SECRET_NAME,
-                },
-            }),
-            &serde_json::json!({
-                "mountPath": "/etc/crabka/krb5",
-                "name": "krb5-conf",
-                "readOnly": true,
-            }),
-            &serde_json::json!({
-                "name": "KRB5_CONFIG",
-                "value": "/etc/crabka/krb5/krb5.conf",
-            }),
-        ),
+        krb5_vol,
+        &serde_json::json!({
+            "name": "krb5-conf",
+            "secret": {
+                "defaultMode": 256,
+                "items": [{ "key": KRB5_KEY, "path": "krb5.conf" }],
+                "secretName": KRB5_SECRET_NAME,
+            },
+        }),
+        "body = {body}"
+    );
+    assert_eq!(
+        krb5_mount,
+        &serde_json::json!({
+            "mountPath": "/etc/crabka/krb5",
+            "name": "krb5-conf",
+            "readOnly": true,
+        }),
+        "body = {body}"
+    );
+    assert_eq!(
+        krb5_config,
+        &serde_json::json!({
+            "name": "KRB5_CONFIG",
+            "value": "/etc/crabka/krb5/krb5.conf",
+        }),
         "body = {body}"
     );
 }

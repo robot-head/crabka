@@ -312,8 +312,13 @@ async fn happy_path_all_objects_created_ready() {
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {status_body}"));
     assert_eq!(
-        (ready["status"].as_str(), ready["reason"].as_str()),
-        (Some("True"), Some("Available")),
+        ready["status"].as_str(),
+        Some("True"),
+        "body = {status_body}"
+    );
+    assert_eq!(
+        ready["reason"].as_str(),
+        Some("Available"),
         "body = {status_body}"
     );
 
@@ -478,9 +483,10 @@ async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {body}"));
+    assert_eq!(ready["status"].as_str(), Some("False"), "body = {body}");
     assert_eq!(
-        (ready["status"].as_str(), ready["reason"].as_str()),
-        (Some("False"), Some("NoTlsListener")),
+        ready["reason"].as_str(),
+        Some("NoTlsListener"),
         "body = {body}"
     );
 
@@ -575,9 +581,10 @@ async fn version_gate_blocks_when_kafka_not_validated() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition missing; body = {body}"));
+    assert_eq!(ready["status"].as_str(), Some("False"), "body = {body}");
     assert_eq!(
-        (ready["status"].as_str(), ready["reason"].as_str()),
-        (Some("False"), Some("WaitingForVersionValidation")),
+        ready["reason"].as_str(),
+        Some("WaitingForVersionValidation"),
         "body = {body}"
     );
 

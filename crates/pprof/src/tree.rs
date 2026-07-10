@@ -457,18 +457,13 @@ mod tests {
         tree.add_stack(&stack(&["work", "main"]), 10);
         tree.add_stack(&stack(&["other", "main"]), 3);
 
-        assert_eq!(
-            (
-                tree.total_of(&["total"]),
-                tree.self_of(&["total"]),
-                tree.total_of(&["total", "main"]),
-                tree.self_of(&["total", "main"]),
-                tree.total_of(&["total", "main", "work"]),
-                tree.self_of(&["total", "main", "work"]),
-                tree.self_of(&["total", "main", "other"]),
-            ),
-            (13, 0, 13, 0, 10, 10, 3)
-        );
+        assert_eq!(tree.total_of(&["total"]), 13);
+        assert_eq!(tree.self_of(&["total"]), 0);
+        assert_eq!(tree.total_of(&["total", "main"]), 13);
+        assert_eq!(tree.self_of(&["total", "main"]), 0);
+        assert_eq!(tree.total_of(&["total", "main", "work"]), 10);
+        assert_eq!(tree.self_of(&["total", "main", "work"]), 10);
+        assert_eq!(tree.self_of(&["total", "main", "other"]), 3);
     }
 
     #[test]
@@ -479,10 +474,8 @@ mod tests {
         tree.add_stack(&stack(&["work", "main"]), 10);
         tree.add_stack(&[], 1);
 
-        assert_eq!(
-            (tree.total_of(&["total"]), tree.self_of(&["total"])),
-            (10, 0)
-        );
+        assert_eq!(tree.total_of(&["total"]), 10);
+        assert_eq!(tree.self_of(&["total"]), 0);
         let fg = tree.to_flamegraph(2048);
         assert!(fg.total == 10);
     }
@@ -495,14 +488,9 @@ mod tests {
         b.add_stack(&stack(&["work", "main"]), 5);
         b.add_stack(&stack(&["new", "main"]), 2);
         a.merge(b);
-        assert_eq!(
-            (
-                a.total_of(&["total"]),
-                a.total_of(&["total", "main", "work"]),
-                a.self_of(&["total", "main", "new"]),
-            ),
-            (17, 15, 2)
-        );
+        assert_eq!(a.total_of(&["total"]), 17);
+        assert_eq!(a.total_of(&["total", "main", "work"]), 15);
+        assert_eq!(a.self_of(&["total", "main", "new"]), 2);
     }
 
     #[test]
@@ -511,10 +499,9 @@ mod tests {
         tree.add_stack(&stack(&["a", "main"]), 6);
         tree.add_stack(&stack(&["b", "main"]), 4);
         let fg = tree.to_flamegraph(2048);
-        assert_eq!(
-            (fg.names[0].as_str(), fg.total, &fg.levels[0].values),
-            ("total", 10, &vec![0, 10, 0, 0])
-        );
+        assert_eq!(fg.names[0].as_str(), "total");
+        assert_eq!(fg.total, 10);
+        assert_eq!(&fg.levels[0].values, &vec![0, 10, 0, 0]);
     }
 
     #[test]
@@ -551,23 +538,21 @@ mod tests {
         let fg = tree.to_flamegraph(2048);
 
         assert_eq!(
-            (
-                fg.names.iter().map(String::as_str).collect::<Vec<_>>(),
-                &fg.levels[2].values,
-            ),
-            (
-                vec!["total", "main", "z_leaf", "a_leaf"],
-                &vec![
-                    0,
-                    4,
-                    4,
-                    names_index(&fg, "a_leaf"),
-                    0,
-                    6,
-                    6,
-                    names_index(&fg, "z_leaf"),
-                ],
-            )
+            fg.names.iter().map(String::as_str).collect::<Vec<_>>(),
+            vec!["total", "main", "z_leaf", "a_leaf"]
+        );
+        assert_eq!(
+            &fg.levels[2].values,
+            &vec![
+                0,
+                4,
+                4,
+                names_index(&fg, "a_leaf"),
+                0,
+                6,
+                6,
+                names_index(&fg, "z_leaf"),
+            ]
         );
     }
 
@@ -578,10 +563,8 @@ mod tests {
             tree.add_stack(&stack(&[&format!("leaf{idx}"), "main"]), 1);
         }
         let fg = tree.to_flamegraph(4);
-        assert_eq!(
-            (fg.names.iter().any(|name| name == "other"), fg.total),
-            (true, 10)
-        );
+        assert_eq!(fg.names.iter().any(|name| name == "other"), true);
+        assert_eq!(fg.total, 10);
     }
 
     #[test]
@@ -601,7 +584,8 @@ mod tests {
             .find(|chunk| chunk[3] == other)
             .unwrap();
 
-        assert_eq!((other_bar[1], other_bar[2]), (9, 9));
+        assert_eq!(other_bar[1], 9);
+        assert_eq!(other_bar[2], 9);
     }
 
     #[test]

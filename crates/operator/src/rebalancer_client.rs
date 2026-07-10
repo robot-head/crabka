@@ -402,10 +402,8 @@ mod tests {
             }
         });
         let p = proposal_from_json(&body);
-        assert_eq!(
-            (p.id.as_str(), p.status),
-            ("xyz", ProposalStatus::Executing)
-        );
+        assert_eq!(p.id.as_str(), "xyz");
+        assert_eq!(p.status, ProposalStatus::Executing);
     }
 
     #[test]
@@ -444,10 +442,8 @@ mod tests {
             "failureReason": "broker 3 unreachable"
         });
         let p = proposal_from_json(&body);
-        assert_eq!(
-            (p.status, p.failure_reason.as_deref()),
-            (ProposalStatus::Failed, Some("broker 3 unreachable"))
-        );
+        assert_eq!(p.status, ProposalStatus::Failed);
+        assert_eq!(p.failure_reason.as_deref(), Some("broker 3 unreachable"));
     }
 
     #[test]
@@ -468,7 +464,9 @@ mod tests {
         ] {
             match connect_error(body, status) {
                 RebalancerError::Rpc { code, message } => {
-                    assert_eq!((code.as_str(), message.as_str()), expected, "case {name}");
+                    let (expected_code, expected_message) = expected;
+                    assert_eq!(code.as_str(), expected_code, "case {name}");
+                    assert_eq!(message.as_str(), expected_message, "case {name}");
                 }
                 other => panic!("case {name}: expected Rpc, got {other:?}"),
             }

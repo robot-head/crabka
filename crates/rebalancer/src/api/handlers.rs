@@ -743,11 +743,12 @@ mod tests {
         let now = std::time::Instant::now();
         let deadline = cancel_poll_deadline(now, Duration::from_secs(5));
         assert_eq!(
-            (
-                cancel_poll_expired(now + Duration::from_secs(4), deadline),
-                cancel_poll_expired(now + Duration::from_secs(5), deadline),
-            ),
-            (false, true)
+            cancel_poll_expired(now + Duration::from_secs(4), deadline),
+            false
+        );
+        assert_eq!(
+            cancel_poll_expired(now + Duration::from_secs(5), deadline),
+            true
         );
     }
 

@@ -161,7 +161,8 @@ mod tests {
         let framed = encode_frame(id, SchemaFormat::Protobuf, payload);
         let (got_id, remainder) = decode_frame(&framed).unwrap();
         let stripped = strip_proto_index(&remainder).unwrap();
-        assert_eq!((got_id, stripped), (id, payload.to_vec()));
+        assert_eq!(got_id, id);
+        assert_eq!(stripped, payload.to_vec());
     }
 
     #[test]
@@ -169,7 +170,8 @@ mod tests {
         // [0x00] prefix + payload
         let with_index = prepend_proto_index(b"hello");
         let stripped = strip_proto_index(&with_index).unwrap();
-        assert_eq!((with_index[0], stripped), (0x00, b"hello".to_vec()));
+        assert_eq!(with_index[0], 0x00);
+        assert_eq!(stripped, b"hello".to_vec());
     }
 
     #[test]

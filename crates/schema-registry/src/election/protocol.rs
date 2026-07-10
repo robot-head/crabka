@@ -143,7 +143,8 @@ mod tests {
         let pick2 = select_master(&[c, b.clone(), a]);
         // `http://a:8081` sorts before `http://b:8081`, so member `m1` wins
         // regardless of input order.
-        assert_eq!((pick1, pick2), (Some(b.clone()), Some(b)));
+        assert_eq!(pick1, Some(b.clone()));
+        assert_eq!(pick2, Some(b));
     }
 
     #[test]
@@ -234,10 +235,8 @@ mod tests {
             vec![node2.clone(), node1.clone()],
         ] {
             let (mid, idn) = select_master(&set).expect("a master");
-            assert_eq!(
-                (mid.as_str(), idn.host.as_str()),
-                ("crabka-d7c9d4c3-a778-465d-a069-954b68d772f9", "sr-node-1")
-            );
+            assert_eq!(mid.as_str(), "crabka-d7c9d4c3-a778-465d-a069-954b68d772f9");
+            assert_eq!(idn.host.as_str(), "sr-node-1");
         }
     }
 }

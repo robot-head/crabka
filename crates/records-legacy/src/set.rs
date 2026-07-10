@@ -455,10 +455,8 @@ mod tests {
         // The inner record's timestamp survives the unwrap as -1.
         let mut c2: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut c2, buf.len()).unwrap();
-        assert_eq!(
-            (wrapper.timestamp, decoded[0].timestamp),
-            (Some(-1), Some(-1))
-        );
+        assert_eq!(wrapper.timestamp, Some(-1));
+        assert_eq!(decoded[0].timestamp, Some(-1));
     }
 
     #[test]

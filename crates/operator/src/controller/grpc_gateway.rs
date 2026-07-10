@@ -1252,22 +1252,17 @@ mod tests {
             "demo-broker-headless.default.svc.cluster.local",
         )
         .unwrap();
+        assert_eq!(dep.metadata.name, Some("gw".into()));
         assert_eq!(
-            (
-                dep.metadata.name,
-                dep.metadata.owner_references.unwrap_or_default(),
-            ),
-            (
-                Some("gw".into()),
-                vec![OwnerReference {
-                    api_version: "crabka.io/v1alpha1".into(),
-                    block_owner_deletion: Some(true),
-                    controller: Some(true),
-                    kind: "KafkaGrpcGateway".into(),
-                    name: "gw".into(),
-                    uid: "gw-uid".into(),
-                }],
-            )
+            dep.metadata.owner_references.unwrap_or_default(),
+            vec![OwnerReference {
+                api_version: "crabka.io/v1alpha1".into(),
+                block_owner_deletion: Some(true),
+                controller: Some(true),
+                kind: "KafkaGrpcGateway".into(),
+                name: "gw".into(),
+                uid: "gw-uid".into(),
+            }]
         );
     }
 
@@ -1363,13 +1358,15 @@ mod tests {
             .find(|e| e.name == "CRABKA_GATEWAY_CLIENT_ID")
             .expect("client id env");
         assert_eq!(
-            (
-                args.iter()
-                    .any(|arg| arg == "--advertised-addr=$(POD_IP):9500"),
-                fr.field_path.as_str(),
-                client_id.value.as_deref(),
-            ),
-            (true, "status.podIP", Some("$(POD_NAME)")),
+            args.iter()
+                .any(|arg| arg == "--advertised-addr=$(POD_IP):9500"),
+            true,
+            "args: {args:?}"
+        );
+        assert_eq!(fr.field_path.as_str(), "status.podIP", "args: {args:?}");
+        assert_eq!(
+            client_id.value.as_deref(),
+            Some("$(POD_NAME)"),
             "args: {args:?}"
         );
     }
@@ -1405,14 +1402,9 @@ mod tests {
         let liveness_get = liveness.http_get.expect("httpGet liveness");
         // containerPort 9500.
         let ports = container.ports.expect("ports");
-        assert_eq!(
-            (
-                readiness_get.path.as_deref(),
-                liveness_get.path.as_deref(),
-                ports.iter().any(|p| p.container_port == 9500),
-            ),
-            (Some("/readyz"), Some("/healthz"), true)
-        );
+        assert_eq!(readiness_get.path.as_deref(), Some("/readyz"));
+        assert_eq!(liveness_get.path.as_deref(), Some("/healthz"));
+        assert_eq!(ports.iter().any(|p| p.container_port == 9500), true);
     }
 
     #[test]
@@ -1457,16 +1449,14 @@ mod tests {
         let selector = spec.selector.expect("selector");
         let labels = gateway_labels("demo", "gw");
         let port = &spec.ports.expect("ports")[0];
+        assert_eq!(spec.type_.as_deref(), Some("ClusterIP"));
+        assert_eq!(selector, labels);
+        assert_eq!(port.port, 9500);
         assert_eq!(
-            (
-                spec.type_.as_deref(),
-                selector,
-                port.port,
-                svc.metadata.owner_references.as_ref().unwrap()[0]
-                    .name
-                    .as_str(),
-            ),
-            (Some("ClusterIP"), labels, 9500, "gw")
+            svc.metadata.owner_references.as_ref().unwrap()[0]
+                .name
+                .as_str(),
+            "gw"
         );
     }
 
@@ -1478,39 +1468,34 @@ mod tests {
             ("crabka.io/cluster".to_string(), "demo".to_string()),
             ("crabka.io/gateway".to_string(), "gw".to_string()),
         ]);
+        assert_eq!(user.metadata.name, Some("gw-broker".into()));
+        assert_eq!(user.metadata.namespace, Some("default".into()));
+        assert_eq!(user.metadata.labels, Some(expected_labels));
         assert_eq!(
-            (
-                user.metadata.name,
-                user.metadata.namespace,
-                user.metadata.labels,
-                user.metadata.owner_references,
-                user.spec,
-            ),
-            (
-                Some("gw-broker".into()),
-                Some("default".into()),
-                Some(expected_labels),
-                Some(vec![OwnerReference {
-                    api_version: "crabka.io/v1alpha1".into(),
-                    block_owner_deletion: Some(true),
-                    controller: Some(true),
-                    kind: "KafkaGrpcGateway".into(),
-                    name: "gw".into(),
-                    uid: "gw-uid".into(),
-                }]),
-                KafkaUserSpec {
-                    authentication: Authentication::Tls(TlsAuth::default()),
-                    authorization: Some(Authorization::Simple(SimpleAuthorization {
-                        acls: vec![
-                            broad_acl(AclResourceKind::Topic, "*"),
-                            broad_acl(AclResourceKind::Group, "*"),
-                            broad_acl(AclResourceKind::TransactionalId, "*"),
-                            broad_acl(AclResourceKind::Cluster, "kafka-cluster"),
-                        ],
-                    })),
-                    quotas: None,
-                },
-            )
+            user.metadata.owner_references,
+            Some(vec![OwnerReference {
+                api_version: "crabka.io/v1alpha1".into(),
+                block_owner_deletion: Some(true),
+                controller: Some(true),
+                kind: "KafkaGrpcGateway".into(),
+                name: "gw".into(),
+                uid: "gw-uid".into(),
+            }])
+        );
+        assert_eq!(
+            user.spec,
+            KafkaUserSpec {
+                authentication: Authentication::Tls(TlsAuth::default()),
+                authorization: Some(Authorization::Simple(SimpleAuthorization {
+                    acls: vec![
+                        broad_acl(AclResourceKind::Topic, "*"),
+                        broad_acl(AclResourceKind::Group, "*"),
+                        broad_acl(AclResourceKind::TransactionalId, "*"),
+                        broad_acl(AclResourceKind::Cluster, "kafka-cluster"),
+                    ],
+                })),
+                quotas: None,
+            }
         );
     }
 
@@ -1557,24 +1542,19 @@ mod tests {
         outbound_secrets.insert("processed".to_string(), "SIGN-HMAC".to_string());
 
         let secret = config_secret(&gw, &webhook_secrets, &outbound_secrets).unwrap();
+        assert_eq!(secret.metadata.name.as_deref(), Some("gw-config"));
         assert_eq!(
-            (
-                secret.metadata.name.as_deref(),
-                secret.metadata.owner_references.as_deref(),
-            ),
-            (
-                Some("gw-config"),
-                Some(
-                    [OwnerReference {
-                        api_version: "crabka.io/v1alpha1".into(),
-                        block_owner_deletion: Some(true),
-                        controller: Some(true),
-                        kind: "KafkaGrpcGateway".into(),
-                        name: "gw".into(),
-                        uid: "gw-uid".into(),
-                    }]
-                    .as_slice()
-                ),
+            secret.metadata.owner_references.as_deref(),
+            Some(
+                [OwnerReference {
+                    api_version: "crabka.io/v1alpha1".into(),
+                    block_owner_deletion: Some(true),
+                    controller: Some(true),
+                    kind: "KafkaGrpcGateway".into(),
+                    name: "gw".into(),
+                    uid: "gw-uid".into(),
+                }]
+                .as_slice()
             )
         );
         let data = secret.data.unwrap();
@@ -1633,14 +1613,9 @@ mod tests {
         let parsed: toml::Value = toml::from_str(&outbound_toml).expect("valid TOML");
         let subs = parsed["subscriptions"].as_array().unwrap();
         let allowed = parsed["allowed_targets"].as_array().unwrap();
-        assert_eq!(
-            (
-                subs[0]["name"].as_str(),
-                allowed[0]["host"].as_str(),
-                allowed[0]["scheme"].as_str(),
-            ),
-            (Some("s"), Some("h.example.com"), Some("https"))
-        );
+        assert_eq!(subs[0]["name"].as_str(), Some("s"));
+        assert_eq!(allowed[0]["host"].as_str(), Some("h.example.com"));
+        assert_eq!(allowed[0]["scheme"].as_str(), Some("https"));
     }
 
     #[test]
@@ -1873,11 +1848,12 @@ mod tests {
         );
         let (bootstrap, sni) = resolve_broker_endpoint(&parent, "default").expect("resolved");
         assert_eq!(
-            (bootstrap.as_str(), sni.as_str()),
-            (
-                "demo-broker-headless.default.svc.cluster.local:9093",
-                "demo-broker-headless.default.svc.cluster.local",
-            )
+            bootstrap.as_str(),
+            "demo-broker-headless.default.svc.cluster.local:9093"
+        );
+        assert_eq!(
+            sni.as_str(),
+            "demo-broker-headless.default.svc.cluster.local"
         );
     }
 

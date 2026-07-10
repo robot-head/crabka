@@ -594,13 +594,8 @@ mod tests {
         let img = MetadataImage::new(uuid::Uuid::nil());
         let mv = feature("metadata.version").unwrap();
         // Empty image floor is METADATA_VERSION_MIN (7), distinct from 0/1/-1.
-        assert_eq!(
-            (
-                mv.min_required_floor(&img),
-                img.min_required_metadata_version()
-            ),
-            (7, 7)
-        );
+        assert_eq!(mv.min_required_floor(&img), 7);
+        assert_eq!(img.min_required_metadata_version(), 7);
     }
 
     #[test]

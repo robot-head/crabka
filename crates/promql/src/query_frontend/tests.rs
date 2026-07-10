@@ -269,10 +269,8 @@ fn range_query_plan_expands_each_split_across_mimir_query_shards() {
     );
 
     let matcher = plan[0].shard_matcher().expect("first shard matcher");
-    assert_eq!(
-        (matcher.name.as_str(), matcher.op),
-        ("__query_shard__", MatchOp::Eq)
-    );
+    assert_eq!(matcher.name.as_str(), "__query_shard__");
+    assert_eq!(matcher.op, MatchOp::Eq);
 }
 
 #[test]
@@ -289,13 +287,8 @@ fn range_query_plan_shards_avg_for_partial_sum_count_reduction() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            plan.len(),
-            plan.iter().all(|subquery| subquery.shard.is_some())
-        ),
-        (3, true)
-    );
+    assert_eq!(plan.len(), 3);
+    assert_eq!(plan.iter().all(|subquery| subquery.shard.is_some()), true);
 }
 
 #[test]
@@ -313,12 +306,10 @@ fn range_query_plan_shards_stddev_and_stdvar_for_moment_reduction() {
         )
         .unwrap();
 
+        assert_eq!(plan.len(), 3, "{query}");
         assert_eq!(
-            (
-                plan.len(),
-                plan.iter().all(|subquery| subquery.shard.is_some())
-            ),
-            (3, true),
+            plan.iter().all(|subquery| subquery.shard.is_some()),
+            true,
             "{query}"
         );
     }
@@ -375,12 +366,10 @@ fn range_query_plan_shards_min_and_max_aggregate_reducers() {
         )
         .unwrap();
 
+        assert_eq!(plan.len(), 3, "{query}");
         assert_eq!(
-            (
-                plan.len(),
-                plan.iter().all(|subquery| subquery.shard.is_some())
-            ),
-            (3, true),
+            plan.iter().all(|subquery| subquery.shard.is_some()),
+            true,
             "{query}"
         );
     }
@@ -400,13 +389,8 @@ fn range_query_plan_shards_group_aggregate_reducer() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            plan.len(),
-            plan.iter().all(|subquery| subquery.shard.is_some())
-        ),
-        (3, true)
-    );
+    assert_eq!(plan.len(), 3);
+    assert_eq!(plan.iter().all(|subquery| subquery.shard.is_some()), true);
 }
 
 #[test]
@@ -424,12 +408,10 @@ fn range_query_plan_shards_topk_and_bottomk_for_final_rank_reduction() {
         )
         .unwrap();
 
+        assert_eq!(plan.len(), 3, "{query}");
         assert_eq!(
-            (
-                plan.len(),
-                plan.iter().all(|subquery| subquery.shard.is_some())
-            ),
-            (3, true),
+            plan.iter().all(|subquery| subquery.shard.is_some()),
+            true,
             "{query}"
         );
     }
@@ -574,27 +556,21 @@ fn range_query_merge_sums_native_histograms_with_different_span_layouts() {
     let QueryResult::RangeMatrix(series) = result else {
         panic!("expected range matrix");
     };
-    assert_eq!((series.len(), &series[0].labels), (1, &labels));
+    assert_eq!(series.len(), 1);
+    assert_eq!(&series[0].labels, &labels);
     let SampleValue::Histogram(histogram) = &series[0].samples[0].1 else {
         panic!("expected histogram sample");
     };
+    assert_eq!(histogram.count, 10.0);
+    assert_eq!(histogram.sum, 30.0);
     assert_eq!(
-        (
-            histogram.count,
-            histogram.sum,
-            &histogram.positive_spans,
-            &histogram.positive_counts,
-        ),
-        (
-            10.0,
-            30.0,
-            &vec![BucketSpan {
-                offset: 0,
-                length: 3,
-            }],
-            &vec![1.0, 5.0, 4.0],
-        )
+        &histogram.positive_spans,
+        &vec![BucketSpan {
+            offset: 0,
+            length: 3,
+        }]
     );
+    assert_eq!(&histogram.positive_counts, &vec![1.0, 5.0, 4.0]);
 }
 
 #[test]
@@ -625,10 +601,8 @@ fn range_result_cache_is_scoped_by_tenant_query_range_step_and_shard() {
 
     cache.insert("tenant-a", &query, result.clone());
 
-    assert_eq!(
-        (cache.get("tenant-a", &query), cache.get("tenant-b", &query),),
-        (Some(result), None)
-    );
+    assert_eq!(cache.get("tenant-a", &query), Some(result));
+    assert_eq!(cache.get("tenant-b", &query), None);
 
     let other_shard = FrontendRangeQuery {
         shard: Some(QueryShard { index: 2, total: 2 }),
@@ -690,15 +664,17 @@ fn in_memory_round_trips_then_expires() {
     // One step past the TTL: miss, and the entry is evicted.
     clock.advance(2_000);
     assert_eq!(
-        (
-            cache.get("tenant-a", &query),
-            cache
-                .range_results
-                .lock()
-                .expect("query frontend cache poisoned")
-                .len(),
-        ),
-        (None, 0),
+        cache.get("tenant-a", &query),
+        None,
+        "expired entry must be evicted on miss"
+    );
+    assert_eq!(
+        cache
+            .range_results
+            .lock()
+            .expect("query frontend cache poisoned")
+            .len(),
+        0,
         "expired entry must be evicted on miss"
     );
 }

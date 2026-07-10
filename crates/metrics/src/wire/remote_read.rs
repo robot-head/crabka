@@ -189,17 +189,18 @@ mod tests {
 
         let ts = &result.timeseries[0];
         assert_eq!(
-            (
-                ts.labels
-                    .iter()
-                    .map(|label| label.name.as_str())
-                    .collect::<Vec<_>>(),
-                ts.samples
-                    .iter()
-                    .map(|sample| sample.timestamp)
-                    .collect::<Vec<_>>(),
-            ),
-            (vec!["__name__", "job"], vec![1, 2])
+            ts.labels
+                .iter()
+                .map(|label| label.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["__name__", "job"]
+        );
+        assert_eq!(
+            ts.samples
+                .iter()
+                .map(|sample| sample.timestamp)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
         );
     }
 

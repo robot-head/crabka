@@ -93,10 +93,8 @@ mod tests {
     fn parse_query_shard_selector_accepts_inclusive_upper_bound() {
         let selector = parse_query_shard_selector("1_of_1").unwrap();
 
-        assert_eq!(
-            (selector, selector.matches(42)),
-            (QueryShardSelector { index: 1, total: 1 }, true)
-        );
+        assert_eq!(selector, QueryShardSelector { index: 1, total: 1 });
+        assert_eq!(selector.matches(42), true);
     }
 
     #[test]

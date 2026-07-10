@@ -322,11 +322,12 @@ mod tests {
                 .copy_log_segment_data(&md, &sample_data(src.path()))
                 .unwrap();
             assert_eq!(
-                (
-                    store.fetch_log_segment(&md, 0, None).unwrap(),
-                    store.fetch_index(&md, IndexType::Offset).unwrap(),
-                ),
-                (b"0123456789".to_vec(), b"OFFSET-IDX".to_vec())
+                store.fetch_log_segment(&md, 0, None).unwrap(),
+                b"0123456789".to_vec()
+            );
+            assert_eq!(
+                store.fetch_index(&md, IndexType::Offset).unwrap(),
+                b"OFFSET-IDX".to_vec()
             );
         })
         .await

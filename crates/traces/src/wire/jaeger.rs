@@ -1006,7 +1006,8 @@ mod tests {
     fn compact_thrift_skips_unknown_map_fields() {
         let spans = decode_jaeger_thrift(&encode_sample_batch_with_unknown_map()).unwrap();
 
-        assert_eq!((spans.len(), spans[0].name.as_str()), (1, "GET /"));
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name.as_str(), "GET /");
     }
 
     #[test]
@@ -1014,7 +1015,8 @@ mod tests {
         let spans =
             decode_jaeger_binary_thrift(&encode_binary_sample_batch_with_unknown_map()).unwrap();
 
-        assert_eq!((spans.len(), spans[0].name.as_str()), (1, "GET /binary"));
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].name.as_str(), "GET /binary");
     }
 
     fn encode_binary_sample_batch() -> Vec<u8> {

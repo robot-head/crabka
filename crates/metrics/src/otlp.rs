@@ -1457,7 +1457,8 @@ mod tests {
 
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
-        assert_eq!((series.len(), series[0].exemplars.is_empty()), (1, true));
+        assert_eq!(series.len(), 1);
+        assert_eq!(series[0].exemplars.is_empty(), true);
     }
 
     #[test]
@@ -1475,14 +1476,12 @@ mod tests {
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
         assert_eq!(
-            (
-                series[0].labels.get("__name__"),
-                series[0].samples.as_slice(),
-            ),
-            (
-                Some("http_server_requests_total"),
-                &[DecodedSample::new(2, 7.0)][..],
-            )
+            series[0].labels.get("__name__"),
+            Some("http_server_requests_total")
+        );
+        assert_eq!(
+            series[0].samples.as_slice(),
+            &[DecodedSample::new(2, 7.0)][..]
         );
     }
 
@@ -1519,17 +1518,15 @@ mod tests {
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
 
         assert_eq!(
-            (
-                series[0].labels.get("__name__"),
-                series[0]
-                    .metadata
-                    .as_ref()
-                    .map(|metadata| metadata.metric_family_name.as_str()),
-            ),
-            (
-                Some("k8s_pod_cpu_time_seconds_total"),
-                Some("k8s_pod_cpu_time_seconds_total"),
-            )
+            series[0].labels.get("__name__"),
+            Some("k8s_pod_cpu_time_seconds_total")
+        );
+        assert_eq!(
+            series[0]
+                .metadata
+                .as_ref()
+                .map(|metadata| metadata.metric_family_name.as_str()),
+            Some("k8s_pod_cpu_time_seconds_total")
         );
     }
 
@@ -1906,16 +1903,14 @@ mod tests {
             .find(|series| series.labels.get("__name__") == Some("target_info"))
             .expect("target_info series");
         assert_eq!(
-            (&target.labels, &target.samples),
-            (
-                &labels(&[
-                    ("__name__", "target_info"),
-                    ("service_name", "checkout"),
-                    ("telemetry_sdk_language", "rust"),
-                ]),
-                &vec![DecodedSample::new(1, 1.0)],
-            )
+            &target.labels,
+            &labels(&[
+                ("__name__", "target_info"),
+                ("service_name", "checkout"),
+                ("telemetry_sdk_language", "rust"),
+            ])
         );
+        assert_eq!(&target.samples, &vec![DecodedSample::new(1, 1.0)]);
     }
 
     #[test]
@@ -2301,15 +2296,13 @@ mod tests {
         check!((second_hist.count - 5.0).abs() < f64::EPSILON);
         check!((second_hist.sum - 8.0).abs() < f64::EPSILON);
         assert_eq!(
-            (&second_hist.positive_spans, &second_hist.positive_counts),
-            (
-                &vec![BucketSpan {
-                    offset: 1,
-                    length: 2
-                }],
-                &vec![2.0, 3.0],
-            )
+            &second_hist.positive_spans,
+            &vec![BucketSpan {
+                offset: 1,
+                length: 2
+            }]
         );
+        assert_eq!(&second_hist.positive_counts, &vec![2.0, 3.0]);
     }
 
     #[test]
@@ -2338,10 +2331,8 @@ mod tests {
         let series = decode_otlp(&data, TranslationStrategy::default()).unwrap();
         let hist = &series[0].histograms[0].1;
 
-        assert_eq!(
-            (hist.positive_spans[0].offset, hist.negative_spans[0].offset),
-            (1, 4)
-        );
+        assert_eq!(hist.positive_spans[0].offset, 1);
+        assert_eq!(hist.negative_spans[0].offset, 4);
     }
 
     #[test]

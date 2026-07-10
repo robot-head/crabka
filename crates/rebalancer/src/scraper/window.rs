@@ -286,13 +286,8 @@ mod tests {
     #[test]
     fn empty_store_returns_none() {
         let s = UsageStore::default();
-        assert_eq!(
-            (
-                s.bytes_in_rate(1, "t", 0, Window::FiveMin, 0),
-                s.disk_bytes_avg(1, "t", 0, Window::FiveMin, 0),
-            ),
-            (None, None)
-        );
+        assert_eq!(s.bytes_in_rate(1, "t", 0, Window::FiveMin, 0), None);
+        assert_eq!(s.disk_bytes_avg(1, "t", 0, Window::FiveMin, 0), None);
     }
 
     #[test]

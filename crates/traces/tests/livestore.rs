@@ -76,13 +76,8 @@ fn exposes_recent_spans_as_mem_table_over_span_schema() {
     store.ingest(record("tenant-a", span([2; 16], 1, 20)));
 
     let table = store.mem_table("tenant-a").unwrap();
-    assert_eq!(
-        (
-            table.schema(),
-            table.schema().index_of(SCOL_TRACE_ID).is_ok(),
-        ),
-        (span_block_schema(), true)
-    );
+    assert_eq!(table.schema(), span_block_schema());
+    assert_eq!(table.schema().index_of(SCOL_TRACE_ID).is_ok(), true);
 }
 
 #[tokio::test]
@@ -117,15 +112,16 @@ async fn live_source_exposes_trace_spans_and_tags() {
 
     let names = store.tag_names("tenant-a", None, 0, 100).await.unwrap();
     assert_eq!(
-        (
-            names.iter().any(|tags| {
-                tags.scope == TagScope::Resource && tags.tags == vec!["service.name"]
-            }),
-            names
-                .iter()
-                .any(|tags| tags.scope == TagScope::Span && tags.tags == vec!["http.method"]),
-        ),
-        (true, true)
+        names
+            .iter()
+            .any(|tags| { tags.scope == TagScope::Resource && tags.tags == vec!["service.name"] }),
+        true
+    );
+    assert_eq!(
+        names
+            .iter()
+            .any(|tags| tags.scope == TagScope::Span && tags.tags == vec!["http.method"]),
+        true
     );
     assert_tag_scope_contains(
         &names,

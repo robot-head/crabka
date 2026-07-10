@@ -120,17 +120,11 @@ mod tests {
         let secret = SecretString::new("super-secret");
 
         assert_eq!(
-            (
-                format!("{secret:?}"),
-                secret.to_string(),
-                secret.expose_secret(),
-            ),
-            (
-                "SecretString([REDACTED])".to_string(),
-                "[REDACTED]".to_string(),
-                "super-secret",
-            )
+            format!("{secret:?}"),
+            "SecretString([REDACTED])".to_string()
         );
+        assert_eq!(secret.to_string(), "[REDACTED]".to_string());
+        assert_eq!(secret.expose_secret(), "super-secret");
     }
 
     #[test]

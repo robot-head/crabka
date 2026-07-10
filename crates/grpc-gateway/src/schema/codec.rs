@@ -294,18 +294,19 @@ mod tests {
         let expected: serde_json::Value = serde_json::from_slice(json_in).unwrap();
         let actual: serde_json::Value = serde_json::from_slice(json_out).unwrap();
         assert_eq!(
-            (decoded.value, decoded.schema, actual),
-            (
-                expected_value,
-                Some(SchemaMeta {
-                    subject: "orders-value".to_string(),
-                    id: 5,
-                    format: SchemaFormat::Avro,
-                }),
-                expected,
-            ),
+            decoded.value, expected_value,
             "complete decoded value should match"
         );
+        assert_eq!(
+            decoded.schema,
+            Some(SchemaMeta {
+                subject: "orders-value".to_string(),
+                id: 5,
+                format: SchemaFormat::Avro,
+            }),
+            "complete decoded value should match"
+        );
+        assert_eq!(actual, expected, "complete decoded value should match");
     }
 
     #[tokio::test]
@@ -337,11 +338,9 @@ mod tests {
         ] {
             let codec = avro_codec(false);
             let decoded = codec.decode("orders", value.clone()).await.unwrap();
-            assert_eq!(
-                (decoded.value, decoded.schema, decoded.json),
-                (value, None, None),
-                "case {name}"
-            );
+            assert_eq!(decoded.value, value, "case {name}");
+            assert_eq!(decoded.schema, None, "case {name}");
+            assert_eq!(decoded.json, None, "case {name}");
         }
     }
 }

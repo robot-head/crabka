@@ -76,19 +76,18 @@ fn label_metadata_is_tenant_scoped() {
     );
 
     assert_eq!(
-        (
-            index.label_names("tenant-a"),
-            index.label_values("tenant-a", "app"),
-            index.label_names("tenant-b"),
-            index.label_values("tenant-b", "app"),
-        ),
-        (
-            BTreeSet::from(["app".into(), "env".into()]),
-            BTreeSet::from(["api".into()]),
-            BTreeSet::from(["env".into(), "service".into()]),
-            BTreeSet::new(),
-        )
+        index.label_names("tenant-a"),
+        BTreeSet::from(["app".into(), "env".into()])
     );
+    assert_eq!(
+        index.label_values("tenant-a", "app"),
+        BTreeSet::from(["api".into()])
+    );
+    assert_eq!(
+        index.label_names("tenant-b"),
+        BTreeSet::from(["env".into(), "service".into()])
+    );
+    assert_eq!(index.label_values("tenant-b", "app"), BTreeSet::new());
 }
 
 #[test]
@@ -119,13 +118,8 @@ fn label_index_returns_labels_and_tenant_series() {
 
     let mut expected = vec![(api, api_labels), (worker, worker_labels)];
     expected.sort_by_key(|(fingerprint, _)| *fingerprint);
-    assert_eq!(
-        (
-            index.tenant_series("tenant-a"),
-            index.tenant_series("missing"),
-        ),
-        (expected, Vec::new())
-    );
+    assert_eq!(index.tenant_series("tenant-a"), expected);
+    assert_eq!(index.tenant_series("missing"), Vec::new());
 }
 
 #[test]

@@ -117,16 +117,11 @@ mod tests {
             result: 42,
             position: Position::default(),
         };
-        assert_eq!(
-            (
-                qr.is_success(),
-                qr.result(),
-                qr.position(),
-                qr.failure_reason(),
-                qr.failure_message(),
-            ),
-            (true, Some(&42), Some(&Position::default()), None, None)
-        );
+        assert_eq!(qr.is_success(), true);
+        assert_eq!(qr.result(), Some(&42));
+        assert_eq!(qr.position(), Some(&Position::default()));
+        assert_eq!(qr.failure_reason(), None);
+        assert_eq!(qr.failure_message(), None);
         assert_eq!(qr.into_result(), Some(42));
     }
 
@@ -136,22 +131,11 @@ mod tests {
             reason: FailureReason::NotPresent,
             message: "store not on this task".to_string(),
         };
-        assert_eq!(
-            (
-                qr.is_success(),
-                qr.result(),
-                qr.position(),
-                qr.failure_reason(),
-                qr.failure_message(),
-            ),
-            (
-                false,
-                None,
-                None,
-                Some(FailureReason::NotPresent),
-                Some("store not on this task"),
-            )
-        );
+        assert_eq!(qr.is_success(), false);
+        assert_eq!(qr.result(), None);
+        assert_eq!(qr.position(), None);
+        assert_eq!(qr.failure_reason(), Some(FailureReason::NotPresent));
+        assert_eq!(qr.failure_message(), Some("store not on this task"));
         assert_eq!(qr.into_result(), None);
     }
 
@@ -173,14 +157,9 @@ mod tests {
             },
         );
         let sqr = StateQueryResult::new(map);
-        assert_eq!(
-            (
-                sqr.partition_results().len(),
-                sqr.only_partition_result().is_none(),
-                sqr.global_result().is_none(),
-            ),
-            (2, true, true)
-        );
+        assert_eq!(sqr.partition_results().len(), 2);
+        assert_eq!(sqr.only_partition_result().is_none(), true);
+        assert_eq!(sqr.global_result().is_none(), true);
     }
 
     #[test]
@@ -195,9 +174,7 @@ mod tests {
         );
         let sqr = StateQueryResult::new(map);
         let only = sqr.only_partition_result().expect("exactly one partition");
-        assert_eq!(
-            (sqr.partition_results().len(), only.result()),
-            (1, Some(&Some(9)))
-        );
+        assert_eq!(sqr.partition_results().len(), 1);
+        assert_eq!(only.result(), Some(&Some(9)));
     }
 }

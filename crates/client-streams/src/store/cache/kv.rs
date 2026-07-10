@@ -283,10 +283,9 @@ mod tests {
         store.put(b(b"k"), b(b"v"), ctx()).await;
         let flushed = store.flush().await;
 
-        assert_eq!(
-            (flushed.len(), &flushed[0].0, &flushed[0].1.value),
-            (1, &b(b"k"), &Some(b(b"v")))
-        );
+        assert_eq!(flushed.len(), 1);
+        assert_eq!(&flushed[0].0, &b(b"k"));
+        assert_eq!(&flushed[0].1.value, &Some(b(b"v")));
 
         // Inner now has the write-through value; serve it from the (now-clean)
         // cache or inner — either way `get` returns it.
@@ -416,15 +415,10 @@ mod tests {
         store.clear().await;
 
         // Both the staged entry and the inner value are gone.
-        assert_eq!(
-            (
-                store.get(b"a").await,
-                store.get(b"b").await,
-                store.scan_all().await.is_empty(),
-                store.flush().await.is_empty(),
-            ),
-            (None, None, true, true)
-        );
+        assert_eq!(store.get(b"a").await, None);
+        assert_eq!(store.get(b"b").await, None);
+        assert_eq!(store.scan_all().await.is_empty(), true);
+        assert_eq!(store.flush().await.is_empty(), true);
     }
 
     /// `flush_with_old` reports `old = None` for a key with no prior inner value
@@ -455,10 +449,8 @@ mod tests {
         );
 
         // Both write-throughs landed.
-        assert_eq!(
-            (store.get(b"present").await, store.get(b"fresh").await),
-            (Some(b(b"new")), Some(b(b"v")))
-        );
+        assert_eq!(store.get(b"present").await, Some(b(b"new")));
+        assert_eq!(store.get(b"fresh").await, Some(b(b"v")));
     }
 
     /// `flush_with_old` on a tombstone returns `new = None` and deletes the inner
@@ -472,10 +464,10 @@ mod tests {
         store.delete(b(b"k"), ctx()).await;
 
         let drained = store.flush_with_old().await;
-        assert_eq!(
-            (drained.len(), &drained[0].0, &drained[0].1, &drained[0].2),
-            (1, &b(b"k"), &Some(b(b"old")), &None)
-        );
+        assert_eq!(drained.len(), 1);
+        assert_eq!(&drained[0].0, &b(b"k"));
+        assert_eq!(&drained[0].1, &Some(b(b"old")));
+        assert_eq!(&drained[0].2, &None);
 
         assert_eq!(store.get(b"k").await, None);
     }

@@ -114,14 +114,15 @@ async fn new_rebalance_creates_proposal() {
 
     let body = status_patch_body(&state.take_observed(), "demo");
     assert_eq!(
-        (
-            body["status"]["conditions"][0]["type"].as_str(),
-            body["status"]["sessionId"].as_str(),
-            body["status"]["optimizationResult"]["replicaMovements"].as_i64(),
-            body["status"]["observedGeneration"].as_i64(),
-        ),
-        (Some("ProposalReady"), Some("p-new"), Some(2), Some(1))
+        body["status"]["conditions"][0]["type"].as_str(),
+        Some("ProposalReady")
     );
+    assert_eq!(body["status"]["sessionId"].as_str(), Some("p-new"));
+    assert_eq!(
+        body["status"]["optimizationResult"]["replicaMovements"].as_i64(),
+        Some(2)
+    );
+    assert_eq!(body["status"]["observedGeneration"].as_i64(), Some(1));
 }
 
 /// `approve` on a `ProposalReady` proposal → `ExecuteProposal` (with the
@@ -166,12 +167,10 @@ async fn approve_executes_and_enters_rebalancing() {
 
     let body = status_patch_body(&observed, "demo");
     assert_eq!(
-        (
-            body["status"]["conditions"][0]["type"].as_str(),
-            body["status"]["sessionId"].as_str(),
-        ),
-        (Some("Rebalancing"), Some("p1"))
+        body["status"]["conditions"][0]["type"].as_str(),
+        Some("Rebalancing")
     );
+    assert_eq!(body["status"]["sessionId"].as_str(), Some("p1"));
 }
 
 /// Polling an in-flight execution that has completed → `Ready`.
@@ -191,12 +190,10 @@ async fn poll_completes_to_ready() {
     assert!(fake.calls() == vec![RebalCall::GetProposal("p1".into())]);
     let body = status_patch_body(&state.take_observed(), "demo");
     assert_eq!(
-        (
-            body["status"]["conditions"][0]["type"].as_str(),
-            body["status"]["sessionId"].as_str(),
-        ),
-        (Some("Ready"), Some("p1"))
+        body["status"]["conditions"][0]["type"].as_str(),
+        Some("Ready")
     );
+    assert_eq!(body["status"]["sessionId"].as_str(), Some("p1"));
 }
 
 /// `stop` while `Rebalancing` → `CancelExecution` → `Stopped`.
@@ -236,11 +233,12 @@ async fn poll_failure_surfaces_not_ready() {
 
     let body = status_patch_body(&state.take_observed(), "demo");
     assert_eq!(
-        (
-            body["status"]["conditions"][0]["type"].as_str(),
-            body["status"]["conditions"][0]["message"].as_str(),
-        ),
-        (Some("NotReady"), Some("broker 3 unreachable"))
+        body["status"]["conditions"][0]["type"].as_str(),
+        Some("NotReady")
+    );
+    assert_eq!(
+        body["status"]["conditions"][0]["message"].as_str(),
+        Some("broker 3 unreachable")
     );
 }
 
@@ -258,11 +256,12 @@ async fn missing_endpoint_sets_not_ready() {
 
     let body = status_patch_body(&state.take_observed(), "demo");
     assert_eq!(
-        (
-            body["status"]["conditions"][0]["type"].as_str(),
-            body["status"]["conditions"][0]["reason"].as_str(),
-        ),
-        (Some("NotReady"), Some("MissingEndpoint"))
+        body["status"]["conditions"][0]["type"].as_str(),
+        Some("NotReady")
+    );
+    assert_eq!(
+        body["status"]["conditions"][0]["reason"].as_str(),
+        Some("MissingEndpoint")
     );
 }
 

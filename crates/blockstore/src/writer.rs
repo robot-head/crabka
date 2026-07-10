@@ -266,7 +266,10 @@ mod tests {
             &SummaryColumns::new("trace_id", "start_unix_nano"),
         )
         .unwrap();
-        assert_eq!((min_ts, max_ts, row_count, fps), (100, 200, 2, Vec::new()));
+        assert_eq!(min_ts, 100);
+        assert_eq!(max_ts, 200);
+        assert_eq!(row_count, 2);
+        assert!(fps.is_empty());
     }
 
     #[test]

@@ -141,7 +141,8 @@ mod tests {
         // Leader declares size 3 but streams 5 bytes in one chunk.
         let step = s.on_chunk((10, 1), 3, 0, b"abcde");
         // buf must not have been blown past the declared size.
-        assert_eq!((step, s.next_position()), (SnapshotFetchStep::Restart, 0));
+        assert_eq!(step, SnapshotFetchStep::Restart);
+        assert_eq!(s.next_position(), 0);
     }
 
     #[test]
@@ -149,7 +150,8 @@ mod tests {
         let mut s = SnapshotFetchState::new((10, 1), NodeId(2));
         let too_big = i64::try_from(MAX_SNAPSHOT_BYTES).unwrap() + 1;
         let step = s.on_chunk((10, 1), too_big, 0, b"abc");
-        assert_eq!((step, s.next_position()), (SnapshotFetchStep::Restart, 0));
+        assert_eq!(step, SnapshotFetchStep::Restart);
+        assert_eq!(s.next_position(), 0);
     }
 
     #[test]

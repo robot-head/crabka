@@ -205,22 +205,20 @@ mod tests {
             .copied()
             .collect::<Vec<_>>();
         assert_eq!(
-            (in_3_to_12, in_5_to_9),
-            (
-                vec![
-                    AbortedTxn {
-                        start_offset: Offset(0),
-                        last_offset: Offset(4),
-                        producer_id: ProducerId(1),
-                    },
-                    AbortedTxn {
-                        start_offset: Offset(10),
-                        last_offset: Offset(14),
-                        producer_id: ProducerId(2),
-                    },
-                ],
-                Vec::new(),
-            )
+            in_3_to_12,
+            vec![
+                AbortedTxn {
+                    start_offset: Offset(0),
+                    last_offset: Offset(4),
+                    producer_id: ProducerId(1),
+                },
+                AbortedTxn {
+                    start_offset: Offset(10),
+                    last_offset: Offset(14),
+                    producer_id: ProducerId(2),
+                },
+            ]
         );
+        assert_eq!(in_5_to_9, Vec::new());
     }
 }

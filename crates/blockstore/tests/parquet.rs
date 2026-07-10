@@ -42,10 +42,8 @@ fn parquet_log_block_round_trips_rows_sorted_by_series_and_timestamp() {
     )
     .unwrap();
 
-    assert_eq!(
-        (descriptor.key, descriptor.fingerprints),
-        (key.clone(), BTreeSet::from([api, worker]))
-    );
+    assert_eq!(descriptor.key, key.clone());
+    assert_eq!(descriptor.fingerprints, BTreeSet::from([api, worker]));
     check!(descriptor.size_bytes > 0);
 
     let rows = read_log_block(dir.path(), &key).unwrap();
@@ -177,10 +175,8 @@ async fn parquet_log_block_round_trips_through_object_store() {
     .await
     .unwrap();
 
-    assert_eq!(
-        (descriptor.key, descriptor.fingerprints),
-        (key.clone(), BTreeSet::from([api, worker]))
-    );
+    assert_eq!(descriptor.key, key.clone());
+    assert_eq!(descriptor.fingerprints, BTreeSet::from([api, worker]));
     check!(descriptor.size_bytes > 0);
 
     let rows = read_log_block_from_object_store(&store, &prefix, &key)

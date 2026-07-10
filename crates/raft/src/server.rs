@@ -977,7 +977,8 @@ mod tests {
         .await
         .expect("submit dispatch");
         let ok = decode_submit_change_response(&ok_body);
-        assert_eq!((ok.error_code, ok.leader_hint), (0, -1));
+        assert_eq!(ok.error_code, 0);
+        assert_eq!(ok.leader_hint, -1);
 
         let bad_req = CrabkaSubmitChangeRequest {
             records: Bytes::from_static(b"not-wincode"),
@@ -992,7 +993,8 @@ mod tests {
         .await
         .expect("decode failure dispatch");
         let err = decode_submit_change_response(&err_body);
-        assert_eq!((err.error_code, err.leader_hint), (2, -1));
+        assert_eq!(err.error_code, 2);
+        assert_eq!(err.leader_hint, -1);
     }
 
     #[tokio::test]
@@ -1018,7 +1020,8 @@ mod tests {
         .await
         .expect("duplicate submit");
         let duplicate = decode_submit_change_response(&duplicate);
-        assert_eq!((duplicate.error_code, duplicate.leader_hint), (2, -1));
+        assert_eq!(duplicate.error_code, 2);
+        assert_eq!(duplicate.leader_hint, -1);
     }
 
     #[tokio::test]

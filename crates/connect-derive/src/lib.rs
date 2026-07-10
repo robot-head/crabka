@@ -400,10 +400,8 @@ mod tests {
     #[test]
     fn type_info_recognizes_options_secrets_and_duration_paths() {
         let optional_secret = analyze_type(&parse_type("Option<SecretString>")).unwrap();
-        assert_eq!(
-            (optional_secret.is_option, optional_secret.is_secret),
-            (true, true)
-        );
+        assert_eq!(optional_secret.is_option, true);
+        assert_eq!(optional_secret.is_secret, true);
 
         let string_vec = analyze_type(&parse_type("Vec<String>")).unwrap();
         check!((string_vec.is_option, string_vec.is_secret) == (false, false));
@@ -414,11 +412,8 @@ mod tests {
             "usize", "f32", "f64", "Value",
         ] {
             let info = analyze_type(&parse_type(scalar)).unwrap();
-            assert_eq!(
-                (info.is_option, info.is_secret),
-                (false, false),
-                "case {scalar}"
-            );
+            assert_eq!(info.is_option, false, "case {scalar}");
+            assert_eq!(info.is_secret, false, "case {scalar}");
         }
 
         for (name, ty) in [
@@ -426,11 +421,8 @@ mod tests {
             ("absolute_duration_path", "::std::time::Duration"),
         ] {
             let info = analyze_type(&parse_type(ty)).unwrap();
-            assert_eq!(
-                (info.is_option, info.is_secret),
-                (false, false),
-                "case {name}"
-            );
+            assert_eq!(info.is_option, false, "case {name}");
+            assert_eq!(info.is_secret, false, "case {name}");
         }
     }
 

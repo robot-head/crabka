@@ -362,29 +362,27 @@ fn maps_mutation_outcomes_preserving_kafka_errors() {
         message: Some("missing".to_string()),
     });
     assert_eq!(
-        (
-            delete_topic_rows,
-            partition_rows,
-            scram_rows,
-            log_dir_rows,
-            delete_acl_rows,
-        ),
-        (
-            vec![ResourceOutcome {
-                resource: "orders".to_string(),
-                error: expected_error.clone(),
-            }],
-            vec![ResourceOutcome::ok("payments")],
-            vec![ResourceOutcome {
-                resource: "alice".to_string(),
-                error: expected_error.clone(),
-            }],
-            vec![ResourceOutcome::ok("orders-1")],
-            vec![ResourceOutcome {
-                resource: "acl-filter".to_string(),
-                error: expected_error,
-            }],
-        )
+        delete_topic_rows,
+        vec![ResourceOutcome {
+            resource: "orders".to_string(),
+            error: expected_error.clone(),
+        }]
+    );
+    assert_eq!(partition_rows, vec![ResourceOutcome::ok("payments")]);
+    assert_eq!(
+        scram_rows,
+        vec![ResourceOutcome {
+            resource: "alice".to_string(),
+            error: expected_error.clone(),
+        }]
+    );
+    assert_eq!(log_dir_rows, vec![ResourceOutcome::ok("orders-1")]);
+    assert_eq!(
+        delete_acl_rows,
+        vec![ResourceOutcome {
+            resource: "acl-filter".to_string(),
+            error: expected_error,
+        }]
     );
 }
 

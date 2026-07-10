@@ -3155,18 +3155,19 @@ mod tests {
 
         let store = CrabkaSpanStore::new(blocks, shared(index), None);
         assert_eq!(
-            (
-                store.tag_names("tenant", None, 0, 10_000).await.unwrap()[0]
-                    .tags
-                    .clone(),
-                store
-                    .tag_values("tenant", "service.name", 0, 10_000)
-                    .await
-                    .unwrap()[0]
-                    .value
-                    .clone(),
-            ),
-            (vec!["service.name".to_string()], "api".to_string())
+            store.tag_names("tenant", None, 0, 10_000).await.unwrap()[0]
+                .tags
+                .clone(),
+            vec!["service.name".to_string()]
+        );
+        assert_eq!(
+            store
+                .tag_values("tenant", "service.name", 0, 10_000)
+                .await
+                .unwrap()[0]
+                .value
+                .clone(),
+            "api".to_string()
         );
     }
 
@@ -3797,13 +3798,14 @@ mod tests {
 
     fn assert_cloud_region_resource_attr(attrs: &[(String, AttrValue)]) {
         assert_eq!(
-            (
-                attrs.contains(&("cloud.region".into(), AttrValue::Str("us-east-1".into()))),
-                attrs
-                    .iter()
-                    .any(|(key, _)| key == "__resource.cloud.region"),
-            ),
-            (true, false)
+            attrs.contains(&("cloud.region".into(), AttrValue::Str("us-east-1".into()))),
+            true
+        );
+        assert_eq!(
+            attrs
+                .iter()
+                .any(|(key, _)| key == "__resource.cloud.region"),
+            false
         );
     }
 
@@ -4381,10 +4383,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (resp.traces.len(), resp.traces[0].trace_id),
-            (1, matching.trace_id)
-        );
+        assert_eq!(resp.traces.len(), 1);
+        assert_eq!(resp.traces[0].trace_id, matching.trace_id);
 
         let resp = engine
             .search("tenant", "{ event:name != nil }", 0, 10_000, 10)
@@ -4529,19 +4529,15 @@ mod tests {
             .search("tenant", "{ span.http.method = \"POST\" }", 0, 10_000, 10)
             .await
             .unwrap();
-        assert_eq!(
-            (resp.traces.len(), resp.traces[0].trace_id),
-            (1, repeated.trace_id)
-        );
+        assert_eq!(resp.traces.len(), 1);
+        assert_eq!(resp.traces[0].trace_id, repeated.trace_id);
 
         let resp = engine
             .search("tenant", "{ span.http.method != \"POST\" }", 0, 10_000, 10)
             .await
             .unwrap();
-        assert_eq!(
-            (resp.traces.len(), resp.traces[0].trace_id),
-            (1, other.trace_id)
-        );
+        assert_eq!(resp.traces.len(), 1);
+        assert_eq!(resp.traces[0].trace_id, other.trace_id);
     }
 
     #[tokio::test]
@@ -4807,7 +4803,8 @@ mod tests {
             .search("tenant", "{ span.http.method != \"POST\" }", 0, 10_000, 10)
             .await
             .unwrap();
-        assert_eq!((resp.traces.len(), resp.traces[0].trace_id), (1, [3; 16]));
+        assert_eq!(resp.traces.len(), 1);
+        assert_eq!(resp.traces[0].trace_id, [3; 16]);
     }
 
     fn block_attr_span_row(
@@ -4905,9 +4902,10 @@ mod tests {
 
         // After swap: candidate_blocks via the same handle now returns the new block.
         let after = handle.load().candidate_blocks("tenant", 0, 10_000);
+        assert_eq!(after.is_empty(), false);
         assert_eq!(
-            (after.is_empty(), after.first().map(String::as_str)),
-            (false, Some("blocks/swap-test.parquet"))
+            after.first().map(String::as_str),
+            Some("blocks/swap-test.parquet")
         );
 
         // Any subsequent load() call through the store's field would return

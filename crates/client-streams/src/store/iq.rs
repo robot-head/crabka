@@ -170,15 +170,10 @@ mod tests {
         let range_keys = r.iter().map(|(key, _)| key.as_ref()).collect::<Vec<_>>();
         let reverse_range = q.iq_kv_range(b"c", b"a").await;
         let counts = (q.iq_kv_all().await.len(), q.iq_kv_approx_count().await);
-        assert_eq!(
-            (hits, range_keys, reverse_range.is_empty(), counts),
-            (
-                (Some(I64Serde.serialize("t", &2)), None),
-                vec![b"a".as_slice(), b"b".as_slice()],
-                true,
-                (3, 3)
-            )
-        );
+        assert_eq!(hits, (Some(I64Serde.serialize("t", &2)), None));
+        assert_eq!(range_keys, vec![b"a".as_slice(), b"b".as_slice()]);
+        assert_eq!(reverse_range.is_empty(), true);
+        assert_eq!(counts, (3, 3));
     }
 
     #[tokio::test]

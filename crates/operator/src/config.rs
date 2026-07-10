@@ -92,13 +92,20 @@ mod tests {
             ),
         ] {
             let parsed = Wrap::parse_from(args);
+            let (expected_watch_namespaces, expected_watched, expected_operator_namespace) =
+                expected;
             assert_eq!(
-                (
-                    parsed.cfg.watch_namespaces.clone(),
-                    parsed.cfg.watched().map(<[String]>::to_vec),
-                    parsed.cfg.operator_namespace.as_str(),
-                ),
-                expected,
+                parsed.cfg.watched().map(<[String]>::to_vec),
+                expected_watched,
+                "case {name}"
+            );
+            assert_eq!(
+                parsed.cfg.operator_namespace.as_str(),
+                expected_operator_namespace,
+                "case {name}"
+            );
+            assert_eq!(
+                parsed.cfg.watch_namespaces, expected_watch_namespaces,
                 "case {name}"
             );
         }

@@ -301,15 +301,13 @@ async fn tls_external_user_reconciles_quotas_under_bare_name_principal() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
+    assert_eq!(username, USER.to_string());
     assert_eq!(
-        (username, ops),
-        (
-            USER.to_string(),
-            vec![QuotaOp::Set {
-                key: "producer_byte_rate".to_string(),
-                value: 1_048_576.0,
-            }],
-        )
+        ops,
+        vec![QuotaOp::Set {
+            key: "producer_byte_rate".to_string(),
+            value: 1_048_576.0,
+        }]
     );
 }
 
@@ -342,26 +340,24 @@ async fn tls_external_user_status_reports_external_true_and_tls_principal_and_no
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
     let s = &body["status"];
     assert_eq!(
-        (
-            s["conditions"][0]["status"].as_str(),
-            s["conditions"][0]["reason"].as_str(),
-            s["external"].as_bool(),
-            s["tlsPrincipal"].as_str(),
-            s["secret"].is_null(),
-            s["scramSha512"].as_bool(),
-            s["tls"].as_bool(),
-        ),
-        (
-            Some("True"),
-            Some("Ready"),
-            Some(true),
-            Some("User:alice"),
-            true,
-            Some(false),
-            Some(false)
-        ),
+        s["conditions"][0]["status"].as_str(),
+        Some("True"),
         "body = {body}"
     );
+    assert_eq!(
+        s["conditions"][0]["reason"].as_str(),
+        Some("Ready"),
+        "body = {body}"
+    );
+    assert_eq!(s["external"].as_bool(), Some(true), "body = {body}");
+    assert_eq!(
+        s["tlsPrincipal"].as_str(),
+        Some("User:alice"),
+        "body = {body}"
+    );
+    assert_eq!(s["secret"].is_null(), true, "body = {body}");
+    assert_eq!(s["scramSha512"].as_bool(), Some(false), "body = {body}");
+    assert_eq!(s["tls"].as_bool(), Some(false), "body = {body}");
 }
 
 /// 5. A minimal `tls-external` user (no authorization, no quotas)
@@ -420,13 +416,14 @@ async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_rea
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
     assert_eq!(
-        (
-            body["status"]["conditions"][0]["status"].as_str(),
-            body["status"]["conditions"][0]["reason"].as_str(),
-            body["status"]["external"].as_bool(),
-        ),
-        (Some("True"), Some("Ready"), Some(true))
+        body["status"]["conditions"][0]["status"].as_str(),
+        Some("True")
     );
+    assert_eq!(
+        body["status"]["conditions"][0]["reason"].as_str(),
+        Some("Ready")
+    );
+    assert_eq!(body["status"]["external"].as_bool(), Some(true));
 }
 
 /// 6. Finalizer cleanup for a `tls-external` user must not call

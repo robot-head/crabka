@@ -85,15 +85,10 @@ async fn trace_split_across_queriers_reassembles() {
     // One by-id job per querier.
     assert!(qf.backend_ref().trace_calls().len() == 2);
     let trace = trace.expect("assembled trace");
-    assert_eq!(
-        (
-            trace.span_count(),
-            metrics.completed_jobs,
-            metrics.total_jobs,
-            matches!(status, TraceStatus::Complete),
-        ),
-        (3, 2, 2, true)
-    );
+    assert_eq!(trace.span_count(), 3);
+    assert_eq!(metrics.completed_jobs, 2);
+    assert_eq!(metrics.total_jobs, 2);
+    assert_eq!(matches!(status, TraceStatus::Complete), true);
 }
 
 #[tokio::test]

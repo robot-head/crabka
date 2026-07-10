@@ -121,10 +121,8 @@ async fn kafka_present_but_not_ready_gates_with_no_children() {
     let body: serde_json::Value = serde_json::from_slice(patch.body()).unwrap();
     let conds = body["status"]["conditions"].as_array().unwrap();
     let kr = conds.iter().find(|c| c["type"] == "KafkaReady").unwrap();
-    assert_eq!(
-        (kr["status"].as_str(), kr["reason"].as_str()),
-        (Some("False"), Some("KafkaNotReady"))
-    );
+    assert_eq!(kr["status"].as_str(), Some("False"));
+    assert_eq!(kr["reason"].as_str(), Some("KafkaNotReady"));
 }
 
 #[tokio::test]
@@ -260,10 +258,8 @@ async fn missing_cluster_label_sets_status() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap();
-    assert_eq!(
-        (ready["status"].as_str(), ready["reason"].as_str()),
-        (Some("False"), Some("MissingClusterLabel"))
-    );
+    assert_eq!(ready["status"].as_str(), Some("False"));
+    assert_eq!(ready["reason"].as_str(), Some("MissingClusterLabel"));
 }
 
 #[tokio::test]
@@ -670,14 +666,12 @@ async fn kafka_client_sasl_ssl_renders_to_args_and_env() {
         .find(|e| e["name"] == "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD")
         .unwrap();
     assert_eq!(
-        (
-            &sasl_user["valueFrom"]["secretKeyRef"],
-            &sasl_pass["valueFrom"]["secretKeyRef"],
-        ),
-        (
-            &serde_json::json!({"name": "kafka-creds", "key": "username"}),
-            &serde_json::json!({"name": "kafka-creds", "key": "password"}),
-        )
+        &sasl_user["valueFrom"]["secretKeyRef"],
+        &serde_json::json!({"name": "kafka-creds", "key": "username"})
+    );
+    assert_eq!(
+        &sasl_pass["valueFrom"]["secretKeyRef"],
+        &serde_json::json!({"name": "kafka-creds", "key": "password"})
     );
     // Volume + mount for kafka-tls CA
     let vols = body["spec"]["template"]["spec"]["volumes"]

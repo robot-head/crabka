@@ -312,13 +312,8 @@ mod tests {
 
     #[test]
     fn stack_broker_pod_regex_distinguishes_stacks() {
-        assert_eq!(
-            (
-                Stack::Crabka.broker_pod_regex(),
-                Stack::Kafka.broker_pod_regex()
-            ),
-            ("^demo-broker", "^demo-kafka-")
-        );
+        assert_eq!(Stack::Crabka.broker_pod_regex(), "^demo-broker");
+        assert_eq!(Stack::Kafka.broker_pod_regex(), "^demo-kafka-");
         // The crabka prefix must match BOTH the single-pool e2e naming and the
         // multi-pool bench naming (used by failover.rs `starts_with`).
         let p = Stack::Crabka.broker_pod_regex().trim_start_matches('^');
@@ -377,7 +372,8 @@ duration_s: 60
 warmup_s: 10
 ";
         let s: Scenario = serde_yaml::from_str(y).expect("parse");
-        assert_eq!((s.name.as_str(), s.partitions), ("small-msg-saturate", 6));
+        assert_eq!(s.name.as_str(), "small-msg-saturate");
+        assert_eq!(s.partitions, 6);
         assert!(matches!(s.mode, LoadMode::Saturate));
     }
 
@@ -442,9 +438,7 @@ mode:
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: RunOutput = serde_json::from_str(&s).unwrap();
-        assert_eq!(
-            (back.scenario.name.as_str(), back.notes),
-            ("x", vec!["test".to_owned()])
-        );
+        assert_eq!(back.scenario.name.as_str(), "x");
+        assert_eq!(back.notes, vec!["test".to_owned()]);
     }
 }

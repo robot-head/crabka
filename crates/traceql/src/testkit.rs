@@ -521,10 +521,8 @@ query: { .svc = "x" }
 
         let report = run_corpus_dir(&dir);
 
-        assert_eq!(
-            (report.cases.len(), report.cases[0].name.as_str()),
-            (1, "one.case:explicit")
-        );
+        assert_eq!(report.cases.len(), 1);
+        assert_eq!(report.cases[0].name.as_str(), "one.case:explicit");
         let _ = fs::remove_dir_all(dir);
     }
 

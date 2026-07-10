@@ -948,7 +948,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn find_coordinator_sends_expected_request_for_legacy_and_batched_versions() {
-        for (name, version, kind, key, expected_request) in [
+        for (_name, version, kind, key, expected_request) in [
             (
                 "legacy group",
                 3,

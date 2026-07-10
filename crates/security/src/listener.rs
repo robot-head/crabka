@@ -32,11 +32,8 @@ mod tests {
             (ListenerProtocol::SaslPlaintext, false, true),
             (ListenerProtocol::SaslSsl, true, true),
         ] {
-            assert_eq!(
-                (protocol.requires_tls(), protocol.requires_sasl()),
-                (tls, sasl),
-                "case {protocol:?}"
-            );
+            assert_eq!(protocol.requires_tls(), tls, "case {protocol:?}");
+            assert_eq!(protocol.requires_sasl(), sasl, "case {protocol:?}");
         }
     }
 }

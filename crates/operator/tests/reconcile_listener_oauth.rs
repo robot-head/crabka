@@ -162,9 +162,10 @@ fn assert_listeners_invalid_with_reason(
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
+    assert_eq!(valid["status"].as_str(), Some("False"), "body = {body}");
     assert_eq!(
-        (valid["status"].as_str(), valid["reason"].as_str()),
-        (Some("False"), Some(expected_reason)),
+        valid["reason"].as_str(),
+        Some(expected_reason),
         "body = {body}"
     );
 
@@ -373,8 +374,13 @@ async fn oauth_listener_with_http_jwks_uri_reconciles_but_emits_weak_auth_event(
     let body: serde_json::Value =
         serde_json::from_slice(event_post.body()).expect("event body is JSON");
     assert_eq!(
-        (body["reason"].as_str(), body["type"].as_str()),
-        (Some("WeakAuth"), Some("Warning")),
+        body["reason"].as_str(),
+        Some("WeakAuth"),
+        "event body = {body}"
+    );
+    assert_eq!(
+        body["type"].as_str(),
+        Some("Warning"),
         "event body = {body}"
     );
     let msg = body["message"]
@@ -977,14 +983,12 @@ async fn oauth_optional_fields_render_broker_toml_cases() {
         reconcile(Arc::new(kafka), ctx).await.unwrap();
 
         let toml = extract_broker0_toml(&state.take_observed(), cluster);
+        assert_eq!(toml.contains("[oauthbearer]"), true, "case {name}: {toml}");
         assert_eq!(
-            (
-                toml.contains("[oauthbearer]"),
-                expected_fragments
-                    .iter()
-                    .all(|fragment| toml.contains(fragment)),
-            ),
-            (true, true),
+            expected_fragments
+                .iter()
+                .all(|fragment| toml.contains(fragment)),
+            true,
             "case {name}: {toml}"
         );
     }

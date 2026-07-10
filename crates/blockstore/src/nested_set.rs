@@ -142,14 +142,9 @@ mod tests {
         let ns = assign_nested_set(&spans);
         let p_left = ns[idx(&spans, 3)].nested_set_left;
         let root_left = ns[idx(&spans, 1)].nested_set_left;
-        assert_eq!(
-            (
-                ns[idx(&spans, 4)].parent_id,
-                ns[idx(&spans, 2)].parent_id,
-                ns[idx(&spans, 3)].parent_id,
-            ),
-            (p_left, root_left, root_left)
-        );
+        assert_eq!(ns[idx(&spans, 4)].parent_id, p_left);
+        assert_eq!(ns[idx(&spans, 2)].parent_id, root_left);
+        assert_eq!(ns[idx(&spans, 3)].parent_id, root_left);
     }
 
     #[test]
@@ -207,14 +202,12 @@ mod tests {
             lefts.sort_unstable();
             lefts.dedup();
             assert_eq!(
-                (
-                    ns.iter().all(|n| n.nested_set_left < n.nested_set_right),
-                    lefts.len(),
-                    ns.iter().any(|n| n.parent_id == -1),
-                ),
-                (true, ns.len(), true),
+                ns.iter().all(|n| n.nested_set_left < n.nested_set_right),
+                true,
                 "case {name}"
             );
+            assert_eq!(lefts.len(), ns.len(), "case {name}");
+            assert_eq!(ns.iter().any(|n| n.parent_id == -1), true, "case {name}");
         }
     }
 

@@ -431,15 +431,18 @@ mod tests {
         let cells = aggregate_cells(&runs);
         assert_eq!(cells.len(), 1);
         let c = &cells[0];
-        assert_eq!(
-            (c.scenario.as_str(), c.broker_count, c.partitions),
-            ("sat", 6, 100)
-        );
-        assert_eq!((c.crabka.n_runs, c.kafka.n_runs), (3, 2));
+        assert_eq!(c.scenario.as_str(), "sat");
+        assert_eq!(c.broker_count, 6);
+        assert_eq!(c.partitions, 100);
+        assert_eq!(c.crabka.n_runs, 3);
+        assert_eq!(c.kafka.n_runs, 2);
         let cm = c.crabka.metrics["producer_msgs_per_sec"];
-        assert_eq!((cm.mean, cm.stddev), (200.0, 100.0));
+        assert_eq!(cm.mean, 200.0);
+        assert_eq!(cm.stddev, 100.0);
         let km = c.kafka.metrics["producer_msgs_per_sec"];
-        assert_eq!((km.mean, km.stddev, km.n), (50.0, 0.0, 2));
+        assert_eq!(km.mean, 50.0);
+        assert_eq!(km.stddev, 0.0);
+        assert_eq!(km.n, 2);
     }
 
     #[test]
@@ -450,7 +453,8 @@ mod tests {
         ];
         let cells = aggregate_cells(&runs);
         assert_eq!(cells.len(), 2);
-        assert_eq!((cells[0].broker_count, cells[1].broker_count), (3, 6));
+        assert_eq!(cells[0].broker_count, 3);
+        assert_eq!(cells[1].broker_count, 6);
     }
 
     #[test]

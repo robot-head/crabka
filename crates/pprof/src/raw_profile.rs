@@ -186,36 +186,36 @@ mod tests {
             .sum();
         let sample_type = inner.sample_type[0];
 
+        assert_eq!(total, 10);
+        assert_eq!(inner.sample.len(), 2);
         assert_eq!(
-            (
-                total,
-                inner.sample.len(),
-                inner.sample.iter().all(|sample| sample.value != vec![0]),
-                inner.function.iter().all(|function| function.id > 0),
-                inner.location.iter().all(|location| location.id > 0),
-                inner
-                    .sample
-                    .iter()
-                    .flat_map(|sample| sample.location_id.iter())
-                    .all(|location_id| *location_id > 0),
-                sample_paths(inner),
-                inner.string_table[usize::try_from(sample_type.r#type).unwrap()].as_str(),
-                inner.string_table[usize::try_from(sample_type.unit).unwrap()].as_str(),
-            ),
-            (
-                10,
-                2,
-                true,
-                true,
-                true,
-                true,
-                vec![
-                    vec!["leaf_a".to_string(), "root_fn".to_string()],
-                    vec!["leaf_b".to_string(), "root_fn".to_string()],
-                ],
-                "cpu",
-                "nanoseconds",
-            )
+            inner.sample.iter().all(|sample| sample.value != vec![0]),
+            true
+        );
+        assert_eq!(inner.function.iter().all(|function| function.id > 0), true);
+        assert_eq!(inner.location.iter().all(|location| location.id > 0), true);
+        assert_eq!(
+            inner
+                .sample
+                .iter()
+                .flat_map(|sample| sample.location_id.iter())
+                .all(|location_id| *location_id > 0),
+            true
+        );
+        assert_eq!(
+            sample_paths(inner),
+            vec![
+                vec!["leaf_a".to_string(), "root_fn".to_string()],
+                vec!["leaf_b".to_string(), "root_fn".to_string()],
+            ]
+        );
+        assert_eq!(
+            inner.string_table[usize::try_from(sample_type.r#type).unwrap()].as_str(),
+            "cpu"
+        );
+        assert_eq!(
+            inner.string_table[usize::try_from(sample_type.unit).unwrap()].as_str(),
+            "nanoseconds"
         );
     }
 
@@ -236,13 +236,11 @@ mod tests {
             .map(|sample| sample.value.iter().sum::<i64>())
             .sum();
 
+        assert_eq!(inner.sample.len() <= 4, true);
+        assert_eq!(total, 10);
         assert_eq!(
-            (
-                inner.sample.len() <= 4,
-                total,
-                inner.string_table.iter().any(|value| value == "other"),
-            ),
-            (true, 10, true)
+            inner.string_table.iter().any(|value| value == "other"),
+            true
         );
     }
 

@@ -243,8 +243,17 @@ async fn allow_all_default_is_unrestricted() {
 
     let result = send_as(&state, &anonymous(), "aa-topic", b"hello").await;
     assert_eq!(
-        (result.error.as_ref(), result.partition, result.offset >= 0),
-        (None, 0, true),
+        result.error.as_ref(),
+        None,
+        "complete deterministic result projection"
+    );
+    assert_eq!(
+        result.partition, 0,
+        "complete deterministic result projection"
+    );
+    assert_eq!(
+        result.offset >= 0,
+        true,
         "complete deterministic result projection"
     );
 
@@ -271,8 +280,15 @@ async fn simpleacl_denies_unauthorized_produce() {
         .error
         .expect("expected a per-record PERMISSION_DENIED");
     assert_eq!(
-        (err.code, result.partition, result.offset),
-        (PERMISSION_DENIED, -1, -1),
+        err.code, PERMISSION_DENIED,
+        "complete denied result projection: {err:?}"
+    );
+    assert_eq!(
+        result.partition, -1,
+        "complete denied result projection: {err:?}"
+    );
+    assert_eq!(
+        result.offset, -1,
         "complete denied result projection: {err:?}"
     );
 
@@ -335,10 +351,9 @@ async fn simpleacl_allows_authorized_produce() {
 
     // Granted topic → produced, no error, present in the topic.
     let ok = send_as(&state, &alice, "t", b"yes").await;
-    assert_eq!(
-        (ok.error.as_ref(), ok.partition, ok.offset >= 0),
-        (None, 0, true)
-    );
+    assert_eq!(ok.error.as_ref(), None);
+    assert_eq!(ok.partition, 0);
+    assert_eq!(ok.offset >= 0, true);
     assert_eq!(count_value(&bootstrap, "t", b"yes").await, 1);
 
     // Ungranted topic → PERMISSION_DENIED, not produced.
@@ -377,14 +392,9 @@ async fn bearer_token_resolves_principal() {
         .validate(&token, now_ms)
         .await
         .expect("token validates");
-    assert_eq!(
-        (
-            outcome.principal.name.as_str(),
-            outcome.principal.auth_method,
-            outcome.principal.groups.as_slice(),
-        ),
-        ("alice", AuthMethod::SaslOAuthBearer, [].as_slice())
-    );
+    assert_eq!(outcome.principal.name.as_str(), "alice");
+    assert_eq!(outcome.principal.auth_method, AuthMethod::SaslOAuthBearer);
+    assert!(outcome.principal.groups.is_empty());
 }
 
 /// 5. Forwarding re-authorizes the ORIGINAL caller against the OWNER's cache.

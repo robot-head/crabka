@@ -1892,7 +1892,9 @@ mod tests {
         ] {
             let r = aggregate_pool_status(pools.iter());
             let (ready, reason, _) = rollup_condition(&r);
-            assert_eq!((ready, reason), expected, "case {name}");
+            let (expected_ready, expected_reason) = expected;
+            assert_eq!(ready, expected_ready, "case {name}");
+            assert_eq!(reason, expected_reason, "case {name}");
         }
     }
 
@@ -1909,7 +1911,9 @@ mod tests {
                 pool_count,
             };
             let (rolling, reason, _) = rolling_condition_from_rollup(&r);
-            assert_eq!((rolling, reason), expected, "case {name}");
+            let (expected_rolling, expected_reason) = expected;
+            assert_eq!(rolling, expected_rolling, "case {name}");
+            assert_eq!(reason, expected_reason, "case {name}");
         }
     }
 

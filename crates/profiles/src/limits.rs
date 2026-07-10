@@ -201,11 +201,9 @@ mod tests {
                 (400, "invalid_argument"),
             ),
         ] {
-            assert_eq!(
-                (error.http_status(), error.connect_code()),
-                expected,
-                "case {name}"
-            );
+            let (expected_status, expected_code) = expected;
+            assert_eq!(error.http_status(), expected_status, "case {name}");
+            assert_eq!(error.connect_code(), expected_code, "case {name}");
         }
 
         let duration = LimitError::QueryLengthExceeded {

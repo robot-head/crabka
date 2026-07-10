@@ -110,10 +110,8 @@ mod tests {
 
         let out = decode_push(&req, 1 << 20).unwrap();
 
-        assert_eq!(
-            (out.len(), out[0].labels.get("__name__")),
-            (1, Some("process_cpu"))
-        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].labels.get("__name__"), Some("process_cpu"));
     }
 
     #[test]
@@ -141,9 +139,7 @@ mod tests {
 
         let out = decode_push(&req, 1 << 20).unwrap();
 
-        assert_eq!(
-            (out.len(), out[0].labels.get("__profile_id__")),
-            (1, Some("profile-a"))
-        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].labels.get("__profile_id__"), Some("profile-a"));
     }
 }

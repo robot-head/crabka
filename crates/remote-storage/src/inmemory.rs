@@ -229,12 +229,10 @@ mod tests {
             .remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42)
             .unwrap()
             .expect("segment found");
+        assert_eq!(got, finished);
         assert_eq!(
-            (
-                got,
-                m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
-            ),
-            (finished, Some(99))
+            m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap(),
+            Some(99)
         );
     }
 
@@ -243,14 +241,15 @@ mod tests {
         let m = InmemoryRemoteLogMetadataManager::new();
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
         assert_eq!(
-            (
-                m.remote_log_segment_metadata(&other, LeaderEpoch(0), 0)
-                    .unwrap(),
-                m.highest_offset_for_epoch(&other, LeaderEpoch(0)).unwrap(),
-                m.list_remote_log_segments(&other).unwrap(),
-            ),
-            (None, None, Vec::new())
+            m.remote_log_segment_metadata(&other, LeaderEpoch(0), 0)
+                .unwrap(),
+            None
         );
+        assert_eq!(
+            m.highest_offset_for_epoch(&other, LeaderEpoch(0)).unwrap(),
+            None
+        );
+        assert_eq!(m.list_remote_log_segments(&other).unwrap(), Vec::new());
     }
 
     #[test]
@@ -352,16 +351,14 @@ mod tests {
         // list_remote_log_segments matches across the partition.
         let before = m.list_remote_log_segments(&tp()).unwrap();
         let after = restored.list_remote_log_segments(&tp()).unwrap();
+        assert_eq!(before, after);
         assert_eq!(
-            (
-                before,
-                restored
-                    .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
-                    .unwrap(),
-                m.export(),
-            ),
-            (after, Some(99), restored.export())
+            restored
+                .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
+                .unwrap(),
+            Some(99)
         );
+        assert_eq!(m.export(), restored.export());
     }
 
     #[test]

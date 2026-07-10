@@ -162,15 +162,10 @@ mod tests {
 
         let q = StateQueryRequest::in_store("s")
             .with_query(KeyQuery::<String, i64>::with_key("k".into()));
-        assert_eq!(
-            (
-                q.store.as_str(),
-                matches!(q.partitions, PartitionSel::All),
-                matches!(q.bound, PositionBound::Unbounded),
-                q.require_active,
-            ),
-            ("s", true, true, false)
-        );
+        assert_eq!(q.store.as_str(), "s");
+        assert_eq!(matches!(q.partitions, PartitionSel::All), true);
+        assert_eq!(matches!(q.bound, PositionBound::Unbounded), true);
+        assert_eq!(q.require_active, false);
     }
 
     #[test]

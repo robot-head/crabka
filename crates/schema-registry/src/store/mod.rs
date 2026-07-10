@@ -653,13 +653,8 @@ mod tests {
                 None,
             )
             .unwrap();
-        assert_eq!(
-            (
-                s.referenced_by("base", sv(1), false),
-                s.referenced_by("base", sv(99), false),
-            ),
-            (vec![r.id], Vec::new())
-        );
+        assert_eq!(s.referenced_by("base", sv(1), false), vec![r.id]);
+        assert_eq!(s.referenced_by("base", sv(99), false), Vec::new());
     }
 
     #[test]
@@ -668,7 +663,8 @@ mod tests {
         let r = s
             .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
-        assert_eq!((r.id, r.version), (sid(1), sv(1)));
+        assert_eq!(r.id, sid(1));
+        assert_eq!(r.version, sv(1));
     }
 
     #[test]
@@ -747,18 +743,14 @@ mod tests {
         let k = SchemaKey::new("av-value", sv(1));
         s.apply_schema(&k, &v);
         s.apply_schema(&k, &v); // second apply is a no-op
-        assert_eq!(
-            (
-                s.versions("av-value", false).unwrap(),
-                s.schema_by_id(sid(1), false).unwrap().1,
-            ),
-            (vec![sv(1)], av("A"))
-        );
+        assert_eq!(s.versions("av-value", false).unwrap(), vec![sv(1)]);
+        assert_eq!(s.schema_by_id(sid(1), false).unwrap().1, av("A"));
         // a fresh register of the same schema is now idempotent against replayed state
         let r = s
             .register("av-value", SchemaType::Avro, &av("A"), &[], None)
             .unwrap();
-        assert_eq!((r.id, r.version), (sid(1), sv(1)));
+        assert_eq!(r.id, sid(1));
+        assert_eq!(r.version, sv(1));
     }
 
     #[test]
@@ -798,23 +790,13 @@ mod tests {
         s.register("av", SchemaType::Avro, &av("B"), &[], None)
             .unwrap();
         apply_deleted(&mut s, "av", 1, 1, &av("A"));
-        assert_eq!(
-            (
-                s.versions("av", false),
-                s.versions("av", true),
-                s.version("av", Some(sv(1)), false).is_some(),
-                s.version("av", Some(sv(1)), true).is_some(),
-            ),
-            (Some(vec![sv(2)]), Some(vec![sv(1), sv(2)]), false, true,)
-        );
+        assert_eq!(s.versions("av", false), Some(vec![sv(2)]));
+        assert_eq!(s.versions("av", true), Some(vec![sv(1), sv(2)]));
+        assert_eq!(s.version("av", Some(sv(1)), false).is_some(), false);
+        assert_eq!(s.version("av", Some(sv(1)), true).is_some(), true);
         assert_eq!(s.permanent_delete_version("av", sv(1)), Some(sv(1)));
-        assert_eq!(
-            (
-                s.version("av", Some(sv(1)), true).is_some(),
-                s.versions("av", true),
-            ),
-            (false, Some(vec![sv(2)]))
-        );
+        assert_eq!(s.version("av", Some(sv(1)), true).is_some(), false);
+        assert_eq!(s.versions("av", true), Some(vec![sv(2)]));
         // idempotent replay: deleting a missing subject/version is a no-op
         for (name, subject, version) in [
             ("missing-subject", "nope", sv(9)),
@@ -837,13 +819,8 @@ mod tests {
             .unwrap(); // id2 / v2
         apply_deleted(&mut s, "av", 2, 2, &av("B"));
         // latest LIVE version is v1; latest incl. deleted is v2
-        assert_eq!(
-            (
-                s.version("av", None, false).unwrap().version,
-                s.version("av", None, true).unwrap().version,
-            ),
-            (sv(1), sv(2))
-        );
+        assert_eq!(s.version("av", None, false).unwrap().version, sv(1));
+        assert_eq!(s.version("av", None, true).unwrap().version, sv(2));
     }
 
     #[test]
@@ -854,10 +831,9 @@ mod tests {
         s.register("av", SchemaType::Avro, &av("B"), &[], None)
             .unwrap();
         assert_eq!(s.soft_delete_subject("av"), Some(vec![sv(1), sv(2)]));
-        assert_eq!(
-            (s.versions("av", false), s.subjects(false), s.subjects(true),),
-            (None, Vec::<String>::new(), vec!["av".to_string()])
-        );
+        assert_eq!(s.versions("av", false), None);
+        assert_eq!(s.subjects(false), Vec::<String>::new());
+        assert_eq!(s.subjects(true), vec!["av".to_string()]);
     }
 
     #[test]
@@ -903,10 +879,8 @@ mod tests {
     #[test]
     fn modes_default_and_resolve() {
         let mut s = StoreState::default();
-        assert_eq!(
-            (s.global_mode(), s.effective_mode("x")),
-            ("READWRITE", "READWRITE")
-        );
+        assert_eq!(s.global_mode(), "READWRITE");
+        assert_eq!(s.effective_mode("x"), "READWRITE");
         s.set_global_mode("READONLY".into());
         assert_eq!(s.effective_mode("x"), "READONLY");
         s.set_subject_mode("x", "IMPORT".into());

@@ -297,12 +297,10 @@ mod tests {
         }]);
 
         assert_eq!(
-            (
-                controller_addr(&voters, NodeId(7)),
-                controller_addr(&voters, NodeId(8)),
-            ),
-            (Some("controller-host:9093".to_string()), None)
+            controller_addr(&voters, NodeId(7)),
+            Some("controller-host:9093".to_string())
         );
+        assert_eq!(controller_addr(&voters, NodeId(8)), None);
     }
 
     #[test]

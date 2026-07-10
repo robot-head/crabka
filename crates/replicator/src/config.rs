@@ -177,20 +177,13 @@ policies:
     #[test]
     fn parses_and_validates() {
         let cfg = ReplicatorConfig::from_yaml(YAML).unwrap();
+        assert_eq!(cfg.clusters.len(), 2);
         assert_eq!(
-            (
-                cfg.clusters.len(),
-                cfg.clusters["eu-west"].zones.clone(),
-                cfg.flows[0].naming,
-                cfg.flows[0].delivery
-            ),
-            (
-                2,
-                vec!["eu".to_string(), "gdpr".to_string()],
-                NamingPolicy::Default,
-                Delivery::AtLeastOnce
-            )
+            cfg.clusters["eu-west"].zones.clone(),
+            vec!["eu".to_string(), "gdpr".to_string()]
         );
+        assert_eq!(cfg.flows[0].naming, NamingPolicy::Default);
+        assert_eq!(cfg.flows[0].delivery, Delivery::AtLeastOnce);
         cfg.validate().unwrap();
     }
 

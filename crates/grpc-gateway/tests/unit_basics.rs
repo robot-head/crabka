@@ -10,10 +10,9 @@ async fn raw_codec_is_identity() {
     assert_eq!(encoded, v);
     // Decode returns the bytes verbatim with no schema/structured view.
     let decoded = codec.decode("t", v.clone()).await.unwrap();
-    assert_eq!(
-        (decoded.value, decoded.schema, decoded.json),
-        (v, None, None)
-    );
+    assert_eq!(decoded.value, v);
+    assert_eq!(decoded.schema, None);
+    assert_eq!(decoded.json, None);
 }
 
 #[test]

@@ -162,25 +162,26 @@ mod tests {
         let (decoded, counts) = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
 
         assert_eq!(
-            (decoded, counts),
-            (
-                vec![DecodedSeries {
-                    labels: Labels::from_iter([("__name__".to_string(), "up".to_string())]),
-                    samples: vec![DecodedSample::new(1000, 1.0)],
-                    histograms: vec![],
-                    exemplars: vec![DecodedExemplar {
-                        labels: Labels::from_iter([("trace_id".to_string(), "abc".to_string())]),
-                        timestamp_ms: 1100,
-                        value: 2.0,
-                    }],
-                    metadata: None,
+            decoded,
+            vec![DecodedSeries {
+                labels: Labels::from_iter([("__name__".to_string(), "up".to_string())]),
+                samples: vec![DecodedSample::new(1000, 1.0)],
+                histograms: vec![],
+                exemplars: vec![DecodedExemplar {
+                    labels: Labels::from_iter([("trace_id".to_string(), "abc".to_string())]),
+                    timestamp_ms: 1100,
+                    value: 2.0,
                 }],
-                WrittenCounts {
-                    samples: 1,
-                    histograms: 0,
-                    exemplars: 1,
-                },
-            )
+                metadata: None,
+            }]
+        );
+        assert_eq!(
+            counts,
+            WrittenCounts {
+                samples: 1,
+                histograms: 0,
+                exemplars: 1,
+            }
         );
     }
 

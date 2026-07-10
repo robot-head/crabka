@@ -285,24 +285,12 @@ mod tests {
 
         let native = v1_histogram_to_native(&histogram).unwrap();
 
-        assert_eq!(
-            (
-                native.is_float,
-                (native.count - 9.0).abs() < f64::EPSILON,
-                (native.zero_count - 1.0).abs() < f64::EPSILON,
-                native.positive_counts,
-                native.negative_counts,
-                native.reset_hint,
-            ),
-            (
-                false,
-                true,
-                true,
-                vec![4.0, 3.0, 6.0],
-                vec![2.0, 3.0],
-                ResetHint::Yes
-            )
-        );
+        assert_eq!(native.is_float, false);
+        assert!((native.count - 9.0).abs() < f64::EPSILON);
+        assert!((native.zero_count - 1.0).abs() < f64::EPSILON);
+        assert_eq!(native.positive_counts, vec![4.0, 3.0, 6.0]);
+        assert_eq!(native.negative_counts, vec![2.0, 3.0]);
+        assert_eq!(native.reset_hint, ResetHint::Yes);
     }
 
     #[test]
@@ -324,24 +312,12 @@ mod tests {
 
         let native = v2_histogram_to_native(&histogram).unwrap();
 
-        assert_eq!(
-            (
-                native.is_float,
-                native.is_nhcb(),
-                native.positive_counts,
-                native.custom_values,
-                native.start_timestamp_ms,
-                native.reset_hint,
-            ),
-            (
-                true,
-                true,
-                vec![1.5, 2.5],
-                Some(vec![0.1, 0.2, 0.3]),
-                Some(7),
-                ResetHint::Gauge,
-            )
-        );
+        assert_eq!(native.is_float, true);
+        assert_eq!(native.is_nhcb(), true);
+        assert_eq!(native.positive_counts, vec![1.5, 2.5]);
+        assert_eq!(native.custom_values, Some(vec![0.1, 0.2, 0.3]));
+        assert_eq!(native.start_timestamp_ms, Some(7));
+        assert_eq!(native.reset_hint, ResetHint::Gauge);
     }
 
     #[test]

@@ -479,19 +479,12 @@ fn query_evaluator_selected_json_extracts_paths_and_arrays() {
         .unwrap();
 
     assert_eq!(
-        (
-            evaluation.fields.get("first_server"),
-            evaluation.fields.get("ua"),
-            evaluation.fields.contains_key("request_method"),
-            evaluation.fields.contains_key("status"),
-        ),
-        (
-            Some(&"10.0.0.1".to_string()),
-            Some(&"Agent/1".to_string()),
-            false,
-            false,
-        )
+        evaluation.fields.get("first_server"),
+        Some(&"10.0.0.1".to_string())
     );
+    assert_eq!(evaluation.fields.get("ua"), Some(&"Agent/1".to_string()));
+    assert_eq!(evaluation.fields.contains_key("request_method"), false);
+    assert_eq!(evaluation.fields.contains_key("status"), false);
 }
 
 #[test]
@@ -1438,17 +1431,14 @@ fn query_evaluator_applies_label_format_to_later_filters_and_labels() {
         .unwrap();
 
     assert_eq!(
-        (
-            evaluation.fields.get("namespace"),
-            evaluation.fields.get("summary"),
-            evaluation.fields.contains_key("env"),
-        ),
-        (
-            Some(&"prod".to_string()),
-            Some(&"GET 500".to_string()),
-            false,
-        )
+        evaluation.fields.get("namespace"),
+        Some(&"prod".to_string())
     );
+    assert_eq!(
+        evaluation.fields.get("summary"),
+        Some(&"GET 500".to_string())
+    );
+    assert_eq!(evaluation.fields.contains_key("env"), false);
 }
 
 #[test]
@@ -1518,19 +1508,15 @@ fn query_evaluator_parameterized_logfmt_extracts_only_requested_fields() {
         .unwrap();
 
     assert_eq!(
-        (
-            evaluation.fields.get("host"),
-            evaluation.fields.get("fwd_ip"),
-            evaluation.fields.contains_key("method"),
-            evaluation.fields.contains_key("status"),
-        ),
-        (
-            Some(&"grafana.net".to_string()),
-            Some(&"124.133.124.161".to_string()),
-            false,
-            false,
-        )
+        evaluation.fields.get("host"),
+        Some(&"grafana.net".to_string())
     );
+    assert_eq!(
+        evaluation.fields.get("fwd_ip"),
+        Some(&"124.133.124.161".to_string())
+    );
+    assert_eq!(evaluation.fields.contains_key("method"), false);
+    assert_eq!(evaluation.fields.contains_key("status"), false);
 }
 
 #[test]
@@ -1569,17 +1555,14 @@ fn query_evaluator_numeric_field_filter_keeps_invalid_present_values_as_label_fi
         )
         .unwrap();
 
+    assert_eq!(evaluation.fields.get("status"), Some(&String::new()));
     assert_eq!(
-        (
-            evaluation.fields.get("status"),
-            evaluation.fields.get("__error__"),
-            evaluation.fields.get("__error_details__"),
-        ),
-        (
-            Some(&String::new()),
-            Some(&"LabelFilterErr".to_string()),
-            Some(&r#"strconv.ParseFloat: parsing "": invalid syntax"#.to_string()),
-        )
+        evaluation.fields.get("__error__"),
+        Some(&"LabelFilterErr".to_string())
+    );
+    assert_eq!(
+        evaluation.fields.get("__error_details__"),
+        Some(&r#"strconv.ParseFloat: parsing "": invalid syntax"#.to_string())
     );
 }
 
@@ -1709,19 +1692,12 @@ fn query_evaluator_logfmt_strict_ignores_standalone_keys_without_keep_empty() {
         .unwrap();
 
     assert_eq!(
-        (
-            evaluation.fields.get("host"),
-            evaluation.fields.get("status"),
-            evaluation.fields.contains_key("empty"),
-            evaluation.fields.contains_key("__error__"),
-        ),
-        (
-            Some(&"grafana.net".to_string()),
-            Some(&"204".to_string()),
-            false,
-            false,
-        )
+        evaluation.fields.get("host"),
+        Some(&"grafana.net".to_string())
     );
+    assert_eq!(evaluation.fields.get("status"), Some(&"204".to_string()));
+    assert_eq!(evaluation.fields.contains_key("empty"), false);
+    assert_eq!(evaluation.fields.contains_key("__error__"), false);
 }
 
 #[test]
@@ -2495,24 +2471,12 @@ fn parses_label_replace_metric_query() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            query.destination_label.as_str(),
-            query.replacement.as_str(),
-            query.source_label.as_str(),
-            query.pattern.as_str(),
-            query.query.aggregation,
-            query.query.range_ns,
-        ),
-        (
-            "service",
-            "$1-api",
-            "app",
-            "(.*)",
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-        )
-    );
+    assert_eq!(query.destination_label.as_str(), "service");
+    assert_eq!(query.replacement.as_str(), "$1-api");
+    assert_eq!(query.source_label.as_str(), "app");
+    assert_eq!(query.pattern.as_str(), "(.*)");
+    assert_eq!(query.query.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.query.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2522,22 +2486,14 @@ fn parses_label_join_metric_query() {
     )
     .unwrap();
 
+    assert_eq!(query.destination_label.as_str(), "joined");
+    assert_eq!(query.separator.as_str(), "/");
     assert_eq!(
-        (
-            query.destination_label.as_str(),
-            query.separator.as_str(),
-            &query.source_labels,
-            query.query.aggregation,
-            query.query.range_ns,
-        ),
-        (
-            "joined",
-            "/",
-            &vec!["app".to_string(), "env".to_string(), "missing".to_string()],
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-        )
+        &query.source_labels,
+        &vec!["app".to_string(), "env".to_string(), "missing".to_string()]
     );
+    assert_eq!(query.query.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.query.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2547,22 +2503,11 @@ fn parses_metric_scalar_comparison_query() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            query.op,
-            query.bool_modifier,
-            query.scalar.as_str(),
-            query.query.aggregation,
-            query.query.range_ns,
-        ),
-        (
-            ComparisonOp::Greater,
-            true,
-            "1.5e0",
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-        )
-    );
+    assert_eq!(query.op, ComparisonOp::Greater);
+    assert_eq!(query.bool_modifier, true);
+    assert_eq!(query.scalar.as_str(), "1.5e0");
+    assert_eq!(query.query.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.query.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2572,24 +2517,12 @@ fn parses_scalar_metric_comparison_query() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            query.op,
-            query.bool_modifier,
-            query.scalar.as_str(),
-            query.scalar_on_left,
-            query.query.aggregation,
-            query.query.range_ns,
-        ),
-        (
-            ComparisonOp::Greater,
-            true,
-            "2",
-            true,
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-        )
-    );
+    assert_eq!(query.op, ComparisonOp::Greater);
+    assert_eq!(query.bool_modifier, true);
+    assert_eq!(query.scalar.as_str(), "2");
+    assert_eq!(query.scalar_on_left, true);
+    assert_eq!(query.query.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.query.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2599,20 +2532,10 @@ fn parses_metric_scalar_arithmetic_query() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            query.op,
-            query.scalar.as_str(),
-            query.query.aggregation,
-            query.query.range_ns,
-        ),
-        (
-            crabka_logql::MetricScalarArithmeticOp::Multiply,
-            "2.5",
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-        )
-    );
+    assert_eq!(query.op, crabka_logql::MetricScalarArithmeticOp::Multiply);
+    assert_eq!(query.scalar.as_str(), "2.5");
+    assert_eq!(query.query.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.query.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2622,22 +2545,11 @@ fn parses_scalar_metric_arithmetic_query() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            query.op,
-            query.scalar.as_str(),
-            query.scalar_on_left,
-            query.query.aggregation,
-            query.query.range_ns,
-        ),
-        (
-            crabka_logql::MetricScalarArithmeticOp::Subtract,
-            "2",
-            true,
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-        )
-    );
+    assert_eq!(query.op, crabka_logql::MetricScalarArithmeticOp::Subtract);
+    assert_eq!(query.scalar.as_str(), "2");
+    assert_eq!(query.scalar_on_left, true);
+    assert_eq!(query.query.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.query.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2645,42 +2557,34 @@ fn parses_parenthesized_metric_expression_operands() {
     let metric_scalar =
         parse_metric_scalar_arithmetic_query(r#"(count_over_time({app="api"}[30s])) * 2"#).unwrap();
     assert_eq!(
-        (metric_scalar.op, metric_scalar.query.aggregation),
-        (
-            crabka_logql::MetricScalarArithmeticOp::Multiply,
-            RangeAggregation::CountOverTime,
-        )
+        metric_scalar.op,
+        crabka_logql::MetricScalarArithmeticOp::Multiply
+    );
+    assert_eq!(
+        metric_scalar.query.aggregation,
+        RangeAggregation::CountOverTime
     );
 
     let scalar_metric =
         parse_metric_scalar_comparison_query(r#"2 > bool ((count_over_time({app="api"}[30s])))"#)
             .unwrap();
-    assert_eq!(
-        (scalar_metric.scalar_on_left, scalar_metric.query.range_ns),
-        (true, DurationNanos(30_000_000_000))
-    );
+    assert_eq!(scalar_metric.scalar_on_left, true);
+    assert_eq!(scalar_metric.query.range_ns, DurationNanos(30_000_000_000));
 
     let binary = parse_metric_binary_arithmetic_query(
         r#"(count_over_time({app="api"}[30s])) / (count_over_time({app="worker"}[15s]))"#,
     )
     .unwrap();
-    assert_eq!(
-        (binary.left.range_ns, binary.right.range_ns),
-        (DurationNanos(30_000_000_000), DurationNanos(15_000_000_000))
-    );
+    assert_eq!(binary.left.range_ns, DurationNanos(30_000_000_000));
+    assert_eq!(binary.right.range_ns, DurationNanos(15_000_000_000));
 
     let set = parse_metric_binary_set_query(
         r#"(count_over_time({app="api"}[30s])) or (count_over_time({app="worker"}[15s]))"#,
     )
     .unwrap();
-    assert_eq!(
-        (set.op, set.left.range_ns, set.right.range_ns),
-        (
-            crabka_logql::MetricBinarySetOp::Or,
-            DurationNanos(30_000_000_000),
-            DurationNanos(15_000_000_000),
-        )
-    );
+    assert_eq!(set.op, crabka_logql::MetricBinarySetOp::Or);
+    assert_eq!(set.left.range_ns, DurationNanos(30_000_000_000));
+    assert_eq!(set.right.range_ns, DurationNanos(15_000_000_000));
 
     let label_replace = parse_metric_label_replace_query(
         r#"label_replace((count_over_time({app="api"}[30s])), "service", "$1", "app", "(.*)")"#,
@@ -2727,26 +2631,16 @@ fn parses_metric_function_arguments_with_nested_commas_and_quotes() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            label_replace.query.vector_aggregation.is_some(),
-            label_replace.pattern.as_str(),
-        ),
-        (true, "api,(.*)")
-    );
+    assert_eq!(label_replace.query.vector_aggregation.is_some(), true);
+    assert_eq!(label_replace.pattern.as_str(), "api,(.*)");
 
     let label_join = parse_metric_label_join_query(
         r#"label_join(sum by (app) (count_over_time({app="api"}[30s])), "joined", ",", "app", "env")"#,
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            label_join.query.vector_aggregation.is_some(),
-            label_join.separator.as_str(),
-        ),
-        (true, ",")
-    );
+    assert_eq!(label_join.query.vector_aggregation.is_some(), true);
+    assert_eq!(label_join.separator.as_str(), ",");
 
     let label_replace = parse_metric_label_replace_query(
         r#"label_replace(sum by (app, env) (count_over_time({app="api"} |= ")" [30s])), "service", "$1", "app", "(.*)")"#,
@@ -2781,22 +2675,11 @@ fn parses_metric_binary_arithmetic_query() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            query.op,
-            query.left.aggregation,
-            query.left.range_ns,
-            query.right.aggregation,
-            query.right.range_ns,
-        ),
-        (
-            crabka_logql::MetricScalarArithmeticOp::Divide,
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-        )
-    );
+    assert_eq!(query.op, crabka_logql::MetricScalarArithmeticOp::Divide);
+    assert_eq!(query.left.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.left.range_ns, DurationNanos(30_000_000_000));
+    assert_eq!(query.right.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.right.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2822,22 +2705,15 @@ fn parses_metric_binary_arithmetic_matching_modifier() {
     .unwrap();
 
     assert_eq!(
-        (
-            query.matching,
-            query.op,
-            query.left.aggregation,
-            query.right.aggregation,
-        ),
-        (
-            Some(crabka_logql::MetricVectorMatching::Ignoring {
-                labels: vec!["app".to_string()],
-                group: None,
-            }),
-            crabka_logql::MetricScalarArithmeticOp::Divide,
-            RangeAggregation::CountOverTime,
-            RangeAggregation::CountOverTime,
-        )
+        query.matching,
+        Some(crabka_logql::MetricVectorMatching::Ignoring {
+            labels: vec!["app".to_string()],
+            group: None,
+        })
     );
+    assert_eq!(query.op, crabka_logql::MetricScalarArithmeticOp::Divide);
+    assert_eq!(query.left.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.right.aggregation, RangeAggregation::CountOverTime);
 }
 
 #[test]
@@ -2846,34 +2722,22 @@ fn parses_metric_binary_arguments_with_nested_operator_characters() {
         r#"count_over_time({app="api"} | line_format `literal > inside` [30s]) > bool count_over_time({app="api"}[30s])"#,
     )
     .unwrap();
-    assert_eq!(
-        (comparison.op, comparison.left.range_ns),
-        (ComparisonOp::Greater, DurationNanos(30_000_000_000))
-    );
+    assert_eq!(comparison.op, ComparisonOp::Greater);
+    assert_eq!(comparison.left.range_ns, DurationNanos(30_000_000_000));
 
     let arithmetic = parse_metric_binary_arithmetic_query(
         r#"count_over_time({app="api"} |= "+" [30s]) + count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
-    assert_eq!(
-        (arithmetic.op, arithmetic.right.range_ns),
-        (
-            crabka_logql::MetricScalarArithmeticOp::Add,
-            DurationNanos(15_000_000_000),
-        )
-    );
+    assert_eq!(arithmetic.op, crabka_logql::MetricScalarArithmeticOp::Add);
+    assert_eq!(arithmetic.right.range_ns, DurationNanos(15_000_000_000));
 
     let set = parse_metric_binary_set_query(
         r#"count_over_time({app="origin"} |= "or" [30s]) or count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
-    assert_eq!(
-        (set.op, set.left.range_ns),
-        (
-            crabka_logql::MetricBinarySetOp::Or,
-            DurationNanos(30_000_000_000),
-        )
-    );
+    assert_eq!(set.op, crabka_logql::MetricBinarySetOp::Or);
+    assert_eq!(set.left.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2882,36 +2746,27 @@ fn parses_metric_binary_arguments_with_quoted_parentheses_and_nested_keywords() 
         r#"count_over_time({app="api"} |= ")" [30s]) > bool count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
-    assert_eq!(
-        (comparison.left.range_ns, comparison.right.range_ns),
-        (DurationNanos(30_000_000_000), DurationNanos(15_000_000_000))
-    );
+    assert_eq!(comparison.left.range_ns, DurationNanos(30_000_000_000));
+    assert_eq!(comparison.right.range_ns, DurationNanos(15_000_000_000));
 
     let arithmetic = parse_metric_binary_arithmetic_query(
         r#"count_over_time({app="api"} |= ")" [30s] offset -5m) + count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
-    assert_eq!(
-        (arithmetic.op, arithmetic.left.offset_ns),
-        (
-            crabka_logql::MetricScalarArithmeticOp::Add,
-            OffsetNanos(-300_000_000_000),
-        )
-    );
+    assert_eq!(arithmetic.op, crabka_logql::MetricScalarArithmeticOp::Add);
+    assert_eq!(arithmetic.left.offset_ns, OffsetNanos(-300_000_000_000));
 
     let set = parse_metric_binary_set_query(
         r#"sum by (or) (count_over_time({app="api"} |= ")" [30s])) and count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
+    assert_eq!(set.op, crabka_logql::MetricBinarySetOp::And);
     assert_eq!(
-        (set.op, set.left.vector_aggregation),
-        (
-            crabka_logql::MetricBinarySetOp::And,
-            Some(VectorAggregation {
-                op: VectorAggregationOp::Sum,
-                grouping: Some(VectorGrouping::By(vec!["or".to_string()])),
-            }),
-        )
+        set.left.vector_aggregation,
+        Some(VectorAggregation {
+            op: VectorAggregationOp::Sum,
+            grouping: Some(VectorGrouping::By(vec!["or".to_string()])),
+        })
     );
 }
 
@@ -2923,24 +2778,17 @@ fn parses_metric_binary_arithmetic_group_modifier() {
     .unwrap();
 
     assert_eq!(
-        (
-            query.matching,
-            query.op,
-            query.left.vector_aggregation.is_some(),
-            query.right.vector_aggregation.is_some(),
-        ),
-        (
-            Some(crabka_logql::MetricVectorMatching::On {
-                labels: vec!["env".to_string()],
-                group: Some(crabka_logql::MetricVectorGroupModifier::Left(vec![
-                    "status".to_string()
-                ])),
-            }),
-            crabka_logql::MetricScalarArithmeticOp::Divide,
-            true,
-            true,
-        )
+        query.matching,
+        Some(crabka_logql::MetricVectorMatching::On {
+            labels: vec!["env".to_string()],
+            group: Some(crabka_logql::MetricVectorGroupModifier::Left(vec![
+                "status".to_string()
+            ])),
+        })
     );
+    assert_eq!(query.op, crabka_logql::MetricScalarArithmeticOp::Divide);
+    assert_eq!(query.left.vector_aggregation.is_some(), true);
+    assert_eq!(query.right.vector_aggregation.is_some(), true);
 }
 
 #[test]
@@ -2950,24 +2798,12 @@ fn parses_metric_binary_comparison_query() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            query.op,
-            query.bool_modifier,
-            query.left.aggregation,
-            query.left.range_ns,
-            query.right.aggregation,
-            query.right.range_ns,
-        ),
-        (
-            ComparisonOp::Greater,
-            true,
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-        )
-    );
+    assert_eq!(query.op, ComparisonOp::Greater);
+    assert_eq!(query.bool_modifier, true);
+    assert_eq!(query.left.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.left.range_ns, DurationNanos(30_000_000_000));
+    assert_eq!(query.right.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.right.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2977,22 +2813,11 @@ fn parses_metric_binary_set_query() {
     )
     .unwrap();
 
-    assert_eq!(
-        (
-            query.op,
-            query.left.aggregation,
-            query.left.range_ns,
-            query.right.aggregation,
-            query.right.range_ns,
-        ),
-        (
-            crabka_logql::MetricBinarySetOp::And,
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-            RangeAggregation::CountOverTime,
-            DurationNanos(30_000_000_000),
-        )
-    );
+    assert_eq!(query.op, crabka_logql::MetricBinarySetOp::And);
+    assert_eq!(query.left.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.left.range_ns, DurationNanos(30_000_000_000));
+    assert_eq!(query.right.aggregation, RangeAggregation::CountOverTime);
+    assert_eq!(query.right.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -3029,14 +2854,12 @@ fn parses_rate_counter_unwrap_metric_query() {
     )
     .unwrap();
 
+    assert_eq!(query.aggregation, RangeAggregation::RateCounter);
     assert_eq!(
-        (query.aggregation, query.stream, query.range_ns),
-        (
-            RangeAggregation::RateCounter,
-            parse_query(r#"{app="api"} | logfmt | unwrap requests | __error__ = """#).unwrap(),
-            DurationNanos(30_000_000_000),
-        )
+        query.stream,
+        parse_query(r#"{app="api"} | logfmt | unwrap requests | __error__ = """#).unwrap()
     );
+    assert_eq!(query.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -3060,18 +2883,12 @@ fn parses_bytes_over_time_metric_query() {
 fn parses_bytes_rate_metric_query() {
     let query = parse_metric_query(r#"bytes_rate({app="api"} |= "error" [2m])"#).unwrap();
 
+    assert_eq!(format!("{:?}", query.aggregation), "BytesRate".to_string());
     assert_eq!(
-        (
-            format!("{:?}", query.aggregation),
-            query.stream,
-            query.range_ns
-        ),
-        (
-            "BytesRate".to_string(),
-            parse_query(r#"{app="api"} |= "error""#).unwrap(),
-            DurationNanos(120_000_000_000),
-        )
+        query.stream,
+        parse_query(r#"{app="api"} |= "error""#).unwrap()
     );
+    assert_eq!(query.range_ns, DurationNanos(120_000_000_000));
 }
 
 #[test]
@@ -3218,15 +3035,13 @@ fn parses_basic_unwrap_metric_queries() {
         ),
     ] {
         let query = parse_metric_query(input).unwrap();
+        assert_eq!(query.aggregation, aggregation, "case {name}");
         assert_eq!(
-            (query.aggregation, query.stream, query.range_ns),
-            (
-                aggregation,
-                parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap(),
-                DurationNanos(30_000_000_000),
-            ),
+            query.stream,
+            parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap(),
             "case {name}"
         );
+        assert_eq!(query.range_ns, DurationNanos(30_000_000_000), "case {name}");
     }
 }
 
@@ -3237,19 +3052,15 @@ fn parses_avg_over_time_unwrap_metric_query_with_range_grouping() {
     )
     .unwrap();
 
+    assert_eq!(query.aggregation, RangeAggregation::AvgOverTime);
     assert_eq!(
-        (
-            query.aggregation,
-            query.stream,
-            query.range_ns,
-            query.range_grouping,
-        ),
-        (
-            RangeAggregation::AvgOverTime,
-            parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap(),
-            DurationNanos(30_000_000_000),
-            Some(VectorGrouping::By(vec!["app".to_string()])),
-        )
+        query.stream,
+        parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
+    );
+    assert_eq!(query.range_ns, DurationNanos(30_000_000_000));
+    assert_eq!(
+        query.range_grouping,
+        Some(VectorGrouping::By(vec!["app".to_string()]))
     );
 }
 
@@ -3261,16 +3072,17 @@ fn parses_quantile_over_time_unwrap_metric_query() {
     .unwrap();
 
     assert_eq!(
-        (query.aggregation, query.stream, query.range_ns),
-        (
-            RangeAggregation::QuantileOverTime(Quantile {
-                numerator: QuantileNumerator(3),
-                denominator: QuantileDenominator(4),
-            }),
-            parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap(),
-            DurationNanos(30_000_000_000),
-        )
+        query.aggregation,
+        RangeAggregation::QuantileOverTime(Quantile {
+            numerator: QuantileNumerator(3),
+            denominator: QuantileDenominator(4),
+        })
     );
+    assert_eq!(
+        query.stream,
+        parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
+    );
+    assert_eq!(query.range_ns, DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -3281,14 +3093,15 @@ fn parses_fraction_only_quantile_over_time_metric_query() {
     .unwrap();
 
     assert_eq!(
-        (query.aggregation, query.range_grouping),
-        (
-            RangeAggregation::QuantileOverTime(Quantile {
-                numerator: QuantileNumerator(3),
-                denominator: QuantileDenominator(4),
-            }),
-            Some(VectorGrouping::By(vec!["app".to_string()])),
-        )
+        query.aggregation,
+        RangeAggregation::QuantileOverTime(Quantile {
+            numerator: QuantileNumerator(3),
+            denominator: QuantileDenominator(4),
+        })
+    );
+    assert_eq!(
+        query.range_grouping,
+        Some(VectorGrouping::By(vec!["app".to_string()]))
     );
 }
 
@@ -3316,15 +3129,13 @@ fn parses_presence_metric_queries() {
         ),
     ] {
         let query = parse_metric_query(input).unwrap();
+        assert_eq!(query.aggregation, expected_aggregation, "case {name}");
         assert_eq!(
-            (query.aggregation, query.stream, query.range_ns),
-            (
-                expected_aggregation,
-                parse_query(expected_stream).unwrap(),
-                DurationNanos(30_000_000_000),
-            ),
+            query.stream,
+            parse_query(expected_stream).unwrap(),
             "case {name}"
         );
+        assert_eq!(query.range_ns, DurationNanos(30_000_000_000), "case {name}");
     }
 }
 
@@ -3339,15 +3150,13 @@ fn parses_extrema_unwrap_metric_queries() {
         let input =
             format!(r#"{function}({{app="api"}} | logfmt | unwrap cost | __error__ = "" [30s])"#);
         let query = parse_metric_query(&input).unwrap();
+        assert_eq!(query.aggregation, aggregation, "case {name}");
         assert_eq!(
-            (query.aggregation, query.stream, query.range_ns),
-            (
-                aggregation,
-                parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap(),
-                DurationNanos(30_000_000_000),
-            ),
+            query.stream,
+            parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap(),
             "case {name}"
         );
+        assert_eq!(query.range_ns, DurationNanos(30_000_000_000), "case {name}");
     }
 }
 
@@ -3378,20 +3187,17 @@ fn parses_metric_query_range_offsets() {
         let input = format!(r#"count_over_time({{app="api"}} |= "error" [10s] offset {offset})"#);
         let query = parse_metric_query(&input).unwrap();
         assert_eq!(
-            (
-                query.aggregation,
-                query.stream,
-                query.range_ns,
-                query.offset_ns,
-            ),
-            (
-                RangeAggregation::CountOverTime,
-                parse_query(r#"{app="api"} |= "error""#).unwrap(),
-                DurationNanos(10_000_000_000),
-                expected_offset,
-            ),
+            query.aggregation,
+            RangeAggregation::CountOverTime,
             "case {name}"
         );
+        assert_eq!(
+            query.stream,
+            parse_query(r#"{app="api"} |= "error""#).unwrap(),
+            "case {name}"
+        );
+        assert_eq!(query.range_ns, DurationNanos(10_000_000_000), "case {name}");
+        assert_eq!(query.offset_ns, expected_offset, "case {name}");
     }
 }
 

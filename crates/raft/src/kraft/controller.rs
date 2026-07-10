@@ -2582,14 +2582,12 @@ mod tests {
     fn initial_state_voters_preserves_configured_quorum_ids() {
         let (engine, _dir) = build_engine_only(NodeId(2), &[NodeId(1), NodeId(2), NodeId(3)]);
         assert_eq!(
-            (
-                initial_state_voters(&engine.core),
-                engine.quorum_tx.borrow().voters.clone(),
-            ),
-            (
-                vec![NodeId(1), NodeId(2), NodeId(3)],
-                vec![NodeId(1), NodeId(2), NodeId(3)],
-            )
+            initial_state_voters(&engine.core),
+            vec![NodeId(1), NodeId(2), NodeId(3)]
+        );
+        assert_eq!(
+            engine.quorum_tx.borrow().voters.clone(),
+            vec![NodeId(1), NodeId(2), NodeId(3)]
         );
     }
 
@@ -3004,7 +3002,8 @@ mod tests {
         let voters: Vec<i32> = decoded.voters.iter().map(|v| v.voter_id).collect();
         let granting_voters: Vec<i32> =
             decoded.granting_voters.iter().map(|v| v.voter_id).collect();
-        assert_eq!((voters, granting_voters), (vec![1, 2, 3], vec![1, 2, 3]));
+        assert_eq!(voters, vec![1, 2, 3]);
+        assert_eq!(granting_voters, vec![1, 2, 3]);
     }
 
     fn elect_single_voter_engine(engine: &mut Engine) {
@@ -3210,7 +3209,8 @@ mod tests {
                     leader_id,
                     leader_epoch,
                 }) => {
-                    assert_eq!((leader_id, leader_epoch), (NodeId(1), 4));
+                    assert_eq!(leader_id, NodeId(1));
+                    assert_eq!(leader_epoch, 4);
                 }
                 other => panic!("unexpected end quorum request: {other:?}"),
             }
@@ -3282,7 +3282,8 @@ mod tests {
                 fetch_offset,
                 ..
             }) => {
-                assert_eq!((fetch_epoch, fetch_offset), (7, 10));
+                assert_eq!(fetch_epoch, 7);
+                assert_eq!(fetch_offset, 10);
             }
             other => panic!("unexpected fetch request: {other:?}"),
         }
@@ -3300,7 +3301,8 @@ mod tests {
                 fetch_offset,
                 ..
             }) => {
-                assert_eq!((fetch_epoch, fetch_offset), (9, 11));
+                assert_eq!(fetch_epoch, 9);
+                assert_eq!(fetch_offset, 11);
             }
             other => panic!("unexpected fetch request: {other:?}"),
         }
@@ -3312,13 +3314,8 @@ mod tests {
         let mut batch = one_offset_batch(0, 1, b"a");
         engine.log.append(&mut batch).expect("append");
 
-        assert_eq!(
-            (
-                engine.serve_fetch_records(Offset(-1)).is_empty(),
-                engine.serve_fetch_records(Offset(1)).is_empty(),
-            ),
-            (true, true)
-        );
+        assert_eq!(engine.serve_fetch_records(Offset(-1)).is_empty(), true);
+        assert_eq!(engine.serve_fetch_records(Offset(1)).is_empty(), true);
         let records = engine.serve_fetch_records(Offset(0));
         let decoded = decode_batches(&records).expect("decode served records");
         assert_eq!(
@@ -3360,7 +3357,8 @@ mod tests {
                 position,
                 ..
             }) => {
-                assert_eq!((snapshot_id, position), ((11, 3), 0));
+                assert_eq!(snapshot_id, (11, 3));
+                assert_eq!(position, 0);
             }
             other => panic!("unexpected fetch snapshot request: {other:?}"),
         }
@@ -3674,10 +3672,8 @@ mod tests {
         assert!(ctrl.current_image().topic("orders").is_some());
 
         let qs = ctrl.quorum_state().await.unwrap();
-        assert_eq!(
-            (qs.leader_id, qs.high_watermark > 0),
-            (Some(NodeId(1)), true)
-        );
+        assert_eq!(qs.leader_id, Some(NodeId(1)));
+        assert_eq!(qs.high_watermark > 0, true);
         ctrl.shutdown().await;
     }
 

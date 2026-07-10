@@ -115,10 +115,9 @@ async fn forward_maps_owner_responses() {
 
     // Happy path: error: None => Ok with the forwarded outcome.
     let ok = fwd.forward(&addr, &rec("ok"), &anon()).await.unwrap();
-    assert_eq!(
-        (ok.partition, ok.offset, ok.deduplicated),
-        (PartitionIndex(7), Offset(11), true)
-    );
+    assert_eq!(ok.partition, PartitionIndex(7));
+    assert_eq!(ok.offset, Offset(11));
+    assert_eq!(ok.deduplicated, true);
 
     for (name, key, expected) in [
         ("retriable_owner_error", "retriable", "unavailable"),
@@ -228,21 +227,17 @@ async fn forward_handler_error_arm_returns_retriable() {
 
     // produce_local => dedup_produce => DedupStore owns nothing => Unavailable
     // => forward_handler wraps it with retriable: true.
+    assert_eq!(status, StatusCode::OK, "complete forward error result");
     assert_eq!(
-        (
-            status,
-            result.partition,
-            result.offset,
-            result.deduplicated,
-            result.error.map(|error| error.retriable),
-        ),
-        (
-            StatusCode::OK,
-            PartitionIndex(-1),
-            Offset(-1),
-            false,
-            Some(true)
-        ),
+        result.partition,
+        PartitionIndex(-1),
+        "complete forward error result"
+    );
+    assert_eq!(result.offset, Offset(-1), "complete forward error result");
+    assert_eq!(result.deduplicated, false, "complete forward error result");
+    assert_eq!(
+        result.error.map(|error| error.retriable),
+        Some(true),
         "complete forward error result"
     );
 
@@ -352,20 +347,27 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
 
     // The gate returns an error with retriable: false — no broker round-trip.
     assert_eq!(
-        (
-            status,
-            result.partition,
-            result.offset,
-            result.deduplicated,
-            result.error.map(|error| error.retriable),
-        ),
-        (
-            StatusCode::FORBIDDEN,
-            PartitionIndex(-1),
-            Offset(-1),
-            false,
-            Some(false),
-        ),
+        status,
+        StatusCode::FORBIDDEN,
+        "complete anonymous-rejection result"
+    );
+    assert_eq!(
+        result.partition,
+        PartitionIndex(-1),
+        "complete anonymous-rejection result"
+    );
+    assert_eq!(
+        result.offset,
+        Offset(-1),
+        "complete anonymous-rejection result"
+    );
+    assert_eq!(
+        result.deduplicated, false,
+        "complete anonymous-rejection result"
+    );
+    assert_eq!(
+        result.error.map(|error| error.retriable),
+        Some(false),
         "complete anonymous-rejection result"
     );
 

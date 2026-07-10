@@ -238,10 +238,8 @@ async fn trace_block_built_indexed_and_located_by_id() {
 
     // Rows are grouped/sorted by trace_id: trace A occupies rows 0..3, the
     // grandchild (deepest) is row 2. The root interval must strictly contain it.
-    assert_eq!(
-        (trace_ids.value(0), trace_ids.value(2)),
-        (trace_a.as_slice(), trace_a.as_slice())
-    );
+    assert_eq!(trace_ids.value(0), trace_a.as_slice());
+    assert_eq!(trace_ids.value(2), trace_a.as_slice());
     check!(left.value(0) < left.value(2));
     check!(right.value(2) < right.value(0));
 

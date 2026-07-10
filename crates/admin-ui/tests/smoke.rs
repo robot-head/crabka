@@ -156,17 +156,12 @@ async fn unauthenticated_login_page_cases() {
         ),
     ] {
         let response = get(path).await;
+        assert_eq!(response.status(), StatusCode::OK, "case {name}");
         assert_eq!(
-            (
-                response.status(),
-                response.headers().get(header::CONTENT_TYPE),
-            ),
-            (
-                StatusCode::OK,
-                Some(&header::HeaderValue::from_static(
-                    "text/html; charset=utf-8"
-                )),
-            ),
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&header::HeaderValue::from_static(
+                "text/html; charset=utf-8"
+            )),
             "case {name}"
         );
         let body = response_text(response).await;
@@ -322,13 +317,8 @@ async fn post_mutation_routes_authenticate_before_decoding_request_body() {
     let response = post_json_from(app, "/topics/create", "not-json", None).await;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        (
-            factory.mutation_seam_calls.load(Ordering::SeqCst),
-            factory.total_mutation_calls(),
-        ),
-        (0, 0)
-    );
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(factory.total_mutation_calls(), 0);
     let text = response_text(response).await;
     assert!(text.contains("not authenticated"));
 }
@@ -343,13 +333,8 @@ async fn post_mutation_routes_reject_stale_cookie_before_decoding_request_body()
     let response = post_json_from(app, "/topics/create", "not-json", Some(cookie)).await;
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(
-        (
-            factory.mutation_seam_calls.load(Ordering::SeqCst),
-            factory.total_mutation_calls(),
-        ),
-        (0, 0)
-    );
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(factory.total_mutation_calls(), 0);
     let text = response_text(response).await;
     assert!(text.contains("not authenticated"));
 }
@@ -366,13 +351,8 @@ async fn post_mutation_routes_return_bad_request_for_authenticated_malformed_jso
     let response = post_json_from(app, "/topics/create", "not-json", Some(cookie)).await;
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        (
-            factory.mutation_seam_calls.load(Ordering::SeqCst),
-            factory.total_mutation_calls(),
-        ),
-        (0, 0)
-    );
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(factory.total_mutation_calls(), 0);
     let text = response_text(response).await;
     assert!(text.contains("invalid JSON request"));
 }
@@ -392,13 +372,8 @@ async fn authenticated_post_mutation_routes_reject_oversized_body_before_deseria
     let response = post_json_from(app, "/topics/create", oversized_body, Some(cookie)).await;
 
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(
-        (
-            factory.mutation_seam_calls.load(Ordering::SeqCst),
-            factory.total_mutation_calls(),
-        ),
-        (0, 0)
-    );
+    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(factory.total_mutation_calls(), 0);
     let text = response_text(response).await;
     assert!(text.contains("request body too large"));
 }
@@ -569,10 +544,8 @@ impl LoginBroker for RecordingLoginBroker {
         password: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
         Box::pin(async move {
-            assert_eq!(
-                (username, password),
-                ("alice", "login-route-password-sentinel")
-            );
+            assert_eq!(username, "alice");
+            assert_eq!(password, "login-route-password-sentinel");
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })

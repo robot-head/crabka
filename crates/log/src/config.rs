@@ -146,10 +146,8 @@ mod tests {
     #[test]
     fn default_local_retention_is_none() {
         let c = LogConfig::default();
-        assert_eq!(
-            (c.local_retention_ms, c.local_retention_bytes),
-            (None, None)
-        );
+        assert_eq!(c.local_retention_ms, None);
+        assert_eq!(c.local_retention_bytes, None);
     }
 
     #[test]

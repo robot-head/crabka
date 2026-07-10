@@ -399,13 +399,8 @@ mod tests {
 
         strip_replica_label(&mut series);
 
-        assert_eq!(
-            (
-                series[0].labels.get("__replica__"),
-                series[0].labels.get("cluster"),
-            ),
-            (None, Some("c1"))
-        );
+        assert_eq!(series[0].labels.get("__replica__"), None);
+        assert_eq!(series[0].labels.get("cluster"), Some("c1"));
     }
 
     #[test]

@@ -356,10 +356,8 @@ mod tests {
         ];
         let ns = assign_nested_set(&spans);
         // Pre-existing well-formed assignment is preserved.
-        assert_eq!(
-            (ns[idx(&spans, 1)].left, ns[idx(&spans, 1)].parent_id,),
-            (1, -1)
-        ); // root: Tempo nestedSetParent sentinel
+        assert_eq!(ns[idx(&spans, 1)].left, 1);
+        assert_eq!(ns[idx(&spans, 1)].parent_id, -1); // root: Tempo nestedSetParent sentinel
         let root = ns[idx(&spans, 1)];
         let child = ns[idx(&spans, 4)];
         assert!(root.left < child.left && child.right < root.right);

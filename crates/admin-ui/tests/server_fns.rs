@@ -61,18 +61,14 @@ fn app_state_carries_config_and_sessions() {
 
     let state = AppState::new(cfg.clone());
 
-    assert_eq!(
-        (state.cfg.as_ref(), state.sessions_ttl_seconds()),
-        (&cfg, 37)
-    );
+    assert_eq!(state.cfg.as_ref(), &cfg);
+    assert_eq!(state.sessions_ttl_seconds(), 37);
 
     let sessions = Arc::new(SessionStore::new(Duration::from_secs(5)));
     let state = AppState::from_parts(Arc::new(cfg.clone()), sessions);
 
-    assert_eq!(
-        (state.cfg.as_ref(), state.sessions_ttl_seconds()),
-        (&cfg, 5)
-    );
+    assert_eq!(state.cfg.as_ref(), &cfg);
+    assert_eq!(state.sessions_ttl_seconds(), 5);
 }
 
 #[tokio::test]
@@ -155,10 +151,8 @@ async fn login_with_context_calls_broker_and_stores_session() {
     .expect("login succeeds through injected broker");
 
     assert_eq!(broker.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        (success.username.as_str(), success.principal.as_str()),
-        ("alice", "User:alice")
-    );
+    assert_eq!(success.username.as_str(), "alice");
+    assert_eq!(success.principal.as_str(), "User:alice");
     let current_session = crabka_admin_ui::server_fns::current_session_with_store(
         &sessions,
         Some(&success.session_id),
@@ -289,24 +283,12 @@ async fn authenticated_read_seams_validate_session_and_call_admin_reader() {
     .await
     .expect("log dirs read succeeds");
 
-    assert_eq!(
-        (
-            topics[0].name.as_str(),
-            groups[0].group_id.as_str(),
-            acls[0].principal.as_str(),
-            users[0].username.as_str(),
-            quotas[0].quota_type.as_str(),
-            log_dirs[0].log_dir.as_str(),
-        ),
-        (
-            "orders",
-            "consumer-a",
-            "User:alice",
-            "scram-alice",
-            "producer_byte_rate",
-            "/var/lib/crabka",
-        )
-    );
+    assert_eq!(topics[0].name.as_str(), "orders");
+    assert_eq!(groups[0].group_id.as_str(), "consumer-a");
+    assert_eq!(acls[0].principal.as_str(), "User:alice");
+    assert_eq!(users[0].username.as_str(), "scram-alice");
+    assert_eq!(quotas[0].quota_type.as_str(), "producer_byte_rate");
+    assert_eq!(log_dirs[0].log_dir.as_str(), "/var/lib/crabka");
     assert_eq!(
         [
             reader.topics.load(Ordering::SeqCst),
@@ -356,24 +338,12 @@ async fn public_context_reads_validate_session_and_call_admin_reader() {
         .await
         .expect("log dirs public context read succeeds");
 
-    assert_eq!(
-        (
-            topics[0].name.as_str(),
-            groups[0].group_id.as_str(),
-            acls[0].principal.as_str(),
-            users[0].username.as_str(),
-            quotas[0].quota_type.as_str(),
-            log_dirs[0].log_dir.as_str(),
-        ),
-        (
-            "orders",
-            "consumer-a",
-            "User:alice",
-            "scram-alice",
-            "producer_byte_rate",
-            "/var/lib/crabka",
-        )
-    );
+    assert_eq!(topics[0].name.as_str(), "orders");
+    assert_eq!(groups[0].group_id.as_str(), "consumer-a");
+    assert_eq!(acls[0].principal.as_str(), "User:alice");
+    assert_eq!(users[0].username.as_str(), "scram-alice");
+    assert_eq!(quotas[0].quota_type.as_str(), "producer_byte_rate");
+    assert_eq!(log_dirs[0].log_dir.as_str(), "/var/lib/crabka");
     assert_eq!(
         [
             factory.read_seam_calls.load(Ordering::SeqCst),
@@ -636,11 +606,13 @@ async fn public_create_topic_authentication_precedes_validation_cases() {
         .await;
 
         assert_eq!(
-            (
-                matches!(result, Err(UiError::NotAuthenticated)),
-                factory.mutation_seam_calls.load(Ordering::SeqCst),
-            ),
-            (true, 0),
+            matches!(result, Err(UiError::NotAuthenticated)),
+            true,
+            "case {name}"
+        );
+        assert_eq!(
+            factory.mutation_seam_calls.load(Ordering::SeqCst),
+            0,
             "case {name}"
         );
     }
@@ -872,7 +844,8 @@ impl LoginBroker for RecordingLoginBroker {
         password: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
         Box::pin(async move {
-            assert_eq!((username, password), ("alice", LOGIN_PASSWORD_SENTINEL));
+            assert_eq!(username, "alice");
+            assert_eq!(password, LOGIN_PASSWORD_SENTINEL);
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })

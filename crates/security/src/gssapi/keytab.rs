@@ -383,7 +383,8 @@ mod tests {
         ]);
 
         let found = load_service_key(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("found");
-        assert_eq!((found.kvno, &found.key), (5, &key_v5));
+        assert_eq!(found.kvno, 5);
+        assert_eq!(&found.key, &key_v5);
 
         // Wrong service name -> NotFound.
         let err = load_service_key(&kt, "http", ENCTYPE_AES256_CTS_HMAC_SHA1_96).unwrap_err();

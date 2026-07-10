@@ -183,10 +183,8 @@ async fn compactor_writes_block_then_tenant_index_manifest() {
     .await
     .unwrap();
 
-    assert_eq!(
-        (&descriptor.key, &descriptor.fingerprints),
-        (&key, &BTreeSet::from([api]))
-    );
+    assert_eq!(&descriptor.key, &key);
+    assert_eq!(&descriptor.fingerprints, &BTreeSet::from([api]));
     check!(
         block_index.match_blocks("tenant-a", TimeRange::new(0, 30).unwrap(), &[api])
             == vec![descriptor.clone()]
@@ -1723,12 +1721,10 @@ async fn compactor_service_accumulates_adjacent_small_wal_polls_into_one_block()
     .await
     .unwrap();
 
+    assert_eq!(descriptors.len(), 1);
     assert_eq!(
-        (descriptors.len(), descriptors[0].key.clone()),
-        (
-            1,
-            BlockKey::new("tenant-a", 6, 42, 43, TimeRange::new(10, 20).unwrap()),
-        )
+        descriptors[0].key.clone(),
+        BlockKey::new("tenant-a", 6, 42, 43, TimeRange::new(10, 20).unwrap())
     );
 
     let prefix = ObjectPath::from("observability/logs");

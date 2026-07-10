@@ -371,14 +371,9 @@ mod tests {
                 },
             }
         );
-        assert_eq!(
-            (
-                mock.search_calls().len(),
-                mock.search_calls()[0].tenant.as_str(),
-                matches!(mock.search_calls()[0].shard, JobShard::Live),
-            ),
-            (1, "t1", true)
-        );
+        assert_eq!(mock.search_calls().len(), 1);
+        assert_eq!(mock.search_calls()[0].tenant.as_str(), "t1");
+        assert_eq!(matches!(mock.search_calls()[0].shard, JobShard::Live), true);
     }
 
     #[tokio::test]
@@ -394,7 +389,8 @@ mod tests {
             shard: JobShard::Live,
         };
         let out = mock.search_job(&req).await.unwrap();
-        assert_eq!((out.traces, out.metrics), (vec![], Metrics::default()));
+        assert_eq!(out.traces, vec![]);
+        assert_eq!(out.metrics, Metrics::default());
     }
 
     #[test]

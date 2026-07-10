@@ -570,10 +570,8 @@ mod tests {
                     && has_label(t, "le", "0.008")
             })
             .unwrap();
-        assert_eq!(
-            (le_8.exemplars.len(), le_8.exemplars[0].labels[0].0.as_str()),
-            (1, "trace_id")
-        );
+        assert_eq!(le_8.exemplars.len(), 1);
+        assert_eq!(le_8.exemplars[0].labels[0].0.as_str(), "trace_id");
     }
 
     #[test]

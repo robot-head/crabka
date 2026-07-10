@@ -296,11 +296,8 @@ mod tests {
         ] {
             let actual = compose_inline_filter(&loggers(input)).unwrap_err();
             let actual_reason = actual.reason();
-            assert_eq!(
-                (actual, actual_reason),
-                (expected, expected_reason),
-                "case {name}"
-            );
+            assert_eq!(actual, expected, "case {name}");
+            assert_eq!(actual_reason, expected_reason, "case {name}");
         }
     }
 

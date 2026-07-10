@@ -687,20 +687,10 @@ mod tests {
             .expect("should succeed")
             .expect("should be Some");
         let tls = sec.tls.expect("tls should be set");
-        assert_eq!(
-            (
-                sec.protocol,
-                tls.server_name,
-                tls.client_identity,
-                tls.trust_roots_pem,
-            ),
-            (
-                ListenerProtocol::Ssl,
-                "broker.example.com".to_string(),
-                Some((cert, key)),
-                Some(ca),
-            )
-        );
+        assert_eq!(sec.protocol, ListenerProtocol::Ssl);
+        assert_eq!(tls.server_name, "broker.example.com".to_string());
+        assert_eq!(tls.client_identity, Some((cert, key)));
+        assert_eq!(tls.trust_roots_pem, Some(ca));
     }
 
     #[test]

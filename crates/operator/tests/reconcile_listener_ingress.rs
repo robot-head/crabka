@@ -202,18 +202,23 @@ async fn ingress_listener_renders_ingress_objects_and_advertises_443() {
         &format!("/ingresses/{name}-ext-0"),
     );
     assert_eq!(
-        (
-            &ing["metadata"]["annotations"]["nginx.ingress.kubernetes.io/ssl-passthrough"],
-            &ing["spec"]["ingressClassName"],
-            &ing["spec"]["rules"][0]["host"],
-            &ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["name"],
-        ),
-        (
-            &serde_json::json!("true"),
-            &serde_json::json!("nginx"),
-            &serde_json::json!("broker-0.kafka.example.com"),
-            &serde_json::json!(format!("{name}-ext-0")),
-        ),
+        &ing["metadata"]["annotations"]["nginx.ingress.kubernetes.io/ssl-passthrough"],
+        &serde_json::json!("true"),
+        "ingress = {ing}"
+    );
+    assert_eq!(
+        &ing["spec"]["ingressClassName"],
+        &serde_json::json!("nginx"),
+        "ingress = {ing}"
+    );
+    assert_eq!(
+        &ing["spec"]["rules"][0]["host"],
+        &serde_json::json!("broker-0.kafka.example.com"),
+        "ingress = {ing}"
+    );
+    assert_eq!(
+        &ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["name"],
+        &serde_json::json!(format!("{name}-ext-0")),
         "ingress = {ing}"
     );
 
@@ -297,18 +302,23 @@ async fn route_listener_renders_passthrough_route_objects() {
 
     let route = body_of(&observed, &Method::PATCH, &format!("/routes/{name}-ext-0"));
     assert_eq!(
-        (
-            &route["spec"]["tls"]["termination"],
-            &route["spec"]["host"],
-            &route["spec"]["port"]["targetPort"],
-            &route["spec"]["to"]["name"],
-        ),
-        (
-            &serde_json::json!("passthrough"),
-            &serde_json::json!("broker-0.kafka.example.com"),
-            &serde_json::json!(9094),
-            &serde_json::json!(format!("{name}-ext-0")),
-        ),
+        &route["spec"]["tls"]["termination"],
+        &serde_json::json!("passthrough"),
+        "route = {route}"
+    );
+    assert_eq!(
+        &route["spec"]["host"],
+        &serde_json::json!("broker-0.kafka.example.com"),
+        "route = {route}"
+    );
+    assert_eq!(
+        &route["spec"]["port"]["targetPort"],
+        &serde_json::json!(9094),
+        "route = {route}"
+    );
+    assert_eq!(
+        &route["spec"]["to"]["name"],
+        &serde_json::json!(format!("{name}-ext-0")),
         "route = {route}"
     );
 
@@ -362,9 +372,10 @@ async fn ingress_without_tls_surfaces_validation_error() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap();
+    assert_eq!(valid["status"].as_str(), Some("False"), "status = {status}");
     assert_eq!(
-        (valid["status"].as_str(), valid["reason"].as_str()),
-        (Some("False"), Some("ListenerIngressRequiresTls")),
+        valid["reason"].as_str(),
+        Some("ListenerIngressRequiresTls"),
         "status = {status}"
     );
 }

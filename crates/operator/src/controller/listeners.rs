@@ -1077,23 +1077,15 @@ mod service_rendering_tests {
         let svc = render_broker_service(&k, &listener, 0, "demo-pool-0").unwrap();
         let spec = svc.spec.as_ref().unwrap();
         let sel = spec.selector.as_ref().unwrap();
+        assert_eq!(svc.metadata.name.as_deref(), Some("demo-external-0"));
+        assert_eq!(spec.type_.as_deref(), Some("NodePort"));
         assert_eq!(
-            (
-                svc.metadata.name.as_deref(),
-                spec.type_.as_deref(),
-                sel.get("statefulset.kubernetes.io/pod-name")
-                    .map(String::as_str),
-                spec.ports.as_ref().unwrap()[0].port,
-                spec.ports.as_ref().unwrap()[0].node_port,
-            ),
-            (
-                Some("demo-external-0"),
-                Some("NodePort"),
-                Some("demo-pool-0"),
-                9094,
-                Some(32100)
-            )
+            sel.get("statefulset.kubernetes.io/pod-name")
+                .map(String::as_str),
+            Some("demo-pool-0")
         );
+        assert_eq!(spec.ports.as_ref().unwrap()[0].port, 9094);
+        assert_eq!(spec.ports.as_ref().unwrap()[0].node_port, Some(32100));
     }
 
     #[test]
@@ -1118,10 +1110,8 @@ mod service_rendering_tests {
         };
         let svc = render_broker_service(&k, &listener, 0, "demo-pool-0").unwrap();
         let spec = svc.spec.as_ref().unwrap();
-        assert_eq!(
-            (spec.type_.as_deref(), spec.load_balancer_ip.as_deref()),
-            (Some("LoadBalancer"), Some("10.0.0.5"))
-        );
+        assert_eq!(spec.type_.as_deref(), Some("LoadBalancer"));
+        assert_eq!(spec.load_balancer_ip.as_deref(), Some("10.0.0.5"));
     }
 
     #[test]
@@ -1147,19 +1137,15 @@ mod service_rendering_tests {
         let spec = svc.spec.as_ref().unwrap();
         let sel = spec.selector.as_ref().unwrap();
         assert_eq!(
-            (
-                svc.metadata.name.as_deref(),
-                sel.get("app.kubernetes.io/instance").map(String::as_str),
-                sel.get("statefulset.kubernetes.io/pod-name"),
-                spec.ports.as_ref().unwrap()[0].node_port,
-            ),
-            (
-                Some("demo-external-bootstrap"),
-                Some("demo"),
-                None,
-                Some(32099)
-            )
+            svc.metadata.name.as_deref(),
+            Some("demo-external-bootstrap")
         );
+        assert_eq!(
+            sel.get("app.kubernetes.io/instance").map(String::as_str),
+            Some("demo")
+        );
+        assert_eq!(sel.get("statefulset.kubernetes.io/pod-name"), None);
+        assert_eq!(spec.ports.as_ref().unwrap()[0].node_port, Some(32099));
     }
 
     fn ingress_listener(type_: ListenerType) -> Listener {
@@ -1191,16 +1177,14 @@ mod service_rendering_tests {
         let l = ingress_listener(ListenerType::Ingress);
         let svc = render_broker_service(&k, &l, 0, "demo-pool-0").unwrap();
         let spec = svc.spec.as_ref().unwrap();
+        assert_eq!(spec.type_.as_deref(), Some("ClusterIP"));
         assert_eq!(
-            (
-                spec.type_.as_deref(),
-                spec.selector
-                    .as_ref()
-                    .unwrap()
-                    .get("statefulset.kubernetes.io/pod-name")
-                    .map(String::as_str),
-            ),
-            (Some("ClusterIP"), Some("demo-pool-0"))
+            spec.selector
+                .as_ref()
+                .unwrap()
+                .get("statefulset.kubernetes.io/pod-name")
+                .map(String::as_str),
+            Some("demo-pool-0")
         );
     }
 
@@ -1223,29 +1207,21 @@ mod service_rendering_tests {
         let path = &rule.http.as_ref().unwrap().paths[0];
         let backend = path.backend.service.as_ref().unwrap();
         let tls = &spec.tls.as_ref().unwrap()[0];
+        assert_eq!(ing.metadata.name.as_deref(), Some("demo-ext-0"));
         assert_eq!(
-            (
-                ing.metadata.name.as_deref(),
-                ann.get("nginx.ingress.kubernetes.io/ssl-passthrough")
-                    .map(String::as_str),
-                spec.ingress_class_name.as_deref(),
-                rule.host.as_deref(),
-                backend.name.as_str(),
-                backend.port.as_ref().unwrap().number,
-                tls.hosts.as_deref(),
-                tls.secret_name.as_deref(),
-            ),
-            (
-                Some("demo-ext-0"),
-                Some("true"),
-                Some("nginx"),
-                Some("broker-0.kafka.example.com"),
-                "demo-ext-0",
-                Some(9094),
-                Some(["broker-0.kafka.example.com".to_string()].as_slice()),
-                None,
-            )
+            ann.get("nginx.ingress.kubernetes.io/ssl-passthrough")
+                .map(String::as_str),
+            Some("true")
         );
+        assert_eq!(spec.ingress_class_name.as_deref(), Some("nginx"));
+        assert_eq!(rule.host.as_deref(), Some("broker-0.kafka.example.com"));
+        assert_eq!(backend.name.as_str(), "demo-ext-0");
+        assert_eq!(backend.port.as_ref().unwrap().number, Some(9094));
+        assert_eq!(
+            tls.hosts.as_deref(),
+            Some(["broker-0.kafka.example.com".to_string()].as_slice())
+        );
+        assert_eq!(tls.secret_name.as_deref(), None);
     }
 
     #[test]
@@ -1254,13 +1230,8 @@ mod service_rendering_tests {
         let l = ingress_listener(ListenerType::Ingress);
         let ing = render_bootstrap_ingress(&k, &l, "bootstrap.kafka.example.com").unwrap();
         let rule = &ing.spec.as_ref().unwrap().rules.as_ref().unwrap()[0];
-        assert_eq!(
-            (ing.metadata.name.as_deref(), rule.host.as_deref()),
-            (
-                Some("demo-ext-bootstrap"),
-                Some("bootstrap.kafka.example.com")
-            )
-        );
+        assert_eq!(ing.metadata.name.as_deref(), Some("demo-ext-bootstrap"));
+        assert_eq!(rule.host.as_deref(), Some("bootstrap.kafka.example.com"));
     }
 
     #[test]
@@ -1504,7 +1475,8 @@ mod tests {
         ] {
             let actual = validate_listeners(&listeners, selected).unwrap_err();
             let reason = actual.reason();
-            assert_eq!((actual, reason), (expected, expected_reason), "case {name}");
+            assert_eq!(actual, expected, "case {name}");
+            assert_eq!(reason, expected_reason, "case {name}");
         }
     }
 
@@ -1643,11 +1615,8 @@ mod tests {
             let listeners = vec![oauth_listener("oauth", 9095, tls, config)];
             let actual_error = validate_listeners(&listeners, None).unwrap_err();
             let actual_reason = actual_error.reason();
-            assert_eq!(
-                (actual_error, actual_reason),
-                (expected_error, expected_reason),
-                "case {name}"
-            );
+            assert_eq!(actual_error, expected_error, "case {name}");
+            assert_eq!(actual_reason, expected_reason, "case {name}");
         }
     }
 
@@ -2217,7 +2186,8 @@ mod tests {
         ] {
             let actual = validate_listeners(&listeners, None).unwrap_err();
             let reason = actual.reason();
-            assert_eq!((actual, reason), (expected, expected_reason), "case {name}");
+            assert_eq!(actual, expected, "case {name}");
+            assert_eq!(reason, expected_reason, "case {name}");
         }
     }
 
@@ -3464,29 +3434,17 @@ mod toml_rendering_tests {
         // Sanity: parses cleanly with the broker's FileConfig.
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
+        assert_eq!(parsed.broker_id, Some(0));
+        assert_eq!(parsed.inter_broker_listener_name.as_deref(), Some("PLAIN"));
+        assert_eq!(parsed.heartbeat_interval_ms, Some(500));
+        assert_eq!(parsed.heartbeat_timeout_ms, Some(3000));
+        assert_eq!(parsed.replica_lag_time_max_ms, Some(2000));
+        assert_eq!(parsed.controller_election_timeout_ms, Some(500));
+        assert_eq!(parsed.controller_heartbeat_interval_ms, Some(100));
+        assert_eq!(parsed.listeners.len(), 1);
         assert_eq!(
-            (
-                parsed.broker_id,
-                parsed.inter_broker_listener_name.as_deref(),
-                parsed.heartbeat_interval_ms,
-                parsed.heartbeat_timeout_ms,
-                parsed.replica_lag_time_max_ms,
-                parsed.controller_election_timeout_ms,
-                parsed.controller_heartbeat_interval_ms,
-                parsed.listeners.len(),
-                parsed.listeners[0].advertised.as_str(),
-            ),
-            (
-                Some(0),
-                Some("PLAIN"),
-                Some(500),
-                Some(3000),
-                Some(2000),
-                Some(500),
-                Some(100),
-                1,
-                "demo-0.svc.local:9092"
-            )
+            parsed.listeners[0].advertised.as_str(),
+            "demo-0.svc.local:9092"
         );
     }
 
@@ -3559,18 +3517,13 @@ mod toml_rendering_tests {
         );
         let parsed: crabka_broker::file_config::FileConfig =
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
-        assert_eq!(
-            (
-                toml_str.contains("controller_quorum_voters"),
-                toml_str.contains("controller_server_name"),
-                toml_str.contains("[server_properties]"),
-                toml_str.contains("[authorization]"),
-                toml_str.contains("[remote_storage]"),
-                parsed.controller_quorum_voters,
-                parsed.controller_server_name,
-            ),
-            (false, false, false, false, false, vec![], None)
-        );
+        assert_eq!(toml_str.contains("controller_quorum_voters"), false);
+        assert_eq!(toml_str.contains("controller_server_name"), false);
+        assert_eq!(toml_str.contains("[server_properties]"), false);
+        assert_eq!(toml_str.contains("[authorization]"), false);
+        assert_eq!(toml_str.contains("[remote_storage]"), false);
+        assert!(parsed.controller_quorum_voters.is_empty());
+        assert_eq!(parsed.controller_server_name, None);
     }
 
     #[test]
@@ -4057,10 +4010,9 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .kafka_metadata
             .expect("kafka_metadata round-trips");
-        assert_eq!(
-            (km.bootstrap.as_str(), km.num_partitions, km.replication),
-            ("127.0.0.1:9094", Some(8), Some(1))
-        );
+        assert_eq!(km.bootstrap.as_str(), "127.0.0.1:9094");
+        assert_eq!(km.num_partitions, Some(8));
+        assert_eq!(km.replication, Some(1));
     }
 
     #[test]
@@ -4185,13 +4137,8 @@ mod toml_rendering_tests {
             &[],
             "",
         );
-        assert_eq!(
-            (
-                t.contains("[remote_storage.kafka_metadata]"),
-                t.contains("bootstrap ="),
-            ),
-            (true, false)
-        );
+        assert_eq!(t.contains("[remote_storage.kafka_metadata]"), true);
+        assert_eq!(t.contains("bootstrap ="), false);
     }
 
     #[test]
@@ -4260,30 +4207,15 @@ mod toml_rendering_tests {
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let rs = parsed.remote_storage.expect("[remote_storage] round-trips");
         let s3 = rs.s3.expect("[remote_storage.s3] round-trips");
-        assert_eq!(
-            (
-                s3.bucket.as_str(),
-                s3.region.as_str(),
-                s3.prefix.as_deref(),
-                s3.endpoint.as_deref(),
-                s3.allow_http,
-                s3.multipart_threshold,
-                s3.multipart_chunk_size,
-                s3.access_key_id.as_deref(),
-                s3.secret_access_key.as_deref(),
-            ),
-            (
-                "crabka-tier",
-                "us-east-1",
-                Some("cluster-a"),
-                Some("http://minio.svc:9000"),
-                true,
-                Some(4096),
-                Some(1024),
-                None,
-                None
-            )
-        );
+        assert_eq!(s3.bucket.as_str(), "crabka-tier");
+        assert_eq!(s3.region.as_str(), "us-east-1");
+        assert_eq!(s3.prefix.as_deref(), Some("cluster-a"));
+        assert_eq!(s3.endpoint.as_deref(), Some("http://minio.svc:9000"));
+        assert_eq!(s3.allow_http, true);
+        assert_eq!(s3.multipart_threshold, Some(4096));
+        assert_eq!(s3.multipart_chunk_size, Some(1024));
+        assert_eq!(s3.access_key_id.as_deref(), None);
+        assert_eq!(s3.secret_access_key.as_deref(), None);
     }
 
     /// Minimal S3 spec — only `bucket` + `region` set. Optional fields
@@ -4352,7 +4284,8 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .s3
             .expect("[remote_storage.s3] round-trips");
-        assert_eq!((s3.bucket.as_str(), s3.region.as_str()), ("b", "r"));
+        assert_eq!(s3.bucket.as_str(), "b");
+        assert_eq!(s3.region.as_str(), "r");
     }
 
     /// Reserved TOML metacharacters (`"`, `\`) in a user-supplied
@@ -4485,26 +4418,16 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .gcs
             .expect("[remote_storage.gcs] round-trips");
+        assert_eq!(gcs.bucket.as_str(), "crabka-tier");
+        assert_eq!(gcs.prefix.as_deref(), Some("cluster-a"));
+        assert_eq!(gcs.endpoint.as_deref(), Some("http://fake-gcs.svc:4443"));
+        assert_eq!(gcs.allow_http, true);
         assert_eq!(
-            (
-                gcs.bucket.as_str(),
-                gcs.prefix.as_deref(),
-                gcs.endpoint.as_deref(),
-                gcs.allow_http,
-                gcs.service_account_path.as_deref(),
-                gcs.multipart_threshold,
-                gcs.multipart_chunk_size,
-            ),
-            (
-                "crabka-tier",
-                Some("cluster-a"),
-                Some("http://fake-gcs.svc:4443"),
-                true,
-                Some("/etc/crabka/gcs-credentials/key.json"),
-                Some(4096),
-                Some(1024)
-            )
+            gcs.service_account_path.as_deref(),
+            Some("/etc/crabka/gcs-credentials/key.json")
         );
+        assert_eq!(gcs.multipart_threshold, Some(4096));
+        assert_eq!(gcs.multipart_chunk_size, Some(1024));
     }
 
     /// Keyless GCS (Workload Identity / ADC): with `credentials` unset,
@@ -4567,7 +4490,8 @@ mod toml_rendering_tests {
             .expect("[remote_storage] round-trips")
             .gcs
             .expect("[remote_storage.gcs] round-trips");
-        assert_eq!((gcs.bucket.as_str(), gcs.service_account_path), ("b", None));
+        assert_eq!(gcs.bucket.as_str(), "b");
+        assert_eq!(gcs.service_account_path, None);
     }
 
     #[test]
@@ -4611,16 +4535,16 @@ mod toml_rendering_tests {
         let controller_listener_protocol = parsed.controller_listener_protocol;
         let parsed_tls = parsed.tls_config.expect("tls_config emitted");
         assert_eq!(
-            (
-                controller_listener_protocol,
-                parsed_tls.cert_path,
-                parsed_tls.trust_roots_path,
-            ),
-            (
-                Some(crabka_security::ListenerProtocol::Ssl),
-                std::path::PathBuf::from("/etc/crabka/broker-tls/0.crt"),
-                Some(std::path::PathBuf::from("/etc/crabka/cluster-ca/ca.crt")),
-            )
+            controller_listener_protocol,
+            Some(crabka_security::ListenerProtocol::Ssl)
+        );
+        assert_eq!(
+            parsed_tls.cert_path,
+            std::path::PathBuf::from("/etc/crabka/broker-tls/0.crt")
+        );
+        assert_eq!(
+            parsed_tls.trust_roots_path,
+            Some(std::path::PathBuf::from("/etc/crabka/cluster-ca/ca.crt"))
         );
     }
 
@@ -5229,25 +5153,24 @@ mod toml_rendering_tests {
             toml::from_str(&toml).expect("rendered TOML must parse with broker FileConfig");
         let ob = parsed.oauthbearer.expect("oauthbearer block emitted");
         assert_eq!(
-            (
-                ob.jwks_endpoint_uri.as_deref(),
-                ob.valid_issuer_uri.as_deref(),
-                ob.expected_audience.as_deref(),
-                ob.principal_claim_name.as_deref(),
-                ob.custom_claim_check.as_deref(),
-                ob.jwks_refresh_interval_ms,
-                ob.allowable_clock_skew_ms,
-            ),
-            (
-                Some("https://kc.example.com/realms/kafka/protocol/openid-connect/certs"),
-                Some("https://kc.example.com/realms/kafka"),
-                Some("kafka"),
-                Some("preferred_username"),
-                Some("$.scope[?@ == 'kafka-broker']"),
-                Some(300_000),
-                Some(30_000)
-            )
+            ob.jwks_endpoint_uri.as_deref(),
+            Some("https://kc.example.com/realms/kafka/protocol/openid-connect/certs")
         );
+        assert_eq!(
+            ob.valid_issuer_uri.as_deref(),
+            Some("https://kc.example.com/realms/kafka")
+        );
+        assert_eq!(ob.expected_audience.as_deref(), Some("kafka"));
+        assert_eq!(
+            ob.principal_claim_name.as_deref(),
+            Some("preferred_username")
+        );
+        assert_eq!(
+            ob.custom_claim_check.as_deref(),
+            Some("$.scope[?@ == 'kafka-broker']")
+        );
+        assert_eq!(ob.jwks_refresh_interval_ms, Some(300_000));
+        assert_eq!(ob.allowable_clock_skew_ms, Some(30_000));
     }
 
     #[test]
@@ -6097,11 +6020,12 @@ mod san_tests {
         };
         let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
         assert_eq!(
-            (
-                sans.contains(&SubjectAltName::Ip("203.0.113.10".parse().unwrap())),
-                sans.contains(&SubjectAltName::Dns("node1.example.com".into())),
-            ),
-            (true, true)
+            sans.contains(&SubjectAltName::Ip("203.0.113.10".parse().unwrap())),
+            true
+        );
+        assert_eq!(
+            sans.contains(&SubjectAltName::Dns("node1.example.com".into())),
+            true
         );
     }
 
@@ -6123,11 +6047,12 @@ mod san_tests {
         observed.lb_bootstrap = vec![LbIngress::Ip("203.0.113.30".parse().unwrap())];
         let sans = compute_extra_sans(0, &listeners, &observed).unwrap();
         assert_eq!(
-            (
-                sans.contains(&SubjectAltName::Ip("203.0.113.20".parse().unwrap())),
-                sans.contains(&SubjectAltName::Ip("203.0.113.30".parse().unwrap())),
-            ),
-            (true, true)
+            sans.contains(&SubjectAltName::Ip("203.0.113.20".parse().unwrap())),
+            true
+        );
+        assert_eq!(
+            sans.contains(&SubjectAltName::Ip("203.0.113.30".parse().unwrap())),
+            true
         );
     }
 

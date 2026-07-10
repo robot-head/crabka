@@ -958,35 +958,25 @@ mod tests {
         // Secret applied with the expected keys.
         let applied = secrets.applied.lock().unwrap();
         let data = applied[0].data.as_ref().expect("data set");
+        assert_eq!(applied.len(), 1);
         assert_eq!(
-            (
-                applied.len(),
-                data.keys().map(String::as_str).collect::<Vec<_>>()
-            ),
-            (1, vec!["hmac", "password", "sasl.jaas.config", "token-id"])
+            data.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["hmac", "password", "sasl.jaas.config", "token-id"]
         );
         let jaas = std::str::from_utf8(&data["sasl.jaas.config"].0).unwrap();
-        assert_eq!(
-            (
-                jaas.contains("tokenauth=\"true\""),
-                jaas.contains("ScramLoginModule"),
-            ),
-            (true, true),
-            "jaas: {jaas}"
-        );
+        assert_eq!(jaas.contains("tokenauth=\"true\""), true, "jaas: {jaas}");
+        assert_eq!(jaas.contains("ScramLoginModule"), true, "jaas: {jaas}");
 
         // Status patch carries delegationTokenId + TokenIssued condition.
         let patches = users.patches.lock().unwrap();
         let (name, body) = &patches[0];
         let status = body.get("status").unwrap();
+        assert_eq!(patches.len(), 1);
+        assert_eq!(name.as_str(), "alice");
+        assert_eq!(status.get("delegationTokenId").is_some(), true);
         assert_eq!(
-            (
-                patches.len(),
-                name.as_str(),
-                status.get("delegationTokenId").is_some(),
-                status.get("delegationTokenExpiryTimestampMs").is_some(),
-            ),
-            (1, "alice", true, true)
+            status.get("delegationTokenExpiryTimestampMs").is_some(),
+            true
         );
         let conds = status.get("conditions").unwrap().as_array().unwrap();
         assert!(
@@ -1086,20 +1076,10 @@ mod tests {
             .iter()
             .find(|c| c["type"] == "Ready")
             .expect("Ready present");
-        assert_eq!(
-            (
-                issued["status"].as_str(),
-                issued["reason"].as_str(),
-                ready["status"].as_str(),
-                ready["reason"].as_str(),
-            ),
-            (
-                Some("False"),
-                Some("OperatorNotSuperUser"),
-                Some("False"),
-                Some("OperatorNotSuperUser"),
-            )
-        );
+        assert_eq!(issued["status"].as_str(), Some("False"));
+        assert_eq!(issued["reason"].as_str(), Some("OperatorNotSuperUser"));
+        assert_eq!(ready["status"].as_str(), Some("False"));
+        assert_eq!(ready["reason"].as_str(), Some("OperatorNotSuperUser"));
     }
 
     #[tokio::test]
@@ -1119,20 +1099,10 @@ mod tests {
         let conds = patches[0].1["status"]["conditions"].as_array().unwrap();
         let issued = conds.iter().find(|c| c["type"] == "TokenIssued").unwrap();
         let ready = conds.iter().find(|c| c["type"] == "Ready").unwrap();
-        assert_eq!(
-            (
-                issued["status"].as_str(),
-                issued["reason"].as_str(),
-                ready["status"].as_str(),
-                ready["reason"].as_str(),
-            ),
-            (
-                Some("False"),
-                Some("InvalidSpec"),
-                Some("False"),
-                Some("InvalidSpec"),
-            )
-        );
+        assert_eq!(issued["status"].as_str(), Some("False"));
+        assert_eq!(issued["reason"].as_str(), Some("InvalidSpec"));
+        assert_eq!(ready["status"].as_str(), Some("False"));
+        assert_eq!(ready["reason"].as_str(), Some("InvalidSpec"));
     }
 
     // --- helpers ----------------------------------------------------------
@@ -1195,16 +1165,10 @@ mod tests {
             let conds = compute_conditions(&t, &auth(vec![], Some(1000)), 0, true, None);
             let expiring = conds.iter().find(|c| c.type_ == "TokenExpiring").unwrap();
             let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
-            assert_eq!(
-                (
-                    expiring.status.as_str(),
-                    expiring.reason.as_str(),
-                    ready.status.as_str(),
-                    ready.reason.as_str(),
-                ),
-                (expected_status, expected_reason, "True", "TokenReady"),
-                "case {name}"
-            );
+            assert_eq!(expiring.status.as_str(), expected_status, "case {name}");
+            assert_eq!(expiring.reason.as_str(), expected_reason, "case {name}");
+            assert_eq!(ready.status.as_str(), "True", "case {name}");
+            assert_eq!(ready.reason.as_str(), "TokenReady", "case {name}");
         }
     }
 }

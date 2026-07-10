@@ -691,22 +691,17 @@ mod tests {
         }];
         let topo = to_wire(&groups, "app");
         let cl = &topo.subtopologies[0].state_changelog_topics[0];
+        assert_eq!(cl.name.as_str(), "app-j-changelog");
         assert_eq!(
-            (
-                cl.name.as_str(),
-                cl.topic_configs
-                    .iter()
-                    .map(|c| (c.key.as_str(), c.value.as_str()))
-                    .collect::<Vec<_>>(),
-            ),
-            (
-                "app-j-changelog",
-                vec![
-                    ("cleanup.policy", "delete"),
-                    ("message.timestamp.type", "CreateTime"),
-                    ("retention.ms", "86520000"),
-                ],
-            )
+            cl.topic_configs
+                .iter()
+                .map(|c| (c.key.as_str(), c.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("cleanup.policy", "delete"),
+                ("message.timestamp.type", "CreateTime"),
+                ("retention.ms", "86520000"),
+            ]
         );
     }
 

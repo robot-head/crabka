@@ -349,9 +349,10 @@ mod tests {
 
         // take_changelog_ts wraps each changelog entry with a None timestamp.
         let cl_ts = s.take_changelog_ts();
+        assert_eq!(cl_ts.len(), 1, "default timestamp is None");
         assert_eq!(
-            (cl_ts.len(), cl_ts.first().and_then(|entry| entry.2)),
-            (1, None),
+            cl_ts.first().and_then(|entry| entry.2),
+            None,
             "default timestamp is None"
         );
         // The wrapped take drained the buffer.

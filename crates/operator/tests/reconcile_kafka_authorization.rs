@@ -130,10 +130,8 @@ async fn kafka_with_opa_authorization_renders_correct_broker_toml() {
     let opa = a
         .opa
         .expect("FileConfig.authorization.opa must be Some for type = \"opa\"");
-    assert_eq!(
-        (opa.url.as_str(), a.super_users),
-        ("http://opa:8181/v1/data/k/a", vec!["ANONYMOUS".to_string()])
-    );
+    assert_eq!(opa.url.as_str(), "http://opa:8181/v1/data/k/a");
+    assert_eq!(a.super_users, vec!["ANONYMOUS".to_string()]);
 }
 
 // ── test 2: type: simple round-trips super_users ─────────────────────────────
@@ -180,8 +178,6 @@ async fn kafka_with_simple_authorization_super_users_round_trip() {
     let a = parsed
         .authorization
         .expect("FileConfig.authorization must be Some when [authorization] is rendered");
-    assert_eq!(
-        (a.opa, a.super_users),
-        (None, vec!["User:admin".to_string()])
-    );
+    assert_eq!(a.opa, None);
+    assert_eq!(a.super_users, vec!["User:admin".to_string()]);
 }

@@ -295,10 +295,9 @@ signature_encoding = "hex"
 
     let status = resp.status();
     let wr = parse_response(resp).await;
-    assert_eq!(
-        (status, wr.deduplicated, wr.offset >= 0),
-        (StatusCode::OK, false, true)
-    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(wr.deduplicated, false);
+    assert_eq!(wr.offset >= 0, true);
 
     // Verify the record landed in the topic.
     assert_eq!(count_topic(&bootstrap, topic, "vhp-verify").await, 1);
@@ -449,22 +448,29 @@ idempotency_source = "json:$.id"
     let second_status = second_resp.status();
     let second = parse_response(second_resp).await;
     assert_eq!(
-        (
-            first_status,
-            first.deduplicated,
-            second_status,
-            second.deduplicated,
-            first.offset,
-            second.offset,
-        ),
-        (
-            StatusCode::OK,
-            false,
-            StatusCode::OK,
-            true,
-            first.offset,
-            first.offset,
-        ),
+        first_status,
+        StatusCode::OK,
+        "redelivery should deduplicate at the original offset"
+    );
+    assert_eq!(
+        first.deduplicated, false,
+        "redelivery should deduplicate at the original offset"
+    );
+    assert_eq!(
+        second_status,
+        StatusCode::OK,
+        "redelivery should deduplicate at the original offset"
+    );
+    assert_eq!(
+        second.deduplicated, true,
+        "redelivery should deduplicate at the original offset"
+    );
+    assert_eq!(
+        first.offset, first.offset,
+        "redelivery should deduplicate at the original offset"
+    );
+    assert_eq!(
+        second.offset, first.offset,
         "redelivery should deduplicate at the original offset"
     );
 
@@ -559,22 +565,29 @@ idempotency_source = "header:X-Delivery"
     let second_status = second_resp.status();
     let second = parse_response(second_resp).await;
     assert_eq!(
-        (
-            first_status,
-            first.deduplicated,
-            second_status,
-            second.deduplicated,
-            first.offset,
-            second.offset,
-        ),
-        (
-            StatusCode::OK,
-            false,
-            StatusCode::OK,
-            true,
-            first.offset,
-            first.offset,
-        ),
+        first_status,
+        StatusCode::OK,
+        "second delivery with the same header should deduplicate"
+    );
+    assert_eq!(
+        first.deduplicated, false,
+        "second delivery with the same header should deduplicate"
+    );
+    assert_eq!(
+        second_status,
+        StatusCode::OK,
+        "second delivery with the same header should deduplicate"
+    );
+    assert_eq!(
+        second.deduplicated, true,
+        "second delivery with the same header should deduplicate"
+    );
+    assert_eq!(
+        first.offset, first.offset,
+        "second delivery with the same header should deduplicate"
+    );
+    assert_eq!(
+        second.offset, first.offset,
         "second delivery with the same header should deduplicate"
     );
 
@@ -629,7 +642,8 @@ async fn generic_produce_route() {
         .unwrap();
     let status = resp.status();
     let first = parse_response(resp).await;
-    assert_eq!((status, first.deduplicated), (StatusCode::OK, false));
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first.deduplicated, false);
 
     // Same idempotency key twice → second is deduplicated.
     let idem_key = "gpr-key-1";
@@ -663,22 +677,29 @@ async fn generic_produce_route() {
     let second_status = resp2.status();
     let keyed_second = parse_response(resp2).await;
     assert_eq!(
-        (
-            first_status,
-            keyed_first.deduplicated,
-            second_status,
-            keyed_second.deduplicated,
-            keyed_first.offset,
-            keyed_second.offset,
-        ),
-        (
-            StatusCode::OK,
-            false,
-            StatusCode::OK,
-            true,
-            keyed_first.offset,
-            keyed_first.offset,
-        ),
+        first_status,
+        StatusCode::OK,
+        "second keyed request should deduplicate at the original offset"
+    );
+    assert_eq!(
+        keyed_first.deduplicated, false,
+        "second keyed request should deduplicate at the original offset"
+    );
+    assert_eq!(
+        second_status,
+        StatusCode::OK,
+        "second keyed request should deduplicate at the original offset"
+    );
+    assert_eq!(
+        keyed_second.deduplicated, true,
+        "second keyed request should deduplicate at the original offset"
+    );
+    assert_eq!(
+        keyed_first.offset, keyed_first.offset,
+        "second keyed request should deduplicate at the original offset"
+    );
+    assert_eq!(
+        keyed_second.offset, keyed_first.offset,
         "second keyed request should deduplicate at the original offset"
     );
 

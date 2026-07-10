@@ -363,7 +363,9 @@ mod tests {
         s.put("k".into(), Some(20), 200).await;
         assert_eq!(s.get(&"k".into()).await.map(|r| r.value), Some(20));
         let r = s.get_as_of(&"k".into(), 150).await.unwrap();
-        assert_eq!((r.value, r.valid_from, r.valid_to), (10, 100, Some(200)));
+        assert_eq!(r.value, 10);
+        assert_eq!(r.valid_from, 100);
+        assert_eq!(r.valid_to, Some(200));
         assert_eq!(s.get_as_of(&"k".into(), 50).await, None);
     }
 

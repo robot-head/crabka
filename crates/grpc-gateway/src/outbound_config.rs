@@ -216,45 +216,25 @@ filter         = "json:$.type"
         let file: OutboundFile = toml::from_str(VALID_TOML).expect("parse TOML");
         let compiled = file.compile().expect("compile");
         let sub = &compiled[0];
+        assert_eq!(compiled.len(), 1);
+        assert_eq!(sub.name.as_str(), "my-sub");
         assert_eq!(
-            (
-                compiled.len(),
-                (
-                    sub.name.as_str(),
-                    sub.source_topics
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>(),
-                    sub.target_url.as_str(),
-                    sub.signing_secret.as_deref(),
-                    sub.filter.is_some(),
-                    sub.dead_letter_topic.as_deref(),
-                    sub.max_attempts,
-                    sub.base_backoff_ms,
-                    sub.max_backoff_ms,
-                    sub.request_timeout_ms,
-                    sub.headers.is_empty(),
-                    sub.decode_to_json,
-                ),
-            ),
-            (
-                1,
-                (
-                    "my-sub",
-                    vec!["events"],
-                    "https://hooks.example.com/deliver",
-                    Some(b"s3cr3t".as_slice()),
-                    true,
-                    None,
-                    5,
-                    500,
-                    30_000,
-                    10_000,
-                    true,
-                    false,
-                ),
-            )
+            sub.source_topics
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["events"]
         );
+        assert_eq!(sub.target_url.as_str(), "https://hooks.example.com/deliver");
+        assert_eq!(sub.signing_secret.as_deref(), Some(b"s3cr3t".as_slice()));
+        assert_eq!(sub.filter.is_some(), true);
+        assert_eq!(sub.dead_letter_topic.as_deref(), None);
+        assert_eq!(sub.max_attempts, 5);
+        assert_eq!(sub.base_backoff_ms, 500);
+        assert_eq!(sub.max_backoff_ms, 30_000);
+        assert_eq!(sub.request_timeout_ms, 10_000);
+        assert_eq!(sub.headers.is_empty(), true);
+        assert_eq!(sub.decode_to_json, false);
     }
 
     #[test]

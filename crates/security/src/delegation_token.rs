@@ -64,7 +64,8 @@ mod tests {
     fn hmac_is_deterministic_for_same_inputs() {
         let h1 = compute_token_hmac(b"k", "tok-1");
         let h2 = compute_token_hmac(b"k", "tok-1");
-        assert_eq!((&h1, h1.len()), (&h2, 32));
+        assert_eq!(&h1, &h2);
+        assert_eq!(h1.len(), 32);
     }
 
     #[test]
@@ -78,10 +79,7 @@ mod tests {
     fn secret_bytes_debug_does_not_leak_bytes() {
         let s = SecretBytes::new(b"super-secret-master-key".to_vec());
         let d = format!("{s:?}");
-        assert_eq!(
-            (d.contains("redacted"), d.contains("super-secret")),
-            (true, false),
-            "got {d:?}"
-        );
+        assert_eq!(d.contains("redacted"), true, "got {d:?}");
+        assert_eq!(d.contains("super-secret"), false, "got {d:?}");
     }
 }

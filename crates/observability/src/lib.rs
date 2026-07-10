@@ -20470,10 +20470,8 @@ mod tests {
         // Identity (no Content-Encoding) decodes to a single record.
         let identity = normalize_otlp_http_logs(&headers, &raw, None, None)
             .expect("uncompressed OTLP proto logs should decode");
-        assert_eq!(
-            (identity.len(), identity[0].line.as_str()),
-            (1, "hello world")
-        );
+        assert_eq!(identity.len(), 1);
+        assert_eq!(identity[0].line.as_str(), "hello world");
 
         // The gzip-compressed body must decode to exactly the same records.
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -20653,10 +20651,8 @@ mod tests {
             CompactionFrontier::new(2 * BUCKET).with_partition_offset(PartitionIndex(0), Offset(7));
 
         assert_eq!(hot_tail.prune_compacted(&frontier), 2);
-        assert_eq!(
-            (hot_tail.records(), hot_tail.records_in_range(0, 6 * BUCKET)),
-            (expected.clone(), expected)
-        );
+        assert_eq!(hot_tail.records(), expected.clone());
+        assert_eq!(hot_tail.records_in_range(0, 6 * BUCKET), expected);
         assert!(hot_tail.records_in_range(2 * BUCKET, 2 * BUCKET).is_empty());
         assert!(hot_tail.records_in_range(4 * BUCKET, 4 * BUCKET).is_empty());
     }
@@ -21034,13 +21030,11 @@ mod tests {
 
         for (name, state) in [("first range", &first), ("moving range", &second)] {
             assert_eq!(
-                (
-                    state.label_index.label_names(tenant),
-                    state.block_index.blocks().len(),
-                ),
-                (BTreeSet::from(["app".to_string()]), 2),
+                state.label_index.label_names(tenant),
+                BTreeSet::from(["app".to_string()]),
                 "case {name}"
             );
+            assert_eq!(state.block_index.blocks().len(), 2, "case {name}");
         }
 
         let shard_prefix =
@@ -21351,17 +21345,12 @@ mod tests {
                 "topic".to_string(),
             );
 
-        assert_eq!(
-            (
-                deps.metrics.is_some(),
-                deps.wal_sink.is_some(),
-                deps.ingest_limiter.is_some(),
-                deps.query_authorizer.is_some(),
-                deps.hot_tail.is_some(),
-                deps.deferred_wal_consumer_connect.is_some(),
-            ),
-            (true, true, true, true, true, true)
-        );
+        assert_eq!(deps.metrics.is_some(), true);
+        assert_eq!(deps.wal_sink.is_some(), true);
+        assert_eq!(deps.ingest_limiter.is_some(), true);
+        assert_eq!(deps.query_authorizer.is_some(), true);
+        assert_eq!(deps.hot_tail.is_some(), true);
+        assert_eq!(deps.deferred_wal_consumer_connect.is_some(), true);
         check!(Arc::ptr_eq(
             &deps.metrics.as_ref().unwrap().registry,
             &metrics.registry
@@ -21811,32 +21800,16 @@ mod tests {
             "type=alert&exclude_alerts=true&time=10&rule_name=HighError&rule_group=api&file=rules.yaml&group_limit=2&group_next_token=next&match=%7Bapp%3D%22api%22%7D",
         ))
         .unwrap();
-        assert_eq!(
-            (
-                filters.rule_kind,
-                filters.exclude_alerts,
-                filters.evaluation_time.is_some(),
-                filters.rule_names.contains("HighError"),
-                filters.rule_groups.contains("api"),
-                filters.files.contains("rules.yaml"),
-                filters.group_limit,
-                filters.group_next_token.as_deref(),
-                filters.label_selectors.len(),
-                filters.has_rule_filter(),
-            ),
-            (
-                Some("alerting"),
-                true,
-                true,
-                true,
-                true,
-                true,
-                Some(2),
-                Some("next"),
-                1,
-                true,
-            )
-        );
+        assert_eq!(filters.rule_kind, Some("alerting"));
+        assert_eq!(filters.exclude_alerts, true);
+        assert_eq!(filters.evaluation_time.is_some(), true);
+        assert_eq!(filters.rule_names.contains("HighError"), true);
+        assert_eq!(filters.rule_groups.contains("api"), true);
+        assert_eq!(filters.files.contains("rules.yaml"), true);
+        assert_eq!(filters.group_limit, Some(2));
+        assert_eq!(filters.group_next_token.as_deref(), Some("next"));
+        assert_eq!(filters.label_selectors.len(), 1);
+        assert_eq!(filters.has_rule_filter(), true);
 
         let recording = PrometheusRulesFilters::parse(Some("type=record")).unwrap();
         assert_eq!(recording.rule_kind, Some("recording"));

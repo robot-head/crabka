@@ -377,18 +377,13 @@ mod tests {
 
     #[test]
     fn accessors_and_advance_return_the_inner_value() {
-        assert_eq!(
-            (
-                Offset(9).get(),
-                PartitionIndex(4).get(),
-                NodeId(7).get(),
-                ProducerId(42).get(),
-                LeaderEpoch(3).get(),
-                ApiKey(18).get(),
-                ApiVersion(2).get()
-            ),
-            (9, 4, 7, 42, 3, 18, 2)
-        );
+        assert_eq!(Offset(9).get(), 9);
+        assert_eq!(PartitionIndex(4).get(), 4);
+        assert_eq!(NodeId(7).get(), 7);
+        assert_eq!(ProducerId(42).get(), 42);
+        assert_eq!(LeaderEpoch(3).get(), 3);
+        assert_eq!(ApiKey(18).get(), 18);
+        assert_eq!(ApiVersion(2).get(), 2);
         assert_eq!(LeaderEpoch(4).next(), LeaderEpoch(5));
     }
 

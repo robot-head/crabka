@@ -911,14 +911,9 @@ mod config_hash_tests {
         spec_b.listeners = vec![crate::controller::listeners::synthesized_default_listener()];
         spec_b.inter_broker_listener_name = Some("PLAIN".into());
         let h_with_listener = combined_config_hash(&spec_b, None, None, None);
-        assert_eq!(
-            (
-                h == h_again,
-                h == config_hash(config_only_form),
-                h != h_with_listener,
-            ),
-            (true, true, true)
-        );
+        assert_eq!(h == h_again, true);
+        assert_eq!(h == config_hash(config_only_form), true);
+        assert_eq!(h != h_with_listener, true);
     }
 
     #[test]
@@ -961,12 +956,10 @@ mod config_hash_tests {
                 ..Default::default()
             });
         }
+        assert_eq!(h_off != h_on, true);
         assert_eq!(
-            (
-                h_off != h_on,
-                h_on == combined_config_hash(&spec_on_diff_interval, None, None, None),
-            ),
-            (true, true)
+            h_on == combined_config_hash(&spec_on_diff_interval, None, None, None),
+            true
         );
     }
 
@@ -1003,7 +996,8 @@ mod config_hash_tests {
             None,
             None,
         );
-        assert_eq!((h_none != h_a, h_a != h_b), (true, true));
+        assert_eq!(h_none != h_a, true);
+        assert_eq!(h_a != h_b, true);
     }
 
     #[test]
@@ -1092,14 +1086,9 @@ mod config_hash_tests {
         // Exactly one toml key per broker; the old broker.env /
         // broker.properties keys are dropped.
         let keys: Vec<&str> = data.keys().map(String::as_str).collect();
-        assert_eq!(
-            (
-                keys,
-                data["broker-0.toml"].contains("demo-0.svc"),
-                data["broker-1.toml"].contains("demo-1.svc"),
-            ),
-            (vec!["broker-0.toml", "broker-1.toml"], true, true)
-        );
+        assert_eq!(keys, vec!["broker-0.toml", "broker-1.toml"]);
+        assert_eq!(data["broker-0.toml"].contains("demo-0.svc"), true);
+        assert_eq!(data["broker-1.toml"].contains("demo-1.svc"), true);
     }
 
     #[test]
@@ -1132,10 +1121,9 @@ mod config_hash_tests {
         let h_pin = combined_config_hash(&spec, None, Some("3.6"), None);
         // A different pin differs again.
         let h_pin2 = combined_config_hash(&spec, None, Some("3.7"), None);
-        assert_eq!(
-            (h_default.clone(), h_default != h_pin, h_pin != h_pin2,),
-            (config_hash(""), true, true)
-        );
+        assert_eq!(h_default.clone(), config_hash(""));
+        assert_eq!(h_default != h_pin, true);
+        assert_eq!(h_pin != h_pin2, true);
     }
 
     #[test]
@@ -1359,20 +1347,14 @@ mod cluster_object_tests {
             .iter()
             .map(|port| (port.name.as_deref(), port.port))
             .collect::<Vec<_>>();
+        assert_eq!(spec.publish_not_ready_addresses, Some(true));
+        assert_eq!(spec.cluster_ip.as_deref(), Some("None"));
         assert_eq!(
-            (
-                spec.publish_not_ready_addresses,
-                spec.cluster_ip.as_deref(),
-                actual_ports,
-            ),
-            (
-                Some(true),
-                Some("None"),
-                vec![
-                    (Some("kafka-internal"), BROKER_PORT),
-                    (Some("controller"), CONTROLLER_PORT),
-                ],
-            )
+            actual_ports,
+            vec![
+                (Some("kafka-internal"), BROKER_PORT),
+                (Some("controller"), CONTROLLER_PORT),
+            ]
         );
     }
 
@@ -1434,14 +1416,16 @@ mod cluster_object_tests {
             let listeners_pos = toml.find("[[listeners]]").unwrap();
             // The server-name top-level scalar must also precede [[listeners]].
             let server_name_pos = toml.find("controller_server_name").unwrap();
+            assert_eq!(toml.contains(expected), true, "broker-{id}.toml: {toml}");
             assert_eq!(
-                (
-                    toml.contains(expected),
-                    toml.contains(expected_server_name),
-                    key_pos < listeners_pos,
-                    server_name_pos < listeners_pos,
-                ),
-                (true, true, true, true),
+                toml.contains(expected_server_name),
+                true,
+                "broker-{id}.toml: {toml}"
+            );
+            assert_eq!(key_pos < listeners_pos, true, "broker-{id}.toml: {toml}");
+            assert_eq!(
+                server_name_pos < listeners_pos,
+                true,
                 "broker-{id}.toml: {toml}"
             );
         }

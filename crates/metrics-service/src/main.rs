@@ -465,14 +465,12 @@ mod tests {
         ])
         .unwrap();
 
+        assert_eq!(matches!(cli.target, Target::QueryFrontend), true);
+        assert_eq!(cli.query_frontend_split_ms, 30_000);
+        assert_eq!(cli.query_frontend_shards, 4);
         assert_eq!(
-            (
-                matches!(cli.target, Target::QueryFrontend),
-                cli.query_frontend_split_ms,
-                cli.query_frontend_shards,
-                cli.query_frontend_cache_prefix.as_str(),
-            ),
-            (true, 30_000, 4, "tenant-a-query-cache")
+            cli.query_frontend_cache_prefix.as_str(),
+            "tenant-a-query-cache"
         );
     }
 
@@ -497,26 +495,16 @@ mod tests {
         ])
         .unwrap();
 
+        assert_eq!(matches!(cli.target, Target::Ruler), true);
+        assert_eq!(cli.ruler_tenant.as_str(), "tenant-a");
+        assert_eq!(cli.ruler_eval_interval_ms, 15_000);
+        assert_eq!(cli.ruler_shard_index, 2);
+        assert_eq!(cli.ruler_shard_total, 4);
         assert_eq!(
-            (
-                matches!(cli.target, Target::Ruler),
-                cli.ruler_tenant.as_str(),
-                cli.ruler_eval_interval_ms,
-                cli.ruler_shard_index,
-                cli.ruler_shard_total,
-                cli.ruler_alertmanager_url.as_deref(),
-                cli.ruler_state_topic.as_str(),
-            ),
-            (
-                true,
-                "tenant-a",
-                15_000,
-                2,
-                4,
-                Some("http://alertmanager.example/api/v2/alerts"),
-                "__tenant_a_ruler_state",
-            )
+            cli.ruler_alertmanager_url.as_deref(),
+            Some("http://alertmanager.example/api/v2/alerts")
         );
+        assert_eq!(cli.ruler_state_topic.as_str(), "__tenant_a_ruler_state");
     }
 
     #[test]
@@ -547,12 +535,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            (&cli.object_store_url, &cli.manifest_prefix),
-            (
-                &"file:///tmp/crabka-metrics".to_string(),
-                &"metrics/tenant-a".to_string()
-            )
+            &cli.object_store_url,
+            &"file:///tmp/crabka-metrics".to_string()
         );
+        assert_eq!(&cli.manifest_prefix, &"metrics/tenant-a".to_string());
     }
 
     #[test]
@@ -590,22 +576,11 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(
-            (
-                cli.wal_bootstrap.as_deref(),
-                cli.wal_group_id.as_str(),
-                cli.wal_client_id.as_str(),
-                cli.wal_topic.as_str(),
-                cli.wal_head_retention_ms,
-            ),
-            (
-                Some("127.0.0.1:9092"),
-                "metrics-querier",
-                "querier-a",
-                "__crabka_metrics_wal",
-                600_000,
-            )
-        );
+        assert_eq!(cli.wal_bootstrap.as_deref(), Some("127.0.0.1:9092"));
+        assert_eq!(cli.wal_group_id.as_str(), "metrics-querier");
+        assert_eq!(cli.wal_client_id.as_str(), "querier-a");
+        assert_eq!(cli.wal_topic.as_str(), "__crabka_metrics_wal");
+        assert_eq!(cli.wal_head_retention_ms, 600_000);
     }
 
     #[test]

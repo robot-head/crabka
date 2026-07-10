@@ -1605,14 +1605,9 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            (
-                status_is_success,
-                body["status"].as_str(),
-                body["data"]["resultType"].as_str(),
-            ),
-            (true, Some("success"), Some("vector")),
-        );
+        assert_eq!(status_is_success, true);
+        assert_eq!(body["status"].as_str(), Some("success"));
+        assert_eq!(body["data"]["resultType"].as_str(), Some("vector"));
     }
 
     #[tokio::test]
@@ -1631,14 +1626,9 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(
-            (
-                status_is_success,
-                body["status"].as_str(),
-                body["data"]["resultType"].as_str(),
-            ),
-            (true, Some("success"), Some("vector")),
-        );
+        assert_eq!(status_is_success, true);
+        assert_eq!(body["status"].as_str(), Some("success"));
+        assert_eq!(body["data"]["resultType"].as_str(), Some("vector"));
     }
 
     #[tokio::test]
@@ -1663,14 +1653,12 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status_is_success, true);
         assert_eq!(
-            (
-                status_is_success,
-                body["data"]["result"][0]["metric"]["job"].as_str(),
-                body["data"]["result"][0]["value"][1].as_str(),
-            ),
-            (true, Some("api"), Some("1")),
+            body["data"]["result"][0]["metric"]["job"].as_str(),
+            Some("api")
         );
+        assert_eq!(body["data"]["result"][0]["value"][1].as_str(), Some("1"));
     }
 
     #[tokio::test]
@@ -1703,16 +1691,14 @@ mod tests {
         let status_is_success = response.status().is_success();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(status_is_success, true);
+        assert_eq!(body["data"]["resultType"].as_str(), Some("matrix"));
         assert_eq!(
-            (
-                status_is_success,
-                body["data"]["resultType"].as_str(),
-                body["data"]["result"][0]["values"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-            ),
-            (true, Some("matrix"), 3),
+            body["data"]["result"][0]["values"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
         );
     }
 
@@ -1810,15 +1796,10 @@ rules:
         assert!(evaluation.recording_records == 1);
         let records = wal_sink.records();
         let record_labels = records[0].labels();
-        assert_eq!(
-            (
-                records.len(),
-                records[0].tenant.as_str(),
-                record_labels.get("__name__"),
-                record_labels.get("job"),
-            ),
-            (1, "tenant-a", Some("job:up:sum"), Some("api"))
-        );
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tenant.as_str(), "tenant-a");
+        assert_eq!(record_labels.get("__name__"), Some("job:up:sum"));
+        assert_eq!(record_labels.get("job"), Some("api"));
         assert!(matches!(
             records[0].payload,
             crabka_metrics::SamplePayload::Float { value, .. } if (value - 1.0).abs() < f64::EPSILON
@@ -2184,12 +2165,10 @@ rules:
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
-            (
-                body["data"]["result"][0]["metric"]["job"].as_str(),
-                body["data"]["result"][0]["value"][1].as_str(),
-            ),
-            (Some("api"), Some("1"))
+            body["data"]["result"][0]["metric"]["job"].as_str(),
+            Some("api")
         );
+        assert_eq!(body["data"]["result"][0]["value"][1].as_str(), Some("1"));
     }
 
     #[tokio::test]
@@ -2256,12 +2235,10 @@ rules:
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
-            (
-                body["data"]["result"][0]["metric"]["job"].as_str(),
-                body["data"]["result"][0]["value"][1].as_str(),
-            ),
-            (Some("api"), Some("1"))
+            body["data"]["result"][0]["metric"]["job"].as_str(),
+            Some("api")
         );
+        assert_eq!(body["data"]["result"][0]["value"][1].as_str(), Some("1"));
     }
 
     #[tokio::test]
@@ -2427,13 +2404,15 @@ rules:
             .series("tenant-a", &matchers, 990_000, 1_010_000)
             .await
             .unwrap();
-        assert_eq!((recent.len(), recent[0].get("job")), (1, Some("new")));
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].get("job"), Some("new"));
 
         let old = metric_store
             .series("tenant-a", &matchers, 0, 20_000)
             .await
             .unwrap();
-        assert_eq!((old.len(), old[0].get("job")), (1, Some("old")));
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].get("job"), Some("old"));
     }
 
     #[tokio::test]
@@ -2638,12 +2617,10 @@ rules:
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(
-            (
-                body["data"]["result"][0]["metric"]["job"].as_str(),
-                body["data"]["result"][0]["value"][1].as_str(),
-            ),
-            (Some("api"), Some("2"))
+            body["data"]["result"][0]["metric"]["job"].as_str(),
+            Some("api")
         );
+        assert_eq!(body["data"]["result"][0]["value"][1].as_str(), Some("2"));
     }
 
     async fn write_float_manifest(

@@ -278,20 +278,10 @@ mod tests {
         let rec = rec.expect("source did not yield the produced record");
 
         let payload = rec.value.unwrap();
-        assert_eq!(
-            (
-                payload.topic.as_str(),
-                payload.partition,
-                payload.offset,
-                payload.value.as_deref()
-            ),
-            (
-                "orders",
-                PartitionIndex(0),
-                Offset(0),
-                Some(b"v".as_slice())
-            )
-        );
+        assert_eq!(payload.topic.as_str(), "orders");
+        assert_eq!(payload.partition, PartitionIndex(0));
+        assert_eq!(payload.offset, Offset(0));
+        assert_eq!(payload.value.as_deref(), Some(b"v".as_slice()));
 
         // The checkpoint position is the NEXT offset to read: `last_offset + 1`.
         // Having consumed offset 0, the position for `orders-0` must be exactly

@@ -105,11 +105,8 @@ async fn metrics_router_renders() {
         .into_iter()
         .filter(|needle| !body.contains(needle))
         .collect();
-    assert_eq!(
-        (status, missing),
-        (StatusCode::OK, Vec::<&str>::new()),
-        "metrics body:\n{body}"
-    );
+    assert_eq!(status, StatusCode::OK, "metrics body:\n{body}");
+    assert_eq!(missing, Vec::<&str>::new(), "metrics body:\n{body}");
 }
 
 /// `record_send` increments `crabka_gateway_sends_total` for the provided
@@ -150,11 +147,13 @@ async fn webhook_out_and_dead_letter_present() {
     let (_, body) = render_metrics().await;
 
     assert_eq!(
-        (
-            body.contains(r#"crabka_gateway_webhook_out_total{result="p8_unique_wh"}"#),
-            body.contains("crabka_gateway_dead_letter_total"),
-        ),
-        (true, true),
+        body.contains(r#"crabka_gateway_webhook_out_total{result="p8_unique_wh"}"#),
+        true,
+        "expected webhook and dead-letter metrics in body:\n{body}"
+    );
+    assert_eq!(
+        body.contains("crabka_gateway_dead_letter_total"),
+        true,
         "expected webhook and dead-letter metrics in body:\n{body}"
     );
 }

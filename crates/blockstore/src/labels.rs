@@ -141,22 +141,16 @@ mod tests {
         let mut l = Labels::new();
         assert_eq!(&l, &Labels::new());
         l.insert("app", "api");
-        assert_eq!(
-            (&l, l.get("app"), l.get("missing")),
-            (&Labels::from_pairs([("app", "api")]), Some("api"), None,)
-        );
+        assert_eq!(&l, &Labels::from_pairs([("app", "api")]));
+        assert_eq!(l.get("app"), Some("api"));
+        assert_eq!(l.get("missing"), None);
         l.insert("env", "prod");
         let pairs = l
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        assert_eq!(
-            (&l, pairs),
-            (
-                &Labels::from_pairs([("app", "api"), ("env", "prod")]),
-                vec![("app", "api"), ("env", "prod")],
-            )
-        );
+        assert_eq!(&l, &Labels::from_pairs([("app", "api"), ("env", "prod")]));
+        assert_eq!(pairs, vec![("app", "api"), ("env", "prod")]);
     }
 
     #[test]

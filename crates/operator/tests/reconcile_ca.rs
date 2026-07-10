@@ -306,13 +306,23 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
         .find(|c| c["type"] == "ClientsCaReady")
         .unwrap_or_else(|| panic!("ClientsCaReady condition missing, body = {body}"));
     assert_eq!(
-        (
-            cluster_ca_cond["status"].as_str(),
-            cluster_ca_cond["reason"].as_str(),
-            clients_ca_cond["status"].as_str(),
-            clients_ca_cond["reason"].as_str(),
-        ),
-        (Some("True"), Some("CaReady"), Some("True"), Some("CaReady")),
+        cluster_ca_cond["status"].as_str(),
+        Some("True"),
+        "body = {body}"
+    );
+    assert_eq!(
+        cluster_ca_cond["reason"].as_str(),
+        Some("CaReady"),
+        "body = {body}"
+    );
+    assert_eq!(
+        clients_ca_cond["status"].as_str(),
+        Some("True"),
+        "body = {body}"
+    );
+    assert_eq!(
+        clients_ca_cond["reason"].as_str(),
+        Some("CaReady"),
         "body = {body}"
     );
 
@@ -493,11 +503,13 @@ async fn byo_mode_adopts_pre_existing_secrets_does_not_overwrite() {
         .find(|c| c["type"] == "ClientsCaReady")
         .unwrap_or_else(|| panic!("ClientsCaReady condition missing, body = {body}"));
     assert_eq!(
-        (
-            cluster_ca_cond["status"].as_str(),
-            clients_ca_cond["status"].as_str()
-        ),
-        (Some("True"), Some("True")),
+        cluster_ca_cond["status"].as_str(),
+        Some("True"),
+        "BYO CA conditions, body = {body}"
+    );
+    assert_eq!(
+        clients_ca_cond["status"].as_str(),
+        Some("True"),
         "BYO CA conditions, body = {body}"
     );
 
@@ -623,11 +635,13 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
     assert_eq!(
-        (
-            cluster_ca_cond["status"].as_str(),
-            cluster_ca_cond["reason"].as_str()
-        ),
-        (Some("False"), Some("ByoCaMissing")),
+        cluster_ca_cond["status"].as_str(),
+        Some("False"),
+        "body = {body}"
+    );
+    assert_eq!(
+        cluster_ca_cond["reason"].as_str(),
+        Some("ByoCaMissing"),
         "body = {body}"
     );
 

@@ -310,20 +310,16 @@ mod core_tests {
         // Reconstructed absolute timestamps (base + delta) must equal the
         // originals: 1000, 1005, 1020.
         let reconstructed: Vec<i64> = deltas.iter().map(|d| base + d).collect();
-        assert_eq!((base, reconstructed), (9999, vec![1000, 1005, 1020]));
+        assert_eq!(base, 9999);
+        assert_eq!(reconstructed, vec![1000, 1005, 1020]);
     }
 
     #[test]
     fn txn_data_fully_gone_checks_survivor_set() {
         let mut survivors = HashSet::new();
         survivors.insert(ProducerId(1000));
-        assert_eq!(
-            (
-                txn_data_fully_gone(ProducerId(2000), &survivors),
-                txn_data_fully_gone(ProducerId(1000), &survivors),
-            ),
-            (true, false)
-        );
+        assert_eq!(txn_data_fully_gone(ProducerId(2000), &survivors), true);
+        assert_eq!(txn_data_fully_gone(ProducerId(1000), &survivors), false);
     }
 }
 
@@ -692,13 +688,8 @@ mod build_map_tests {
 
         let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
         // Producer 2000's newest data survives; producer 1000's is superseded.
-        assert_eq!(
-            (
-                txn.txn_state(ProducerId(2000)),
-                txn.txn_state(ProducerId(1000)),
-            ),
-            (TxnDataState::DataSurvives, TxnDataState::DataFullyGone)
-        );
+        assert_eq!(txn.txn_state(ProducerId(2000)), TxnDataState::DataSurvives);
+        assert_eq!(txn.txn_state(ProducerId(1000)), TxnDataState::DataFullyGone);
     }
 }
 
@@ -1023,21 +1014,19 @@ mod rewrite_tests {
         let out = rewrite_simple(dir.path(), &segs);
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
+        assert_eq!(out.new_base_offset, Offset(0));
+        assert_eq!(out.new_last_offset, Offset(2));
         assert_eq!(
-            (out.new_base_offset, out.new_last_offset, batches),
-            (
-                Offset(0),
-                Offset(2),
-                vec![RecordBatch {
-                    base_offset: 0,
-                    last_offset_delta: 2,
-                    records: vec![
-                        make_record(1, Some(b"k2"), Some(b"v2")),
-                        make_record(2, Some(b"k1"), Some(b"v3")),
-                    ],
-                    ..RecordBatch::default()
-                }],
-            )
+            batches,
+            vec![RecordBatch {
+                base_offset: 0,
+                last_offset_delta: 2,
+                records: vec![
+                    make_record(1, Some(b"k2"), Some(b"v2")),
+                    make_record(2, Some(b"k1"), Some(b"v3")),
+                ],
+                ..RecordBatch::default()
+            }]
         );
     }
 
@@ -1059,20 +1048,18 @@ mod rewrite_tests {
         let batch = RecordBatch::decode(&mut cursor).unwrap();
         let mut record = make_record(1, Some(b"k1"), None);
         record.timestamp_delta = -1_000;
+        assert_eq!(out.new_base_offset, Offset(0));
+        assert_eq!(out.new_last_offset, Offset(1));
         assert_eq!(
-            (out.new_base_offset, out.new_last_offset, batch),
-            (
-                Offset(0),
-                Offset(1),
-                RecordBatch {
-                    base_offset: 0,
-                    last_offset_delta: 1,
-                    base_timestamp: RET_MS,
-                    attributes: Attributes::default().with_delete_horizon(true),
-                    records: vec![record],
-                    ..RecordBatch::default()
-                },
-            )
+            batch,
+            RecordBatch {
+                base_offset: 0,
+                last_offset_delta: 1,
+                base_timestamp: RET_MS,
+                attributes: Attributes::default().with_delete_horizon(true),
+                records: vec![record],
+                ..RecordBatch::default()
+            }
         );
     }
 
@@ -1092,21 +1079,19 @@ mod rewrite_tests {
         let out = rewrite_simple(dir.path(), &segs);
         let bytes = std::fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
+        assert_eq!(out.new_base_offset, Offset(100));
+        assert_eq!(out.new_last_offset, Offset(102));
         assert_eq!(
-            (out.new_base_offset, out.new_last_offset, batches),
-            (
-                Offset(100),
-                Offset(102),
-                vec![RecordBatch {
-                    base_offset: 100,
-                    last_offset_delta: 2,
-                    records: vec![
-                        make_record(1, Some(b"k2"), Some(b"v2")),
-                        make_record(2, Some(b"k1"), Some(b"v3")),
-                    ],
-                    ..RecordBatch::default()
-                }],
-            )
+            batches,
+            vec![RecordBatch {
+                base_offset: 100,
+                last_offset_delta: 2,
+                records: vec![
+                    make_record(1, Some(b"k2"), Some(b"v2")),
+                    make_record(2, Some(b"k1"), Some(b"v3")),
+                ],
+                ..RecordBatch::default()
+            }]
         );
     }
 
@@ -1158,10 +1143,16 @@ mod rewrite_tests {
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
         assert_eq!(
-            (out.new_base_offset, out.new_last_offset, batches),
-            (Offset(0), Offset(3), expected),
+            out.new_base_offset,
+            Offset(0),
             "both commit markers must survive"
         );
+        assert_eq!(
+            out.new_last_offset,
+            Offset(3),
+            "both commit markers must survive"
+        );
+        assert_eq!(batches, expected, "both commit markers must survive");
     }
 
     /// (b) A newest-for-key tombstone with no existing horizon gets bit 6 set
@@ -1194,20 +1185,18 @@ mod rewrite_tests {
         let batches = decode_all(&bytes);
         let mut record = make_record(0, Some(b"k1"), None);
         record.timestamp_delta = -(now + ret);
+        assert_eq!(out.new_base_offset, Offset(0));
+        assert_eq!(out.new_last_offset, Offset(0));
         assert_eq!(
-            (out.new_base_offset, out.new_last_offset, batches),
-            (
-                Offset(0),
-                Offset(0),
-                vec![RecordBatch {
-                    base_offset: 0,
-                    last_offset_delta: 0,
-                    base_timestamp: now + ret,
-                    attributes: Attributes::default().with_delete_horizon(true),
-                    records: vec![record],
-                    ..RecordBatch::default()
-                }],
-            )
+            batches,
+            vec![RecordBatch {
+                base_offset: 0,
+                last_offset_delta: 0,
+                base_timestamp: now + ret,
+                attributes: Attributes::default().with_delete_horizon(true),
+                records: vec![record],
+                ..RecordBatch::default()
+            }]
         );
     }
 
@@ -1248,17 +1237,23 @@ mod rewrite_tests {
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
         assert_eq!(
-            (out.new_base_offset, out.new_last_offset, batches),
-            (
-                Offset(0),
-                Offset(1),
-                vec![RecordBatch {
-                    base_offset: 1,
-                    last_offset_delta: 0,
-                    records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
-                    ..RecordBatch::default()
-                }],
-            ),
+            out.new_base_offset,
+            Offset(0),
+            "expired marker drops while the complete data batch survives"
+        );
+        assert_eq!(
+            out.new_last_offset,
+            Offset(1),
+            "expired marker drops while the complete data batch survives"
+        );
+        assert_eq!(
+            batches,
+            vec![RecordBatch {
+                base_offset: 1,
+                last_offset_delta: 0,
+                records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+                ..RecordBatch::default()
+            }],
             "expired marker drops while the complete data batch survives"
         );
     }
@@ -1298,29 +1293,27 @@ mod rewrite_tests {
             rewrite_segments(dir.path(), &segs, &map, &txn, 0, RET_MS, &active, 4096).unwrap();
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
+        assert_eq!(out.new_base_offset, Offset(0));
+        assert_eq!(out.new_last_offset, Offset(1));
         assert_eq!(
-            (out.new_base_offset, out.new_last_offset, batches),
-            (
-                Offset(0),
-                Offset(1),
-                vec![
-                    RecordBatch {
-                        base_offset: 0,
-                        last_offset_delta: 0,
-                        producer_id: 1000,
-                        producer_epoch: 7,
-                        base_sequence: 3,
-                        ..RecordBatch::default()
-                    },
-                    RecordBatch {
-                        base_offset: 1,
-                        last_offset_delta: 0,
-                        producer_id: -1,
-                        records: vec![make_record(0, Some(b"k1"), Some(b"v2"))],
-                        ..RecordBatch::default()
-                    },
-                ],
-            )
+            batches,
+            vec![
+                RecordBatch {
+                    base_offset: 0,
+                    last_offset_delta: 0,
+                    producer_id: 1000,
+                    producer_epoch: 7,
+                    base_sequence: 3,
+                    ..RecordBatch::default()
+                },
+                RecordBatch {
+                    base_offset: 1,
+                    last_offset_delta: 0,
+                    producer_id: -1,
+                    records: vec![make_record(0, Some(b"k1"), Some(b"v2"))],
+                    ..RecordBatch::default()
+                },
+            ]
         );
     }
 
@@ -1361,27 +1354,25 @@ mod rewrite_tests {
         // The emptied batch is re-emitted as a bare header at base_offset 100.
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
+        assert_eq!(out.new_base_offset, Offset(0));
+        assert_eq!(out.new_last_offset, Offset(105));
         assert_eq!(
-            (out.new_base_offset, out.new_last_offset, batches),
-            (
-                Offset(0),
-                Offset(105),
-                vec![
-                    RecordBatch {
-                        base_offset: 0,
-                        last_offset_delta: 0,
-                        producer_id: -1,
-                        records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
-                        ..RecordBatch::default()
-                    },
-                    RecordBatch {
-                        base_offset: 100,
-                        last_offset_delta: 5,
-                        producer_id: -1,
-                        ..RecordBatch::default()
-                    },
-                ],
-            )
+            batches,
+            vec![
+                RecordBatch {
+                    base_offset: 0,
+                    last_offset_delta: 0,
+                    producer_id: -1,
+                    records: vec![make_record(0, Some(b"k1"), Some(b"v1"))],
+                    ..RecordBatch::default()
+                },
+                RecordBatch {
+                    base_offset: 100,
+                    last_offset_delta: 5,
+                    producer_id: -1,
+                    ..RecordBatch::default()
+                },
+            ]
         );
     }
 }

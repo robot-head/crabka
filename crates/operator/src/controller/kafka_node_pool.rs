@@ -1698,13 +1698,14 @@ mod tests {
             .and_then(|m| m.labels.as_ref())
             .expect("pod template labels");
         assert_eq!(
-            (
-                pod_labels
-                    .get("app.kubernetes.io/instance")
-                    .map(String::as_str),
-                pod_labels.get("crabka.io/pool").map(String::as_str),
-            ),
-            (Some("demo"), Some("brokers"))
+            pod_labels
+                .get("app.kubernetes.io/instance")
+                .map(String::as_str),
+            Some("demo")
+        );
+        assert_eq!(
+            pod_labels.get("crabka.io/pool").map(String::as_str),
+            Some("brokers")
         );
     }
 
@@ -1913,12 +1914,10 @@ mod tests {
         });
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let pod_labels = sts.spec.unwrap().template.metadata.unwrap().labels.unwrap();
+        assert_eq!(pod_labels.get("team").map(String::as_str), Some("platform"));
         assert_eq!(
-            (
-                pod_labels.get("team").map(String::as_str),
-                pod_labels.get("app.kubernetes.io/name").map(String::as_str),
-            ),
-            (Some("platform"), Some(APP_LABEL))
+            pod_labels.get("app.kubernetes.io/name").map(String::as_str),
+            Some(APP_LABEL)
         );
     }
 
@@ -2016,14 +2015,9 @@ mod tests {
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let spec = sts.spec.unwrap().template.spec.unwrap();
-        assert_eq!(
-            (
-                spec.affinity,
-                spec.tolerations.unwrap_or_default(),
-                spec.node_selector.unwrap_or_default(),
-            ),
-            (None, vec![], BTreeMap::new())
-        );
+        assert_eq!(spec.affinity, None);
+        assert_eq!(spec.tolerations.unwrap_or_default(), vec![]);
+        assert_eq!(spec.node_selector.unwrap_or_default(), BTreeMap::new());
     }
 
     #[test]
@@ -2071,11 +2065,8 @@ mod tests {
                 .iter()
                 .find(|v| v.name == "data")
                 .expect("data volume present");
-            assert_eq!(
-                (claims, data_vol.empty_dir.is_some()),
-                (vec![], true),
-                "case {name}"
-            );
+            assert_eq!(claims, vec![], "case {name}");
+            assert_eq!(data_vol.empty_dir.is_some(), true, "case {name}");
         }
     }
 
@@ -2107,22 +2098,14 @@ mod tests {
             .requests
             .as_ref()
             .unwrap();
+        assert_eq!(vct.len(), 1);
+        assert_eq!(data_pvc.metadata.name.as_deref(), Some("data"));
         assert_eq!(
-            (
-                vct.len(),
-                data_pvc.metadata.name.as_deref(),
-                pvc_spec.access_modes.as_deref(),
-                req.get("storage").map(|q| q.0.as_str()),
-                pvc_spec.storage_class_name.as_deref(),
-            ),
-            (
-                1,
-                Some("data"),
-                Some(["ReadWriteOnce".to_string()].as_slice()),
-                Some("10Gi"),
-                Some("fast-ssd"),
-            )
+            pvc_spec.access_modes.as_deref(),
+            Some(["ReadWriteOnce".to_string()].as_slice())
         );
+        assert_eq!(req.get("storage").map(|q| q.0.as_str()), Some("10Gi"));
+        assert_eq!(pvc_spec.storage_class_name.as_deref(), Some("fast-ssd"));
     }
 
     #[test]
@@ -2159,11 +2142,12 @@ mod tests {
             .clone()
             .expect("PVC has labels");
         assert_eq!(
-            (
-                labels.get("app.kubernetes.io/instance").map(String::as_str),
-                labels.get("crabka.io/pool").map(String::as_str),
-            ),
-            (Some("demo"), Some("brokers"))
+            labels.get("app.kubernetes.io/instance").map(String::as_str),
+            Some("demo")
+        );
+        assert_eq!(
+            labels.get("crabka.io/pool").map(String::as_str),
+            Some("brokers")
         );
     }
 
@@ -2487,13 +2471,8 @@ mod tests {
             .unwrap()
             .persistent_volume_claim_retention_policy
             .unwrap();
-        assert_eq!(
-            (
-                policy.when_deleted.as_deref(),
-                policy.when_scaled.as_deref()
-            ),
-            (Some("Delete"), Some("Retain"))
-        );
+        assert_eq!(policy.when_deleted.as_deref(), Some("Delete"));
+        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
     }
 
     #[test]
@@ -2687,29 +2666,30 @@ mod tests {
             .find(|v| v.name == "gssapi-keytab")
             .expect("gssapi-keytab volume present");
         assert_eq!(
-            (mount, volume),
-            (
-                &k8s_openapi::api::core::v1::VolumeMount {
-                    mount_path: "/etc/crabka/gssapi-keytab".into(),
-                    name: "gssapi-keytab".into(),
-                    read_only: Some(true),
+            mount,
+            &k8s_openapi::api::core::v1::VolumeMount {
+                mount_path: "/etc/crabka/gssapi-keytab".into(),
+                name: "gssapi-keytab".into(),
+                read_only: Some(true),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            volume,
+            &k8s_openapi::api::core::v1::Volume {
+                name: "gssapi-keytab".into(),
+                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                    default_mode: Some(0o400),
+                    items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
+                        key: "krb5.keytab".into(),
+                        mode: None,
+                        path: "keytab".into(),
+                    }]),
+                    secret_name: Some("broker-keytab".into()),
                     ..Default::default()
-                },
-                &k8s_openapi::api::core::v1::Volume {
-                    name: "gssapi-keytab".into(),
-                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                        default_mode: Some(0o400),
-                        items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
-                            key: "krb5.keytab".into(),
-                            mode: None,
-                            path: "keytab".into(),
-                        }]),
-                        secret_name: Some("broker-keytab".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
+                }),
+                ..Default::default()
+            }
         );
     }
 
@@ -2744,34 +2724,38 @@ mod tests {
             .find(|v| v.name == "krb5-conf")
             .expect("krb5-conf volume present");
         assert_eq!(
-            (mount, krb5_config, volume),
-            (
-                &k8s_openapi::api::core::v1::VolumeMount {
-                    mount_path: "/etc/crabka/krb5".into(),
-                    name: "krb5-conf".into(),
-                    read_only: Some(true),
+            mount,
+            &k8s_openapi::api::core::v1::VolumeMount {
+                mount_path: "/etc/crabka/krb5".into(),
+                name: "krb5-conf".into(),
+                read_only: Some(true),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            krb5_config,
+            &k8s_openapi::api::core::v1::EnvVar {
+                name: "KRB5_CONFIG".into(),
+                value: Some("/etc/crabka/krb5/krb5.conf".into()),
+                value_from: None,
+            }
+        );
+        assert_eq!(
+            volume,
+            &k8s_openapi::api::core::v1::Volume {
+                name: "krb5-conf".into(),
+                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                    default_mode: Some(0o400),
+                    items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
+                        key: "config".into(),
+                        mode: None,
+                        path: "krb5.conf".into(),
+                    }]),
+                    secret_name: Some("krb5-conf".into()),
                     ..Default::default()
-                },
-                &k8s_openapi::api::core::v1::EnvVar {
-                    name: "KRB5_CONFIG".into(),
-                    value: Some("/etc/crabka/krb5/krb5.conf".into()),
-                    value_from: None,
-                },
-                &k8s_openapi::api::core::v1::Volume {
-                    name: "krb5-conf".into(),
-                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                        default_mode: Some(0o400),
-                        items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
-                            key: "config".into(),
-                            mode: None,
-                            path: "krb5.conf".into(),
-                        }]),
-                        secret_name: Some("krb5-conf".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
+                }),
+                ..Default::default()
+            }
         );
     }
 
@@ -2997,24 +2981,25 @@ mod tests {
             .find(|v| v.name == "oauth-jwks-trust")
             .expect("oauth-jwks-trust volume present");
         assert_eq!(
-            (mount, volume),
-            (
-                &k8s_openapi::api::core::v1::VolumeMount {
-                    mount_path: "/etc/crabka/oauth-jwks-trust".into(),
-                    name: "oauth-jwks-trust".into(),
-                    read_only: Some(true),
+            mount,
+            &k8s_openapi::api::core::v1::VolumeMount {
+                mount_path: "/etc/crabka/oauth-jwks-trust".into(),
+                name: "oauth-jwks-trust".into(),
+                read_only: Some(true),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            volume,
+            &k8s_openapi::api::core::v1::Volume {
+                name: "oauth-jwks-trust".into(),
+                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                    default_mode: Some(0o400),
+                    secret_name: Some("demo-oauth-jwks-trust".into()),
                     ..Default::default()
-                },
-                &k8s_openapi::api::core::v1::Volume {
-                    name: "oauth-jwks-trust".into(),
-                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                        default_mode: Some(0o400),
-                        secret_name: Some("demo-oauth-jwks-trust".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
+                }),
+                ..Default::default()
+            }
         );
     }
 
@@ -3088,11 +3073,8 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|volume| volume.name == resource_name);
-            assert_eq!(
-                (mount_present, volume_present),
-                (false, false),
-                "case {name}"
-            );
+            assert_eq!(mount_present, false, "case {name}");
+            assert_eq!(volume_present, false, "case {name}");
         }
     }
 
@@ -3175,29 +3157,30 @@ mod tests {
             .find(|v| v.name == "oauth-introspection-secret")
             .expect("oauth-introspection-secret volume present");
         assert_eq!(
-            (mount, volume),
-            (
-                &k8s_openapi::api::core::v1::VolumeMount {
-                    mount_path: "/etc/crabka/oauth-introspection".into(),
-                    name: "oauth-introspection-secret".into(),
-                    read_only: Some(true),
+            mount,
+            &k8s_openapi::api::core::v1::VolumeMount {
+                mount_path: "/etc/crabka/oauth-introspection".into(),
+                name: "oauth-introspection-secret".into(),
+                read_only: Some(true),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            volume,
+            &k8s_openapi::api::core::v1::Volume {
+                name: "oauth-introspection-secret".into(),
+                secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                    default_mode: Some(0o400),
+                    items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
+                        key: "my-key".into(),
+                        mode: None,
+                        path: "client-secret".into(),
+                    }]),
+                    secret_name: Some("my-oauth-secret".into()),
                     ..Default::default()
-                },
-                &k8s_openapi::api::core::v1::Volume {
-                    name: "oauth-introspection-secret".into(),
-                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
-                        default_mode: Some(0o400),
-                        items: Some(vec![k8s_openapi::api::core::v1::KeyToPath {
-                            key: "my-key".into(),
-                            mode: None,
-                            path: "client-secret".into(),
-                        }]),
-                        secret_name: Some("my-oauth-secret".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
+                }),
+                ..Default::default()
+            }
         );
     }
 
@@ -3273,9 +3256,10 @@ mod tests {
             .find(|m| m.name == "tier-storage")
             .expect("tier-storage mount present");
         assert_eq!(
-            (mount.mount_path.as_str(), mount.read_only.unwrap_or(false)),
-            (crate::controller::listeners::TIER_STORAGE_PATH, false)
+            mount.mount_path.as_str(),
+            crate::controller::listeners::TIER_STORAGE_PATH
         );
+        assert_eq!(mount.read_only.unwrap_or(false), false);
     }
 
     // ── S3 tiered storage env + volume gating ────────────────────────
@@ -3316,22 +3300,23 @@ mod tests {
             .as_ref()
             .and_then(|v| v.secret_key_ref.as_ref())
             .expect("secretKeyRef present");
+        assert_eq!(ak.value.as_deref(), None);
+        assert_eq!(sk.value.as_deref(), None);
         assert_eq!(
-            (ak.value.as_deref(), sk.value.as_deref(), ak_ref, sk_ref),
-            (
-                None,
-                None,
-                &k8s_openapi::api::core::v1::SecretKeySelector {
-                    name: "crabka-s3-creds".to_string(),
-                    key: "access-key-id".to_string(),
-                    optional: None,
-                },
-                &k8s_openapi::api::core::v1::SecretKeySelector {
-                    name: "crabka-s3-creds".to_string(),
-                    key: "secret-access-key".to_string(),
-                    optional: None,
-                },
-            )
+            ak_ref,
+            &k8s_openapi::api::core::v1::SecretKeySelector {
+                name: "crabka-s3-creds".to_string(),
+                key: "access-key-id".to_string(),
+                optional: None,
+            }
+        );
+        assert_eq!(
+            sk_ref,
+            &k8s_openapi::api::core::v1::SecretKeySelector {
+                name: "crabka-s3-creds".to_string(),
+                key: "secret-access-key".to_string(),
+                optional: None,
+            }
         );
     }
 
@@ -3406,17 +3391,15 @@ mod tests {
             .as_ref()
             .expect("gcs-credentials is a Secret volume");
         let items = secret.items.as_ref().expect("projected items");
+        assert_eq!(secret.secret_name.as_deref(), Some("crabka-gcs-creds"));
         assert_eq!(
-            (secret.secret_name.as_deref(), items.as_slice()),
-            (
-                Some("crabka-gcs-creds"),
-                [k8s_openapi::api::core::v1::KeyToPath {
-                    key: "key.json".into(),
-                    mode: None,
-                    path: "key.json".into(),
-                }]
-                .as_slice(),
-            )
+            items.as_slice(),
+            [k8s_openapi::api::core::v1::KeyToPath {
+                key: "key.json".into(),
+                mode: None,
+                path: "key.json".into(),
+            }]
+            .as_slice()
         );
 
         // Read-only mount at the canonical credentials dir.
@@ -3433,11 +3416,13 @@ mod tests {
             .find(|m| m.name == "gcs-credentials")
             .expect("gcs-credentials mount present");
         assert_eq!(
-            (mount.mount_path.as_str(), mount.read_only),
-            (
-                crate::controller::listeners::GCS_CREDENTIALS_DIR,
-                Some(true)
-            ),
+            mount.mount_path.as_str(),
+            crate::controller::listeners::GCS_CREDENTIALS_DIR,
+            "must use the canonical read-only mount"
+        );
+        assert_eq!(
+            mount.read_only,
+            Some(true),
             "must use the canonical read-only mount"
         );
 
@@ -3488,18 +3473,21 @@ mod tests {
                 .find(|container| container.name == "broker")
                 .expect("broker container");
             assert_eq!(
-                (
-                    pod_spec
-                        .volumes
-                        .as_ref()
-                        .unwrap()
-                        .iter()
-                        .any(|volume| volume.name == resource_name),
-                    broker.volume_mounts.as_ref().is_some_and(|mounts| mounts
-                        .iter()
-                        .any(|mount| mount.name == resource_name)),
-                ),
-                (false, false),
+                pod_spec
+                    .volumes
+                    .as_ref()
+                    .unwrap()
+                    .iter()
+                    .any(|volume| volume.name == resource_name),
+                false,
+                "case {name}"
+            );
+            assert_eq!(
+                broker
+                    .volume_mounts
+                    .as_ref()
+                    .is_some_and(|mounts| mounts.iter().any(|mount| mount.name == resource_name)),
+                false,
                 "case {name}"
             );
         }
@@ -3558,13 +3546,8 @@ mod tests {
             .as_ref()
             .and_then(|r| r.requests.as_ref())
             .expect("resources.requests");
-        assert_eq!(
-            (
-                req.get("storage").map(|q| q.0.as_str()),
-                spec.storage_class_name.as_deref(),
-            ),
-            (Some("50Gi"), Some("fast-ssd"))
-        );
+        assert_eq!(req.get("storage").map(|q| q.0.as_str()), Some("50Gi"));
+        assert_eq!(spec.storage_class_name.as_deref(), Some("fast-ssd"));
         // Mount inside the broker container still lands at the canonical path.
         let broker = pod_spec
             .containers
@@ -3716,11 +3699,13 @@ mod tests {
             .as_ref()
             .expect("policy must exist when tier PVC is present");
         assert_eq!(
-            (
-                policy.when_deleted.as_deref(),
-                policy.when_scaled.as_deref()
-            ),
-            (Some("Delete"), Some("Retain")),
+            policy.when_deleted.as_deref(),
+            Some("Delete"),
+            "delete_claim=true retention policy"
+        );
+        assert_eq!(
+            policy.when_scaled.as_deref(),
+            Some("Retain"),
             "delete_claim=true retention policy"
         );
     }
@@ -3876,15 +3861,10 @@ mod tests {
         ] {
             match version_gate(&parent) {
                 VersionGate::Blocked(cond) => {
-                    assert_eq!(
-                        (
-                            cond.type_.as_str(),
-                            cond.status.as_str(),
-                            cond.reason.as_str()
-                        ),
-                        expected,
-                        "case {name}"
-                    );
+                    let (expected_type, expected_status, expected_reason) = expected;
+                    assert_eq!(cond.type_.as_str(), expected_type, "case {name}");
+                    assert_eq!(cond.status.as_str(), expected_status, "case {name}");
+                    assert_eq!(cond.reason.as_str(), expected_reason, "case {name}");
                     if let Some(fragment) = message_fragment {
                         check!(
                             cond.message.contains(fragment),

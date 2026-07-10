@@ -207,12 +207,10 @@ overrides:
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
         let tenant_b = provider.for_tenant("tenant-b");
 
+        assert_eq!(tenant_b.max_label_value_length, 64);
         assert_eq!(
-            (
-                tenant_b.max_label_value_length,
-                tenant_b.ingestion_rate_profiles_per_sec,
-            ),
-            (64, Limits::default().ingestion_rate_profiles_per_sec)
+            tenant_b.ingestion_rate_profiles_per_sec,
+            Limits::default().ingestion_rate_profiles_per_sec
         );
     }
 

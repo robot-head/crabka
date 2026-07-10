@@ -309,13 +309,8 @@ mod tests {
         let finished = started.clone().with_update(&finish(10)).unwrap();
         c.add(started).unwrap();
         c.update(&finish(10)).unwrap();
-        assert_eq!(
-            (
-                c.list_by_epoch(LeaderEpoch(0)),
-                c.list_by_epoch(LeaderEpoch(7)),
-            ),
-            (vec![finished], Vec::new())
-        );
+        assert_eq!(c.list_by_epoch(LeaderEpoch(0)), vec![finished]);
+        assert_eq!(c.list_by_epoch(LeaderEpoch(7)), Vec::new());
     }
 
     #[test]
@@ -384,13 +379,8 @@ mod tests {
         c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
         c.update(&finish(10)).unwrap();
         c.update(&finish(11)).unwrap();
-        assert_eq!(
-            (
-                c.highest_offset_for_epoch(LeaderEpoch(0)),
-                c.highest_offset_for_epoch(LeaderEpoch(7)),
-            ),
-            (Some(199), None)
-        );
+        assert_eq!(c.highest_offset_for_epoch(LeaderEpoch(0)), Some(199));
+        assert_eq!(c.highest_offset_for_epoch(LeaderEpoch(7)), None);
     }
 
     #[test]
@@ -409,8 +399,13 @@ mod tests {
         c.update(&transition(10, RemoteLogSegmentState::DeleteSegmentStarted))
             .unwrap();
         assert_eq!(
-            (c.segment_for(LeaderEpoch(0), 50), c.list()),
-            (None, vec![delete_started]),
+            c.segment_for(LeaderEpoch(0), 50),
+            None,
+            "delete-started segment is hidden but retained"
+        );
+        assert_eq!(
+            c.list(),
+            vec![delete_started],
             "delete-started segment is hidden but retained"
         );
 
@@ -475,18 +470,14 @@ mod tests {
         // Finished seg 10 is queryable; delete-started seg 11 is hidden
         // but still listed; delete_state survives.
         assert_eq!(
-            (
-                seeded.segment_for(LeaderEpoch(0), 50),
-                seeded.segment_for(LeaderEpoch(0), 150),
-                seeded.list(),
-                seeded.delete_state(),
-            ),
-            (
-                Some(finished_first.clone()),
-                None,
-                vec![finished_first, delete_started_second],
-                Some(RemotePartitionDeleteState::DeletePartitionMarked),
-            )
+            seeded.segment_for(LeaderEpoch(0), 50),
+            Some(finished_first.clone())
+        );
+        assert_eq!(seeded.segment_for(LeaderEpoch(0), 150), None);
+        assert_eq!(seeded.list(), vec![finished_first, delete_started_second]);
+        assert_eq!(
+            seeded.delete_state(),
+            Some(RemotePartitionDeleteState::DeletePartitionMarked)
         );
     }
 

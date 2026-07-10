@@ -127,15 +127,10 @@ mod tests {
         let flg = z[4];
         let bd = z[5];
         // BD bits 4..6 encode the block max size; value 4 == 64 KiB.
-        assert_eq!(
-            (
-                &z[0..4],
-                (bd >> 4) & 0x7,
-                (flg >> 5) & 1,
-                (flg >> 4) & 1,
-                (flg >> 2) & 1,
-            ),
-            (&[0x04, 0x22, 0x4D, 0x18][..], 4, 1, 0, 0)
-        );
+        assert_eq!(&z[0..4], &[0x04, 0x22, 0x4D, 0x18][..]);
+        assert_eq!(bd >> 4 & 0x7, 4);
+        assert_eq!(flg >> 5 & 1, 1);
+        assert_eq!(flg >> 4 & 1, 0);
+        assert_eq!(flg >> 2 & 1, 0);
     }
 }

@@ -146,10 +146,8 @@ async fn cluster_not_found_sets_status_cluster_not_ready() {
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(
-        (cond["status"].as_str(), cond["reason"].as_str()),
-        (Some("False"), Some("ClusterNotReady"))
-    );
+    assert_eq!(cond["status"].as_str(), Some("False"));
+    assert_eq!(cond["reason"].as_str(), Some("ClusterNotReady"));
 }
 
 /// `KafkaTopic` whose effective name is invalid
@@ -183,10 +181,8 @@ async fn invalid_topic_name_sets_status() {
         .expect("status PATCH");
     let body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(
-        (cond["status"].as_str(), cond["reason"].as_str()),
-        (Some("False"), Some("InvalidTopicName"))
-    );
+    assert_eq!(cond["status"].as_str(), Some("False"));
+    assert_eq!(cond["reason"].as_str(), Some("InvalidTopicName"));
 }
 
 /// A `KafkaTopic` referencing a Ready Kafka but with no
@@ -391,10 +387,8 @@ async fn creates_topic_on_first_reconcile() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(
-        (cond["status"].as_str(), cond["reason"].as_str()),
-        (Some("True"), Some("Ready"))
-    );
+    assert_eq!(cond["status"].as_str(), Some("True"));
+    assert_eq!(cond["reason"].as_str(), Some("Ready"));
     check!(
         body["status"]["topicId"].is_string(),
         "topicId should be a uuid string, got {:?}",
@@ -448,10 +442,8 @@ async fn noop_when_spec_matches_cluster() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(
-        (cond["status"].as_str(), cond["reason"].as_str()),
-        (Some("True"), Some("Ready"))
-    );
+    assert_eq!(cond["status"].as_str(), Some("True"));
+    assert_eq!(cond["reason"].as_str(), Some("Ready"));
 }
 
 /// current=3 partitions, spec=5 → one CreatePartitions(5) call,
@@ -496,11 +488,12 @@ async fn partition_increase_triggers_create_partitions() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     assert_eq!(
-        (
-            body["status"]["conditions"][0]["status"].as_str(),
-            body["status"]["conditions"][0]["reason"].as_str(),
-        ),
-        (Some("True"), Some("Ready"))
+        body["status"]["conditions"][0]["status"].as_str(),
+        Some("True")
+    );
+    assert_eq!(
+        body["status"]["conditions"][0]["reason"].as_str(),
+        Some("Ready")
     );
 }
 
@@ -544,13 +537,15 @@ async fn immutable_topic_field_change_cases() {
         });
         let body = last_status_patch_body(&state, TOPIC_NAME);
         let condition = &body["status"]["conditions"][0];
+        assert_eq!(has_mutation, false, "case {name}: {calls:?}");
         assert_eq!(
-            (
-                has_mutation,
-                condition["status"].as_str(),
-                condition["reason"].as_str(),
-            ),
-            (false, Some("False"), Some("ImmutableFieldChanged")),
+            condition["status"].as_str(),
+            Some("False"),
+            "case {name}: {calls:?}"
+        );
+        assert_eq!(
+            condition["reason"].as_str(),
+            Some("ImmutableFieldChanged"),
             "case {name}: {calls:?}"
         );
     }
@@ -609,18 +604,22 @@ async fn config_diff_sets_and_deletes() {
         )
     });
     assert_eq!(
-        (has_set_bar, has_delete_foo),
-        (true, true),
+        has_set_bar, true,
+        "expected SET bar=2 and DELETE foo, got {ops:?}"
+    );
+    assert_eq!(
+        has_delete_foo, true,
         "expected SET bar=2 and DELETE foo, got {ops:?}"
     );
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     assert_eq!(
-        (
-            body["status"]["conditions"][0]["status"].as_str(),
-            body["status"]["conditions"][0]["reason"].as_str(),
-        ),
-        (Some("True"), Some("Ready"))
+        body["status"]["conditions"][0]["status"].as_str(),
+        Some("True")
+    );
+    assert_eq!(
+        body["status"]["conditions"][0]["reason"].as_str(),
+        Some("Ready")
     );
 }
 
@@ -705,10 +704,8 @@ async fn creates_topic_broker_error_surfaces_in_status() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(
-        (cond["status"].as_str(), cond["reason"].as_str()),
-        (Some("False"), Some("BrokerError"))
-    );
+    assert_eq!(cond["status"].as_str(), Some("False"));
+    assert_eq!(cond["reason"].as_str(), Some("BrokerError"));
     let msg = cond["message"].as_str().unwrap();
     assert!(msg.contains("CreateTopics"), "message {msg:?}");
     assert!(msg.contains("TOPIC_ALREADY_EXISTS"), "message {msg:?}");
@@ -742,10 +739,8 @@ async fn create_partitions_broker_error_surfaces_in_status() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(
-        (cond["status"].as_str(), cond["reason"].as_str()),
-        (Some("False"), Some("BrokerError"))
-    );
+    assert_eq!(cond["status"].as_str(), Some("False"));
+    assert_eq!(cond["reason"].as_str(), Some("BrokerError"));
     let msg = cond["message"].as_str().unwrap();
     assert!(msg.contains("CreatePartitions"), "message {msg:?}");
     assert!(msg.contains("INVALID_PARTITIONS"), "message {msg:?}");
@@ -785,10 +780,8 @@ async fn incremental_alter_configs_broker_error_surfaces_in_status() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(
-        (cond["status"].as_str(), cond["reason"].as_str()),
-        (Some("False"), Some("BrokerError"))
-    );
+    assert_eq!(cond["status"].as_str(), Some("False"));
+    assert_eq!(cond["reason"].as_str(), Some("BrokerError"));
     let msg = cond["message"].as_str().unwrap();
     assert!(msg.contains("IncrementalAlterConfigs"), "message {msg:?}");
     assert!(msg.contains("INVALID_CONFIG"), "message {msg:?}");

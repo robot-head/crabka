@@ -292,13 +292,8 @@ mod tests {
             .map(|attr| &attr.value)
             .collect::<Vec<_>>();
 
-        assert_eq!(
-            (
-                methods.contains(&&AttrValue::Str("GET".into())),
-                methods.contains(&&AttrValue::Str("POST".into())),
-            ),
-            (true, true)
-        );
+        assert_eq!(methods.contains(&&AttrValue::Str("GET".into())), true);
+        assert_eq!(methods.contains(&&AttrValue::Str("POST".into())), true);
     }
 
     #[test]

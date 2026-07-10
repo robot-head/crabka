@@ -113,13 +113,8 @@ mod tests {
             serde_json::from_slice(&json_bytes).expect("output should be valid JSON");
 
         // proto3 JSON encodes int64 as a decimal string.
-        assert_eq!(
-            (
-                json.get("id").and_then(|v| v.as_str()),
-                json.get("name").and_then(|v| v.as_str()),
-            ),
-            (Some("1"), Some("a"))
-        );
+        assert_eq!(json.get("id").and_then(|v| v.as_str()), Some("1"));
+        assert_eq!(json.get("name").and_then(|v| v.as_str()), Some("a"));
     }
 
     #[test]

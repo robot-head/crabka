@@ -1300,14 +1300,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                diff.left_ticks,
-                diff.right_ticks,
-                diff.names.iter().any(|name| name == "b"),
-            ),
-            (10, 15, true)
-        );
+        assert_eq!(diff.left_ticks, 10);
+        assert_eq!(diff.right_ticks, 15);
+        assert_eq!(diff.names.iter().any(|name| name == "b"), true);
     }
 
     #[tokio::test]
@@ -1465,7 +1460,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!((heatmap.counts[0][0], heatmap.counts[1][1]), (1, 1));
+        assert_eq!(heatmap.counts[0][0], 1);
+        assert_eq!(heatmap.counts[1][1], 1);
     }
 
     #[tokio::test]
@@ -1490,14 +1486,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                fg.names.iter().any(|name| name == "alpha"),
-                fg.names.iter().any(|name| name == "beta"),
-                fg.total,
-            ),
-            (true, true, 12)
-        );
+        assert_eq!(fg.names.iter().any(|name| name == "alpha"), true);
+        assert_eq!(fg.names.iter().any(|name| name == "beta"), true);
+        assert_eq!(fg.total, 12);
     }
 
     #[tokio::test]
@@ -1507,10 +1498,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (fg.total, &fg.levels[0].values, self_value_for(&fg, "work")),
-            (18, &vec![0, 18, 0, 0], 15)
-        );
+        assert_eq!(fg.total, 18);
+        assert_eq!(&fg.levels[0].values, &vec![0, 18, 0, 0]);
+        assert_eq!(self_value_for(&fg, "work"), 15);
     }
 
     #[tokio::test]
@@ -1520,15 +1510,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                fg.total,
-                fg.names[0].as_str(),
-                self_value_for(&fg, "work"),
-                fg.names.iter().any(|name| name == "other"),
-            ),
-            (15, "total", 15, false)
-        );
+        assert_eq!(fg.total, 15);
+        assert_eq!(fg.names[0].as_str(), "total");
+        assert_eq!(self_value_for(&fg, "work"), 15);
+        assert_eq!(fg.names.iter().any(|name| name == "other"), false);
     }
 
     #[tokio::test]
@@ -1546,14 +1531,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            (
-                fg.total,
-                fg.names.iter().any(|name| name == "work"),
-                fg.names.iter().any(|name| name == "other"),
-            ),
-            (15, true, false)
-        );
+        assert_eq!(fg.total, 15);
+        assert_eq!(fg.names.iter().any(|name| name == "work"), true);
+        assert_eq!(fg.names.iter().any(|name| name == "other"), false);
     }
 
     #[tokio::test]

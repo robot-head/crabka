@@ -277,12 +277,10 @@ mod tests {
         let (mut log, _dir) = open_tmp();
         // follower applies a leader-assigned batch at offset 0
         log.append_at(&mut batch(0, 2, b"x"), Offset(0)).unwrap();
+        assert_eq!(log.log_end_offset().0, 1);
         assert_eq!(
-            (
-                log.log_end_offset().0,
-                log.read_decoded(Offset(0), 1 << 20).unwrap()[0].partition_leader_epoch,
-            ),
-            (1, 2)
+            log.read_decoded(Offset(0), 1 << 20).unwrap()[0].partition_leader_epoch,
+            2
         );
     }
 
@@ -291,10 +289,8 @@ mod tests {
         let (mut log, _dir) = open_tmp();
         log.append(&mut batch(0, 1, b"a")).unwrap();
         log.append(&mut batch(0, 3, b"b")).unwrap(); // epoch jumps to 3
-        assert_eq!(
-            (LogView::end_offset(&log), LogView::last_epoch(&log)),
-            (2, 3)
-        );
+        assert_eq!(LogView::end_offset(&log), 2);
+        assert_eq!(LogView::last_epoch(&log), 3);
     }
 
     #[test]
@@ -388,6 +384,7 @@ mod tests {
         }
         log.advance_hwm(Offset(5));
         log.truncate_to(Offset(2)).unwrap();
-        assert_eq!((log.log_end_offset().0, log.hwm().0), (2, 2));
+        assert_eq!(log.log_end_offset().0, 2);
+        assert_eq!(log.hwm().0, 2);
     }
 }

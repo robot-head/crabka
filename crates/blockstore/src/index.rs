@@ -829,11 +829,12 @@ mod tests {
     fn label_names_and_values() {
         let idx = seed();
         assert_eq!(
-            (idx.label_names("t"), idx.label_values("t", "env")),
-            (
-                vec!["app".to_string(), "env".to_string()],
-                vec!["dev".to_string(), "prod".to_string()],
-            )
+            idx.label_names("t"),
+            vec!["app".to_string(), "env".to_string()]
+        );
+        assert_eq!(
+            idx.label_values("t", "env"),
+            vec!["dev".to_string(), "prod".to_string()]
         );
     }
 
@@ -943,16 +944,14 @@ mod tests {
         idx.add_series("t", fp, &replacement);
 
         let snapshot = serde_json::to_string(&idx).unwrap();
+        assert_eq!(idx.label_names("t"), vec!["app".to_string()]);
         assert_eq!(
-            (
-                idx.label_names("t"),
-                idx.resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
-                    .unwrap(),
-                snapshot.contains("web"),
-                snapshot.contains("env"),
-            ),
-            (vec!["app".to_string()], BTreeSet::from([fp]), false, false)
+            idx.resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
+                .unwrap(),
+            BTreeSet::from([fp])
         );
+        assert_eq!(snapshot.contains("web"), false);
+        assert_eq!(snapshot.contains("env"), false);
     }
 
     #[test]
@@ -1060,10 +1059,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            (expected.is_empty(), expected.len() < series.len(), got),
-            (false, true, expected)
-        );
+        assert_eq!(expected.is_empty(), false);
+        assert_eq!(expected.len() < series.len(), true);
+        assert_eq!(got, expected);
     }
 
     #[test]
@@ -1091,10 +1089,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            (expected.is_empty(), expected.len() < series.len(), got),
-            (false, true, expected)
-        );
+        assert_eq!(expected.is_empty(), false);
+        assert_eq!(expected.len() < series.len(), true);
+        assert_eq!(got, expected);
     }
 
     #[test]
@@ -1132,10 +1129,8 @@ mod tests {
         let names = idx
             .label_names_for("t", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
             .unwrap();
-        assert_eq!(
-            (names, idx.label_names_for("nope", &[]).unwrap()),
-            (vec!["app".to_string(), "env".to_string()], Vec::new())
-        );
+        assert_eq!(names, vec!["app".to_string(), "env".to_string()]);
+        assert!(idx.label_names_for("nope", &[]).unwrap().is_empty());
     }
 
     #[test]
@@ -1143,12 +1138,10 @@ mod tests {
         let idx = seed();
         let api_prod = labels(&[("app", "api"), ("env", "prod")]).fingerprint();
         let names = idx.label_names_for_fingerprints("t", &BTreeSet::from([api_prod]));
-        assert_eq!(
-            (
-                names,
-                idx.label_names_for_fingerprints("nope", &BTreeSet::from([api_prod])),
-            ),
-            (vec!["app".to_string(), "env".to_string()], Vec::new())
+        assert_eq!(names, vec!["app".to_string(), "env".to_string()]);
+        assert!(
+            idx.label_names_for_fingerprints("nope", &BTreeSet::from([api_prod]))
+                .is_empty()
         );
     }
 
@@ -1185,12 +1178,10 @@ mod tests {
         let api_dev = labels(&[("app", "api"), ("env", "dev")]).fingerprint();
         let values =
             idx.label_values_for_fingerprints("t", "env", &BTreeSet::from([api_prod, api_dev]));
-        assert_eq!(
-            (
-                values,
-                idx.label_values_for_fingerprints("nope", "env", &BTreeSet::from([api_prod]),),
-            ),
-            (vec!["dev".to_string(), "prod".to_string()], Vec::new())
+        assert_eq!(values, vec!["dev".to_string(), "prod".to_string()]);
+        assert!(
+            idx.label_values_for_fingerprints("nope", "env", &BTreeSet::from([api_prod]))
+                .is_empty()
         );
     }
 
@@ -1205,24 +1196,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            (
-                got,
-                idx.series_projected("nope", &[], &["app".to_string()])
-                    .unwrap(),
-            ),
-            (
+            got,
+            vec![
                 vec![
-                    vec![
-                        ("app".to_string(), "api".to_string()),
-                        ("env".to_string(), "dev".to_string())
-                    ],
-                    vec![
-                        ("app".to_string(), "api".to_string()),
-                        ("env".to_string(), "prod".to_string())
-                    ],
+                    ("app".to_string(), "api".to_string()),
+                    ("env".to_string(), "dev".to_string())
                 ],
-                Vec::new(),
-            )
+                vec![
+                    ("app".to_string(), "api".to_string()),
+                    ("env".to_string(), "prod".to_string())
+                ],
+            ]
+        );
+        assert!(
+            idx.series_projected("nope", &[], &["app".to_string()])
+                .unwrap()
+                .is_empty()
         );
     }
 
@@ -1246,13 +1235,8 @@ mod tests {
             labels(&[("app", "web"), ("env", "prod")]),
         ];
         expected_all.sort_by_key(Labels::fingerprint);
-        assert_eq!(
-            (
-                idx.series("t", &[]).unwrap(),
-                idx.series("nope", &[]).unwrap()
-            ),
-            (expected_all, Vec::new())
-        );
+        assert_eq!(idx.series("t", &[]).unwrap(), expected_all);
+        assert_eq!(idx.series("nope", &[]).unwrap(), Vec::new());
     }
 
     #[test]
@@ -1265,21 +1249,15 @@ mod tests {
             &["app".to_string(), "env".to_string()],
         );
         assert_eq!(
-            (
-                got,
-                idx.series_for_fingerprints(
-                    "nope",
-                    &BTreeSet::from([web_prod]),
-                    &["app".to_string()],
-                ),
-            ),
-            (
-                vec![vec![
-                    ("app".to_string(), "web".to_string()),
-                    ("env".to_string(), "prod".to_string()),
-                ]],
-                Vec::new(),
-            )
+            got,
+            vec![vec![
+                ("app".to_string(), "web".to_string()),
+                ("env".to_string(), "prod".to_string()),
+            ]]
+        );
+        assert!(
+            idx.series_for_fingerprints("nope", &BTreeSet::from([web_prod]), &["app".to_string()])
+                .is_empty()
         );
     }
 
@@ -1520,12 +1498,10 @@ mod tests {
             },
         );
 
+        assert_eq!(<Index as BlockIndex>::block_count(&idx, "t"), 2);
         assert_eq!(
-            (
-                <Index as BlockIndex>::block_count(&idx, "t"),
-                <Index as BlockIndex>::candidate_blocks(&idx, "t", 50, 150),
-            ),
-            (2, vec!["b1.parquet".to_string()])
+            <Index as BlockIndex>::candidate_blocks(&idx, "t", 50, 150),
+            vec!["b1.parquet".to_string()]
         );
     }
 

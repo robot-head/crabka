@@ -377,40 +377,44 @@ mod tests {
             string_field(unchanged_toast_column, "kind"),
         );
 
+        assert_eq!(key_frame, (KEY_SCHEMA_ID, vec![1], false));
+        assert_eq!(value_frame, (VALUE_SCHEMA_ID, vec![2], false));
         assert_eq!(
+            key_projection,
             (
-                key_frame,
-                value_frame,
-                key_projection,
-                value_projection,
-                name_projection,
-                null_projection,
-                avatar_projection,
-                unchanged_projection,
-            ),
-            (
-                (KEY_SCHEMA_ID, vec![1], false),
-                (VALUE_SCHEMA_ID, vec![2], false),
-                (
-                    "public.accounts".to_string(),
-                    "id".to_string(),
-                    "int".to_string(),
-                    42,
-                ),
-                (
-                    "public.accounts".to_string(),
-                    "update".to_string(),
-                    "0/2A".to_string(),
-                ),
-                ("name".to_string(), "text".to_string(), "new".to_string()),
-                ("nickname".to_string(), "null".to_string(), true),
-                (
-                    "avatar".to_string(),
-                    "bytes".to_string(),
-                    Bytes::from_static(b"abc"),
-                ),
-                ("details".to_string(), "unchanged_toast".to_string()),
+                "public.accounts".to_string(),
+                "id".to_string(),
+                "int".to_string(),
+                42,
             )
+        );
+        assert_eq!(
+            value_projection,
+            (
+                "public.accounts".to_string(),
+                "update".to_string(),
+                "0/2A".to_string(),
+            )
+        );
+        assert_eq!(
+            name_projection,
+            ("name".to_string(), "text".to_string(), "new".to_string())
+        );
+        assert_eq!(
+            null_projection,
+            ("nickname".to_string(), "null".to_string(), true)
+        );
+        assert_eq!(
+            avatar_projection,
+            (
+                "avatar".to_string(),
+                "bytes".to_string(),
+                Bytes::from_static(b"abc"),
+            )
+        );
+        assert_eq!(
+            unchanged_projection,
+            ("details".to_string(), "unchanged_toast".to_string())
         );
     }
 
@@ -486,13 +490,8 @@ mod tests {
         let key_columns = list_field(&key_message, "columns");
         let id_column = message_value(&key_columns[0]);
 
-        assert_eq!(
-            (
-                string_field(id_column, "kind"),
-                i64_field(id_column, "int_value")
-            ),
-            ("int".to_string(), 42)
-        );
+        assert_eq!(string_field(id_column, "kind"), "int".to_string());
+        assert_eq!(i64_field(id_column, "int_value"), 42);
     }
 
     #[test]

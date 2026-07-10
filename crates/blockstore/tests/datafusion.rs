@@ -31,10 +31,9 @@ fn assert_single_api_error(batches: &[RecordBatch]) {
         .downcast_ref::<StringArray>()
         .unwrap();
 
-    assert_eq!(
-        (batch.num_rows(), timestamps.value(0), lines.value(0)),
-        (1, 19, "api error")
-    );
+    assert_eq!(batch.num_rows(), 1);
+    assert_eq!(timestamps.value(0), 19);
+    assert_eq!(lines.value(0), "api error");
 }
 
 #[tokio::test]

@@ -412,17 +412,19 @@ async fn pool_persistent_claim_renders_volume_claim_template() {
         .as_array()
         .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
     let pvc = &vct[0];
+    assert_eq!(vct.len(), 1, "body = {body}");
     assert_eq!(
-        (vct.len(), &pvc["metadata"]["name"], &pvc["spec"]),
-        (
-            1,
-            &serde_json::json!("data"),
-            &serde_json::json!({
-                "accessModes": ["ReadWriteOnce"],
-                "resources": { "requests": { "storage": "10Gi" } },
-                "storageClassName": "fast-ssd"
-            }),
-        ),
+        &pvc["metadata"]["name"],
+        &serde_json::json!("data"),
+        "body = {body}"
+    );
+    assert_eq!(
+        &pvc["spec"],
+        &serde_json::json!({
+            "accessModes": ["ReadWriteOnce"],
+            "resources": { "requests": { "storage": "10Gi" } },
+            "storageClassName": "fast-ssd"
+        }),
         "body = {body}"
     );
 
@@ -796,11 +798,13 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
         .find(|m| m["name"] == "broker-config")
         .unwrap_or_else(|| panic!("broker-config volumeMount missing; mounts = {volume_mounts:?}"));
     assert_eq!(
-        (
-            config_mount["mountPath"].as_str(),
-            config_mount["readOnly"].as_bool(),
-        ),
-        (Some("/etc/crabka/config"), Some(true)),
+        config_mount["mountPath"].as_str(),
+        Some("/etc/crabka/config"),
+        "body = {body}"
+    );
+    assert_eq!(
+        config_mount["readOnly"].as_bool(),
+        Some(true),
         "body = {body}"
     );
 
