@@ -948,8 +948,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn find_coordinator_sends_expected_request_for_legacy_and_batched_versions() {
-        for (version, kind, key, expected_request) in [
+        for (name, version, kind, key, expected_request) in [
             (
+                "legacy group",
                 3,
                 LookupKind::Group,
                 "group-a",
@@ -959,6 +960,7 @@ mod tests {
                 },
             ),
             (
+                "batched group",
                 4,
                 LookupKind::Group,
                 "group-a",
@@ -968,6 +970,7 @@ mod tests {
                 },
             ),
             (
+                "legacy transaction",
                 3,
                 LookupKind::Transaction,
                 "txn-a",
@@ -978,6 +981,7 @@ mod tests {
                 },
             ),
             (
+                "batched transaction",
                 4,
                 LookupKind::Transaction,
                 "txn-a",
@@ -993,7 +997,6 @@ mod tests {
                 producer_with_find_coordinator_version(version, Arc::clone(&seen)).await;
 
             let addr = find_coordinator(&producer, kind, key).await;
-
             assert_eq!(addr, "127.0.0.1:19092");
             let requests = seen.lock().unwrap();
             assert_eq!(*requests, vec![expected_request]);

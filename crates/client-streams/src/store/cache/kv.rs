@@ -283,9 +283,10 @@ mod tests {
         store.put(b(b"k"), b(b"v"), ctx()).await;
         let flushed = store.flush().await;
 
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].0, b(b"k"));
-        assert_eq!(flushed[0].1.value, Some(b(b"v")));
+        assert_eq!(
+            (flushed.len(), &flushed[0].0, &flushed[0].1.value),
+            (1, &b(b"k"), &Some(b(b"v")))
+        );
 
         // Inner now has the write-through value; serve it from the (now-clean)
         // cache or inner — either way `get` returns it.
@@ -415,11 +416,15 @@ mod tests {
         store.clear().await;
 
         // Both the staged entry and the inner value are gone.
-        assert_eq!(store.get(b"a").await, None);
-        assert_eq!(store.get(b"b").await, None);
-        assert!(store.scan_all().await.is_empty());
-        // The cleared cache has no dirty entries to flush.
-        assert!(store.flush().await.is_empty());
+        assert_eq!(
+            (
+                store.get(b"a").await,
+                store.get(b"b").await,
+                store.scan_all().await.is_empty(),
+                store.flush().await.is_empty(),
+            ),
+            (None, None, true, true)
+        );
     }
 
     /// `flush_with_old` reports `old = None` for a key with no prior inner value
@@ -437,21 +442,23 @@ mod tests {
         // Sort by key for a deterministic assertion (insertion order is preserved
         // by the cache, but make the test independent of it).
         drained.sort_by(|a, b| a.0.cmp(&b.0));
-        assert_eq!(drained.len(), 2);
-
-        let fresh = &drained[0];
-        assert_eq!(fresh.0, b(b"fresh"));
-        assert_eq!(fresh.1, None); // no prior inner value
-        assert_eq!(fresh.2, Some(b(b"v")));
-
-        let present = &drained[1];
-        assert_eq!(present.0, b(b"present"));
-        assert_eq!(present.1, Some(b(b"old"))); // prior inner value captured
-        assert_eq!(present.2, Some(b(b"new")));
+        let actual = drained
+            .iter()
+            .map(|(key, old, new, _)| (key.clone(), old.clone(), new.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            vec![
+                (b(b"fresh"), None, Some(b(b"v"))),
+                (b(b"present"), Some(b(b"old")), Some(b(b"new"))),
+            ]
+        );
 
         // Both write-throughs landed.
-        assert_eq!(store.get(b"present").await, Some(b(b"new")));
-        assert_eq!(store.get(b"fresh").await, Some(b(b"v")));
+        assert_eq!(
+            (store.get(b"present").await, store.get(b"fresh").await),
+            (Some(b(b"new")), Some(b(b"v")))
+        );
     }
 
     /// `flush_with_old` on a tombstone returns `new = None` and deletes the inner
@@ -465,10 +472,10 @@ mod tests {
         store.delete(b(b"k"), ctx()).await;
 
         let drained = store.flush_with_old().await;
-        assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].0, b(b"k"));
-        assert_eq!(drained[0].1, Some(b(b"old"))); // inner OLD captured
-        assert_eq!(drained[0].2, None); // tombstone
+        assert_eq!(
+            (drained.len(), &drained[0].0, &drained[0].1, &drained[0].2),
+            (1, &b(b"k"), &Some(b(b"old")), &None)
+        );
 
         assert_eq!(store.get(b"k").await, None);
     }

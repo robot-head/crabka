@@ -540,29 +540,33 @@ mod tests {
 
     #[test]
     fn kafka_error_name_known_codes() {
-        for (code, want) in [
-            (0, "NONE"),
-            (36, "TOPIC_ALREADY_EXISTS"),
-            (41, "NOT_CONTROLLER"),
+        for (name, code, want) in [
+            ("success", 0, "NONE"),
+            ("topic exists", 36, "TOPIC_ALREADY_EXISTS"),
+            ("not controller", 41, "NOT_CONTROLLER"),
         ] {
-            assert!(kafka_error_name(code) == want);
+            assert!(kafka_error_name(code) == want, "case {name}");
         }
     }
 
     #[test]
     fn users_kafka_error_name_includes_scram_describe_codes() {
-        for (code, want) in [
-            (31, "CLUSTER_AUTHORIZATION_FAILED"),
-            (33, "UNSUPPORTED_SASL_MECHANISM"),
-            (35, "UNSUPPORTED_VERSION"),
-            (66, "DELEGATION_TOKEN_EXPIRED"),
-            (83, "ELIGIBLE_LEADERS_NOT_AVAILABLE"),
-            (84, "ELECTION_NOT_NEEDED"),
-            (91, "RESOURCE_NOT_FOUND"),
-            (92, "DUPLICATE_RESOURCE"),
-            (93, "UNACCEPTABLE_CREDENTIAL"),
+        for (name, code, want) in [
+            ("cluster authorization", 31, "CLUSTER_AUTHORIZATION_FAILED"),
+            ("unsupported SASL", 33, "UNSUPPORTED_SASL_MECHANISM"),
+            ("unsupported version", 35, "UNSUPPORTED_VERSION"),
+            ("delegation token expired", 66, "DELEGATION_TOKEN_EXPIRED"),
+            (
+                "eligible leaders unavailable",
+                83,
+                "ELIGIBLE_LEADERS_NOT_AVAILABLE",
+            ),
+            ("election unnecessary", 84, "ELECTION_NOT_NEEDED"),
+            ("resource not found", 91, "RESOURCE_NOT_FOUND"),
+            ("duplicate resource", 92, "DUPLICATE_RESOURCE"),
+            ("unacceptable credential", 93, "UNACCEPTABLE_CREDENTIAL"),
         ] {
-            assert!(kafka_error_name(code) == want);
+            assert!(kafka_error_name(code) == want, "case {name}");
         }
     }
 

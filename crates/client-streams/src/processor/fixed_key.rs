@@ -190,9 +190,13 @@ mod tests {
             timestamp: 42,
         };
         let r2 = r.with_value("v".to_string());
-        check!(r2.key == "k");
-        check!(r2.value == "v");
-        check!(r2.timestamp == 42);
+        check!(
+            r2 == FixedKeyRecord {
+                key: "k".to_string(),
+                value: "v".to_string(),
+                timestamp: 42,
+            }
+        );
     }
 
     /// A fixed-key processor that uppercases the value, preserving the key.
@@ -240,14 +244,19 @@ mod tests {
             .process(&mut ctx, Record::new(Some("k".into()), "hi".into(), 5))
             .await;
 
-        check!(buffer.len() == 1);
+        let actual_len = buffer.len();
         let (child, rec) = buffer.pop_front().unwrap();
-        check!(child == 1);
         // The key is preserved (Some("k")) and the value uppercased.
         let key = rec.key.expect("forwarded record must carry the key");
-        check!(*key.downcast::<String>().unwrap() == "k");
-        check!(*rec.value.downcast::<String>().unwrap() == "HI");
-        check!(rec.timestamp == 5);
+        check!(
+            (
+                actual_len,
+                child,
+                *key.downcast::<String>().unwrap(),
+                *rec.value.downcast::<String>().unwrap(),
+                rec.timestamp
+            ) == (1, 1, "k".to_string(), "HI".to_string(), 5)
+        );
     }
 
     #[tokio::test]
@@ -296,8 +305,8 @@ mod tests {
             )
             .await;
 
-        check!(buffer.len() == 1);
+        let actual_len = buffer.len();
         let (_child, rec) = buffer.pop_front().unwrap();
-        check!(*rec.value.downcast::<String>().unwrap() == "LO");
+        check!((actual_len, *rec.value.downcast::<String>().unwrap()) == (1, "LO".to_string()));
     }
 }

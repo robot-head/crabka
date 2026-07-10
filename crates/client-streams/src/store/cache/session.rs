@@ -366,9 +366,10 @@ mod tests {
         store.put(sk.clone(), b(b"v"), ctx()).await;
 
         let flushed = store.flush().await;
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].0, sk);
-        assert_eq!(flushed[0].1.value, Some(b(b"v")));
+        assert_eq!(
+            (flushed.len(), &flushed[0].0, &flushed[0].1.value),
+            (1, &sk, &Some(b(b"v")))
+        );
 
         // Inner now has the write-through value; the cache is clean, so this
         // exercises the inner-store read path of the merge.
@@ -524,9 +525,13 @@ mod tests {
 
         store.clear().await;
 
-        check!(store.find_sessions(b"k", 0, 1000).await.is_empty());
-        check!(store.scan_all().await.is_empty());
-        check!(store.flush().await.is_empty());
+        check!(
+            (
+                store.find_sessions(b"k", 0, 1000).await.is_empty(),
+                store.scan_all().await.is_empty(),
+                store.flush().await.is_empty(),
+            ) == (true, true, true)
+        );
     }
 
     /// `flush` deletes a staged tombstone through to the inner store.
@@ -539,8 +544,7 @@ mod tests {
 
         store.remove(sk.clone(), ctx()).await;
         let flushed = store.flush().await;
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].1.value, None);
+        assert_eq!((flushed.len(), flushed[0].1.value.as_ref()), (1, None));
 
         // Inner value deleted through.
         assert_eq!(store.get(&sk).await, None);
@@ -558,11 +562,11 @@ mod tests {
         store.put(sk.clone(), b(b"new"), ctx()).await;
 
         let drained = store.flush_with_old().await;
-        assert_eq!(drained.len(), 1);
         let (k, old, new, _ctx) = &drained[0];
-        assert_eq!(k, &sk);
-        assert_eq!(old.as_ref(), Some(&b(b"old"))); // inner OLD captured pre-write
-        assert_eq!(new.as_ref(), Some(&b(b"new")));
+        assert_eq!(
+            (drained.len(), k, old.as_ref(), new.as_ref()),
+            (1, &sk, Some(&b(b"old")), Some(&b(b"new")))
+        );
         // Write-through landed; the (now-clean) merge reads the new value.
         assert_eq!(
             store.find_sessions(b"k", 0, 100).await,

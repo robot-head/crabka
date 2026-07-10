@@ -396,9 +396,10 @@ mod tests {
         s.put(sk.clone(), val.clone(), ctx());
 
         let flushed = s.flush().await;
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].0, sk);
-        assert_eq!(flushed[0].1.value, Some(val.clone()));
+        assert_eq!(
+            (flushed.len(), &flushed[0].0, &flushed[0].1.value),
+            (1, &sk, &Some(val.clone()))
+        );
 
         // Inner now contains the written-through entry.
         assert_eq!(inner_get(&s, &sk).await, Some(val));
@@ -414,8 +415,7 @@ mod tests {
         s.delete(sk.clone(), ctx());
 
         let flushed = s.flush().await;
-        assert_eq!(flushed.len(), 1);
-        assert_eq!(flushed[0].1.value, None);
+        assert_eq!((flushed.len(), flushed[0].1.value.as_ref()), (1, None));
 
         assert_eq!(
             inner_get(&s, &sk).await,
@@ -510,11 +510,11 @@ mod tests {
         s.put(sk.clone(), wrapped(2, b"new"), ctx());
 
         let drained = s.flush_with_old().await;
-        assert_eq!(drained.len(), 1);
         let (k, old, new, _ctx) = &drained[0];
-        assert_eq!(k, &sk);
-        assert_eq!(old.as_ref(), Some(&wrapped(1, b"old"))); // inner OLD captured pre-write
-        assert_eq!(new.as_ref(), Some(&wrapped(2, b"new")));
+        assert_eq!(
+            (drained.len(), k, old.as_ref(), new.as_ref()),
+            (1, &sk, Some(&wrapped(1, b"old")), Some(&wrapped(2, b"new")))
+        );
         // Write-through landed in the inner store.
         assert_eq!(inner_get(&s, &sk).await, Some(wrapped(2, b"new")));
     }
@@ -530,11 +530,11 @@ mod tests {
         s.delete(sk.clone(), ctx());
 
         let drained = s.flush_with_old().await;
-        assert_eq!(drained.len(), 1);
         let (k, old, new, _ctx) = &drained[0];
-        assert_eq!(k, &sk);
-        assert_eq!(old.as_ref(), Some(&wrapped(1, b"old"))); // inner OLD captured
-        assert_eq!(new.as_ref(), None); // tombstone
+        assert_eq!(
+            (drained.len(), k, old.as_ref(), new.as_ref()),
+            (1, &sk, Some(&wrapped(1, b"old")), None)
+        );
         assert_eq!(inner_get(&s, &sk).await, None); // deleted through
     }
 

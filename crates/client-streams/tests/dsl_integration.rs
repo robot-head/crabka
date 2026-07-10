@@ -271,8 +271,11 @@ async fn dsl_count_restart_restore_emit_on_update() {
         .filter(|(k, _)| k == "b")
         .map(|(_, v)| *v)
         .collect();
-    assert_eq!(a_counts, vec![1, 2], "a counts must be [1, 2]; got {got:?}");
-    assert_eq!(b_counts, vec![1], "b count must be [1]; got {got:?}");
+    assert_eq!(
+        (a_counts, b_counts),
+        (vec![1, 2], vec![1]),
+        "counts must match by key; got {got:?}"
+    );
 
     // ── 4. Close the first instance ───────────────────────────────────────────
     streams.close().await.unwrap();

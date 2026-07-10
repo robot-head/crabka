@@ -97,13 +97,25 @@ mod tests {
     fn broker_range_reports_exact_advertised_bounds() {
         let t = ApiVersionTable::from_entries([(ApiVersionsRequest::API_KEY, 2, 4)]);
 
-        assert!(t.broker_range(ApiVersionsRequest::API_KEY) == Some((2, 4)));
-        assert!(t.broker_range(ApiVersionsRequest::API_KEY + 1).is_none());
+        for (name, api_key, expected) in [
+            ("advertised api", ApiVersionsRequest::API_KEY, Some((2, 4))),
+            ("missing api", ApiVersionsRequest::API_KEY + 1, None),
+        ] {
+            assert!(t.broker_range(api_key) == expected, "case {name}");
+        }
     }
 
     #[test]
     fn is_empty_reflects_whether_any_versions_were_advertised() {
-        assert!(ApiVersionTable::default().is_empty());
-        assert!(!ApiVersionTable::from_entries([(ApiVersionsRequest::API_KEY, 0, 1)]).is_empty());
+        for (name, table, expected) in [
+            ("default", ApiVersionTable::default(), true),
+            (
+                "one advertised api",
+                ApiVersionTable::from_entries([(ApiVersionsRequest::API_KEY, 0, 1)]),
+                false,
+            ),
+        ] {
+            assert!(table.is_empty() == expected, "case {name}");
+        }
     }
 }

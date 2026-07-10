@@ -439,34 +439,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn heartbeat_fenced_member_epoch_requests_rejoin() {
-        let fake = FakeTransport::new(vec![err_resp(110)]);
-        let (st, _rx) = state_with(fake);
-        check!(matches!(heartbeat_once(&st, false).await, Outcome::Rejoin));
-    }
-
-    #[tokio::test]
-    async fn heartbeat_unknown_member_id_requests_rejoin() {
-        let fake = FakeTransport::new(vec![err_resp(25)]);
-        let (st, _rx) = state_with(fake);
-        check!(matches!(heartbeat_once(&st, false).await, Outcome::Rejoin));
-    }
-
-    #[tokio::test]
-    async fn heartbeat_stale_member_epoch_requests_rejoin() {
-        let fake = FakeTransport::new(vec![err_resp(113)]);
-        let (st, _rx) = state_with(fake);
-        check!(matches!(heartbeat_once(&st, false).await, Outcome::Rejoin));
-    }
-
-    #[tokio::test]
-    async fn heartbeat_unexpected_code_is_transient() {
-        let fake = FakeTransport::new(vec![err_resp(99)]);
-        let (st, _rx) = state_with(fake);
-        check!(matches!(
-            heartbeat_once(&st, false).await,
-            Outcome::Transient
-        ));
+    async fn heartbeat_error_codes_map_to_outcomes() {
+        for (name, code, expected) in [
+            ("fenced epoch", 110, Outcome::Rejoin),
+            ("unknown member", 25, Outcome::Rejoin),
+            ("stale epoch", 113, Outcome::Rejoin),
+            ("unexpected code", 99, Outcome::Transient),
+        ] {
+            let fake = FakeTransport::new(vec![err_resp(code)]);
+            let (st, _rx) = state_with(fake);
+            check!(
+                std::mem::discriminant(&heartbeat_once(&st, false).await)
+                    == std::mem::discriminant(&expected),
+                "case {name}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -489,24 +476,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn heartbeat_sends_topology_when_rejoining() {
-        let fake = FakeTransport::new(vec![ok_resp(1, vec![])]);
-        let sent = fake.sent_arc();
-        let (st, _rx) = state_with(fake);
-        let _ = heartbeat_once(&st, true).await;
-        let sent = sent.lock().unwrap();
-        check!(sent[0].topology.is_some());
-    }
-
-    #[tokio::test]
-    async fn heartbeat_sends_topology_when_epoch_zero() {
-        let fake = FakeTransport::new(vec![ok_resp(1, vec![])]);
-        let sent = fake.sent_arc();
-        let (st, _rx) = state_with(fake);
-        *st.member_epoch.lock().await = 0;
-        let _ = heartbeat_once(&st, false).await;
-        let sent = sent.lock().unwrap();
-        check!(sent[0].topology.is_some());
+    async fn heartbeat_sends_topology_when_required() {
+        for (name, rejoining, epoch) in [("explicit rejoin", true, 1), ("zero epoch", false, 0)] {
+            let fake = FakeTransport::new(vec![ok_resp(1, vec![])]);
+            let sent = fake.sent_arc();
+            let (st, _rx) = state_with(fake);
+            *st.member_epoch.lock().await = epoch;
+            let _ = heartbeat_once(&st, rejoining).await;
+            let sent = sent.lock().unwrap();
+            check!(sent[0].topology.is_some(), "case {name}");
+        }
     }
 
     #[tokio::test]

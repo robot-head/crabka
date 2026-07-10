@@ -108,11 +108,13 @@ async fn connect_negotiates_api_versions() {
         .await
         .unwrap();
 
-    check!(!conn.versions().is_empty());
-    // The mock advertised api_key 18 min=0 max=3.
-    check!(conn.versions().broker_range(api_versions_request::API_KEY) == Some((0, 3)));
-    // The mock advertised api_key 3 min=0 max=12.
-    check!(conn.versions().broker_range(metadata_request_mod::API_KEY) == Some((0, 12)));
+    check!(
+        (
+            conn.versions().is_empty(),
+            conn.versions().broker_range(api_versions_request::API_KEY),
+            conn.versions().broker_range(metadata_request_mod::API_KEY),
+        ) == (false, Some((0, 3)), Some((0, 12)))
+    );
 
     conn.close();
     mock.stop();

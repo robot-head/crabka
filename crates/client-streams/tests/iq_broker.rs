@@ -167,9 +167,17 @@ async fn interactive_query_kv_store_over_broker() {
     };
 
     // ── 4. Assert the materialized read semantics ─────────────────────────────
-    assert_eq!(counts.get(&"a".to_string()).await.unwrap(), Some(2));
-    assert_eq!(counts.get(&"b".to_string()).await.unwrap(), Some(1));
-    assert_eq!(counts.get(&"missing".to_string()).await.unwrap(), None);
+    for (name, key, expected) in [
+        ("updated key", "a", Some(2)),
+        ("single record key", "b", Some(1)),
+        ("missing key", "missing", None),
+    ] {
+        assert_eq!(
+            counts.get(&key.to_string()).await.unwrap(),
+            expected,
+            "case {name}"
+        );
+    }
     assert!(
         counts.approximate_num_entries().await.unwrap() >= 2,
         "approximate_num_entries should count at least the two keys",

@@ -183,8 +183,10 @@ mod tests {
         reg.add_sink("snk", "out".into(), vec!["src".into()])
             .unwrap();
         let groups = group_nodes(&reg);
-        check!(ids(&groups) == vec!["0"]);
-        check!(groups[0].source_topics == vec!["in".to_string()]);
+        check!(
+            (ids(&groups), groups[0].source_topics.as_slice())
+                == (vec!["0"], &["in".to_string()][..])
+        );
     }
 
     #[test]
@@ -198,10 +200,19 @@ mod tests {
         reg.add_sink("snk2", "out".into(), vec!["rsrc".into()])
             .unwrap();
         let groups = group_nodes(&reg);
-        check!(ids(&groups) == vec!["0", "1"]);
-        check!(groups[0].source_topics == vec!["in".to_string()]);
-        check!(groups[0].repartition_sink_topics == vec!["rp".to_string()]);
-        check!(groups[1].repartition_source_topics == vec!["rp".to_string()]);
+        check!(
+            (
+                ids(&groups),
+                groups[0].source_topics.as_slice(),
+                groups[0].repartition_sink_topics.as_slice(),
+                groups[1].repartition_source_topics.as_slice(),
+            ) == (
+                vec!["0", "1"],
+                &["in".to_string()][..],
+                &["rp".to_string()][..],
+                &["rp".to_string()][..],
+            )
+        );
     }
 
     #[test]
@@ -213,11 +224,16 @@ mod tests {
         reg.add_processor("p2", vec!["s2".into()]).unwrap();
         reg.add_store("store", vec!["p1".into(), "p2".into()], None);
         let groups = group_nodes(&reg);
-        check!(ids(&groups) == vec!["0"]);
         let mut srcs = groups[0].source_topics.clone();
         srcs.sort();
-        check!(srcs == vec!["a".to_string(), "b".to_string()]);
-        check!(groups[0].changelog_stores == vec![("store".to_string(), None, ChangelogKind::Kv)]);
+        check!(
+            (ids(&groups), srcs, groups[0].changelog_stores.clone())
+                == (
+                    vec!["0"],
+                    vec!["a".to_string(), "b".to_string()],
+                    vec![("store".to_string(), None, ChangelogKind::Kv)]
+                )
+        );
     }
 
     #[test]
@@ -250,8 +266,12 @@ mod tests {
         reg.add_sink("snk", "out".into(), vec!["src".into()])
             .unwrap();
         let groups = group_nodes(&reg);
-        check!(groups.len() == 1);
-        check!(ids(&groups) == vec!["1"]);
-        check!(groups[0].source_topics == vec!["in".to_string()]);
+        check!(
+            (
+                groups.len(),
+                ids(&groups),
+                groups[0].source_topics.as_slice()
+            ) == (1, vec!["1"], &["in".to_string()][..])
+        );
     }
 }

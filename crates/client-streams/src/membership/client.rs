@@ -341,28 +341,55 @@ mod tests {
             &topology,
         );
 
-        check!(req.group_id == "streams-group");
-        check!(req.member_id == "member-1");
-        check!(req.member_epoch == 0);
-        check!(req.process_id.as_deref() == Some("process-1"));
-        check!(req.instance_id.as_deref() == Some("instance-1"));
-        check!(req.rebalance_timeout_ms == 45_000);
-        check!(req.topology.is_some());
+        check!(
+            (
+                req.group_id.as_str(),
+                req.member_id.as_str(),
+                req.member_epoch,
+                req.process_id.as_deref(),
+                req.instance_id.as_deref(),
+                req.rebalance_timeout_ms,
+                req.topology.is_some(),
+            ) == (
+                "streams-group",
+                "member-1",
+                0,
+                Some("process-1"),
+                Some("instance-1"),
+                45_000,
+                true,
+            )
+        );
     }
 
     #[test]
     fn heartbeat_interval_uses_positive_broker_value_or_default() {
-        check!(heartbeat_interval(1) == std::time::Duration::from_millis(1));
-        check!(heartbeat_interval(3_000) == std::time::Duration::from_secs(3));
-        check!(heartbeat_interval(0) == std::time::Duration::from_secs(3));
-        check!(heartbeat_interval(-1) == std::time::Duration::from_secs(3));
+        for (name, broker_ms, expected) in [
+            (
+                "positive millisecond",
+                1,
+                std::time::Duration::from_millis(1),
+            ),
+            ("positive seconds", 3_000, std::time::Duration::from_secs(3)),
+            ("zero defaults", 0, std::time::Duration::from_secs(3)),
+            ("negative defaults", -1, std::time::Duration::from_secs(3)),
+        ] {
+            check!(heartbeat_interval(broker_ms) == expected, "case {name}");
+        }
     }
 
     #[test]
     fn should_emit_statuses_only_for_non_empty_status_list() {
-        check!(!should_emit_statuses::<i32>(None));
-        check!(!should_emit_statuses(Some(&Vec::<i32>::new())));
-        check!(should_emit_statuses(Some(&vec![1])));
+        for (name, statuses, expected) in [
+            ("absent", None, false),
+            ("empty", Some(vec![]), false),
+            ("present", Some(vec![1]), true),
+        ] {
+            check!(
+                should_emit_statuses(statuses.as_ref()) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -380,44 +407,61 @@ mod tests {
             tracker: tracker.clone(),
         };
 
-        check!(membership.member_id() == "member-1");
-        check!(membership.group_id() == "group-1");
+        check!((membership.member_id(), membership.group_id()) == ("member-1", "group-1"));
         check!(Arc::ptr_eq(&membership.tracker(), &tracker));
 
         let meta = membership.group_metadata().await;
-        check!(meta.member_id == "member-1");
-        check!(meta.group_id == "group-1");
-        check!(meta.generation_id == 42);
-        check!(meta.group_instance_id.is_none());
+        check!(
+            (
+                meta.member_id.as_str(),
+                meta.group_id.as_str(),
+                meta.generation_id,
+                meta.group_instance_id.as_ref(),
+            ) == ("member-1", "group-1", 42, None)
+        );
     }
 
     #[test]
     fn invalid_topology_family_maps() {
-        for code in [130i16, 131, 132] {
-            check!(matches!(
-                map_error(resp(code)),
-                Err(StreamsClientError::InvalidTopology { code: c, .. }) if c == code
-            ));
+        for (name, code) in [
+            ("invalid topology", 130i16),
+            ("invalid subscription", 131),
+            ("invalid repartition", 132),
+        ] {
+            check!(
+                matches!(
+                    map_error(resp(code)),
+                    Err(StreamsClientError::InvalidTopology { code: c, .. }) if c == code
+                ),
+                "case {name}"
+            );
         }
     }
 
     #[test]
     fn auth_not_found_and_unknown_codes_map() {
-        check!(matches!(
-            map_error(resp(30)),
-            Err(StreamsClientError::Authorization(30))
-        ));
-        check!(matches!(
-            map_error(resp(29)),
-            Err(StreamsClientError::Authorization(29))
-        ));
-        check!(matches!(
-            map_error(resp(69)),
-            Err(StreamsClientError::GroupIdNotFound)
-        ));
-        check!(matches!(
-            map_error(resp(99)),
-            Err(StreamsClientError::Server(99))
-        ));
+        enum Expected {
+            Authorization(i16),
+            NotFound,
+            Server(i16),
+        }
+        for (name, code, expected) in [
+            ("cluster authorization", 30, Expected::Authorization(30)),
+            ("topic authorization", 29, Expected::Authorization(29)),
+            ("group not found", 69, Expected::NotFound),
+            ("unknown server error", 99, Expected::Server(99)),
+        ] {
+            let actual = map_error(resp(code));
+            let matches = match expected {
+                Expected::Authorization(expected) => {
+                    matches!(actual, Err(StreamsClientError::Authorization(code)) if code == expected)
+                }
+                Expected::NotFound => matches!(actual, Err(StreamsClientError::GroupIdNotFound)),
+                Expected::Server(expected) => {
+                    matches!(actual, Err(StreamsClientError::Server(code)) if code == expected)
+                }
+            };
+            check!(matches, "case {name}");
+        }
     }
 }

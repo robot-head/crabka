@@ -165,15 +165,20 @@ mod tests {
             s.put(k.into(), v).await;
         }
         let q: &dyn IqQueryable = s.as_iq().unwrap();
-        assert_eq!(q.iq_kv_get(b"b").await, Some(I64Serde.serialize("t", &2)));
-        assert_eq!(q.iq_kv_get(b"z").await, None);
+        let hits = (q.iq_kv_get(b"b").await, q.iq_kv_get(b"z").await);
         let r = q.iq_kv_range(b"a", b"b").await; // inclusive => a,b
-        assert_eq!(r.len(), 2);
-        assert_eq!(r[0].0, bytes::Bytes::from_static(b"a"));
-        assert_eq!(r[1].0, bytes::Bytes::from_static(b"b"));
-        assert!(q.iq_kv_range(b"c", b"a").await.is_empty()); // lo>hi => empty
-        assert_eq!(q.iq_kv_all().await.len(), 3);
-        assert_eq!(q.iq_kv_approx_count().await, 3);
+        let range_keys = r.iter().map(|(key, _)| key.as_ref()).collect::<Vec<_>>();
+        let reverse_range = q.iq_kv_range(b"c", b"a").await;
+        let counts = (q.iq_kv_all().await.len(), q.iq_kv_approx_count().await);
+        assert_eq!(
+            (hits, range_keys, reverse_range.is_empty(), counts),
+            (
+                (Some(I64Serde.serialize("t", &2)), None),
+                vec![b"a".as_slice(), b"b".as_slice()],
+                true,
+                (3, 3)
+            )
+        );
     }
 
     #[tokio::test]
@@ -211,12 +216,14 @@ mod tests {
         s.put("k".into(), Some(20), 200).await;
         let q: &dyn IqQueryable = s.as_iq().unwrap();
         assert_eq!(q.kind(), StoreKind::Versioned);
-        let (vf, vt, raw) = q.iq_versioned_get(b"k").await.unwrap();
-        assert_eq!((vf, vt), (200, None));
-        assert_eq!(raw, I64Serde.serialize("t", &20));
-        let (vf2, vt2, raw2) = q.iq_versioned_get_as_of(b"k", 150).await.unwrap();
-        assert_eq!((vf2, vt2), (100, Some(200)));
-        assert_eq!(raw2, I64Serde.serialize("t", &10));
+        assert_eq!(
+            q.iq_versioned_get(b"k").await,
+            Some((200, None, I64Serde.serialize("t", &20)))
+        );
+        assert_eq!(
+            q.iq_versioned_get_as_of(b"k", 150).await,
+            Some((100, Some(200), I64Serde.serialize("t", &10)))
+        );
         assert_eq!(q.iq_versioned_get_as_of(b"k", 50).await, None);
     }
 

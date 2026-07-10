@@ -761,9 +761,13 @@ mod tests {
         corr_id: i32,
         flexible: bool,
     ) {
-        check!(ApiKey(i16::from_be_bytes([req[0], req[1]])) == api_key);
-        check!(ApiVersion(i16::from_be_bytes([req[2], req[3]])) == api_version);
-        check!(i32::from_be_bytes([req[4], req[5], req[6], req[7]]) == corr_id);
+        check!(
+            (
+                ApiKey(i16::from_be_bytes([req[0], req[1]])),
+                ApiVersion(i16::from_be_bytes([req[2], req[3]])),
+                i32::from_be_bytes([req[4], req[5], req[6], req[7]])
+            ) == (api_key, api_version, corr_id)
+        );
         let client_len = i16::from_be_bytes([req[8], req[9]]);
         assert_eq!(client_len, i16::try_from(OUTBOUND_CLIENT_ID.len()).unwrap());
         assert_eq!(

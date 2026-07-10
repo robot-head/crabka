@@ -1338,18 +1338,21 @@ mod retry_tests {
         let one: HashMap<String, i32> = [("logs".to_string(), 1)].into_iter().collect();
         let three: HashMap<String, i32> = [("logs".to_string(), 3)].into_iter().collect();
 
-        for (known, current, expected) in [
+        for (name, known, current, expected) in [
             // Cold-start race: topic absent at join, created later -> growth -> rejoin.
-            (&empty, &one, true),
+            ("topic appears", &empty, &one, true),
             // Topic gained partitions -> rejoin to (re)distribute them.
-            (&one, &three, true),
+            ("partition count grows", &one, &three, true),
             // Steady state: unchanged -> no spurious rejoin.
-            (&one, &one, false),
+            ("steady state", &one, &one, false),
             // A topic shrinking/disappearing is not "growth" -> no rejoin.
-            (&three, &one, false),
-            (&one, &empty, false),
+            ("partition count shrinks", &three, &one, false),
+            ("topic disappears", &one, &empty, false),
         ] {
-            assert!(subscribed_topics_grew(known, current) == expected);
+            assert!(
+                subscribed_topics_grew(known, current) == expected,
+                "case {name}"
+            );
         }
     }
 
@@ -1367,16 +1370,14 @@ mod retry_tests {
         // Growth advances the baseline; after merging the new count the SAME
         // count is no longer seen as growth (so the rejoin doesn't re-fire).
         merge_counts(&mut known, &three);
-        assert!(known.get("logs") == Some(&3));
-        assert!(!subscribed_topics_grew(&known, &three));
+        assert!((known.get("logs"), subscribed_topics_grew(&known, &three)) == (Some(&3), false));
 
         // A transient metadata under-report (controller failover / partial
         // response) must NOT lower the baseline: Kafka partition counts are
         // monotonic, so dropping to 1 then recovering to 3 would otherwise churn
         // a spurious rejoin. max-merge pins it at 3.
         merge_counts(&mut known, &one);
-        assert!(known.get("logs") == Some(&3));
-        assert!(!subscribed_topics_grew(&known, &three));
+        assert!((known.get("logs"), subscribed_topics_grew(&known, &three)) == (Some(&3), false));
 
         // A non-leader rejoin's snapshot is empty -> max-merge is a no-op, so the
         // baseline survives (the next tick sees no phantom growth).
@@ -1399,24 +1400,30 @@ mod retry_tests {
 
     #[test]
     fn next_backoff_doubles_until_cap() {
-        for (backoff, max_backoff, expected) in [
+        for (name, backoff, max_backoff, expected) in [
             (
+                "doubling below cap",
                 Duration::from_millis(100),
                 Duration::from_secs(1),
                 Duration::from_millis(200),
             ),
             (
+                "doubling reaches cap",
                 Duration::from_millis(800),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
             ),
             (
+                "already capped",
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
             ),
         ] {
-            assert!(next_backoff(backoff, max_backoff) == expected);
+            assert!(
+                next_backoff(backoff, max_backoff) == expected,
+                "case {name}"
+            );
         }
     }
 
@@ -1445,16 +1452,16 @@ mod retry_tests {
 
     #[test]
     fn revoked_commit_helpers_preserve_filter_boundaries_and_request_fields() {
-        for (is_revoked, next_offset, expected) in [
-            (true, 1, true),
-            (false, 1, false),
-            (true, 0, false),
-            (true, -1, false),
-            (true, i64::MAX, false),
+        for (name, is_revoked, next_offset, expected) in [
+            ("revoked positive", true, 1, true),
+            ("not revoked", false, 1, false),
+            ("zero offset", true, 0, false),
+            ("negative offset", true, -1, false),
+            ("latest sentinel", true, i64::MAX, false),
         ] {
             assert!(
                 should_commit_revoked_offset(is_revoked, next_offset) == expected,
-                "is_revoked: {is_revoked}, next_offset: {next_offset}"
+                "case {name}: is_revoked: {is_revoked}, next_offset: {next_offset}"
             );
         }
 
@@ -1521,10 +1528,14 @@ mod retry_tests {
             "member-a".into(),
             &[("topic-a".to_string(), 0), ("topic-a".to_string(), 1)],
         );
-        assert!(assignment.member_id == "member-a");
         assert!(
-            decode_assignment(&assignment.assignment)
-                == vec![("topic-a".to_string(), 0), ("topic-a".to_string(), 1),]
+            (
+                assignment.member_id.as_str(),
+                decode_assignment(&assignment.assignment),
+            ) == (
+                "member-a",
+                vec![("topic-a".to_string(), 0), ("topic-a".to_string(), 1)],
+            )
         );
 
         let req = build_sync_group_request(
@@ -1572,44 +1583,54 @@ mod retry_tests {
 
     #[test]
     fn prime_offset_helpers_preserve_committed_and_reset_boundaries() {
-        for (committed, reset, expected) in [
-            (12, AutoOffsetReset::Earliest, 12),
-            (0, AutoOffsetReset::Latest, 0),
-            (-1, AutoOffsetReset::Earliest, 0),
-            (-1, AutoOffsetReset::Latest, i64::MAX),
-            (-1, AutoOffsetReset::None, i64::MAX),
+        for (name, committed, reset, expected) in [
+            ("committed positive", 12, AutoOffsetReset::Earliest, 12),
+            ("committed zero", 0, AutoOffsetReset::Latest, 0),
+            ("missing earliest", -1, AutoOffsetReset::Earliest, 0),
+            ("missing latest", -1, AutoOffsetReset::Latest, i64::MAX),
+            ("missing none", -1, AutoOffsetReset::None, i64::MAX),
         ] {
             assert!(
                 starting_offset(committed, reset) == expected,
-                "committed: {committed}, reset: {reset:?}"
+                "case {name}: committed: {committed}, reset: {reset:?}"
             );
         }
 
-        for (reset, expected) in [
-            (AutoOffsetReset::Earliest, 0),
-            (AutoOffsetReset::Latest, i64::MAX),
-            (AutoOffsetReset::None, i64::MAX),
+        for (name, reset, expected) in [
+            ("earliest", AutoOffsetReset::Earliest, 0),
+            ("latest", AutoOffsetReset::Latest, i64::MAX),
+            ("none", AutoOffsetReset::None, i64::MAX),
         ] {
-            assert!(reset_starting_offset(reset) == expected, "reset: {reset:?}");
+            assert!(
+                reset_starting_offset(reset) == expected,
+                "case {name}: reset: {reset:?}"
+            );
         }
 
-        assert!(should_prime_missing_partition(false));
-        assert!(!should_prime_missing_partition(true));
+        for (name, has_position, expected) in [
+            ("missing position", false, true),
+            ("existing position", true, false),
+        ] {
+            assert!(
+                should_prime_missing_partition(has_position) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn heartbeat_outcome_classifies_success_rejoin_and_transient_errors() {
-        for (error_code, expected) in [
-            (0, HeartbeatOutcome::Ok),
-            (27, HeartbeatOutcome::NeedRejoin),
-            (22, HeartbeatOutcome::NeedRejoin),
-            (25, HeartbeatOutcome::RejoinFromScratch),
-            (14, HeartbeatOutcome::Transient),
-            (99, HeartbeatOutcome::Transient),
+        for (name, error_code, expected) in [
+            ("success", 0, HeartbeatOutcome::Ok),
+            ("rebalance in progress", 27, HeartbeatOutcome::NeedRejoin),
+            ("illegal generation", 22, HeartbeatOutcome::NeedRejoin),
+            ("unknown member", 25, HeartbeatOutcome::RejoinFromScratch),
+            ("loading coordinator", 14, HeartbeatOutcome::Transient),
+            ("unknown transient", 99, HeartbeatOutcome::Transient),
         ] {
             assert!(
                 heartbeat_outcome(error_code) == expected,
-                "error_code: {error_code}"
+                "case {name}: error_code: {error_code}"
             );
         }
     }
@@ -1707,59 +1728,62 @@ mod find_coordinator_parse_tests {
 
     use super::*;
 
-    // v4+ shape: the broker fills the `coordinators` array; legacy top-level
-    // fields are zeroed/unused. We must read the array.
     #[test]
-    fn reads_node_id_and_code_from_coordinators_array() {
-        let resp = FindCoordinatorResponse {
-            // Legacy top-level deliberately wrong to prove we prefer the array.
-            node_id: -1,
-            error_code: 99,
-            coordinators: vec![Coordinator {
-                key: "g".into(),
-                node_id: 7,
-                host: "h".into(),
-                port: 9092,
-                error_code: 0,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(coordinator_node_id(&resp) == 7);
-        assert!(coordinator_error_code(&resp) == 0);
-    }
-
-    // v0-v3 shape: no `coordinators` array, the top-level fields carry the
-    // answer. crabka's broker also populates these for the legacy versions.
-    #[test]
-    fn falls_back_to_top_level_when_array_empty() {
-        let resp = FindCoordinatorResponse {
-            node_id: 3,
-            error_code: 0,
-            coordinators: vec![],
-            ..Default::default()
-        };
-        assert!(coordinator_node_id(&resp) == 3);
-        assert!(coordinator_error_code(&resp) == 0);
-    }
-
-    // A relocating coordinator surfaces NOT_COORDINATOR in the array row; we
-    // read it so the retry/re-find path triggers.
-    #[test]
-    fn surfaces_not_coordinator_from_array_row() {
-        let resp = FindCoordinatorResponse {
-            node_id: 1,
-            error_code: 0,
-            coordinators: vec![Coordinator {
-                key: "g".into(),
-                node_id: -1,
-                error_code: NOT_COORDINATOR,
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        assert!(coordinator_error_code(&resp) == NOT_COORDINATOR);
-        assert!(is_retriable_coordinator_code(coordinator_error_code(&resp)));
+    fn parses_legacy_and_batched_coordinator_shapes() {
+        for (name, resp, expected) in [
+            (
+                "batched success",
+                FindCoordinatorResponse {
+                    node_id: -1,
+                    error_code: 99,
+                    coordinators: vec![Coordinator {
+                        key: "g".into(),
+                        node_id: 7,
+                        host: "h".into(),
+                        port: 9092,
+                        error_code: 0,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                (7, 0, false),
+            ),
+            (
+                "legacy success",
+                FindCoordinatorResponse {
+                    node_id: 3,
+                    error_code: 0,
+                    coordinators: vec![],
+                    ..Default::default()
+                },
+                (3, 0, false),
+            ),
+            (
+                "batched not coordinator",
+                FindCoordinatorResponse {
+                    node_id: 1,
+                    error_code: 0,
+                    coordinators: vec![Coordinator {
+                        key: "g".into(),
+                        node_id: -1,
+                        error_code: NOT_COORDINATOR,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                (-1, NOT_COORDINATOR, true),
+            ),
+        ] {
+            let code = coordinator_error_code(&resp);
+            assert!(
+                (
+                    coordinator_node_id(&resp),
+                    code,
+                    is_retriable_coordinator_code(code)
+                ) == expected,
+                "case {name}"
+            );
+        }
     }
 }
 

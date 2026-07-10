@@ -307,10 +307,15 @@ mod tests {
                 name,
                 message,
             } => {
-                check!(api == "DescribeConfigs");
-                check!(code == 3);
-                check!(name == "UNKNOWN_TOPIC_OR_PARTITION");
-                check!(message.as_deref() == Some("nope"));
+                check!(
+                    (api, code, name, message.as_deref())
+                        == (
+                            "DescribeConfigs",
+                            3,
+                            "UNKNOWN_TOPIC_OR_PARTITION",
+                            Some("nope")
+                        )
+                );
             }
             other => panic!("expected Broker, got {other:?}"),
         }

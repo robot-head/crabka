@@ -133,23 +133,27 @@ mod tests {
     #[test]
     fn dominates_requires_all_bound_partitions_met() {
         let cur = pos(&[("in", 0, 10), ("in", 1, 5)]);
-        for (bound, want) in [
-            (pos(&[("in", 0, 10)]), true),
-            (pos(&[("in", 0, 9), ("in", 1, 5)]), true),
-            (pos(&[("in", 0, 11)]), false),   // behind
-            (pos(&[("other", 0, 1)]), false), // unknown tp
+        for (name, bound, want) in [
+            ("exact bound", pos(&[("in", 0, 10)]), true),
+            ("ahead of bound", pos(&[("in", 0, 9), ("in", 1, 5)]), true),
+            ("behind bound", pos(&[("in", 0, 11)]), false),
+            ("unknown topic partition", pos(&[("other", 0, 1)]), false),
         ] {
-            assert_eq!(cur.dominates(&bound), want);
+            assert_eq!(cur.dominates(&bound), want, "case {name}");
         }
     }
 
     #[test]
     fn position_offset_reads_present_and_absent_tps() {
         let p = pos(&[("in", 0, 10), ("in", 1, 5)]);
-        assert_eq!(p.offset("in", 0), Some(10));
-        assert_eq!(p.offset("in", 1), Some(5));
-        assert_eq!(p.offset("in", 2), None); // present topic, absent partition
-        assert_eq!(p.offset("other", 0), None); // absent topic
+        for (name, topic, partition, expected) in [
+            ("first present partition", "in", 0, Some(10)),
+            ("second present partition", "in", 1, Some(5)),
+            ("absent partition", "in", 2, None),
+            ("absent topic", "other", 0, None),
+        ] {
+            assert_eq!(p.offset(topic, partition), expected, "case {name}");
+        }
     }
 
     #[test]
@@ -158,10 +162,15 @@ mod tests {
 
         let q = StateQueryRequest::in_store("s")
             .with_query(KeyQuery::<String, i64>::with_key("k".into()));
-        assert_eq!(q.store, "s");
-        assert!(matches!(q.partitions, PartitionSel::All));
-        assert!(matches!(q.bound, PositionBound::Unbounded));
-        assert!(!q.require_active);
+        assert_eq!(
+            (
+                q.store.as_str(),
+                matches!(q.partitions, PartitionSel::All),
+                matches!(q.bound, PositionBound::Unbounded),
+                q.require_active,
+            ),
+            ("s", true, true, false)
+        );
     }
 
     #[test]

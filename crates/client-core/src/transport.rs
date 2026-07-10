@@ -93,26 +93,27 @@ mod tests {
 
     #[test]
     fn put_uvarint_single_byte() {
-        let mut buf = BytesMut::new();
-        put_uvarint(&mut buf, 0);
-        assert!(buf.as_ref() == &[0u8]);
-        buf.clear();
-        put_uvarint(&mut buf, 127);
-        assert!(buf.as_ref() == &[0x7Fu8]);
+        for (name, value, expected) in [
+            ("zero", 0, &[0u8][..]),
+            ("largest single byte", 127, &[0x7F][..]),
+        ] {
+            let mut buf = BytesMut::new();
+            put_uvarint(&mut buf, value);
+            assert!(buf.as_ref() == expected, "case {name}");
+        }
     }
 
     #[test]
     fn put_uvarint_multibyte() {
-        // 128 encodes to 0x80 0x01
-        let mut buf = BytesMut::new();
-        put_uvarint(&mut buf, 128);
-        assert!(buf.as_ref() == &[0x80u8, 0x01u8]);
-        buf.clear();
-        put_uvarint(&mut buf, 16_384);
-        assert!(buf.as_ref() == &[0x80u8, 0x80u8, 0x01u8]);
-        buf.clear();
-        put_uvarint(&mut buf, u32::MAX);
-        assert!(buf.as_ref() == &[0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0x0F]);
+        for (name, value, expected) in [
+            ("two bytes", 128, &[0x80u8, 0x01][..]),
+            ("three bytes", 16_384, &[0x80u8, 0x80, 0x01][..]),
+            ("u32 max", u32::MAX, &[0xFFu8, 0xFF, 0xFF, 0xFF, 0x0F][..]),
+        ] {
+            let mut buf = BytesMut::new();
+            put_uvarint(&mut buf, value);
+            assert!(buf.as_ref() == expected, "case {name}");
+        }
     }
 
     #[test]

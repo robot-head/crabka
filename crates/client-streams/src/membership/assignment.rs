@@ -60,15 +60,19 @@ mod tests {
             ..Default::default()
         }];
         let resolved = resolve(Some(&tasks), &built());
-        check!(resolved.len() == 1);
-        check!(resolved[0].subtopology_id == "0");
-        check!(resolved[0].partitions == vec![0, 2]);
         let tps: Vec<(&str, i32)> = resolved[0]
             .source_topic_partitions
             .iter()
             .map(|tp| (tp.topic.as_str(), tp.partition))
             .collect();
-        check!(tps == vec![("in", 0), ("in", 2)]);
+        check!(
+            (
+                resolved.len(),
+                resolved[0].subtopology_id.as_str(),
+                resolved[0].partitions.as_slice(),
+                tps
+            ) == (1, "0", &[0, 2][..], vec![("in", 0), ("in", 2)])
+        );
     }
 
     #[test]

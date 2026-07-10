@@ -263,10 +263,15 @@ mod tests {
             },
         ])
         .await;
-        assert!(pool.by_addr.contains_key(&1));
-        assert!(pool.by_addr.contains_key(&2));
-        check!(*pool.by_addr.get(&1).unwrap() == "127.0.0.1:9092".parse().unwrap());
-        check!(*pool.by_addr.get(&2).unwrap() == "127.0.0.1:9093".parse().unwrap());
+        check!(
+            (
+                pool.by_addr.get(&1).map(|entry| *entry),
+                pool.by_addr.get(&2).map(|entry| *entry),
+            ) == (
+                Some("127.0.0.1:9092".parse().unwrap()),
+                Some("127.0.0.1:9093".parse().unwrap()),
+            )
+        );
     }
 
     #[tokio::test]
@@ -303,8 +308,9 @@ mod tests {
         ])
         .await;
 
-        assert!(!pool.knows_broker(1));
-        assert!(!pool.knows_broker(2));
+        for (name, broker_id) in [("zero port", 1), ("negative port", 2)] {
+            assert!(!pool.knows_broker(broker_id), "case {name}");
+        }
     }
 
     // ── socket-free caching / fallback / eviction via a counting connector ────
@@ -454,13 +460,21 @@ mod tests {
         pool.by_addr.insert(3, addr(9092));
         let _ = pool.get(3).await.unwrap();
         let _ = pool.bootstrap_connection().await.unwrap();
-        assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
-        assert!(pool.by_id.contains_key(&3));
+        assert!(
+            (
+                pool.by_id.contains_key(&BOOTSTRAP_ID),
+                pool.by_id.contains_key(&3)
+            ) == (true, true)
+        );
 
         pool.evict_bootstrap();
         // Only the bootstrap entry is gone; the real broker stays cached.
-        assert!(!pool.by_id.contains_key(&BOOTSTRAP_ID));
-        assert!(pool.by_id.contains_key(&3));
+        assert!(
+            (
+                pool.by_id.contains_key(&BOOTSTRAP_ID),
+                pool.by_id.contains_key(&3)
+            ) == (false, true)
+        );
 
         // The next bootstrap_connection redials.
         let before = dials.load(Ordering::Relaxed);

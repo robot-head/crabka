@@ -433,8 +433,7 @@ mod tests {
         assert_eq!(s.find_sessions(&"k".to_string(), -5, 35).await, vec![]);
         // changelog: put, put, remove → 3 entries (last is a tombstone)
         let cl = s.take_changelog();
-        assert_eq!(cl.len(), 3);
-        assert!(cl[2].1.is_none());
+        assert_eq!((cl.len(), cl[2].1.is_none()), (3, true));
     }
 
     #[tokio::test]
@@ -553,10 +552,7 @@ mod tests {
 
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[7]).await;
-        assert_eq!(buffer.len(), 1);
         let (child, rec) = &buffer[0];
-        assert_eq!(*child, 7);
-        assert_eq!(rec.timestamp, 7);
         // Key downcasts to Windowed<String> carrying the encoded start/end.
         let key = rec
             .key
@@ -564,25 +560,38 @@ mod tests {
             .unwrap()
             .downcast_ref::<Windowed<String>>()
             .unwrap();
-        assert_eq!(key.key, "a");
-        assert_eq!(key.window, Window { start: 0, end: 10 });
         // Value downcasts to Change<i64> { old = committed (1), new = latest (3) }.
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
-        assert_eq!(change.old, Some(1));
-        assert_eq!(change.new, Some(3));
+        assert_eq!(
+            (buffer.len(), *child, rec.timestamp, key, change),
+            (
+                1,
+                7,
+                7,
+                &Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 10 },
+                },
+                &Change {
+                    old: Some(1),
+                    new: Some(3)
+                },
+            )
+        );
 
         // Changelog buffered the RAW session store-key + the latest value.
         let cl = s.take_changelog();
-        assert_eq!(cl.len(), 1);
         assert_eq!(
-            cl[0].0,
-            session_key(
-                &StringSerde.serialize("app-s-changelog", &"a".to_string()),
-                0,
-                10
-            )
+            cl,
+            vec![(
+                session_key(
+                    &StringSerde.serialize("app-s-changelog", &"a".to_string()),
+                    0,
+                    10
+                ),
+                Some(I64Serde.serialize("app-s-changelog", &3)),
+            )]
         );
-        assert_eq!(cl[0].1, Some(I64Serde.serialize("app-s-changelog", &3)));
 
         // Inner store now holds the write-through value.
         assert_eq!(
@@ -634,13 +643,19 @@ mod tests {
 
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
-        assert_eq!(buffer.len(), 1);
         let change = buffer[0].1.value.downcast_ref::<Change<i64>>().unwrap();
-        assert_eq!(change.old, Some(1)); // committed value
-        assert_eq!(change.new, None); // tombstone
+        assert_eq!(
+            (buffer.len(), change),
+            (
+                1,
+                &Change {
+                    old: Some(1),
+                    new: None
+                }
+            )
+        );
         let cl = s.take_changelog();
-        assert_eq!(cl.len(), 1);
-        assert!(cl[0].1.is_none()); // changelog tombstone
+        assert_eq!((cl.len(), cl[0].1.is_none()), (1, true)); // changelog tombstone
     }
 
     /// `apply_changelog` on a cached store writes BELOW the cache (no dirty entry

@@ -165,11 +165,13 @@ mod tests {
     fn first_append_creates_batch() {
         let mut a = Accumulator::new(1024);
         let _ = a.try_append(None, Some(Bytes::from_static(b"hi")), vec![], 0);
-        assert!(a.current.is_some());
-        check!(a.current.as_ref().unwrap().records.len() == 1);
-        check!(!a.current.as_ref().unwrap().is_empty());
+        let current = a.current.as_ref().expect("append creates current batch");
         check!(
-            a.current.as_ref().unwrap().size_bytes == approx_record_size(None, Some(b"hi"), &[])
+            (
+                current.records.len(),
+                current.is_empty(),
+                current.size_bytes
+            ) == (1, false, approx_record_size(None, Some(b"hi"), &[]))
         );
     }
 
@@ -179,10 +181,17 @@ mod tests {
         let mut a = Accumulator::new(record_size * 2 - 1);
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
-        check!(a.ready.len() == 1);
-        assert!(a.current.is_some());
-        assert!(a.current.as_ref().unwrap().records.len() == 1);
-        check!(a.current.as_ref().unwrap().records[0].offset_delta == 0);
+        let current = a
+            .current
+            .as_ref()
+            .expect("second record starts a new batch");
+        check!(
+            (
+                a.ready.len(),
+                current.records.len(),
+                current.records[0].offset_delta
+            ) == (1, 1, 0)
+        );
     }
 
     #[test]
@@ -193,12 +202,16 @@ mod tests {
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
 
-        check!(a.ready.is_empty());
         let current = a.current.as_ref().unwrap();
-        assert!(current.records.len() == 2);
-        check!(current.records[0].offset_delta == 0);
-        check!(current.records[1].offset_delta == 1);
-        check!(current.size_bytes == record_size * 2);
+        check!(
+            (
+                a.ready.is_empty(),
+                current.records.len(),
+                current.records[0].offset_delta,
+                current.records[1].offset_delta,
+                current.size_bytes,
+            ) == (true, 2, 0, 1, record_size * 2)
+        );
     }
 
     #[test]
@@ -206,8 +219,7 @@ mod tests {
         let mut a = Accumulator::new(1024);
         let _ = a.try_append(None, Some(Bytes::from_static(b"x")), vec![], 0);
         a.seal_current();
-        assert!(a.current.is_none());
-        assert!(a.ready.len() == 1);
+        assert!((a.current.is_none(), a.ready.len()) == (true, 1));
     }
 
     #[test]
@@ -218,8 +230,7 @@ mod tests {
         assert!(a.current.as_ref().unwrap().is_empty());
         a.seal_current();
 
-        assert!(a.current.is_none());
-        assert!(a.ready.is_empty());
+        assert!((a.current.is_none(), a.ready.is_empty()) == (true, true));
     }
 
     #[test]
@@ -235,8 +246,21 @@ mod tests {
             },
         ];
 
-        let expected_size: usize = [8, 3, 4, 5, 4, 2, 3, 8, 5, 0, 8].into_iter().sum();
-        assert!(approx_record_size(Some(b"key"), Some(b"value"), &headers) == expected_size);
-        assert!(approx_record_size(None, None, &[]) == 8 + 4 + 4);
+        let populated_size: usize = [8, 3, 4, 5, 4, 2, 3, 8, 5, 0, 8].into_iter().sum();
+        for (name, key, value, case_headers, expected) in [
+            (
+                "populated",
+                Some(&b"key"[..]),
+                Some(&b"value"[..]),
+                headers.as_slice(),
+                populated_size,
+            ),
+            ("empty", None, None, &[][..], 8 + 4 + 4),
+        ] {
+            assert!(
+                approx_record_size(key, value, case_headers) == expected,
+                "case {name}"
+            );
+        }
     }
 }

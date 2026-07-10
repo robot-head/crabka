@@ -62,14 +62,14 @@ mod tests {
 
     #[test]
     fn attribute_bits_match_kafka_table() {
-        for (compression, want) in [
-            (Compression::None, 0),
-            (Compression::Gzip, 1),
-            (Compression::Snappy, 2),
-            (Compression::Lz4, 3),
-            (Compression::Zstd, 4),
+        for (name, compression, want) in [
+            ("none", Compression::None, 0),
+            ("gzip", Compression::Gzip, 1),
+            ("snappy", Compression::Snappy, 2),
+            ("lz4", Compression::Lz4, 3),
+            ("zstd", Compression::Zstd, 4),
         ] {
-            assert!(compression.attribute_bits() == want);
+            assert!(compression.attribute_bits() == want, "case {name}");
         }
     }
 

@@ -547,9 +547,17 @@ mod tests {
         s.put("k".to_string(), 0, 1, 5).await;
         s.put("k".to_string(), 0, 2, 7).await;
         s.put("k".to_string(), 10, 9, 11).await;
-        assert_eq!(s.fetch_single(&"k".to_string(), 0).await, Some((7, 2)));
-        assert_eq!(s.fetch_single(&"k".to_string(), 10).await, Some((11, 9)));
-        assert_eq!(s.fetch_single(&"k".to_string(), 99).await, None);
+        for (name, window_start, expected) in [
+            ("latest duplicate window", 0, Some((7, 2))),
+            ("next window", 10, Some((11, 9))),
+            ("missing window", 99, None),
+        ] {
+            assert_eq!(
+                s.fetch_single(&"k".to_string(), window_start).await,
+                expected,
+                "case {name}"
+            );
+        }
         assert_eq!(
             s.fetch(&"k".to_string(), 0, 10).await,
             vec![(0, 2), (10, 9)]
@@ -594,10 +602,15 @@ mod tests {
             vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 0, 6, 7)]
         );
 
-        // Range [0,10] returns all three.
-        assert_eq!(s.fetch_all_in_range(0, 10).await.len(), 3);
-        // Range above everything returns nothing.
-        assert!(s.fetch_all_in_range(11, 100).await.is_empty());
+        for (name, from, to, expected_len) in
+            [("all windows", 0, 10, 3), ("above all windows", 11, 100, 0)]
+        {
+            assert_eq!(
+                s.fetch_all_in_range(from, to).await.len(),
+                expected_len,
+                "case {name}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -750,11 +763,7 @@ mod tests {
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[7]).await;
         // Exactly ONE deduped record for the single fake child index 7.
-        assert_eq!(buffer.len(), 1);
         let (child, rec) = &buffer[0];
-        assert_eq!(*child, 7);
-        // Timestamp comes from the dirty entry's record context.
-        assert_eq!(rec.timestamp, 7);
         // Key downcasts to Windowed<String> with start 0 / end = start + size.
         let key = rec
             .key
@@ -762,27 +771,37 @@ mod tests {
             .unwrap()
             .downcast_ref::<Windowed<String>>()
             .unwrap();
-        assert_eq!(key.key, "a");
-        assert_eq!(key.window, Window { start: 0, end: 10 }); // end = start + window_size
         // Value downcasts to Change<i64> { old = committed (1), new = latest (3) }.
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
-        assert_eq!(change.old, Some(1));
-        assert_eq!(change.new, Some(3));
+        assert_eq!(
+            (buffer.len(), *child, rec.timestamp, key, change),
+            (
+                1,
+                7,
+                7,
+                &Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 10 },
+                },
+                &Change {
+                    old: Some(1),
+                    new: Some(3)
+                },
+            )
+        );
 
         // Changelog buffered the RAW windowed store-key + the latest wrapped value.
         let cl = s.take_changelog();
-        assert_eq!(cl.len(), 1);
         assert_eq!(
-            cl[0].0,
-            store_key(
-                &StringSerde.serialize("w-changelog", &"a".to_string()),
-                0,
-                0
-            )
-        );
-        assert_eq!(
-            cl[0].1,
-            Some(wrap_value(13, &I64Serde.serialize("w-changelog", &3)))
+            cl,
+            vec![(
+                store_key(
+                    &StringSerde.serialize("w-changelog", &"a".to_string()),
+                    0,
+                    0
+                ),
+                Some(wrap_value(13, &I64Serde.serialize("w-changelog", &3))),
+            )]
         );
 
         // Inner store now holds the write-through value.
@@ -816,24 +835,34 @@ mod tests {
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
         assert_eq!(buffer.len(), 1);
-        let (_child, rec) = &buffer[0];
+        let (child, rec) = &buffer[0];
         let key = rec
             .key
             .as_ref()
             .unwrap()
             .downcast_ref::<Windowed<String>>()
             .unwrap();
-        assert_eq!(key.key, "a");
+        let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
         // end == ws + D (10), NOT ws + 2*D (20).
         assert_eq!(
-            key.window,
-            Window {
-                start: ws,
-                end: ws + D
-            }
+            (buffer.len(), *child, rec.timestamp, key, change),
+            (
+                1,
+                0,
+                7,
+                &Windowed {
+                    key: "a".into(),
+                    window: Window {
+                        start: ws,
+                        end: ws + D,
+                    },
+                },
+                &Change {
+                    old: None,
+                    new: Some(1),
+                },
+            )
         );
-        let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
-        assert_eq!(change.new, Some(1));
     }
 
     /// Cached `fetch` / `fetch_with_ts` route through `Backing::Cached::range`

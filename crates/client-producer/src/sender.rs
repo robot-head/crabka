@@ -1145,39 +1145,54 @@ mod tests {
 
     #[test]
     fn classify_verdict_maps_codes() {
-        for (code, base_offset, want) in [
+        for (name, code, base_offset, want) in [
             (
+                "success",
                 codes::NONE,
                 42,
                 Classification::Verdict(BatchVerdict::Acked { base_offset: 42 }),
             ),
             // DUPLICATE is acked like a success (broker already wrote it).
             (
+                "duplicate sequence",
                 codes::DUPLICATE_SEQUENCE_NUMBER,
                 7,
                 Classification::Verdict(BatchVerdict::Acked { base_offset: 7 }),
             ),
             (
+                "out of order",
                 codes::OUT_OF_ORDER_SEQUENCE_NUMBER,
                 0,
                 Classification::Verdict(BatchVerdict::Retry),
             ),
             (
+                "invalid epoch",
                 codes::INVALID_PRODUCER_EPOCH,
                 0,
                 Classification::Verdict(BatchVerdict::Fence),
             ),
-            (codes::NOT_LEADER_OR_FOLLOWER, 0, Classification::Routing),
             (
+                "not leader",
+                codes::NOT_LEADER_OR_FOLLOWER,
+                0,
+                Classification::Routing,
+            ),
+            (
+                "unknown topic",
                 codes::UNKNOWN_TOPIC_OR_PARTITION,
                 0,
                 Classification::Routing,
             ),
             // An arbitrary server error (MESSAGE_TOO_LARGE = 10) is terminal-but-
             // not-fatal: fail the records with Server(10), never fence.
-            (10, 0, Classification::Verdict(BatchVerdict::Terminal(10))),
+            (
+                "terminal server error",
+                10,
+                0,
+                Classification::Verdict(BatchVerdict::Terminal(10)),
+            ),
         ] {
-            assert!(classify_verdict(code, base_offset) == want);
+            assert!(classify_verdict(code, base_offset) == want, "case {name}");
         }
     }
 
@@ -1197,11 +1212,15 @@ mod tests {
 
         let (to_send, expired) = collect_retries(&mut retry, Instant::now());
 
-        assert!(expired.len() == 1);
-        check!(expired[0].base_sequence == 0);
-        assert!(to_send.len() == 1);
-        check!(to_send[0].base_sequence == 16);
-        check!(retry.is_empty());
+        check!(
+            (
+                expired.len(),
+                expired[0].base_sequence,
+                to_send.len(),
+                to_send[0].base_sequence,
+                retry.is_empty(),
+            ) == (1, 0, 1, 16, true)
+        );
     }
 
     #[test]
@@ -1213,9 +1232,7 @@ mod tests {
         let now = Instant::now();
         let (to_send, expired) = collect_retries(&mut retry, now);
 
-        check!(expired.is_empty());
-        assert!(to_send.len() == 1);
-        check!(to_send[0].first_sent == Some(now));
+        check!((expired.is_empty(), to_send.len(), to_send[0].first_sent) == (true, 1, Some(now)));
     }
 
     #[test]
@@ -1240,16 +1257,16 @@ mod tests {
             (to_send.len(), retry.len())
         };
 
-        for (elapsed, want) in [
+        for (name, elapsed, want) in [
             // Before the backoff instant: parked in its slot, nothing sent.
-            (Duration::from_millis(40), (0, 1)),
+            ("before deadline", Duration::from_millis(40), (0, 1)),
             // Exactly at the backoff instant: eligible — `now < t` is false
             // here, so `<` resends while `<=` would keep it parked.
-            (backoff, (1, 0)),
+            ("at deadline", backoff, (1, 0)),
             // After the backoff instant: eligible and drained out to send.
-            (Duration::from_millis(160), (1, 0)),
+            ("after deadline", Duration::from_millis(160), (1, 0)),
         ] {
-            assert!(collect_after(elapsed) == want);
+            assert!(collect_after(elapsed) == want, "case {name}");
         }
     }
 
@@ -1261,13 +1278,17 @@ mod tests {
         let now = Instant::now();
         let d = Duration::from_millis(100);
         assert!(backoff_deadline(now, d) == now + d);
-        assert!(backoff_deadline(now, d) > now);
     }
 
     #[test]
     fn positive_partition_count_filters_boundary_values() {
-        for (input, want) in [(-1, None), (0, None), (1, Some(1)), (2, Some(2))] {
-            assert!(positive_partition_count(input) == want);
+        for (name, input, want) in [
+            ("negative", -1, None),
+            ("zero", 0, None),
+            ("one", 1, Some(1)),
+            ("positive", 2, Some(2)),
+        ] {
+            assert!(positive_partition_count(input) == want, "case {name}");
         }
     }
 }
@@ -2027,21 +2048,17 @@ mod harness {
             .expect("oneshot sender should stay alive")
             .expect("record should ack after reroute");
 
-        check!(md.partition == 0);
-        check!(md.offset == 0);
+        let refresh_count = h.transport.refresh_count();
         check!(
-            h.transport.refresh_count() >= 1,
-            "first transport failure must force a metadata refresh"
+            (
+                md.partition,
+                md.offset,
+                (1..=2).contains(&refresh_count),
+                h.transport.sent_leaders(),
+                h.transport.evicted(),
+            ) == (0, 0, true, vec![Some(0), Some(1)], vec![0]),
+            "failover must refresh once without churn, evict the stale leader, and reroute"
         );
-        check!(
-            h.transport.refresh_count() <= 2,
-            "failover should not spin through repeated refreshes"
-        );
-        check!(
-            h.transport.sent_leaders() == vec![Some(0), Some(1)],
-            "sender should try stale leader once, then reroute to fresh leader"
-        );
-        check!(h.transport.evicted() == vec![0]);
 
         shutdown(h).await;
     }
@@ -2081,16 +2098,14 @@ mod harness {
             .expect("live partition ack should not wait for a slow dead leader")
             .expect("oneshot sender should stay alive")
             .expect("live partition should ack Ok");
-        assert!(live_md.partition == 1);
-        assert!(live_md.offset == 0);
+        assert!((live_md.partition, live_md.offset) == (1, 0));
 
         let dead_md = tokio::time::timeout(Duration::from_secs(5), dead_rx.remove(0))
             .await
             .expect("dead leader partition should resolve after reroute")
             .expect("oneshot sender should stay alive")
             .expect("dead leader partition should ack after reroute");
-        assert!(dead_md.partition == 0);
-        assert!(dead_md.offset == 0);
+        assert!((dead_md.partition, dead_md.offset) == (0, 0));
 
         let sent = h.transport.sent_leaders();
         assert!(
@@ -2275,16 +2290,12 @@ mod harness {
 
         let leaders = h.transport.sent_leaders();
         check!(
-            leaders.contains(&Some(5)),
-            "known leader 5 must be routed to explicitly, got {leaders:?}"
-        );
-        check!(
-            leaders.contains(&None),
-            "unknown leader must fall back to bootstrap (None), got {leaders:?}"
-        );
-        check!(
-            !leaders.contains(&Some(7)),
-            "unknown-address leader 7 must never be dialed, got {leaders:?}"
+            (
+                leaders.contains(&Some(5)),
+                leaders.contains(&None),
+                leaders.contains(&Some(7)),
+            ) == (true, true, false),
+            "known, bootstrap-fallback, and unknown-address leader routing: {leaders:?}"
         );
 
         shutdown(h).await;
@@ -2434,23 +2445,15 @@ mod harness {
 
         let leaders = h.transport.sent_leaders();
         check!(
-            leaders.contains(&Some(5)),
-            "first send routes to current leader 5, got {leaders:?}"
-        );
-        check!(
-            leaders.contains(&Some(8)),
-            "the resend must adopt the inline hint 8, got {leaders:?}"
-        );
-        check!(
-            h.partition_leaders
-                .get(&("t".to_string(), 0))
-                .map(|e| *e.value())
-                == Some(8),
-            "the leader cache must be updated to the hinted leader 8"
-        );
-        check!(
-            h.transport.refresh_count() == 0,
-            "a known inline hint must not trigger a metadata refresh"
+            (
+                leaders.contains(&Some(5)),
+                leaders.contains(&Some(8)),
+                h.partition_leaders
+                    .get(&("t".to_string(), 0))
+                    .map(|e| *e.value()),
+                h.transport.refresh_count(),
+            ) == (true, true, Some(8), 0),
+            "inline hint must reroute, update the cache, and avoid metadata refresh: {leaders:?}"
         );
 
         shutdown(h).await;

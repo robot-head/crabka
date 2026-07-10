@@ -82,8 +82,12 @@ mod tests {
             .await;
         check!(s.get(&[1, 2]).await == Some(Bytes::from_static(b"b")));
         let r = s.range(&[1, 0], &[2, 0]).await;
-        check!(r.len() == 2);
-        check!(r[0].1 == Bytes::from_static(b"a")); // ordered
+        check!(
+            r == vec![
+                (Bytes::from_static(&[1, 0]), Bytes::from_static(b"a")),
+                (Bytes::from_static(&[1, 2]), Bytes::from_static(b"b")),
+            ]
+        ); // ordered
         check!(s.delete(&[1, 0]).await == Some(Bytes::from_static(b"a")));
         check!(s.get(&[1, 0]).await == None);
     }

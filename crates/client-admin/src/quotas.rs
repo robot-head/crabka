@@ -467,8 +467,7 @@ mod tests {
             .expect("alter quotas maps broker entry")
             .expect("non-zero broker error is returned");
 
-        assert!(error.code == 40);
-        assert!(error.message == Some("invalid quota".into()));
+        assert!((error.code, error.message.as_deref()) == (40, Some("invalid quota")));
         let request = seen_request
             .lock()
             .expect("request capture lock")

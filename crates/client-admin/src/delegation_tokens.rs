@@ -270,8 +270,7 @@ mod tests {
     #[test]
     fn build_renew_uses_minus_one_for_broker_default() {
         let req = build_renew_delegation_token(b"\x01\x02\x03");
-        assert!(req.hmac.as_ref() == &[0x01, 0x02, 0x03]);
-        assert!(req.renew_period_ms == -1);
+        assert!((req.hmac.as_ref(), req.renew_period_ms) == (&[0x01, 0x02, 0x03][..], -1));
     }
 
     /// Expire-immediately is signaled by `expiry_time_period_ms = -1`;
@@ -279,38 +278,30 @@ mod tests {
     #[test]
     fn build_expire_uses_minus_one_for_immediate_tombstone() {
         let req = build_expire_delegation_token(b"\xaa\xbb");
-        assert!(req.hmac.as_ref() == &[0xaa, 0xbb]);
-        assert!(req.expiry_time_period_ms == -1);
+        assert!((req.hmac.as_ref(), req.expiry_time_period_ms) == (&[0xaa, 0xbb][..], -1));
     }
 
     // ── build_describe_owner_filter ──────────────────────────────────
 
     #[test]
     fn build_describe_owner_filter_sets_single_entry() {
-        let req = build_describe_owner_filter("User:alice");
-        assert!(
-            req == DescribeDelegationTokenRequest {
-                owners: Some(vec![DescribeDelegationTokenOwner {
-                    principal_type: "User".to_string(),
-                    principal_name: "alice".to_string(),
+        for (name, owner, principal_name) in [
+            ("typed owner", "User:alice", "alice"),
+            ("bare owner defaults to User", "solo", "solo"),
+        ] {
+            let req = build_describe_owner_filter(owner);
+            assert!(
+                req == DescribeDelegationTokenRequest {
+                    owners: Some(vec![DescribeDelegationTokenOwner {
+                        principal_type: "User".to_string(),
+                        principal_name: principal_name.to_string(),
+                        unknown_tagged_fields: UnknownTaggedFields(vec![]),
+                    }]),
                     unknown_tagged_fields: UnknownTaggedFields(vec![]),
-                }]),
-                unknown_tagged_fields: UnknownTaggedFields(vec![]),
-            }
-        );
-
-        // Bare-name default-type=User path.
-        let req2 = build_describe_owner_filter("solo");
-        assert!(
-            req2 == DescribeDelegationTokenRequest {
-                owners: Some(vec![DescribeDelegationTokenOwner {
-                    principal_type: "User".to_string(),
-                    principal_name: "solo".to_string(),
-                    unknown_tagged_fields: UnknownTaggedFields(vec![]),
-                }]),
-                unknown_tagged_fields: UnknownTaggedFields(vec![]),
-            }
-        );
+                },
+                "case {name}"
+            );
+        }
     }
 
     // ── parse_describe_delegation_tokens ─────────────────────────────
@@ -381,14 +372,19 @@ mod tests {
                 name,
                 message,
             } => {
-                check!(api == "CreateDelegationToken");
-                check!(code == 65);
                 // 65 is not in `kafka_error_name`'s match table yet, so
                 // it falls through to "UNKNOWN" — locking that behavior
                 // so a later edit to the table doesn't silently change
                 // the surfaced name.
-                check!(name == "UNKNOWN");
-                check!(message.as_deref() == Some("not super-user"));
+                check!(
+                    (api, code, name, message.as_deref())
+                        == (
+                            "CreateDelegationToken",
+                            65,
+                            "UNKNOWN",
+                            Some("not super-user")
+                        )
+                );
             }
             other => panic!("expected AdminError::Broker, got {other:?}"),
         }
@@ -406,8 +402,7 @@ mod tests {
         let err = parse_describe_delegation_tokens(resp).unwrap_err();
         match err {
             AdminError::Broker { api, code, .. } => {
-                assert!(api == "DescribeDelegationToken");
-                assert!(code == 61);
+                assert!((api, code) == ("DescribeDelegationToken", 61));
             }
             other => panic!("expected AdminError::Broker, got {other:?}"),
         }

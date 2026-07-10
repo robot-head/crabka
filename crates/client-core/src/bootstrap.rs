@@ -36,10 +36,9 @@ mod tests {
     #[tokio::test]
     async fn resolve_returns_addresses_for_valid_entries() {
         let addrs = resolve("127.0.0.1:9092, 127.0.0.1:9093").await.unwrap();
-
-        assert_eq!(addrs.len(), 2);
-        assert!(addrs.iter().any(|addr| addr.port() == 9092));
-        assert!(addrs.iter().any(|addr| addr.port() == 9093));
+        let mut ports: Vec<_> = addrs.iter().map(std::net::SocketAddr::port).collect();
+        ports.sort_unstable();
+        assert_eq!(ports, vec![9092, 9093]);
     }
 
     #[tokio::test]

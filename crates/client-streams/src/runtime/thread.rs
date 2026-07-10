@@ -1539,11 +1539,20 @@ mod tests {
             )
             .await
             .unwrap();
-        check!(thread.task_count() == 3);
-
-        check!(thread.tasks.get(&("0".to_string(), 0)).map(|t| t.role) == Some(TaskRole::Active));
-        check!(thread.tasks.get(&("0".to_string(), 1)).map(|t| t.role) == Some(TaskRole::Standby));
-        check!(thread.tasks.get(&("0".to_string(), 2)).map(|t| t.role) == Some(TaskRole::Warmup));
+        let mut roles: Vec<_> = thread
+            .tasks
+            .iter()
+            .map(|(key, task)| (key.clone(), task.role))
+            .collect();
+        roles.sort_by(|a, b| a.0.cmp(&b.0));
+        check!(
+            roles
+                == vec![
+                    (("0".to_string(), 0), TaskRole::Active),
+                    (("0".to_string(), 1), TaskRole::Standby),
+                    (("0".to_string(), 2), TaskRole::Warmup),
+                ]
+        );
 
         // 2. Updated assignment:
         // Subtopology 0 Partition 0 -> Standby (Demoted)
@@ -1588,12 +1597,20 @@ mod tests {
             )
             .await
             .unwrap();
-        check!(thread.task_count() == 3);
-
-        check!(thread.tasks.get(&("0".to_string(), 0)).map(|t| t.role) == Some(TaskRole::Standby));
-        check!(!thread.tasks.contains_key(&("0".to_string(), 1)));
-        check!(thread.tasks.get(&("0".to_string(), 2)).map(|t| t.role) == Some(TaskRole::Active));
-        check!(thread.tasks.get(&("0".to_string(), 3)).map(|t| t.role) == Some(TaskRole::Warmup));
+        let mut roles: Vec<_> = thread
+            .tasks
+            .iter()
+            .map(|(key, task)| (key.clone(), task.role))
+            .collect();
+        roles.sort_by(|a, b| a.0.cmp(&b.0));
+        check!(
+            roles
+                == vec![
+                    (("0".to_string(), 0), TaskRole::Standby),
+                    (("0".to_string(), 2), TaskRole::Active),
+                    (("0".to_string(), 3), TaskRole::Warmup),
+                ]
+        );
     }
 
     /// EOS-v2 happy path: the thread runs the full transactional commit lifecycle
@@ -2042,10 +2059,22 @@ mod tests {
         // "counts" changelog got exactly one entry.
         let sent = mock.sent.lock().unwrap();
         let out: Vec<_> = sent.iter().filter(|(t, ..)| t == "out").collect();
-        check!(out.len() == 1, "exactly one deduped sink record");
         check!(
-            out[0].3.as_deref() == Some([0, 0, 0, 0, 0, 0, 0, 2].as_ref()),
-            "deduped sink value is the latest count (2)"
+            out.iter()
+                .map(|(topic, partition, key, value)| (
+                    topic.as_str(),
+                    *partition,
+                    key.as_deref(),
+                    value.as_deref(),
+                ))
+                .collect::<Vec<_>>()
+                == vec![(
+                    "out",
+                    None,
+                    Some(b"a".as_ref()),
+                    Some(&[0u8, 0, 0, 0, 0, 0, 0, 2][..]),
+                )],
+            "exactly one deduped sink record with the latest count"
         );
         check!(
             sent.iter().any(|(t, ..)| t.contains("counts")),

@@ -389,29 +389,46 @@ mod tests {
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(key.window, Window { start: 0, end: 10 });
-        assert_eq!(change.old, None);
-        assert_eq!(change.new, Some(1));
+        assert_eq!(
+            (*key, *change),
+            (
+                Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 10 },
+                },
+                Change {
+                    old: None,
+                    new: Some(1)
+                },
+            )
+        );
 
         // record at ts=7 → same window [0,10), count 2
         drive!(7);
         let (_, rec2) = buffer.pop_front().unwrap();
         let change2 = rec2.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(change2.old, Some(1));
-        assert_eq!(change2.new, Some(2));
+        assert_eq!(
+            *change2,
+            Change {
+                old: Some(1),
+                new: Some(2)
+            }
+        );
 
         // record at ts=12 → window [10,20), count 1
         drive!(12);
         let (_, rec3) = buffer.pop_front().unwrap();
+        let window = rec3
+            .key
+            .unwrap()
+            .downcast::<Windowed<String>>()
+            .unwrap()
+            .window;
+        let change = rec3.value.downcast::<Change<i64>>().unwrap();
         assert_eq!(
-            rec3.key
-                .unwrap()
-                .downcast::<Windowed<String>>()
-                .unwrap()
-                .window,
-            Window { start: 10, end: 20 }
+            (window, change.new),
+            (Window { start: 10, end: 20 }, Some(1))
         );
-        assert_eq!(rec3.value.downcast::<Change<i64>>().unwrap().new, Some(1));
     }
 
     #[tokio::test]
@@ -487,9 +504,20 @@ mod tests {
         assert_eq!(buffer.len(), 1, "exactly one final emit on close");
         let (_, rec) = buffer.pop_front().unwrap();
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(key.key, "a");
-        assert_eq!(key.window, Window { start: 0, end: 10 });
-        assert_eq!(rec.value.downcast::<Change<i64>>().unwrap().new, Some(2));
+        let change = rec.value.downcast::<Change<i64>>().unwrap();
+        assert_eq!(
+            (*key, *change),
+            (
+                Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 10 },
+                },
+                Change {
+                    old: None,
+                    new: Some(2)
+                },
+            )
+        );
     }
 
     #[tokio::test]
@@ -565,10 +593,20 @@ mod tests {
         assert_eq!(buffer.len(), 1, "exactly one final emit on close");
         let (_, rec) = buffer.pop_front().unwrap();
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(key.key, "a");
-        assert_eq!(key.window, Window { start: 0, end: 10 });
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!((ch.old, ch.new), (None, Some(10)));
+        assert_eq!(
+            (*key, *ch),
+            (
+                Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 10 },
+                },
+                Change {
+                    old: None,
+                    new: Some(10)
+                },
+            )
+        );
     }
 
     // ── Record-cache suppression (sub-task 3d-ii) ─────────────────────────────
@@ -672,9 +710,20 @@ mod tests {
         assert_eq!(buffer.len(), 1, "flush emits exactly one deduped change");
         let (_, rec) = buffer.pop_front().unwrap();
         let key = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(key.key, "a");
-        assert_eq!(key.window, Window { start: 0, end: 10 });
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!(ch.new, Some(2), "deduped to the latest window count");
+        assert_eq!(
+            (*key, *ch),
+            (
+                Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 10 },
+                },
+                Change {
+                    old: None,
+                    new: Some(2)
+                },
+            ),
+            "deduped to the latest window count"
+        );
     }
 }

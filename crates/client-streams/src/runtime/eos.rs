@@ -143,8 +143,15 @@ mod tests {
 
     #[test]
     fn transactional_id_is_stable_per_thread() {
-        check!(transactional_id("word-count", 0) == "word-count-0");
-        check!(transactional_id("word-count", 1) == "word-count-1");
+        for (name, thread, expected) in [
+            ("first thread", 0, "word-count-0"),
+            ("second thread", 1, "word-count-1"),
+        ] {
+            check!(
+                transactional_id("word-count", thread) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[tokio::test]

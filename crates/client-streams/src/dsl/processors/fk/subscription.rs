@@ -157,8 +157,12 @@ mod tests {
         for e in v["instruction_ordinals"].as_array().unwrap() {
             let name = e["name"].as_str().unwrap();
             let byte = u8::try_from(e["byte"].as_u64().unwrap()).unwrap();
-            assert_eq!(Instruction::from_byte(byte).unwrap().name(), name);
-            assert_eq!(Instruction::from_byte(byte).unwrap().to_byte(), byte);
+            let instruction = Instruction::from_byte(byte).unwrap();
+            assert_eq!(
+                (instruction.name(), instruction.to_byte()),
+                (name, byte),
+                "case {name}"
+            );
         }
     }
 
@@ -180,11 +184,16 @@ mod tests {
                 primary_partition: pp,
             };
             assert_eq!(
-                w.serialize(),
-                Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
-                "subscription wrapper bytes mismatch: {e}"
+                (
+                    w.serialize(),
+                    SubscriptionWrapper::deserialize(&w.serialize())
+                ),
+                (
+                    Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
+                    w.clone()
+                ),
+                "subscription wrapper fixture: {e}"
             );
-            assert_eq!(SubscriptionWrapper::deserialize(&w.serialize()), w);
         }
     }
 
@@ -199,11 +208,16 @@ mod tests {
                 foreign_value: fv.clone(),
             };
             assert_eq!(
-                w.serialize(),
-                Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
-                "response wrapper bytes mismatch: {e}"
+                (
+                    w.serialize(),
+                    SubscriptionResponseWrapper::deserialize(&w.serialize())
+                ),
+                (
+                    Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
+                    w.clone()
+                ),
+                "response wrapper fixture: {e}"
             );
-            assert_eq!(SubscriptionResponseWrapper::deserialize(&w.serialize()), w);
         }
     }
 

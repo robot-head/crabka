@@ -651,8 +651,12 @@ mod tests {
             .iter()
             .find(|part| part.partition_index == 2)
             .unwrap();
-        assert!(part.partition_max_bytes == PARTITION_MAX_BYTES);
-        assert!(part.acknowledgement_batches == vec![ack]);
+        assert!(
+            (
+                part.partition_max_bytes,
+                part.acknowledgement_batches.as_slice()
+            ) == (PARTITION_MAX_BYTES, &[ack][..])
+        );
         let empty = topic
             .partitions
             .iter()
@@ -682,14 +686,26 @@ mod tests {
 
     #[test]
     fn response_and_record_helpers_preserve_boundaries() {
-        check!(!response_has_error(0));
-        check!(response_has_error(17));
-        check!(range_len(10, 12) == 3);
-        check!(range_len(12, 10) == 0);
-        check!(offset_in_range(10, 10, 12));
-        check!(offset_in_range(10, 12, 12));
-        check!(!offset_in_range(10, 9, 12));
-        check!(!offset_in_range(10, 13, 12));
+        for (name, code, expected) in [("success", 0, false), ("error", 17, true)] {
+            check!(response_has_error(code) == expected, "case {name}");
+        }
+        for (name, first, last, expected) in [
+            ("inclusive range", 10, 12, 3),
+            ("reversed range", 12, 10, 0),
+        ] {
+            check!(range_len(first, last) == expected, "case {name}");
+        }
+        for (name, first, offset, last, expected) in [
+            ("lower bound", 10, 10, 12, true),
+            ("upper bound", 10, 12, 12, true),
+            ("below range", 10, 9, 12, false),
+            ("above range", 10, 13, 12, false),
+        ] {
+            check!(
+                offset_in_range(first, offset, last) == expected,
+                "case {name}"
+            );
+        }
         check!(record_offset(100, 7) == 107);
         check!(record_timestamp(1000, 33) == 1033);
     }
@@ -773,8 +789,12 @@ mod tests {
 
         let acks = consumer.take_piggyback_acks();
 
-        assert!(consumer.prev_delivered.is_empty());
-        assert!(consumer.pending_acks.is_empty());
+        assert!(
+            (
+                consumer.prev_delivered.is_empty(),
+                consumer.pending_acks.is_empty()
+            ) == (true, true)
+        );
         let batch = only(acks.get(&(id(7), 2)).unwrap());
         assert!(
             *batch

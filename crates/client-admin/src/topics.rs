@@ -555,8 +555,12 @@ mod tests {
             ..Default::default()
         };
         let md = parse_metadata(resp);
-        assert!(md.topics[0].partition_count == 3);
-        assert!(md.topics[0].replication_factor == 2);
+        assert!(
+            (
+                md.topics[0].partition_count,
+                md.topics[0].replication_factor
+            ) == (3, 2)
+        );
     }
 
     // ── parse_create_topics ────────────────────────────────────────────

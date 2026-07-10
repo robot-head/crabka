@@ -433,8 +433,19 @@ mod tests {
         let (_, rec) = buffer.pop_front().unwrap();
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
         let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(wk.window, Window { start: 0, end: 0 });
-        assert_eq!((ch.old, ch.new), (None, Some(1)));
+        assert_eq!(
+            (*wk, *ch),
+            (
+                Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 0 },
+                },
+                Change {
+                    old: None,
+                    new: Some(1)
+                },
+            )
+        );
 
         // record 2 @ ts=30 (within gap 60 of session [0,0]) → merge:
         //   tombstone [0,0], update merged [0,30] count 2.
@@ -461,13 +472,26 @@ mod tests {
         let (_, tomb) = buffer.pop_front().unwrap();
         let tch = tomb.value.downcast::<Change<i64>>().unwrap();
         let tkey = tomb.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(tkey.window, Window { start: 0, end: 0 });
-        assert!(tch.is_tombstone());
+        assert_eq!(
+            (tkey.window, tch.is_tombstone()),
+            (Window { start: 0, end: 0 }, true)
+        );
         let (_, upd) = buffer.pop_front().unwrap();
         let uch = upd.value.downcast::<Change<i64>>().unwrap();
         let ukey = upd.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(ukey.window, Window { start: 0, end: 30 });
-        assert_eq!((uch.old, uch.new), (None, Some(2)));
+        assert_eq!(
+            (*ukey, *uch),
+            (
+                Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 30 },
+                },
+                Change {
+                    old: None,
+                    new: Some(2)
+                },
+            )
+        );
     }
 
     #[tokio::test]
@@ -589,40 +613,34 @@ mod tests {
         }
         // Deterministic emit order: tombstone candidates in store order (end asc) —
         // [0,0] then [100,100] — then the merged update [0,100] = 3.
-        assert_eq!(buffer.len(), 3);
-        let (_, t0) = buffer.pop_front().unwrap();
-        assert!(t0.value.downcast::<Change<i64>>().unwrap().is_tombstone());
+        let actual = buffer
+            .drain(..)
+            .map(|(_, record)| {
+                let window = record
+                    .key
+                    .unwrap()
+                    .downcast::<Windowed<String>>()
+                    .unwrap()
+                    .window;
+                let change = record.value.downcast::<Change<i64>>().unwrap();
+                (window, change.is_tombstone(), change.new)
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            t0.key
-                .unwrap()
-                .downcast::<Windowed<String>>()
-                .unwrap()
-                .window,
-            Window { start: 0, end: 0 }
+            actual,
+            vec![
+                (Window { start: 0, end: 0 }, true, None),
+                (
+                    Window {
+                        start: 100,
+                        end: 100
+                    },
+                    true,
+                    None
+                ),
+                (Window { start: 0, end: 100 }, false, Some(3)),
+            ]
         );
-        let (_, t1) = buffer.pop_front().unwrap();
-        assert!(t1.value.downcast::<Change<i64>>().unwrap().is_tombstone());
-        assert_eq!(
-            t1.key
-                .unwrap()
-                .downcast::<Windowed<String>>()
-                .unwrap()
-                .window,
-            Window {
-                start: 100,
-                end: 100
-            }
-        );
-        let (_, upd) = buffer.pop_front().unwrap();
-        assert_eq!(
-            upd.key
-                .unwrap()
-                .downcast::<Windowed<String>>()
-                .unwrap()
-                .window,
-            Window { start: 0, end: 100 }
-        );
-        assert_eq!(upd.value.downcast::<Change<i64>>().unwrap().new, Some(3));
     }
 
     #[tokio::test]
@@ -707,10 +725,20 @@ mod tests {
         assert_eq!(buffer.len(), 1, "exactly one closed-session emit");
         let (_, rec) = buffer.pop_front().unwrap();
         let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(wk.key, "a");
-        assert_eq!(wk.window, Window { start: 0, end: 4 });
         let ch = rec.value.downcast::<Change<i64>>().unwrap();
-        assert_eq!((ch.old, ch.new), (None, Some(2)));
+        assert_eq!(
+            (*wk, *ch),
+            (
+                Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 4 },
+                },
+                Change {
+                    old: None,
+                    new: Some(2)
+                },
+            )
+        );
     }
 
     #[tokio::test]
@@ -764,19 +792,17 @@ mod tests {
                 .await;
         }
         // buffer = [update[0,0]="x", tombstone[0,0], update[0,30]="xy"].
-        assert_eq!(buffer.len(), 3);
         let (_, last) = buffer.pop_back().unwrap();
+        let window = last
+            .key
+            .unwrap()
+            .downcast::<Windowed<String>>()
+            .unwrap()
+            .window;
+        let change = last.value.downcast::<Change<String>>().unwrap();
         assert_eq!(
-            last.key
-                .unwrap()
-                .downcast::<Windowed<String>>()
-                .unwrap()
-                .window,
-            Window { start: 0, end: 30 }
-        );
-        assert_eq!(
-            last.value.downcast::<Change<String>>().unwrap().new,
-            Some("xy".to_string())
+            (buffer.len(), window, change.new),
+            (2, Window { start: 0, end: 30 }, Some("xy".to_string()))
         );
     }
 
@@ -865,10 +891,20 @@ mod tests {
         assert_eq!(buffer.len(), 1, "exactly one closed-session emit");
         let (_, rec) = buffer.pop_front().unwrap();
         let wk = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(wk.key, "a");
-        assert_eq!(wk.window, Window { start: 0, end: 4 });
         let ch = rec.value.downcast::<Change<String>>().unwrap();
-        assert_eq!((ch.old, ch.new), (None, Some("xy".to_string())));
+        assert_eq!(
+            (*wk, *ch),
+            (
+                Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 4 },
+                },
+                Change {
+                    old: None,
+                    new: Some("xy".to_string())
+                },
+            )
+        );
     }
 
     // ── Record-cache suppression (sub-task 3d-ii) ─────────────────────────────

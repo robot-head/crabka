@@ -40,13 +40,29 @@ mod tests {
 
     #[test]
     fn assignor_protocol_names_match_kafka_protocols() {
-        assert!(Assignor::Range.protocol_name() == "range");
-        assert!(Assignor::CooperativeSticky.protocol_name() == "cooperative-sticky");
+        for (name, assignor, expected) in [
+            ("range", Assignor::Range, "range"),
+            (
+                "cooperative sticky",
+                Assignor::CooperativeSticky,
+                "cooperative-sticky",
+            ),
+        ] {
+            assert!(assignor.protocol_name() == expected, "case {name}");
+        }
     }
 
     #[test]
     fn assignor_rebalance_protocols_match_assignor_strategy() {
-        assert!(Assignor::Range.rebalance_protocol() == RebalanceProtocol::Eager);
-        assert!(Assignor::CooperativeSticky.rebalance_protocol() == RebalanceProtocol::Cooperative);
+        for (name, assignor, expected) in [
+            ("range", Assignor::Range, RebalanceProtocol::Eager),
+            (
+                "cooperative sticky",
+                Assignor::CooperativeSticky,
+                RebalanceProtocol::Cooperative,
+            ),
+        ] {
+            assert!(assignor.rebalance_protocol() == expected, "case {name}");
+        }
     }
 }

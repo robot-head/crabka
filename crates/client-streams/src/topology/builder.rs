@@ -1632,8 +1632,12 @@ mod tests {
         t.add_copartition_group(["left", "right"]);
         let wire = t.build("app").unwrap().to_wire();
         let sub = &wire.subtopologies[0];
-        check!(sub.copartition_groups.len() == 1);
-        check!(sub.copartition_groups[0].source_topics == vec![0i16, 1i16]); // sorted ["left","right"]
+        check!(
+            (
+                sub.copartition_groups.len(),
+                sub.copartition_groups[0].source_topics.as_slice()
+            ) == (1, &[0i16, 1][..])
+        );
     }
 
     #[test]
@@ -1657,9 +1661,13 @@ mod tests {
         check!(t.has_global_store_for_test("global-store"));
         let built = t.build("app").unwrap();
         let wire = built.to_wire();
-        check!(wire.subtopologies.len() == 1);
-        check!(wire.subtopologies[0].subtopology_id == "1");
-        check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
+        check!(
+            (
+                wire.subtopologies.len(),
+                wire.subtopologies[0].subtopology_id.as_str(),
+                wire.subtopologies[0].source_topics.as_slice(),
+            ) == (1, "1", &["in".to_string()][..])
+        );
         // No changelog topic anywhere.
         check!(
             wire.subtopologies
@@ -1694,9 +1702,13 @@ mod tests {
         t.add_sink("out", "out-topic", [&up]);
         let built = t.build("app").unwrap();
         let wire = built.to_wire();
-        check!(wire.epoch == 0);
-        check!(wire.subtopologies[0].subtopology_id == "0");
-        check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
+        check!(
+            (
+                wire.epoch,
+                wire.subtopologies[0].subtopology_id.as_str(),
+                wire.subtopologies[0].source_topics.as_slice(),
+            ) == (0, "0", &["in".to_string()][..])
+        );
         check!(built.source_topics_for("0") == ["in".to_string()]);
     }
 
@@ -1765,8 +1777,10 @@ mod tests {
         .unwrap();
         pollster::block_on(g.pipe("in", Some(b"k"), b"hi", 0)).unwrap();
         let out = g.take_output();
-        check!(out.len() == 1);
-        check!(out[0].value.as_ref().unwrap().as_ref() == b"HI");
+        check!(
+            (out.len(), out[0].value.as_ref().map(bytes::Bytes::as_ref))
+                == (1, Some(b"HI".as_slice()))
+        );
     }
 
     #[test]
@@ -2021,8 +2035,7 @@ mod tests {
             1024,
         ))
         .unwrap();
-        check!(g.cache_owner.get("counts") == Some(&0));
-        check!(g.stores.kv_is_cached("counts"));
+        check!((g.cache_owner.get("counts"), g.stores.kv_is_cached("counts")) == (Some(&0), true));
 
         // Pipe two records for the SAME key, then flush: a cached store dedups the
         // two staged writes into ONE changelog entry. (Without caching the store
@@ -2036,9 +2049,15 @@ mod tests {
         );
         pollster::block_on(g.flush_caches()).unwrap();
         let cl = g.drain_changelogs(&std::collections::HashSet::new());
-        check!(cl.len() == 1); // deduped to the latest count (2)
         // tuple is (changelog_topic, key, value, ts); value is the BE i64 count.
-        check!(cl[0].2.as_ref().unwrap().as_ref() == [0, 0, 0, 0, 0, 0, 0, 2]);
+        check!(
+            cl == vec![(
+                "app-counts-changelog".to_string(),
+                bytes::Bytes::from_static(b"x"),
+                Some(bytes::Bytes::copy_from_slice(&2i64.to_be_bytes())),
+                None,
+            )]
+        ); // deduped to the latest count (2)
     }
 
     #[test]
@@ -2053,8 +2072,7 @@ mod tests {
             0,
         ))
         .unwrap();
-        check!(g.cache_owner.is_empty());
-        check!(!g.stores.kv_is_cached("counts"));
+        check!((g.cache_owner.is_empty(), g.stores.kv_is_cached("counts")) == (true, false));
 
         pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
         pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();
@@ -2074,8 +2092,7 @@ mod tests {
             1024,
         ))
         .unwrap();
-        check!(g.cache_owner.is_empty());
-        check!(!g.stores.kv_is_cached("counts"));
+        check!((g.cache_owner.is_empty(), g.stores.kv_is_cached("counts")) == (true, false));
     }
 
     #[test]
@@ -2094,13 +2111,14 @@ mod tests {
         t.add_sink("out", "out-topic", [&proc]);
         let wire = t.build("app").unwrap().to_wire();
         let blob = serde_json::to_value(&wire).unwrap().to_string();
-        check!(blob.contains("vstore"), "changelog topic name not in wire");
-        check!(
-            blob.contains("min.compaction.lag.ms"),
-            "min.compaction.lag.ms key not in wire"
-        );
         // history_retention_ms=600_000 → min_compaction_lag_ms = 600_000 + 86_400_000 = 87_000_000
-        check!(blob.contains("87000000"), "lag value not in wire");
+        for (name, fragment) in [
+            ("changelog topic name", "vstore"),
+            ("compaction-lag config key", "min.compaction.lag.ms"),
+            ("retention-derived lag value", "87000000"),
+        ] {
+            check!(blob.contains(fragment), "case {name}");
+        }
     }
 
     #[tokio::test]
@@ -2155,7 +2173,6 @@ mod tests {
 
         let mut buffer = std::collections::VecDeque::new();
         store.flush_cache_into(&mut buffer, &[0]).await;
-        assert_eq!(buffer.len(), 1);
         let (_child, rec) = &buffer[0];
         let key = rec
             .key
@@ -2163,10 +2180,17 @@ mod tests {
             .unwrap()
             .downcast_ref::<Windowed<String>>()
             .unwrap();
-        assert_eq!(key.key, "a");
-        // end == start + window_size (D), NOT start + retention basis (2*D).
-        assert_eq!(key.window, Window { start: 0, end: D });
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
-        assert_eq!(change.new, Some(1));
+        assert_eq!(
+            (buffer.len(), key, change.new),
+            (
+                1,
+                &Windowed {
+                    key: "a".to_string(),
+                    window: Window { start: 0, end: D },
+                },
+                Some(1),
+            )
+        );
     }
 }

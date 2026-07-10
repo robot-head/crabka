@@ -244,17 +244,19 @@ mod tests {
     fn leader_epoch_update_marks_only_real_advances_with_consumed_epoch() {
         let mut p = pos(2, 2, false);
         update_leader_epoch(&mut p, LeaderEpoch(2));
-        assert!(p.leader_epoch == 2);
-        assert!(!p.awaiting_validation);
+        assert!((p.leader_epoch, p.awaiting_validation) == (LeaderEpoch(2), false));
 
         update_leader_epoch(&mut p, LeaderEpoch(3));
-        assert!(p.leader_epoch == 3);
-        assert!(p.awaiting_validation);
+        assert!((p.leader_epoch, p.awaiting_validation) == (LeaderEpoch(3), true));
 
         let mut never_consumed = pos(-1, -1, false);
         update_leader_epoch(&mut never_consumed, LeaderEpoch(0));
-        assert!(never_consumed.leader_epoch == 0);
-        assert!(!never_consumed.awaiting_validation);
+        assert!(
+            (
+                never_consumed.leader_epoch,
+                never_consumed.awaiting_validation
+            ) == (LeaderEpoch(0), false)
+        );
 
         let mut equal_but_consumed = pos(2, 3, false);
         update_leader_epoch(&mut equal_but_consumed, LeaderEpoch(3));
@@ -265,50 +267,69 @@ mod tests {
 
     #[test]
     fn validation_eligibility_clears_never_consumed_partitions() {
-        let mut never_consumed = pos(-1, 4, true);
-        clear_unvalidatable_position(&mut never_consumed);
-        assert!(!never_consumed.awaiting_validation);
-        assert!(!should_validate_position(&never_consumed));
-
-        let consumed = pos(2, 4, true);
-        assert!(should_validate_position(&consumed));
-
-        let mut consumed_zero = pos(0, 4, true);
-        clear_unvalidatable_position(&mut consumed_zero);
-        assert!(should_validate_position(&consumed_zero));
-
-        let already_clear = pos(2, 4, false);
-        assert!(!should_validate_position(&already_clear));
+        for (name, offset, awaiting_validation, clear, expected) in [
+            ("never consumed", -1, true, true, (false, false)),
+            ("consumed", 2, true, false, (true, true)),
+            ("consumed at zero", 0, true, true, (true, true)),
+            ("already clear", 2, false, false, (false, false)),
+        ] {
+            let mut position = pos(offset, 4, awaiting_validation);
+            if clear {
+                clear_unvalidatable_position(&mut position);
+            }
+            assert!(
+                (
+                    position.awaiting_validation,
+                    should_validate_position(&position)
+                ) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn validation_routing_requires_known_non_negative_leader() {
-        let cases = [(3, true, true), (-1, true, false), (3, false, false)];
-        for (leader_id, knows_leader, expected) in cases {
-            assert!(should_route_to_leader(leader_id, knows_leader) == expected);
+        let cases = [
+            ("known leader", 3, true, true),
+            ("negative leader", -1, true, false),
+            ("unknown broker", 3, false, false),
+        ];
+        for (name, leader_id, knows_leader, expected) in cases {
+            assert!(
+                should_route_to_leader(leader_id, knows_leader) == expected,
+                "case {name}"
+            );
         }
     }
 
     #[test]
     fn response_epoch_must_still_match_position_epoch() {
         let p = pos(2, 7, true);
-        check!(response_still_current(&p, LeaderEpoch(7)));
-        check!(!response_still_current(&p, LeaderEpoch(6)));
-        check!(!should_skip_stale_response(&p, LeaderEpoch(7)));
-        check!(should_skip_stale_response(&p, LeaderEpoch(6)));
+        for (name, epoch, expected) in [
+            ("current", LeaderEpoch(7), (true, false)),
+            ("stale", LeaderEpoch(6), (false, true)),
+        ] {
+            check!(
+                (
+                    response_still_current(&p, epoch),
+                    should_skip_stale_response(&p, epoch)
+                ) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn zero_error_code_is_success_and_nonzero_is_error() {
-        assert!(!response_has_error(0));
-        assert!(response_has_error(74));
+        for (name, code, expected) in [("success", 0, false), ("error", 74, true)] {
+            assert!(response_has_error(code) == expected, "case {name}");
+        }
     }
 
     #[test]
     fn validation_error_resets_epoch_and_keeps_partition_flagged() {
         let mut p = pos(2, 7, false);
         mark_validation_error(&mut p);
-        assert!(p.leader_epoch == -1);
-        assert!(p.awaiting_validation);
+        assert!((p.leader_epoch, p.awaiting_validation) == (LeaderEpoch(-1), true));
     }
 }

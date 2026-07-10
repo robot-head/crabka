@@ -199,20 +199,32 @@ mod tests {
 
     #[test]
     fn isolation_level_wire_values_match_fetch_request_encoding() {
-        assert!(IsolationLevel::ReadUncommitted.wire() == 0);
-        assert!(IsolationLevel::ReadCommitted.wire() == 1);
+        for (name, isolation, expected) in [
+            ("read uncommitted", IsolationLevel::ReadUncommitted, 0),
+            ("read committed", IsolationLevel::ReadCommitted, 1),
+        ] {
+            assert!(isolation.wire() == expected, "case {name}");
+        }
     }
 
     #[test]
     fn peek_version_requires_two_bytes() {
-        for (bytes, want) in [(&[][..], 0), (&[0x7f][..], 0), (&[0, 3][..], 3)] {
-            assert!(peek_version(bytes) == want);
+        for (name, bytes, want) in [
+            ("empty", &[][..], 0),
+            ("truncated", &[0x7f][..], 0),
+            ("two byte version", &[0, 3][..], 3),
+        ] {
+            assert!(peek_version(bytes) == want, "case {name}");
         }
     }
 
     #[test]
     fn decode_subscription_short_or_malformed_payload_uses_empty_fallback() {
-        for payload in [&[][..], &[0x7f][..], &[0, 3][..]] {
+        for (name, payload) in [
+            ("empty", &[][..]),
+            ("truncated version", &[0x7f][..]),
+            ("version only", &[0, 3][..]),
+        ] {
             let decoded = decode_subscription(payload);
             assert!(
                 decoded
@@ -221,15 +233,20 @@ mod tests {
                         owned: Vec::new(),
                         generation_id: -1,
                         rack_id: None,
-                    }
+                    },
+                "case {name}"
             );
         }
     }
 
     #[test]
     fn decode_assignment_short_or_malformed_payload_uses_empty_fallback() {
-        for payload in [&[][..], &[0x7f][..], &[0, 3][..]] {
-            assert!(decode_assignment(payload).is_empty());
+        for (name, payload) in [
+            ("empty", &[][..]),
+            ("truncated version", &[0x7f][..]),
+            ("version only", &[0, 3][..]),
+        ] {
+            assert!(decode_assignment(payload).is_empty(), "case {name}");
         }
     }
 
@@ -271,8 +288,15 @@ mod tests {
     fn subscription_v3_generation_and_rack_round_trip() {
         let s = encode_subscription(&["t".into()], &[], 42, Some("rack-a"));
         let decoded = decode_subscription(&s);
-        assert!(decoded.generation_id == 42);
-        assert!(decoded.rack_id.as_deref() == Some("rack-a"));
+        assert!(
+            decoded
+                == DecodedSubscription {
+                    topics: vec!["t".into()],
+                    owned: Vec::new(),
+                    generation_id: 42,
+                    rack_id: Some("rack-a".into()),
+                }
+        );
     }
 
     #[test]

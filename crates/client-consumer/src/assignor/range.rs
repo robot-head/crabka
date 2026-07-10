@@ -67,7 +67,6 @@ mod tests {
         let mut tp = HashMap::new();
         tp.insert("t".into(), 4);
         let a = assign(vec![("m1".into(), vec!["t".into()])], &tp);
-        assert!(a["m1"].len() == 4);
         assert!(
             a["m1"]
                 == vec![
@@ -90,8 +89,12 @@ mod tests {
             ],
             &tp,
         );
-        assert!(a["m1"] == vec![("t".into(), 0), ("t".into(), 1)]);
-        assert!(a["m2"] == vec![("t".into(), 2), ("t".into(), 3)]);
+        assert!(
+            a == HashMap::from([
+                ("m1".into(), vec![("t".into(), 0), ("t".into(), 1)]),
+                ("m2".into(), vec![("t".into(), 2), ("t".into(), 3)]),
+            ])
+        );
     }
 
     #[test]
@@ -105,8 +108,7 @@ mod tests {
             ],
             &tp,
         );
-        assert!(a["m1"].len() == 3);
-        assert!(a["m2"].len() == 2);
+        assert!((a["m1"].len(), a["m2"].len()) == (3, 2));
     }
 
     #[test]
@@ -117,8 +119,7 @@ mod tests {
             vec![("m1".into(), vec!["t".into()]), ("m2".into(), vec![])],
             &tp,
         );
-        assert!(a["m1"].len() == 2);
-        assert!(a["m2"].len() == 0);
+        assert!((a["m1"].len(), a["m2"].len()) == (2, 0));
     }
 
     #[test]

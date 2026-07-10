@@ -306,20 +306,31 @@ mod tests {
 
     #[test]
     fn heartbeat_result_classifies_success_rejoin_and_transient_errors() {
-        assert!(matches!(heartbeat_result(0), HeartbeatOutcome::Ok));
-        assert!(matches!(
-            heartbeat_result(FENCED_MEMBER_EPOCH),
-            HeartbeatOutcome::RejoinFromScratch
-        ));
-        assert!(matches!(
-            heartbeat_result(UNKNOWN_MEMBER_ID),
-            HeartbeatOutcome::RejoinFromScratch
-        ));
-        assert!(matches!(
-            heartbeat_result(STALE_MEMBER_EPOCH),
-            HeartbeatOutcome::RejoinFromScratch
-        ));
-        assert!(matches!(heartbeat_result(17), HeartbeatOutcome::Transient));
+        for (name, code, expected) in [
+            ("success", 0, HeartbeatOutcome::Ok),
+            (
+                "fenced epoch",
+                FENCED_MEMBER_EPOCH,
+                HeartbeatOutcome::RejoinFromScratch,
+            ),
+            (
+                "unknown member",
+                UNKNOWN_MEMBER_ID,
+                HeartbeatOutcome::RejoinFromScratch,
+            ),
+            (
+                "stale epoch",
+                STALE_MEMBER_EPOCH,
+                HeartbeatOutcome::RejoinFromScratch,
+            ),
+            ("transient", 17, HeartbeatOutcome::Transient),
+        ] {
+            assert!(
+                std::mem::discriminant(&heartbeat_result(code))
+                    == std::mem::discriminant(&expected),
+                "case {name}"
+            );
+        }
     }
 
     #[tokio::test]

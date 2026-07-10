@@ -130,8 +130,7 @@ mod tests {
         g.nodes.push(repartition_node(1, 0));
         g.nodes.push(repartition_node(2, 0));
         merge_repartition_topics(&mut g);
-        assert_eq!(g.aliases.get(&2), Some(&1));
-        assert_eq!(g.aliases.get(&1), None);
+        assert_eq!(g.aliases, std::collections::HashMap::from([(2, 1)]));
     }
 
     #[test]
@@ -195,8 +194,7 @@ mod tests {
                 topic,
                 ..
             } => {
-                assert!(reuse_source_for_changelog);
-                assert_eq!(topic, "in");
+                assert_eq!((*reuse_source_for_changelog, topic.as_str()), (true, "in"));
             }
             _ => panic!("node 0 should be a TableSource"),
         }

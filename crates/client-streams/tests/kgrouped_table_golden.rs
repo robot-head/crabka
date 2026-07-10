@@ -165,16 +165,16 @@ fn kgrouped_table_behavior_matches_jvm() {
     )
     .unwrap();
     // The golden keys count/reduce/aggregate map to sink topics count-out/reduce-out/agg-out.
-    for (golden_key, out) in [
-        ("count", "count-out"),
-        ("reduce", "reduce-out"),
-        ("aggregate", "agg-out"),
+    for (name, golden_key, out) in [
+        ("count output", "count", "count-out"),
+        ("reduce output", "reduce", "reduce-out"),
+        ("aggregate output", "aggregate", "agg-out"),
     ] {
         let mut got: Vec<Row> = Vec::new();
         while let Some((Some(k), v)) = d.read_output(out, Produced::with(StringSerde, I64Serde)) {
             got.push(Row { key: k, value: v });
         }
         let want: Vec<Row> = serde_json::from_value(golden[golden_key].clone()).unwrap();
-        assert_eq!(got, want, "{golden_key} output != JVM behavioral golden");
+        assert_eq!(got, want, "case {name}: output != JVM behavioral golden");
     }
 }

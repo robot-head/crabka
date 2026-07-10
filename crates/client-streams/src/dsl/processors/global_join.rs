@@ -217,9 +217,13 @@ mod tests {
         )
         .await;
         let (_child, rec) = buffer.pop_front().expect("inner hit should forward");
-        check!(*rec.key.unwrap().downcast::<String>().unwrap() == "k"); // stream key preserved
-        check!(*rec.value.downcast::<String>().unwrap() == "v+gv");
-        check!(rec.timestamp == 7); // stream timestamp preserved
+        check!(
+            (
+                *rec.key.unwrap().downcast::<String>().unwrap(),
+                *rec.value.downcast::<String>().unwrap(),
+                rec.timestamp,
+            ) == ("k".to_string(), "v+gv".to_string(), 7)
+        );
     }
 
     #[tokio::test]

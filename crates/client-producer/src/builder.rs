@@ -286,14 +286,14 @@ mod security_arg_tests {
 
     #[test]
     fn coordinator_retry_classifier_matches_cold_start_codes_only() {
-        for (code, want) in [
-            (COORDINATOR_LOAD_IN_PROGRESS, true),
-            (COORDINATOR_NOT_AVAILABLE, true),
-            (NOT_COORDINATOR, true),
-            (0, false),
-            (42, false),
+        for (name, code, want) in [
+            ("loading", COORDINATOR_LOAD_IN_PROGRESS, true),
+            ("unavailable", COORDINATOR_NOT_AVAILABLE, true),
+            ("not coordinator", NOT_COORDINATOR, true),
+            ("success", 0, false),
+            ("invalid request", 42, false),
         ] {
-            assert!(is_retriable_coordinator_code(code) == want);
+            assert!(is_retriable_coordinator_code(code) == want, "case {name}");
         }
     }
 
@@ -301,8 +301,7 @@ mod security_arg_tests {
     fn init_producer_id_request_is_idempotent_only_shape() {
         let req = build_init_producer_id_request();
 
-        assert!(req.transactional_id.is_none());
-        assert!(req.transaction_timeout_ms == 0);
+        assert!((req.transactional_id.as_ref(), req.transaction_timeout_ms) == (None, 0));
     }
 
     #[tokio::test(start_paused = true)]
@@ -311,23 +310,38 @@ mod security_arg_tests {
         assert!(!retry_deadline_elapsed(start, Duration::from_secs(30)));
         tokio::time::advance(Duration::from_secs(30)).await;
         assert!(retry_deadline_elapsed(start, Duration::from_secs(30)));
-        for (current, want) in [
-            (Duration::from_millis(100), Duration::from_millis(200)),
-            (Duration::from_millis(800), Duration::from_secs(1)),
-            (Duration::from_secs(1), Duration::from_secs(1)),
+        for (name, current, want) in [
+            (
+                "double below cap",
+                Duration::from_millis(100),
+                Duration::from_millis(200),
+            ),
+            (
+                "double to cap",
+                Duration::from_millis(800),
+                Duration::from_secs(1),
+            ),
+            (
+                "remain capped",
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
         ] {
-            assert!(next_backoff(current) == want);
+            assert!(next_backoff(current) == want, "case {name}");
         }
     }
 
     #[test]
     fn validated_acks_forces_idempotence_to_all_and_rejects_zero() {
-        for (idempotent, acks, want) in [
-            (true, Acks::One, Acks::All),
-            (false, Acks::One, Acks::One),
-            (false, Acks::Zero, Acks::Zero),
+        for (name, idempotent, acks, want) in [
+            ("idempotent forces all", true, Acks::One, Acks::All),
+            ("non-idempotent keeps one", false, Acks::One, Acks::One),
+            ("non-idempotent keeps zero", false, Acks::Zero, Acks::Zero),
         ] {
-            assert!(validated_acks(idempotent, acks).unwrap() == want);
+            assert!(
+                validated_acks(idempotent, acks).unwrap() == want,
+                "case {name}"
+            );
         }
         assert!(validated_acks(true, Acks::Zero).is_err());
     }

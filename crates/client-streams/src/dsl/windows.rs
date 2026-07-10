@@ -298,27 +298,38 @@ mod tests {
     #[test]
     fn windows_for_tumbling_one_window() {
         let w = TimeWindows::of_size(10);
-        assert_eq!(w.windows_for(0), vec![0]);
-        assert_eq!(w.windows_for(9), vec![0]);
-        assert_eq!(w.windows_for(10), vec![10]);
-        assert_eq!(w.windows_for(25), vec![20]);
+        for (name, timestamp, expected) in [
+            ("window start", 0, vec![0]),
+            ("window end minus one", 9, vec![0]),
+            ("next window start", 10, vec![10]),
+            ("later window", 25, vec![20]),
+        ] {
+            assert_eq!(w.windows_for(timestamp), expected, "case {name}");
+        }
     }
 
     #[test]
     fn windows_for_hopping_overlaps() {
         let w = TimeWindows::of_size(10).advance_by(5);
-        assert_eq!(w.windows_for(12), vec![5, 10]); // start0 = max(0,12-10+5)/5*5 = 5
-        assert_eq!(w.windows_for(0), vec![0]);
+        for (name, timestamp, expected) in [
+            ("overlapping windows", 12, vec![5, 10]),
+            ("initial window", 0, vec![0]),
+        ] {
+            assert_eq!(w.windows_for(timestamp), expected, "case {name}");
+        }
     }
 
     #[test]
     fn join_windows_before_after_size() {
         let w = JoinWindows::of(10);
-        assert_eq!((w.before_ms, w.after_ms, w.grace_ms), (10, 10, 0));
-        assert_eq!(w.size(), 20);
         let a = JoinWindows::of(10).before(3).after(7).grace(5);
-        assert_eq!((a.before_ms, a.after_ms, a.grace_ms), (3, 7, 5));
-        assert_eq!(a.size(), 10);
+        assert_eq!(
+            (
+                (w.before_ms, w.after_ms, w.grace_ms, w.size()),
+                (a.before_ms, a.after_ms, a.grace_ms, a.size())
+            ),
+            ((10, 10, 0, 20), (3, 7, 5, 10))
+        );
     }
 
     #[test]
@@ -333,8 +344,7 @@ mod tests {
         assert_eq!(b.len(), 9); // "k"(1) ‖ 20i64 BE(8)
         assert_eq!(&b[1..9], &20i64.to_be_bytes());
         let back = s.deserialize("t", &b).unwrap();
-        assert_eq!(back.key, "k");
-        assert_eq!(back.window, Window { start: 20, end: 30 }); // end = start + size
+        assert_eq!(back, wk);
     }
 
     #[test]
@@ -358,8 +368,7 @@ mod tests {
         assert_eq!(&b[1..9], &9i64.to_be_bytes()); // end first
         assert_eq!(&b[9..17], &5i64.to_be_bytes()); // start second
         let back = s.deserialize("t", &b).unwrap();
-        assert_eq!(back.key, "k");
-        assert_eq!(back.window, Window { start: 5, end: 9 });
+        assert_eq!(back, wk);
     }
 
     #[test]

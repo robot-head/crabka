@@ -156,8 +156,10 @@ mod tests {
         s.put(Bytes::from_static(&[1, 9]), Bytes::from_static(b"b"))
             .await;
         let r = s.range(&[1, 0], &[1, 5]).await; // half-open → only [1,0]
-        assert_eq!(r.len(), 1);
-        assert_eq!(r[0].1, Bytes::from_static(b"a"));
+        assert_eq!(
+            r,
+            vec![(Bytes::from_static(&[1, 0]), Bytes::from_static(b"a"))]
+        );
         assert_eq!(s.delete(b"k").await, Some(Bytes::from_static(b"v2")));
         assert_eq!(s.get(b"k").await, None);
     }

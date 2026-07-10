@@ -12,9 +12,10 @@
 //! (an as-of(150) read of the table yields 10 → 11, an as-of(250) read yields
 //! 20 → 21), so a wrong as-of timestamp would surface as a wrong value.
 
-use assert2::check;
 use crabka_client_streams::{
-    Consumed, I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
+    Consumed, I64Serde, Materialized, Produced, StringSerde,
+    dsl::StreamsBuilder,
+    topology::{WireKeyValue, WireTopicInfo},
 };
 use serde::Deserialize;
 
@@ -453,35 +454,21 @@ fn grace_buffer_changelog_matches_golden_wire() {
         .iter()
         .flat_map(|st| st.state_changelog_topics.iter())
         .filter(|t| t.name.contains("Buffer"))
+        .cloned()
         .collect();
     assert_eq!(
-        buffer.len(),
-        1,
-        "expected exactly one buffer changelog; got {:?}",
-        buffer.iter().map(|t| &t.name).collect::<Vec<_>>()
-    );
-    let buffer = buffer[0];
-
-    // Name must match grace.json `buffer_changelog_topic`.
-    assert_eq!(
-        buffer.name, golden.buffer_changelog_topic,
-        "buffer changelog name must match JVM golden"
-    );
-
-    // Config must match grace.json `buffer_changelog_configs` exactly (and carry
-    // no `retention.ms` — a KV, not window, changelog).
-    let got_configs: std::collections::BTreeMap<String, String> = buffer
-        .topic_configs
-        .iter()
-        .map(|kv| (kv.key.clone(), kv.value.clone()))
-        .collect();
-    assert_eq!(
-        got_configs, golden.buffer_changelog_configs,
-        "buffer changelog configs must match JVM golden"
-    );
-    assert!(
-        !got_configs.contains_key("retention.ms"),
-        "buffer changelog (a KV store) must not carry retention.ms; got {got_configs:?}"
+        buffer,
+        vec![WireTopicInfo {
+            name: golden.buffer_changelog_topic,
+            partitions: 0,
+            replication_factor: -1,
+            topic_configs: golden
+                .buffer_changelog_configs
+                .into_iter()
+                .map(|(key, value)| WireKeyValue { key, value })
+                .collect(),
+        }],
+        "buffer changelog must match the complete JVM-golden projection"
     );
 }
 
@@ -624,29 +611,18 @@ fn table_table_versioned_no_extra_changelog_wire() {
     drop(b_table);
     let wire = b.build("app").unwrap().to_wire();
 
-    let changelogs: Vec<&str> = wire
+    let mut changelogs: Vec<&str> = wire
         .subtopologies
         .iter()
         .flat_map(|st| st.state_changelog_topics.iter())
         .map(|t| t.name.as_str())
         .collect();
+    changelogs.sort_unstable();
 
     // Exactly the two versioned table-source changelogs (va/vb), nothing else.
     assert_eq!(
-        changelogs.len(),
-        2,
-        "expected exactly the two table-source changelogs; got {changelogs:?}"
-    );
-    check!(
-        changelogs.iter().any(|n| n.contains("va")),
-        "expected a 'va' changelog; got {changelogs:?}"
-    );
-    check!(
-        changelogs.iter().any(|n| n.contains("vb")),
-        "expected a 'vb' changelog; got {changelogs:?}"
-    );
-    check!(
-        !changelogs.iter().any(|n| n.contains("Buffer")),
-        "the out-of-order gate must not introduce a Buffer changelog; got {changelogs:?}"
+        changelogs,
+        vec!["app-va-changelog", "app-vb-changelog"],
+        "only the two versioned table-source changelogs are expected"
     );
 }

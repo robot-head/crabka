@@ -285,11 +285,14 @@ mod tests {
             .await;
         }
         // Exactly the [0,10) final value (2) emits; [20,30) stays buffered.
-        assert_eq!(buffer.len(), 1);
+        let actual_len = buffer.len();
         let (_, rec) = buffer.pop_front().unwrap();
         let k = rec.key.unwrap().downcast::<Windowed<String>>().unwrap();
-        assert_eq!(k.window, Window { start: 0, end: 10 });
-        assert_eq!(rec.value.downcast::<Change<i64>>().unwrap().new, Some(2));
+        let change = rec.value.downcast::<Change<i64>>().unwrap();
+        assert_eq!(
+            (actual_len, k.window, change.new),
+            (1, Window { start: 0, end: 10 }, Some(2))
+        );
     }
 
     #[tokio::test]
@@ -627,10 +630,11 @@ mod tests {
             )
             .await;
         }
-        assert_eq!(buffer.len(), 1);
+        let actual_len = buffer.len();
         let (_, rec) = buffer.pop_front().unwrap();
-        assert_eq!(rec.key.unwrap().downcast::<String>().unwrap().as_str(), "a");
+        let key = rec.key.unwrap().downcast::<String>().unwrap();
         // The newest value (2), not the stale 1 → the reset kept the latest update.
-        assert_eq!(rec.value.downcast::<Change<i64>>().unwrap().new, Some(2));
+        let change = rec.value.downcast::<Change<i64>>().unwrap();
+        assert_eq!((actual_len, key.as_str(), change.new), (1, "a", Some(2)));
     }
 }

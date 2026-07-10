@@ -122,15 +122,18 @@ mod tests {
     #[test]
     fn filter_keeps_reserved_columns() {
         let out = run(BuiltinOp::Filter(col("amount").gt(lit(4))), batch());
-        check!(out[0].height() == 2);
-        check!(out[0].column("__key").is_ok());
+        check!((out[0].height(), out[0].column("__key").is_ok()) == (2, true));
     }
 
     #[test]
     fn select_reappends_reserved_columns() {
         let out = run(BuiltinOp::Select(vec![col("user")]), batch());
-        check!(out[0].column("user").is_ok());
-        check!(out[0].column("__timestamp").is_ok());
+        check!(
+            (
+                out[0].column("user").is_ok(),
+                out[0].column("__timestamp").is_ok()
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -145,9 +148,9 @@ mod tests {
         let df = out[0]
             .sort(["user"], SortMultipleOptions::default())
             .unwrap();
-        check!(df.height() == 2);
         let totals = df.column("total").unwrap().i64().unwrap();
-        check!(totals.get(0) == Some(8)); // a: 5+3
-        check!(totals.get(1) == Some(9)); // b: 9
+        check!(
+            (df.height(), totals.get(0), totals.get(1)) == (2, Some(8), Some(9)) // a: 5+3; b: 9
+        );
     }
 }

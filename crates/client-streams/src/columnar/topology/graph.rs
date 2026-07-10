@@ -322,10 +322,8 @@ mod tests {
             offset: 0,
         };
         let out = built.run_batch("in", &[rec]).unwrap();
-        check!(out.len() == 1);
-        check!(out[0].0 == "out");
         let back = PolarsIpcSerde.deserialize("", &out[0].1.value).unwrap();
-        check!(back.height() == 2); // amounts 5 and 9
+        check!((out.len(), out[0].0.as_str(), back.height()) == (1, "out", 2));
     }
 
     #[test]
@@ -351,21 +349,19 @@ mod tests {
 
         let first = built.run_batch("in", &mk(&[1, 5, 9])).unwrap();
         let second = built.run_batch("in", &mk(&[7, 2])).unwrap();
-        check!(first.len() == 1);
-        check!(second.len() == 1);
         check!(
-            PolarsIpcSerde
-                .deserialize("", &first[0].1.value)
-                .unwrap()
-                .height()
-                == 2
-        );
-        check!(
-            PolarsIpcSerde
-                .deserialize("", &second[0].1.value)
-                .unwrap()
-                .height()
-                == 1
+            (
+                first.len(),
+                PolarsIpcSerde
+                    .deserialize("", &first[0].1.value)
+                    .unwrap()
+                    .height(),
+                second.len(),
+                PolarsIpcSerde
+                    .deserialize("", &second[0].1.value)
+                    .unwrap()
+                    .height(),
+            ) == (1, 2, 1, 1)
         );
     }
 

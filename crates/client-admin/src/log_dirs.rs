@@ -267,14 +267,19 @@ mod tests {
             .await
             .expect("alter log dirs response maps");
 
-        assert!(outcomes.len() == 1);
-        assert!(outcomes[0].topic == "orders");
-        assert!(outcomes[0].partition == 2);
         let error = outcomes[0]
             .error
             .as_ref()
             .expect("broker error is surfaced");
-        assert!(error.code == 56);
+        assert!(
+            (
+                outcomes.len(),
+                &outcomes[0].topic,
+                outcomes[0].partition,
+                error.code,
+                &error.message
+            ) == (1, &"orders".to_string(), 2, 56, &None)
+        );
         let request = seen_request
             .lock()
             .expect("request capture lock")
@@ -350,15 +355,20 @@ mod tests {
             .await
             .expect("describe log dirs response maps");
 
-        assert!(dirs.len() == 1);
-        assert!(dirs[0].log_dir == "/data/kafka");
-        assert!(dirs[0].topics.len() == 1);
-        assert!(dirs[0].topics[0].name == "orders");
         let partition = &dirs[0].topics[0].partitions[0];
-        assert!(partition.partition_index == 4);
-        assert!(partition.partition_size == 123);
-        assert!(partition.offset_lag == 7);
-        assert!(partition.is_future_key);
+        assert!(
+            (
+                dirs.len(),
+                dirs[0].log_dir.as_str(),
+                dirs[0].error.as_ref(),
+                dirs[0].topics.len(),
+                dirs[0].topics[0].name.as_str(),
+                partition.partition_index,
+                partition.partition_size,
+                partition.offset_lag,
+                partition.is_future_key,
+            ) == (1, "/data/kafka", None, 1, "orders", 4, 123, 7, true)
+        );
         let request = seen_request
             .lock()
             .expect("request capture lock")

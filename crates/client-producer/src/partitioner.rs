@@ -114,9 +114,7 @@ mod tests {
         let p = UniformStickyPartitioner::new();
         let a = p.pick("t", Some(b"my-key"), 12);
         let b = p.pick("t", Some(b"my-key"), 12);
-        check!(a == b);
-        check!(a == 9);
-        check!((0..12).contains(&a));
+        check!((a, b) == (9, 9));
     }
 
     #[test]
@@ -125,8 +123,7 @@ mod tests {
         let a = p.pick("t", None, 4);
         let b = p.pick("t", None, 4);
         let c = p.pick("t", None, 4);
-        assert!(a == b);
-        assert!(b == c);
+        assert!((a, b, c) == (a, a, a));
     }
 
     #[test]
@@ -135,8 +132,7 @@ mod tests {
         let a = p.pick("t", None, 4);
         p.rotate("t", 4);
         let b = p.pick("t", None, 4);
-        assert!(a != b);
-        assert!(b == (a + 1) % 4);
+        assert!((a != b, b) == (true, (a + 1) % 4));
     }
 
     #[test]
@@ -164,17 +160,17 @@ mod tests {
 
     #[test]
     fn murmur2_matches_kafka_golden_vectors() {
-        for (input, want) in [
-            (b"".as_slice(), 275_646_681),
-            (b"a".as_slice(), -1_563_381_124),
-            (b"ab".as_slice(), 316_155_434),
-            (b"abc".as_slice(), 479_470_107),
-            (b"abcd".as_slice(), -1_323_649_548),
-            (b"abcde".as_slice(), 461_995_741),
-            (b"kafka".as_slice(), -798_503_068),
-            (b"my-key".as_slice(), 1_748_425_209),
+        for (name, input, want) in [
+            ("empty", b"".as_slice(), 275_646_681),
+            ("one byte", b"a".as_slice(), -1_563_381_124),
+            ("two bytes", b"ab".as_slice(), 316_155_434),
+            ("three bytes", b"abc".as_slice(), 479_470_107),
+            ("four bytes", b"abcd".as_slice(), -1_323_649_548),
+            ("five bytes", b"abcde".as_slice(), 461_995_741),
+            ("kafka", b"kafka".as_slice(), -798_503_068),
+            ("my key", b"my-key".as_slice(), 1_748_425_209),
         ] {
-            assert!(murmur2(input) == want);
+            assert!(murmur2(input) == want, "case {name}");
         }
     }
 }

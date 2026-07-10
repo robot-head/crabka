@@ -261,12 +261,10 @@ mod tests {
         s.put("a".into(), 1, 100).await;
         s.put("b".into(), 2, 200).await;
         let cl = s.take_changelog();
-        check!(cl.len() == 2);
-        check!(cl.iter().all(|(_, v)| v.is_some()));
+        check!((cl.len(), cl.iter().all(|(_, v)| v.is_some())) == (2, true));
         let _ = s.drain_due(100).await;
         let cl = s.take_changelog();
-        check!(cl.len() == 1);
-        check!(cl[0].1.is_none());
+        check!((cl.len(), cl[0].1.is_none()) == (1, true));
     }
 
     #[tokio::test]

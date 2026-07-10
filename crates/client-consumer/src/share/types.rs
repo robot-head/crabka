@@ -67,12 +67,12 @@ mod tests {
 
     #[test]
     fn ack_wire_codes() {
-        for (ack, expected) in [
-            (ShareAckType::Accept, 1),
-            (ShareAckType::Release, 2),
-            (ShareAckType::Reject, 3),
+        for (name, ack, expected) in [
+            ("accept", ShareAckType::Accept, 1),
+            ("release", ShareAckType::Release, 2),
+            ("reject", ShareAckType::Reject, 3),
         ] {
-            assert!(ack.wire() == expected, "ack: {ack:?}");
+            assert!(ack.wire() == expected, "case {name}: ack: {ack:?}");
         }
     }
 

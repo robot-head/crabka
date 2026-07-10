@@ -54,27 +54,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_not_subscribed() {
-        let e = ConsumerError::NotSubscribed;
-        assert!(e.to_string().contains("not subscribed"));
-    }
-
-    #[test]
-    fn display_server_error_code() {
-        let e = ConsumerError::Server(25);
-        assert!(e.to_string().contains("25"));
-    }
-
-    #[test]
-    fn display_log_truncation() {
-        let e = ConsumerError::LogTruncation {
-            topic: "t".into(),
-            partition: 3,
-            fetch_offset: 100,
-            safe_offset: 42,
-        };
-        let s = e.to_string();
-        assert!(s.contains("truncation"));
-        assert!(s.contains("42"));
+    fn display_messages() {
+        for (name, error, expected) in [
+            ("not subscribed", ConsumerError::NotSubscribed, "not subscribed to any topic"),
+            ("server", ConsumerError::Server(25), "broker error_code 25"),
+            (
+                "log truncation",
+                ConsumerError::LogTruncation {
+                    topic: "t".into(),
+                    partition: 3,
+                    fetch_offset: 100,
+                    safe_offset: 42,
+                },
+                "log truncation detected on t-3: fetch offset 100 is past the leader's log; safe offset 42",
+            ),
+        ] {
+            assert!(error.to_string() == expected, "case {name}");
+        }
     }
 }

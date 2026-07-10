@@ -56,13 +56,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_fenced_producer() {
-        assert!(ProducerError::FencedProducer.to_string().contains("fenced"));
-    }
-
-    #[test]
-    fn display_invalid_config() {
-        let e = ProducerError::InvalidConfig("idempotence requires acks=all");
-        assert!(e.to_string().contains("idempotence"));
+    fn display_messages() {
+        for (name, error, expected) in [
+            (
+                "fenced producer",
+                ProducerError::FencedProducer,
+                "fenced by newer producer instance",
+            ),
+            (
+                "invalid config",
+                ProducerError::InvalidConfig("idempotence requires acks=all"),
+                "invalid config: idempotence requires acks=all",
+            ),
+        ] {
+            assert!(error.to_string() == expected, "case {name}");
+        }
     }
 }

@@ -443,9 +443,16 @@ mod tests {
             old: Some(4i64),
             new: None,
         };
-        check!(hex(&s.serialize("topic", &both)) == g["both"].as_str().unwrap());
-        check!(hex(&s.serialize("topic", &new_only)) == g["new_only"].as_str().unwrap());
-        check!(hex(&s.serialize("topic", &old_only)) == g["old_only"].as_str().unwrap());
+        for (name, value) in [
+            ("both", both),
+            ("new_only", new_only),
+            ("old_only", old_only),
+        ] {
+            check!(
+                hex(&s.serialize("topic", &value)) == g[name].as_str().unwrap(),
+                "case {name}"
+            );
+        }
     }
 
     #[test]

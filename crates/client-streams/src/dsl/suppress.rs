@@ -200,39 +200,68 @@ mod tests {
 
     #[test]
     fn buffer_config_caps_and_overflow() {
-        assert_eq!(BufferConfig::unbounded().record_cap(), None);
-        assert!(!BufferConfig::unbounded().is_emit_early()); // strict
-        let strict = BufferConfig::unbounded().with_max_records(3);
-        assert_eq!(strict.record_cap(), Some(3));
-        assert!(!strict.is_emit_early());
-        let eager = BufferConfig::max_records(5); // eager
-        assert_eq!(eager.record_cap(), Some(5));
-        check!(eager.is_emit_early());
-        check!(!eager.shut_down_when_full().is_emit_early());
-        check!(
-            BufferConfig::unbounded()
-                .emit_early_when_full()
-                .is_emit_early()
-        );
+        for (name, config, expected) in [
+            ("unbounded", BufferConfig::unbounded(), (None, false)),
+            (
+                "strict record cap",
+                BufferConfig::unbounded().with_max_records(3),
+                (Some(3), false),
+            ),
+            (
+                "eager record cap",
+                BufferConfig::max_records(5),
+                (Some(5), true),
+            ),
+            (
+                "eager changed to shutdown",
+                BufferConfig::max_records(5).shut_down_when_full(),
+                (Some(5), false),
+            ),
+            (
+                "unbounded changed to emit early",
+                BufferConfig::unbounded().emit_early_when_full(),
+                (None, true),
+            ),
+        ] {
+            check!(
+                (config.record_cap(), config.is_emit_early()) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn buffer_config_byte_caps() {
-        assert_eq!(BufferConfig::unbounded().byte_cap(), None);
-        let eager = BufferConfig::max_bytes(1024); // eager static
-        assert_eq!(eager.byte_cap(), Some(1024));
-        assert_eq!(eager.record_cap(), None);
-        assert!(eager.is_emit_early());
-        // strict path keeps shutDownWhenFull
-        let strict = BufferConfig::unbounded().with_max_bytes(512);
-        assert_eq!(strict.byte_cap(), Some(512));
-        assert!(!strict.is_emit_early());
-        // records + bytes coexist
-        let both = BufferConfig::unbounded()
-            .with_max_records(3)
-            .with_max_bytes(99);
-        assert_eq!(both.record_cap(), Some(3));
-        assert_eq!(both.byte_cap(), Some(99));
+        for (name, config, expected) in [
+            ("unbounded", BufferConfig::unbounded(), (None, None, false)),
+            (
+                "eager byte cap",
+                BufferConfig::max_bytes(1024),
+                (Some(1024), None, true),
+            ),
+            (
+                "strict byte cap",
+                BufferConfig::unbounded().with_max_bytes(512),
+                (Some(512), None, false),
+            ),
+            (
+                "record and byte caps",
+                BufferConfig::unbounded()
+                    .with_max_records(3)
+                    .with_max_bytes(99),
+                (Some(99), Some(3), false),
+            ),
+        ] {
+            assert_eq!(
+                (
+                    config.byte_cap(),
+                    config.record_cap(),
+                    config.is_emit_early()
+                ),
+                expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]

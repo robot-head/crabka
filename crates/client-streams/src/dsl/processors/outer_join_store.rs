@@ -71,11 +71,16 @@ mod tests {
     fn outer_key_roundtrips_and_sorts_by_time() {
         let k1 = outer_key(5, true, b"k");
         let k2 = outer_key(7, false, b"k");
-        assert_eq!(outer_key_ts(&k1), 5);
-        assert!(outer_key_side_left(&k1));
-        assert_eq!(outer_key_key_bytes(&k1), b"k");
-        assert!(!outer_key_side_left(&k2));
-        assert!(k2 > k1); // sorts by timestamp (8-byte BE prefix)
+        assert_eq!(
+            (
+                outer_key_ts(&k1),
+                outer_key_side_left(&k1),
+                outer_key_key_bytes(&k1),
+                outer_key_side_left(&k2),
+                k2 > k1
+            ),
+            (5, true, b"k".as_slice(), false, true) // sorts by timestamp (8-byte BE prefix)
+        );
     }
 
     #[test]

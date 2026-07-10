@@ -387,22 +387,26 @@ mod tests {
         // No `unknown_tagged_fields` leaks into the JSON, and the nested config
         // maps to `{key, value}`.
         check!(
-            json["subtopologies"][0]["state_changelog_topics"][0]["name"] == "app-store-changelog"
-        );
-        check!(json["subtopologies"][0]["state_changelog_topics"][0]["replication_factor"] == -1);
-        check!(
-            json["subtopologies"][0]["state_changelog_topics"][0]["topic_configs"][0]["key"]
-                == "cleanup.policy"
-        );
-        check!(
-            json["subtopologies"][0]
-                .get("unknown_tagged_fields")
-                .is_none()
-        );
-        check!(
-            json["subtopologies"][0]["state_changelog_topics"][0]
-                .get("unknown_tagged_fields")
-                .is_none()
+            json == serde_json::json!({
+                "epoch": 0,
+                "subtopologies": [{
+                    "subtopology_id": "0",
+                    "source_topics": ["in"],
+                    "source_topic_regex": [],
+                    "repartition_sink_topics": [],
+                    "repartition_source_topics": [],
+                    "state_changelog_topics": [{
+                        "name": "app-store-changelog",
+                        "partitions": 0,
+                        "replication_factor": -1,
+                        "topic_configs": [{
+                            "key": "cleanup.policy",
+                            "value": "compact"
+                        }]
+                    }],
+                    "copartition_groups": []
+                }]
+            })
         );
     }
 
@@ -415,8 +419,12 @@ mod tests {
             ..Default::default()
         };
         let view = WireCopartitionGroup::from(&proto);
-        check!(view.source_topics == vec![0i16, 2i16]);
-        check!(view.repartition_source_topics == vec![1i16]);
+        check!(
+            (
+                view.source_topics.as_slice(),
+                view.repartition_source_topics.as_slice()
+            ) == (&[0i16, 2][..], &[1i16][..])
+        );
         let json = serde_json::to_value(&view).unwrap();
         check!(json.get("unknown_tagged_fields").is_none());
     }
@@ -429,9 +437,13 @@ mod tests {
             ..Default::default()
         }];
         let topo = to_wire(&groups, "app");
-        check!(topo.epoch == 0);
-        check!(topo.subtopologies[0].source_topics == vec!["a".to_string(), "b".to_string()]);
-        check!(topo.subtopologies[0].source_topic_regex.is_empty());
+        check!(
+            (
+                topo.epoch,
+                topo.subtopologies[0].source_topics.as_slice(),
+                topo.subtopologies[0].source_topic_regex.as_slice(),
+            ) == (0, &["a".to_string(), "b".to_string()][..], &[][..])
+        );
     }
 
     #[test]
@@ -472,12 +484,14 @@ mod tests {
         }];
         let topo = to_wire(&groups, "my-app");
         let cl = &topo.subtopologies[0].state_changelog_topics;
-        check!(cl.len() == 1);
-        check!(cl[0].name == "my-app-store-changelog");
-        check!(cl[0].partitions == 0);
-        // JVM-faithful internal-topic encoding: RF = -1 (broker default) and the
-        // sorted KV-store changelog configs.
-        check!(cl[0].replication_factor == -1);
+        check!(
+            (
+                cl.len(),
+                cl[0].name.as_str(),
+                cl[0].partitions,
+                cl[0].replication_factor,
+            ) == (1, "my-app-store-changelog", 0, -1)
+        );
         let configs: Vec<(&str, &str)> = cl[0]
             .topic_configs
             .iter()
@@ -505,9 +519,7 @@ mod tests {
         }];
         let topo = to_wire(&groups, "my-app");
         let cl = &topo.subtopologies[0].state_changelog_topics;
-        check!(cl.len() == 1);
-        check!(cl[0].name == "in");
-        check!(cl[0].replication_factor == -1);
+        check!((cl.len(), cl[0].name.as_str(), cl[0].replication_factor) == (1, "in", -1));
         let configs: Vec<(&str, &str)> = cl[0]
             .topic_configs
             .iter()
@@ -531,10 +543,14 @@ mod tests {
         }];
         let topo = to_wire(&groups, "my-app");
         let rp = &topo.subtopologies[0].repartition_source_topics;
-        check!(rp.len() == 1);
-        check!(rp[0].name == "my-app-store-repartition");
-        check!(rp[0].partitions == 0);
-        check!(rp[0].replication_factor == -1);
+        check!(
+            (
+                rp.len(),
+                rp[0].name.as_str(),
+                rp[0].partitions,
+                rp[0].replication_factor
+            ) == (1, "my-app-store-repartition", 0, -1)
+        );
         let configs: Vec<(&str, &str)> = rp[0]
             .topic_configs
             .iter()
@@ -556,9 +572,13 @@ mod tests {
         let sources = vec!["a".to_string(), "b".to_string(), "c".to_string()];
         let repartition: Vec<String> = vec![];
         let cg = copartition_group(&sources, &repartition, &["c".into(), "a".into()]);
-        check!(cg.source_topics == vec![0i16, 2i16]);
-        check!(cg.repartition_source_topics.is_empty());
-        check!(cg.source_topic_regex.is_empty());
+        check!(
+            (
+                cg.source_topics.as_slice(),
+                cg.repartition_source_topics.as_slice(),
+                cg.source_topic_regex.as_slice(),
+            ) == (&[0i16, 2][..], &[][..], &[][..])
+        );
     }
 
     #[test]
@@ -566,8 +586,12 @@ mod tests {
         let sources = vec!["a".to_string()];
         let repartition = vec!["rp0".to_string(), "rp1".to_string()];
         let cg = copartition_group(&sources, &repartition, &["rp1".into(), "a".into()]);
-        check!(cg.source_topics == vec![0i16]);
-        check!(cg.repartition_source_topics == vec![1i16]);
+        check!(
+            (
+                cg.source_topics.as_slice(),
+                cg.repartition_source_topics.as_slice()
+            ) == (&[0i16][..], &[1i16][..])
+        );
     }
 
     #[test]
@@ -587,10 +611,14 @@ mod tests {
         }];
         let topo = to_wire(&groups, "app");
         let cl = &topo.subtopologies[0].state_changelog_topics;
-        check!(cl.len() == 1);
-        check!(cl[0].name == "app-w-changelog");
-        check!(cl[0].partitions == 0);
-        check!(cl[0].replication_factor == -1);
+        check!(
+            (
+                cl.len(),
+                cl[0].name.as_str(),
+                cl[0].partitions,
+                cl[0].replication_factor
+            ) == (1, "app-w-changelog", 0, -1)
+        );
         let configs: Vec<(&str, &str)> = cl[0]
             .topic_configs
             .iter()
@@ -637,8 +665,12 @@ mod tests {
         let sources = vec!["a".to_string()];
         let repartition: Vec<String> = vec![];
         let cg = copartition_group(&sources, &repartition, &["unknown".into()]);
-        check!(cg.source_topics.is_empty());
-        check!(cg.repartition_source_topics.is_empty());
+        check!(
+            (
+                cg.source_topics.as_slice(),
+                cg.repartition_source_topics.as_slice()
+            ) == (&[][..], &[][..])
+        );
     }
 
     #[test]
@@ -659,21 +691,38 @@ mod tests {
         }];
         let topo = to_wire(&groups, "app");
         let cl = &topo.subtopologies[0].state_changelog_topics[0];
-        assert_eq!(cl.name, "app-j-changelog");
-        assert_eq!(cl.topic_configs[0].key, "cleanup.policy");
-        assert_eq!(cl.topic_configs[0].value, "delete"); // NOT compact,delete
-        assert_eq!(cl.topic_configs[1].key, "message.timestamp.type");
-        assert_eq!(cl.topic_configs[2].key, "retention.ms");
-        assert_eq!(cl.topic_configs[2].value, "86520000");
+        assert_eq!(
+            (
+                cl.name.as_str(),
+                cl.topic_configs
+                    .iter()
+                    .map(|c| (c.key.as_str(), c.value.as_str()))
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "app-j-changelog",
+                vec![
+                    ("cleanup.policy", "delete"),
+                    ("message.timestamp.type", "CreateTime"),
+                    ("retention.ms", "86520000"),
+                ],
+            )
+        );
     }
 
     #[test]
     fn versioned_store_changelog_config_is_compact_with_min_compaction_lag() {
         let cfgs = versioned_changelog_topic_configs(686_400_000);
-        let get = |k: &str| cfgs.iter().find(|c| c.key == k).map(|c| c.value.clone());
-        assert_eq!(get("cleanup.policy").as_deref(), Some("compact"));
-        assert_eq!(get("message.timestamp.type").as_deref(), Some("CreateTime"));
-        assert_eq!(get("min.compaction.lag.ms").as_deref(), Some("686400000"));
+        assert_eq!(
+            cfgs.iter()
+                .map(|cfg| (cfg.key.as_str(), cfg.value.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("cleanup.policy", "compact"),
+                ("message.timestamp.type", "CreateTime"),
+                ("min.compaction.lag.ms", "686400000"),
+            ]
+        );
     }
 
     #[test]
@@ -687,8 +736,12 @@ mod tests {
         }];
         let topo = to_wire(&groups, "app");
         let st = &topo.subtopologies[0];
-        check!(st.repartition_sink_topics == vec!["rp".to_string()]);
-        check!(st.repartition_source_topics.len() == 1);
-        check!(st.repartition_source_topics[0].name == "rp");
+        check!(
+            (
+                st.repartition_sink_topics.as_slice(),
+                st.repartition_source_topics.len(),
+                st.repartition_source_topics[0].name.as_str(),
+            ) == (&["rp".to_string()][..], 1, "rp")
+        );
     }
 }

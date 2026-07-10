@@ -2203,10 +2203,11 @@ mod to_table_caching_tests {
 
         pollster::block_on(g.flush_caches()).unwrap();
         let out = g.take_output();
-        check!(out.len() == 1);
-        check!(out[0].topic == "out");
         // to_stream forwards the deduped `new` value = 9 (BE i64).
-        check!(out[0].value.as_ref().unwrap().as_ref() == 9i64.to_be_bytes());
+        check!(
+            (out.len(), out[0].topic.as_str(), out[0].value.as_deref())
+                == (1, "out", Some(9i64.to_be_bytes().as_slice()))
+        );
     }
 
     /// `with_caching(false)`: the store is NOT cached even with a positive
