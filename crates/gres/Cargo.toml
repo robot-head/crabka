@@ -51,6 +51,8 @@ async-trait = { workspace = true }
 assert2 = { workspace = true }
 crabka-broker = { path = "../broker" }
 crabka-gres-control = { path = "../gres-control" }
+crabka-pgcatalog = { path = "../pgcatalog" }
+crabka-pgmvcc = { path = "../pgmvcc" }
 crabka-security = { path = "../security" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

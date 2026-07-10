@@ -22,8 +22,9 @@ use tokio::sync::Mutex;
 
 use crate::{
     CheckpointManifest, HashShardSpec, MapEpoch, RangeId, RangeKey, RangeMap, RangeScanSegment,
-    RangeSpec, RouteIntent, RowInterval as MapRowInterval, SplitCommand, SplitError, SplitHooks,
-    SplitState, SplitStateStore, TableId, TenantName,
+    RangeSpec, RangeTransferCapability, RangeTransferError, RouteIntent,
+    RowInterval as MapRowInterval, SplitCommand, SplitError, SplitHooks, SplitState,
+    SplitStateStore, TableId, TableTransferRequest, TenantName,
     coordinator::{LocalCoordinator, LocalCoordinatorError, TransactionDecision},
     forward::{ForwardError, RegistryRangeScanner, RegistryRemoteForward, RemoteForward},
     registry::RangeRegistry,
@@ -232,7 +233,9 @@ pub enum LocalSqlSplitError {
     UnsupportedTableKind(TableId),
     #[error("split target table {0} has secondary indexes")]
     IndexedTable(TableId),
-    #[error("split target table {0} contains physical rows")]
+    #[error(
+        "split target table {0} contains physical rows; local SQL splitting requires a durable range-owned SQL snapshot transfer"
+    )]
     NonEmptyTable(TableId),
     #[error("split target table {0} has allocated row IDs")]
     AllocatedRowIds(TableId),
@@ -242,6 +245,12 @@ pub enum LocalSqlSplitError {
     Catalog(#[from] crabka_pgcatalog::CatalogError),
     #[error(transparent)]
     Storage(#[from] crabka_pgkv::KvError),
+    #[error(transparent)]
+    Transfer(#[from] RangeTransferError),
+    #[error(
+        "split successor interval contains catalog-visible table {0} besides the transferred table"
+    )]
+    SuccessorIntervalHasOtherTable(TableId),
 }
 
 /// Opaque handles that keep all in-process range engines alive.
@@ -385,6 +394,7 @@ impl MultiRangeTenant {
             data_dir: config.data_dir,
             split_states: Mutex::new(BTreeMap::new()),
             split_lock: Mutex::new(()),
+            schema_gate: Arc::new(Mutex::new(())),
             table_write_gates: StdMutex::new(BTreeMap::new()),
             active_explicit_transactions: AtomicUsize::new(0),
             empty_table_split_test_hook: config.empty_table_split_test_hook,
@@ -485,6 +495,201 @@ impl MultiRangeTenant {
         run_split(operation_id, command, &bridge, &bridge)
             .await
             .map_err(Into::into)
+    }
+
+    /// Physically transfer and publish one populated ordinary table into a local successor.
+    ///
+    /// This is intentionally limited to a target interval containing exactly one
+    /// catalog-visible table.  The table gate and source WAL pause are held until
+    /// the complete successor engine is atomically published with the new map.
+    pub async fn split_populated_table_successor(
+        &self,
+        operation_id: impl Into<String>,
+        successor: RangeId,
+        table_id: TableId,
+        transfer: &dyn RangeTransferCapability,
+    ) -> Result<SplitState, LocalSqlSplitError> {
+        let _split_guard = self.inner.split_lock.lock().await;
+        let _schema_gate = self.inner.schema_gate.clone().lock_owned().await;
+        let operation_id = operation_id.into();
+        let table_write_gate = self.inner.table_write_gate(table_id);
+        let _table_write_gate = table_write_gate.lock_owned().await;
+        let serving = self.inner.serving.load_full();
+        let transfer_table = self.validate_populated_table_split(&serving, successor, table_id)?;
+        let state = SplitState::for_split(
+            operation_id,
+            SplitCommand {
+                current_map: serving.range_map.clone(),
+                predecessor: transfer_table.predecessor,
+                successor,
+                split_at: RangeKey::table_start(table_id),
+            },
+        )?;
+        Self::validate_successor_interval(&serving, &state, table_id)?;
+
+        let checkpoint = transfer
+            .force_checkpoint(transfer_table.predecessor)
+            .await?;
+        let barrier = transfer.pause_at_checkpoint(&checkpoint).await?;
+        let pause = TransferPauseGuard::new(transfer, barrier);
+        self.stage_and_publish_successor(
+            transfer,
+            &serving,
+            &state,
+            TableTransferRequest {
+                target_range: state.successor,
+                routing_table_id: table_id,
+                physical_table_id: transfer_table.physical_table_id,
+            },
+            &checkpoint,
+            barrier,
+        )
+        .await?;
+        pause.resume().await?;
+        self.inner
+            .split_states
+            .lock()
+            .await
+            .insert(state.operation_id.clone(), state.clone());
+        Ok(state)
+    }
+
+    async fn stage_and_publish_successor(
+        &self,
+        transfer: &dyn RangeTransferCapability,
+        serving: &ServingSnapshot,
+        state: &SplitState,
+        request: TableTransferRequest,
+        checkpoint: &CheckpointManifest,
+        barrier: crate::RangeTransferBarrier,
+    ) -> Result<(), LocalSqlSplitError> {
+        let tail = transfer
+            .read_committed_tail(state.predecessor, checkpoint.covered_offset, barrier)
+            .await?;
+        let staged = transfer
+            .stage_empty_successor(request, checkpoint, &tail, barrier)
+            .await?;
+        let claimed = transfer.claim_staged_successor(&staged, barrier).await?;
+        self.publish_claimed_successor(serving, state, claimed)
+    }
+
+    fn publish_claimed_successor(
+        &self,
+        serving: &ServingSnapshot,
+        state: &SplitState,
+        claimed: crate::ClaimedStagedSuccessor,
+    ) -> Result<(), LocalSqlSplitError> {
+        let coordinator = serving
+            .engines
+            .get(&RangeId::COORDINATOR)
+            .ok_or(LocalSqlSplitError::RemoteRange)?;
+        let mut successor = claimed.engine;
+        successor.set_catalog_kv(coordinator.kv_handle());
+        coordinator.share_gtm_to(&mut successor);
+        successor.set_timestamp_oracle(coordinator.timestamp_oracle_handle());
+
+        let mut engines = serving
+            .engines
+            .iter()
+            .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
+            .collect::<BTreeMap<_, _>>();
+        engines.insert(state.successor, successor);
+        let scanner: Arc<dyn crabka_pgexec::RangeScanner> = Arc::new(InProcessRangeScanner {
+            engines: engines
+                .iter()
+                .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
+                .collect(),
+            range_map: state.target_map.clone(),
+        });
+        for engine in engines.values_mut() {
+            engine.set_range_scanner(Arc::clone(&scanner));
+        }
+        let mut keepalives = serving.keepalives.clone();
+        keepalives.insert(state.successor, claimed.keepalive);
+        self.inner
+            .serving
+            .store(Arc::new(ServingSnapshot::ready_with_keepalives(
+                state.target_map.clone(),
+                engines,
+                keepalives,
+            )));
+        Ok(())
+    }
+
+    fn validate_populated_table_split(
+        &self,
+        serving: &ServingSnapshot,
+        successor: RangeId,
+        table_id: TableId,
+    ) -> Result<PopulatedTransferTable, LocalSqlSplitError> {
+        if self.inner.remote_forward.is_some() {
+            return Err(LocalSqlSplitError::RemoteRange);
+        }
+        if self
+            .inner
+            .active_explicit_transactions
+            .load(Ordering::Acquire)
+            != 0
+        {
+            return Err(LocalSqlSplitError::ExplicitTransaction);
+        }
+        if serving.engines.contains_key(&successor) {
+            return Err(LocalSqlSplitError::SuccessorAlreadyHosted(successor));
+        }
+        let predecessor = serving
+            .range_map
+            .range_for_key(table_id, 0)
+            .map_err(SplitError::from)?
+            .range_id;
+        if predecessor == RangeId::COORDINATOR || !serving.engines.contains_key(&predecessor) {
+            return Err(LocalSqlSplitError::RemoteRange);
+        }
+        let coordinator = serving
+            .engines
+            .get(&RangeId::COORDINATOR)
+            .ok_or(LocalSqlSplitError::RemoteRange)?;
+        let table = crabka_pgcatalog::list_tables(coordinator.catalog_kv())?
+            .into_iter()
+            .find(|table| routing_table_id(&table.name) == table_id)
+            .ok_or(LocalSqlSplitError::MissingTable(table_id))?;
+        if table.sharded || table.sharding.is_some() || table.foreign.is_some() {
+            return Err(LocalSqlSplitError::UnsupportedTableKind(table_id));
+        }
+        if !crabka_pgcatalog::list_table_indexes(coordinator.catalog_kv(), &table.name)?.is_empty()
+        {
+            return Err(LocalSqlSplitError::IndexedTable(table_id));
+        }
+        Ok(PopulatedTransferTable {
+            predecessor,
+            physical_table_id: table.id,
+        })
+    }
+
+    fn validate_successor_interval(
+        serving: &ServingSnapshot,
+        state: &SplitState,
+        table_id: TableId,
+    ) -> Result<(), LocalSqlSplitError> {
+        let coordinator = serving
+            .engines
+            .get(&RangeId::COORDINATOR)
+            .ok_or(LocalSqlSplitError::RemoteRange)?;
+        for table in crabka_pgcatalog::list_tables(coordinator.catalog_kv())? {
+            let catalog_table_id = routing_table_id(&table.name);
+            if state
+                .target_map
+                .route_table(catalog_table_id)
+                .map_err(SplitError::from)?
+                .range_id
+                == state.successor
+                && catalog_table_id != table_id
+            {
+                return Err(LocalSqlSplitError::SuccessorIntervalHasOtherTable(
+                    catalog_table_id,
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn validate_empty_table_split(
@@ -975,10 +1180,51 @@ struct TenantInner {
     data_dir: Option<PathBuf>,
     split_states: Mutex<BTreeMap<String, SplitState>>,
     split_lock: Mutex<()>,
+    schema_gate: Arc<Mutex<()>>,
     table_write_gates: StdMutex<BTreeMap<TableId, Arc<Mutex<()>>>>,
     active_explicit_transactions: AtomicUsize,
     empty_table_split_test_hook: Option<EmptyTableSplitTestHook>,
     commit_fault_for_testing: Option<Arc<StdMutex<Option<GatewayCommitFault>>>>,
+}
+
+struct PopulatedTransferTable {
+    predecessor: RangeId,
+    physical_table_id: u32,
+}
+
+/// Owns a successful source pause until the transfer either resumes it or is dropped.
+struct TransferPauseGuard<'a> {
+    transfer: &'a dyn RangeTransferCapability,
+    barrier: Option<crate::RangeTransferBarrier>,
+}
+
+impl<'a> TransferPauseGuard<'a> {
+    fn new(
+        transfer: &'a dyn RangeTransferCapability,
+        barrier: crate::RangeTransferBarrier,
+    ) -> Self {
+        Self {
+            transfer,
+            barrier: Some(barrier),
+        }
+    }
+
+    async fn resume(mut self) -> Result<(), RangeTransferError> {
+        let barrier = self
+            .barrier
+            .expect("transfer pause guard must hold a barrier");
+        self.transfer.resume(barrier).await?;
+        self.barrier = None;
+        Ok(())
+    }
+}
+
+impl Drop for TransferPauseGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(barrier) = self.barrier {
+            self.transfer.resume_after_drop(barrier);
+        }
+    }
 }
 
 impl TenantInner {
@@ -999,15 +1245,25 @@ struct ServingSnapshot {
     range_map: RangeMap,
     engines: BTreeMap<RangeId, SqlEngine>,
     ready: BTreeSet<RangeId>,
+    keepalives: BTreeMap<RangeId, Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 impl ServingSnapshot {
     fn ready(range_map: RangeMap, engines: BTreeMap<RangeId, SqlEngine>) -> Self {
+        Self::ready_with_keepalives(range_map, engines, BTreeMap::new())
+    }
+
+    fn ready_with_keepalives(
+        range_map: RangeMap,
+        engines: BTreeMap<RangeId, SqlEngine>,
+        keepalives: BTreeMap<RangeId, Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Self {
         let ready = engines.keys().copied().collect();
         Self {
             range_map,
             engines,
             ready,
+            keepalives,
         }
     }
 
@@ -1861,6 +2117,7 @@ impl GatewaySession {
     }
 
     async fn execute_ddl(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
+        let _schema_gate = self.inner.schema_gate.clone().lock_owned().await;
         self.session_for(RangeId::COORDINATOR)?
             .simple_query(statement)
             .await
