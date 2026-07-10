@@ -1,0 +1,34 @@
+[package]
+name = "crabka-gres-activator"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Scale-to-zero wake activator for Crabka Gres"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+keywords = ["postgres", "gres", "lifecycle", "crabka"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+crabka-gres-control = { version = "0.3.9", path = "../gres-control" }
+crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+crabka-gres = { version = "0.3.9", path = "../gres" }
+crabka-gres-substrate = { version = "0.3.9", path = "../gres-substrate" }
+crabka-pgkv = { version = "0.3.9", path = "../pgkv" }

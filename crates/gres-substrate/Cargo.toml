@@ -1,0 +1,49 @@
+[package]
+name = "crabka-gres-substrate"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Substrate-backed durability for Crabka Gres tenant computes: WAL journaling to a per-tenant topic, fencing, and replay"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-gres-substrate"
+readme = "README.md"
+keywords = ["postgres", "wal", "durability", "crabka", "gres"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+crabka-pgexec = { version = "0.3.9", path = "../pgexec" }
+crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
+crabka-pgmvcc = { version = "0.3.9", path = "../pgmvcc" }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
+crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
+crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
+crabka-protocol = { version = "0.3.9", path = "../protocol" }
+crabka-security = { workspace = true }
+crabka-gres-ranges = { version = "0.3.9", path = "../gres-ranges" }
+crabka-object-store = { version = "0.3.8", path = "../object-store" }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+object_store = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+proptest = { workspace = true }
+crabka-broker = { version = "0.3.9", path = "../broker" }
+crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
+stateright = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["full"] }

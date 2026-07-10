@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pgdog-admin
+type: Opaque
+stringData:
+  password: change-me
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alice-gres-password
+type: Opaque
+stringData:
+  password: change-me
+---
+apiVersion: crabka.io/v1alpha1
+kind: Gres
+metadata:
+  name: analytics
+spec:
+  kafkaCluster: demo
+  pgdog:
+    replicas: 1
+    listenPort: 6432
+    adminSecretRef:
+      name: pgdog-admin
+      key: password
+  defaults:
+    walReplication: 3
+    checkpointFrames: 10000
+    checkpointBytes: 134217728
+---
+apiVersion: crabka.io/v1alpha1
+kind: GresTenant
+metadata:
+  name: alice
+spec:
+  gres: analytics
+  user: alice
+  passwordSecretRef:
+    name: alice-gres-password
+    key: password

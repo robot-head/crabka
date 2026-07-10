@@ -1,0 +1,29 @@
+[package]
+name = "crabka-pgkv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Ordered key-value storage seam for the Crabka Gres engine with order-preserving key encoding and versioned row encoding"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-pgkv"
+readme = "README.md"
+keywords = ["postgres", "storage", "kv", "crabka", "gres"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
+serde = { workspace = true }
+fjall = { workspace = true }
+zerocopy = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+jiff = { workspace = true }

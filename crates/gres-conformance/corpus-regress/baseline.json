@@ -1,0 +1,14 @@
+{
+  "files": [
+    {
+      "file": "boolean/boolean.sql",
+      "total": 98,
+      "matched": 0
+    },
+    {
+      "file": "int4/int4.sql",
+      "total": 94,
+      "matched": 0
+    }
+  ]
+}
