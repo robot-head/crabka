@@ -61,7 +61,13 @@ pub fn decode_protobuf(bytes: &[u8]) -> Result<(u32, Vec<i32>, &[u8]), SchemaSer
         let index_count = usize::try_from(len).map_err(|_| {
             SchemaSerdeError::Wire(format!("negative Protobuf message-index count {len}"))
         })?;
-        let mut v = Vec::with_capacity(index_count.min(rest.len()));
+        if index_count > rest.len() {
+            return Err(SchemaSerdeError::Wire(format!(
+                "Protobuf message-index count {index_count} exceeds remaining frame bytes {}",
+                rest.len()
+            )));
+        }
+        let mut v = Vec::with_capacity(index_count);
         for _ in 0..index_count {
             let (ix, r) = read_varint(rest)?;
             let ix = i32::try_from(ix).map_err(|_| {
@@ -106,19 +112,34 @@ fn put_varint(buf: &mut BytesMut, value: i64) {
 
 fn read_varint(bytes: &[u8]) -> Result<(i64, &[u8]), SchemaSerdeError> {
     let mut result: u64 = 0;
-    let mut shift = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        result |= u64::from(b & 0x7f) << shift;
-        if b & 0x80 == 0 {
-            let decoded = (result >> 1).cast_signed() ^ -(result & 1).cast_signed();
-            return Ok((decoded, &bytes[i + 1..]));
+    for (index, &byte) in bytes.iter().take(10).enumerate() {
+        let payload = u64::from(byte & 0x7f);
+        if index == 9 && payload > 1 {
+            return Err(SchemaSerdeError::Wire("varint overflows 64 bits".into()));
         }
-        shift += 7;
-        if shift >= 64 {
-            break;
+        result |= payload << (index * 7);
+        if byte & 0x80 == 0 {
+            if encoded_varint_len(result) != index + 1 {
+                return Err(SchemaSerdeError::Wire("varint is overlong".into()));
+            }
+            #[allow(clippy::cast_possible_wrap)]
+            let decoded = ((result >> 1) as i64) ^ -((result & 1) as i64);
+            return Ok((decoded, &bytes[index + 1..]));
         }
     }
+    if bytes.len() >= 10 {
+        return Err(SchemaSerdeError::Wire("varint exceeds 10 bytes".into()));
+    }
     Err(SchemaSerdeError::Wire("truncated varint".into()))
+}
+
+fn encoded_varint_len(mut value: u64) -> usize {
+    let mut len = 1;
+    while value >= 0x80 {
+        value >>= 7;
+        len += 1;
+    }
+    len
 }
 
 #[cfg(test)]
@@ -227,5 +248,17 @@ mod tests {
             check!(decoded == v, "round-trip {v}");
             check!(rest.is_empty(), "no trailing bytes for {v}");
         }
+    }
+
+    #[test]
+    fn protobuf_rejects_overflowing_and_noncanonical_message_indices() {
+        let header = [MAGIC, 0, 0, 0, 7];
+        let overflowing = [header.as_slice(), &[0x80; 9], &[0x02]].concat();
+        let error = decode_protobuf(&overflowing).expect_err("overflowing varint is rejected");
+        check!(error.to_string().contains("overflows 64 bits"));
+
+        let overlong_zero = [header.as_slice(), &[0x80, 0x00]].concat();
+        let error = decode_protobuf(&overlong_zero).expect_err("overlong zero is rejected");
+        check!(error.to_string().contains("overlong"));
     }
 }

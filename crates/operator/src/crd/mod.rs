@@ -3,6 +3,8 @@
 //! CRD YAML manifest (see `gen_crds`).
 
 pub mod ca;
+pub mod gres;
+pub mod gres_tenant;
 pub mod grpc_gateway;
 pub mod kafka;
 pub mod kafka_node_pool;
@@ -16,6 +18,14 @@ pub mod topic;
 pub mod user;
 
 pub use ca::{CertificateAuthority, CertificateAuthorityStatus};
+pub use gres::{
+    Gres, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind, GresBalancerPlanSnapshot,
+    GresBalancerRegistryLayout, GresBalancerSpec, GresBalancerStatus, GresBalancerThresholds,
+    GresSpec, GresStatus, PgdogSpec, SecretKeyRef, SecretRef, TenantDefaults,
+};
+pub use gres_tenant::{
+    GresTenant, GresTenantRangeKey, GresTenantRangeSpec, GresTenantSpec, GresTenantStatus,
+};
 pub use grpc_gateway::{KafkaGrpcGateway, KafkaGrpcGatewaySpec, KafkaGrpcGatewayStatus};
 pub use kafka::{
     Authorization, InterBrokerKerberos, Kafka, KafkaCondition, KafkaSpec, KafkaStatus,

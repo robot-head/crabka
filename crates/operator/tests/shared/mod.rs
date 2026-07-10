@@ -422,6 +422,18 @@ pub fn op_config(namespace: &str) -> OperatorConfig {
         default_broker_image: None,
         default_gateway_image: None,
         default_schema_registry_image: None,
+        default_gres_image: None,
+        default_pgdog_image: None,
+        default_gres_activator_image: None,
+        gres_checkpoint_store: None,
+        gres_checkpoint_bucket: None,
+        gres_checkpoint_region: None,
+        gres_checkpoint_endpoint: None,
+        gres_checkpoint_allow_http: false,
+        gres_checkpoint_access_key_id: None,
+        gres_checkpoint_secret_access_key: None,
+        gres_checkpoint_gcs_service_account_path: None,
+        gres_checkpoint_gcs_application_credentials_path: None,
     }
 }
 

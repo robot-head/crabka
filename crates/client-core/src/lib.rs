@@ -69,7 +69,10 @@ mod mock;
 pub use client::{BrokerHandle, Client};
 pub use connection::{ClientDuplex, Connection, ConnectionOptions};
 pub use error::ClientError;
-pub use fetch::{FetchedRecord, IsolatedFetch, fetch_partition, fetch_partition_with_isolation};
+pub use fetch::{
+    FetchPartitionResult, FetchedHeader, FetchedRecord, IsolatedFetch, fetch_partition,
+    fetch_partition_with_isolation, fetch_partition_with_isolation_progress,
+};
 #[cfg(any(test, feature = "mock"))]
 pub use mock::MockBroker;
 pub use offset_for_leader_epoch::{EpochEndOffset, offset_for_leader_epoch};

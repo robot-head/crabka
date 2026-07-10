@@ -1,0 +1,45 @@
+[package]
+name = "crabka-gres-ranges"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Typed range maps and deterministic routing primitives for Crabka Gres multi-range tenants"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-gres-ranges"
+readme = "README.md"
+keywords = ["postgres", "ranges", "routing", "crabka", "gres"]
+categories = ["database-implementations"]
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+arc-swap = { workspace = true }
+crabka-gres-control = { version = "0.3.9", path = "../gres-control" }
+crabka-security = { path = "../security" }
+crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
+crabka-pgexec = { version = "0.3.9", path = "../pgexec" }
+crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
+crabka-pgmvcc = { version = "0.3.9", path = "../pgmvcc" }
+crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
+crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
+crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
+derive_more = { workspace = true, features = ["display", "from", "into", "from_str"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+rustls = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "macros", "sync", "time"] }
+tokio-rustls = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+proptest = { workspace = true }
+stateright = { workspace = true }
+tempfile = { workspace = true }

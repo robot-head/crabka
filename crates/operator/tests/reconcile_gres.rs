@@ -1,0 +1,539 @@
+use std::sync::{Arc, Mutex};
+
+use assert2::assert;
+use crabka_operator::{
+    context::{PgdogAdminError, PgdogAdminLike, PgdogReloadRequest},
+    controller::gres::{reconcile, tenant_endpoint, tenant_to_gres_refs},
+    crd::{
+        Gres, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
+        GresBalancerPlanSnapshot, GresBalancerRegistryLayout, GresBalancerSpec,
+        GresBalancerThresholds, GresSpec, GresTenant, GresTenantSpec, PgdogSpec, SecretKeyRef,
+    },
+};
+use http::Method;
+
+#[path = "shared/mod.rs"]
+mod shared;
+
+use shared::{MockRule, MockState, fixture_ctx, json_response, mock_client};
+
+#[derive(Debug)]
+struct FakePgdogAdmin {
+    outcomes: Mutex<Vec<bool>>,
+    requests: Mutex<Vec<PgdogReloadRequest>>,
+}
+
+impl FakePgdogAdmin {
+    fn new(outcomes: Vec<bool>) -> Arc<Self> {
+        Arc::new(Self {
+            outcomes: Mutex::new(outcomes),
+            requests: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn requests(&self) -> Vec<PgdogReloadRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl PgdogAdminLike for FakePgdogAdmin {
+    async fn reload_and_database_view_matches(
+        &self,
+        request: &PgdogReloadRequest,
+    ) -> Result<bool, PgdogAdminError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(self.outcomes.lock().unwrap().remove(0))
+    }
+}
+
+fn gres() -> Gres {
+    let mut obj = Gres::new(
+        "fleet",
+        GresSpec {
+            kafka_cluster: "demo".into(),
+            pgdog: PgdogSpec {
+                image: None,
+                replicas: 1,
+                listen_port: 6432,
+                tls_secret_ref: None,
+                admin_secret_ref: SecretKeyRef {
+                    name: "admin".into(),
+                    key: "password".into(),
+                },
+            },
+            defaults: None,
+            balancer: Some(GresBalancerSpec {
+                enabled: true,
+                goals: GresBalancerGoals {
+                    disabled_goals: vec![GresBalancerGoal::LoadSkew],
+                },
+                thresholds: GresBalancerThresholds::default(),
+                registry_layout: GresBalancerRegistryLayout::default(),
+                plan_snapshot: None,
+            }),
+        },
+    );
+    obj.metadata.namespace = Some("ns".into());
+    obj.metadata.uid = Some("gres-uid".into());
+    obj.metadata.generation = Some(3);
+    obj
+}
+
+fn tenant_list_body() -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "GresTenantList",
+        "items": [{
+            "apiVersion": "crabka.io/v1alpha1",
+            "kind": "GresTenant",
+            "metadata": { "name": "tenant-a", "namespace": "ns", "uid": "tenant-uid" },
+            "spec": { "gres": "fleet", "user": "alice", "passwordSecretRef": { "name": "pw", "key": "password" }, "suspended": false }
+        }]
+    })
+}
+
+fn tenant_list_body_with_multi_range_tenant() -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "GresTenantList",
+        "items": [
+            {
+                "apiVersion": "crabka.io/v1alpha1",
+                "kind": "GresTenant",
+                "metadata": { "name": "tenant-a", "namespace": "ns", "uid": "tenant-a-uid" },
+                "spec": { "gres": "fleet", "user": "alice", "passwordSecretRef": { "name": "pw", "key": "password" }, "suspended": false }
+            },
+            {
+                "apiVersion": "crabka.io/v1alpha1",
+                "kind": "GresTenant",
+                "metadata": { "name": "tenant-b", "namespace": "ns", "uid": "tenant-b-uid" },
+                "spec": {
+                    "gres": "fleet", "user": "bob", "passwordSecretRef": { "name": "pw", "key": "password" },
+                    "ranges": [
+                        { "rangeId": 0, "endKey": { "tableId": 100, "rowid": 0 } },
+                        { "rangeId": 1 }
+                    ]
+                }
+            }
+        ]
+    })
+}
+
+fn admin_secret_body() -> serde_json::Value {
+    use base64::Engine as _;
+
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": { "name": "admin", "namespace": "ns", "uid": "admin-uid" },
+        "type": "Opaque",
+        "data": {
+            "password": base64::engine::general_purpose::STANDARD.encode(b"pw")
+        }
+    })
+}
+
+fn gres_tenant(name: &str, gres_name: &str) -> GresTenant {
+    let mut tenant = GresTenant::new(
+        name,
+        GresTenantSpec {
+            gres: gres_name.into(),
+            user: "alice".into(),
+            password_secret_ref: SecretKeyRef {
+                name: "pw".into(),
+                key: "password".into(),
+            },
+            suspended: Some(false),
+            resources: None,
+            ranges: Vec::new(),
+            overrides: None,
+        },
+    );
+    tenant.metadata.namespace = Some("ns".into());
+    tenant
+}
+
+fn reconcile_rules(include_status: bool) -> Vec<MockRule> {
+    let mut rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: "/grestenants".into(),
+            response: json_response(200, &tenant_list_body()),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/secrets/fleet-pgdog-config".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"apiVersion":"v1","kind":"Secret","metadata":{"name":"fleet-pgdog-config","namespace":"ns"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/fleet-gres-activator".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"fleet-gres-activator","namespace":"ns"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/fleet-pgdog".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"apiVersion":"v1","kind":"Service","metadata":{"name":"fleet-pgdog","namespace":"ns"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/deployments/fleet-gres-activator".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fleet-gres-activator","namespace":"ns"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/deployments/fleet-pgdog".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"fleet-pgdog","namespace":"ns"}}),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/secrets/admin".into(),
+            response: json_response(200, &admin_secret_body()),
+        },
+    ];
+    if include_status {
+        rules.push(MockRule {
+            method: Method::PATCH,
+            path_substr: "/greses/fleet/status".into(),
+            response: json_response(200, &serde_json::to_value(gres()).unwrap()),
+        });
+    }
+    rules
+}
+
+#[tokio::test]
+async fn renders_pgdog_config_secret_and_status_hash() {
+    let admin = FakePgdogAdmin::new(vec![false, true]);
+    let rules = reconcile_rules(true);
+    let state = MockState::new(rules);
+    let ctx = Arc::new(
+        fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone()),
+    );
+
+    reconcile(Arc::new(gres()), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let secret_patch = observed
+        .iter()
+        .find(|request| {
+            request
+                .uri()
+                .to_string()
+                .contains("/secrets/fleet-pgdog-config")
+        })
+        .expect("config Secret patch captured");
+    let secret_body: serde_json::Value = serde_json::from_slice(secret_patch.body()).unwrap();
+    assert!(secret_body["data"]["pgdog.toml"].is_string());
+    assert!(secret_body["data"]["users.toml"].is_string());
+
+    let deployment_patch = observed
+        .iter()
+        .find(|request| {
+            request
+                .uri()
+                .to_string()
+                .contains("/deployments/fleet-pgdog")
+        })
+        .expect("deployment patch captured");
+    let deployment_body: serde_json::Value =
+        serde_json::from_slice(deployment_patch.body()).unwrap();
+    assert!(
+        deployment_body["spec"]["template"]["spec"]["containers"][0]["image"]
+            == "ghcr.io/pgdogdev/pgdog:v0.1.0"
+    );
+    assert!(observed.iter().any(|request| {
+        request
+            .uri()
+            .to_string()
+            .contains("/services/fleet-gres-activator")
+    }));
+    let activator_deployment = observed
+        .iter()
+        .find(|request| {
+            request
+                .uri()
+                .to_string()
+                .contains("/deployments/fleet-gres-activator")
+        })
+        .expect("activator deployment patch captured");
+    let activator_body: serde_json::Value =
+        serde_json::from_slice(activator_deployment.body()).unwrap();
+    assert!(
+        activator_body["spec"]["template"]["spec"]["containers"][0]["image"]
+            .as_str()
+            .is_some_and(|image| image.starts_with("ghcr.io/robot-head/crabka-gres-activator:"))
+    );
+
+    let status_patch = observed
+        .iter()
+        .find(|request| request.uri().to_string().contains("/greses/fleet/status"))
+        .expect("status patch captured");
+    let status_body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
+    assert!(
+        status_body["status"]["confirmedPgdogConfigHash"]
+            .as_str()
+            .unwrap()
+            .len()
+            == 64
+    );
+    let admin_requests = admin.requests();
+    assert!(admin_requests.len() == 2);
+    assert!(admin_requests[0].expected_databases == vec!["tenant-a"]);
+    assert!(status_body["status"]["balancer"]["dryRunOnly"] == true);
+    assert!(status_body["status"]["balancer"]["plannedOperations"] == 0);
+    assert!(status_body["status"]["balancer"]["executableOperations"] == 0);
+    assert!(status_body["status"]["balancer"]["unsupportedOperations"] == 0);
+    assert!(status_body["status"]["balancer"]["disabledGoals"] == serde_json::json!(["load_skew"]));
+    assert!(
+        status_body["status"]["balancer"]["enabledGoals"]
+            == serde_json::json!([
+                "co_location_integrity",
+                "range_limit",
+                "range_size",
+                "auto_shard_conversion"
+            ])
+    );
+    assert!(status_body["status"]["balancer"]["plannedOperationKinds"] == serde_json::json!([]));
+    assert!(
+        status_body["status"]["balancer"]["mutationDisabledReason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("protocol is not configured"))
+    );
+    assert!(
+        status_body["status"]["balancer"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("no dry-run planner snapshot"))
+    );
+}
+
+#[tokio::test]
+async fn reconciled_balancer_plan_without_protocol_keeps_all_operations_disabled() {
+    let admin = FakePgdogAdmin::new(vec![true]);
+    let state = MockState::new(reconcile_rules(true));
+    let ctx =
+        Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin));
+    let mut obj = gres();
+    obj.spec
+        .balancer
+        .as_mut()
+        .expect("fixture configures the balancer")
+        .plan_snapshot = Some(GresBalancerPlanSnapshot {
+        operations: vec![
+            GresBalancerOperationKind::Split,
+            GresBalancerOperationKind::Merge,
+            GresBalancerOperationKind::Move,
+            GresBalancerOperationKind::ConvertToSharded,
+        ],
+    });
+
+    reconcile(Arc::new(obj), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let status_patch = observed
+        .iter()
+        .find(|request| request.uri().to_string().contains("/greses/fleet/status"))
+        .expect("status patch captured");
+    let status_body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
+    let balancer = &status_body["status"]["balancer"];
+    assert!(balancer["plannedOperations"] == 4);
+    assert!(
+        balancer["plannedOperationKinds"]
+            == serde_json::json!(["split", "merge", "move", "convert_to_sharded"])
+    );
+    assert!(balancer["executableOperations"] == 0);
+    assert!(balancer["executableOperationKinds"] == serde_json::json!([]));
+    assert!(balancer["unsupportedOperations"] == 4);
+    assert!(balancer["unsupportedOperationKinds"] == balancer["plannedOperationKinds"]);
+    assert!(
+        balancer["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("mutations remain disabled"))
+    );
+}
+
+#[tokio::test]
+async fn reconciled_balancer_plan_with_protocol_reports_physical_operations_unavailable() {
+    let admin = FakePgdogAdmin::new(vec![true]);
+    let state = MockState::new(reconcile_rules(true));
+    let ctx =
+        Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin));
+    let mut obj = gres();
+    let balancer_spec = obj
+        .spec
+        .balancer
+        .as_mut()
+        .expect("fixture configures the balancer");
+    balancer_spec
+        .registry_layout
+        .transactional_registry_protocol = true;
+    balancer_spec.plan_snapshot = Some(GresBalancerPlanSnapshot {
+        operations: vec![
+            GresBalancerOperationKind::Move,
+            GresBalancerOperationKind::ConvertToSharded,
+            GresBalancerOperationKind::Split,
+            GresBalancerOperationKind::Merge,
+            GresBalancerOperationKind::Move,
+        ],
+    });
+
+    reconcile(Arc::new(obj), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let status_patch = observed
+        .iter()
+        .find(|request| request.uri().to_string().contains("/greses/fleet/status"))
+        .expect("status patch captured");
+    let status_body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
+    let balancer = &status_body["status"]["balancer"];
+    assert!(balancer["transactionalRegistryProtocolAvailable"] == true);
+    assert!(balancer["plannedOperations"] == 5);
+    assert!(
+        balancer["plannedOperationKinds"]
+            == serde_json::json!(["move", "convert_to_sharded", "split", "merge"])
+    );
+    assert!(balancer["executableOperations"] == 0);
+    assert!(balancer["executableOperationKinds"] == serde_json::json!([]));
+    assert!(balancer["unsupportedOperations"] == 5);
+    assert!(
+        balancer["unsupportedOperationKinds"]
+            == serde_json::json!(["move", "convert_to_sharded", "split", "merge"])
+    );
+    assert!(
+        balancer["mutationDisabledReason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("checkpoint, copy, catch-up, and cutover"))
+    );
+}
+
+#[tokio::test]
+async fn stale_pgdog_admin_view_requeues_without_confirming_hash() {
+    let admin = FakePgdogAdmin::new(vec![false, false, false]);
+    let state = MockState::new(reconcile_rules(false));
+    let ctx = Arc::new(
+        fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone()),
+    );
+
+    let action = reconcile(Arc::new(gres()), ctx).await.unwrap();
+
+    assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(15))
+    );
+    assert!(admin.requests().len() == 3);
+    assert!(state.remaining_rules() == 0);
+    let observed = state.take_observed();
+    assert!(
+        !observed
+            .iter()
+            .any(|request| request.uri().to_string().contains("/greses/fleet/status"))
+    );
+}
+
+#[tokio::test]
+async fn fleet_reconcile_excludes_unsupported_multi_range_tenants_from_pgdog_config_and_reload_expectations()
+ {
+    let admin = FakePgdogAdmin::new(vec![true]);
+    let mut rules = reconcile_rules(true);
+    rules[0].response = json_response(200, &tenant_list_body_with_multi_range_tenant());
+    let state = MockState::new(rules);
+    let ctx = Arc::new(
+        fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone()),
+    );
+
+    reconcile(Arc::new(gres()), ctx).await.unwrap();
+
+    assert!(admin.requests()[0].expected_databases == vec!["tenant-a"]);
+    let observed = state.take_observed();
+    let secret_patch = observed
+        .iter()
+        .find(|request| request.uri().path().contains("/secrets/fleet-pgdog-config"))
+        .expect("config Secret patch captured");
+    let body: serde_json::Value = serde_json::from_slice(secret_patch.body()).unwrap();
+    let pgdog_toml = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        body["data"]["pgdog.toml"]
+            .as_str()
+            .expect("pgdog config data"),
+    )
+    .expect("base64 pgdog config");
+    let pgdog_toml = String::from_utf8(pgdog_toml).expect("UTF-8 pgdog config");
+    assert!(pgdog_toml.contains("tenant-a"));
+    assert!(!pgdog_toml.contains("tenant-b"));
+}
+
+#[test]
+fn tenant_watch_maps_to_referenced_gres_fleet() {
+    let refs = tenant_to_gres_refs(&gres_tenant("tenant-a", "fleet"));
+
+    assert!(refs.len() == 1);
+    assert!(refs[0].name == "fleet");
+    assert!(refs[0].namespace.as_deref() == Some("ns"));
+}
+
+#[test]
+fn tenant_endpoint_uses_status_lifecycle_phase_for_activator_routing() {
+    let mut tenant = gres_tenant("tenant-a", "fleet");
+    tenant.status = Some(crabka_operator::crd::GresTenantStatus {
+        lifecycle_phase: Some("resume_requested".into()),
+        ..Default::default()
+    });
+
+    let endpoint = tenant_endpoint(&tenant).expect("valid endpoint");
+
+    assert!(endpoint.state == crabka_gres_control::TenantState::ResumeRequested);
+}
+
+#[test]
+fn multi_range_unsupported_tenant_is_excluded_from_pgdog_endpoint_set() {
+    let mut tenant = gres_tenant("tenant-a", "fleet");
+    tenant.status = Some(crabka_operator::crd::GresTenantStatus {
+        conditions: vec![crabka_operator::crd::KafkaCondition {
+            type_: "Ready".into(),
+            status: "False".into(),
+            reason: "MultiRangeUnsupported".into(),
+            message: "multi-range placement is unavailable".into(),
+            last_transition_time: "2026-07-10T00:00:00Z".into(),
+        }],
+        ..Default::default()
+    });
+
+    let endpoints: Vec<_> = [tenant].iter().filter_map(tenant_endpoint).collect();
+
+    assert!(endpoints.is_empty());
+}
+
+#[test]
+fn disabled_balancer_knob_reports_no_enabled_goals() {
+    let mut obj = gres();
+    obj.spec.balancer = Some(GresBalancerSpec {
+        enabled: false,
+        goals: GresBalancerGoals::default(),
+        thresholds: GresBalancerThresholds::default(),
+        registry_layout: GresBalancerRegistryLayout::default(),
+        plan_snapshot: None,
+    });
+
+    let status = crabka_operator::controller::gres::balancer_status(&obj);
+
+    assert!(!status.enabled);
+    assert!(status.enabled_goals.is_empty());
+    assert!(status.disabled_goals.len() == 5);
+    assert!(status.planned_operations == 0);
+    assert!(status.executable_operations == 0);
+    assert!(status.unsupported_operations == 0);
+}

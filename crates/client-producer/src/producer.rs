@@ -5,7 +5,7 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -137,6 +137,11 @@ pub struct Producer {
     /// Arc-wrapped so the sender task can share the same state without
     /// additional synchronization structures.
     pub(crate) txn_state: Arc<Mutex<TxnState>>,
+    /// Set synchronously when an unresolved transaction guard is dropped or
+    /// `EndTxn` loses its response. This is separate from `txn_state` because
+    /// `Drop` cannot await its async mutex.
+    pub(crate) txn_recovery_required: Arc<AtomicBool>,
+    pub(crate) txn_recovery_generation: Arc<AtomicU64>,
     /// Cached connection to the transaction coordinator broker.
     /// Populated by `init_transactions`; reused by begin/commit/abort.
     pub(crate) txn_coord_client: Mutex<Option<Client>>,
@@ -183,7 +188,10 @@ impl Producer {
     )]
     pub async fn begin_transaction(&self) -> Result<Transaction<'_>, ProducerError> {
         self.begin_transaction_state().await?;
-        Ok(Transaction { producer: self })
+        Ok(Transaction {
+            producer: self,
+            finished: false,
+        })
     }
 
     /// Begin a new transaction, returning an owning guard that must be
@@ -209,12 +217,18 @@ impl Producer {
         self: Arc<Self>,
     ) -> Result<OwnedTransaction, ProducerError> {
         self.begin_transaction_state().await?;
-        Ok(OwnedTransaction { producer: self })
+        Ok(OwnedTransaction {
+            producer: self,
+            finished: false,
+        })
     }
 
     async fn begin_transaction_state(&self) -> Result<(), ProducerError> {
         if self.transactional_id.is_none() {
             return Err(ProducerError::NotTransactional);
+        }
+        if self.transaction_recovery_required() {
+            return Err(ProducerError::RecoveryRequired);
         }
         let mut state = self.txn_state.lock().await;
         match *state {
@@ -281,7 +295,7 @@ impl Producer {
         let (pid, epoch) = *self.txn_pid_epoch.lock().await;
 
         // 3. Send EndTxn to the coordinator.
-        let resp = coord
+        let resp = match coord
             .send(EndTxnRequest {
                 transactional_id: tid,
                 producer_id: pid,
@@ -289,7 +303,17 @@ impl Producer {
                 committed,
                 ..Default::default()
             })
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                // The EndTxn result is unknown after a transport failure. A
+                // fresh InitProducerId epoch is required before any reuse.
+                self.require_transaction_recovery();
+                *self.txn_state.lock().await = TxnState::RecoveryRequired;
+                return Err(ProducerError::Client(error));
+            }
+        };
 
         tracing::Span::current().record("error_code", resp.error_code);
         let mut state = self.txn_state.lock().await;
@@ -359,8 +383,12 @@ impl Producer {
         let mut state = self.txn_state.lock().await;
         if !matches!(
             *state,
-            TxnState::Uninitialized | TxnState::Ready | TxnState::Fenced
-        ) {
+            TxnState::Uninitialized
+                | TxnState::Ready
+                | TxnState::Fenced
+                | TxnState::RecoveryRequired
+        ) && !self.transaction_recovery_required()
+        {
             return Err(ProducerError::InvalidTransactionState(
                 "init_transactions called while a transaction is in flight",
             ));
@@ -373,6 +401,7 @@ impl Producer {
             .bootstrap(coord_addr)
             .client_id(self.client_id.clone())
             .maybe_security(self.security.clone())
+            .request_timeout(self.request_timeout)
             .build()
             .await?;
 
@@ -394,6 +423,7 @@ impl Producer {
                 *self.txn_pid_epoch.lock().await = (resp.producer_id, resp.producer_epoch);
                 *self.txn_coord_client.lock().await = Some(coord);
                 *state = TxnState::Ready;
+                self.txn_recovery_required.store(false, Ordering::Release);
                 Ok(())
             }
             47 /* INVALID_PRODUCER_EPOCH */ => {
@@ -571,6 +601,17 @@ impl Producer {
         }
     }
 
+    pub(crate) fn require_transaction_recovery(&self) {
+        if !self.txn_recovery_required.swap(true, Ordering::AcqRel) {
+            self.txn_recovery_generation.fetch_add(1, Ordering::AcqRel);
+        }
+        let _ = self.wake_tx.try_send(());
+    }
+
+    fn transaction_recovery_required(&self) -> bool {
+        self.txn_recovery_required.load(Ordering::Acquire)
+    }
+
     #[allow(dead_code)] // wired by sender on INVALID_PRODUCER_EPOCH; kept for symmetry
     pub(crate) fn fence(&self) {
         self.state
@@ -609,6 +650,11 @@ impl Producer {
             let _ = tx.send(Err(e));
             return rx;
         }
+        if self.transactional_id.is_some() && self.transaction_recovery_required() {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Err(ProducerError::RecoveryRequired));
+            return rx;
+        }
 
         let partition = match record.partition {
             Some(p) => {
@@ -637,11 +683,25 @@ impl Producer {
         );
 
         let timestamp = record.timestamp_ms.unwrap_or_else(current_millis);
+        let transaction_generation = match self.transaction_generation_for_send().await {
+            Ok(generation) => generation,
+            Err(error) => {
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(Err(error));
+                return rx;
+            }
+        };
         let mut a = acc.lock().await;
         // try_append currently only ever returns `Appended`; if a future
         // change adds `BatchFull` we want a compile error, so match
         // exhaustively rather than `let ... else`.
-        let rx = match a.try_append(record.key, record.value, record.headers, timestamp) {
+        let rx = match a.try_append(
+            record.key,
+            record.value,
+            record.headers,
+            timestamp,
+            transaction_generation,
+        ) {
             AppendResult::Appended(rx) => rx,
             AppendResult::BatchFull => {
                 // Should not happen with the current implementation; treat
@@ -653,6 +713,19 @@ impl Producer {
         };
         let _ = self.wake_tx.try_send(());
         rx
+    }
+
+    async fn transaction_generation_for_send(&self) -> Result<Option<u64>, ProducerError> {
+        if self.transactional_id.is_none() {
+            return Ok(None);
+        }
+        if self.transaction_recovery_required() {
+            return Err(ProducerError::RecoveryRequired);
+        }
+        if *self.txn_state.lock().await != TxnState::InTransaction {
+            return Ok(None);
+        }
+        Ok(Some(self.txn_recovery_generation.load(Ordering::Acquire)))
     }
 
     /// Resolve the destination partition for a record. Hashes the key when
