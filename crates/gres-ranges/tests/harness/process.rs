@@ -114,7 +114,15 @@ impl ProcessHarness {
     }
 
     pub async fn kill_and_restart(&mut self, range: u32) {
+        self.kill(range).await;
+        self.restart(range).await;
+    }
+
+    pub async fn kill(&mut self, range: u32) {
         self.stop_node(range).await;
+    }
+
+    pub async fn restart(&mut self, range: u32) {
         let hosted_ranges = format!("r{range}");
         self.restart_node(range, &hosted_ranges).await;
     }
