@@ -207,10 +207,71 @@ pub struct ScanRequest<'a> {
     pub top_k: Option<TopKSpec>,
 }
 
+/// One bounded batch returned by a [`RangeCursor`].
+#[derive(Debug)]
+pub struct ScanPage {
+    /// Visible rows in deterministic `(rowid, xmin)` table order.
+    pub rows: Box<[ScannedRow]>,
+    /// True when this page exhausted the cursor.
+    pub is_last: bool,
+}
+
+/// Pull-based scan result. A page is not produced until the consumer asks for
+/// it, which provides backpressure without a detached producer task.
+#[async_trait::async_trait]
+pub trait RangeCursor: Send {
+    /// Return at most `max_rows` rows. Dropping the future or cursor cancels the
+    /// scan and releases its snapshot/resources through ordinary drop.
+    async fn next_page(&mut self, max_rows: usize) -> Result<ScanPage, ExecError>;
+}
+
+/// Compatibility cursor for scanners which still return a complete vector.
+///
+/// This type deliberately says "materialized": it bounds page delivery but
+/// does not make its backing scan incremental. New scanner implementations
+/// should override [`RangeScanner::scan_cursor`] with a native cursor.
+pub struct MaterializedRangeCursor {
+    rows: std::collections::VecDeque<ScannedRow>,
+}
+
+impl MaterializedRangeCursor {
+    /// Wrap an already materialized scan result.
+    #[must_use]
+    pub fn new(rows: Vec<ScannedRow>) -> Self {
+        Self { rows: rows.into() }
+    }
+}
+
+#[async_trait::async_trait]
+impl RangeCursor for MaterializedRangeCursor {
+    async fn next_page(&mut self, max_rows: usize) -> Result<ScanPage, ExecError> {
+        if max_rows == 0 {
+            return Err(ExecError::Unsupported(
+                "range cursor page size must be greater than zero".into(),
+            ));
+        }
+        let take = max_rows.min(self.rows.len());
+        let rows = self.rows.drain(..take).collect::<Vec<_>>().into_boxed_slice();
+        Ok(ScanPage {
+            rows,
+            is_last: self.rows.is_empty(),
+        })
+    }
+}
+
 /// Seam for local or scatter-gather table scans.
 pub trait RangeScanner: Send + Sync + 'static {
     /// Return visible rows in deterministic `(rowid, xmin)` table order.
     fn scan(&self, request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, ExecError>;
+
+    /// Open a pull-based cursor. The default is a compatibility adapter which
+    /// materializes through [`RangeScanner::scan`].
+    fn scan_cursor<'a>(
+        &'a self,
+        request: ScanRequest<'a>,
+    ) -> Result<Box<dyn RangeCursor + 'a>, ExecError> {
+        Ok(Box::new(MaterializedRangeCursor::new(self.scan(request)?)))
+    }
 }
 
 /// Decorates a scanner with the read point allocated once for a SQL statement.
@@ -879,4 +940,39 @@ fn project_scanned_row(
         row: projected,
         ..row
     })
+}
+
+#[cfg(test)]
+mod cursor_contract_tests {
+    use super::{MaterializedRangeCursor, RangeCursor};
+    use crabka_pgtypes::Datum;
+
+    fn row(rowid: u64) -> super::ScannedRow {
+        super::ScannedRow {
+            rowid,
+            xmin: 1,
+            row: vec![Datum::Int8(i64::try_from(rowid).expect("test rowid fits"))],
+        }
+    }
+
+    #[tokio::test]
+    async fn materialized_adapter_returns_only_the_requested_page() {
+        let mut cursor = MaterializedRangeCursor::new(vec![row(1), row(2), row(3)]);
+
+        let first = cursor.next_page(2).await.expect("first page succeeds");
+        assert_eq!(first.rows.len(), 2);
+        assert!(!first.is_last);
+        let second = cursor.next_page(2).await.expect("second page succeeds");
+        assert_eq!(second.rows.len(), 1);
+        assert!(second.is_last);
+    }
+
+    #[tokio::test]
+    async fn zero_page_size_is_rejected_without_consuming_rows() {
+        let mut cursor = MaterializedRangeCursor::new(vec![row(1)]);
+
+        assert!(cursor.next_page(0).await.is_err());
+        let page = cursor.next_page(1).await.expect("valid page succeeds");
+        assert_eq!(page.rows[0].rowid, 1);
+    }
 }

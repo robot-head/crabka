@@ -78,8 +78,9 @@ pub use gtm::GlobalXidLease;
 pub use read_gate::{Linearizer, LocalLinearizer};
 pub use scanner::{
     ColumnPredicate, LocalRangeScanner, PartialAggregateFunction, PartialAggregateSpec,
-    PredicateOp, PredicatePushdown, ProjectionPushdown, RangeScanner, RowInterval, ScanRequest,
-    ScannedRow, TimestampedRangeScanner, TopKColumn, TopKSpec,
+    MaterializedRangeCursor, PredicateOp, PredicatePushdown, ProjectionPushdown, RangeCursor,
+    RangeScanner, RowInterval, ScanPage, ScanRequest, ScannedRow, TimestampedRangeScanner,
+    TopKColumn, TopKSpec,
 };
 pub use session::SqlSession;
 pub use timestamp_txn::{
