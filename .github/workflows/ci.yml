@@ -923,6 +923,8 @@ jobs:
           sudo curl -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc --fail https://www.postgresql.org/media/keys/ACCC4CF8.asc
           echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update && sudo apt-get install -y postgresql-client-18
+      - name: Install pinned Python PostgreSQL driver
+        run: python3 -m pip install --require-hashes --no-deps -r crates/gres-conformance/requirements-driver-smoke.txt
       - run: cargo build --locked -p crabka-cli -p crabka-broker -p crabka-gres -p crabka-gres-activator -p crabka-gres-conformance
       - run: ./scripts/gres-psql-smoke.sh
       - name: Durable restart smoke
@@ -930,7 +932,7 @@ jobs:
       - name: Substrate WAL smoke
         run: CRABKA_GRES_SKIP_BUILD=1 ./scripts/gres-substrate-smoke.sh
       - name: Front-door PgDog e2e gate
-        run: CRABKA_GRES_SKIP_BUILD=1 ./scripts/gres-e2e.sh
+        run: CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_E2E_KEEP_ARTIFACTS=1 ./scripts/gres-e2e.sh
       - name: Cold-start SLO gate
         run: CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_COLDSTART_KEEP_ARTIFACTS=1 ./scripts/gres-coldstart.sh
       - name: Conformance harness against the parity baseline
@@ -947,6 +949,10 @@ jobs:
             --baseline crates/gres-conformance/baseline.json \
             --corpus-regress crates/gres-conformance/corpus-regress \
             --regress-baseline crates/gres-conformance/corpus-regress/baseline.json \
+            --extended-corpus crates/gres-conformance/corpus-extended \
+            --extended-baseline crates/gres-conformance/corpus-extended/baseline.json \
+            --extended-out extended-parity-standalone.json \
+            --extended-summary extended-parity-standalone.md \
             --regress-out regress-parity.json \
             --regress-summary regress-parity.md \
             --out parity.json --summary parity.md
@@ -1001,6 +1007,10 @@ jobs:
             --subject-url "host=127.0.0.1 port=54334 user=crab dbname=crab" \
             --corpus crates/gres-conformance/corpus \
             --baseline crates/gres-conformance/baseline.json \
+            --extended-corpus crates/gres-conformance/corpus-extended \
+            --extended-baseline crates/gres-conformance/corpus-extended/baseline.json \
+            --extended-out extended-parity-substrate.json \
+            --extended-summary extended-parity-substrate.md \
             --out parity-substrate.json --summary parity-substrate.md
       - name: Publish parity summary
         if: ${{ !cancelled() }}
@@ -1011,6 +1021,9 @@ jobs:
       - name: Publish substrate parity summary
         if: ${{ !cancelled() }}
         run: cat parity-substrate.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish extended parity summaries
+        if: ${{ !cancelled() }}
+        run: cat extended-parity-standalone.md extended-parity-substrate.md >> "$GITHUB_STEP_SUMMARY"
       - name: Upload parity report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
@@ -1023,13 +1036,20 @@ jobs:
             regress-parity.md
             parity-substrate.json
             parity-substrate.md
+            extended-parity-standalone.json
+            extended-parity-standalone.md
+            extended-parity-substrate.json
+            extended-parity-substrate.md
           if-no-files-found: warn
       - name: Upload Gres front-door e2e artifacts
-        if: ${{ failure() }}
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: gres-front-door-e2e-artifacts
-          path: target/gres-e2e-artifacts
+          path: |
+            target/gres-e2e-artifacts
+            target/gres-e2e-artifacts/extended-parity-pgdog.json
+            target/gres-e2e-artifacts/extended-parity-pgdog.md
           if-no-files-found: warn
       - name: Upload Gres cold-start artifacts
         if: ${{ !cancelled() }}

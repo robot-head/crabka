@@ -76,6 +76,29 @@ against both oracle and subject. It writes `extended-parity.json` and
 `extended-parity.md`; `--extended-baseline` pins the extended statement total and
 ratchets the matched count exactly like the simple corpus baseline.
 
+CI runs this six-case baseline twice: against the standalone subject, producing
+`extended-parity-standalone.{json,md}`, and against the substrate-backed subject,
+producing `extended-parity-substrate.{json,md}`. Both Markdown summaries are
+added to the job summary and all four reports are included in the
+`gres-parity-report` artifact.
+
+The front-door gate runs the same corpus through transaction-mode PgDog and
+retains `extended-parity-pgdog.{json,md}` under
+`target/gres-e2e-artifacts/`. It also executes real parameterized queries in
+separate transactions with `tokio-postgres`, `sqlx`, and Python `psycopg`.
+Install the pinned Python driver and run the complete gate with:
+
+```sh
+python3 -m pip install --require-hashes --no-deps \
+  -r crates/gres-conformance/requirements-driver-smoke.txt
+CRABKA_GRES_E2E_KEEP_ARTIFACTS=1 ./scripts/gres-e2e.sh
+```
+
+Docker/PgDog and `psycopg` are mandatory for the complete gate. For local
+engine work that intentionally omits the front door, the explicit
+`./scripts/gres-e2e.sh --skip-pgdog` path remains available; it does not provide
+PgDog corpus or driver evidence.
+
 ## License
 
 Apache-2.0. Derived from [crabgresql](https://github.com/robot-head/crabgresql)
