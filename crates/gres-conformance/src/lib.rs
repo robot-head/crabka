@@ -250,6 +250,7 @@ pub fn discover_sql_files(corpus: &Path, recursive: bool) -> Result<Vec<PathBuf>
 pub fn discover_extended_case_files(corpus: &Path) -> Result<Vec<PathBuf>, io::Error> {
     let mut files = Vec::new();
     collect_files_with_extension(corpus, true, "json", &mut files)?;
+    files.retain(|path| path.file_name().is_none_or(|name| name != "baseline.json"));
     files.sort();
     Ok(files)
 }
@@ -295,8 +296,9 @@ fn collect_files_with_extension(
 
 /// Loads extended-protocol case files from a JSON corpus directory.
 ///
-/// Each `.json` file contains an array of [`ExtendedCase`] values. Files are
-/// discovered recursively so feature areas can grow independently.
+/// Each `.json` file except the reserved `baseline.json` metadata file contains
+/// an array of [`ExtendedCase`] values. Files are discovered recursively so
+/// feature areas can grow independently.
 pub fn load_extended_case_files(
     corpus: &Path,
 ) -> Result<Vec<ExtendedCaseFile>, Box<dyn std::error::Error>> {
@@ -898,6 +900,52 @@ mod tests {
         assert_eq!(files[0].cases[0].name, "select_text_parameter");
         assert_eq!(report.file_summaries()[0].file, "parameters.json");
         assert!(report.markdown_summary().contains("SELECT $1::text"));
+
+        std::fs::remove_dir_all(root).expect("clean extended corpus directory");
+    }
+
+    #[test]
+    fn loads_extended_cases_without_parsing_baseline_metadata() {
+        let root = temp_corpus_dir();
+        let extended_dir = root.join("parameters");
+        std::fs::create_dir_all(&extended_dir).expect("create extended corpus directory");
+        std::fs::write(
+            extended_dir.join("f0.json"),
+            r#"[
+              {
+                "name": "select_text_parameter",
+                "sql": "SELECT $1::text",
+                "params": [{ "type": "text", "value": "crab" }],
+                "setup": [],
+                "teardown": []
+              }
+            ]"#,
+        )
+        .expect("write extended case file");
+        std::fs::write(
+            root.join("baseline.json"),
+            r#"{ "total": 6, "matched": 6 }"#,
+        )
+        .expect("write extended baseline");
+
+        let files = load_extended_case_files(&root).expect("load extended case files");
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].file, "parameters/f0.json");
+        assert_eq!(files[0].cases[0].name, "select_text_parameter");
+
+        std::fs::remove_dir_all(root).expect("clean extended corpus directory");
+    }
+
+    #[test]
+    fn rejects_malformed_non_baseline_extended_case_file() {
+        let root = temp_corpus_dir();
+        std::fs::write(root.join("malformed.json"), r#"{ "not": "cases" }"#)
+            .expect("write malformed extended case file");
+
+        let error = load_extended_case_files(&root).expect_err("reject malformed case file");
+
+        assert!(error.to_string().contains("expected a sequence"));
 
         std::fs::remove_dir_all(root).expect("clean extended corpus directory");
     }
