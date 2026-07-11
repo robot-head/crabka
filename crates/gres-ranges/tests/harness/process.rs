@@ -17,8 +17,8 @@ use tokio::{
     io::copy_bidirectional,
     net::{TcpListener, TcpStream},
     process::{Child, Command},
-    sync::watch,
-    task::JoinHandle,
+    sync::{mpsc, oneshot, watch},
+    task::{JoinHandle, JoinSet},
 };
 
 const PASSWORD: &str = "process-secret";
@@ -147,13 +147,11 @@ impl ProcessHarness {
     }
 
     pub async fn partition(&self, range: u32) {
-        self.proxy(range).set_enabled(false);
-        tokio::task::yield_now().await;
+        self.proxy(range).set_enabled(false).await;
     }
 
     pub async fn heal(&self, range: u32) {
-        self.proxy(range).set_enabled(true);
-        tokio::task::yield_now().await;
+        self.proxy(range).set_enabled(true).await;
     }
 
     async fn stop_node(&mut self, range: u32) {
@@ -248,8 +246,13 @@ struct TlsPaths {
 
 struct RangeProxy {
     port: u16,
-    enabled: watch::Sender<bool>,
+    commands: mpsc::Sender<ProxyCommand>,
     task: JoinHandle<()>,
+}
+
+struct ProxyCommand {
+    enabled: bool,
+    acknowledged: oneshot::Sender<()>,
 }
 
 impl RangeProxy {
@@ -259,38 +262,61 @@ impl RangeProxy {
             .expect("bind range proxy");
         let port = listener.local_addr().expect("range proxy address").port();
         let (enabled, _) = watch::channel(true);
-        let task_enabled = enabled.clone();
+        let (commands, mut command_rx) = mpsc::channel::<ProxyCommand>(4);
         let task = tokio::spawn(async move {
+            let mut streams = JoinSet::new();
             loop {
-                let Ok((mut frontend, _)) = listener.accept().await else {
-                    return;
-                };
-                let mut enabled = task_enabled.subscribe();
-                tokio::spawn(async move {
-                    if !*enabled.borrow() {
-                        return;
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((mut frontend, _)) = accepted else { return; };
+                        let mut enabled = enabled.subscribe();
+                        streams.spawn(async move {
+                            if !*enabled.borrow() {
+                                return;
+                            }
+                            let Ok(mut backend) =
+                                TcpStream::connect((IpAddr::V4(Ipv4Addr::LOCALHOST), backend_port)).await
+                            else {
+                                return;
+                            };
+                            tokio::select! {
+                                _ = copy_bidirectional(&mut frontend, &mut backend) => {}
+                                _ = wait_until_disabled(&mut enabled) => {}
+                            }
+                        });
                     }
-                    let Ok(mut backend) =
-                        TcpStream::connect((IpAddr::V4(Ipv4Addr::LOCALHOST), backend_port)).await
-                    else {
-                        return;
-                    };
-                    tokio::select! {
-                        _ = copy_bidirectional(&mut frontend, &mut backend) => {}
-                        _ = wait_until_disabled(&mut enabled) => {}
+                    command = command_rx.recv() => {
+                        let Some(command) = command else { return; };
+                        enabled.send_replace(command.enabled);
+                        if !command.enabled {
+                            while streams.join_next().await.is_some() {}
+                        }
+                        let _ = command.acknowledged.send(());
                     }
-                });
+                    _ = streams.join_next(), if !streams.is_empty() => {}
+                }
             }
         });
         Self {
             port,
-            enabled,
+            commands,
             task,
         }
     }
 
-    fn set_enabled(&self, enabled: bool) {
-        self.enabled.send_replace(enabled);
+    async fn set_enabled(&self, enabled: bool) {
+        let (acknowledged, wait) = oneshot::channel();
+        self.commands
+            .send(ProxyCommand {
+                enabled,
+                acknowledged,
+            })
+            .await
+            .expect("range proxy control task");
+        tokio::time::timeout(Duration::from_secs(5), wait)
+            .await
+            .expect("range proxy control acknowledgement timeout")
+            .expect("range proxy control acknowledgement");
     }
 }
 
