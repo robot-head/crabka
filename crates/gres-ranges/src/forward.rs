@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc};
 
 use async_trait::async_trait;
 use crabka_pgwire::{
-    engine::{Engine as _, QueryResult, Session as _},
+    engine::{Cell, Engine as _, FieldDescription, QueryResult, Session as _},
     error::PgError,
 };
 
@@ -15,8 +15,8 @@ use crate::{
         FramedTcpClient, RangeRequest, RangeResponse, RangeService, ResolveTxnResp, ScanRangeReq,
         ScanRangeResp, ScanRangeRow, TransportError, WireColumnPredicate, WireDatum, WireErrorKind,
         WirePartialAggregateFunction, WirePartialAggregateSpec, WirePredicateOp,
-        WirePredicatePushdown, WireProjectionPushdown, WireRowInterval, WireSnapshot,
-        WireTopKColumn, WireTopKSpec,
+        WirePredicatePushdown, WireProjectionPushdown, WireQueryResult, WireRowInterval,
+        WireSnapshot, WireTopKColumn, WireTopKSpec,
     },
     tso::{GrantLease, TsoError, TsoRpc},
 };
@@ -65,8 +65,8 @@ impl RangeService for HostedRangeService {
                     Err(response) => return response,
                 };
                 match engine.connect().simple_query(&sql).await {
-                    Ok(results) => RangeResponse::Sql {
-                        result: sql_result_summary(&results),
+                    Ok(results) => RangeResponse::SqlResults {
+                        results: results.into_iter().map(WireQueryResult::from).collect(),
                     },
                     Err(error) => RangeResponse::SqlError {
                         code: error.code,
@@ -160,6 +160,13 @@ fn tso_error_response(error: &TsoError) -> RangeResponse {
 pub trait RemoteForward: Send + Sync {
     /// Forward SQL to the owning range and return the remote command summary.
     async fn forward_sql(&self, range_id: RangeId, sql: String) -> Result<String, ForwardError>;
+
+    /// Forward SQL and preserve row descriptions, values, and command results.
+    async fn forward_query(
+        &self,
+        range_id: RangeId,
+        sql: String,
+    ) -> Result<Vec<QueryResult>, ForwardError>;
 }
 
 /// TCP implementation of [`RemoteForward`] backed by [`RangeRegistry`].
@@ -195,6 +202,13 @@ impl RemoteForward for RegistryRemoteForward {
                 .await;
             match response {
                 Ok(RangeResponse::Sql { result }) => return Ok(result),
+                Ok(RangeResponse::SqlResults { results }) => {
+                    let results = results
+                        .into_iter()
+                        .map(QueryResult::from)
+                        .collect::<Vec<_>>();
+                    return Ok(sql_result_summary(&results));
+                }
                 Ok(RangeResponse::SqlError { code, message }) => {
                     return Err(ForwardError::RemoteSql { code, message });
                 }
@@ -224,6 +238,112 @@ impl RemoteForward for RegistryRemoteForward {
                 }
                 Err(error) => return Err(error.into()),
             }
+        }
+    }
+
+    async fn forward_query(
+        &self,
+        range_id: RangeId,
+        sql: String,
+    ) -> Result<Vec<QueryResult>, ForwardError> {
+        let endpoint = self.registry.resolve(range_id).await?;
+        match self
+            .client
+            .call(&endpoint.endpoint, &RangeRequest::Sql { range_id, sql })
+            .await?
+        {
+            RangeResponse::SqlResults { results } => {
+                Ok(results.into_iter().map(QueryResult::from).collect())
+            }
+            RangeResponse::Sql { result } => Ok(vec![QueryResult::Command { tag: result }]),
+            RangeResponse::SqlError { code, message } => {
+                Err(ForwardError::RemoteSql { code, message })
+            }
+            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
+                kind: error,
+                message,
+            }),
+            _ => Err(ForwardError::UnexpectedResponse),
+        }
+    }
+}
+
+impl From<QueryResult> for WireQueryResult {
+    fn from(value: QueryResult) -> Self {
+        match value {
+            QueryResult::Rows { fields, rows, tag } => Self::Rows {
+                fields: fields.into_iter().map(Into::into).collect(),
+                rows: rows
+                    .into_iter()
+                    .map(|row| row.into_iter().map(|cell| cell.map(Into::into)).collect())
+                    .collect(),
+                tag,
+            },
+            QueryResult::Command { tag } => Self::Command { tag },
+            QueryResult::Empty => Self::Empty,
+        }
+    }
+}
+
+impl From<WireQueryResult> for QueryResult {
+    fn from(value: WireQueryResult) -> Self {
+        match value {
+            WireQueryResult::Rows { fields, rows, tag } => Self::Rows {
+                fields: fields.into_iter().map(Into::into).collect(),
+                rows: rows
+                    .into_iter()
+                    .map(|row| row.into_iter().map(|cell| cell.map(Into::into)).collect())
+                    .collect(),
+                tag,
+            },
+            WireQueryResult::Command { tag } => Self::Command { tag },
+            WireQueryResult::Empty => Self::Empty,
+        }
+    }
+}
+
+impl From<Cell> for crate::transport::WireCell {
+    fn from(value: Cell) -> Self {
+        Self {
+            text: value.text.to_vec(),
+            binary: value.binary.to_vec(),
+        }
+    }
+}
+
+impl From<crate::transport::WireCell> for Cell {
+    fn from(value: crate::transport::WireCell) -> Self {
+        Self {
+            text: value.text.into(),
+            binary: value.binary.into(),
+        }
+    }
+}
+
+impl From<FieldDescription> for crate::transport::WireFieldDescription {
+    fn from(value: FieldDescription) -> Self {
+        Self {
+            name: value.name,
+            table_oid: value.table_oid,
+            column_id: value.column_id,
+            type_oid: value.type_oid,
+            type_size: value.type_size,
+            type_modifier: value.type_modifier,
+            format: value.format,
+        }
+    }
+}
+
+impl From<crate::transport::WireFieldDescription> for FieldDescription {
+    fn from(value: crate::transport::WireFieldDescription) -> Self {
+        Self {
+            name: value.name,
+            table_oid: value.table_oid,
+            column_id: value.column_id,
+            type_oid: value.type_oid,
+            type_size: value.type_size,
+            type_modifier: value.type_modifier,
+            format: value.format,
         }
     }
 }
@@ -1057,6 +1177,48 @@ mod tests {
 
         let pg = error.into_pg();
         assert_eq!(pg.code, "42P01");
+    }
+
+    #[tokio::test]
+    async fn remote_query_returns_fields_and_cells() {
+        let engine = crabka_pgexec::SqlEngine::new();
+        let mut setup = engine.connect();
+        setup
+            .simple_query("CREATE TABLE t (id int, value text)")
+            .await
+            .expect("create table");
+        setup
+            .simple_query("INSERT INTO t VALUES (7, 'remote')")
+            .await
+            .expect("insert row");
+        let address = spawn_loopback(Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::new(1),
+            engine,
+        )]))))
+        .await
+        .expect("start range service");
+        let registry =
+            RangeRegistry::from_tenant_record(&record(address.to_string())).expect("registry");
+
+        let results = RegistryRemoteForward::new(registry, FramedTcpClient::default())
+            .forward_query(RangeId::new(1), "SELECT id, value FROM t".to_string())
+            .await
+            .expect("forward query rows");
+
+        let [QueryResult::Rows { fields, rows, tag }] = results.as_slice() else {
+            panic!("expected row result: {results:?}");
+        };
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.name.as_str())
+                .collect::<Vec<_>>(),
+            ["id", "value"]
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].as_ref().expect("id").text, "7");
+        assert_eq!(rows[0][1].as_ref().expect("value").text, "remote");
+        assert_eq!(tag, "SELECT 1");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

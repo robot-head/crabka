@@ -2520,13 +2520,7 @@ impl GatewaySession {
                 "remote range transactions are unsupported until a stateful participant RPC is designed",
             )));
         }
-        if kind == StatementKind::Query {
-            return Err(PgError::error(
-                sqlstate::FEATURE_NOT_SUPPORTED,
-                "remote range queries are unsupported until the range SQL RPC returns query rows",
-            ));
-        }
-        if kind != StatementKind::Dml {
+        if kind != StatementKind::Dml && kind != StatementKind::Query {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
                 format!(
@@ -2544,6 +2538,12 @@ impl GatewaySession {
                 ),
             )
         })?;
+        if kind == StatementKind::Query {
+            return forward
+                .forward_query(range_id, statement.to_string())
+                .await
+                .map_err(ForwardError::into_pg);
+        }
         let tag = forward
             .forward_sql(range_id, statement.to_string())
             .await
