@@ -35,6 +35,8 @@
 //! level via the `RowLockManager`, with rowid allocation via the
 //! `SequenceManager` and DDL serialized behind a small catalog lock.
 
+#![doc(html_root_url = "https://docs.rs/crabka-pgexec/0.3.9")]
+
 mod agg;
 pub mod clock;
 mod commit;
