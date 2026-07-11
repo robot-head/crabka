@@ -358,6 +358,7 @@ fn fetch_partition_with_isolation_progress_response(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use bytes::BufMut as _;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -370,6 +371,81 @@ mod tests {
     };
 
     use super::*;
+
+    fn put_signed_varint(buf: &mut Vec<u8>, value: i64) {
+        let mut encoded = ((value << 1) ^ (value >> 63)).cast_unsigned();
+        loop {
+            let byte = (encoded & 0x7f) as u8;
+            encoded >>= 7;
+            buf.push(if encoded == 0 { byte } else { byte | 0x80 });
+            if encoded == 0 {
+                break;
+            }
+        }
+    }
+
+    fn put_hand_encoded_record(buf: &mut Vec<u8>, body: &[u8]) {
+        put_signed_varint(buf, i64::try_from(body.len()).expect("record body fits"));
+        buf.extend_from_slice(body);
+    }
+
+    /// Build bytes directly from the Kafka record-batch v2 grammar. This
+    /// deliberately does not call either production encoder.
+    fn hand_encoded_v2_header_batch() -> RecordBatch {
+        let mut records = Vec::new();
+        let mut empty = Vec::new();
+        empty.push(0);
+        put_signed_varint(&mut empty, 0);
+        put_signed_varint(&mut empty, 0);
+        put_signed_varint(&mut empty, -1);
+        put_signed_varint(&mut empty, 5);
+        empty.extend_from_slice(b"empty");
+        put_signed_varint(&mut empty, 0);
+        put_hand_encoded_record(&mut records, &empty);
+
+        let long_key = "k".repeat(130);
+        let long_value = vec![0xa5; 130];
+        let mut headered = Vec::new();
+        headered.push(0);
+        put_signed_varint(&mut headered, 10);
+        put_signed_varint(&mut headered, 1);
+        put_signed_varint(&mut headered, -1);
+        put_signed_varint(&mut headered, 4);
+        headered.extend_from_slice(b"data");
+        put_signed_varint(&mut headered, 3);
+        put_signed_varint(&mut headered, 130);
+        headered.extend_from_slice(long_key.as_bytes());
+        put_signed_varint(&mut headered, 130);
+        headered.extend_from_slice(&long_value);
+        put_signed_varint(&mut headered, 3);
+        headered.extend_from_slice(b"dup");
+        put_signed_varint(&mut headered, -1);
+        put_signed_varint(&mut headered, 3);
+        headered.extend_from_slice(b"dup");
+        put_signed_varint(&mut headered, 0);
+        put_hand_encoded_record(&mut records, &headered);
+
+        let mut batch = bytes::BytesMut::new();
+        batch.put_i64(5);
+        batch.put_i32(0);
+        batch.put_i32(0);
+        batch.put_i8(2);
+        batch.put_u32(0);
+        batch.put_i16(0);
+        batch.put_i32(1);
+        batch.put_i64(1_000);
+        batch.put_i64(1_010);
+        batch.put_i64(-1);
+        batch.put_i16(-1);
+        batch.put_i32(-1);
+        batch.put_i32(2);
+        batch.extend_from_slice(&records);
+        let batch_len = i32::try_from(batch.len() - 12).expect("batch length fits");
+        batch[8..12].copy_from_slice(&batch_len.to_be_bytes());
+        let crc = crc32c::crc32c(&batch[21..]);
+        batch[17..21].copy_from_slice(&crc.to_be_bytes());
+        RecordBatch::decode(&mut &batch[..]).expect("hand-encoded v2 batch decodes")
+    }
 
     fn batch_with(base_offset: i64, values: &[&[u8]]) -> RecordBatch {
         let records = values
@@ -434,6 +510,57 @@ mod tests {
                     value: Some(Bytes::from_static(b"b")),
                     timestamp: 1_010,
                     headers: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_preserves_hand_encoded_v2_header_wire_order_and_varints() {
+        let response = FetchResponse {
+            responses: vec![FetchableTopicResponse {
+                topic: "headers".into(),
+                partitions: vec![PartitionData {
+                    partition_index: 0,
+                    records: Some(RecordsPayload::from(vec![hand_encoded_v2_header_batch()])),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let records = fetch_partition_with_isolation_progress_response(&response, 0, 0, 0)
+            .expect("fetch response")
+            .records;
+        assert_eq!(
+            records,
+            vec![
+                FetchedRecord {
+                    offset: 5,
+                    key: None,
+                    value: Some(Bytes::from_static(b"empty")),
+                    timestamp: 1_000,
+                    headers: Vec::new(),
+                },
+                FetchedRecord {
+                    offset: 6,
+                    key: None,
+                    value: Some(Bytes::from_static(b"data")),
+                    timestamp: 1_010,
+                    headers: vec![
+                        FetchedHeader {
+                            key: "k".repeat(130),
+                            value: Some(Bytes::from(vec![0xa5; 130])),
+                        },
+                        FetchedHeader {
+                            key: "dup".to_string(),
+                            value: None,
+                        },
+                        FetchedHeader {
+                            key: "dup".to_string(),
+                            value: Some(Bytes::new()),
+                        },
+                    ],
                 },
             ]
         );

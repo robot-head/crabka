@@ -3,8 +3,10 @@
 Authoritative published evidence:
 `docs/superpowers/evidence/2026-07-11-gres-g6-fdw-sql-breadth.md`.
 
-Verdict before independent review: all G-6 tasks and completion items have
-direct source and real-broker evidence. G-7+ remains unclaimed. Wider-workspace
-G-8, blockstore-Clippy, and all-target disk-capacity contradictions are stated
+The first independent review found two Important proof gaps: client-core lacked
+the required hand-encoded header fixture, and the default-server roundtrip was
+not an actual substrate runtime while multi-range registration silently
+skipped. Both are now repaired with direct regression tests; final independent
+re-review remains required. G-7+ remains unclaimed. Wider-workspace G-8,
+blockstore-Clippy, and all-target disk-capacity contradictions are stated
 explicitly in the published evidence.
-

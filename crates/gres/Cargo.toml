@@ -49,7 +49,9 @@ async-trait = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 assert2 = { workspace = true }
+bytes = { workspace = true }
 crabka-broker = { path = "../broker" }
+crabka-client-producer = { path = "../client-producer" }
 crabka-gres-control = { path = "../gres-control" }
 crabka-pgcatalog = { path = "../pgcatalog" }
 crabka-pgmvcc = { path = "../pgmvcc" }
