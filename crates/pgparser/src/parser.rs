@@ -1236,7 +1236,8 @@ impl Parser {
     /// or any other identifier (→ that ident verbatim).
     fn set_value(&mut self) -> Result<crate::ast::SetValue, ParseError> {
         use crate::ast::SetValue;
-        let mut parts = Vec::new();
+        let mut rendered = String::new();
+        let mut separator = "";
         loop {
             let part = match self.peek().clone() {
                 Token::Plus | Token::Minus => {
@@ -1253,13 +1254,13 @@ impl Parser {
                     };
                     format!("{sign}{number}")
                 }
-                Token::StringLit(s) | Token::IntLit(s) => {
+                Token::StringLit(s) | Token::IntLit(s) | Token::FloatLit(s) => {
                     self.bump();
                     s
                 }
                 Token::Ident(w) if w.eq_ignore_ascii_case("default") => {
                     self.bump();
-                    if parts.is_empty() && !self.eat_comma() {
+                    if rendered.is_empty() && *self.peek() != Token::Comma {
                         return Ok(SetValue::Default);
                     }
                     "default".into()
@@ -1289,12 +1290,34 @@ impl Parser {
                     self.peek_pos(),
                 ))?,
             };
-            parts.push(part);
-            if !self.eat_comma() {
+            rendered.push_str(separator);
+            rendered.push_str(&part);
+            if self.eat_comma() {
+                separator = ", ";
+                continue;
+            }
+            if matches!(
+                self.peek(),
+                Token::Ident(_)
+                    | Token::StringLit(_)
+                    | Token::IntLit(_)
+                    | Token::FloatLit(_)
+                    | Token::Plus
+                    | Token::Minus
+                    | Token::Keyword(
+                        Keyword::True
+                            | Keyword::On
+                            | Keyword::False
+                            | Keyword::Local
+                            | Keyword::Public
+                    )
+            ) {
+                separator = " ";
+            } else {
                 break;
             }
         }
-        Ok(SetValue::Value(parts.join(", ")))
+        Ok(SetValue::Value(rendered))
     }
 
     fn set_transaction_tail(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -4760,6 +4783,21 @@ mod tests {
                 local: false,
                 name: "datestyle".into(),
                 value: SetValue::Value("iso, mdy".into()),
+            }
+        );
+        let statements = crate::parser::parse("SET DateStyle TO SQL DMY; SHOW DateStyle").unwrap();
+        assert_eq!(
+            statements[0],
+            Statement::Set {
+                local: false,
+                name: "datestyle".into(),
+                value: SetValue::Value("sql dmy".into()),
+            }
+        );
+        assert_eq!(
+            statements[1],
+            Statement::Show {
+                name: "datestyle".into(),
             }
         );
         assert_eq!(one("SHOW ALL"), Statement::Show { name: "all".into() });

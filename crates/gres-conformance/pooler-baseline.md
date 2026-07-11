@@ -10,9 +10,12 @@ PgDog 0.1.6 only records `SET` when it is issued outside an explicit transaction
 and before a backend is assigned. A `SET` issued after `BEGIN` is forwarded to
 the backend without entering the logical client's parameter map, so it can leak
 to the next client. The gate therefore supplies `application_name` as client
-one's startup parameter (which 0.1.6 does track), issues `SET` to that same
-value, and verifies its isolation and replay across later transactions. It
-still executes and observes `SET LOCAL` inside a transaction and rollback.
+one's startup parameter (which 0.1.6 does track), issues a distinct SET inside
+the transaction and observes that changed value directly on the assigned
+backend, then restores the tracked startup value before releasing the backend.
+The later replay assertion proves startup-parameter replay only; it does not
+claim SET-change replay. The gate also executes and observes `SET LOCAL` inside
+a transaction and rollback.
 
 PgDog 0.1.6 answers `SHOW statement_timeout` from its logical parameter map as
 the raw assigned value (`17`) rather than PostgreSQL/Gres canonical output

@@ -73,6 +73,9 @@ pub(crate) struct TxnCtx {
     /// Remains held even when DDL releases `table_write_guard` before it waits
     /// for the catalog lock.
     pub(crate) writer_fence_guard: Option<crate::WriterFenceGuard>,
+    /// Whether a data query has already established transaction semantics.
+    /// PostgreSQL rejects SET TRANSACTION after this point.
+    pub(crate) query_started: bool,
 }
 
 /// Shared physical gate held while a transaction issues ordinary writes.
@@ -172,6 +175,12 @@ impl GucValue {
             Self::Bool(false) => "off".into(),
             Self::Integer(value) => value.to_string(),
             Self::DurationMillis(0) => "0".into(),
+            Self::DurationMillis(value) if value % 86_400_000 == 0 => {
+                format!("{}d", value / 86_400_000)
+            }
+            Self::DurationMillis(value) if value % 3_600_000 == 0 => {
+                format!("{}h", value / 3_600_000)
+            }
             Self::DurationMillis(value) if value % 60_000 == 0 => format!("{}min", value / 60_000),
             Self::DurationMillis(value) if value % 1_000 == 0 => format!("{}s", value / 1_000),
             Self::DurationMillis(value) => format!("{value}ms"),
@@ -244,7 +253,7 @@ struct GucDefinition {
     aliases: &'static [&'static str],
     vartype: &'static str,
     boot_default: &'static str,
-    parse: fn(&str) -> Result<GucValue, ExecError>,
+    parse: fn(&str, Option<&GucValue>) -> Result<GucValue, ExecError>,
 }
 
 static GUC_DEFINITIONS: &[GucDefinition] = &[
@@ -253,7 +262,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         aliases: &[],
         vartype: "string",
         boot_default: "",
-        parse: |value| Ok(GucValue::Text(value.to_string())),
+        parse: |value, _| Ok(GucValue::Text(value.to_string())),
     },
     GucDefinition {
         name: "client_encoding",
@@ -288,7 +297,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         aliases: &[],
         vartype: "string",
         boot_default: "\"$user\", public",
-        parse: |value| Ok(GucValue::Text(value.to_string())),
+        parse: |value, _| Ok(GucValue::Text(value.to_string())),
     },
     GucDefinition {
         name: "standard_conforming_strings",
@@ -363,7 +372,7 @@ impl GucState {
                 .map_or(definition.boot_default, |(_, value)| value.as_str());
             slots.insert(
                 definition.name.into(),
-                GucSlot::new(parse_guc_value(definition, source)?),
+                GucSlot::new(parse_guc_value(definition, source, None)?),
             );
         }
         Ok(Self { slots })
@@ -389,7 +398,13 @@ impl GucState {
         let key = normalize_guc_name(name);
         let definition = guc_definition(&key)
             .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?;
-        let value = parse_guc_value(definition, value)?;
+        let current = self
+            .slots
+            .get(&key)
+            .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?
+            .effective()
+            .clone();
+        let value = parse_guc_value(definition, value, Some(&current))?;
         let slot = self
             .slots
             .get_mut(&key)
@@ -488,17 +503,22 @@ fn normalize_guc_name(name: &str) -> String {
     )
 }
 
-fn parse_guc_value(definition: &GucDefinition, value: &str) -> Result<GucValue, ExecError> {
-    (definition.parse)(value)
+fn parse_guc_value(
+    definition: &GucDefinition,
+    value: &str,
+    current: Option<&GucValue>,
+) -> Result<GucValue, ExecError> {
+    (definition.parse)(value, current)
 }
 
+#[cfg(test)]
 fn canonical_guc_value(name: &str, value: &str) -> Result<String, ExecError> {
     let definition =
         guc_definition(name).ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?;
-    parse_guc_value(definition, value).map(|parsed| parsed.render())
+    parse_guc_value(definition, value, None).map(|parsed| parsed.render())
 }
 
-fn parse_timezone(value: &str) -> Result<GucValue, ExecError> {
+fn parse_timezone(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
     if value.eq_ignore_ascii_case("UTC") || jiff::tz::TimeZone::get(value).is_ok() {
         Ok(GucValue::Text(value.to_string()))
     } else {
@@ -506,7 +526,7 @@ fn parse_timezone(value: &str) -> Result<GucValue, ExecError> {
     }
 }
 
-fn parse_client_encoding(value: &str) -> Result<GucValue, ExecError> {
+fn parse_client_encoding(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
     if matches!(
         value.to_ascii_uppercase().as_str(),
         "UTF8" | "UTF-8" | "UNICODE"
@@ -517,7 +537,7 @@ fn parse_client_encoding(value: &str) -> Result<GucValue, ExecError> {
     }
 }
 
-fn parse_bool(value: &str) -> Result<GucValue, ExecError> {
+fn parse_bool(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
     match value.to_ascii_lowercase().as_str() {
         "on" | "true" | "yes" | "1" => Ok(GucValue::Bool(true)),
         "off" | "false" | "no" | "0" => Ok(GucValue::Bool(false)),
@@ -525,17 +545,21 @@ fn parse_bool(value: &str) -> Result<GucValue, ExecError> {
     }
 }
 
-fn parse_extra_float_digits(value: &str) -> Result<GucValue, ExecError> {
+fn parse_extra_float_digits(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
     canonical_integer_guc(value, -15, 3)?
         .parse()
         .map(GucValue::Integer)
         .map_err(|_| ExecError::InvalidParameterValue(value.into()))
 }
 
-fn parse_date_style(value: &str) -> Result<GucValue, ExecError> {
+fn parse_date_style(value: &str, current: Option<&GucValue>) -> Result<GucValue, ExecError> {
     let mut output = None;
     let mut order = None;
-    for part in value.split(',').map(str::trim) {
+    for part in value
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
         let lower = part.to_ascii_lowercase();
         match lower.as_str() {
             "iso" => output = Some(DateOutputStyle::Iso),
@@ -548,9 +572,12 @@ fn parse_date_style(value: &str) -> Result<GucValue, ExecError> {
             _ => return Err(ExecError::InvalidParameterValue(value.to_string())),
         }
     }
-    let current = DateStyle {
-        output: DateOutputStyle::Iso,
-        order: DateOrder::Mdy,
+    let current = match current {
+        Some(GucValue::DateStyle(current)) => *current,
+        _ => DateStyle {
+            output: DateOutputStyle::Iso,
+            order: DateOrder::Mdy,
+        },
     };
     Ok(GucValue::DateStyle(DateStyle {
         output: output.unwrap_or(current.output),
@@ -558,7 +585,7 @@ fn parse_date_style(value: &str) -> Result<GucValue, ExecError> {
     }))
 }
 
-fn parse_interval_style(value: &str) -> Result<GucValue, ExecError> {
+fn parse_interval_style(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
     let style = match value.to_ascii_lowercase().as_str() {
         "postgres" => IntervalStyle::Postgres,
         "postgres_verbose" => IntervalStyle::PostgresVerbose,
@@ -569,7 +596,7 @@ fn parse_interval_style(value: &str) -> Result<GucValue, ExecError> {
     Ok(GucValue::IntervalStyle(style))
 }
 
-fn parse_statement_timeout(value: &str) -> Result<GucValue, ExecError> {
+fn parse_statement_timeout(value: &str, _: Option<&GucValue>) -> Result<GucValue, ExecError> {
     let trimmed = value.trim();
     let split = trimmed
         .find(|character: char| !(character.is_ascii_digit() || character == '.'))
@@ -680,15 +707,19 @@ pub(crate) fn set_config_runtime(
     local: bool,
 ) -> Result<String, ExecError> {
     let key = normalize_guc_name(name);
-    let value = canonical_guc_value(&key, value)?;
     GUC_RUNTIME.with(|cell| {
         let mut runtime = cell.borrow_mut();
         let Some(runtime) = runtime.as_mut() else {
             return Err(ExecError::UnrecognizedParameter(name.to_string()));
         };
-        if !runtime.values.contains_key(&key) {
-            return Err(ExecError::UnrecognizedParameter(name.to_string()));
-        }
+        let current = runtime
+            .values
+            .get(&key)
+            .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?;
+        let definition = guc_definition(&key)
+            .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?;
+        let current = parse_guc_value(definition, current, None)?;
+        let value = parse_guc_value(definition, value, Some(&current))?.render();
         runtime.values.insert(key.clone(), value.clone());
         runtime.mutations.push(GucMutation {
             name: key,
@@ -909,10 +940,8 @@ impl SqlSession {
         }
     }
 
-    /// SP37: `SET [LOCAL] <name> = <value>`. Only `timezone` is a real, mutable
-    /// parameter; `datestyle`/`intervalstyle` are accepted ONLY at their PG default
-    /// (a no-op, so the conformance corpus's standard preamble succeeds), and any
-    /// other name is unrecognized (42704). Returns the `SET` command tag.
+    /// Apply a typed practical-subset GUC mutation and return the `SET` command
+    /// tag. Names outside the registry are unrecognized (42704).
     ///
     /// Transactional application mirrors PostgreSQL: inside an open block a `SET`
     /// stages a session override and `SET LOCAL` stages a local override (promoted/
@@ -948,8 +977,8 @@ impl SqlSession {
         Ok(QueryResult::Command { tag: "SET".into() })
     }
 
-    /// SP37: `RESET <name>` — reset the parameter to its built-in default. Only
-    /// `timezone` is recognized (any other name is 42704). Transactional like SET.
+    /// Reset a registered parameter to its independent source value. Transactional
+    /// like SET; names outside the registry are unrecognized (42704).
     fn reset_guc(&mut self, target: &ResetTarget) -> Result<QueryResult, ExecError> {
         match target {
             ResetTarget::Name(name) => self.guc.reset(name)?,
@@ -974,9 +1003,8 @@ impl SqlSession {
         Ok(QueryResult::Command { tag: "SET".into() })
     }
 
-    /// SP37: `SHOW <name>` — return the parameter's effective value as a single
-    /// text row (column name `TimeZone`, matching PostgreSQL). Only `timezone` is
-    /// recognized (any other name is 42704). A read, so it does NOT mutate the GUC.
+    /// Return a registered parameter's effective value as one text row. Names
+    /// outside the registry are unrecognized (42704); SHOW does not mutate state.
     fn show_guc(&self, name: &str) -> Result<QueryResult, ExecError> {
         use bytes::Bytes;
         use crabka_pgwire::engine::Cell;
@@ -1058,6 +1086,17 @@ impl SqlSession {
         let Some(level) = isolation else {
             return Ok(QueryResult::Command { tag: "SET".into() });
         };
+        if matches!(
+            &self.state,
+            TxnState::InTransaction(TxnCtx {
+                query_started: true,
+                ..
+            })
+        ) {
+            return Err(ExecError::ActiveSqlTransaction(
+                "SET TRANSACTION ISOLATION LEVEL must be called before any query".into(),
+            ));
+        }
         if matches!(level, IsolationLevel::RepeatableRead) {
             self.linearizer.ensure_readable().await?;
             self.ensure_global_readable().await?;
@@ -1242,6 +1281,10 @@ impl SqlSession {
         // leave us Idle (the statement was its own transaction).
         if result.is_err() {
             self.mark_transaction_failed();
+        } else if matches!(stmt, Statement::Query(_))
+            && let TxnState::InTransaction(ctx) = &mut self.state
+        {
+            ctx.query_started = true;
         }
         result
     }
@@ -1330,6 +1373,7 @@ impl SqlSession {
             unique_index_guard: None,
             table_write_guard: None,
             writer_fence_guard: None,
+            query_started: false,
         });
         Ok(QueryResult::Command {
             tag: "BEGIN".into(),
@@ -5381,6 +5425,92 @@ mod tests {
         assert!(gucs.set("DateStyle", "nonsense", false).is_err());
         assert!(gucs.set("IntervalStyle", "nonsense", false).is_err());
         assert!(gucs.set("statement_timeout", "-1", false).is_err());
+    }
+
+    #[test]
+    fn datestyle_partial_assignment_inherits_effective_components() {
+        let mut gucs = GucState::default();
+        gucs.set("DateStyle", "SQL, DMY", false).unwrap();
+        gucs.set("DateStyle", "MDY", false).unwrap();
+        assert_eq!(gucs.effective("DateStyle").unwrap(), "SQL, MDY");
+        gucs.set("DateStyle", "German", false).unwrap();
+        assert_eq!(gucs.effective("DateStyle").unwrap(), "German, MDY");
+    }
+
+    #[tokio::test]
+    async fn datestyle_partial_sql_assignment_matches_postgres_18() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("SET DateStyle TO SQL DMY; SET DateStyle TO MDY")
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW DateStyle").await.unwrap()),
+            "SQL, MDY"
+        );
+        session
+            .simple_query("SELECT set_config('DateStyle', 'YMD', false)")
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW DateStyle").await.unwrap()),
+            "SQL, YMD"
+        );
+    }
+
+    #[test]
+    fn statement_timeout_extended_units_match_postgres_18() {
+        let mut gucs = GucState::default();
+        for (input, expected) in [(".5s", "500ms"), ("1h", "1h"), ("1d", "1d")] {
+            gucs.set("statement_timeout", input, false).unwrap();
+            assert_eq!(gucs.effective("statement_timeout").unwrap(), expected);
+        }
+        for invalid in ["-0.5s", "25d", "NaN", "1fortnight"] {
+            assert!(gucs.set("statement_timeout", invalid, false).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn statement_timeout_extended_units_work_through_sql() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for (input, expected) in [(".5s", "500ms"), ("1h", "1h"), ("1d", "1d")] {
+            session
+                .simple_query(&format!("SET statement_timeout TO {input}"))
+                .await
+                .unwrap();
+            assert_eq!(
+                single_text(
+                    &session
+                        .simple_query("SHOW statement_timeout")
+                        .await
+                        .unwrap()
+                ),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn set_transaction_must_precede_first_query() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session.simple_query("BEGIN").await.unwrap();
+        session
+            .simple_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .await
+            .unwrap();
+        session.simple_query("ROLLBACK").await.unwrap();
+
+        session.simple_query("BEGIN; SELECT 1").await.unwrap();
+        let error = session
+            .simple_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "25001");
+        assert_eq!(session.tx_status(), TxStatus::Failed);
+        session.simple_query("ROLLBACK").await.unwrap();
     }
 
     #[tokio::test]
