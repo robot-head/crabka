@@ -94,3 +94,76 @@ async fn real_range0_kill_fences_old_session_and_recovers_before_serving() {
         .get(0);
     assert_eq!((left, right, left + right), (87, 113, 200));
 }
+
+#[tokio::test]
+async fn real_range0_readiness_waits_for_in_doubt_recovery_prologue() {
+    let mut system = ProcessHarness::start_with_commit_fault(
+        "tenant-real-range0-in-doubt-drain",
+        "before_decision_after_prepare",
+    )
+    .await;
+    system
+        .create_table_on_all(
+            "CREATE TABLE bank50 (id int4, balance int4); CREATE TABLE bank150 (id int4, balance int4)",
+        )
+        .await;
+    let client = system.sql(0).await;
+    client
+        .simple_query("INSERT INTO bank50 VALUES (1, 100); INSERT INTO bank150 VALUES (1, 100)")
+        .await
+        .unwrap();
+    client.simple_query("BEGIN").await.unwrap();
+    client
+        .simple_query("UPDATE bank50 SET balance = 90 WHERE id = 1")
+        .await
+        .unwrap();
+    client
+        .simple_query("UPDATE bank150 SET balance = 110 WHERE id = 1")
+        .await
+        .unwrap();
+    let error = client
+        .simple_query("COMMIT")
+        .await
+        .expect_err("prepared phase barrier");
+    assert!(
+        error
+            .as_db_error()
+            .is_some_and(|error| error.message().contains("before global decision"))
+    );
+    let participant = system.pid(1);
+    system.kill(0).await;
+    system.clear_commit_fault();
+    system.restart(0).await;
+    assert_eq!(
+        system.pid(1),
+        participant,
+        "prepared participant remains live"
+    );
+
+    // restart returns only after the child's recovery-complete readiness event.
+    // These reads and the following transaction prove the prepared locks were
+    // settled before SQL serving was published.
+    let recovered = system.sql(0).await;
+    let left: i32 = recovered
+        .query_one("SELECT balance FROM bank50 WHERE id = 1", &[])
+        .await
+        .unwrap()
+        .get(0);
+    let right: i32 = recovered
+        .query_one("SELECT balance FROM bank150 WHERE id = 1", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!((left, right, left + right), (100, 100, 200));
+    recovered.simple_query("BEGIN").await.unwrap();
+    recovered
+        .simple_query("UPDATE bank50 SET balance = 99 WHERE id = 1")
+        .await
+        .unwrap();
+    recovered
+        .simple_query("UPDATE bank150 SET balance = 101 WHERE id = 1")
+        .await
+        .unwrap();
+    recovered.simple_query("COMMIT").await.unwrap();
+    system.shutdown().await;
+}

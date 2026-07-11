@@ -1823,6 +1823,23 @@ async fn open_multirange_runtime(
     let mut tenant_config =
         crabka_gres_ranges::MultiRangeTenantConfig::from_boundaries(tenant, boundaries)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    if let Ok(fault) = std::env::var("CRABKA_GRES_TEST_COMMIT_FAULT") {
+        let fault = match fault.as_str() {
+            "before_decision_after_prepare" => {
+                crabka_gres_ranges::GatewayCommitFault::BeforeDecisionAfterPrepare
+            }
+            "before_release_after_commit_decision" => {
+                crabka_gres_ranges::GatewayCommitFault::BeforeReleaseAfterCommitDecision
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "invalid CRABKA_GRES_TEST_COMMIT_FAULT",
+                ));
+            }
+        };
+        tenant_config = tenant_config.with_commit_fault_for_testing(fault);
+    }
     if let Some(hosted_ranges) = &config.host_ranges {
         tenant_config = tenant_config
             .with_hosted_ranges(hosted_ranges.clone())
@@ -1933,7 +1950,7 @@ async fn open_multirange_runtime(
         });
     }
     let engines = recover_live_multirange_engines(config, &tenant_config, checkpoint_store).await?;
-    open_live_multirange_tenant(tenant_config, engines, config)
+    open_live_multirange_tenant(tenant_config, engines, config).await
 }
 
 fn remote_ranges_are_configured(config: &SubstrateRuntimeConfig, record: &TenantRecord) -> bool {
@@ -2198,7 +2215,7 @@ fn range_pause_lock_error(
     }
 }
 
-fn open_live_multirange_tenant(
+async fn open_live_multirange_tenant(
     tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
     mut live_engines: LiveMultirangeEngines,
     config: &SubstrateRuntimeConfig,
@@ -2262,6 +2279,10 @@ fn open_live_multirange_tenant(
         .map_err(|error| std::io::Error::other(format!("multi-range tenant: {error}")))?;
         (gateway, handles, None)
     };
+    gateway
+        .recover_ordinary_globals_before_serving()
+        .await
+        .map_err(|error| std::io::Error::other(format!("ordinary 2PC recovery: {error:?}")))?;
     let mut range_service =
         crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines());
     if let Some(tso_rpc) = tso_rpc {

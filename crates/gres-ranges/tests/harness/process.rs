@@ -29,6 +29,7 @@ pub struct ProcessHarness {
     bootstrap: String,
     tenant: String,
     tls: TlsPaths,
+    commit_fault: Option<String>,
     r0_proxy: RangeProxy,
     r1_proxy: RangeProxy,
     r0: ProcessNode,
@@ -53,6 +54,14 @@ struct ProcessReady {
 
 impl ProcessHarness {
     pub async fn start(name: &str) -> Self {
+        Self::start_inner(name, None).await
+    }
+
+    pub async fn start_with_commit_fault(name: &str, fault: &str) -> Self {
+        Self::start_inner(name, Some(fault.to_owned())).await
+    }
+
+    async fn start_inner(name: &str, commit_fault: Option<String>) -> Self {
         let root = tempfile::tempdir().expect("process harness root");
         let broker_dir = root.path().join("broker");
         let broker = Broker::start(BrokerConfig::for_tests(broker_dir))
@@ -65,14 +74,23 @@ impl ProcessHarness {
         let tls = write_tls_fixture(root.path());
         provision_control(&bootstrap, &tenant, r0_proxy.port, r1_proxy.port).await;
 
-        let r0 = spawn_node(root.path(), &bootstrap, &tenant, 0, "r0", &tls);
-        let r1 = spawn_node(root.path(), &bootstrap, &tenant, 1, "r1", &tls);
+        let r0 = spawn_node(
+            root.path(),
+            &bootstrap,
+            &tenant,
+            0,
+            "r0",
+            &tls,
+            commit_fault.as_deref(),
+        );
+        let r1 = spawn_node(root.path(), &bootstrap, &tenant, 1, "r1", &tls, None);
         let mut harness = Self {
             _root: root,
             _broker: broker,
             bootstrap,
             tenant,
             tls,
+            commit_fault,
             r0_proxy,
             r1_proxy,
             r0,
@@ -138,6 +156,10 @@ impl ProcessHarness {
         self.restart_node(range, &hosted_ranges).await;
     }
 
+    pub fn clear_commit_fault(&mut self) {
+        self.commit_fault = None;
+    }
+
     pub async fn partition(&self, range: u32) {
         self.proxy(range).set_enabled(false).await;
     }
@@ -176,6 +198,11 @@ impl ProcessHarness {
             node_range,
             hosted_ranges,
             &self.tls,
+            if range == 0 {
+                self.commit_fault.as_deref()
+            } else {
+                None
+            },
         );
         *self.node_mut(range) = replacement;
         self.wait_ready(range).await;
@@ -363,39 +390,44 @@ fn spawn_node(
     range: u32,
     hosted_ranges: &str,
     tls: &TlsPaths,
+    commit_fault: Option<&str>,
 ) -> ProcessNode {
     let cache_dir = root.join(format!("r{range}-cache"));
     std::fs::create_dir_all(&cache_dir).expect("cache dir");
     let log_path = root.join(format!("r{range}.log"));
     let stderr = File::create(&log_path).expect("node log");
     let binary = gres_binary();
-    let child = Command::new(binary)
-        .args([
-            "--listen",
-            "127.0.0.1:0",
-            "--substrate-bootstrap",
-            bootstrap,
-            "--tenant",
-            tenant,
-            "--cache-dir",
-            cache_dir.to_str().expect("cache path"),
-            "--ranges",
-            "0:0,50:10",
-            "--host-ranges",
-            hosted_ranges,
-            "--range-listen",
-            "127.0.0.1:0",
-            "--range-tls-cert",
-            tls.server_cert.to_str().expect("cert"),
-            "--range-tls-key",
-            tls.server_key.to_str().expect("key"),
-            "--range-tls-ca",
-            tls.ca.to_str().expect("ca"),
-            "--range-tls-server-name",
-            "crabka-dev",
-            "--range-allowed-principal",
-            "CN=process-range",
-        ])
+    let mut command = Command::new(binary);
+    command.args([
+        "--listen",
+        "127.0.0.1:0",
+        "--substrate-bootstrap",
+        bootstrap,
+        "--tenant",
+        tenant,
+        "--cache-dir",
+        cache_dir.to_str().expect("cache path"),
+        "--ranges",
+        "0:0,50:10",
+        "--host-ranges",
+        hosted_ranges,
+        "--range-listen",
+        "127.0.0.1:0",
+        "--range-tls-cert",
+        tls.server_cert.to_str().expect("cert"),
+        "--range-tls-key",
+        tls.server_key.to_str().expect("key"),
+        "--range-tls-ca",
+        tls.ca.to_str().expect("ca"),
+        "--range-tls-server-name",
+        "crabka-dev",
+        "--range-allowed-principal",
+        "CN=process-range",
+    ]);
+    if let Some(fault) = commit_fault {
+        command.env("CRABKA_GRES_TEST_COMMIT_FAULT", fault);
+    }
+    let child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr))
         .kill_on_drop(true)

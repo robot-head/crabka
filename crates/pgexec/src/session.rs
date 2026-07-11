@@ -2560,6 +2560,12 @@ impl SqlSession {
         Ok(())
     }
 
+    /// Global xid currently owned by this prepared participant session.
+    #[must_use]
+    pub const fn prepared_global_xid(&self) -> Option<u64> {
+        self.global_xid
+    }
+
     /// Release this participant after the coordinator has durably aborted the
     /// supplied global xid. This only releases local locks and session state; it
     /// does not write a local abort or the global decision.

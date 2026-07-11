@@ -329,6 +329,36 @@ pub struct MultiRangeTenant {
 }
 
 impl MultiRangeTenant {
+    /// Settle durable ordinary 2PC participants before publishing SQL readiness.
+    pub async fn recover_ordinary_globals_before_serving(&self) -> Result<(), ExecError> {
+        let serving = self.inner.serving.load_full();
+        let Some(coordinator) = serving.engine(RangeId::COORDINATOR) else {
+            return Ok(());
+        };
+        let Some(forward) = &self.inner.remote_forward else {
+            return Ok(());
+        };
+        for global_xid in coordinator.prepared_globals()? {
+            let status = coordinator
+                .commit_global_decision(global_xid, crabka_pgmvcc::clog::XidStatus::Aborted)
+                .await?;
+            let commit = status == crabka_pgmvcc::clog::XidStatus::Committed;
+            for range_id in serving
+                .range_map
+                .ranges()
+                .iter()
+                .map(|range| range.range_id)
+            {
+                if serving.engine(range_id).is_none() {
+                    forward
+                        .recover_global(range_id, global_xid, commit)
+                        .await
+                        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+                }
+            }
+        }
+        Ok(())
+    }
     /// Start N local range engines and return the gateway plus lifetime handles.
     pub fn start(
         config: MultiRangeTenantConfig,

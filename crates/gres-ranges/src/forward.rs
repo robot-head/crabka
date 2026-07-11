@@ -304,6 +304,46 @@ impl RangeService for HostedRangeService {
                 }
                 RangeResponse::ExplicitGate(self.handle_explicit_gate(request).await)
             }
+            RangeRequest::RecoverGlobal {
+                range_id,
+                global_xid,
+                commit,
+            } => {
+                if let Err(response) = self.hosted_engine(range_id) {
+                    return response;
+                }
+                let session_ids: Vec<_> = self.sessions.lock().await.keys().copied().collect();
+                for session_id in session_ids {
+                    let Some(mut lease) = self.sessions.lock().await.remove(&session_id) else {
+                        continue;
+                    };
+                    if lease.range_id == range_id
+                        && lease.session.prepared_global_xid() == Some(global_xid)
+                    {
+                        let result = if commit {
+                            lease
+                                .session
+                                .release_global_participant_commit(global_xid)
+                                .await
+                        } else {
+                            lease
+                                .session
+                                .release_global_participant_abort(global_xid)
+                                .await
+                        };
+                        if let Err(error) = result {
+                            self.sessions.lock().await.insert(session_id, lease);
+                            let error = error.into_pg();
+                            return RangeResponse::SqlError {
+                                code: error.code,
+                                message: error.message,
+                            };
+                        }
+                    }
+                    self.sessions.lock().await.insert(session_id, lease);
+                }
+                RangeResponse::GlobalRecovered
+            }
             RangeRequest::Sql { range_id, sql } => {
                 let engine = match self.hosted_engine(range_id) {
                     Ok(engine) => engine,
@@ -891,6 +931,15 @@ pub trait RemoteForward: Send + Sync {
     async fn acquire_explicit_gate(&self) -> Result<Option<RemoteExplicitGateLease>, ForwardError> {
         Ok(None)
     }
+
+    async fn recover_global(
+        &self,
+        _range_id: RangeId,
+        _global_xid: u64,
+        _commit: bool,
+    ) -> Result<(), ForwardError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -1102,6 +1151,34 @@ impl RemoteForward for RegistryRemoteForward {
             RangeResponse::SqlError { code, message } => {
                 Err(ForwardError::RemoteSql { code, message })
             }
+            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
+                kind: error,
+                message,
+            }),
+            _ => Err(ForwardError::UnexpectedResponse),
+        }
+    }
+
+    async fn recover_global(
+        &self,
+        range_id: RangeId,
+        global_xid: u64,
+        commit: bool,
+    ) -> Result<(), ForwardError> {
+        let endpoint = self.registry.resolve(range_id).await?;
+        match self
+            .client
+            .call(
+                &endpoint.endpoint,
+                &RangeRequest::RecoverGlobal {
+                    range_id,
+                    global_xid,
+                    commit,
+                },
+            )
+            .await?
+        {
+            RangeResponse::GlobalRecovered => Ok(()),
             RangeResponse::Error { error, message } => Err(ForwardError::Remote {
                 kind: error,
                 message,
@@ -2680,6 +2757,7 @@ mod tests {
                 | RangeRequest::GlobalDecision { .. }
                 | RangeRequest::GlobalBegin { .. }
                 | RangeRequest::ExplicitGate(_)
+                | RangeRequest::RecoverGlobal { .. }
                 | RangeRequest::Txn(_)
                 | RangeRequest::Tso(_)
                 | RangeRequest::ResolveTxn(_)
