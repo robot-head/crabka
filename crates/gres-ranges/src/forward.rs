@@ -373,6 +373,75 @@ impl RangeService for HostedRangeService {
                     }
                 }
             }
+            RangeRequest::TimestampRecover(request) => {
+                let engine = match self.hosted_engine(request.range_id) {
+                    Ok(engine) => engine,
+                    Err(response) => return response,
+                };
+                let identity = match decode_timestamp_identity(request.identity) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        return RangeResponse::SqlError {
+                            code: "22023".into(),
+                            message,
+                        };
+                    }
+                };
+                let decision = match request.decision {
+                    crate::transport::WireTimestampDecision::Aborted => {
+                        crabka_pgexec::PrimaryTxnDecision::Aborted
+                    }
+                    crate::transport::WireTimestampDecision::Committed { commit_ts } => {
+                        match crabka_pgexec::CommitTimestamp::new(commit_ts) {
+                            Ok(ts) => crabka_pgexec::PrimaryTxnDecision::Committed(ts),
+                            Err(error) => {
+                                return RangeResponse::SqlError {
+                                    code: "22023".into(),
+                                    message: error.to_string(),
+                                };
+                            }
+                        }
+                    }
+                };
+                let operations = request
+                    .operations
+                    .into_iter()
+                    .map(|op| crabka_pgexec::TimestampTxnOperation {
+                        range_id: op.range_id,
+                        table_id: op.table_id,
+                        rowid: op.rowid,
+                        delete: op.delete,
+                    })
+                    .collect::<Vec<_>>();
+                let result = if decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
+                    engine
+                        .abort_timestamp_transaction_intents(identity.start_ts)
+                        .await
+                } else {
+                    match engine
+                        .resolve_timestamp_transaction_operations(
+                            request.range_id.as_u32(),
+                            identity,
+                            decision,
+                            &operations,
+                        )
+                        .await
+                    {
+                        Ok(()) => engine.recover_timestamp_scan_terminals(&operations).await,
+                        Err(error) => Err(error),
+                    }
+                };
+                match result {
+                    Ok(()) => RangeResponse::TimestampParticipantDone,
+                    Err(error) => {
+                        let error = error.into_pg();
+                        RangeResponse::SqlError {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    }
+                }
+            }
             RangeRequest::Tso(crate::transport::TsoReq::Grant { count }) => {
                 let Some(tso) = &self.tso else {
                     return RangeResponse::Error {
@@ -2335,7 +2404,8 @@ mod tests {
                 | RangeRequest::Tso(_)
                 | RangeRequest::ResolveTxn(_)
                 | RangeRequest::TimestampPrewrite(_)
-                | RangeRequest::TimestampResolve(_) => RangeResponse::Error {
+                | RangeRequest::TimestampResolve(_)
+                | RangeRequest::TimestampRecover(_) => RangeResponse::Error {
                     error: WireErrorKind::Failed,
                     message: "wrong rpc".to_string(),
                 },

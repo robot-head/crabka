@@ -65,6 +65,8 @@ pub enum RangeRequest {
     TimestampPrewrite(TimestampPrewriteReq),
     /// Resolve timestamp intents after the primary has chosen a decision.
     TimestampResolve(TimestampResolveReq),
+    /// Idempotently settle participant intents from a durable primary descriptor.
+    TimestampRecover(TimestampRecoverReq),
 }
 
 /// Response sent between range computes.
@@ -411,6 +413,22 @@ pub struct TimestampResolveReq {
     pub identity: WireTimestampIdentity,
     pub decision: WireTimestampDecision,
     pub writes: Vec<WireTimestampWrite>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireTimestampOperation {
+    pub range_id: u32,
+    pub table_id: u32,
+    pub rowid: u64,
+    pub delete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimestampRecoverReq {
+    pub range_id: RangeId,
+    pub identity: WireTimestampIdentity,
+    pub decision: WireTimestampDecision,
+    pub operations: Vec<WireTimestampOperation>,
 }
 
 /// Serializable projection pushdown for range-scan RPCs.
@@ -1352,7 +1370,8 @@ mod tests {
                 | RangeRequest::GlobalDecision { .. }
                 | RangeRequest::GlobalBegin { .. }
                 | RangeRequest::TimestampPrewrite(_)
-                | RangeRequest::TimestampResolve(_) => RangeResponse::Error {
+                | RangeRequest::TimestampResolve(_)
+                | RangeRequest::TimestampRecover(_) => RangeResponse::Error {
                     error: WireErrorKind::Failed,
                     message: "wrong rpc".into(),
                 },

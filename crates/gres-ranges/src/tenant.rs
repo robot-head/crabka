@@ -411,7 +411,13 @@ impl MultiRangeTenant {
             }
         }
 
-        recover_durable_timestamp_transactions(&engines)?;
+        recover_durable_timestamp_transactions(
+            &engines,
+            config
+                .range_registry
+                .clone()
+                .zip(config.range_client.clone()),
+        )?;
         let scanner_engines = engines
             .iter()
             .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
@@ -857,6 +863,7 @@ impl MultiRangeTenant {
 /// commit is physically replayed with the operations stored in that descriptor.
 fn recover_durable_timestamp_transactions(
     engines: &BTreeMap<RangeId, SqlEngine>,
+    remote: Option<(RangeRegistry, FramedTcpClient)>,
 ) -> Result<(), TenantError> {
     let Some(coordinator) = engines.get(&RangeId::COORDINATOR) else {
         return Ok(());
@@ -876,15 +883,11 @@ fn recover_durable_timestamp_transactions(
                             let decision = coordinator
                                 .recover_timestamp_transaction(descriptor.start_ts)
                                 .await
-                                .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
+                                .map_err(|error| {
+                                    TenantError::TimestampRecovery(format!("{error:?}"))
+                                })?;
                             for range_id in descriptor.participants {
                                 let range_id = RangeId::new(range_id);
-                                let participant = engines.get(&range_id).ok_or_else(|| {
-                                    TenantError::TimestampRecovery(format!(
-                                        "cannot recover timestamp transaction {}: participant r{range_id} is not hosted",
-                                        descriptor.start_ts.get()
-                                    ))
-                                })?;
                                 let identity = crabka_pgexec::TimestampTxnIdentity {
                                     start_ts: descriptor.start_ts,
                                     global_xid: descriptor.global_xid,
@@ -896,23 +899,46 @@ fn recover_durable_timestamp_transactions(
                                     .copied()
                                     .filter(|operation| operation.range_id == range_id.as_u32())
                                     .collect::<Vec<_>>();
-                                let resolve_result = if decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
-                                    participant
-                                        .abort_timestamp_transaction_intents(descriptor.start_ts)
-                                        .await
+                                let resolve_result = if let Some(participant) =
+                                    engines.get(&range_id)
+                                {
+                                    if decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
+                                        participant
+                                            .abort_timestamp_transaction_intents(
+                                                descriptor.start_ts,
+                                            )
+                                            .await
+                                    } else {
+                                        match participant
+                                            .resolve_timestamp_transaction_operations(
+                                                range_id.as_u32(),
+                                                identity,
+                                                decision,
+                                                &operations,
+                                            )
+                                            .await
+                                        {
+                                            Ok(()) => {
+                                                participant
+                                                    .recover_timestamp_scan_terminals(&operations)
+                                                    .await
+                                            }
+                                            Err(error) => Err(error),
+                                        }
+                                    }
                                 } else {
-                                    participant
-                                        .resolve_timestamp_transaction_operations(
-                                            range_id.as_u32(),
-                                            identity,
-                                            decision,
-                                            &operations,
-                                        )
-                                        .await
+                                    recover_remote_timestamp_participant(
+                                        remote.as_ref(),
+                                        range_id,
+                                        identity,
+                                        decision,
+                                        &operations,
+                                    )
+                                    .await
                                 };
                                 resolve_result.map_err(|error| {
-                                        TenantError::TimestampRecovery(format!("{error:?}"))
-                                    })?;
+                                    TenantError::TimestampRecovery(format!("{error:?}"))
+                                })?;
                             }
                         }
                         Ok(())
@@ -921,6 +947,73 @@ fn recover_durable_timestamp_transactions(
             .join()
             .map_err(|_| TenantError::TimestampRecovery("recovery worker panicked".into()))?
     })
+}
+
+async fn recover_remote_timestamp_participant(
+    remote: Option<&(RangeRegistry, FramedTcpClient)>,
+    range_id: RangeId,
+    identity: crabka_pgexec::TimestampTxnIdentity,
+    decision: crabka_pgexec::PrimaryTxnDecision,
+    operations: &[crabka_pgexec::TimestampTxnOperation],
+) -> Result<(), ExecError> {
+    let (registry, client) = remote.ok_or_else(|| {
+        ExecError::Unsupported(format!(
+            "cannot recover timestamp transaction {}: participant r{range_id} is not hosted",
+            identity.start_ts.get()
+        ))
+    })?;
+    let endpoint = registry
+        .resolve(range_id)
+        .await
+        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+    let decision = match decision {
+        crabka_pgexec::PrimaryTxnDecision::Aborted => {
+            crate::transport::WireTimestampDecision::Aborted
+        }
+        crabka_pgexec::PrimaryTxnDecision::Committed(ts) => {
+            crate::transport::WireTimestampDecision::Committed {
+                commit_ts: ts.get(),
+            }
+        }
+        crabka_pgexec::PrimaryTxnDecision::Pending => {
+            return Err(ExecError::Unsupported(
+                "timestamp recovery primary remained pending".into(),
+            ));
+        }
+    };
+    let request =
+        crate::transport::RangeRequest::TimestampRecover(crate::transport::TimestampRecoverReq {
+            range_id,
+            identity: crate::transport::WireTimestampIdentity {
+                start_ts: identity.start_ts.get(),
+                global_xid: identity.global_xid,
+                primary_range: identity.primary_range,
+            },
+            decision,
+            operations: operations
+                .iter()
+                .map(|op| crate::transport::WireTimestampOperation {
+                    range_id: op.range_id,
+                    table_id: op.table_id,
+                    rowid: op.rowid,
+                    delete: op.delete,
+                })
+                .collect(),
+        });
+    match client
+        .call(&endpoint.endpoint, &request)
+        .await
+        .map_err(|error| ExecError::Unsupported(error.to_string()))?
+    {
+        crate::transport::RangeResponse::TimestampParticipantDone => Ok(()),
+        crate::transport::RangeResponse::SqlError { message, .. }
+        | crate::transport::RangeResponse::Error { message, .. } => {
+            Err(ExecError::Unsupported(message))
+        }
+        _ => Err(ExecError::Unsupported(
+            "unexpected timestamp recovery response".into(),
+        )),
+    }
 }
 
 struct InProcessTsoRpc<C, H> {
@@ -4537,14 +4630,14 @@ mod tests {
         engines.insert(RangeId::COORDINATOR, coordinator);
         engines.insert(RangeId::new(1), participant);
 
-        recover_durable_timestamp_transactions(&engines).expect("first recovery");
+        recover_durable_timestamp_transactions(&engines, None).expect("first recovery");
         assert!(
             participant_kv
                 .scan_prefix(b"\0\0\0\0index/ts_intent/")
                 .expect("scan global-index intents after first recovery")
                 .is_empty()
         );
-        recover_durable_timestamp_transactions(&engines).expect("repeat recovery");
+        recover_durable_timestamp_transactions(&engines, None).expect("repeat recovery");
 
         let tuple_key =
             crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get());
