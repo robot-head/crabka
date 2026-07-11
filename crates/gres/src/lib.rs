@@ -1286,7 +1286,7 @@ pub fn tls_acceptor(
 /// Run the single-node pgwire service, binding the configured listener address.
 pub async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let listener = TcpListener::bind(&args.listen).await?;
-    tracing::info!(listen = %args.listen, "crabka-gres listening");
+    tracing::info!(listen = %listener.local_addr()?, "crabka-gres listening");
     Box::pin(serve_listener(listener, args)).await
 }
 
@@ -1301,6 +1301,7 @@ pub async fn serve_listener_with_tenant_config_loader(
     args: ServeArgs,
     tenant_config_loader: &impl TenantConfigLoader,
 ) -> std::io::Result<()> {
+    let sql_addr = listener.local_addr()?;
     let tls = match (&args.tls_cert, &args.tls_key) {
         (Some(cert), Some(key)) => Some(tls_acceptor(cert, key)?),
         _ => None,
@@ -1374,7 +1375,11 @@ pub async fn serve_listener_with_tenant_config_loader(
     // initialized. The activator treats Active as permission to connect, so an
     // earlier write can leave its held startup queued on a bound-but-unpolled
     // listener while initialization stalls.
-    tracing::info!(listen = %effective_args.listen, "crabka-gres ready to accept sessions");
+    tracing::info!(listen = %sql_addr, "crabka-gres ready to accept sessions");
+    let range_addr = range_server
+        .as_ref()
+        .map_or_else(|| "-".to_string(), |(_, address)| address.to_string());
+    println!("CRABKA_GRES_READY {sql_addr} {range_addr}");
     let serve_result = if let Some((policy, registry, checkpointer)) = suspend {
         tokio::select! {
             result = serve => result,
@@ -1383,7 +1388,7 @@ pub async fn serve_listener_with_tenant_config_loader(
     } else {
         serve.await
     };
-    if let Some(server) = range_server {
+    if let Some((server, _)) = range_server {
         server.abort();
         let _ = server.await;
     }
@@ -1393,7 +1398,7 @@ pub async fn serve_listener_with_tenant_config_loader(
 async fn start_range_service(
     args: &ServeArgs,
     service: Option<Arc<dyn crabka_gres_ranges::RangeService>>,
-) -> std::io::Result<Option<tokio::task::JoinHandle<()>>> {
+) -> std::io::Result<Option<(tokio::task::JoinHandle<()>, SocketAddr)>> {
     let Some(listen) = &args.range_listen else {
         return Ok(None);
     };
@@ -1416,12 +1421,16 @@ async fn start_range_service(
     tls.build_acceptor()
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let listener = TcpListener::bind(listen).await?;
-    tracing::info!(range_listen = %listen, "crabka-gres range compute listening");
-    Ok(Some(tokio::spawn(async move {
-        if let Err(error) = crabka_gres_ranges::serve_tls(listener, service, tls).await {
-            tracing::warn!(%error, "range compute server stopped");
-        }
-    })))
+    let address = listener.local_addr()?;
+    tracing::info!(range_listen = %address, "crabka-gres range compute listening");
+    Ok(Some((
+        tokio::spawn(async move {
+            if let Err(error) = crabka_gres_ranges::serve_tls(listener, service, tls).await {
+                tracing::warn!(%error, "range compute server stopped");
+            }
+        }),
+        address,
+    )))
 }
 
 async fn run_suspend_monitor(

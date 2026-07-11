@@ -35,3 +35,30 @@ TDD/evidence:
 The shared session lifecycle for completed G9 timestamp transactions is
 unchanged; timestamp transactions acquire the same outer explicit-session lease
 but retain their existing timestamp decision and participant protocol.
+
+## Independent-review remediation: deterministic process harness resources
+
+The real-process harness no longer reserves child ports by binding and dropping
+temporary listeners. Every child now binds SQL and range RPC on
+`127.0.0.1:0`; after both listeners and runtime recovery are complete,
+`crabka-gres` emits one machine-readable readiness event containing the actual
+addresses. The harness awaits that event on a one-shot channel under a 30-second
+timeout, with no sleep or readiness polling. Range proxies keep their public
+listeners bound from construction and atomically receive each newly published
+backend port, including after restart, so registry endpoints remain stable.
+
+`ProcessHarness::shutdown` now kills and waits for both children and their log
+forwarding tasks under bounded five-second deadlines. `Drop` remains only the
+emergency kill fallback. The concurrent harness and multiprocess tests use the
+explicit shutdown path.
+
+Evidence:
+
+- `cargo check -p crabka-gres -p crabka-gres-ranges --tests`: passed.
+- `cargo build -p crabka-gres --bin crabka-gres`: passed.
+- Concurrent two-harness test: passed; both two-process harnesses published four nonzero, pairwise-distinct SQL/proxy ports, accepted SQL, and completed concurrent explicit shutdown.
+- Full `multiprocess`: 4 passed, including restart and distributed lease tests.
+- Full `participant_kill_bank`: 2 passed.
+- Full `crossrange_2pc_nemesis`: 2 passed.
+- `cargo test -p crabka-gres-ranges --lib --no-fail-fast`: 106 passed.
+- `git diff --check`: passed.
