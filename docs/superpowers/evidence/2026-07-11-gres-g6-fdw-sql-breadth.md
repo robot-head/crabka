@@ -90,8 +90,9 @@ cargo nextest run -p crabka-gres-fdw --features roundtrip --test roundtrip
 cargo test -p crabka-gres --test runtime \
   live_multirange_substrate_default_fdw_server_reads_own_broker -- --exact
   1 passed (real multi-range substrate runtime + own broker)
-cargo clippy -p crabka-client-core -p crabka-gres-fdw -p crabka-gres \
-  --all-targets --features crabka-gres-fdw/roundtrip -- -D warnings
+cargo clippy -p crabka-client-core -p crabka-pgexec -p crabka-gres-ranges \
+  -p crabka-gres-fdw -p crabka-gres --all-targets \
+  --features crabka-gres-fdw/roundtrip -- -D warnings
 cargo check --workspace --all-targets
 cargo +nightly fmt --all -- --check
 python3 scripts/tests/gres_f0_runtime_gates.py
