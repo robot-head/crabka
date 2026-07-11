@@ -5,6 +5,10 @@ use crabka_pgtypes::{ColumnType, Datum};
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
+    /// A PostgreSQL command that is recognized deliberately but cannot be
+    /// executed by the Gres architecture. Metadata lives on [`RefusalCommand`]
+    /// so parser, session, and compatibility tooling share one contract.
+    CompatibilityRefusal(RefusalCommand),
     CreateTable {
         name: String,
         columns: Vec<ColumnDef>,
@@ -165,6 +169,58 @@ pub enum Statement {
         server: String,
         into_schema: String,
     },
+}
+
+/// Stable, typed metadata for commands that parse normally and then fail clear.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalCommand {
+    AlterDatabase,
+    CreateDatabase,
+    DropDatabase,
+    AlterExtension,
+    DropExtension,
+    PrepareTransaction,
+    CommitPrepared,
+    RollbackPrepared,
+}
+
+impl RefusalCommand {
+    #[must_use]
+    pub const fn command_name(self) -> &'static str {
+        match self {
+            Self::AlterDatabase => "ALTER DATABASE",
+            Self::CreateDatabase => "CREATE DATABASE",
+            Self::DropDatabase => "DROP DATABASE",
+            Self::AlterExtension => "ALTER EXTENSION",
+            Self::DropExtension => "DROP EXTENSION",
+            Self::PrepareTransaction => "PREPARE TRANSACTION",
+            Self::CommitPrepared => "COMMIT PREPARED",
+            Self::RollbackPrepared => "ROLLBACK PREPARED",
+        }
+    }
+
+    #[must_use]
+    pub const fn sqlstate(self) -> &'static str {
+        match self {
+            Self::PrepareTransaction | Self::CommitPrepared | Self::RollbackPrepared => "55000",
+            _ => "0A000",
+        }
+    }
+
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::AlterDatabase | Self::CreateDatabase | Self::DropDatabase => {
+                "database lifecycle is managed by tenant provisioning"
+            }
+            Self::AlterExtension | Self::DropExtension => {
+                "extension lifecycle is not supported; use built-in compatibility shims"
+            }
+            Self::PrepareTransaction | Self::CommitPrepared | Self::RollbackPrepared => {
+                "SQL-level prepared transactions are not available"
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

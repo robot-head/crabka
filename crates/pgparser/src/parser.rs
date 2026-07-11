@@ -927,6 +927,7 @@ impl Parser {
                     }
                     Token::Ident(s) if s == "role" => self.create_role(false),
                     Token::Ident(s) if s == "sequence" => self.create_sequence(),
+                    Token::Ident(s) if s == "database" => self.create_database_refusal(),
                     _ => self.create_table(),
                 }
             }
@@ -958,6 +959,8 @@ impl Parser {
                     }
                     Token::Ident(s) if s == "role" => self.drop_role(),
                     Token::Ident(s) if s == "sequence" => self.drop_sequence(),
+                    Token::Ident(s) if s == "database" => self.drop_database_refusal(),
+                    Token::Ident(s) if s == "extension" => self.drop_extension_refusal(),
                     _ => self.drop_table(),
                 }
             }
@@ -968,6 +971,12 @@ impl Parser {
             Token::Keyword(Keyword::Copy) => self.copy_stmt(),
             // SP4: transaction control
             Token::Keyword(Keyword::Begin | Keyword::Start) => self.begin(),
+            Token::Keyword(Keyword::Commit) if matches!(self.peek2(), Token::Ident(s) if s == "prepared") => {
+                self.prepared_transaction_refusal(crate::ast::RefusalCommand::CommitPrepared)
+            }
+            Token::Keyword(Keyword::Rollback) if matches!(self.peek2(), Token::Ident(s) if s == "prepared") => {
+                self.prepared_transaction_refusal(crate::ast::RefusalCommand::RollbackPrepared)
+            }
             Token::Keyword(Keyword::Commit | Keyword::End) => {
                 self.bump();
                 Ok(crate::ast::Statement::Commit)
@@ -991,11 +1000,19 @@ impl Parser {
             Token::Ident(s) if s == "show" => self.show_stmt(),
             Token::Ident(s) if s == "reset" => self.reset_stmt(),
             Token::Ident(s) if s == "discard" => self.discard_stmt(),
+            Token::Ident(s)
+                if s == "prepare"
+                    && matches!(self.peek2(), Token::Keyword(Keyword::Transaction)) =>
+            {
+                self.prepared_transaction_refusal(crate::ast::RefusalCommand::PrepareTransaction)
+            }
             // SP40: ALTER SERVER / ALTER USER MAPPING; bounded ALTER TABLE rename.
             Token::Ident(s) if s == "alter" => match self.peek2() {
                 Token::Keyword(Keyword::Table) => self.alter_table(),
                 Token::Keyword(Keyword::Server) => self.alter_server(),
                 Token::Keyword(Keyword::User) => self.alter_user_mapping(),
+                Token::Ident(s) if s == "database" => self.alter_database_refusal(),
+                Token::Ident(s) if s == "extension" => self.alter_extension_refusal(),
                 _ => Err(ParseError::new(
                     format!("unexpected token after ALTER: {:?}", self.peek2()),
                     self.peek_pos(),
@@ -1006,6 +1023,86 @@ impl Parser {
                 self.peek_pos(),
             )),
         }
+    }
+
+    fn create_database_refusal(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("database")?;
+        self.expect_ident()?;
+        Ok(crate::ast::Statement::CompatibilityRefusal(
+            crate::ast::RefusalCommand::CreateDatabase,
+        ))
+    }
+
+    fn drop_database_refusal(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("database")?;
+        self.expect_ident()?;
+        Ok(crate::ast::Statement::CompatibilityRefusal(
+            crate::ast::RefusalCommand::DropDatabase,
+        ))
+    }
+
+    fn drop_extension_refusal(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("extension")?;
+        self.expect_ident()?;
+        Ok(crate::ast::Statement::CompatibilityRefusal(
+            crate::ast::RefusalCommand::DropExtension,
+        ))
+    }
+
+    fn alter_database_refusal(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("database")?;
+        self.expect_ident()?;
+        self.expect_ident_eq("rename")?;
+        self.expect_keyword_or_ident(Keyword::To, "to")?;
+        self.expect_ident()?;
+        Ok(crate::ast::Statement::CompatibilityRefusal(
+            crate::ast::RefusalCommand::AlterDatabase,
+        ))
+    }
+
+    fn alter_extension_refusal(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("extension")?;
+        self.expect_ident()?;
+        self.expect_keyword_or_ident(Keyword::Update, "update")?;
+        Ok(crate::ast::Statement::CompatibilityRefusal(
+            crate::ast::RefusalCommand::AlterExtension,
+        ))
+    }
+
+    fn prepared_transaction_refusal(
+        &mut self,
+        command: crate::ast::RefusalCommand,
+    ) -> Result<crate::ast::Statement, ParseError> {
+        match command {
+            crate::ast::RefusalCommand::PrepareTransaction => {
+                self.expect_ident_eq("prepare")?;
+                self.expect(&Token::Keyword(Keyword::Transaction))?;
+            }
+            crate::ast::RefusalCommand::CommitPrepared => {
+                self.expect(&Token::Keyword(Keyword::Commit))?;
+                self.expect_ident_eq("prepared")?;
+            }
+            crate::ast::RefusalCommand::RollbackPrepared => {
+                self.expect(&Token::Keyword(Keyword::Rollback))?;
+                self.expect_ident_eq("prepared")?;
+            }
+            _ => unreachable!("only SQL-level prepared transaction commands use this parser"),
+        }
+        match self.bump() {
+            Token::StringLit(_) => {}
+            other => {
+                return Err(ParseError::new(
+                    format!("expected transaction identifier string, found {other:?}"),
+                    self.peek_pos(),
+                ));
+            }
+        }
+        Ok(crate::ast::Statement::CompatibilityRefusal(command))
     }
 
     fn alter_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -5851,5 +5948,53 @@ mod tests {
             let err = crate::parse(sql).expect_err(sql);
             assert_eq!(err.sqlstate(), "0A000", "{sql}");
         }
+    }
+}
+#[test]
+fn explicit_compatibility_refusals_parse_to_typed_statements() {
+    use crate::ast::{RefusalCommand, Statement};
+
+    let cases = [
+        (
+            "ALTER DATABASE postgres RENAME TO other",
+            RefusalCommand::AlterDatabase,
+        ),
+        ("CREATE DATABASE other", RefusalCommand::CreateDatabase),
+        ("DROP DATABASE other", RefusalCommand::DropDatabase),
+        (
+            "ALTER EXTENSION plpgsql UPDATE",
+            RefusalCommand::AlterExtension,
+        ),
+        ("DROP EXTENSION plpgsql", RefusalCommand::DropExtension),
+        (
+            "PREPARE TRANSACTION 'xid-1'",
+            RefusalCommand::PrepareTransaction,
+        ),
+        ("COMMIT PREPARED 'xid-1'", RefusalCommand::CommitPrepared),
+        (
+            "ROLLBACK PREPARED 'xid-1'",
+            RefusalCommand::RollbackPrepared,
+        ),
+    ];
+
+    for (sql, command) in cases {
+        let statements = parse(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        assert_eq!(statements, vec![Statement::CompatibilityRefusal(command)]);
+    }
+}
+
+#[test]
+fn explicit_compatibility_refusals_reject_malformed_neighbors() {
+    for sql in [
+        "CREATE DATABASE",
+        "DROP DATABASE db unexpected",
+        "ALTER DATABASE db",
+        "ALTER EXTENSION ext UPDATE unexpected",
+        "DROP EXTENSION",
+        "PREPARE TRANSACTION xid",
+        "COMMIT PREPARED xid",
+        "ROLLBACK PREPARED 'xid' unexpected",
+    ] {
+        assert!(parse(sql).is_err(), "malformed refusal form parsed: {sql}");
     }
 }

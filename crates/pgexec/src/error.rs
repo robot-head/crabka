@@ -9,6 +9,8 @@ use crabka_pgwire::error::PgError;
 /// Executor-level error; converts to a non-fatal `PgError`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecError {
+    /// Deliberately recognized compatibility refusal with centralized wire metadata.
+    CompatibilityRefusal(crabka_pgparser::ast::RefusalCommand),
     /// An execution error returned by a remote range owner.
     Remote(PgError),
     Parse(ParseError),
@@ -107,6 +109,9 @@ pub enum ExecError {
 impl ExecError {
     pub fn into_pg(self) -> PgError {
         match self {
+            ExecError::CompatibilityRefusal(command) => {
+                PgError::error(command.sqlstate(), command.message())
+            }
             ExecError::Remote(error) => error,
             ExecError::Parse(e) => PgError::error(e.sqlstate(), e.to_string()),
             ExecError::Catalog(e) => PgError::error(e.sqlstate(), e.to_string()),

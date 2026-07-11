@@ -48,6 +48,46 @@ struct CommandProbe {
 
 const COMMAND_PROBES: &[CommandProbe] = &[
     CommandProbe {
+        command: "ALTER DATABASE",
+        sql: "ALTER DATABASE postgres RENAME TO other",
+        expected_statement: "CompatibilityRefusal",
+    },
+    CommandProbe {
+        command: "CREATE DATABASE",
+        sql: "CREATE DATABASE other",
+        expected_statement: "CompatibilityRefusal",
+    },
+    CommandProbe {
+        command: "DROP DATABASE",
+        sql: "DROP DATABASE other",
+        expected_statement: "CompatibilityRefusal",
+    },
+    CommandProbe {
+        command: "ALTER EXTENSION",
+        sql: "ALTER EXTENSION plpgsql UPDATE",
+        expected_statement: "CompatibilityRefusal",
+    },
+    CommandProbe {
+        command: "DROP EXTENSION",
+        sql: "DROP EXTENSION plpgsql",
+        expected_statement: "CompatibilityRefusal",
+    },
+    CommandProbe {
+        command: "PREPARE TRANSACTION",
+        sql: "PREPARE TRANSACTION 'xid-1'",
+        expected_statement: "CompatibilityRefusal",
+    },
+    CommandProbe {
+        command: "COMMIT PREPARED",
+        sql: "COMMIT PREPARED 'xid-1'",
+        expected_statement: "CompatibilityRefusal",
+    },
+    CommandProbe {
+        command: "ROLLBACK PREPARED",
+        sql: "ROLLBACK PREPARED 'xid-1'",
+        expected_statement: "CompatibilityRefusal",
+    },
+    CommandProbe {
         command: "CREATE TABLE",
         sql: "CREATE TABLE parser_commands_probe (id int4)",
         expected_statement: "CreateTable",
@@ -320,6 +360,7 @@ fn validate_probe(probe: &CommandProbe) -> Result<(), ParserCommandError> {
 
 fn statement_shape(statement: &Statement) -> &'static str {
     match statement {
+        Statement::CompatibilityRefusal(_) => "CompatibilityRefusal",
         Statement::CreateTable { .. } => "CreateTable",
         Statement::CreateView { .. } => "CreateView",
         Statement::CreateIndex { table, .. } if table == "__crabka_sequence__" => "CreateSequence",
@@ -380,12 +421,16 @@ mod tests {
             report.commands,
             vec![
                 "ABORT",
+                "ALTER DATABASE",
+                "ALTER EXTENSION",
                 "ALTER SERVER",
                 "ALTER TABLE",
                 "ALTER USER MAPPING",
                 "BEGIN",
                 "COMMIT",
+                "COMMIT PREPARED",
                 "COPY",
+                "CREATE DATABASE",
                 "CREATE FOREIGN DATA WRAPPER",
                 "CREATE FOREIGN TABLE",
                 "CREATE INDEX",
@@ -398,6 +443,8 @@ mod tests {
                 "CREATE VIEW",
                 "DELETE",
                 "DISCARD",
+                "DROP DATABASE",
+                "DROP EXTENSION",
                 "DROP FOREIGN DATA WRAPPER",
                 "DROP FOREIGN TABLE",
                 "DROP INDEX",
@@ -412,9 +459,11 @@ mod tests {
                 "GRANT",
                 "IMPORT FOREIGN SCHEMA",
                 "INSERT",
+                "PREPARE TRANSACTION",
                 "RESET",
                 "REVOKE",
                 "ROLLBACK",
+                "ROLLBACK PREPARED",
                 "SELECT",
                 "SET",
                 "SET ROLE",
