@@ -4998,7 +4998,12 @@ fn routing_param_literal(param: &BoundParam, inferred_oid: u32) -> Result<String
         (1114, 0) => quoted_typed_literal(value, "timestamp"),
         (1184, 0) => quoted_typed_literal(value, "timestamptz"),
         (1186, 0) => quoted_typed_literal(value, "interval"),
-        (2950, 0 | 1) => quoted_typed_literal(value, "uuid"),
+        (2950, 0) => quoted_typed_literal(value, "uuid"),
+        (2950, 1) if value.len() == 16 => Ok(format_binary_uuid(value)),
+        (2950, 1) => Err(PgError::error(
+            "22P03",
+            "invalid binary UUID parameter length",
+        )),
         (_, 0 | 1) => Err(PgError::error(
             sqlstate::FEATURE_NOT_SUPPORTED,
             format!("parameter type {oid} cannot be used as a shard key"),
@@ -5036,6 +5041,18 @@ fn hex_bytes(value: &[u8]) -> String {
         encoded.push(HEX[usize::from(byte & 0x0f)] as char);
     }
     encoded
+}
+
+fn format_binary_uuid(value: &[u8]) -> String {
+    let hex = hex_bytes(value);
+    format!(
+        "'{}-{}-{}-{}-{}'::uuid",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 fn unknown_shard_key_error() -> PgError {
