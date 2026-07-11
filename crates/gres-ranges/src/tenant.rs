@@ -2518,12 +2518,7 @@ impl GatewaySession {
             let merged = merge_timestamp_insert_statements(&statements)?;
             self.transaction = GatewayTransaction::Idle;
             let route = self.route_statement(&merged)?;
-            let ranges = route.scatter_ranges.ok_or_else(|| {
-                PgError::error(
-                    sqlstate::FEATURE_NOT_SUPPORTED,
-                    "buffered sharded transaction no longer spans ranges",
-                )
-            })?;
+            let ranges = route.scatter_ranges.unwrap_or_else(|| vec![route.range_id]);
             if let Err(error) = self.execute_timestamp_scatter(&merged, ranges).await {
                 self.transaction = GatewayTransaction::Failed {
                     touched: Vec::new(),
