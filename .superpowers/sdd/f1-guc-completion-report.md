@@ -4,10 +4,11 @@ Date: 2026-07-11
 
 ## Status
 
-INCOMPLETE. The typed registry/transaction stack, parser surface, DISCARD core,
-and mandatory live PgDog E2E are implemented and verified. Exact capture-backed
-driver/PgDog goldens, compatibility anti-rot, and dated M0 publication remain;
-accordingly the M0 matrix was not advanced.
+COMPLETE. The typed registry/transaction stack, parser surface, DISCARD core,
+capture-backed exact-driver/PgDog goldens, executable direct-Gres replay,
+compatibility anti-rot, mandatory live PgDog E2E, and dated M0 publication are
+implemented and verified. M0 covers F-0/F-1 only and does not claim later SQL
+waves or full PostgreSQL parity.
 
 ## PostgreSQL 18 oracle
 
@@ -63,19 +64,19 @@ transaction and renders `statement_timeout = 17` as `17ms`.
 - `git diff --check`: PASS.
 - Complete correction-pass verification and live results are recorded below.
 
-## Remaining concerns / exit blockers
+## Resolved exit blockers
 
-- No exact payload-decoded, allowlisted startup captures and corresponding PgDog
-  backend SET captures are checked in for tokio-postgres 0.7.18, sqlx 0.9.0,
-  and psycopg 3.2.9. Draft assumptions were deliberately removed after pinned
-  source proved SQLx and tokio both send `client_encoding=UTF8` (SQLx also sends
-  `extra_float_digits=2`).
-- Compatibility anti-rot and dated M0 matrix publication remain outstanding.
+- Exact payload-decoded, allowlisted startup captures and corresponding PgDog
+  backend SET captures are checked in for tokio-postgres 0.7.18, SQLx 0.9.0,
+  and psycopg 3.2.9. Empty batches are explicit rather than inferred.
+- Compatibility anti-rot and dated M0 matrix publication are green and linked
+  from `docs/PG_COMPAT_MATRIX.md`.
 
 ## Landed-core review correction pass (2026-07-11)
 
-Status remains **INCOMPLETE** because exact capture-backed driver goldens,
-compatibility anti-rot, and M0 publication are outside this correction pass.
+Historical status at the end of this correction pass was **INCOMPLETE** because
+exact capture-backed driver goldens, compatibility anti-rot, and M0 publication
+were outside that pass. The exit wave below resolves those items.
 
 ### Additional PostgreSQL 18 oracle evidence
 
@@ -171,3 +172,56 @@ parser target and direct PostgreSQL 18 grammar/value probes remained green.
   lifecycle 3/3, parity 666/688 at baseline, extended parity 6/6, Rust driver,
   psycopg 3.2.9, and the F-1 one-backend/two-client GUC gate. Kafka ACL was
   explicitly skipped in this rerun because it was not changed by this pass.
+
+## Capture-backed driver goldens and M0 exit (2026-07-11)
+
+Commit `bbe43a9b` adds the payload-safe recorder, deterministic recapture
+orchestrator, schema/secret/version validator, checked fixture, raw-startup
+replay, bounded Gres gate, and mandatory CI wiring.
+
+### RED/GREEN and capture evidence
+
+- RED: the validator test failed because the fixture/module did not exist, then
+  because the placeholder schema was version 0. GREEN: schema version 1,
+  complete provenance, exact dependency pins, strict startup-key allowlist,
+  explicit empty arrays, and forbidden identity/secret scanning all pass.
+- RED: the first real PgDog backend trace presented an SSLRequest before the
+  startup packet. GREEN: a focused recorder test proves the standard `N`
+  plaintext negotiation path and the capture completed without retaining
+  encrypted or raw bytes.
+- Direct PostgreSQL 18 captures: tokio-postgres sends
+  `client_encoding=UTF8`; SQLx sends `DateStyle=ISO, MDY`, `TimeZone=UTC`,
+  `client_encoding=UTF8`, and `extra_float_digits=2`; psycopg sends no
+  non-identity startup settings. All direct simple-query SET arrays are empty.
+- PgDog 0.1.6 backend captures: tokio-postgres and psycopg produce empty SET
+  arrays; SQLx produces exactly `SET "datestyle" TO 'ISO, MDY'`,
+  `SET "extra_float_digits" TO '2'`, and `SET "timezone" TO 'UTC'`, in that
+  order. PgDog backend startup was consistently
+  `application_name=PgDog, client_encoding=utf-8`.
+- The exact recapture command
+  `PATH=/tmp/crabka-f1-venv/bin:$PATH python3
+  tools/capture-gres-driver-goldens.py --write` provisioned a fresh
+  `postgres:18`, verified PgDog image digest and dependency pins, captured all
+  six paths, and reproduced the checked fixture.
+- RED: the structural gate reported the missing `Captured driver startup
+  replay` CI step. GREEN: the mandatory Gres job runs the bounded replay script.
+- `CRABKA_GRES_SKIP_BUILD=1 timeout 30s
+  ./scripts/gres-driver-goldens-gate.sh`: PASS; three captured startup packets
+  and every captured backend SET batch were accepted directly by Gres.
+
+### Final static and live exit evidence
+
+- Matrix `--self-test` and normal anti-rot checks: PASS.
+- Relevant all-target test/check/clippy (`-D warnings`) commands: PASS.
+- Nightly format, diff check, F-0 structural gate, recorder unit tests, and
+  direct-Gres replay: PASS.
+- Complete provisioned PgDog 0.1.6 E2E: PASS with both pinned Rust drivers,
+  psycopg 3.2.9, F-1 one-backend/two-client GUC gate, lifecycle 3/3, base floor
+  666/688, and extended parity 6/6.
+- The Kafka ACL leg was explicitly disabled for this unchanged rerun and is not
+  claimed as executed. The previously reviewed exact-topic/code-29 probe is the
+  unchanged ACL evidence.
+- Dated M0 evidence is published at
+  `docs/superpowers/evidence/2026-07-11-gres-m0.md`. PgDog SET/SHOW/RESET
+  limitations remain checked, precisely bounded deviations in
+  `crates/gres-conformance/pooler-baseline.md`.
