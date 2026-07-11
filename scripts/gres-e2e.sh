@@ -477,9 +477,9 @@ expect_sql_equals "tenant B survives tenant A compute death" "$TENANT_B_CONN" bo
 start_oracle
 CRABKA_GRES_PGDOG_TEST_URL="postgresql://carol:carol-secret@127.0.0.1:${PGDOG_PORT}/tenant-c?sslmode=disable&connect_timeout=5" \
     cargo test --locked -p crabka-gres-conformance \
-    --test extended_transaction_pinning -- --nocapture \
-    >"${ARTIFACT_DIR}/extended-transaction-pinning.log" 2>&1 || \
-    fail "extended transaction-pinning regression failed"
+    --test extended_case_lifecycle -- --nocapture \
+    >"${ARTIFACT_DIR}/extended-case-lifecycle.log" 2>&1 || \
+    fail "extended case lifecycle regression failed"
 ./target/debug/crabka-gres-conformance \
     --oracle-url "host=127.0.0.1 port=${ORACLE_PORT} user=postgres dbname=postgres" \
     --subject-url "$TENANT_C_CONN password=carol-secret" \

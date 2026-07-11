@@ -8,11 +8,16 @@ use std::{
     fmt::Write as _,
     io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio_postgres::types::{ToSql, Type};
+
+const CASE_ID_TOKEN: &str = "__case_id__";
+static NEXT_CASE_ID: AtomicU64 = AtomicU64::new(0);
 
 pub use self::parser_commands::{
     PARSER_COMMAND_REPORT_FORMAT_VERSION, ParserCommandError, ParserCommandReport,
@@ -413,36 +418,106 @@ pub async fn run_extended_one(
     client: &mut tokio_postgres::Client,
     case: &ExtendedCase,
 ) -> QueryOutcome {
+    let case = materialize_case(case);
     let transaction = match client.transaction().await {
         Ok(transaction) => transaction,
         Err(error) => return outcome_from_error(&error),
     };
 
-    if let Err(error_code) = execute_case_statements(&transaction, &case.setup).await {
-        let outcome = QueryOutcome {
+    let mut outcome = match execute_case_statements(&transaction, &case.setup).await {
+        Ok(()) => query_extended(&transaction, &case).await,
+        Err(error_code) => QueryOutcome {
+            rows: Vec::new(),
+            error_code: Some(error_code),
+        },
+    };
+    let mut cleanup_after_rollback = outcome.error_code.is_some();
+    if !cleanup_after_rollback
+        && let Err(error_code) = execute_case_statements(&transaction, &case.teardown).await
+    {
+        outcome = QueryOutcome {
             rows: Vec::new(),
             error_code: Some(error_code),
         };
-        let _ = transaction.rollback().await;
-        return outcome;
+        cleanup_after_rollback = true;
     }
 
-    let outcome = query_extended(&transaction, case).await;
-    let outcome = if outcome.error_code.is_none() {
-        match execute_case_statements(&transaction, &case.teardown).await {
-            Ok(()) => outcome,
-            Err(error_code) => QueryOutcome {
-                rows: Vec::new(),
-                error_code: Some(error_code),
-            },
-        }
-    } else {
-        outcome
-    };
-    match transaction.rollback().await {
-        Err(error) if outcome.error_code.is_none() => outcome_from_error(&error),
-        Ok(()) | Err(_) => outcome,
+    if let Err(error) = transaction.rollback().await
+        && outcome.error_code.is_none()
+    {
+        outcome = outcome_from_error(&error);
     }
+    if cleanup_after_rollback
+        && let Err(error_code) = cleanup_case(client, &case.teardown).await
+        && outcome.error_code.is_none()
+    {
+        outcome = QueryOutcome {
+            rows: Vec::new(),
+            error_code: Some(error_code),
+        }
+    }
+    outcome
+}
+
+fn materialize_case(case: &ExtendedCase) -> ExtendedCase {
+    if !case.sql.contains(CASE_ID_TOKEN)
+        && !case.setup.iter().any(|sql| sql.contains(CASE_ID_TOKEN))
+        && !case.teardown.iter().any(|sql| sql.contains(CASE_ID_TOKEN))
+    {
+        return case.clone();
+    }
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let id = format!(
+        "{nanos}_{}_{}",
+        std::process::id(),
+        NEXT_CASE_ID.fetch_add(1, Ordering::Relaxed)
+    );
+    let replace = |sql: &String| sql.replace(CASE_ID_TOKEN, &id);
+    ExtendedCase {
+        name: case.name.clone(),
+        sql: case.sql.replace(CASE_ID_TOKEN, &id),
+        params: case.params.clone(),
+        setup: case.setup.iter().map(replace).collect(),
+        teardown: case.teardown.iter().map(replace).collect(),
+    }
+}
+
+async fn cleanup_case(
+    client: &mut tokio_postgres::Client,
+    statements: &[String],
+) -> Result<(), String> {
+    let mut first_error = None;
+    for statement in statements {
+        if statement.trim().is_empty() {
+            continue;
+        }
+        // Recover a client whose prior transaction could not be rolled back,
+        // and isolate every cleanup statement so one failure cannot suppress
+        // the remaining deterministic cleanup work.
+        let _ = client.batch_execute("ROLLBACK").await;
+        let transaction = match client.transaction().await {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                first_error.get_or_insert_with(|| error_code_from_error(&error));
+                continue;
+            }
+        };
+        let result = transaction.batch_execute(statement).await;
+        match result {
+            Ok(()) => {
+                if let Err(error) = transaction.commit().await {
+                    first_error.get_or_insert_with(|| error_code_from_error(&error));
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert_with(|| error_code_from_error(&error));
+                let _ = transaction.rollback().await;
+            }
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 async fn query_extended(
@@ -999,6 +1074,31 @@ mod tests {
         };
 
         assert!(report.check_baseline(&baseline).is_ok());
+    }
+
+    #[test]
+    fn materialized_extended_case_identifiers_are_unique_and_sql_safe() {
+        let case = ExtendedCase {
+            name: "unique".into(),
+            sql: "SELECT * FROM probe___case_id__".into(),
+            params: Vec::new(),
+            setup: vec!["CREATE TABLE probe___case_id__ (id int4)".into()],
+            teardown: vec!["DROP TABLE probe___case_id__".into()],
+        };
+
+        let first = materialize_case(&case);
+        let second = materialize_case(&case);
+
+        assert_ne!(first.sql, second.sql);
+        assert!(!first.sql.contains(CASE_ID_TOKEN));
+        assert!(
+            first
+                .sql
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || " *_".contains(character))
+        );
+        assert_eq!(first.name, case.name);
+        assert_eq!(first.params.len(), case.params.len());
     }
 
     /// Report with the given counts and no per-case detail.
