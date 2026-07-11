@@ -44,10 +44,7 @@ pub struct GresTenantSpec {
 
     /// Optional ordered range layout. Omitted means one open-ended range r0.
     ///
-    /// The operator currently accepts only a single range. It reports a
-    /// `Ready=False` `MultiRangeUnsupported` condition for a multi-range
-    /// layout rather than rendering unsafe per-range computes that would each
-    /// host range r0 and write its WAL.
+    /// Each entry is placed on a distinct range compute.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ranges: Vec<GresTenantRangeSpec>,
 
