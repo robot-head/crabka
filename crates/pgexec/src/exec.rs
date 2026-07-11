@@ -2372,11 +2372,10 @@ fn scan_table_interval(
     table_id: u32,
     interval: RowInterval,
 ) -> Result<crabka_pgkv::KvScan, ExecError> {
-    let start = interval
-        .start
-        .map_or_else(|| crabka_pgkv::key::table_prefix(table_id), |rowid| {
-            crabka_pgkv::key::row_key(table_id, rowid)
-        });
+    let start = interval.start.map_or_else(
+        || crabka_pgkv::key::table_prefix(table_id),
+        |rowid| crabka_pgkv::key::row_key(table_id, rowid),
+    );
     let end = interval.end.map_or_else(
         || {
             let mut end = crabka_pgkv::key::table_prefix(table_id);
