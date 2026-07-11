@@ -5,7 +5,7 @@ use crabka_pgtypes::{ColumnType, Datum};
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
-    /// A PostgreSQL command that is recognized deliberately but cannot be
+    /// A `PostgreSQL` command that is recognized deliberately but cannot be
     /// executed by the Gres architecture. Metadata lives on [`RefusalCommand`]
     /// so parser, session, and compatibility tooling share one contract.
     CompatibilityRefusal(RefusalCommand),
@@ -226,7 +226,7 @@ impl RefusalCommand {
     }
 }
 
-/// Architectural non-goal commands tracked by the PostgreSQL compatibility matrix.
+/// Architectural non-goal commands tracked by the `PostgreSQL` compatibility matrix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NonGoalCommand {
     AlterConversion,
@@ -367,7 +367,7 @@ impl NonGoalCommand {
     }
 }
 
-/// One bounded PostgreSQL 18 syntax representative for an architectural refusal.
+/// One bounded `PostgreSQL` 18 syntax representative for an architectural refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NonGoalRefusalSpec {
     pub command: RefusalCommand,

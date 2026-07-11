@@ -27,8 +27,13 @@ The following commands were run from the repository root and passed on 2026-07-1
 ```text
 cargo test -p crabka-pgparser -p crabka-pgexec -p crabka-gres-conformance --lib --no-fail-fast
 cargo test -p crabka-gres-conformance --test compatibility_behavior --no-fail-fast
+cargo check --workspace --all-targets --locked
+cargo clippy -p crabka-pgparser -p crabka-pgexec -p crabka-gres-conformance --all-targets --locked -- -D warnings
+cargo +nightly fmt --all -- --check
+python3 scripts/tests/gres_f0_runtime_gates.py
 tools/check-pg-compat-matrix.sh --self-test
 tools/check-pg-compat-matrix.sh
+git diff --check
 ```
 
-The final all-target check, clippy, formatting, structural gate, and diff check are recorded in the task handoff after this artifact is committed.
+The workspace-wide clippy command was also attempted. It reached unrelated existing `manual_assert_eq` warnings in `crates/gres-substrate/src/writer.rs` and `crates/broker/src/diskless/hot_tail.rs`; the three task-owning crates pass all-target clippy with warnings denied as recorded above.
