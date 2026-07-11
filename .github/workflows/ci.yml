@@ -1093,6 +1093,7 @@ jobs:
       - name: Gres engine integration coverage
         run: |
           cargo llvm-cov nextest -p crabka-pgwire -p crabka-pgexec -p crabka-gres-fdw -p crabka-gres-substrate -p crabka-gres \
+            --features crabka-gres-substrate/checkpoint-test-hooks \
             --profile ci --tests --lcov --output-path lcov.info
       - uses: codecov/codecov-action@v7
         with:
