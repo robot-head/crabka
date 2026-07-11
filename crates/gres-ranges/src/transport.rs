@@ -49,6 +49,8 @@ pub enum RangeRequest {
         global_xid: u64,
         status: WireGlobalStatus,
     },
+    /// Allocate and durably publish one global transaction id on range 0.
+    GlobalBegin { range_id: RangeId },
     /// Ask an owning range to scan a table rowid interval under caller snapshots.
     ScanRange(ScanRangeReq),
     /// Pull one bounded page from an owner-issued range cursor token.
@@ -82,6 +84,8 @@ pub enum RangeResponse {
     SessionResult { result: WireSessionResult },
     /// Effective immutable global decision status.
     GlobalStatus { status: WireGlobalStatus },
+    /// Newly allocated global transaction id.
+    GlobalXid { global_xid: u64 },
     /// Visible rows returned by a range scan.
     ScanRange(ScanRangeResp),
     /// One bounded owner-cursor page.
@@ -1301,7 +1305,8 @@ mod tests {
                 RangeRequest::SessionOpen { .. }
                 | RangeRequest::Session { .. }
                 | RangeRequest::SessionClose { .. }
-                | RangeRequest::GlobalDecision { .. } => RangeResponse::Error {
+                | RangeRequest::GlobalDecision { .. }
+                | RangeRequest::GlobalBegin { .. } => RangeResponse::Error {
                     error: WireErrorKind::Failed,
                     message: "wrong rpc".into(),
                 },

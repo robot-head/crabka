@@ -5,9 +5,11 @@ Internal range-map and deterministic-routing primitives for Chapter Gres multi-r
 ## Gateway capabilities
 
 - A gateway may forward data-range requests to a remote range through the TLS range registry.
-- A gateway **must host range 0 locally**. Configurations that omit range 0 fail at configuration
-  and startup with an explicit error; they are never coerced into hosting it. Remote range-0
-  decision and barrier support is not implemented yet.
+- A gateway that does not host range 0 consumes its read-only range-0 follower
+  tail for catalog/global visibility and resolves range-0 write RPCs through the
+  authenticated registry. Global xid allocation and immutable decisions are
+  remote-capable; freshness remains certified by the follower's log-derived
+  barrier before reads are served.
 
 ## Empty-table local SQL split bridge
 
