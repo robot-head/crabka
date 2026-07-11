@@ -767,6 +767,43 @@ impl SqlEngine {
         }
     }
 
+    /// Durably expand a pending descriptor's participant set with CAS fencing.
+    pub async fn add_timestamp_transaction_participant(
+        &self,
+        start_ts: TimestampTransactionId,
+        range_id: u32,
+    ) -> Result<TimestampTxnDescriptor, ExecError> {
+        loop {
+            let Some(current) =
+                timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts)?
+            else {
+                return Err(ExecError::Unsupported(
+                    "timestamp transaction descriptor is missing".into(),
+                ));
+            };
+            let mut expanded = current.clone();
+            expanded
+                .add_participant(range_id)
+                .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+            if expanded == current {
+                return Ok(current);
+            }
+            self.committer
+                .commit(vec![timestamp_txn::timestamp_txn_descriptor_cas_op(
+                    &expanded,
+                    Some(&current),
+                )])
+                .await?;
+            let stored = timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), start_ts)?
+                .ok_or_else(|| {
+                    ExecError::Unsupported("timestamp transaction descriptor disappeared".into())
+                })?;
+            if stored == expanded {
+                return Ok(stored);
+            }
+        }
+    }
+
     /// Make range 0's timestamp decision durable. Commit is refused unless all
     /// participant acknowledgements are already durable. The descriptor is the
     /// sole write-once primary record and includes the exact commit timestamp.

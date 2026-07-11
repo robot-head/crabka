@@ -2233,22 +2233,19 @@ impl GatewaySession {
                 format!("cursor \"{portal}\" already exists"),
             ));
         }
-        let route = if let Some(route) = prepared.route.clone() {
-            route
+        let bound_sql = if params.is_empty() {
+            prepared.sql.clone()
         } else {
-            let routing_sql = routing_sql_with_bound_params(
+            routing_sql_with_bound_params(
                 &prepared.sql,
                 &prepared.description.parameter_types,
                 params,
-            )?;
-            let route = self.route_statement(&routing_sql)?;
-            if route.scatter_ranges.is_some() {
-                return Err(PgError::error(
-                    sqlstate::FEATURE_NOT_SUPPORTED,
-                    "extended statements must target one range",
-                ));
-            }
+            )?
+        };
+        let route = if let Some(route) = prepared.route.clone() {
             route
+        } else {
+            self.route_statement(&bound_sql)?
         };
         if matches!(
             route.kind,
@@ -2265,6 +2262,24 @@ impl GatewaySession {
                 portal.to_owned(),
                 GatewayPortal {
                     sql: prepared.sql,
+                    route,
+                    description: description.clone(),
+                    gateway_execution: None,
+                },
+            );
+            return Ok(description);
+        }
+        let gateway_timestamp_dml = route.kind == StatementKind::Dml
+            && self.statement_targets_sharded_table(&bound_sql)?
+            && (route.scatter_ranges.is_some()
+                || matches!(self.transaction, GatewayTransaction::Timestamp { .. })
+                || matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty()));
+        if gateway_timestamp_dml {
+            let description = PortalDescription { fields: Vec::new() };
+            self.portals.insert(
+                portal.to_owned(),
+                GatewayPortal {
+                    sql: bound_sql,
                     route,
                     description: description.clone(),
                     gateway_execution: None,
@@ -2385,6 +2400,23 @@ impl GatewaySession {
             }
             StatementKind::Dml | StatementKind::Query | StatementKind::Local => {}
         }
+        if portal_state.route.kind == StatementKind::Dml
+            && self.statement_targets_sharded_table(&portal_state.sql)?
+            && (portal_state.route.scatter_ranges.is_some()
+                || matches!(self.transaction, GatewayTransaction::Timestamp { .. })
+                || matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty()))
+        {
+            if let Some(outcome) = portal_state.gateway_execution {
+                return Ok(outcome);
+            }
+            let mut results = self.execute_one(&portal_state.sql).await?;
+            let outcome = query_result_to_outcome(results.pop().unwrap_or(QueryResult::Empty));
+            self.portals
+                .get_mut(portal)
+                .expect("portal exists throughout gateway execution")
+                .gateway_execution = Some(outcome.clone());
+            return Ok(outcome);
+        }
         self.inner.route_log.lock().await.push(RouteRecord {
             kind: portal_state.route.kind,
             range_id: portal_state.route.range_id,
@@ -2431,10 +2463,12 @@ impl GatewaySession {
             identity,
             participants,
             ..
-        } = std::mem::replace(&mut self.transaction, GatewayTransaction::Idle)
+        } = &self.transaction
         else {
             return Ok(());
         };
+        let identity = *identity;
+        let participants = participants.clone();
         let serving = self.current_serving()?;
         let coordinator = serving
             .engine(RangeId::COORDINATOR)
@@ -2473,8 +2507,9 @@ impl GatewaySession {
                 .map(|result| vec![result]);
         }
         if route.kind == StatementKind::Dml
-            && matches!(self.transaction, GatewayTransaction::Timestamp { .. })
-            && self.route_table_is_sharded(&route)?
+            && (matches!(self.transaction, GatewayTransaction::Timestamp { .. })
+                || matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty()))
+            && self.statement_targets_sharded_table(statement)?
         {
             return self
                 .execute_timestamp_scatter(statement, vec![route.range_id])
@@ -3018,19 +3053,17 @@ impl GatewaySession {
         Ok(Some(table_write_gate))
     }
 
-    fn route_table_is_sharded(&self, route: &StatementRoute) -> Result<bool, PgError> {
-        let Some(table_id) = route.table_id else {
+    fn statement_targets_sharded_table(&self, statement: &str) -> Result<bool, PgError> {
+        let normalized = statement.trim_start().to_ascii_lowercase();
+        let table_refs = table_refs_in_statement(&normalized);
+        let Some(table_ref) = table_refs.first() else {
             return Ok(false);
         };
         let serving = self.current_serving()?;
         let catalog = serving
             .engine(RangeId::COORDINATOR)
             .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
-        Ok(crabka_pgcatalog::list_tables(catalog.catalog_kv())
-            .map_err(ExecError::from)
-            .map_err(ExecError::into_pg)?
-            .into_iter()
-            .any(|table| u64::from(table.id) == table_id.as_u64() && table.sharded))
+        catalog_table_is_sharded(catalog, &table_ref.name)
     }
 
     async fn execute_routed_statement(
@@ -3082,11 +3115,18 @@ impl GatewaySession {
             self.touch_write_range(range_id).await?;
         }
         self.ensure_remote_session(range_id).await?;
-        self.remote_sessions
+        let own_start_ts = match &self.transaction {
+            GatewayTransaction::Timestamp { identity, .. } if kind == StatementKind::Query => {
+                Some(identity.start_ts)
+            }
+            _ => None,
+        };
+        let remote = self
+            .remote_sessions
             .get_mut(&range_id)
-            .expect("remote session inserted")
-            .simple_query(statement.to_owned())
-            .await
+            .expect("remote session inserted");
+        remote.set_timestamp_own_start_ts(own_start_ts).await?;
+        remote.simple_query(statement.to_owned()).await
     }
 
     #[allow(
@@ -3168,6 +3208,12 @@ impl GatewaySession {
         let autocommit = matches!(self.transaction, GatewayTransaction::Idle);
         let (start_ts, identity) =
             if let GatewayTransaction::Timestamp { identity, .. } = &self.transaction {
+                for range_id in writes_by_range.keys() {
+                    coordinator
+                        .add_timestamp_transaction_participant(identity.start_ts, range_id.as_u32())
+                        .await
+                        .map_err(ExecError::into_pg)?;
+                }
                 (identity.start_ts, *identity)
             } else {
                 let begun = self
@@ -3233,7 +3279,11 @@ impl GatewaySession {
             for (range_id, writes) in statement_participants {
                 participants.entry(range_id).or_default().extend(writes);
             }
-            commit_ops.extend(plan.commit_ops);
+            coordinator
+                .commit_timestamp_statement_ops(plan.commit_ops)
+                .await
+                .map_err(ExecError::into_pg)?;
+            commit_ops.clear();
             return Ok(plan.result);
         }
         if self
@@ -3317,6 +3367,14 @@ impl GatewaySession {
         let coordinator = serving
             .engine(RangeId::COORDINATOR)
             .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
+        if self
+            .take_commit_fault_for_testing(GatewayCommitFault::AfterTimestampPrewriteBeforeDecision)
+        {
+            return Err(PgError::error(
+                "XX000",
+                "injected crash after timestamp prewrites before durable decision",
+            ));
+        }
         let commit_ts = coordinator
             .allocate_commit_timestamp_after(identity.start_ts)
             .await
@@ -3331,6 +3389,12 @@ impl GatewaySession {
         let crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) = decision else {
             return Err(PgError::error("40001", "timestamp transaction aborted"));
         };
+        if self.take_commit_fault_for_testing(GatewayCommitFault::AfterTimestampCommitDecision) {
+            return Err(PgError::error(
+                "XX000",
+                "injected crash after durable timestamp commit decision",
+            ));
+        }
         for (range_id, writes) in &participants {
             self.timestamp_resolve(
                 *range_id,
@@ -3612,8 +3676,76 @@ impl GatewaySession {
 
 impl Drop for GatewaySession {
     fn drop(&mut self) {
+        if let GatewayTransaction::Timestamp {
+            identity,
+            participants,
+            ..
+        } = &self.transaction
+        {
+            let identity = *identity;
+            let participants = participants.clone();
+            let serving = self.inner.serving.load_full();
+            let remote_sessions = self.remote_sessions.clone();
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let _ = cleanup_dropped_timestamp_session(
+                        serving,
+                        remote_sessions,
+                        identity,
+                        participants,
+                    )
+                    .await;
+                });
+            }
+        }
         self.release_explicit_transaction();
     }
+}
+
+async fn cleanup_dropped_timestamp_session(
+    serving: Arc<ServingSnapshot>,
+    remote_sessions: BTreeMap<RangeId, RemoteRangeSession>,
+    identity: crabka_pgexec::TimestampTxnIdentity,
+    participants: BTreeMap<RangeId, Vec<crabka_pgexec::TimestampWrite>>,
+) -> Result<(), PgError> {
+    let coordinator = serving
+        .engine(RangeId::COORDINATOR)
+        .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
+    let decision = coordinator
+        .decide_timestamp_transaction(
+            identity.start_ts,
+            crabka_pgexec::PrimaryTxnDecision::Aborted,
+        )
+        .await
+        .map_err(ExecError::into_pg)?;
+    let decision = match decision {
+        crabka_pgexec::PrimaryTxnDecision::Aborted => crabka_pgexec::TimestampTxnDecision::Aborted,
+        crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) => {
+            crabka_pgexec::TimestampTxnDecision::Committed(commit_ts)
+        }
+        crabka_pgexec::PrimaryTxnDecision::Pending => {
+            return Err(PgError::error(
+                "XX000",
+                "timestamp cleanup remained pending",
+            ));
+        }
+    };
+    for (range_id, writes) in participants {
+        if let Some(engine) = serving.engine(range_id) {
+            engine
+                .timestamp_txn_participant(range_id.as_u32())
+                .resolve_with_primary(identity, decision, &writes)
+                .await
+                .map_err(ExecError::into_pg)?;
+        } else {
+            remote_sessions
+                .get(&range_id)
+                .ok_or_else(|| PgError::error("08003", "remote timestamp session is missing"))?
+                .timestamp_resolve(identity, decision, &writes)
+                .await?;
+        }
+    }
+    Ok(())
 }
 
 /// Map each INSERT tuple to its physical owner from the same literal shard keys

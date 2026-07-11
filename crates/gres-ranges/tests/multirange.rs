@@ -473,6 +473,76 @@ async fn sharded_multi_row_inserts_in_explicit_transaction_read_own_writes_and_c
 }
 
 #[tokio::test]
+async fn explicit_timestamp_transaction_expands_from_single_range_to_new_range() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .simple_query("INSERT INTO t150 VALUES (20, 10)")
+        .await
+        .expect("first range");
+    session
+        .simple_query("INSERT INTO t150 VALUES (120, 20)")
+        .await
+        .expect("new range");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![10, 20]
+    );
+    session.simple_query("COMMIT").await.expect("commit");
+}
+
+#[tokio::test]
+async fn extended_sharded_writes_join_explicit_timestamp_transaction() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .extended_query_v2(
+            "INSERT INTO t150 VALUES ($1, 10), (120, 20)",
+            &[text_param("20")],
+        )
+        .await
+        .expect("extended write");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![10, 20]
+    );
+    session.simple_query("COMMIT").await.expect("commit");
+}
+
+#[tokio::test]
+async fn dropping_explicit_timestamp_session_aborts_pending_intents() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut setup = gateway.connect();
+    setup
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    setup.simple_query("BEGIN").await.expect("begin");
+    setup
+        .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
+        .await
+        .expect("prewrite");
+    drop(setup);
+    tokio::task::yield_now().await;
+
+    let mut observer = gateway.connect();
+    observer
+        .simple_query("INSERT INTO t150 VALUES (20, 30), (120, 40)")
+        .await
+        .expect("abandoned intents were resolved");
+}
+
+#[tokio::test]
 async fn sharded_multi_row_insert_in_explicit_transaction_rolls_back() {
     let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
     let mut session = gateway.connect();

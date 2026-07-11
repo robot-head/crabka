@@ -658,6 +658,14 @@ async fn handle_session_operation(
             .await
             .map(|()| WireSessionResult::Closed)
             .map_err(crabka_pgexec::ExecError::into_pg),
+        WireSessionOperation::SetTimestampOwner { start_ts } => {
+            let start_ts = start_ts
+                .map(crabka_pgexec::TimestampTransactionId::new)
+                .transpose()
+                .map_err(|error| PgError::protocol(error.to_string()))?;
+            session.set_timestamp_own_start_ts(start_ts);
+            Ok(WireSessionResult::Closed)
+        }
         WireSessionOperation::CloseStatement { name } => session
             .close(CloseTarget::Statement(&name))
             .await
@@ -983,6 +991,21 @@ pub struct RemoteRangeSession {
 }
 
 impl RemoteRangeSession {
+    pub async fn set_timestamp_own_start_ts(
+        &mut self,
+        start_ts: Option<crabka_pgexec::TimestampTransactionId>,
+    ) -> Result<(), PgError> {
+        match self
+            .call(WireSessionOperation::SetTimestampOwner {
+                start_ts: start_ts.map(crabka_pgexec::TimestampTransactionId::get),
+            })
+            .await?
+        {
+            WireSessionResult::Closed => Ok(()),
+            _ => Err(PgError::protocol("unexpected timestamp-owner response")),
+        }
+    }
+
     pub async fn timestamp_prewrite(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
