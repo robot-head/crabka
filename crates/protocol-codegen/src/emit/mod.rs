@@ -77,6 +77,10 @@ mod tests {
                 check!(w_borrowed.contains("case {case}, version {v}"));
                 check!(!w_owned.contains("_case , msg"));
                 check!(!w_borrowed.contains("_case , msg"));
+                let has_fetch_plan = w_owned.contains("fetch_response_plan.rs");
+                let expects_fetch_plan = namespace.is_none() && s.name == "FetchResponse";
+                check!(has_fetch_plan == expects_fetch_plan);
+                check!(!w_borrowed.contains("fetch_response_plan.rs"));
                 check!(!name_conv::module_name(&s.name).is_empty());
             }
         }

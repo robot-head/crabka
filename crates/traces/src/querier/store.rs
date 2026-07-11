@@ -2617,6 +2617,24 @@ mod tests {
         Arc::new(ArcSwap::from_pointee(index))
     }
 
+    #[test]
+    fn integer_matchers_distinguish_equal_and_unequal_values() {
+        let expected = MatchValue::Int(7);
+        assert2::assert!(int_matches(7, MatchCmp::Eq, &expected));
+        assert2::assert!(!int_matches(8, MatchCmp::Eq, &expected));
+        assert2::assert!(!int_matches(7, MatchCmp::Neq, &expected));
+        assert2::assert!(int_matches(8, MatchCmp::Neq, &expected));
+    }
+
+    #[test]
+    fn float_matchers_distinguish_equal_and_unequal_values() {
+        let expected = MatchValue::Float(7.5);
+        assert2::assert!(float_matches(7.5, MatchCmp::Eq, &expected));
+        assert2::assert!(!float_matches(8.5, MatchCmp::Eq, &expected));
+        assert2::assert!(!float_matches(7.5, MatchCmp::Neq, &expected));
+        assert2::assert!(float_matches(8.5, MatchCmp::Neq, &expected));
+    }
+
     #[derive(Default)]
     struct FakeLiveSource {
         trace: Option<TraceSpans>,

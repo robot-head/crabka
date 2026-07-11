@@ -59,6 +59,22 @@ async fn connect(bootstrap: &str) -> Arc<Client> {
     )
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn group_type_waiter_blocks_until_expected_type_exists() {
+    let (broker, _bootstrap, _dir) = boot().await;
+    let pending = tokio::time::timeout(
+        Duration::from_millis(50),
+        broker.wait_until_group_type(
+            "missing",
+            crabka_broker::coordinator::unified::GroupType::Classic,
+        ),
+    )
+    .await;
+    assert2::assert!(pending.is_err());
+
+    broker.shutdown().await;
+}
+
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
     let resp = client
         .send(CreateTopicsRequest {

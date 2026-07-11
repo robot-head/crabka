@@ -313,6 +313,21 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn high_watermark_waiter_blocks_until_target_is_reached() {
+    let (broker, bootstrap, _dir) = boot_single().await;
+    create_topic(&broker, &bootstrap, "pending-hw", 1).await;
+
+    let pending = tokio::time::timeout(
+        Duration::from_millis(50),
+        broker.wait_until_high_watermark("pending-hw", 0, 1),
+    )
+    .await;
+    assert2::assert!(pending.is_err());
+
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // Regression-pin for the `min(HW, lso)` behavior, which is equivalent to
 // plain `lso` for rf=1 (HW = LEO immediately). Previously flaked with the
 // `INVALID_TXN_STATE` race fixed in `Producer::flush` (it now waits for
