@@ -3420,6 +3420,7 @@ dependencies = [
 name = "crabka-pgwire"
 version = "0.3.9"
 dependencies = [
+ "async-trait",
  "base64",
  "bytes",
  "hmac 0.13.0",

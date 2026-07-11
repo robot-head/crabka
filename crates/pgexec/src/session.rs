@@ -3795,6 +3795,72 @@ impl Session for SqlSession {
         Ok(results)
     }
 
+    async fn simple_query_into<S: crabka_pgwire::engine::ResultSink>(
+        &mut self,
+        sql: &str,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> Result<(), PgError> {
+        use crabka_pgwire::engine::ResultPage;
+
+        if page_rows == 0 {
+            return Err(PgError::protocol("result page size must be greater than zero"));
+        }
+        if sql.trim().is_empty() {
+            return sink.send(ResultPage::Empty { result_index: 0 }).await;
+        }
+        let statements = crabka_pgparser::parse(sql).map_err(|e| ExecError::from(e).into_pg())?;
+        if statements.is_empty() {
+            return sink.send(ResultPage::Empty { result_index: 0 }).await;
+        }
+        for (result_index, stmt) in statements.iter().enumerate() {
+            match self.run_one(stmt).await.map_err(ExecError::into_pg)? {
+                QueryResult::Rows {
+                    fields,
+                    mut rows,
+                    tag,
+                } => {
+                    let mut fields = Some(fields);
+                    if rows.is_empty() {
+                        sink.send(ResultPage::Rows {
+                            result_index,
+                            fields,
+                            rows,
+                            tag: Some(tag),
+                        })
+                        .await?;
+                        continue;
+                    }
+                    while rows.len() > page_rows {
+                        let tail = rows.split_off(page_rows);
+                        sink.send(ResultPage::Rows {
+                            result_index,
+                            fields: fields.take(),
+                            rows,
+                            tag: None,
+                        })
+                        .await?;
+                        rows = tail;
+                    }
+                    sink.send(ResultPage::Rows {
+                        result_index,
+                        fields: fields.take(),
+                        rows,
+                        tag: Some(tag),
+                    })
+                    .await?;
+                }
+                QueryResult::Command { tag } => {
+                    sink.send(ResultPage::Command { result_index, tag }).await?;
+                }
+                QueryResult::Empty => {
+                    sink.send(ResultPage::Empty { result_index }).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn parse(
         &mut self,
         name: &str,
@@ -4217,6 +4283,80 @@ mod tests {
             Arc::new(crate::read_gate::LocalLinearizer),
         )
         .expect("replicated engine")
+    }
+
+    #[tokio::test]
+    async fn bounded_result_sink_matches_collecting_simple_query() {
+        use crabka_pgwire::engine::{CollectingResultSink, ResultPage};
+
+        let engine = SqlEngine::new();
+        let mut setup = engine.connect();
+        setup
+            .simple_query(
+                "CREATE TABLE streamed (id int4, value text); \
+                 INSERT INTO streamed VALUES (1, 'one'), (2, NULL), (3, 'three')",
+            )
+            .await
+            .expect("setup");
+
+        let mut collecting_session = engine.connect();
+        let expected = collecting_session
+            .simple_query("SELECT id, value FROM streamed ORDER BY id; SELECT 7")
+            .await
+            .expect("collecting query");
+
+        let mut streamed_session = engine.connect();
+        let mut sink = CollectingResultSink::default();
+        streamed_session
+            .simple_query_into(
+                "SELECT id, value FROM streamed ORDER BY id; SELECT 7",
+                2,
+                &mut sink,
+            )
+            .await
+            .expect("streamed query");
+
+        assert!(sink.pages().iter().any(|page| matches!(
+            page,
+            ResultPage::Rows { rows, .. } if rows.len() == 2
+        )));
+        assert_eq!(sink.finish(), expected);
+    }
+
+    #[tokio::test]
+    async fn bounded_result_sink_propagates_backpressure_failure_before_next_statement() {
+        use crabka_pgwire::{
+            engine::{ResultPage, ResultSink},
+            error::PgError,
+        };
+
+        struct RejectingSink {
+            pages: usize,
+        }
+
+        #[async_trait::async_trait]
+        impl ResultSink for RejectingSink {
+            async fn send(&mut self, _page: ResultPage) -> Result<(), PgError> {
+                self.pages += 1;
+                Err(PgError::error("57014", "result consumer disconnected"))
+            }
+        }
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut sink = RejectingSink { pages: 0 };
+        let error = session
+            .simple_query_into("SELECT 1; CREATE TABLE must_not_run (id int4)", 1, &mut sink)
+            .await
+            .expect_err("sink refusal must cancel production");
+        assert_eq!(error.code, "57014");
+        assert_eq!(sink.pages, 1);
+
+        let missing = session
+            .simple_query("SELECT id FROM must_not_run")
+            .await
+            .expect_err("second statement was not executed");
+        assert_eq!(missing.code, "42P01");
     }
 
     #[tokio::test]
