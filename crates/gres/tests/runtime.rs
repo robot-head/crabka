@@ -99,9 +99,12 @@ impl crabka_gres::TenantConfigLoader for FakeTenantConfigLoader {
 }
 
 fn tenant_record() -> crabka_gres_control::TenantRecord {
-    let verifier =
-        crabka_security::scram::PgScramVerifier::generate_with_salt("hunter2", 4096, vec![3; 16])
-            .expect("verifier");
+    let verifier = crabka_security::scram::PgScramVerifier::generate_with_salt(
+        "g5-secret-password",
+        8192,
+        vec![3; 16],
+    )
+    .expect("verifier");
     crabka_gres_control::TenantRecord::new(
         1,
         crabka_gres_control::TenantId::try_from("runtime-test").expect("tenant id"),
@@ -785,7 +788,7 @@ async fn runtime_uses_tenant_scram_by_default_and_rejects_wrong_password() {
         crabka_gres::serve_listener_with_tenant_config_loader(listener, args, &loader).await
     });
 
-    let client = connect_with_password(port, "alice", "hunter2").await;
+    let client = connect_with_password(port, "alice", "g5-secret-password").await;
     client.simple_query("SELECT 1").await.expect("select");
     let wrong_password = tokio_postgres::Config::new()
         .host("127.0.0.1")
@@ -795,6 +798,48 @@ async fn runtime_uses_tenant_scram_by_default_and_rejects_wrong_password() {
         .connect(tokio_postgres::NoTls)
         .await;
     assert!(wrong_password.is_err());
+
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_tenant_scram_accepts_libpq_psql() {
+    if std::process::Command::new("psql")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let loader = FakeTenantConfigLoader {
+        record: tenant_record(),
+    };
+    let mut args = substrate_test_args(format!("127.0.0.1:{port}"));
+    args.auth = None;
+    let server = tokio::spawn(async move {
+        crabka_gres::serve_listener_with_tenant_config_loader(listener, args, &loader).await
+    });
+
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("psql")
+            .env("PGPASSWORD", "g5-secret-password")
+            .arg(format!(
+                "host=127.0.0.1 port={port} user=alice dbname=crab sslmode=disable"
+            ))
+            .args(["-tAc", "SELECT 1"])
+            .output()
+            .expect("run psql")
+    })
+    .await
+    .expect("join psql");
+    assert!(
+        output.status.success(),
+        "psql stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     server.abort();
     let _ = server.await;

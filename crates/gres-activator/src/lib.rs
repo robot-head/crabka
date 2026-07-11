@@ -99,11 +99,34 @@ where
         request: &WakeRequest,
         wait: WaitForReadyConfig,
     ) -> Result<BackendEndpoint, ActivatorError> {
-        self.request_resume_once(request).await?;
-        let result = wait_for_ready(&self.registry, request.tenant(), wait).await;
-        if result.is_err() {
+        let started = tokio::time::Instant::now();
+        let Ok(request_result) =
+            tokio::time::timeout(wait.timeout, self.request_resume_once(request)).await
+        else {
             self.forget_request(request.tenant()).await;
+            return Err(ActivatorError::ReadyTimeout {
+                tenant: request.tenant().clone(),
+                timeout: wait.timeout,
+            });
+        };
+        if let Err(error) = request_result {
+            self.forget_request(request.tenant()).await;
+            return Err(error);
         }
+        let remaining = wait.timeout.saturating_sub(started.elapsed());
+        let result = wait_for_ready(
+            &self.registry,
+            request.tenant(),
+            WaitForReadyConfig {
+                timeout: remaining,
+                poll_interval: wait.poll_interval,
+            },
+        )
+        .await;
+        // Coalesce only concurrent wake attempts. Once this lifecycle wait
+        // completes, a later suspend must be allowed to publish a fresh
+        // ResumeRequested transition.
+        self.forget_request(request.tenant()).await;
         result
     }
 
@@ -132,6 +155,7 @@ where
 {
     let prelude = peek_prelude(&mut stream).await?;
     let request = WakeRequest::for_database(&prelude.database)?;
+    tracing::info!(tenant = %request.tenant(), "gres activator received startup");
     let wait = WaitForReadyConfig {
         timeout: cfg.cold_start_timeout,
         poll_interval: cfg.registry_poll,
@@ -144,6 +168,7 @@ where
         }
         Err(error) => return Err(error),
     };
+    tracing::info!(tenant = %request.tenant(), backend = %endpoint.as_str(), "gres activator backend ready; piping startup");
     pipe_startup_and_session(stream, endpoint.as_str(), &prelude.raw_startup).await
 }
 
@@ -176,15 +201,22 @@ impl ControlRegistryWakeRegistry {
 #[async_trait]
 impl WakeRegistry for ControlRegistryWakeRegistry {
     async fn request_resume(&self, request: &WakeRequest) -> Result<(), ActivatorError> {
-        let mut registry = self.registry.lock().await;
-        let Some(record) = registry.get(request.tenant().as_str()).await? else {
-            return Err(ActivatorError::TenantMissing(request.tenant().clone()));
-        };
-        if record.state == TenantState::Active {
-            return Ok(());
+        loop {
+            let mut registry = self.registry.lock().await;
+            let Some(record) = registry.get(request.tenant().as_str()).await? else {
+                return Err(ActivatorError::TenantMissing(request.tenant().clone()));
+            };
+            match record.state {
+                TenantState::Active | TenantState::ResumeRequested => return Ok(()),
+                TenantState::Suspended => {
+                    registry.request_resume(request.tenant().as_str()).await?;
+                    return Ok(());
+                }
+                TenantState::Parking => {}
+            }
+            drop(registry);
+            tokio::time::sleep(self.cfg.registry_poll).await;
         }
-        registry.request_resume(request.tenant().as_str()).await?;
-        Ok(())
     }
 
     async fn readiness(&self, tenant: &TenantName) -> Result<Readiness, ActivatorError> {
@@ -192,6 +224,7 @@ impl WakeRegistry for ControlRegistryWakeRegistry {
         let Some(record) = registry.get(tenant.as_str()).await? else {
             return Ok(Readiness::Missing);
         };
+        tracing::debug!(tenant = %tenant, state = %record.state, version = record.record_version, "gres activator observed registry state");
         if record.state != TenantState::Active {
             return Ok(Readiness::NotReady);
         }
@@ -449,7 +482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wake_request_is_idempotent_after_tenant_is_ready() {
+    async fn completed_wake_does_not_suppress_a_later_lifecycle_wake() {
         let registry = FakeWakeRegistry::default();
         let coordinator = WakeCoordinator::new(registry.clone());
         let request = WakeRequest::for_database("tenant-a").unwrap();
@@ -466,9 +499,23 @@ mod tests {
         };
 
         let first = coordinator.wake_and_wait(&request, wait).await.unwrap();
+        registry
+            .set_readiness(tenant.clone(), Readiness::NotReady)
+            .await;
+        let registry_for_setter = registry.clone();
+        let tenant_for_setter = tenant.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            registry_for_setter
+                .set_readiness(
+                    tenant_for_setter,
+                    Readiness::Ready(BackendEndpoint("127.0.0.1:25432".to_string())),
+                )
+                .await;
+        });
         let second = coordinator.wake_and_wait(&request, wait).await.unwrap();
 
         assert!(first == second);
-        assert!(registry.resume_request_count(&tenant).await == 1);
+        assert!(registry.resume_request_count(&tenant).await == 2);
     }
 }

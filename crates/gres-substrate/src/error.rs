@@ -65,7 +65,10 @@ impl From<SubstrateError> for crabka_pgexec::ExecError {
     fn from(error: SubstrateError) -> Self {
         match error {
             SubstrateError::Kv(source) => Self::Kv(source),
-            SubstrateError::Fenced | SubstrateError::SequenceGap { .. } => Self::NotLeader,
+            error @ (SubstrateError::Fenced | SubstrateError::SequenceGap { .. }) => {
+                tracing::warn!(%error, "substrate rejected operation as not-leader");
+                Self::NotLeader
+            }
             SubstrateError::Frame(_)
             | SubstrateError::Unavailable(_)
             | SubstrateError::AlreadyPaused

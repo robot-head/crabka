@@ -207,7 +207,8 @@ impl CheckpointManifestVerifier for ObjectStoreCheckpointManifestVerifier {
             .map_err(|error| CheckpointManifestError::Verification(error.to_string()))?;
         let manifest = Manifest::decode(&manifest_bytes)
             .map_err(|error| CheckpointManifestError::Verification(error.to_string()))?;
-        if manifest.tenant != record.name.as_str()
+        let expected_tenant = checkpoint_manifest_tenant(record);
+        if manifest.tenant != expected_tenant
             || manifest.wal_generation != checkpoint.wal_generation
             || manifest.covered_offset != checkpoint.covered_offset
         {
@@ -246,13 +247,20 @@ impl CheckpointManifestVerifier for ObjectStoreCheckpointManifestVerifier {
         }
         manifest
             .validate(&ManifestValidation {
-                tenant: record.name.as_str(),
+                tenant: &expected_tenant,
                 wal_generation: checkpoint.wal_generation,
                 log_start: None,
                 parts_by_name: &parts,
             })
             .map_err(|error| CheckpointManifestError::Verification(error.to_string()))?;
         Ok(())
+    }
+}
+
+fn checkpoint_manifest_tenant(record: &crabka_gres_control::TenantRecord) -> String {
+    match record.ranges.as_slice() {
+        [range] => format!("{}/r{}", record.name, range.range_id),
+        _ => record.name.to_string(),
     }
 }
 
@@ -265,7 +273,7 @@ pub struct PgdogExpectedRoute {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PgdogReloadRequest {
-    /// DNS name used for PostgreSQL host identity and TLS verification.
+    /// DNS name used for `PostgreSQL` host identity and TLS verification.
     pub host: String,
     /// Optional per-replica TCP destination, while retaining `host` for SNI.
     pub connect_addr: Option<std::net::IpAddr>,
@@ -274,6 +282,7 @@ pub struct PgdogReloadRequest {
     pub expected_routes: Vec<PgdogExpectedRoute>,
     pub maintenance_mode: bool,
     pub tls_ca_pem: Option<Vec<u8>>,
+    pub tls_client_identity_pem: Option<(Vec<u8>, Vec<u8>)>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -320,7 +329,17 @@ impl PgdogAdminLike for TokioPostgresPgdogAdmin {
             if let Some(connect_addr) = request.connect_addr {
                 config.hostaddr(connect_addr);
             }
-            clients.push(connect_pgdog_admin(config, request.tls_ca_pem.as_deref()).await?);
+            clients.push(
+                connect_pgdog_admin(
+                    config,
+                    request.tls_ca_pem.as_deref(),
+                    request
+                        .tls_client_identity_pem
+                        .as_ref()
+                        .map(|(cert, key)| (cert.as_slice(), key.as_slice())),
+                )
+                .await?,
+            );
         }
         let connections = clients
             .iter()
@@ -351,12 +370,31 @@ impl PgdogAdminConnectionLike for tokio_postgres::Client {
         // PgDog 0.1.47 exposes effective routes through SHOW POOLS. Columns
         // 1, 3, and 4 are database, configured address, and port. This view
         // contains configured database pools, not the admin pseudo-database.
-        let rows = self.query("SHOW POOLS", &[]).await?;
+        let messages = self.simple_query("SHOW POOLS").await?;
         let mut routes = std::collections::BTreeSet::new();
-        for (index, row) in rows.iter().enumerate() {
-            let database = row.try_get::<usize, String>(1)?;
-            let host = row.try_get::<usize, String>(3)?;
-            let port = row.try_get::<usize, i32>(4)?;
+        for (index, row) in messages
+            .iter()
+            .filter_map(|message| match message {
+                tokio_postgres::SimpleQueryMessage::Row(row) => Some(row),
+                _ => None,
+            })
+            .enumerate()
+        {
+            let field = |column: usize, name: &str| {
+                row.get(column).ok_or_else(|| {
+                    PgdogAdminError::Fleet(format!(
+                        "SHOW POOLS row {index} is missing {name} column {column}"
+                    ))
+                })
+            };
+            let database = field(1, "database")?.to_string();
+            let host = field(3, "address")?.to_string();
+            let port_text = field(4, "port")?;
+            let port = port_text.parse::<i32>().map_err(|error| {
+                PgdogAdminError::Fleet(format!(
+                    "SHOW POOLS row {index} has invalid port {port_text}: {error}"
+                ))
+            })?;
             routes.insert(pgdog_route_from_fields(index, database, host, port)?);
         }
         Ok(routes)
@@ -465,11 +503,12 @@ fn route_view_matches(
 
 #[cfg(test)]
 mod pgdog_reload_tests {
+    use std::{collections::BTreeSet, sync::Mutex};
+
     use super::{
         PgdogAdminConnectionLike, PgdogAdminError, PgdogExpectedRoute, PgdogReloadRequest,
         pgdog_route_from_fields, reload_and_match_connections, route_view_matches,
     };
-    use std::{collections::BTreeSet, sync::Mutex};
 
     struct FakeConnection {
         fail_execute: Option<&'static str>,
@@ -523,7 +562,7 @@ mod pgdog_reload_tests {
     #[test]
     fn malformed_show_pools_route_is_rejected_instead_of_discarded() {
         assert!(pgdog_route_from_fields(7, "tenant-a".into(), "host".into(), -1).is_err());
-        assert!(pgdog_route_from_fields(8, "".into(), "host".into(), 5_432).is_err());
+        assert!(pgdog_route_from_fields(8, String::new(), "host".into(), 5_432).is_err());
     }
 
     fn requests() -> Vec<PgdogReloadRequest> {
@@ -537,6 +576,7 @@ mod pgdog_reload_tests {
                 expected_routes: vec![expected_route()],
                 maintenance_mode: true,
                 tls_ca_pem: Some(b"ca".to_vec()),
+                tls_client_identity_pem: Some((b"cert".to_vec(), b"key".to_vec())),
             })
             .collect()
     }
@@ -568,6 +608,25 @@ mod pgdog_reload_tests {
             );
             assert!(first.calls().contains(&"MAINTENANCE OFF".into()));
             assert!(second.calls().contains(&"MAINTENANCE OFF".into()));
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_never_reconnects_other_tenant_pools() {
+        let first = FakeConnection::new(None, false);
+        let second = FakeConnection::new(None, false);
+
+        assert!(
+            reload_and_match_connections(&[&first, &second], &requests())
+                .await
+                .unwrap()
+        );
+        for calls in [first.calls(), second.calls()] {
+            assert_eq!(
+                calls,
+                ["MAINTENANCE ON", "RELOAD", "SHOW POOLS", "MAINTENANCE OFF"]
+            );
+            assert!(!calls.iter().any(|command| command == "RECONNECT"));
         }
     }
 
@@ -622,11 +681,15 @@ mod pgdog_reload_tests {
 async fn connect_pgdog_admin(
     config: tokio_postgres::Config,
     tls_ca_pem: Option<&[u8]>,
+    tls_client_identity_pem: Option<(&[u8], &[u8])>,
 ) -> Result<tokio_postgres::Client, PgdogAdminError> {
     if let Some(tls_ca_pem) = tls_ca_pem {
         let certificate = native_tls::Certificate::from_pem(tls_ca_pem)?;
         let mut builder = native_tls::TlsConnector::builder();
         builder.add_root_certificate(certificate);
+        if let Some((certificate, private_key)) = tls_client_identity_pem {
+            builder.identity(native_tls::Identity::from_pkcs8(certificate, private_key)?);
+        }
         let connector = postgres_native_tls::MakeTlsConnector::new(builder.build()?);
         let (client, connection) = config.connect(connector).await?;
         drop(tokio::spawn(async move {
@@ -925,6 +988,35 @@ mod tests {
         config.gres_checkpoint_bucket = Some("checkpoints".into());
         config.gres_checkpoint_region = Some("us-east-1".into());
         config
+    }
+
+    #[test]
+    fn single_range_checkpoint_manifest_identity_is_generation_namespace() {
+        let record = crabka_gres_control::TenantRecord::new(
+            1,
+            crabka_gres_control::TenantId::try_from("tenant-a").unwrap(),
+            crabka_gres_control::TenantName::try_from("tenant-a").unwrap(),
+            crabka_gres_control::TenantState::Active,
+            crabka_gres_control::SqlUser::try_from("alice").unwrap(),
+            crabka_security::scram::PgScramVerifier::generate_with_salt(
+                "secret",
+                4096,
+                vec![1; 16],
+            )
+            .unwrap()
+            .to_string(),
+            1,
+        )
+        .unwrap()
+        .with_range_layout(vec![crabka_gres_control::RangeLayoutEntry {
+            range_id: 0,
+            end_key: None,
+            endpoint: "tenant-a-gres.default.svc:5432".into(),
+            wal_generation: 0,
+        }])
+        .unwrap();
+
+        assert!(checkpoint_manifest_tenant(&record) == "tenant-a/r0");
     }
 
     #[tokio::test]

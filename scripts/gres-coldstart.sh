@@ -8,15 +8,16 @@ usage() {
     cat <<'EOF'
 Usage: scripts/gres-coldstart.sh [--help]
 
-Measures first-connection-to-SELECT-1 latency through PgDog and the Gres
-activator for a small suspended tenant. Each iteration forces the tenant back to
-Suspended, kills the compute, lets a local controller loop observe the
-activator's ResumeRequested record, starts the compute, marks it Active, and
-records the psql round-trip latency.
+By default, delegates to the gating operator-backed Kind lifecycle gate. The
+legacy local scripted-controller harness remains available only as an explicitly
+named non-gating component diagnostic.
 
 Environment:
   CRABKA_GRES_SKIP_BUILD=1                  Reuse existing target/debug binaries.
   CRABKA_GRES_COLDSTART_ITERATIONS=<n>      Iterations to measure (default: 10).
+  CRABKA_GRES_COLDSTART_MODE=operator-kind  Real operator/Kind gate (default).
+  CRABKA_GRES_COLDSTART_MODE=component-non-gating
+                                              Local component diagnostic only.
   CRABKA_GRES_COLDSTART_ARTIFACT_DIR=<dir>  Artifact directory (default: target/gres-coldstart-artifacts).
   CRABKA_GRES_COLDSTART_KEEP_ARTIFACTS=1    Keep artifacts after a successful run.
   CRABKA_GRES_COLDSTART_P95_CEILING_MS=<ms> CI backstop ceiling for p95 (default: 30000).
@@ -29,6 +30,16 @@ case "${1:-}" in
     --help|-h) usage; exit 0 ;;
     *) echo "FAIL: unknown argument $1" >&2; usage >&2; exit 2 ;;
 esac
+
+readonly COLDSTART_MODE="${CRABKA_GRES_COLDSTART_MODE:-operator-kind}"
+if [ "$COLDSTART_MODE" = "operator-kind" ]; then
+    exec ./scripts/gres-kind-lifecycle.sh
+fi
+if [ "$COLDSTART_MODE" != "component-non-gating" ]; then
+    echo "FAIL: CRABKA_GRES_COLDSTART_MODE must be operator-kind or component-non-gating" >&2
+    exit 2
+fi
+echo "WARNING: component-non-gating uses a local scripted controller and is not G-5 evidence" >&2
 
 readonly TENANT="coldstart-a"
 readonly SQL_USER="colduser"

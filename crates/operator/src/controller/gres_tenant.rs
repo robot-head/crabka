@@ -195,26 +195,12 @@ async fn reconcile_inner(
         .as_ref()
         .map_or_else(|| requested_state(&obj), |record| record.state);
     let registry_version = current_record.as_ref().map(|record| record.record_version);
+    let kafka_sasl = kafka
+        .as_ref()
+        .is_some_and(kafka_internal_listener_requires_sasl);
     let reconcile_result: Result<Action, ReconcileError> = async {
         let admin_handle = ctx.admin_client_for(&cluster, &bootstrap).await?;
         let mut admin = admin_handle.lock().await;
-        if lifecycle_state == TenantState::ResumeRequested
-            && wal_topics_remain(&mut admin, &tenant_name, &tenant_ranges).await?
-        {
-            drop(admin);
-            reconcile_compute_deployments(
-                &ctx,
-                &ns,
-                &obj,
-                &tenant_ranges,
-                &bootstrap,
-                &wal_topic,
-                &cfg_topic,
-                TenantState::Parking,
-            )
-            .await?;
-            return Ok(Action::requeue(LIFECYCLE_REQUEUE));
-        }
         let mut topic_specs = vec![
             CreateTopicSpec {
                 name: cfg_topic.clone(),
@@ -233,8 +219,11 @@ async fn reconcile_inner(
             lifecycle_state,
             TenantState::Active | TenantState::ResumeRequested
         ) {
+            let wal_generation = current_record
+                .as_ref()
+                .map_or(0, |record| record.wal_generation);
             topic_specs.extend(tenant_ranges.iter().map(|range| CreateTopicSpec {
-                name: wal_topic_for_range(&tenant_name, range.range_id),
+                name: wal_topic_for_generation(&tenant_name, range.range_id, wal_generation),
                 partitions: 1,
                 replicas: defaults.wal_replication,
                 configs: BTreeMap::new(),
@@ -322,6 +311,7 @@ async fn reconcile_inner(
                 &wal_topic,
                 &cfg_topic,
                 record.state,
+                kafka_sasl,
             )
             .await?;
             return Ok(Action::requeue(LIFECYCLE_REQUEUE));
@@ -363,6 +353,7 @@ async fn reconcile_inner(
             &wal_topic,
             &cfg_topic,
             record.state,
+            kafka_sasl,
         )
         .await?;
         apply_object(
@@ -425,6 +416,7 @@ async fn reconcile_compute_deployments(
     wal_topic: &str,
     config_topic: &str,
     lifecycle_state: TenantState,
+    kafka_sasl: bool,
 ) -> Result<(), ReconcileError> {
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
     let image = ctx
@@ -443,6 +435,8 @@ async fn reconcile_compute_deployments(
             wal_topic,
             config_topic,
             compute_replicas(lifecycle_state),
+            &ctx.config,
+            kafka_sasl,
         )?;
         apply_object(
             &dep_api,
@@ -462,9 +456,14 @@ async fn park_suspended_tenant_wal(
     record: &mut TenantRecord,
     expected_record_version: Option<u64>,
 ) -> Result<ParkingProgress, ReconcileError> {
+    let generation_to_park = if record.state == TenantState::Parking {
+        record.wal_generation.saturating_sub(1)
+    } else {
+        record.wal_generation
+    };
     let mut ranges_to_park = Vec::with_capacity(ranges.len());
     for range in ranges {
-        let topic = wal_topic_for_range(tenant, range.range_id);
+        let topic = wal_topic_for_generation(tenant, range.range_id, generation_to_park);
         if topic_exists(admin, &topic).await? {
             ranges_to_park.push(range.range_id);
         }
@@ -511,9 +510,9 @@ async fn park_suspended_tenant_wal(
     *record = latest;
 
     if !ranges_to_park.is_empty() {
-        delete_wal_topics(admin, tenant, &ranges_to_park).await?;
+        delete_wal_topics(admin, tenant, &ranges_to_park, generation_to_park).await?;
     }
-    if wal_topics_remain(admin, tenant, ranges).await? {
+    if wal_topics_remain(admin, tenant, ranges, generation_to_park).await? {
         return Ok(ParkingProgress::DeletionPending);
     }
     record.state = TenantState::Suspended;
@@ -533,9 +532,15 @@ async fn wal_topics_remain(
     admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
     tenant: &TenantName,
     ranges: &[GresTenantRangeSpec],
+    generation: u64,
 ) -> Result<bool, ReconcileError> {
     for range in ranges {
-        if topic_exists(admin, &wal_topic_for_range(tenant, range.range_id)).await? {
+        if topic_exists(
+            admin,
+            &wal_topic_for_generation(tenant, range.range_id, generation),
+        )
+        .await?
+        {
             return Ok(true);
         }
     }
@@ -546,9 +551,10 @@ async fn delete_wal_topics(
     admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
     tenant: &TenantName,
     ranges: &[u32],
+    generation: u64,
 ) -> Result<(), ReconcileError> {
     for range_id in ranges {
-        let topic = wal_topic_for_range(tenant, *range_id);
+        let topic = wal_topic_for_generation(tenant, *range_id, generation);
         let outcomes = admin.delete_topics(&[topic.as_str()], 30_000).await?;
         for outcome in outcomes {
             if let Some(error) = outcome.error {
@@ -617,6 +623,7 @@ struct EffectiveDefaults {
     wal_replication: i32,
     checkpoint_frames: Option<u64>,
     checkpoint_bytes: Option<u64>,
+    suspend_max_checkpoint_bytes: Option<u64>,
     idle_seconds: Option<u64>,
 }
 
@@ -635,6 +642,9 @@ fn effective_defaults(
         checkpoint_bytes: override_
             .and_then(|d| d.checkpoint_bytes)
             .or_else(|| base.and_then(|d| d.checkpoint_bytes)),
+        suspend_max_checkpoint_bytes: override_
+            .and_then(|d| d.suspend_max_checkpoint_bytes)
+            .or_else(|| base.and_then(|d| d.suspend_max_checkpoint_bytes)),
         idle_seconds: override_
             .and_then(|d| d.idle_seconds)
             .or_else(|| base.and_then(|d| d.idle_seconds)),
@@ -723,13 +733,13 @@ fn build_tenant_record(
     )?;
     record.checkpoint_frames = defaults.checkpoint_frames;
     record.checkpoint_bytes = defaults.checkpoint_bytes;
+    record.suspend_max_checkpoint_bytes = defaults.suspend_max_checkpoint_bytes;
     record.idle_seconds = defaults.idle_seconds;
     if let Some(current) = current {
         record.wal_generation = current.wal_generation;
         record.endpoint.clone_from(&current.endpoint);
         record.bucket_prefix.clone_from(&current.bucket_prefix);
         record.hash_placements.clone_from(&current.hash_placements);
-        record.suspend_max_checkpoint_bytes = current.suspend_max_checkpoint_bytes;
         record
             .final_checkpoint
             .clone_from(&current.final_checkpoint);
@@ -940,6 +950,15 @@ fn wal_topic_for_range(tenant: &TenantName, range_id: u32) -> String {
     format!("__gres_wal.{tenant}.r{range_id}")
 }
 
+fn wal_topic_for_generation(tenant: &TenantName, range_id: u32, generation: u64) -> String {
+    let base = wal_topic_for_range(tenant, range_id);
+    if generation == 0 {
+        base
+    } else {
+        format!("{base}.g{generation:010}")
+    }
+}
+
 fn service_name(name: &str) -> String {
     format!("{name}-gres")
 }
@@ -1060,11 +1079,48 @@ fn render_deployment(
     wal_topic: &str,
     cfg_topic: &str,
     replicas: i32,
+    operator_config: &crate::config::OperatorConfig,
+    kafka_sasl: bool,
 ) -> Result<Deployment, ReconcileError> {
     let name = obj.name_any();
     let selector = range_labels(obj, range.range_id);
     let host_ranges = host_ranges_arg();
     let ranges = ranges_arg(all_ranges);
+    let mut args = vec![
+        "--listen".to_owned(),
+        format!("0.0.0.0:{COMPUTE_PORT}"),
+        "--substrate-bootstrap".to_owned(),
+        bootstrap.to_owned(),
+        "--tenant".to_owned(),
+        name.clone(),
+    ];
+    if all_ranges.len() > 1 {
+        args.extend([
+            "--ranges".to_owned(),
+            ranges.clone(),
+            "--host-ranges".to_owned(),
+            host_ranges.clone(),
+        ]);
+    }
+    args.extend(checkpoint_runtime_args(operator_config)?);
+    let mut env = vec![
+        json!({ "name": "KAFKA_BOOTSTRAP_SERVERS", "value": bootstrap }),
+        json!({ "name": "GRES_TENANT", "value": name }),
+        json!({ "name": "GRES_WAL_TOPIC", "value": wal_topic }),
+        json!({ "name": "GRES_CONFIG_TOPIC", "value": cfg_topic }),
+        json!({ "name": "GRES_RANGES", "value": ranges }),
+        json!({ "name": "GRES_HOST_RANGES", "value": host_ranges }),
+    ];
+    if kafka_sasl {
+        env.push(json!({ "name": "GRES_KAFKA_USERNAME", "value": format!("gres-{name}") }));
+        env.push(json!({ "name": "GRES_KAFKA_PASSWORD", "valueFrom": { "secretKeyRef": { "name": obj.spec.password_secret_ref.name, "key": obj.spec.password_secret_ref.key } } }));
+    }
+    if let Some(access_key) = &operator_config.gres_checkpoint_access_key_id {
+        env.push(json!({ "name": "AWS_ACCESS_KEY_ID", "value": access_key }));
+    }
+    if let Some(secret_key) = &operator_config.gres_checkpoint_secret_access_key {
+        env.push(json!({ "name": "AWS_SECRET_ACCESS_KEY", "value": secret_key }));
+    }
     Ok(serde_json::from_value(json!({
         "metadata": { "name": deployment_name(&name, range.range_id), "namespace": obj.namespace(), "labels": meta_labels(obj), "ownerReferences": [owner_ref::<GresTenant>(obj)?] },
         "spec": {
@@ -1077,23 +1133,8 @@ fn render_deployment(
                     "containers": [{
                         "name": "gres",
                         "image": image,
-                        "args": [
-                            "--listen", format!("0.0.0.0:{COMPUTE_PORT}"),
-                            "--substrate-bootstrap", bootstrap,
-                            "--tenant", name,
-                            "--ranges", ranges,
-                            "--host-ranges", host_ranges
-                        ],
-                        "env": [
-                            { "name": "KAFKA_BOOTSTRAP_SERVERS", "value": bootstrap },
-                            { "name": "GRES_TENANT", "value": name },
-                            { "name": "GRES_WAL_TOPIC", "value": wal_topic },
-                            { "name": "GRES_CONFIG_TOPIC", "value": cfg_topic },
-                            { "name": "GRES_RANGES", "value": ranges },
-                            { "name": "GRES_HOST_RANGES", "value": host_ranges },
-                            { "name": "GRES_KAFKA_USERNAME", "value": format!("gres-{name}") },
-                            { "name": "GRES_KAFKA_PASSWORD", "valueFrom": { "secretKeyRef": { "name": obj.spec.password_secret_ref.name, "key": obj.spec.password_secret_ref.key } } }
-                        ],
+                        "args": args,
+                        "env": env,
                         "ports": [{ "name": "postgres", "containerPort": COMPUTE_PORT, "protocol": "TCP" }],
                         "readinessProbe": { "tcpSocket": { "port": COMPUTE_PORT }, "periodSeconds": 5 },
                         "resources": obj.spec.resources.clone().unwrap_or_default()
@@ -1102,6 +1143,47 @@ fn render_deployment(
             }
         }
     }))?)
+}
+
+fn kafka_internal_listener_requires_sasl(kafka: &Kafka) -> bool {
+    !kafka
+        .spec
+        .inter_broker_listener_name
+        .as_deref()
+        .unwrap_or("PLAIN")
+        .eq_ignore_ascii_case("PLAIN")
+}
+
+fn checkpoint_runtime_args(
+    config: &crate::config::OperatorConfig,
+) -> Result<Vec<String>, ReconcileError> {
+    let Some(store) = config.gres_checkpoint_store else {
+        return Ok(Vec::new());
+    };
+    let mut args = vec![
+        "--checkpoint-store".to_owned(),
+        match store {
+            crate::config::GresCheckpointStoreKind::S3 => "s3".to_owned(),
+            crate::config::GresCheckpointStoreKind::Gcs => "gcs".to_owned(),
+        },
+    ];
+    let bucket = config.gres_checkpoint_bucket.as_ref().ok_or_else(|| {
+        ReconcileError::Malformed("GRES_CHECKPOINT_BUCKET is required".to_owned())
+    })?;
+    args.extend(["--checkpoint-bucket".to_owned(), bucket.clone()]);
+    if let Some(region) = &config.gres_checkpoint_region {
+        args.extend(["--checkpoint-region".to_owned(), region.clone()]);
+    }
+    if let Some(endpoint) = &config.gres_checkpoint_endpoint {
+        args.extend(["--checkpoint-endpoint".to_owned(), endpoint.clone()]);
+    }
+    if config.gres_checkpoint_allow_http {
+        args.push("--checkpoint-allow-http".to_owned());
+    }
+    // A final checkpoint must be possible even when no periodic threshold was
+    // selected; this threshold also keeps the live lifecycle gate compact.
+    args.extend(["--checkpoint-frames".to_owned(), "1".to_owned()]);
+    Ok(args)
 }
 
 fn ranges_arg(ranges: &[GresTenantRangeSpec]) -> String {
@@ -1132,6 +1214,18 @@ fn render_range_compute_network_policy(obj: &GresTenant) -> Result<NetworkPolicy
         namespace_selector: None,
         ip_block: None,
     };
+    let fleet_peer = |component: &str, app_name: &str| NetworkPolicyPeer {
+        pod_selector: Some(LabelSelector {
+            match_labels: Some(BTreeMap::from([
+                ("app.kubernetes.io/name".into(), app_name.into()),
+                ("app.kubernetes.io/component".into(), component.into()),
+                ("app.kubernetes.io/instance".into(), obj.spec.gres.clone()),
+            ])),
+            match_expressions: None,
+        }),
+        namespace_selector: None,
+        ip_block: None,
+    };
     Ok(NetworkPolicy {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(network_policy_name(&name)),
@@ -1144,7 +1238,11 @@ fn render_range_compute_network_policy(obj: &GresTenant) -> Result<NetworkPolicy
             pod_selector: Some(pod_selector),
             policy_types: Some(vec!["Ingress".into()]),
             ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(vec![same_tenant_peer]),
+                from: Some(vec![
+                    same_tenant_peer,
+                    fleet_peer("pgdog", "crabka-pgdog"),
+                    fleet_peer("gres-activator", "crabka-gres-activator"),
+                ]),
                 ports: Some(vec![NetworkPolicyPort {
                     protocol: Some("TCP".into()),
                     port: Some(IntOrString::Int(COMPUTE_PORT)),
@@ -1201,12 +1299,38 @@ async fn patch_status(
     lifecycle_phase: TenantState,
     advance_generation: bool,
 ) -> Result<(), ReconcileError> {
+    const PGDOG_ACTIVE_GRACE_MS: u64 = 4_000;
     let observed_generation = if advance_generation {
         obj.meta().generation
     } else {
         obj.status.as_ref().and_then(|s| s.observed_generation)
     };
     let tenant = TenantName::try_from(name).ok();
+    let previous_phase = obj
+        .status
+        .as_ref()
+        .and_then(|status| status.lifecycle_phase.as_deref());
+    let existing_grace = obj
+        .status
+        .as_ref()
+        .and_then(|status| status.pgdog_credential_grace_until_unix_ms);
+    let pgdog_grace = if lifecycle_phase == TenantState::Active {
+        if previous_phase == Some("active") {
+            existing_grace
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| ReconcileError::Malformed(format!("system clock: {error}")))?
+                .as_millis();
+            Some(
+                u64::try_from(now)
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(PGDOG_ACTIVE_GRACE_MS),
+            )
+        }
+    } else {
+        None
+    };
     let body = json!({
         "status": {
             "conditions": [condition("Ready", status, reason, message)],
@@ -1215,6 +1339,7 @@ async fn patch_status(
             "walTopic": tenant.as_ref().map(wal_topic),
             "registryVersion": registry_version.or_else(|| obj.status.as_ref().and_then(|s| s.registry_version)),
             "lifecyclePhase": lifecycle_phase.to_string(),
+            "pgdogCredentialGraceUntilUnixMs": pgdog_grace,
         }
     });
     api.patch_status(
@@ -1246,9 +1371,16 @@ fn preserved_lifecycle_state(obj: &GresTenant) -> TenantState {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use clap::Parser as _;
 
     use super::*;
     use crate::crd::{GresTenantSpec, SecretKeyRef};
+
+    #[derive(clap::Parser)]
+    struct ConfigArgs {
+        #[command(flatten)]
+        config: crate::config::OperatorConfig,
+    }
 
     fn tenant() -> GresTenant {
         GresTenant::new(
@@ -1301,12 +1433,28 @@ mod tests {
     }
 
     #[test]
+    fn compute_network_policy_admits_front_door_and_activator() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let rendered = serde_json::to_string(
+            &render_range_compute_network_policy(&obj).expect("render network policy"),
+        )
+        .unwrap();
+
+        assert!(rendered.contains("crabka-pgdog"));
+        assert!(rendered.contains("crabka-gres-activator"));
+        assert!(rendered.contains("fleet"));
+    }
+
+    #[test]
     fn tenant_record_hashes_password_without_plaintext() {
         let obj = tenant();
         let defaults = EffectiveDefaults {
             wal_replication: 1,
             checkpoint_frames: None,
             checkpoint_bytes: None,
+            suspend_max_checkpoint_bytes: None,
             idle_seconds: None,
         };
         let record = build_tenant_record(
@@ -1327,7 +1475,7 @@ mod tests {
     }
 
     #[test]
-    fn deployment_references_password_secret_without_plaintext() {
+    fn plaintext_kafka_deployment_omits_sasl_credentials() {
         let mut obj = tenant();
         obj.metadata.namespace = Some("ns".into());
         obj.metadata.uid = Some("uid".into());
@@ -1346,10 +1494,69 @@ mod tests {
             "__gres_wal.tenant-a.r0",
             "__gres_cfg.tenant-a",
             1,
+            &ConfigArgs::parse_from(["operator"]).config,
+            false,
         )
         .unwrap();
         let json = serde_json::to_string(&deployment).unwrap();
+        assert!(!json.contains("secretKeyRef"));
+        assert!(!json.contains("GRES_KAFKA_PASSWORD"));
+        let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+            .args
+            .clone()
+            .unwrap();
+        assert!(!args.iter().any(|arg| arg == "--ranges"));
+    }
+
+    #[test]
+    fn sasl_kafka_deployment_references_password_secret_without_plaintext() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let deployment = render_deployment(
+            &obj,
+            &ranges[0],
+            &ranges,
+            "image",
+            "k:9092",
+            "__gres_wal.tenant-a.r0",
+            "__gres_cfg.tenant-a",
+            1,
+            &ConfigArgs::parse_from(["operator"]).config,
+            true,
+        )
+        .unwrap();
+        let json = serde_json::to_string(&deployment).unwrap();
+        assert!(json.contains("GRES_KAFKA_PASSWORD"));
         assert!(json.contains("secretKeyRef"));
         assert!(!json.contains("hunter2"));
+    }
+
+    #[test]
+    fn s3_checkpoint_runtime_args_match_operator_manifest_verifier() {
+        let mut config = ConfigArgs::parse_from(["operator"]).config;
+        config.gres_checkpoint_store = Some(crate::config::GresCheckpointStoreKind::S3);
+        config.gres_checkpoint_bucket = Some("gres-checkpoints".into());
+        config.gres_checkpoint_region = Some("us-east-1".into());
+        config.gres_checkpoint_endpoint = Some("http://minio.default.svc:9000".into());
+        config.gres_checkpoint_allow_http = true;
+        config.gres_checkpoint_access_key_id = Some("minio".into());
+        config.gres_checkpoint_secret_access_key = Some("secret".into());
+
+        let args = checkpoint_runtime_args(&config).expect("checkpoint runtime args");
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--checkpoint-store", "s3"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--checkpoint-bucket", "gres-checkpoints"])
+        );
+        assert!(args.contains(&"--checkpoint-allow-http".to_string()));
+        assert!(!args.iter().any(|arg| arg == "secret"));
     }
 }

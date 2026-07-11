@@ -107,6 +107,12 @@ pub struct GresTenantStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_phase: Option<String>,
 
+    /// Bounded compatibility window for `PgDog` 0.1.47 after a resumed compute
+    /// becomes Active. The fleet reconciler removes the temporary backend
+    /// credential after this Unix-millisecond deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgdog_credential_grace_until_unix_ms: Option<u64>,
+
     /// Last checkpoint offset observed by the controller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_checkpoint_offset: Option<u64>,
@@ -156,6 +162,7 @@ mod tests {
                 wal_replication: Some(3),
                 checkpoint_frames: None,
                 checkpoint_bytes: Some(134_217_728),
+                suspend_max_checkpoint_bytes: None,
                 idle_seconds: None,
             }),
         };
@@ -178,6 +185,7 @@ mod tests {
             wal_topic: Some("__gres_wal.alice".into()),
             registry_version: Some(3),
             lifecycle_phase: Some("active".into()),
+            pgdog_credential_grace_until_unix_ms: Some(123),
             last_checkpoint_offset: Some(42),
         };
         let json = serde_json::to_string(&status).unwrap();

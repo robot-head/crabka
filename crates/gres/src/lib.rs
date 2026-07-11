@@ -460,19 +460,21 @@ impl CheckpointObjectStoreConfig {
         reject_gcs_only_args(args, "s3")?;
         let bucket = required_trimmed(args.checkpoint_bucket.as_ref(), "--checkpoint-bucket")?;
         let region = required_trimmed(args.checkpoint_region.as_ref(), "--checkpoint-region")?;
+        let env_access_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
+        let env_secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+        let (access_key_id, secret_access_key) = resolve_s3_credentials(
+            args.checkpoint_access_key_id.as_ref(),
+            args.checkpoint_secret_access_key.as_ref(),
+            env_access_key.as_ref(),
+            env_secret_key.as_ref(),
+        )?;
         Ok(Self::S3 {
             bucket,
             prefix: parse_checkpoint_prefix(args)?,
             region,
             endpoint: trimmed_optional(args.checkpoint_endpoint.as_ref(), "--checkpoint-endpoint")?,
-            access_key_id: trimmed_optional(
-                args.checkpoint_access_key_id.as_ref(),
-                "--checkpoint-access-key-id",
-            )?,
-            secret_access_key: trimmed_optional(
-                args.checkpoint_secret_access_key.as_ref(),
-                "--checkpoint-secret-access-key",
-            )?,
+            access_key_id,
+            secret_access_key,
             allow_http: args.checkpoint_allow_http,
         })
     }
@@ -565,6 +567,28 @@ impl CheckpointObjectStoreConfig {
             Self::InMemory => crabka_object_store::ObjectStoreConfig::InMemory,
         }
     }
+}
+
+fn resolve_s3_credentials(
+    cli_access_key: Option<&String>,
+    cli_secret_key: Option<&String>,
+    env_access_key: Option<&String>,
+    env_secret_key: Option<&String>,
+) -> std::io::Result<(Option<String>, Option<String>)> {
+    let access_key = trimmed_optional(
+        cli_access_key.or(env_access_key),
+        "--checkpoint-access-key-id/AWS_ACCESS_KEY_ID",
+    )?;
+    let secret_key = trimmed_optional(
+        cli_secret_key.or(env_secret_key),
+        "--checkpoint-secret-access-key/AWS_SECRET_ACCESS_KEY",
+    )?;
+    if access_key.is_some() != secret_key.is_some() {
+        return invalid_input(
+            "S3 checkpoint access key id and secret access key must be set together",
+        );
+    }
+    Ok((access_key, secret_key))
 }
 
 /// Build the checkpoint object-store adapter selected by validated CLI settings.
@@ -1263,7 +1287,7 @@ pub fn tls_acceptor(
 pub async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let listener = TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %args.listen, "crabka-gres listening");
-    serve_listener(listener, args).await
+    Box::pin(serve_listener(listener, args)).await
 }
 
 /// Run the single-node pgwire service on an already-bound listener.
@@ -1282,7 +1306,25 @@ pub async fn serve_listener_with_tenant_config_loader(
         _ => None,
     };
 
-    let tenant_record = load_substrate_tenant_record(&args, tenant_config_loader).await?;
+    let mut tenant_record = load_substrate_tenant_record(&args, tenant_config_loader).await?;
+    let mut lifecycle_registry = None;
+    if let (Some(record), Some(bootstrap)) =
+        (tenant_record.as_ref(), args.substrate_bootstrap.as_deref())
+        && !matches!(bootstrap, "memory://" | "in-memory://")
+    {
+        let mut registry = crabka_gres_control::Registry::connect(bootstrap)
+            .await
+            .map_err(|error| std::io::Error::other(format!("tenant registry connect: {error}")))?;
+        registry
+            .ensure_topic(1)
+            .await
+            .map_err(|error| std::io::Error::other(format!("tenant registry ensure: {error}")))?;
+        tenant_record = registry
+            .get(record.name.as_str())
+            .await
+            .map_err(|error| std::io::Error::other(format!("tenant registry read: {error}")))?;
+        lifecycle_registry = Some(registry);
+    }
     let effective_args = apply_tenant_runtime_defaults(args, tenant_record.as_ref())?;
     let mut runtime =
         open_runtime_with_tenant_record(&effective_args, tenant_record.as_ref()).await?;
@@ -1306,24 +1348,41 @@ pub async fn serve_listener_with_tenant_config_loader(
     );
 
     let range_server = start_range_service(&effective_args, range_service).await?;
-    let serve_result = async {
-        let Some(policy) = SuspendPolicy::from_tenant_record(tenant_record.as_ref()) else {
-            return serve.await;
-        };
+    let checkpointer = live_final_checkpointer(checkpoint_runtime);
+    let registry = mark_active_after_recovery(tenant_record.as_ref(), lifecycle_registry).await?;
+    let suspend = if let Some(policy) = SuspendPolicy::from_tenant_record(tenant_record.as_ref()) {
+        match (registry, checkpointer) {
+            (Some(registry), Some(checkpointer)) => Some((
+                policy,
+                Box::new(LiveSuspendRegistry { registry }) as Box<dyn SuspendRegistry>,
+                checkpointer,
+            )),
+            (None, _) => {
+                tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled without live registry bootstrap");
+                None
+            }
+            (_, None) => {
+                tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled: final checkpoint snapshot seam unavailable");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
-    let Some(registry) = live_suspend_registry(&effective_args).await? else {
-        tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled without live registry bootstrap");
-        return serve.await;
+    // Publish Active only after every potentially blocking runtime component is
+    // initialized. The activator treats Active as permission to connect, so an
+    // earlier write can leave its held startup queued on a bound-but-unpolled
+    // listener while initialization stalls.
+    tracing::info!(listen = %effective_args.listen, "crabka-gres ready to accept sessions");
+    let serve_result = if let Some((policy, registry, checkpointer)) = suspend {
+        tokio::select! {
+            result = serve => result,
+            result = run_suspend_monitor(policy, activity, checkpointer, registry, shutdown) => result,
+        }
+    } else {
+        serve.await
     };
-    let Some(checkpointer) = live_final_checkpointer(checkpoint_runtime) else {
-        tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled: final checkpoint snapshot seam unavailable");
-        return serve.await;
-    };
-    tokio::select! {
-        result = serve => result,
-        result = run_suspend_monitor(policy, activity, checkpointer, registry, shutdown) => result,
-    }
-    }.await;
     if let Some(server) = range_server {
         server.abort();
         let _ = server.await;
@@ -1398,24 +1457,62 @@ async fn run_suspend_monitor(
     }
 }
 
-async fn live_suspend_registry(
-    args: &ServeArgs,
-) -> std::io::Result<Option<Box<dyn SuspendRegistry>>> {
-    let Some(bootstrap) = args.substrate_bootstrap.as_deref() else {
+async fn mark_active_after_recovery(
+    tenant_record: Option<&crabka_gres_control::TenantRecord>,
+    registry: Option<crabka_gres_control::Registry>,
+) -> std::io::Result<Option<crabka_gres_control::Registry>> {
+    let Some(record) = tenant_record else {
         return Ok(None);
     };
-    if matches!(bootstrap, "memory://" | "in-memory://") {
+    let Some(mut registry) = registry else {
         return Ok(None);
+    };
+    let Some(current) = registry.get(record.name.as_str()).await.map_err(|error| {
+        std::io::Error::other(format!("tenant registry read after recovery: {error}"))
+    })?
+    else {
+        return Err(std::io::Error::other(
+            "tenant registry record disappeared after recovery",
+        ));
+    };
+    if current.state != crabka_gres_control::TenantState::ResumeRequested {
+        return Ok(Some(registry));
     }
-
-    let mut registry = crabka_gres_control::Registry::connect(bootstrap)
-        .await
-        .map_err(|error| std::io::Error::other(format!("tenant registry connect: {error}")))?;
+    let endpoint = current
+        .endpoint
+        .clone()
+        .or_else(|| {
+            current
+                .ranges
+                .iter()
+                .find(|range| range.range_id == 0)
+                .map(|range| range.endpoint.clone())
+        })
+        .or_else(|| record.endpoint.clone())
+        .or_else(|| {
+            record
+                .ranges
+                .iter()
+                .find(|range| range.range_id == 0)
+                .map(|range| range.endpoint.clone())
+        })
+        .ok_or_else(|| {
+            std::io::Error::other("resume-requested tenant record has no compute endpoint")
+        })?;
     registry
-        .ensure_topic(1)
+        .mark_active(record.name.as_str(), endpoint)
         .await
-        .map_err(|error| std::io::Error::other(format!("tenant registry ensure: {error}")))?;
-    Ok(Some(Box::new(LiveSuspendRegistry { registry })))
+        .map_err(|error| std::io::Error::other(format!("tenant registry mark active: {error}")))?;
+    let confirmed = registry.get(record.name.as_str()).await.map_err(|error| {
+        std::io::Error::other(format!("tenant registry confirm active: {error}"))
+    })?;
+    if !confirmed.is_some_and(|record| record.state == crabka_gres_control::TenantState::Active) {
+        return Err(std::io::Error::other(
+            "tenant registry did not confirm Active after recovery",
+        ));
+    }
+    tracing::info!(tenant = %record.name, "recovered tenant marked active");
+    Ok(Some(registry))
 }
 
 fn live_final_checkpointer(
@@ -1665,7 +1762,7 @@ async fn open_substrate_runtime_with_tenant_record(
 
     let store = open_substrate_cache(config.cache_dir.as_deref())?;
     if !config.is_in_memory_bootstrap() {
-        return open_live_substrate_runtime(config, store).await;
+        return open_live_substrate_runtime(config, store, tenant_record).await;
     }
 
     let log = crabka_gres_substrate::InMemoryWalLog::shared();
@@ -1852,6 +1949,7 @@ struct SingleRangeLiveWalSelection {
 
 fn single_range_live_wal_selection(
     config: &SubstrateRuntimeConfig,
+    tenant_record: Option<&TenantRecord>,
 ) -> std::io::Result<SingleRangeLiveWalSelection> {
     let tenant = crabka_gres_ranges::TenantName::parse(config.tenant.clone()).map_err(|error| {
         std::io::Error::new(
@@ -1859,12 +1957,20 @@ fn single_range_live_wal_selection(
             format!("--tenant: {error}"),
         )
     })?;
+    let wal_generation = tenant_record.map_or(0, |record| {
+        record
+            .ranges
+            .iter()
+            .find(|range| range.range_id == crabka_gres_ranges::RangeId::COORDINATOR.as_u32())
+            .map_or(record.wal_generation, |range| range.wal_generation)
+    });
     let recovery_config = crabka_gres_substrate::LiveRecoveryConfig::new(
         config.bootstrap.clone(),
         tenant,
         crabka_gres_ranges::RangeId::COORDINATOR,
         config.kafka_security.clone(),
-    );
+    )
+    .with_wal_generation(wal_generation);
     let topic = recovery_config.wal_topic();
     Ok(SingleRangeLiveWalSelection {
         checkpoint_namespace: recovery_config.checkpoint_namespace(),
@@ -2120,6 +2226,7 @@ struct StartedCheckpointRuntime {
     snapshot_source: Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     store: Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
     tenant: String,
+    latest_checkpoint_bytes: std::sync::atomic::AtomicU64,
 }
 
 impl Clone for LiveRangeResources {
@@ -2634,18 +2741,18 @@ fn validate_staged_transfer_boundary(
 impl FinalCheckpointer for StartedCheckpointRuntime {
     async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64> {
         let snapshot = self.snapshot_source.snapshot();
-        let Some(metadata) = crabka_gres_substrate::latest_checkpoint_metadata(
+        let metadata = crabka_gres_substrate::latest_checkpoint_metadata(
             self.store.as_ref(),
             &self.tenant,
             snapshot.wal_generation,
             None,
         )
         .await
-        .map_err(|error| std::io::Error::other(format!("latest checkpoint metadata: {error}")))?
-        else {
-            return Ok(0);
-        };
-        Ok(metadata.total_bytes)
+        .map_err(|error| std::io::Error::other(format!("latest checkpoint metadata: {error}")))?;
+        Ok(remember_latest_checkpoint_bytes(
+            &self.latest_checkpoint_bytes,
+            metadata.map(|metadata| metadata.total_bytes),
+        ))
     }
 
     async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint> {
@@ -2664,6 +2771,16 @@ impl FinalCheckpointer for StartedCheckpointRuntime {
             total_bytes: run.metadata.total_bytes,
         })
     }
+}
+
+fn remember_latest_checkpoint_bytes(
+    cached: &std::sync::atomic::AtomicU64,
+    observed: Option<u64>,
+) -> u64 {
+    if let Some(bytes) = observed {
+        cached.store(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+    cached.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 fn build_checkpoint_runtime(
@@ -2706,6 +2823,7 @@ fn build_checkpoint_runtime(
         snapshot_source,
         store: checkpoint_store,
         tenant: checkpoint_namespace,
+        latest_checkpoint_bytes: std::sync::atomic::AtomicU64::new(0),
     }))
 }
 
@@ -2754,14 +2872,16 @@ fn build_range_checkpoint_runtime(
         snapshot_source,
         store: checkpoint_store,
         tenant: namespace,
+        latest_checkpoint_bytes: std::sync::atomic::AtomicU64::new(0),
     }))
 }
 
 async fn open_live_substrate_runtime(
     config: &SubstrateRuntimeConfig,
     store: Arc<dyn SubstrateKv>,
+    tenant_record: Option<&TenantRecord>,
 ) -> std::io::Result<GresRuntime> {
-    let wal_selection = single_range_live_wal_selection(config)?;
+    let wal_selection = single_range_live_wal_selection(config, tenant_record)?;
     let checkpoint_store = config
         .checkpoints
         .as_ref()
@@ -2779,6 +2899,9 @@ async fn open_live_substrate_runtime(
         recovered.producer,
         wal_selection.writer_topic,
     ));
+    crabka_gres_substrate::FenceLease::assert_current(writer.as_ref(), recovered.generation)
+        .await
+        .map_err(|error| std::io::Error::other(format!("WAL writer readiness fence: {error}")))?;
     let snapshot_source = Arc::new(crabka_gres_substrate::CheckpointSnapshotSource::new(
         recovered.barrier_offset,
         recovered.next_journal_seq,
@@ -3041,6 +3164,18 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn checkpoint_size_cache_survives_pruning_and_accepts_newer_smaller_manifest() {
+        let cached = std::sync::atomic::AtomicU64::new(0);
+        assert_eq!(
+            remember_latest_checkpoint_bytes(&cached, Some(1_000)),
+            1_000
+        );
+        assert_eq!(remember_latest_checkpoint_bytes(&cached, None), 1_000);
+        assert_eq!(remember_latest_checkpoint_bytes(&cached, Some(100)), 100);
+        assert_eq!(remember_latest_checkpoint_bytes(&cached, None), 100);
+    }
+
     struct FakeCheckpointer {
         bytes: AtomicU64,
         checkpoints: AtomicUsize,
@@ -3165,7 +3300,7 @@ mod tests {
         let config = SubstrateRuntimeConfig::from_args(&args)
             .expect("config")
             .expect("substrate config");
-        let wal_selection = single_range_live_wal_selection(&config).expect("wal selection");
+        let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
         let checkpoint_store: Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore> =
             crabka_gres_substrate::checkpoint::InMemoryCheckpointStore::shared();
 
@@ -3561,6 +3696,19 @@ mod tests {
     }
 
     #[test]
+    fn s3_checkpoint_credentials_fall_back_to_standard_environment_values() {
+        let env_access = "minio".to_string();
+        let env_secret = "minio-secret".to_string();
+        let (access, secret) =
+            resolve_s3_credentials(None, None, Some(&env_access), Some(&env_secret))
+                .expect("paired environment credentials");
+
+        assert_eq!(access.as_deref(), Some("minio"));
+        assert_eq!(secret.as_deref(), Some("minio-secret"));
+        assert!(resolve_s3_credentials(None, None, Some(&env_access), None).is_err());
+    }
+
+    #[test]
     fn checkpoint_options_require_substrate_mode() {
         let mut args = serve_args(Some("trust"), Vec::new());
         args.checkpoint_store = Some(CheckpointStoreKind::InMemory);
@@ -3790,7 +3938,7 @@ mod tests {
             host_ranges: None,
             range_rpc: None,
         };
-        let wal_selection = single_range_live_wal_selection(&config).expect("wal selection");
+        let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
         let kv = Arc::new(MemKv::default());
         kv.put(b"checkpointed".to_vec(), b"value".to_vec())
             .expect("seed checkpoint data");
@@ -3920,7 +4068,7 @@ mod tests {
             range_rpc: None,
         };
 
-        let wal_selection = single_range_live_wal_selection(&config).expect("wal selection");
+        let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
 
         assert_eq!(
             wal_selection.recovery_config.wal_topic(),
@@ -3946,6 +4094,19 @@ mod tests {
         assert_ne!(
             wal_selection.writer_topic,
             crabka_gres_substrate::wal_topic("tenant-a")
+        );
+
+        let mut resumed = tenant_record();
+        resumed.wal_generation = 3;
+        let resumed_selection =
+            single_range_live_wal_selection(&config, Some(&resumed)).expect("resumed selection");
+        assert_eq!(
+            resumed_selection.recovery_config.wal_topic(),
+            "__gres_wal.tenant-a.r0.g0000000003"
+        );
+        assert_eq!(
+            resumed_selection.writer_topic,
+            resumed_selection.recovery_config.wal_topic()
         );
     }
 

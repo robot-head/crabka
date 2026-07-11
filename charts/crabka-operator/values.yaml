@@ -15,6 +15,34 @@ gatewayImage:
   tag: ""
   pullPolicy: IfNotPresent
 
+# Default images for operator-managed Gres compute and activator workloads.
+gresImage:
+  repository: ghcr.io/robot-head/crabka-gres
+  tag: ""
+  pullPolicy: IfNotPresent
+
+gresActivatorImage:
+  repository: ghcr.io/robot-head/crabka-gres-activator
+  tag: ""
+  pullPolicy: IfNotPresent
+
+pgdogImage:
+  repository: ghcr.io/pgdogdev/pgdog
+  tag: "0.1.47"
+  pullPolicy: IfNotPresent
+
+# Optional durable store shared by Gres computes and the operator's final
+# manifest verifier. The access keys should be supplied through a values Secret
+# mechanism in production; literal values are intended only for disposable e2e.
+gresCheckpoint:
+  store: ""
+  bucket: ""
+  region: ""
+  endpoint: ""
+  allowHttp: false
+  accessKeyId: ""
+  secretAccessKey: ""
+
 replicaCount: 1
 
 watchNamespaces: []  # empty = cluster-scoped

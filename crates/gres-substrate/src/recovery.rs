@@ -435,9 +435,17 @@ impl CommittedWalReader for KafkaCommittedWalReader {
                 }
                 empty_fetches += 1;
                 if empty_fetches > EMPTY_FETCH_RETRIES {
-                    return Err(SubstrateError::Unavailable(
-                        "replay could not read recovery barrier before retry limit".into(),
-                    ));
+                    return Err(SubstrateError::Unavailable(format!(
+                        "replay could not read recovery barrier {} for {} (topic id {:?}, next offset {}, log start {}, high watermark {}, last stable offset {}, decoded batches {}) before retry limit",
+                        self.barrier_offset,
+                        self.topic,
+                        self.topic_uuid,
+                        fetched.next_offset,
+                        fetched.log_start_offset,
+                        fetched.high_watermark,
+                        fetched.last_stable_offset,
+                        fetched.decoded_batches,
+                    )));
                 }
                 continue;
             }
@@ -466,6 +474,9 @@ impl CommittedWalReader for KafkaCommittedWalReader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FetchedWalPartition {
     log_start_offset: i64,
+    high_watermark: i64,
+    last_stable_offset: i64,
+    decoded_batches: usize,
     next_offset: i64,
     records: Vec<ReplayItem>,
 }
@@ -550,6 +561,13 @@ fn decode_fetch_response(
                 {
                     return Ok(FetchedWalPartition {
                         log_start_offset: partition.log_start_offset,
+                        high_watermark: partition.high_watermark,
+                        last_stable_offset: partition.last_stable_offset,
+                        decoded_batches: partition
+                            .records
+                            .as_ref()
+                            .and_then(|payload| payload.as_v2())
+                            .map_or(0, <[_]>::len),
                         next_offset: partition.log_start_offset,
                         records: Vec::new(),
                     });
@@ -559,9 +577,23 @@ fn decode_fetch_response(
                     partition.error_code
                 )));
             }
+            if let Some(payload) = partition.records.as_ref()
+                && payload.as_v2().is_none()
+            {
+                return Err(SubstrateError::Unavailable(format!(
+                    "fetch partition {PARTITION} returned non-v2 records payload: {payload:?}"
+                )));
+            }
             let (records, next_offset) = decode_replay_items(partition);
             return Ok(FetchedWalPartition {
                 log_start_offset: partition.log_start_offset,
+                high_watermark: partition.high_watermark,
+                last_stable_offset: partition.last_stable_offset,
+                decoded_batches: partition
+                    .records
+                    .as_ref()
+                    .and_then(|payload| payload.as_v2())
+                    .map_or(0, <[_]>::len),
                 next_offset,
                 records,
             });

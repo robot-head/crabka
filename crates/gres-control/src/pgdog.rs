@@ -14,6 +14,10 @@ const DEFAULT_LISTEN_PORT: u16 = 6_432;
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_mins(1);
 const DEFAULT_SERVER_LIFETIME: Duration = Duration::from_mins(5);
 const DEFAULT_CONNECT_ATTEMPTS: u16 = 3;
+// PgDog's documented way to disable proactive database healthchecks. This is
+// required for scale-to-zero routes: an ephemeral idle healthcheck must not
+// become the event that wakes a suspended tenant.
+const DISABLED_IDLE_HEALTHCHECK_DELAY_MS: u64 = 3_155_760_000_000;
 
 /// One tenant route available to `PgDog`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +128,8 @@ pub struct PgdogGeneral {
     pub tls_cert_path: Option<String>,
     /// Optional TLS private-key path for client connections.
     pub tls_key_path: Option<String>,
+    /// Optional CA bundle used to authenticate required client certificates.
+    pub tls_client_ca_path: Option<String>,
     /// Enable `PgDog` passthrough authentication.
     pub passthrough_auth: bool,
     /// Fleet-wide pooler mode.
@@ -146,6 +152,7 @@ impl Default for PgdogGeneral {
             listen_port: DEFAULT_LISTEN_PORT,
             tls_cert_path: None,
             tls_key_path: None,
+            tls_client_ca_path: None,
             passthrough_auth: true,
             pooler_mode: PgdogPoolerMode::Transaction,
             cold_start_ceiling: Duration::from_secs(30),
@@ -203,6 +210,12 @@ impl<'a> PgdogConfig<'a> {
                 "TLS certificate and private key must be configured together",
             ));
         }
+        if input.general.tls_client_ca_path.is_some() && input.general.tls_cert_path.is_none() {
+            return Err(ControlError::invalid_field(
+                "frontend_tls",
+                "client CA requires a TLS certificate and private key",
+            ));
+        }
         let timeouts = input
             .general
             .timeouts
@@ -221,6 +234,7 @@ impl<'a> PgdogConfig<'a> {
 #[derive(Debug, Serialize)]
 struct RenderGeneral<'a> {
     port: u16,
+    min_pool_size: u32,
     pooler_mode: PgdogPoolerMode,
     passthrough_auth: &'static str,
     connect_timeout: u64,
@@ -228,10 +242,13 @@ struct RenderGeneral<'a> {
     checkout_timeout: u64,
     idle_timeout: u64,
     server_lifetime: u64,
+    idle_healthcheck_delay: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     tls_certificate: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tls_private_key: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tls_client_ca_certificate: Option<&'a str>,
     tls_client_required: bool,
 }
 
@@ -239,6 +256,9 @@ impl<'a> RenderGeneral<'a> {
     fn from_settings(general: &'a PgdogGeneral, timeouts: PgdogTimeouts) -> Self {
         Self {
             port: general.listen_port,
+            // Scale-to-zero tenants cannot suspend while PgDog holds an eager
+            // backend session open. Connections are created on demand instead.
+            min_pool_size: 0,
             pooler_mode: general.pooler_mode,
             passthrough_auth: if general.passthrough_auth {
                 "enabled"
@@ -250,9 +270,11 @@ impl<'a> RenderGeneral<'a> {
             checkout_timeout: milliseconds_rounded_up(timeouts.checkout_timeout),
             idle_timeout: milliseconds_rounded_up(general.idle_timeout),
             server_lifetime: milliseconds_rounded_up(general.server_lifetime),
+            idle_healthcheck_delay: DISABLED_IDLE_HEALTHCHECK_DELAY_MS,
             tls_certificate: general.tls_cert_path.as_deref(),
             tls_private_key: general.tls_key_path.as_deref(),
-            tls_client_required: general.tls_cert_path.is_some(),
+            tls_client_ca_certificate: general.tls_client_ca_path.as_deref(),
+            tls_client_required: general.tls_client_ca_path.is_some(),
         }
     }
 }
@@ -563,6 +585,7 @@ mod tests {
             listen_port: 6432,
             tls_cert_path: Some("/etc/pgdog/tls/tls.crt".to_owned()),
             tls_key_path: Some("/etc/pgdog/tls/tls.key".to_owned()),
+            tls_client_ca_path: Some("/etc/pgdog/tls/ca.crt".to_owned()),
             cold_start_ceiling: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(45),
             server_lifetime: Duration::from_mins(4),

@@ -305,6 +305,14 @@ fn multi_range_reconcile_rules() -> Vec<MockRule> {
             response: json_response(200, &ready_kafka_body("demo", "ns")),
         },
         MockRule {
+            method: Method::GET,
+            path_substr: "/deployments/tenant-a-gres".into(),
+            response: json_response(
+                404,
+                &serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404}),
+            ),
+        },
+        MockRule {
             method: Method::PATCH,
             path_substr: "/grestenants/tenant-a/status".into(),
             response: json_response(200, &tenant_body()),
@@ -378,10 +386,11 @@ async fn multi_range_tenant_is_rejected_before_creating_wal_or_compute_deploymen
     let status = observed
         .iter()
         .find(|request| {
-            request
-                .uri()
-                .to_string()
-                .contains("/grestenants/tenant-a/status")
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains("/grestenants/tenant-a/status")
         })
         .expect("status patch captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
@@ -1051,10 +1060,11 @@ async fn resume_request_remains_fenced_while_wal_deletion_is_pending() {
     let deployments: Vec<_> = observed
         .iter()
         .filter(|request| {
-            request
-                .uri()
-                .to_string()
-                .contains("/deployments/tenant-a-gres")
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains("/deployments/tenant-a-gres")
         })
         .collect();
     assert!(deployments.len() == 1);
@@ -1094,10 +1104,11 @@ async fn suspended_tenant_failure_preserves_lifecycle_without_reactivating_routi
     let status = observed
         .iter()
         .find(|request| {
-            request
-                .uri()
-                .to_string()
-                .contains("/grestenants/tenant-a/status")
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains("/grestenants/tenant-a/status")
         })
         .expect("status patch captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
@@ -1320,12 +1331,16 @@ async fn resume_requested_ensures_wal_and_scales_compute_to_one() {
     let deployment = observed
         .iter()
         .find(|request| {
-            request
-                .uri()
-                .to_string()
-                .contains("/deployments/tenant-a-gres")
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .to_string()
+                    .contains("/deployments/tenant-a-gres")
         })
         .expect("deployment patch captured");
     let body: serde_json::Value = serde_json::from_slice(deployment.body()).unwrap();
     assert!(body["spec"]["replicas"] == 1);
+    let resumed = control.current.lock().await.clone().unwrap();
+    assert!(resumed.state == TenantState::ResumeRequested);
+    assert!(resumed.record_version == 10);
 }

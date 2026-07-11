@@ -95,3 +95,26 @@ Equal-version registry retries are accepted only when byte-identical. Divergent
 snapshots with the same tenant/version are rejected, deliberately replacing the
 draft's ordering-dependent last-record-wins tie rule. The policy and rationale
 are documented in `crates/gres-control/README.md` and pinned by unit tests.
+
+## G-5 security re-review amendment — 2026-07-11
+
+G-5 does not add a second long-lived tenant credential store. Compute remains
+the SCRAM authentication authority and PgDog remains passthrough. PgDog 0.1.47
+has an upstream passwordless-passthrough pool bug, so suspended activator routes
+receive the existing Kubernetes tenant Secret through the PgDog config Secret
+with mode 0400. The same config is retained only for a bounded four-second
+post-resume grace so the held first session is not disrupted. Ordinary
+reconcile then flips direct while briefly retaining the credential, rolls a
+fresh pod through the route-hash rollout. A second bounded
+reconcile removes the credential through `RELOAD` without rolling the
+established direct pool. The Kind gate asserts tenant-credential presence while
+suspended, wake-path config/pod identity, post-bootstrap credential removal,
+correct-password success, wrong-password rejection, passthrough logging, and a
+verified-TLS direct-route query. No tenant credential is written to CR status, logs,
+argv, the registry, or Kafka.
+
+The suspended route is confirmed from a completed hash-addressed Deployment
+rollout. Admin `RECONNECT` and proactive health checks are deliberately absent
+because either can open the activator backend and wake a tenant without a real
+client. PgDog's official health-check disable guidance is represented by the
+large `idle_healthcheck_delay` renderer value and pinned golden.
