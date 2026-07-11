@@ -53,6 +53,12 @@ pub enum RangeRequest {
     GlobalBegin { range_id: RangeId },
     /// Acquire, renew, or release the range-0 ordinary transaction lease.
     ExplicitGate(ExplicitGateReq),
+    /// Settle abandoned live owner sessions for one durable global xid.
+    RecoverGlobal {
+        range_id: RangeId,
+        global_xid: u64,
+        commit: bool,
+    },
     /// Ask an owning range to scan a table rowid interval under caller snapshots.
     ScanRange(ScanRangeReq),
     /// Pull one bounded page from an owner-issued range cursor token.
@@ -96,6 +102,8 @@ pub enum RangeResponse {
     GlobalXid { global_xid: u64 },
     /// Range-0 ordinary transaction lease result.
     ExplicitGate(ExplicitGateResp),
+    /// Abandoned live owner sessions were inspected and settled idempotently.
+    GlobalRecovered,
     /// Visible rows returned by a range scan.
     ScanRange(ScanRangeResp),
     /// One bounded owner-cursor page.
@@ -1396,6 +1404,7 @@ mod tests {
                 | RangeRequest::GlobalDecision { .. }
                 | RangeRequest::GlobalBegin { .. }
                 | RangeRequest::ExplicitGate(_)
+                | RangeRequest::RecoverGlobal { .. }
                 | RangeRequest::TimestampPrewrite(_)
                 | RangeRequest::TimestampResolve(_)
                 | RangeRequest::TimestampRecover(_) => RangeResponse::Error {

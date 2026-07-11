@@ -1126,6 +1126,25 @@ impl SqlEngine {
         Ok(self.in_doubt_globals_from(0).await?.0)
     }
 
+    /// List every local prepared participant marker, including markers whose
+    /// range-0 decision is already terminal. Recovery uses this to release
+    /// abandoned live owner sessions after a coordinator restart.
+    pub fn prepared_globals(&self) -> Result<Vec<u64>, ExecError> {
+        let mut globals = std::collections::BTreeSet::new();
+        for (key, value) in self.kv.scan_range(
+            &crabka_pgkv::key::clog_key(0),
+            &crabka_pgkv::key::clog_key(crabka_pgmvcc::xid::GLOBAL_XID_BASE),
+        )? {
+            if crabka_pgkv::key::clog_xid_of(&key).is_some()
+                && let crabka_pgmvcc::clog::XidStatus::Prepared(global_xid) =
+                    crabka_pgmvcc::clog::decode(&value)?
+            {
+                globals.insert(global_xid);
+            }
+        }
+        Ok(globals.into_iter().collect())
+    }
+
     /// SP24 abort-atomicity ROOT FIX — re-acquire the in-memory row locks for every
     /// inherited in-doubt participant version on this range, returning the in-doubt
     /// local xids `Li` that now hold those locks. Call on the leadership-rising edge,

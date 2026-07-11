@@ -10,6 +10,32 @@ Verification:
 - `CRABKA_GRES_TEST_BINARY=target/debug/crabka-gres cargo nextest run -p crabka-gres-ranges --test multiprocess --test jepsen_bank --test participant_kill_bank --test range0_cascade_kill_bank --test range0_leader_kill_drain --test crossrange_2pc_nemesis --test jepsen_elle`: 17 passed, 0 skipped.
 - `git diff --check`: passed.
 
+## Independent-review remediation: acknowledged 2PC crash recovery
+
+The real-process harness can inject one environment-gated, one-shot commit
+phase fault into r0. The `COMMIT` error is the acknowledged barrier: it is
+returned only after every participant prepared (`before_decision_after_prepare`)
+or after the write-once commit decision was durable but before participant
+release (`before_release_after_commit_decision`). No timing sleep or network
+admin endpoint is used.
+
+Production r0 startup now scans all local prepared global markers, including
+markers with terminal decisions. Pending decisions are abort-raced through the
+write-once r0 clog; terminal commit remains commit. Before runtime construction
+returns, r0 sends an authenticated, registry-resolved `RecoverGlobal` RPC to
+each remote named range. That RPC idempotently finds a matching live hosted
+session and releases its locks according to the effective durable decision.
+Release errors and unreachable named participants fail startup before the
+machine-readable SQL readiness event. The RPC is harmless when the old session
+was already dropped and durable MVCC resolution is sufficient.
+
+Evidence:
+
+- `range0_cascade_kill_bank`: 4 passed. The new pre-decision case kills r0+r1 after acknowledged prepare and recovers `(100,100)`/total 200; the new post-decision case kills both after acknowledged durable commit and recovers `(95,105)`/total 200. Participants restart before r0, proving fail-closed dependency ordering.
+- `range0_leader_kill_drain`: 3 passed. The new case leaves r1 live and prepared, kills only r0, then proves r0 readiness is withheld until recovery releases the live r1 session: old balances are visible and a subsequent cross-range update/commit succeeds without a stranded lock.
+- `cargo test -p crabka-gres-ranges --lib --no-fail-fast`: 106 passed.
+- Real `crabka-gres` binary build and `git diff --check`: passed.
+
 Known scope: G8/G9 sharded timestamp explicit transactions and later distributed maturity gates are outside G7 Task 7 and remain active work.
 
 ## Independent-review remediation: range-0 explicit transaction lease
