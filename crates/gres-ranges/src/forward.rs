@@ -271,6 +271,108 @@ impl RangeService for HostedRangeService {
                     },
                 }
             }
+            RangeRequest::TimestampPrewrite(request) => {
+                let engine = match self.hosted_engine(request.range_id) {
+                    Ok(engine) => engine,
+                    Err(response) => return response,
+                };
+                let identity = match decode_timestamp_identity(request.identity) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        return RangeResponse::SqlError {
+                            code: "22023".into(),
+                            message,
+                        };
+                    }
+                };
+                let writes = request
+                    .writes
+                    .into_iter()
+                    .map(decode_timestamp_write)
+                    .collect::<Result<Vec<_>, _>>();
+                let writes = match writes {
+                    Ok(value) => value,
+                    Err(message) => {
+                        return RangeResponse::SqlError {
+                            code: "22023".into(),
+                            message,
+                        };
+                    }
+                };
+                match engine
+                    .timestamp_txn_participant(request.range_id.as_u32())
+                    .prewrite_with_primary(identity, &writes)
+                    .await
+                {
+                    Ok(()) => RangeResponse::TimestampParticipantDone,
+                    Err(error) => {
+                        let error = error.into_pg();
+                        RangeResponse::SqlError {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    }
+                }
+            }
+            RangeRequest::TimestampResolve(request) => {
+                let engine = match self.hosted_engine(request.range_id) {
+                    Ok(engine) => engine,
+                    Err(response) => return response,
+                };
+                let identity = match decode_timestamp_identity(request.identity) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        return RangeResponse::SqlError {
+                            code: "22023".into(),
+                            message,
+                        };
+                    }
+                };
+                let decision = match request.decision {
+                    crate::transport::WireTimestampDecision::Aborted => {
+                        crabka_pgexec::TimestampTxnDecision::Aborted
+                    }
+                    crate::transport::WireTimestampDecision::Committed { commit_ts } => {
+                        match crabka_pgexec::CommitTimestamp::new(commit_ts) {
+                            Ok(ts) => crabka_pgexec::TimestampTxnDecision::Committed(ts),
+                            Err(error) => {
+                                return RangeResponse::SqlError {
+                                    code: "22023".into(),
+                                    message: error.to_string(),
+                                };
+                            }
+                        }
+                    }
+                };
+                let writes = request
+                    .writes
+                    .into_iter()
+                    .map(decode_timestamp_write)
+                    .collect::<Result<Vec<_>, _>>();
+                let writes = match writes {
+                    Ok(value) => value,
+                    Err(message) => {
+                        return RangeResponse::SqlError {
+                            code: "22023".into(),
+                            message,
+                        };
+                    }
+                };
+                match engine
+                    .timestamp_txn_participant(request.range_id.as_u32())
+                    .resolve_with_primary(identity, decision, &writes)
+                    .await
+                {
+                    Ok(()) => RangeResponse::TimestampParticipantDone,
+                    Err(error) => {
+                        let error = error.into_pg();
+                        RangeResponse::SqlError {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    }
+                }
+            }
             RangeRequest::Tso(crate::transport::TsoReq::Grant { count }) => {
                 let Some(tso) = &self.tso else {
                     return RangeResponse::Error {
@@ -812,6 +914,78 @@ pub struct RemoteRangeSession {
 }
 
 impl RemoteRangeSession {
+    pub async fn timestamp_prewrite(
+        &self,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        writes: &[crabka_pgexec::TimestampWrite],
+    ) -> Result<(), PgError> {
+        let request = RangeRequest::TimestampPrewrite(crate::transport::TimestampPrewriteReq {
+            range_id: self.range_id,
+            identity: encode_timestamp_identity(identity),
+            writes: writes
+                .iter()
+                .map(encode_timestamp_write)
+                .collect::<Result<_, _>>()?,
+        });
+        self.call_timestamp_participant(request).await
+    }
+
+    pub async fn timestamp_resolve(
+        &self,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        decision: crabka_pgexec::TimestampTxnDecision,
+        writes: &[crabka_pgexec::TimestampWrite],
+    ) -> Result<(), PgError> {
+        let decision = match decision {
+            crabka_pgexec::TimestampTxnDecision::Aborted => {
+                crate::transport::WireTimestampDecision::Aborted
+            }
+            crabka_pgexec::TimestampTxnDecision::Committed(ts) => {
+                crate::transport::WireTimestampDecision::Committed {
+                    commit_ts: ts.get(),
+                }
+            }
+            _ => {
+                return Err(PgError::protocol(
+                    "remote timestamp resolution requires a terminal put decision",
+                ));
+            }
+        };
+        let request = RangeRequest::TimestampResolve(crate::transport::TimestampResolveReq {
+            range_id: self.range_id,
+            identity: encode_timestamp_identity(identity),
+            decision,
+            writes: writes
+                .iter()
+                .map(encode_timestamp_write)
+                .collect::<Result<_, _>>()?,
+        });
+        self.call_timestamp_participant(request).await
+    }
+
+    async fn call_timestamp_participant(&self, request: RangeRequest) -> Result<(), PgError> {
+        let endpoint = self
+            .registry
+            .resolve(self.range_id)
+            .await
+            .map_err(|error| ForwardError::Registry(error).into_pg())?;
+        match self
+            .client
+            .call(&endpoint.endpoint, &request)
+            .await
+            .map_err(|error| ForwardError::Transport(error).into_pg())?
+        {
+            RangeResponse::TimestampParticipantDone => Ok(()),
+            RangeResponse::SqlError { code, message } => Err(PgError::error(&code, message)),
+            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
+                kind: error,
+                message,
+            }
+            .into_pg()),
+            _ => Err(ForwardError::UnexpectedResponse.into_pg()),
+        }
+    }
+
     pub async fn begin_global(&mut self) -> Result<u64, PgError> {
         let endpoint = self
             .registry
@@ -1906,6 +2080,7 @@ fn decode_predicate_op(op: WirePredicateOp) -> crabka_pgexec::PredicateOp {
 
 fn encode_datum(datum: &crabka_pgtypes::Datum) -> Result<WireDatum, crabka_pgexec::ExecError> {
     match datum {
+        crabka_pgtypes::Datum::Null => Ok(WireDatum::Null),
         crabka_pgtypes::Datum::Bool(value) => Ok(WireDatum::Bool(*value)),
         crabka_pgtypes::Datum::Int4(value) => Ok(WireDatum::Int4(*value)),
         crabka_pgtypes::Datum::Int8(value) => Ok(WireDatum::Int8(*value)),
@@ -1918,11 +2093,61 @@ fn encode_datum(datum: &crabka_pgtypes::Datum) -> Result<WireDatum, crabka_pgexe
 
 fn decode_datum(datum: WireDatum) -> crabka_pgtypes::Datum {
     match datum {
+        WireDatum::Null => crabka_pgtypes::Datum::Null,
         WireDatum::Bool(value) => crabka_pgtypes::Datum::Bool(value),
         WireDatum::Int4(value) => crabka_pgtypes::Datum::Int4(value),
         WireDatum::Int8(value) => crabka_pgtypes::Datum::Int8(value),
         WireDatum::Text(value) => crabka_pgtypes::Datum::Text(value),
     }
+}
+
+fn decode_timestamp_identity(
+    identity: crate::transport::WireTimestampIdentity,
+) -> Result<crabka_pgexec::TimestampTxnIdentity, String> {
+    Ok(crabka_pgexec::TimestampTxnIdentity {
+        start_ts: crabka_pgexec::TimestampTransactionId::new(identity.start_ts)
+            .map_err(|error| error.to_string())?,
+        global_xid: identity.global_xid,
+        primary_range: identity.primary_range,
+    })
+}
+
+fn decode_timestamp_write(
+    write: crate::transport::WireTimestampWrite,
+) -> Result<crabka_pgexec::TimestampWrite, String> {
+    Ok(crabka_pgexec::TimestampWrite {
+        table_id: write.table_id,
+        rowid: write.rowid,
+        row: write.row.into_iter().map(decode_datum).collect(),
+        delete: write.delete,
+        global_index_intents: vec![],
+    })
+}
+
+fn encode_timestamp_identity(
+    identity: crabka_pgexec::TimestampTxnIdentity,
+) -> crate::transport::WireTimestampIdentity {
+    crate::transport::WireTimestampIdentity {
+        start_ts: identity.start_ts.get(),
+        global_xid: identity.global_xid,
+        primary_range: identity.primary_range,
+    }
+}
+
+fn encode_timestamp_write(
+    write: &crabka_pgexec::TimestampWrite,
+) -> Result<crate::transport::WireTimestampWrite, PgError> {
+    Ok(crate::transport::WireTimestampWrite {
+        table_id: write.table_id,
+        rowid: write.rowid,
+        row: write
+            .row
+            .iter()
+            .map(encode_datum)
+            .collect::<Result<_, _>>()
+            .map_err(crabka_pgexec::ExecError::into_pg)?,
+        delete: write.delete,
+    })
 }
 
 fn decode_scan_rows(
@@ -2108,7 +2333,9 @@ mod tests {
                 | RangeRequest::GlobalBegin { .. }
                 | RangeRequest::Txn(_)
                 | RangeRequest::Tso(_)
-                | RangeRequest::ResolveTxn(_) => RangeResponse::Error {
+                | RangeRequest::ResolveTxn(_)
+                | RangeRequest::TimestampPrewrite(_)
+                | RangeRequest::TimestampResolve(_) => RangeResponse::Error {
                     error: WireErrorKind::Failed,
                     message: "wrong rpc".to_string(),
                 },

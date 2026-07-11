@@ -2812,14 +2812,10 @@ impl GatewaySession {
                 "multi-range sharded timestamp DML is only supported in autocommit",
             ));
         }
-        if ranges
-            .iter()
-            .any(|range_id| !self.sessions.contains_key(range_id))
-        {
-            return Err(PgError::error(
-                sqlstate::FEATURE_NOT_SUPPORTED,
-                "remote multi-range transactions are unsupported until a stateful participant RPC is designed",
-            ));
+        for range_id in &ranges {
+            if !self.sessions.contains_key(range_id) {
+                self.ensure_remote_session(*range_id).await?;
+            }
         }
         ensure_timestamp_scatter_is_supported(statement)?;
         let serving = self.current_serving()?;
@@ -2880,16 +2876,15 @@ impl GatewaySession {
             .await?;
         let mut participants = Vec::with_capacity(writes_by_range.len());
         for (range_id, writes) in &writes_by_range {
-            let participant = self.timestamp_participant(*range_id)?;
-            if let Err(error) = participant.prewrite_with_primary(identity, writes).await {
+            if let Err(error) = self.timestamp_prewrite(*range_id, identity, writes).await {
                 self.abort_timestamp_scatter(coordinator, identity, &participants)
                     .await
                     .map_err(ExecError::into_pg)?;
-                return Err(error.into_pg());
+                return Err(error);
             }
             // Track durable prewrite before the range-0 acknowledgement. An ack
             // write failure must still abort and resolve this participant.
-            participants.push((*range_id, participant.clone(), writes.clone()));
+            participants.push((*range_id, writes.clone()));
             let operations = writes
                 .iter()
                 .map(|write| crabka_pgexec::TimestampTxnOperation {
@@ -2948,18 +2943,15 @@ impl GatewaySession {
             ));
         }
         let mut commit_ops = Some(plan.commit_ops);
-        for (_range_id, participant, writes) in &participants {
+        for (range_id, writes) in &participants {
             let extra_ops = commit_ops.take().unwrap_or_default();
-            if let Err(error) = participant
-                .resolve_with_primary(
-                    identity,
-                    crabka_pgexec::TimestampTxnDecision::Committed(commit_ts),
-                    writes,
-                )
-                .await
-            {
-                return Err(error.into_pg());
-            }
+            self.timestamp_resolve(
+                *range_id,
+                identity,
+                crabka_pgexec::TimestampTxnDecision::Committed(commit_ts),
+                writes,
+            )
+            .await?;
             if !extra_ops.is_empty() {
                 coordinator
                     .commit_timestamp_statement_ops(extra_ops)
@@ -3025,15 +3017,54 @@ impl GatewaySession {
             })
     }
 
+    async fn timestamp_prewrite(
+        &self,
+        range_id: RangeId,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        writes: &[crabka_pgexec::TimestampWrite],
+    ) -> Result<(), PgError> {
+        if let Ok(participant) = self.timestamp_participant(range_id) {
+            return participant
+                .prewrite_with_primary(identity, writes)
+                .await
+                .map_err(ExecError::into_pg);
+        }
+        self.remote_sessions
+            .get(&range_id)
+            .ok_or_else(|| {
+                PgError::error("08003", "remote timestamp participant session is missing")
+            })?
+            .timestamp_prewrite(identity, writes)
+            .await
+    }
+
+    async fn timestamp_resolve(
+        &self,
+        range_id: RangeId,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        decision: crabka_pgexec::TimestampTxnDecision,
+        writes: &[crabka_pgexec::TimestampWrite],
+    ) -> Result<(), PgError> {
+        if let Ok(participant) = self.timestamp_participant(range_id) {
+            return participant
+                .resolve_with_primary(identity, decision, writes)
+                .await
+                .map_err(ExecError::into_pg);
+        }
+        self.remote_sessions
+            .get(&range_id)
+            .ok_or_else(|| {
+                PgError::error("08003", "remote timestamp participant session is missing")
+            })?
+            .timestamp_resolve(identity, decision, writes)
+            .await
+    }
+
     async fn abort_timestamp_scatter(
         &self,
         coordinator: &SqlEngine,
         identity: crabka_pgexec::TimestampTxnIdentity,
-        participants: &[(
-            RangeId,
-            crabka_pgexec::TimestampTxnParticipant,
-            Vec<crabka_pgexec::TimestampWrite>,
-        )],
+        participants: &[(RangeId, Vec<crabka_pgexec::TimestampWrite>)],
     ) -> Result<(), ExecError> {
         let decision = coordinator
             .decide_timestamp_transaction(
@@ -3054,10 +3085,10 @@ impl GatewaySession {
                 ));
             }
         };
-        for (_range_id, participant, writes) in participants {
-            participant
-                .resolve_with_primary(identity, effective_decision, writes)
-                .await?;
+        for (range_id, writes) in participants {
+            self.timestamp_resolve(*range_id, identity, effective_decision, writes)
+                .await
+                .map_err(|error| ExecError::Unsupported(error.message))?;
         }
         Ok(())
     }
