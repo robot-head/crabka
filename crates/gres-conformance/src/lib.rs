@@ -4,6 +4,7 @@
 pub mod driver_goldens;
 pub mod feature_manifest;
 mod parser_commands;
+pub mod tls;
 
 use std::{
     collections::{BTreeMap, BTreeSet},

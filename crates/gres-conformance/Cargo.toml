@@ -36,6 +36,8 @@ path = "src/bin/driver_golden_replay.rs"
 [dependencies]
 tokio = { workspace = true, features = ["full"] }
 tokio-postgres = { workspace = true }
+native-tls = { workspace = true }
+postgres-native-tls = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

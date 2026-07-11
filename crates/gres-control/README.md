@@ -22,9 +22,21 @@ SCRAM verifier, WAL replication factor, optional checkpoint thresholds, and idle
 timeout metadata. The SCRAM field is a PostgreSQL `SCRAM-SHA-256$...` verifier;
 the control plane does not store plaintext SQL passwords in either Kafka topic.
 
+Equal-version consistency policy: byte-identical retries are idempotent, but two
+different snapshots for the same tenant and `record_version` are rejected as
+divergent. This deliberately amends the original G-4 draft's "last record wins"
+tie rule: accepting an ordering-dependent tie would hide a split writer. Only a
+strictly greater version may replace a different snapshot.
+
 ## PgDog rendering
 
 The crate also owns typed PgDog rendering helpers. They turn active tenant
 endpoints into `pgdog.toml`, optionally route suspended tenants to an activator,
-and render `users.toml` only from explicit local/dev user inputs. The renderer
-validates duplicate routes and timeout budgets before producing TOML.
+and render `users.toml` from explicit user inputs. Production passthrough entries
+contain only user/database identity and omit passwords; password-bearing entries
+are a local-development mode. The renderer targets pinned PgDog 0.1.47 field
+names and millisecond timeout units, requires client TLS when a certificate is
+configured, and validates duplicate routes and timeout budgets before producing
+TOML. PgDog 0.1.47 exposes effective routes through `SHOW POOLS` (there is no
+`SHOW DATABASES` command), so the operator uses that supported admin view for
+confirmed-generation reloads.

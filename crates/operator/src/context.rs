@@ -262,12 +262,16 @@ pub struct PgdogReloadRequest {
     pub port: u16,
     pub password: String,
     pub expected_databases: Vec<String>,
+    pub maintenance_mode: bool,
+    pub tls_ca_pem: Option<Vec<u8>>,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum PgdogAdminError {
     #[error("pgdog admin connection: {0}")]
     Connect(#[from] tokio_postgres::Error),
+    #[error("pgdog admin TLS: {0}")]
+    Tls(#[from] native_tls::Error),
 }
 
 #[async_trait::async_trait]
@@ -294,23 +298,60 @@ impl PgdogAdminLike for TokioPostgresPgdogAdmin {
             .user("admin")
             .password(&request.password)
             .dbname("admin");
-        let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
-        tokio::spawn(async move {
-            if let Err(err) = connection.await {
-                tracing::debug!(error = %err, "pgdog admin connection task ended");
+        let client = connect_pgdog_admin(config, request.tls_ca_pem.as_deref()).await?;
+        if request.maintenance_mode {
+            client.simple_query("MAINTENANCE ON").await?;
+        }
+        let operation = async {
+            client.simple_query("RELOAD").await?;
+            // PgDog's supported effective-routing view is SHOW POOLS. The G-4
+            // plan called this SHOW DATABASES, but that command does not exist
+            // upstream. Column 1 is the exposed database name.
+            client.query("SHOW POOLS", &[]).await
+        }
+        .await;
+        if request.maintenance_mode {
+            let maintenance_off = client.simple_query("MAINTENANCE OFF").await;
+            if operation.is_ok() {
+                maintenance_off?;
             }
-        });
-        client.simple_query("RELOAD").await?;
-        let rows = client.query("SHOW DATABASES", &[]).await?;
+        }
+        let rows = operation?;
         let observed_databases = rows
             .iter()
-            .filter_map(|row| row.try_get::<usize, String>(0).ok())
+            .filter_map(|row| row.try_get::<usize, String>(1).ok())
             .collect::<std::collections::BTreeSet<_>>();
         Ok(request
             .expected_databases
             .iter()
             .all(|database| observed_databases.contains(database)))
     }
+}
+
+async fn connect_pgdog_admin(
+    config: tokio_postgres::Config,
+    tls_ca_pem: Option<&[u8]>,
+) -> Result<tokio_postgres::Client, PgdogAdminError> {
+    if let Some(tls_ca_pem) = tls_ca_pem {
+        let certificate = native_tls::Certificate::from_pem(tls_ca_pem)?;
+        let mut builder = native_tls::TlsConnector::builder();
+        builder.add_root_certificate(certificate);
+        let connector = postgres_native_tls::MakeTlsConnector::new(builder.build()?);
+        let (client, connection) = config.connect(connector).await?;
+        drop(tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                tracing::debug!(%error, "pgdog TLS admin connection task ended");
+            }
+        }));
+        return Ok(client);
+    }
+    let (client, connection) = config.connect(tokio_postgres::NoTls).await?;
+    drop(tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            tracing::debug!(%error, "pgdog plaintext admin connection task ended");
+        }
+    }));
+    Ok(client)
 }
 
 #[derive(Debug, thiserror::Error)]

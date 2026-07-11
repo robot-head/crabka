@@ -39,6 +39,23 @@ grep -Fq 'timeout 120s docker pull "$KAFKA_IMAGE"' scripts/gres-e2e.sh
 grep -Fq 'chmod 600 "$client_properties"' scripts/gres-e2e.sh
 grep -Fq 'crabka gres probe-topic-read' scripts/gres-e2e.sh
 grep -Fq -- '--password-file "$client_properties"' scripts/gres-e2e.sh
+grep -Fq 'tenant-a-cannot-read-tenant-b-config' scripts/gres-e2e.sh
+grep -Fq 'tenant-a-cannot-read-tenant-b-wal' scripts/gres-e2e.sh
+grep -Fq 'tenant-a-cannot-read-global-registry' scripts/gres-e2e.sh
+grep -Fq 'sslmode=verify-full' scripts/gres-e2e.sh
+grep -Fq 'sslmode=disable' scripts/gres-e2e.sh
+grep -Fq 'sslrootcert=' scripts/gres-e2e.sh
+grep -Fq 'SHOW POOLS' scripts/gres-e2e.sh
+grep -Fq 'RELOAD' scripts/gres-e2e.sh
+if grep -Fq 'patch_pgdog_local_users' scripts/gres-e2e.sh; then
+    echo 'front-door gate still replaces passthrough auth with local password users' >&2
+    exit 1
+fi
+if grep -E '^(TENANT_[ABC]_CONN|WRONG_TENANT_CONN)=' scripts/gres-e2e.sh |
+    grep -Eq 'sslmode=(prefer|disable)'; then
+    echo 'PgDog success path does not require verified TLS' >&2
+    exit 1
+fi
 if grep -Fq 'kafka-console-consumer.sh' scripts/gres-e2e.sh; then
     echo 'global registry ACL proof still depends on the JVM console consumer' >&2
     exit 1

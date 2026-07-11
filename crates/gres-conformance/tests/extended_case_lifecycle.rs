@@ -2,8 +2,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crabka_gres_conformance::{
     ExtendedCase, ExtendedParam, ExtendedParamType, ExtendedParamValue, run_extended_one, run_one,
+    tls,
 };
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::Client;
 
 static NEXT_TABLE: AtomicU64 = AtomicU64::new(0);
 
@@ -20,13 +21,9 @@ fn unique_table(prefix: &str) -> String {
 }
 
 async fn connect(url: &str) -> Client {
-    let (client, connection) = tokio_postgres::connect(url, NoTls)
+    tls::connect(url)
         .await
-        .expect("connect to PgDog test endpoint");
-    tokio::spawn(async move {
-        connection.await.expect("drive PgDog test connection");
-    });
-    client
+        .expect("connect to PgDog test endpoint")
 }
 
 fn select_case(table: &str, setup: Vec<String>, teardown: Vec<String>) -> ExtendedCase {

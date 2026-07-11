@@ -143,6 +143,15 @@ struct RenderPgdogArgs {
     /// Suspended-tenant activator route as host:port.
     #[arg(long, value_parser = parse_activator)]
     activator: Option<(String, u16)>,
+    /// Client-facing PgDog listen port.
+    #[arg(long, default_value_t = 6432)]
+    listen_port: u16,
+    /// Client-facing TLS certificate path as visible inside the PgDog runtime.
+    #[arg(long, requires = "tls_private_key")]
+    tls_certificate: Option<PathBuf>,
+    /// Client-facing TLS private-key path as visible inside the PgDog runtime.
+    #[arg(long, requires = "tls_certificate")]
+    tls_private_key: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -644,7 +653,14 @@ async fn delete_tenant(args: TenantNameArgs) -> Result<(), String> {
 async fn render_pgdog(args: RenderPgdogArgs) -> Result<(), String> {
     let mut registry = connect_registry(&args.bootstrap).await?;
     let tenants = registry.list().await.map_err(|e| e.to_string())?;
-    render_pgdog_files(&tenants, args.activator, &args.out_dir)
+    render_pgdog_files(
+        &tenants,
+        args.activator,
+        &args.out_dir,
+        args.listen_port,
+        args.tls_certificate.as_deref(),
+        args.tls_private_key.as_deref(),
+    )
 }
 
 async fn connect_registry(bootstrap: &str) -> Result<Registry, String> {
@@ -794,6 +810,9 @@ fn render_pgdog_files(
     records: &[TenantRecord],
     activator: Option<(String, u16)>,
     out_dir: &Path,
+    listen_port: u16,
+    tls_certificate: Option<&Path>,
+    tls_private_key: Option<&Path>,
 ) -> Result<(), String> {
     std::fs::create_dir_all(out_dir).map_err(|e| format!("create output directory: {e}"))?;
     let endpoints = records.iter().map(tenant_endpoint).collect::<Vec<_>>();
@@ -802,13 +821,16 @@ fn render_pgdog_files(
         .map(|record| PgdogUser {
             name: record.sql_user.as_str().to_string(),
             database: record.name.as_str().to_string(),
-            password: record.scram_verifier.clone(),
+            password: None,
         })
-        .collect::<Vec<_>>();
+        .collect();
     let input = PgdogRenderInput {
         tenants: &endpoints,
         activator,
         general: PgdogGeneral {
+            listen_port,
+            tls_cert_path: tls_certificate.map(|path| path.to_string_lossy().into_owned()),
+            tls_key_path: tls_private_key.map(|path| path.to_string_lossy().into_owned()),
             users,
             ..PgdogGeneral::default()
         },
@@ -1053,13 +1075,18 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let records = vec![test_record("tenant-a", TenantState::Active)];
 
-        render_pgdog_files(&records, None, dir.path()).expect("render succeeds");
+        render_pgdog_files(&records, None, dir.path(), 6432, None, None).expect("render succeeds");
 
         let pgdog = std::fs::read_to_string(dir.path().join("pgdog.toml")).expect("pgdog file");
         let users = std::fs::read_to_string(dir.path().join("users.toml")).expect("users file");
         check!(pgdog.contains("name = \"tenant-a\""));
         check!(pgdog.contains("host = \"tenant-a.gres.svc\""));
-        assert!(users.contains("SCRAM-SHA-256$4096:salt$stored:server"));
+        assert!(users.contains("name = \"alice\""));
+        assert!(users.contains("database = \"tenant-a\""));
+        assert!(
+            !users.contains("password"),
+            "passthrough skeleton leaked a credential: {users}"
+        );
     }
 
     #[test]

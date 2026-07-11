@@ -36,7 +36,7 @@ case "${1:-}" in
     *) echo "FAIL: unknown argument $1" >&2; usage >&2; exit 2 ;;
 esac
 
-PGDOG_IMAGE="${CRABKA_GRES_PGDOG_IMAGE:-ghcr.io/pgdogdev/pgdog:0.1.6}"
+PGDOG_IMAGE="${CRABKA_GRES_PGDOG_IMAGE:-ghcr.io/pgdogdev/pgdog:0.1.47}"
 POSTGRES_IMAGE="${CRABKA_GRES_POSTGRES_IMAGE:-postgres:18}"
 KAFKA_IMAGE="${CRABKA_GRES_KAFKA_IMAGE:-mirror.gcr.io/apache/kafka:4.0.0}"
 CLUSTER_ID="00000000-0000-0000-0000-000000000001"
@@ -45,6 +45,7 @@ BROKER_PID=""
 PGDOG_CONTAINER=""
 ORACLE_CONTAINER=""
 EXPECT_KAFKA_ACL="${CRABKA_GRES_EXPECT_KAFKA_ACL:-1}"
+PGDOG_ADMIN_PASSWORD="gres-e2e-admin"
 TENANT_A_PID=""
 TENANT_B_PID=""
 TENANT_C_PID=""
@@ -195,6 +196,29 @@ expect_sql_fails() {
     log "PASS: ${label} failed as expected"
 }
 
+expect_tls_negotiated() {
+    local conninfo="$1"
+    local password="$2"
+    local output="${ARTIFACT_DIR}/tls-conninfo.log"
+    PGAPPNAME= PGPASSWORD="$password" psql "$conninfo" -c '\conninfo' >"$output" 2>&1 ||
+        fail "verified TLS connection failed"
+    grep -Eq 'SSL connection|TLSv[0-9]' "$output" ||
+        fail "psql did not report a negotiated TLS connection"
+    log "PASS: client-to-PgDog TLS negotiated and CA/hostname verified"
+}
+
+assert_pgdog_admin_reload() {
+    local admin_conn="$1"
+    local output="${ARTIFACT_DIR}/pgdog-admin-show-pools.log"
+    PGAPPNAME= PGPASSWORD="$PGDOG_ADMIN_PASSWORD" psql "$admin_conn" -v ON_ERROR_STOP=1 \
+        -c 'RELOAD' -c 'SHOW POOLS' >"$output" 2>&1 ||
+        fail "PgDog admin RELOAD/SHOW POOLS failed"
+    for tenant in tenant-a tenant-b tenant-c; do
+        grep -Fq "$tenant" "$output" || fail "PgDog admin view omitted $tenant after RELOAD"
+    done
+    log "PASS: real PgDog RELOAD confirmed three rendered database routes"
+}
+
 docker_is_available() {
     command -v docker >/dev/null 2>&1 && timeout 10s docker info >/dev/null 2>&1
 }
@@ -262,6 +286,8 @@ assert_kafka_acl_enforcement() {
         fail "Kafka CLI image pull failed or did not complete within 120 seconds"
     expect_compute_denied tenant-a-cannot-read-tenant-b tenant-b gres-tenant-a alice-secret
     expect_compute_denied tenant-b-cannot-read-tenant-a tenant-a gres-tenant-b bob-secret
+    expect_kafka_topic_read_denied tenant-a-cannot-read-tenant-b-config __gres_cfg.tenant-b gres-tenant-a alice-secret
+    expect_kafka_topic_read_denied tenant-a-cannot-read-tenant-b-wal __gres_wal.tenant-b.r0 gres-tenant-a alice-secret
     expect_kafka_topic_read_denied tenant-a-cannot-read-global-registry __gres_tenants gres-tenant-a alice-secret
 }
 
@@ -340,47 +366,42 @@ start_compute() {
 }
 
 patch_pgdog_listen_port() {
-    python3 - "$PGDOG_PORT" "${ARTIFACT_DIR}/pgdog/pgdog.toml" <<'PY'
+    python3 - "${ARTIFACT_DIR}/pgdog/pgdog.toml" <<'PY'
 import pathlib
 import sys
 
-port = sys.argv[1]
-path = pathlib.Path(sys.argv[2])
+path = pathlib.Path(sys.argv[1])
 text = path.read_text()
-text = text.replace("listen_port = 6432", f"listen_port = {port}", 1)
 text = text.replace(
     "pooler_mode = \"transaction\"",
     'pooler_mode = "transaction"\ndefault_pool_size = 10',
     1,
 )
-tenant_b = 'name = "tenant-b"\nhost = "tenant-b.gres.svc"'
-text = text.replace(tenant_b, tenant_b + "\npool_size = 1", 1)
-if (
-    "default_pool_size = 10" not in text
-    or "pool_size = 1" not in text
-):
-    raise SystemExit("failed to configure tenant-b's one-backend PgDog pool")
+if "default_pool_size = 10" not in text:
+    raise SystemExit("failed to configure PgDog pools")
 path.write_text(text)
+
+users = pathlib.Path(path.parent / "users.toml")
+users_text = users.read_text()
+bob = 'name = "bob"\ndatabase = "tenant-b"'
+users_text = users_text.replace(bob, bob + "\npool_size = 1", 1)
+if "pool_size = 1" not in users_text:
+    raise SystemExit("failed to pin tenant-b to one backend for F-1")
+users.write_text(users_text)
 PY
 }
 
-patch_pgdog_local_users() {
-    cat >"${ARTIFACT_DIR}/pgdog/users.toml" <<EOF
-[[users]]
-name = "alice"
-database = "tenant-a"
-password = "alice-secret"
-
-[[users]]
-name = "bob"
-database = "tenant-b"
-password = "bob-secret"
-
-[[users]]
-name = "carol"
-database = "tenant-c"
-password = "carol-secret"
-EOF
+assert_pgdog_config_loads() {
+    local output="${ARTIFACT_DIR}/pgdog-configcheck.log"
+    timeout 30s docker run --rm --network none \
+        -v "${PWD}/${ARTIFACT_DIR}/pgdog:/etc/pgdog:ro" \
+        "$PGDOG_IMAGE" /usr/local/bin/pgdog \
+        --config /etc/pgdog/pgdog.toml --users /etc/pgdog/users.toml configcheck \
+        >"$output" 2>&1 || fail "PgDog configcheck failed or timed out"
+    if grep -Eq '(^| )ERROR( |$)|failed to load|unknown field' "$output"; then
+        fail "PgDog configcheck reported an invalid rendered configuration"
+    fi
+    log "PASS: rendered files load in the pinned official PgDog image"
 }
 
 start_pgdog() {
@@ -390,6 +411,7 @@ start_pgdog() {
         --add-host "tenant-a.gres.svc:127.0.0.2"
         --add-host "tenant-b.gres.svc:127.0.0.3"
         --add-host "tenant-c.gres.svc:127.0.0.4"
+        -e PGDOG_ADMIN_PASSWORD="$PGDOG_ADMIN_PASSWORD"
         -v "${PWD}/${ARTIFACT_DIR}/pgdog:/etc/pgdog:ro"
         "$PGDOG_IMAGE"
         /usr/local/bin/pgdog --config /etc/pgdog/pgdog.toml --users /etc/pgdog/users.toml run
@@ -424,6 +446,11 @@ ORACLE_PORT="${PORTS[3]}"
 
 rm -rf "$ARTIFACT_DIR"
 mkdir -p "${ARTIFACT_DIR}/pgdog"
+cp crates/pgwire/tests/fixtures/test-server.pem "${ARTIFACT_DIR}/pgdog/tls.crt"
+cp crates/pgwire/tests/fixtures/test-server-key.pem "${ARTIFACT_DIR}/pgdog/tls.key"
+cp crates/pgwire/tests/fixtures/test-ca.pem "${ARTIFACT_DIR}/pgdog/ca.pem"
+chmod 644 "${ARTIFACT_DIR}/pgdog/tls.crt" "${ARTIFACT_DIR}/pgdog/ca.pem"
+chmod 600 "${ARTIFACT_DIR}/pgdog/tls.key"
 
 if [ "${CRABKA_GRES_SKIP_BUILD:-}" != "1" ]; then
     cargo build --locked -p crabka-cli -p crabka-broker -p crabka-gres -p crabka-gres-conformance
@@ -438,6 +465,29 @@ create_tenant tenant-a alice alice-secret
 create_tenant tenant-b bob bob-secret
 create_tenant tenant-c carol carol-secret
 
+# Broker-backed Registry + CLI CRUD proof through the production client.
+./target/debug/crabka gres list --bootstrap "127.0.0.1:${BROKER_PORT}" \
+    >"${ARTIFACT_DIR}/cli-list.json"
+for tenant in tenant-a tenant-b tenant-c; do
+    grep -Fq "\"name\": \"${tenant}\"" "${ARTIFACT_DIR}/cli-list.json" ||
+        fail "CLI list omitted ${tenant}"
+done
+./target/debug/crabka gres describe --bootstrap "127.0.0.1:${BROKER_PORT}" --name tenant-a \
+    >"${ARTIFACT_DIR}/cli-describe.json"
+grep -Fq '"name": "tenant-a"' "${ARTIFACT_DIR}/cli-describe.json" ||
+    fail "CLI describe omitted tenant-a"
+create_tenant tenant-crud dora dora-secret
+./target/debug/crabka gres delete --bootstrap "127.0.0.1:${BROKER_PORT}" --name tenant-crud \
+    >"${ARTIFACT_DIR}/cli-delete.log"
+if ./target/debug/crabka gres describe --bootstrap "127.0.0.1:${BROKER_PORT}" --name tenant-crud \
+    >"${ARTIFACT_DIR}/cli-describe-deleted.log" 2>&1; then
+    fail "CLI delete did not tombstone tenant-crud"
+fi
+if grep -R -Fq --include='cli-*' -e 'alice-secret' -e 'bob-secret' -e 'carol-secret' -e 'dora-secret' "$ARTIFACT_DIR"; then
+    fail "CLI output exposed plaintext password material"
+fi
+log "PASS: broker-backed Registry/CLI create-list-describe-delete/tombstone"
+
 start_compute tenant-a 127.0.0.2 tenant-a-compute TENANT_A_PID
 start_compute tenant-b 127.0.0.3 tenant-b-compute TENANT_B_PID
 start_compute tenant-c 127.0.0.4 tenant-c-compute TENANT_C_PID
@@ -445,9 +495,17 @@ start_compute tenant-c 127.0.0.4 tenant-c-compute TENANT_C_PID
 ./target/debug/crabka gres render-pgdog \
     --bootstrap "127.0.0.1:${BROKER_PORT}" \
     --out-dir "${ARTIFACT_DIR}/pgdog" \
+    --listen-port "$PGDOG_PORT" \
+    --tls-certificate /etc/pgdog/tls.crt \
+    --tls-private-key /etc/pgdog/tls.key \
     >"${ARTIFACT_DIR}/render-pgdog.log" 2>&1
 patch_pgdog_listen_port
-patch_pgdog_local_users
+grep -Fq 'name = "alice"' "${ARTIFACT_DIR}/pgdog/users.toml" || fail "passthrough users skeleton omitted alice"
+grep -Fq 'name = "bob"' "${ARTIFACT_DIR}/pgdog/users.toml" || fail "passthrough users skeleton omitted bob"
+grep -Fq 'name = "carol"' "${ARTIFACT_DIR}/pgdog/users.toml" || fail "passthrough users skeleton omitted carol"
+if grep -Fq 'password' "${ARTIFACT_DIR}/pgdog/users.toml"; then
+    fail "passthrough users.toml contains local password material"
+fi
 
 assert_kafka_acl_enforcement
 
@@ -460,19 +518,28 @@ docker_is_available || fail "Docker/PgDog runtime unavailable; pass --skip-pgdog
 
 docker pull "$PGDOG_IMAGE" >"${ARTIFACT_DIR}/pull-pgdog.log" 2>&1
 docker pull "$POSTGRES_IMAGE" >"${ARTIFACT_DIR}/pull-postgres.log" 2>&1
+assert_pgdog_config_loads
 start_pgdog
 
-TENANT_A_CONN="host=127.0.0.1 port=${PGDOG_PORT} dbname=tenant-a user=alice sslmode=prefer"
-TENANT_B_CONN="host=127.0.0.1 port=${PGDOG_PORT} dbname=tenant-b user=bob sslmode=prefer"
-TENANT_C_CONN="host=127.0.0.1 port=${PGDOG_PORT} dbname=tenant-c user=carol sslmode=prefer"
-WRONG_TENANT_CONN="host=127.0.0.1 port=${PGDOG_PORT} dbname=tenant-b user=alice sslmode=prefer"
+TLS_ROOT="${PWD}/${ARTIFACT_DIR}/pgdog/ca.pem"
+export PGSSLROOTCERT="$TLS_ROOT"
+TENANT_A_CONN="host=localhost port=${PGDOG_PORT} dbname=tenant-a user=alice sslmode=verify-full sslrootcert=${TLS_ROOT}"
+TENANT_B_CONN="host=localhost port=${PGDOG_PORT} dbname=tenant-b user=bob sslmode=verify-full sslrootcert=${TLS_ROOT}"
+TENANT_C_CONN="host=localhost port=${PGDOG_PORT} dbname=tenant-c user=carol sslmode=verify-full sslrootcert=${TLS_ROOT}"
+WRONG_TENANT_CONN="host=localhost port=${PGDOG_PORT} dbname=tenant-b user=alice sslmode=verify-full sslrootcert=${TLS_ROOT}"
+PGDOG_ADMIN_CONN="host=localhost port=${PGDOG_PORT} dbname=admin user=admin sslmode=verify-full sslrootcert=${TLS_ROOT}"
 
 wait_for_sql "tenant A through PgDog" "$TENANT_A_CONN" alice-secret
 wait_for_sql "tenant B through PgDog" "$TENANT_B_CONN" bob-secret
+wait_for_sql "tenant C through PgDog" "$TENANT_C_CONN" carol-secret
 expect_sql_equals "tenant A SCRAM" "$TENANT_A_CONN" alice-secret 'SELECT 1' 1
 expect_sql_equals "tenant B SCRAM" "$TENANT_B_CONN" bob-secret 'SELECT 1' 1
+expect_tls_negotiated "$TENANT_A_CONN" alice-secret
+expect_sql_fails "plaintext-client" "host=localhost port=${PGDOG_PORT} dbname=tenant-a user=alice sslmode=disable" alice-secret 'SELECT 1'
+expect_sql_fails "incorrect-tls-trust" "host=localhost port=${PGDOG_PORT} dbname=tenant-a user=alice sslmode=verify-full sslrootcert=${PWD}/crates/security/tests/fixtures/dev_client_ca.pem" alice-secret 'SELECT 1'
 expect_sql_fails "wrong-password" "$TENANT_A_CONN" wrong-secret 'SELECT 1'
 expect_sql_fails "wrong-tenant-credentials" "$WRONG_TENANT_CONN" alice-secret 'SELECT 1'
+assert_pgdog_admin_reload "$PGDOG_ADMIN_CONN"
 
 PGAPPNAME= PGPASSWORD=alice-secret psql "$TENANT_A_CONN" -v ON_ERROR_STOP=1 -c \
     "CREATE TABLE e2e_marker (id int4, name text); INSERT INTO e2e_marker VALUES (1, 'tenant-a');"
@@ -487,16 +554,17 @@ TENANT_A_PID=""
 expect_sql_equals "tenant B survives tenant A compute death" "$TENANT_B_CONN" bob-secret "SELECT name FROM e2e_marker WHERE id = 1" tenant-b
 
 start_oracle
-CRABKA_GRES_PGDOG_TEST_URL="postgresql://carol:carol-secret@127.0.0.1:${PGDOG_PORT}/tenant-c?sslmode=disable&connect_timeout=5" \
+CRABKA_GRES_PGDOG_TEST_URL="postgresql://carol:carol-secret@localhost:${PGDOG_PORT}/tenant-c?sslmode=require&connect_timeout=5" \
     cargo test --locked -p crabka-gres-conformance \
     --test extended_case_lifecycle -- --nocapture \
     >"${ARTIFACT_DIR}/extended-case-lifecycle.log" 2>&1 || \
     fail "extended case lifecycle regression failed"
 ./target/debug/crabka-gres-conformance \
     --oracle-url "host=127.0.0.1 port=${ORACLE_PORT} user=postgres dbname=postgres" \
-    --subject-url "$TENANT_C_CONN password=carol-secret" \
+    --subject-url "host=localhost port=${PGDOG_PORT} dbname=tenant-c user=carol password=carol-secret sslmode=require" \
+    --subject-reconnect-per-file \
     --corpus crates/gres-conformance/corpus \
-    --baseline crates/gres-conformance/baseline.json \
+    --baseline crates/gres-conformance/pooler-baseline.json \
     --extended-corpus crates/gres-conformance/corpus-extended \
     --extended-baseline crates/gres-conformance/corpus-extended/baseline.json \
     --extended-out "${ARTIFACT_DIR}/extended-parity-pgdog.json" \
@@ -505,11 +573,11 @@ CRABKA_GRES_PGDOG_TEST_URL="postgresql://carol:carol-secret@127.0.0.1:${PGDOG_PO
     --summary "${ARTIFACT_DIR}/parity-pgdog.md" \
     >"${ARTIFACT_DIR}/conformance-pgdog.log" 2>&1
 
-DATABASE_URL="postgresql://bob:bob-secret@127.0.0.1:${PGDOG_PORT}/tenant-b?sslmode=prefer&connect_timeout=5" \
+DATABASE_URL="postgresql://bob:bob-secret@localhost:${PGDOG_PORT}/tenant-b?sslmode=require&connect_timeout=5" \
     timeout 30s ./target/debug/crabka-gres-driver-smoke \
     >"${ARTIFACT_DIR}/rust-driver-smoke.log" 2>&1 || fail "Rust driver smoke failed or timed out"
 
-DATABASE_URL="postgresql://bob:bob-secret@127.0.0.1:${PGDOG_PORT}/tenant-b?sslmode=prefer&connect_timeout=5" \
+DATABASE_URL="postgresql://bob:bob-secret@localhost:${PGDOG_PORT}/tenant-b?sslmode=verify-full&sslrootcert=${TLS_ROOT}&connect_timeout=5" \
 timeout 30s python3 - <<'PY' >"${ARTIFACT_DIR}/python-driver-smoke.log" 2>&1 || fail "Python driver smoke failed or timed out"
 import os
 import psycopg
@@ -525,13 +593,13 @@ with psycopg.connect(os.environ["DATABASE_URL"]) as connection:
 print("PASS: psycopg parameterized transaction-pooling smoke")
 PY
 
-DATABASE_URL="postgresql://bob:bob-secret@127.0.0.1:${PGDOG_PORT}/tenant-b?sslmode=prefer&connect_timeout=5" \
+DATABASE_URL="postgresql://bob:bob-secret@localhost:${PGDOG_PORT}/tenant-b?sslmode=verify-full&sslrootcert=${TLS_ROOT}&connect_timeout=5" \
 timeout 30s python3 - <<'F1PY' >"${ARTIFACT_DIR}/f1-pooler-guc.log" 2>&1 || fail "F-1 PgDog GUC gate failed or timed out"
 import os
 import psycopg
 
 with (
-    # PgDog 0.1.6 tracks session-control statements on its simple-query path.
+    # PgDog tracks session-control statements on its simple-query path.
     # ClientCursor keeps the gate on that documented transaction-pooler path.
     psycopg.connect(
         os.environ["DATABASE_URL"],
@@ -547,7 +615,7 @@ with (
     second_connection.autocommit = True
 
     with first_connection.transaction(), first_connection.cursor() as cursor:
-        # PgDog 0.1.6 forwards in-transaction SET without tracking it. Observe a
+        # PgDog forwards this in-transaction SET without tracking it. Observe a
         # distinct backend value directly, then restore the tracked startup value
         # before releasing the sole backend so the known limitation cannot leak.
         cursor.execute("SET application_name = 'f1-distinct-set'")
@@ -567,7 +635,7 @@ with (
         cursor.execute("SET LOCAL statement_timeout = 17")
         cursor.execute("SHOW statement_timeout")
         local_timeout = cursor.fetchone()[0]
-        assert local_timeout == "17", f"pinned PgDog SET LOCAL baseline changed: {local_timeout!r}"
+        assert local_timeout == "17ms", f"pinned PgDog SET LOCAL baseline changed: {local_timeout!r}"
         second_connection.rollback()
 
     with second_connection.transaction(), second_connection.cursor() as cursor:
@@ -580,11 +648,11 @@ with (
         cursor.execute("SHOW application_name")
         assert cursor.fetchone()[0] == "f1-client-one"
 
-    # Keep RESET and its observation in one simple-query checkout. PgDog 0.1.6
-    # does not retain RESET in its logical parameter map (pinned baseline).
+    # PgDog 0.1.47 rejects mixed SET-family/non-SET multi-statements, so issue
+    # RESET and its observation as separate simple queries on the same client.
     with first_connection.cursor() as cursor:
-        cursor.execute("RESET application_name; SHOW application_name")
-        assert cursor.nextset()
+        cursor.execute("RESET application_name")
+        cursor.execute("SHOW application_name")
         assert cursor.fetchone()[0] == ""
 
     with second_connection.transaction(), second_connection.cursor() as cursor:

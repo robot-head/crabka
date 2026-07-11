@@ -57,6 +57,8 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tokio-postgres = { workspace = true }
+native-tls = { workspace = true }
+postgres-native-tls = { workspace = true }
 tower = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

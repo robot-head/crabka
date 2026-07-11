@@ -36,7 +36,7 @@ readonly SQL_PASSWORD="cold-secret"
 readonly COMPUTE_HOST="127.0.0.2"
 readonly COMPUTE_PORT="5432"
 readonly CLUSTER_ID="00000000-0000-0000-0000-000000000001"
-readonly PGDOG_IMAGE="${CRABKA_GRES_PGDOG_IMAGE:-ghcr.io/pgdogdev/pgdog:0.1.6}"
+readonly PGDOG_IMAGE="${CRABKA_GRES_PGDOG_IMAGE:-ghcr.io/pgdogdev/pgdog:0.1.47}"
 readonly ARTIFACT_DIR="${CRABKA_GRES_COLDSTART_ARTIFACT_DIR:-target/gres-coldstart-artifacts}"
 readonly ITERATIONS="${CRABKA_GRES_COLDSTART_ITERATIONS:-10}"
 # This is a deliberately generous CI-environment backstop, not the product SLO.

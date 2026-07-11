@@ -111,8 +111,8 @@ pub struct PgdogUser {
     pub name: String,
     /// `PgDog` database route this user may access.
     pub database: String,
-    /// PgDog-compatible password or verifier material.
-    pub password: String,
+    /// Optional PgDog-local password. Omit it for passthrough skeleton entries.
+    pub password: Option<String>,
 }
 
 /// General `PgDog` settings shared by the rendered fleet.
@@ -128,8 +128,6 @@ pub struct PgdogGeneral {
     pub passthrough_auth: bool,
     /// Fleet-wide pooler mode.
     pub pooler_mode: PgdogPoolerMode,
-    /// Kubernetes secret reference that owns the `PgDog` admin password.
-    pub admin_password_secret_ref: Option<String>,
     /// Maximum acceptable tenant wake latency.
     pub cold_start_ceiling: Duration,
     /// Optional explicit timeout knobs. Omitted values are derived from the ceiling.
@@ -150,7 +148,6 @@ impl Default for PgdogGeneral {
             tls_key_path: None,
             passthrough_auth: true,
             pooler_mode: PgdogPoolerMode::Transaction,
-            admin_password_secret_ref: None,
             cold_start_ceiling: Duration::from_secs(30),
             timeouts: None,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
@@ -200,6 +197,12 @@ struct PgdogConfig<'a> {
 
 impl<'a> PgdogConfig<'a> {
     fn try_from_input(input: &'a PgdogRenderInput<'a>) -> Result<Self, ControlError> {
+        if input.general.tls_cert_path.is_some() != input.general.tls_key_path.is_some() {
+            return Err(ControlError::invalid_field(
+                "frontend_tls",
+                "TLS certificate and private key must be configured together",
+            ));
+        }
         let timeouts = input
             .general
             .timeouts
@@ -217,7 +220,7 @@ impl<'a> PgdogConfig<'a> {
 
 #[derive(Debug, Serialize)]
 struct RenderGeneral<'a> {
-    listen_port: u16,
+    port: u16,
     pooler_mode: PgdogPoolerMode,
     passthrough_auth: &'static str,
     connect_timeout: u64,
@@ -226,31 +229,30 @@ struct RenderGeneral<'a> {
     idle_timeout: u64,
     server_lifetime: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tls_cert_path: Option<&'a str>,
+    tls_certificate: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tls_key_path: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    admin_password_secret_ref: Option<&'a str>,
+    tls_private_key: Option<&'a str>,
+    tls_client_required: bool,
 }
 
 impl<'a> RenderGeneral<'a> {
     fn from_settings(general: &'a PgdogGeneral, timeouts: PgdogTimeouts) -> Self {
         Self {
-            listen_port: general.listen_port,
+            port: general.listen_port,
             pooler_mode: general.pooler_mode,
             passthrough_auth: if general.passthrough_auth {
                 "enabled"
             } else {
                 "disabled"
             },
-            connect_timeout: seconds_rounded_up(timeouts.connect_timeout),
+            connect_timeout: milliseconds_rounded_up(timeouts.connect_timeout),
             connect_attempts: timeouts.connect_attempts,
-            checkout_timeout: seconds_rounded_up(timeouts.checkout_timeout),
-            idle_timeout: seconds_rounded_up(general.idle_timeout),
-            server_lifetime: seconds_rounded_up(general.server_lifetime),
-            tls_cert_path: general.tls_cert_path.as_deref(),
-            tls_key_path: general.tls_key_path.as_deref(),
-            admin_password_secret_ref: general.admin_password_secret_ref.as_deref(),
+            checkout_timeout: milliseconds_rounded_up(timeouts.checkout_timeout),
+            idle_timeout: milliseconds_rounded_up(general.idle_timeout),
+            server_lifetime: milliseconds_rounded_up(general.server_lifetime),
+            tls_certificate: general.tls_cert_path.as_deref(),
+            tls_private_key: general.tls_key_path.as_deref(),
+            tls_client_required: general.tls_cert_path.is_some(),
         }
     }
 }
@@ -287,7 +289,7 @@ impl<'a> UsersConfig<'a> {
                     "must not be empty",
                 ));
             }
-            if user.password.is_empty() {
+            if user.password.as_ref().is_some_and(String::is_empty) {
                 return Err(ControlError::invalid_field(
                     "user password",
                     "must not be empty",
@@ -300,7 +302,7 @@ impl<'a> UsersConfig<'a> {
             users.push(RenderUser {
                 name: user.name.as_str(),
                 database: user.database.as_str(),
-                password: user.password.as_str(),
+                password: user.password.as_deref(),
             });
         }
 
@@ -312,7 +314,8 @@ impl<'a> UsersConfig<'a> {
 struct RenderUser<'a> {
     name: &'a str,
     database: &'a str,
-    password: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    password: Option<&'a str>,
 }
 
 fn render_databases<'a>(
@@ -384,13 +387,12 @@ fn divide_rounding_up(duration: Duration, divisor: u32) -> Duration {
     Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
 }
 
-fn seconds_rounded_up(duration: Duration) -> u64 {
-    let seconds = duration.as_secs();
-    if duration.subsec_nanos() == 0 {
-        return seconds;
+fn milliseconds_rounded_up(duration: Duration) -> u64 {
+    let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+    if duration.subsec_nanos().is_multiple_of(1_000_000) {
+        return millis;
     }
-
-    seconds.saturating_add(1)
+    millis.saturating_add(1)
 }
 
 #[cfg(test)]
@@ -415,6 +417,36 @@ mod tests {
         let rendered = render_pgdog_toml(&input).expect("pgdog render succeeds");
 
         assert!(rendered == EXPECTED_PGDOG);
+        check!(rendered.contains("tls_certificate = \"/etc/pgdog/tls/tls.crt\""));
+        check!(rendered.contains("tls_private_key = \"/etc/pgdog/tls/tls.key\""));
+        check!(rendered.contains("tls_client_required = true"));
+        check!(rendered.contains("port = 6432"));
+        check!(!rendered.contains("listen_port"));
+        check!(!rendered.contains("tls_cert_path"));
+        check!(!rendered.contains("tls_key_path"));
+    }
+
+    #[test]
+    fn rejects_partial_frontend_tls_configuration() {
+        let general = PgdogGeneral {
+            tls_cert_path: Some("/etc/pgdog/tls/tls.crt".to_owned()),
+            tls_key_path: None,
+            ..PgdogGeneral::default()
+        };
+        let tenants = vec![active_tenant("blue", "blue-0.gres.svc", 5432)];
+        let input = PgdogRenderInput {
+            tenants: &tenants,
+            activator: None,
+            general,
+        };
+
+        let error = render_pgdog_toml(&input).expect_err("partial TLS must fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("TLS certificate and private key")
+        );
     }
 
     #[test]
@@ -531,14 +563,13 @@ mod tests {
             listen_port: 6432,
             tls_cert_path: Some("/etc/pgdog/tls/tls.crt".to_owned()),
             tls_key_path: Some("/etc/pgdog/tls/tls.key".to_owned()),
-            admin_password_secret_ref: Some("pgdog-admin".to_owned()),
             cold_start_ceiling: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(45),
             server_lifetime: Duration::from_mins(4),
             users: vec![PgdogUser {
                 name: "alice".to_owned(),
                 database: "blue".to_owned(),
-                password: "SCRAM-SHA-256$4096:salt$stored:server".to_owned(),
+                password: Some("SCRAM-SHA-256$4096:salt$stored:server".to_owned()),
             }],
             ..PgdogGeneral::default()
         }
