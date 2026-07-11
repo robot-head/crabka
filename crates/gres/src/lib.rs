@@ -1852,21 +1852,77 @@ async fn open_multirange_runtime(
         return Ok(GresRuntime::multi(gateway));
     }
 
-    if tenant_config
-        .hosted_ranges
-        .as_ref()
-        .is_some_and(|ranges| !ranges.contains(&crabka_gres_ranges::RangeId::COORDINATOR))
-    {
-        return invalid_input(
-            "live rN-only substrate runtime is disabled: read-only range-0 follower broker wiring is not available",
-        );
-    }
-
     let checkpoint_store = config
         .checkpoints
         .as_ref()
         .map(build_checkpoint_store)
         .transpose()?;
+    if tenant_config
+        .hosted_ranges
+        .as_ref()
+        .is_some_and(|ranges| !ranges.contains(&crabka_gres_ranges::RangeId::COORDINATOR))
+    {
+        let follower_config = crabka_gres_substrate::LiveRecoveryConfig::new(
+            config.bootstrap.clone(),
+            tenant_config.tenant.clone(),
+            crabka_gres_ranges::RangeId::COORDINATOR,
+            config.kafka_security.clone(),
+        );
+        let follower_store: Arc<dyn RestoreKv> = match config.cache_dir.as_deref() {
+            Some(parent) => {
+                let dir = parent.join("r0-follower");
+                std::fs::create_dir_all(&dir)?;
+                Arc::new(FjallKv::open_cache(&dir).map_err(|error| {
+                    std::io::Error::other(format!("range-0 follower cache: {error:?}"))
+                })?)
+            }
+            None => Arc::new(MemKv::default()),
+        };
+        let follower = crabka_gres_substrate::bootstrap_live_range0_follower(
+            &follower_config,
+            follower_store,
+            checkpoint_store.as_deref(),
+        )
+        .await
+        .map_err(|error| std::io::Error::other(format!("range-0 follower bootstrap: {error}")))?;
+        let tail = follower.tail();
+        let sampler = Arc::new(crabka_gres_substrate::BrokerRange0EndSampler(Arc::new(
+            crabka_gres_substrate::LiveCommittedEndSampler::new(follower_config.clone()),
+        )));
+        tenant_config = tenant_config.with_read_only_range0_replica(
+            crabka_gres_ranges::ReadOnlyRange0Replica::new(tail, sampler),
+        );
+        tokio::spawn(async move {
+            loop {
+                let applied = follower.tail().applied_offset();
+                match crabka_gres_substrate::live_committed_end(&follower_config).await {
+                    Ok(end) if end > applied => {
+                        match crabka_gres_substrate::read_live_committed_tail(
+                            &follower_config,
+                            applied,
+                            end,
+                        )
+                        .await
+                        {
+                            Ok(items) => {
+                                for item in &items {
+                                    if follower.apply_committed(item).is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "range-0 follower tail read failed")
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "range-0 follower end sample failed"),
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        });
+    }
     let engines = recover_live_multirange_engines(config, &tenant_config, checkpoint_store).await?;
     open_live_multirange_tenant(tenant_config, engines, config)
 }

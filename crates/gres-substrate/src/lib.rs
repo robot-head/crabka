@@ -37,12 +37,16 @@ pub use self::{
         restore_table_transfer_from_manifest_and_replay_tail, rewrite_for_checkpoint,
     },
     error::SubstrateError,
-    follower::{BrokerRange0EndSampler, CommittedEndSampler, ReadOnlyRange0Follower},
+    follower::{
+        BrokerRange0EndSampler, CommittedEndSampler, LiveCommittedEndSampler,
+        ReadOnlyRange0Follower,
+    },
     frame::WalFrame,
     recovery::{
         CommittedWalReader, InMemoryWalLog, LiveRecovered, LiveRecoveryConfig, RecoveryBarrier,
-        RecoveryFencer, bounded_committed_tail, read_live_committed_tail, recover_after_barrier,
-        recover_live, recover_live_for_range, recover_live_for_range_with_restore,
+        RecoveryFencer, bootstrap_live_range0_follower, bounded_committed_tail, live_committed_end,
+        read_live_committed_tail, recover_after_barrier, recover_live, recover_live_for_range,
+        recover_live_for_range_with_restore,
     },
     replay::{
         ReplayItem, ReplayOutcome, replay_committed_frames, replay_committed_frames_from_filtered,

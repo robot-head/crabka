@@ -207,6 +207,49 @@ pub async fn read_live_committed_tail(
     bounded_committed_tail(&reader, after_offset, barrier_offset).await
 }
 
+/// Return the last offset visible under broker `READ_COMMITTED` isolation.
+pub async fn live_committed_end(config: &LiveRecoveryConfig) -> Result<i64, SubstrateError> {
+    let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
+    let topic = config.wal_topic();
+    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
+        .await
+        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+    let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
+    let reader = KafkaCommittedWalReader::new(
+        bootstrap_addrs,
+        topic,
+        topic_uuid,
+        0,
+        config.security.clone(),
+    );
+    let conn = reader.open_connection().await?;
+    let fetched = reader.fetch_partition_log_start(&conn).await?;
+    Ok(fetched.last_stable_offset.saturating_sub(1))
+}
+
+/// Restore and catch up a read-only range-zero follower without fencing a writer.
+pub async fn bootstrap_live_range0_follower(
+    config: &LiveRecoveryConfig,
+    store: Arc<dyn RestoreKv>,
+    checkpoints: Option<&dyn CheckpointStore>,
+) -> Result<crate::follower::ReadOnlyRange0Follower, SubstrateError> {
+    let end = live_committed_end(config).await?;
+    let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
+    let topic = config.wal_topic();
+    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
+        .await
+        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+    let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
+    let reader = KafkaCommittedWalReader::new(
+        bootstrap_addrs,
+        topic,
+        topic_uuid,
+        end,
+        config.security.clone(),
+    );
+    crate::follower::ReadOnlyRange0Follower::bootstrap(config, store, &reader, checkpoints).await
+}
+
 async fn recover_live_for_range_inner(
     config: LiveRecoveryConfig,
     store: &dyn Kv,
