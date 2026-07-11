@@ -485,6 +485,8 @@ pub struct ScanRangeReq {
     pub global_snapshot: WireSnapshot,
     pub own_xid: Option<u64>,
     pub read_ts: Option<u64>,
+    #[serde(default)]
+    pub own_start_ts: Option<u64>,
     pub predicate: WirePredicatePushdown,
     pub projection: WireProjectionPushdown,
     pub partial_aggregate: Option<WirePartialAggregateSpec>,
@@ -1495,6 +1497,7 @@ mod tests {
                     },
                     own_xid: None,
                     read_ts: None,
+                    own_start_ts: None,
                     predicate: WirePredicatePushdown::FullScan,
                     projection: WireProjectionPushdown::All,
                     partial_aggregate: None,
@@ -1606,6 +1609,7 @@ mod tests {
                     },
                     own_xid: Some(10),
                     read_ts: Some(22),
+                    own_start_ts: None,
                     predicate: WirePredicatePushdown::Conjunctive {
                         predicates: vec![WireColumnPredicate {
                             column: 0,

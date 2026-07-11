@@ -450,6 +450,7 @@ impl VisibilityWorld {
                 snapshot: &snapshot,
                 own_xid: None,
                 read_ts: Some(read_ts),
+                own_start_ts: None,
                 table: &table,
                 interval: crabka_pgexec::RowInterval::ALL,
                 predicate: PredicatePushdown::FullScan,

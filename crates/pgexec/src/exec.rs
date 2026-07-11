@@ -1800,7 +1800,7 @@ fn execute_timestamp_update(
                 .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let rows = scan_ts_live_interval(kv, kv, table, ReadTimestamp::MAX, RowInterval::ALL)?;
+    let rows = scan_ts_live_interval(kv, kv, table, ReadTimestamp::MAX, None, RowInterval::ALL)?;
     let mut writes = Vec::new();
     for ScannedRow { rowid, row, .. } in rows {
         if !row_matches(filter, &scope, &row, ctx)? {
@@ -1837,7 +1837,7 @@ fn execute_timestamp_delete(
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TimestampWritePlan, ExecError> {
     let scope = Scope::single(table, &table.name);
-    let rows = scan_ts_live_interval(kv, kv, table, ReadTimestamp::MAX, RowInterval::ALL)?;
+    let rows = scan_ts_live_interval(kv, kv, table, ReadTimestamp::MAX, None, RowInterval::ALL)?;
     let mut writes = Vec::new();
     for ScannedRow { rowid, row, .. } in rows {
         if !row_matches(filter, &scope, &row, ctx)? {
@@ -2274,6 +2274,7 @@ pub(crate) fn scan_ts_live_interval(
     primary_kv: &dyn Kv,
     table: &crabka_pgcatalog::Table,
     read_ts: ReadTimestamp,
+    own_start_ts: Option<TimestampTransactionId>,
     interval: RowInterval,
 ) -> Result<Vec<ScannedRow>, ExecError> {
     let scanned = scan_table_interval(kv, table.id, interval)?;
@@ -2311,6 +2312,11 @@ pub(crate) fn scan_ts_live_interval(
             };
             let primary_decision = descriptor.as_ref().map(|descriptor| descriptor.decision);
             let candidate = match (version.state, primary_decision, verified_distributed_intent) {
+                (
+                    crabka_pgmvcc::version::TsVersionState::Intent,
+                    Some(PrimaryTxnDecision::Pending),
+                    true,
+                ) if own_start_ts == Some(start_ts) => Some((u64::MAX, Some(version.row))),
                 // A range-0 commit decision makes every prewritten intent logically
                 // visible, even if this particular participant has not yet completed
                 // its idempotent physical resolution.
@@ -2805,6 +2811,7 @@ fn build_table_expr(
                 snapshot,
                 own_xid: own,
                 read_ts: None,
+                own_start_ts: None,
                 table: &t,
                 interval: RowInterval::ALL,
                 predicate: distributed_plan.predicate.clone(),
@@ -2828,6 +2835,7 @@ fn build_table_expr(
                             snapshot,
                             own_xid: own,
                             read_ts: None,
+                            own_start_ts: None,
                             table: &t,
                             interval: RowInterval::ALL,
                             predicate: PredicatePushdown::FullScan,
@@ -3012,6 +3020,7 @@ fn try_execute_partial_aggregate_pushdown(
         snapshot,
         own_xid: own,
         read_ts: None,
+        own_start_ts: None,
         table: &table,
         interval: RowInterval::ALL,
         predicate,
@@ -4196,6 +4205,7 @@ pub(crate) async fn execute_read_locking(
         snapshot,
         own_xid: Some(xid),
         read_ts: None,
+        own_start_ts: None,
         table: &t,
         interval: RowInterval::ALL,
         predicate: PredicatePushdown::FullScan,

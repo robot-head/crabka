@@ -493,6 +493,28 @@ impl SqlEngine {
         read_ts: Option<timestamp_txn::ReadTimestamp>,
         interval: scanner::RowInterval,
     ) -> Result<Vec<scanner::ScannedRow>, ExecError> {
+        self.scan_local_visible_with_timestamp_owner(
+            table,
+            global_snapshot,
+            snapshot,
+            own_xid,
+            read_ts,
+            None,
+            interval,
+        )
+    }
+
+    /// Scan local visibility while exposing pending intents owned by `own_start_ts`.
+    pub fn scan_local_visible_with_timestamp_owner(
+        &self,
+        table: &crabka_pgcatalog::Table,
+        global_snapshot: &crabka_pgmvcc::visibility::Snapshot,
+        snapshot: &crabka_pgmvcc::visibility::Snapshot,
+        own_xid: Option<u64>,
+        read_ts: Option<timestamp_txn::ReadTimestamp>,
+        own_start_ts: Option<timestamp_txn::TimestampTransactionId>,
+        interval: scanner::RowInterval,
+    ) -> Result<Vec<scanner::ScannedRow>, ExecError> {
         if table.sharded {
             let read_ts = read_ts.ok_or_else(|| {
                 ExecError::Unsupported(
@@ -504,6 +526,7 @@ impl SqlEngine {
                 self.catalog_kv.as_ref(),
                 table,
                 read_ts,
+                own_start_ts,
                 interval,
             );
         }
@@ -1762,6 +1785,7 @@ mod tests {
                 snapshot: &snapshot,
                 own_xid: None,
                 read_ts: None,
+                own_start_ts: None,
                 table: &table,
                 interval: RowInterval::ALL,
                 predicate: PredicatePushdown::FullScan,

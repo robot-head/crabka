@@ -1456,12 +1456,13 @@ impl RegistryRangeScanner {
         let mut rows = Vec::new();
         for range_id in self.registry.range_ids().await {
             if let Some(engine) = self.local_engines.get(&range_id) {
-                let local_rows = engine.scan_local_visible(
+                let local_rows = engine.scan_local_visible_with_timestamp_owner(
                     request.table,
                     request.global_snapshot,
                     request.snapshot,
                     request.own_xid,
                     request.read_ts,
+                    request.own_start_ts,
                     request.interval,
                 )?;
                 rows.extend(crabka_pgexec::scanner::apply_executable_scan_pushdown(
@@ -1503,6 +1504,9 @@ impl RegistryRangeScanner {
             read_ts: request
                 .read_ts
                 .map(crabka_pgexec::timestamp_txn::ReadTimestamp::get),
+            own_start_ts: request
+                .own_start_ts
+                .map(crabka_pgexec::TimestampTransactionId::get),
             predicate: encode_predicate(&request.predicate)?,
             projection: encode_projection(&request.projection),
             partial_aggregate: request
@@ -1735,6 +1739,10 @@ impl crabka_pgexec::RangeCursor for RegistryRangeCursor<'_> {
                             .request
                             .read_ts
                             .map(crabka_pgexec::timestamp_txn::ReadTimestamp::get),
+                        own_start_ts: self
+                            .request
+                            .own_start_ts
+                            .map(crabka_pgexec::TimestampTransactionId::get),
                         predicate: encode_predicate(&self.request.predicate)?,
                         projection: encode_projection(&self.request.projection),
                         partial_aggregate: None,
@@ -1890,7 +1898,7 @@ fn handle_scan_range(
     request: ScanRangeReq,
 ) -> Result<ScanRangeResp, crabka_pgexec::ExecError> {
     let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.table_name)?;
-    let rows = engine.scan_local_visible(
+    let rows = engine.scan_local_visible_with_timestamp_owner(
         &table,
         &request.global_snapshot.into(),
         &request.local_snapshot.into(),
@@ -1898,6 +1906,11 @@ fn handle_scan_range(
         request
             .read_ts
             .map(crabka_pgexec::timestamp_txn::ReadTimestamp::new)
+            .transpose()
+            .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?,
+        request
+            .own_start_ts
+            .map(crabka_pgexec::TimestampTransactionId::new)
             .transpose()
             .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?,
         crabka_pgexec::RowInterval {
@@ -2875,6 +2888,7 @@ mod tests {
                     read_ts: Some(
                         crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                     ),
+                    own_start_ts: None,
                     table: &sharded_table(),
                     interval: crabka_pgexec::RowInterval::ALL,
                     predicate: crabka_pgexec::PredicatePushdown::FullScan,
@@ -2947,6 +2961,7 @@ mod tests {
                 read_ts: Some(
                     crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                 ),
+                own_start_ts: None,
                 table: &sharded_table(),
                 interval: crabka_pgexec::RowInterval {
                     start: Some(1),
@@ -3035,6 +3050,7 @@ mod tests {
                 read_ts: Some(
                     crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                 ),
+                own_start_ts: None,
                 table: &sharded_table(),
                 interval: crabka_pgexec::RowInterval::ALL,
                 predicate: crabka_pgexec::PredicatePushdown::FullScan,
@@ -3110,6 +3126,7 @@ mod tests {
                 read_ts: Some(
                     crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                 ),
+                own_start_ts: None,
                 table: &sharded_table(),
                 interval: crabka_pgexec::RowInterval::ALL,
                 predicate: crabka_pgexec::PredicatePushdown::FullScan,
@@ -3237,6 +3254,7 @@ mod tests {
                 },
                 own_xid: None,
                 read_ts: Some(100),
+                own_start_ts: None,
                 predicate: WirePredicatePushdown::Conjunctive {
                     predicates: vec![WireColumnPredicate {
                         column: 0,
@@ -3294,6 +3312,7 @@ mod tests {
             },
             own_xid: None,
             read_ts: Some(100),
+            own_start_ts: None,
             predicate: WirePredicatePushdown::FullScan,
             projection: WireProjectionPushdown::All,
             partial_aggregate: None,
@@ -3361,6 +3380,7 @@ mod tests {
                 },
                 own_xid: None,
                 read_ts: Some(100),
+                own_start_ts: None,
                 predicate: WirePredicatePushdown::Conjunctive {
                     predicates: vec![WireColumnPredicate {
                         column: 1,
@@ -3423,6 +3443,7 @@ mod tests {
                 },
                 own_xid: None,
                 read_ts: Some(100),
+                own_start_ts: None,
                 predicate: WirePredicatePushdown::FullScan,
                 projection: WireProjectionPushdown::All,
                 partial_aggregate: None,
@@ -3495,6 +3516,7 @@ mod tests {
                 read_ts: Some(
                     crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                 ),
+                own_start_ts: None,
                 table: &sharded_table(),
                 interval: crabka_pgexec::RowInterval::ALL,
                 predicate: crabka_pgexec::PredicatePushdown::FullScan,
@@ -3581,6 +3603,7 @@ mod tests {
                 read_ts: Some(
                     crabka_pgexec::ReadTimestamp::new(100).expect("finite test timestamp"),
                 ),
+                own_start_ts: None,
                 table: &owner_table,
                 interval: crabka_pgexec::RowInterval::ALL,
                 predicate: crabka_pgexec::PredicatePushdown::FullScan,
