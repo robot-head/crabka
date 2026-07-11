@@ -279,6 +279,7 @@ jobs:
               - 'packaging/melange/crabka.yaml'
               - 'charts/crabka-operator/**'
               - 'scripts/gres-range-scaling.sh'
+              - 'scripts/tests/gres-range-scaling-ci.sh'
               - 'scripts/gres-sharded-conformance.sh'
 
   rust:
@@ -485,15 +486,39 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    continue-on-error: true
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - name: Generate Gres range-scaling artifact
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gres-range-scaling
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+      - name: Verify Gres scaling CI contract
+        run: bash scripts/tests/gres-range-scaling-ci.sh
+      - name: Measure live Gres range scaling
         run: |
-          CRABKA_GRES_RANGE_SCALING_MODE=dry-run \
+          CRABKA_GRES_RANGE_SCALING_MODE=fast \
           CRABKA_GRES_RANGE_SCALING_KEEP_ARTIFACTS=1 \
           ./scripts/gres-range-scaling.sh
+      - name: Verify live scaling gates
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          artifact = json.loads(Path("target/gres-range-scaling-artifacts/range-scaling.json").read_text())
+          assert artifact["mode"] == "live", artifact["mode"]
+          assert artifact["passed"]["range_local"] is True
+          assert artifact["passed"]["sharded_ingest"] is True
+          assert artifact["passed"]["decision_ceiling"] is True
+          assert artifact["passed"]["overall"] is True
+          assert artifact["sharded_table"]["timestamp_transactions"]["commit_rate_curve"]
+          assert artifact["sharded_table"]["decision_ceiling"]["g8_decision_ceiling_curve"]
+          PY
       - name: Upload Gres range-scaling artifact
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
