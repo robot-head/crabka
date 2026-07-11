@@ -434,7 +434,7 @@ non_goal_specs!(
     ),
     (
         CreateAccessMethod,
-        "CREATE ACCESS METHOD am TYPE INDEX HANDLER handler"
+        "CREATE ACCESS METHOD am TYPE INDEX HANDLER handler_fn"
     ),
     (
         CreateConversion,

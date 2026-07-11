@@ -1,8 +1,10 @@
 {
   "format_version": 1,
   "postgresql_major": 18,
-  "source": "https://www.postgresql.org/docs/18/sql-commands.html",
-  "source_description": "PostgreSQL 18 SQL Commands reference; command titles are preserved exactly and language-feature rows are excluded.",
+  "source": "https://github.com/postgres/postgres/blob/REL_18_0/doc/src/sgml/ref/allfiles.sgml",
+  "source_snapshot": "pg18-allfiles-REL_18_0.sgml",
+  "source_sha256": "4240987b5fddaa5ab5ffa2562551cb1325f2e5527b552c3bbe5be7ca6fd42fc7",
+  "source_description": "PostgreSQL REL_18_0 SQL-command entity list. The checker expands documented filename abbreviations and seven separately tracked ALTER/CREATE TABLE syntax families deterministically.",
   "commands": [
     "ABORT",
     "ALTER AGGREGATE",

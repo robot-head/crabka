@@ -198,6 +198,78 @@ fn compatibility_refusal_representatives_are_postgresql_syntax() {
             "pgparser rejected refusal representative: {sql}"
         );
     }
+    for spec in crabka_pgparser::ast::NON_GOAL_REFUSALS {
+        let variant = refusal_variant(spec.representative_sql);
+        assert!(
+            pg_accepts(&variant),
+            "libpg_query rejected refusal variant for {}: {variant}",
+            spec.command.command_name(),
+        );
+        assert!(
+            we_accept(&variant),
+            "pgparser rejected refusal variant for {}: {variant}",
+            spec.command.command_name(),
+        );
+    }
+}
+
+fn refusal_variant(sql: &str) -> String {
+    use crabka_pgparser::token::Token;
+
+    const SLOTS: &[&str] = &[
+        "conv",
+        "conv2",
+        "lang",
+        "lang2",
+        "postgres",
+        "opc",
+        "opc2",
+        "opf",
+        "opf2",
+        "pub",
+        "r",
+        "r2",
+        "sub",
+        "ts",
+        "ts2",
+        "p",
+        "p2",
+        "t",
+        "t2",
+        "am",
+        "handler_fn",
+        "func",
+        "int4eq",
+        "f",
+    ];
+    let mut parts: Vec<String> = Vec::new();
+    for (token, _) in crabka_pgparser::lexer::lex(sql).expect("representative lexes") {
+        let part = match token {
+            Token::Eof => break,
+            Token::Ident(value) if SLOTS.contains(&value.as_str()) => format!("{value}_variant"),
+            Token::Ident(value) => value,
+            Token::Keyword(keyword) => format!("{keyword:?}").to_ascii_lowercase(),
+            Token::StringLit(_) => "'variant'".into(),
+            Token::IntLit(_) => "42".into(),
+            Token::LParen => "(".into(),
+            Token::RParen => ")".into(),
+            Token::Comma => ",".into(),
+            Token::Eq => "=".into(),
+            Token::Lt => "<".into(),
+            Token::Plus => "+".into(),
+            other => panic!("unexpected refusal token {other:?}"),
+        };
+        if matches!(part.as_str(), "=" | "+" | "<")
+            && parts
+                .last()
+                .is_some_and(|last| last.chars().all(|character| "=+<".contains(character)))
+        {
+            parts.last_mut().expect("operator part").push_str(&part);
+        } else {
+            parts.push(part);
+        }
+    }
+    parts.join(" ")
 }
 
 #[test]
