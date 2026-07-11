@@ -566,10 +566,10 @@ fn decode_replay_items(
     partition: &crabka_protocol::owned::fetch_response::PartitionData,
 ) -> (Vec<ReplayItem>, i64) {
     let Some(payload) = &partition.records else {
-        return (Vec::new(), partition.high_watermark);
+        return (Vec::new(), partition.log_start_offset.max(0));
     };
     let Some(batches) = payload.as_v2() else {
-        return (Vec::new(), partition.high_watermark);
+        return (Vec::new(), partition.log_start_offset.max(0));
     };
     let mut aborted: std::collections::VecDeque<(i64, i64)> = partition
         .aborted_transactions
