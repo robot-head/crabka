@@ -410,29 +410,45 @@ pub async fn run_one(client: &tokio_postgres::Client, sql: &str) -> QueryOutcome
 }
 
 pub async fn run_extended_one(
-    client: &tokio_postgres::Client,
+    client: &mut tokio_postgres::Client,
     case: &ExtendedCase,
 ) -> QueryOutcome {
-    if let Err(error_code) = execute_case_statements(client, &case.setup).await {
-        return QueryOutcome {
+    let transaction = match client.transaction().await {
+        Ok(transaction) => transaction,
+        Err(error) => return outcome_from_error(&error),
+    };
+
+    if let Err(error_code) = execute_case_statements(&transaction, &case.setup).await {
+        let outcome = QueryOutcome {
             rows: Vec::new(),
             error_code: Some(error_code),
         };
+        let _ = transaction.rollback().await;
+        return outcome;
     }
 
-    let outcome = query_extended(client, case).await;
-    if outcome.error_code.is_none()
-        && let Err(error_code) = execute_case_statements(client, &case.teardown).await
-    {
-        return QueryOutcome {
-            rows: Vec::new(),
-            error_code: Some(error_code),
-        };
+    let outcome = query_extended(&transaction, case).await;
+    let outcome = if outcome.error_code.is_none() {
+        match execute_case_statements(&transaction, &case.teardown).await {
+            Ok(()) => outcome,
+            Err(error_code) => QueryOutcome {
+                rows: Vec::new(),
+                error_code: Some(error_code),
+            },
+        }
+    } else {
+        outcome
+    };
+    match transaction.rollback().await {
+        Err(error) if outcome.error_code.is_none() => outcome_from_error(&error),
+        Ok(()) | Err(_) => outcome,
     }
-    outcome
 }
 
-async fn query_extended(client: &tokio_postgres::Client, case: &ExtendedCase) -> QueryOutcome {
+async fn query_extended(
+    client: &tokio_postgres::Transaction<'_>,
+    case: &ExtendedCase,
+) -> QueryOutcome {
     let params = match owned_params(&case.params) {
         Ok(params) => params,
         Err(error) => {
@@ -459,7 +475,7 @@ async fn query_extended(client: &tokio_postgres::Client, case: &ExtendedCase) ->
 }
 
 async fn execute_case_statements(
-    client: &tokio_postgres::Client,
+    client: &tokio_postgres::Transaction<'_>,
     statements: &[String],
 ) -> Result<(), String> {
     for statement in statements {

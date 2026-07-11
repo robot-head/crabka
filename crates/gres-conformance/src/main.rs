@@ -56,9 +56,9 @@ struct Args {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    let (oracle, oracle_conn) = tokio_postgres::connect(&args.oracle_url, NoTls).await?;
+    let (mut oracle, oracle_conn) = tokio_postgres::connect(&args.oracle_url, NoTls).await?;
     tokio::spawn(oracle_conn);
-    let (subject, subject_conn) = tokio_postgres::connect(&args.subject_url, NoTls).await?;
+    let (mut subject, subject_conn) = tokio_postgres::connect(&args.subject_url, NoTls).await?;
     tokio::spawn(subject_conn);
 
     let report = run_corpus(&oracle, &subject, &args.corpus, false).await?;
@@ -117,7 +117,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if let Some(extended_corpus) = &args.extended_corpus {
-        let extended_report = run_extended_corpus(&oracle, &subject, extended_corpus).await?;
+        let extended_report =
+            run_extended_corpus(&mut oracle, &mut subject, extended_corpus).await?;
         std::fs::write(
             &args.extended_out,
             serde_json::to_string_pretty(&extended_report)?,
@@ -175,8 +176,8 @@ async fn run_corpus(
 }
 
 async fn run_extended_corpus(
-    oracle: &tokio_postgres::Client,
-    subject: &tokio_postgres::Client,
+    oracle: &mut tokio_postgres::Client,
+    subject: &mut tokio_postgres::Client,
     corpus: &Path,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut cases = Vec::new();

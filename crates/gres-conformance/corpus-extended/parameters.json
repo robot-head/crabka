@@ -32,11 +32,10 @@
     "sql": "SELECT label FROM gres_ext_where WHERE id = $1",
     "params": [{ "type": "int4", "value": 7 }],
     "setup": [
-      "DROP TABLE IF EXISTS gres_ext_where",
-      "CREATE TEMP TABLE gres_ext_where (id int4, label text)",
+      "CREATE TABLE gres_ext_where (id int4, label text)",
       "INSERT INTO gres_ext_where VALUES (7, 'seven'), (8, 'eight')"
     ],
-    "teardown": ["DROP TABLE IF EXISTS gres_ext_where"]
+    "teardown": ["DROP TABLE gres_ext_where"]
   },
   {
     "name": "insert_parameterized_values_returning",
@@ -47,9 +46,8 @@
       { "type": "bool", "value": false }
     ],
     "setup": [
-      "DROP TABLE IF EXISTS gres_ext_insert",
-      "CREATE TEMP TABLE gres_ext_insert (id int4, label text, enabled bool)"
+      "CREATE TABLE gres_ext_insert (id int4, label text, enabled bool)"
     ],
-    "teardown": ["DROP TABLE IF EXISTS gres_ext_insert"]
+    "teardown": ["DROP TABLE gres_ext_insert"]
   }
 ]
