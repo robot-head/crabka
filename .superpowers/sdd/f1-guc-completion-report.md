@@ -4,9 +4,10 @@ Date: 2026-07-11
 
 ## Status
 
-INCOMPLETE. The typed registry/transaction stack and DISCARD core are implemented,
-but the exact capture-backed driver/PgDog goldens and mandatory live E2E evidence
-are not complete. Accordingly the M0 matrix was not advanced.
+INCOMPLETE. The typed registry/transaction stack, parser surface, DISCARD core,
+and mandatory live PgDog E2E are implemented and verified. Exact capture-backed
+driver/PgDog goldens, compatibility anti-rot, and dated M0 publication remain;
+accordingly the M0 matrix was not advanced.
 
 ## PostgreSQL 18 oracle
 
@@ -51,6 +52,7 @@ transaction and renders `statement_timeout = 17` as `17ms`.
 
 - `7306b1a5` `fix(gres): model typed transactional GUC state`
 - `a339dd16` `test(gres): gate GUCs through transaction pooler`
+- `e81d7c5d` `fix(gres): close F-1 session core review gaps`
 
 ## Static and local verification
 
@@ -59,8 +61,7 @@ transaction and renders `statement_timeout = 17` as `17ms`.
 - `python3 scripts/tests/gres_f0_runtime_gates.py`: PASS.
 - `bash -n scripts/gres-e2e.sh`: PASS.
 - `git diff --check`: PASS.
-- Workspace all-target check/clippy/fmt command was launched; no complete live
-  F-1 E2E result is claimed here.
+- Complete correction-pass verification and live results are recorded below.
 
 ## Remaining concerns / exit blockers
 
@@ -69,9 +70,6 @@ transaction and renders `statement_timeout = 17` as `17ms`.
   and psycopg 3.2.9. Draft assumptions were deliberately removed after pinned
   source proved SQLx and tokio both send `client_encoding=UTF8` (SQLx also sends
   `extra_float_digits=2`).
-- Parser-oracle coverage was not expanded for every requested grammar spelling.
-- The mandatory Docker/PgDog live gate, 6/6 extended parity, and all three driver
-  completion were not run to a final PASS after these changes.
 - Compatibility anti-rot and dated M0 matrix publication remain outstanding.
 
 ## Landed-core review correction pass (2026-07-11)
@@ -90,6 +88,13 @@ The provisioned `crabka-pg18-control` (`postgres:18`) returned:
 - `SET statement_timeout TO '2s'` -> `2s`;
 - `SET statement_timeout TO '1.5s'` -> `1500ms`;
 - `SET statement_timeout TO '1 min'` -> `1min`;
+- `SET statement_timeout TO '.5s'` -> `500ms`;
+- `SET statement_timeout TO '1h'` -> `1h`;
+- `SET statement_timeout TO '1d'` -> `1d`;
+- `SET DateStyle TO 'SQL, DMY'; SET DateStyle TO 'MDY'` -> `SQL, MDY`;
+- `BEGIN; SELECT 1; SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` -> error
+  `SET TRANSACTION ISOLATION LEVEL must be called before any query` (25001
+  class);
 - negative timeout -> invalid/out-of-range.
 
 Commands used `docker exec crabka-pg18-control psql -U bob -d tenant-b
@@ -117,10 +122,18 @@ parser target and direct PostgreSQL 18 grammar/value probes remained green.
   and source-backed GUCs, clears resources, and leaves the connection usable.
 - LIVE RED: a one-backend PgDog 0.1.6 pool exposed its documented/pinned session
   limitations (transactional SET leakage and raw timeout rendering). GREEN:
-  the final gate uses tracked startup session state, exercises SET, SET LOCAL,
-  SHOW/current_setting, rollback, RESET, two concurrently open logical clients,
-  and replay on exactly one tenant-b backend. Deviations are checked and
-  explained in `crates/gres-conformance/pooler-baseline.md`.
+  the final gate directly observes a distinct SET on the assigned backend,
+  restores the tracked startup value before release, and then exercises SET
+  LOCAL, SHOW/current_setting, rollback, RESET, two concurrently open logical
+  clients, and startup-state replay on exactly one tenant-b backend. It does not
+  claim SET-change replay. Deviations are checked and explained in
+  `crates/gres-conformance/pooler-baseline.md`.
+- RED: partial DateStyle assignment reset unspecified components to boot values;
+  unquoted `SQL DMY` left trailing parser input; `1h` rendered `60min`; and SET
+  TRANSACTION remained legal after SELECT. GREEN: partial assignments inherit
+  current typed components, bounded multi-token parsing stops at statement
+  boundaries, `.5s`/hours/days render like PostgreSQL 18, and post-query SET
+  TRANSACTION fails with SQLSTATE 25001 and aborts the block.
 
 ### Implementation corrections
 
@@ -138,8 +151,7 @@ parser target and direct PostgreSQL 18 grammar/value probes remained green.
 
 - `cargo test -p crabka-pgparser -p crabka-pgexec -p crabka-pgwire
   -p crabka-gres-conformance --all-targets`: PASS.
-- `cargo test -p crabka-pgexec --lib session::tests:: -- --nocapture`: 44/44
-  PASS.
+- `cargo test -p crabka-pgexec --lib session::tests:: -- --nocapture`: PASS.
 - `cargo clippy -p crabka-pgparser -p crabka-pgexec -p crabka-pgwire
   -p crabka-gres-conformance --all-targets -- -D warnings`: PASS.
 - `cargo +nightly fmt --all -- --check`, `git diff --check`, `bash -n

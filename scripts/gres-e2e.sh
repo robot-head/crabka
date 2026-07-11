@@ -547,10 +547,14 @@ with (
     second_connection.autocommit = True
 
     with first_connection.transaction(), first_connection.cursor() as cursor:
-        # The pinned pooler tracks this value from startup; SET exercises Gres
-        # without changing it to a value PgDog 0.1.6 cannot track inside BEGIN.
-        cursor.execute("SET application_name = 'f1-client-one'")
+        # PgDog 0.1.6 forwards in-transaction SET without tracking it. Observe a
+        # distinct backend value directly, then restore the tracked startup value
+        # before releasing the sole backend so the known limitation cannot leak.
+        cursor.execute("SET application_name = 'f1-distinct-set'")
         cursor.execute("SELECT current_setting('application_name')")
+        assert cursor.fetchone()[0] == "f1-distinct-set"
+        cursor.execute("SET application_name = 'f1-client-one'")
+        cursor.execute("SHOW application_name")
         assert cursor.fetchone()[0] == "f1-client-one"
 
     # Both logical clients remain connected while PgDog has exactly one backend.
@@ -570,8 +574,8 @@ with (
         cursor.execute("SHOW statement_timeout")
         assert cursor.fetchone()[0] == "0"
 
-    # Returning to client one proves PgDog replays that logical client's state
-    # onto the same single backend rather than leaking or losing it.
+    # Returning to client one proves PgDog replays its tracked startup state onto
+    # the same single backend. The baseline does not claim SET-change replay.
     with first_connection.transaction(), first_connection.cursor() as cursor:
         cursor.execute("SHOW application_name")
         assert cursor.fetchone()[0] == "f1-client-one"
