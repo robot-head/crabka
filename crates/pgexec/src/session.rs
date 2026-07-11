@@ -5360,6 +5360,23 @@ mod tests {
         session.simple_query("ROLLBACK").await.unwrap();
     }
 
+    #[tokio::test]
+    async fn discard_all_clears_extended_resources_and_keeps_session_usable() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session.parse("gone", "SELECT 1", &[]).await.unwrap();
+        session.bind("gone_portal", "gone", &[], &[]).await.unwrap();
+
+        session.simple_query("DISCARD ALL").await.unwrap();
+
+        assert!(session.describe_statement("gone").await.is_err());
+        assert!(session.describe_portal("gone_portal").await.is_err());
+        assert_eq!(
+            single_text(&session.simple_query("SELECT 1").await.unwrap()),
+            "1"
+        );
+    }
+
     /// A session dropped while a write transaction is open (client disconnect)
     /// must deregister its xid from the ProcArray so it no longer pins
     /// `snapshot().xmin`.
