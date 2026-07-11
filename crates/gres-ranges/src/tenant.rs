@@ -3287,10 +3287,15 @@ impl GatewaySession {
 
     fn route_statement(&self, sql: &str) -> Result<StatementRoute, PgError> {
         let serving = self.current_serving()?;
-        let Some(catalog) = serving.engine(RangeId::COORDINATOR) else {
+        // Every hosted data-range engine points its catalog KV at the certified
+        // range-0 follower, so an rN-only gateway can route without hosting r0.
+        let Some(catalog) = serving
+            .engine(RangeId::COORDINATOR)
+            .or_else(|| serving.engines.values().next())
+        else {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
-                "range r0 is not hosted by this tenant",
+                "tenant has no hosted engine with a range-0 catalog view",
             ));
         };
         route_statement(&serving.range_map, catalog, sql)
@@ -4396,13 +4401,21 @@ mod tests {
             .with_hosted_ranges(vec![RangeId::new(1)])
             .expect("r1 host")
             .with_read_only_range0_replica(replica);
-        let (_gateway, handles) =
+        let (gateway, handles) =
             MultiRangeTenant::start_with_engine_factory(config, |_dir, _id| Ok(SqlEngine::new()))
                 .expect("rN-only assembly");
 
         let range1 = &handles.inner.serving.load().engines[&RangeId::new(1)];
         assert!(range1.catalog_table("follower_table").is_ok());
         assert!(range1.catalog_table("unrelated_table").is_err());
+
+        let session = gateway.connect();
+        assert!(
+            session
+                .route_statement("SELECT id FROM follower_table")
+                .is_ok(),
+            "rN-only routing must use the follower-backed catalog"
+        );
 
         let error = range1
             .connect()
