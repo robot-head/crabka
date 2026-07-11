@@ -375,20 +375,12 @@ fn behavior_probe(probe: &CommandProbe) -> Result<BehaviorProbe, ParserCommandEr
             count: statements.len(),
         });
     };
-    let (behavior, sqlstate, message_fragment) = match statement {
-        Statement::CompatibilityRefusal(command) => {
+    let (behavior, sqlstate, message_fragment) =
+        if let Some(command) = statement.compatibility_refusal() {
             ("refuse", Some(command.sqlstate()), Some(command.message()))
-        }
-        Statement::AlterServer { .. } => {
-            ("refuse", Some("0A000"), Some("ALTER SERVER not supported"))
-        }
-        Statement::AlterUserMapping { .. } => (
-            "refuse",
-            Some("0A000"),
-            Some("ALTER USER MAPPING not supported"),
-        ),
-        _ => ("session-execute", None, None),
-    };
+        } else {
+            ("session-execute", None, None)
+        };
     Ok(BehaviorProbe {
         command: probe.command.to_string(),
         sql: probe.sql.to_string(),

@@ -375,12 +375,12 @@ pub(crate) fn execute_ddl(
         }
         // The catalog has no ALTER for foreign objects, and phase-1 querying does
         // not need one — surface a clear 0A000 rather than silently no-op'ing.
-        Statement::AlterServer { .. } => {
-            Err(ExecError::Unsupported("ALTER SERVER not supported".into()))
-        }
-        Statement::AlterUserMapping { .. } => Err(ExecError::Unsupported(
-            "ALTER USER MAPPING not supported".into(),
-        )),
+        Statement::AlterServer { .. } | Statement::AlterUserMapping { .. } => Err(
+            ExecError::CompatibilityRefusal(
+                stmt.compatibility_refusal()
+                    .expect("ALTER refusal metadata is centralized on the AST"),
+            ),
+        ),
         // SP40: IMPORT FOREIGN SCHEMA discovers the server's tables through the
         // registered scanner (the `kafka_fdw` seam enumerates Kafka topics and
         // derives each topic's value columns from its Schema Registry subject),
