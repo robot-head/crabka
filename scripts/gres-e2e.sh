@@ -496,11 +496,12 @@ start_oracle
     --summary "${ARTIFACT_DIR}/parity-pgdog.md" \
     >"${ARTIFACT_DIR}/conformance-pgdog.log" 2>&1
 
-DATABASE_URL="postgresql://alice:alice-secret@127.0.0.1:${PGDOG_PORT}/tenant-a?sslmode=prefer" \
-    ./target/debug/crabka-gres-driver-smoke >"${ARTIFACT_DIR}/rust-driver-smoke.log" 2>&1
+DATABASE_URL="postgresql://alice:alice-secret@127.0.0.1:${PGDOG_PORT}/tenant-a?sslmode=prefer&connect_timeout=5" \
+    timeout 30s ./target/debug/crabka-gres-driver-smoke \
+    >"${ARTIFACT_DIR}/rust-driver-smoke.log" 2>&1 || fail "Rust driver smoke failed or timed out"
 
-DATABASE_URL="postgresql://alice:alice-secret@127.0.0.1:${PGDOG_PORT}/tenant-a?sslmode=prefer" \
-python3 - <<'PY' >"${ARTIFACT_DIR}/python-driver-smoke.log" 2>&1
+DATABASE_URL="postgresql://alice:alice-secret@127.0.0.1:${PGDOG_PORT}/tenant-a?sslmode=prefer&connect_timeout=5" \
+timeout 30s python3 - <<'PY' >"${ARTIFACT_DIR}/python-driver-smoke.log" 2>&1 || fail "Python driver smoke failed or timed out"
 import os
 import psycopg
 

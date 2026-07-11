@@ -915,6 +915,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-conformance
+      - name: F-0 runtime wiring contract
+        run: python3 scripts/tests/gres_f0_runtime_gates.py
       - name: PostgreSQL compatibility matrix anti-rot check
         run: ./tools/check-pg-compat-matrix.sh --self-test
       - name: Install psql 18 (pgdg)
