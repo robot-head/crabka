@@ -22,6 +22,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX = ROOT / "docs" / "PG_COMPAT_MATRIX.md"
+DEFAULT_INVENTORY = ROOT / "docs" / "pg18-command-inventory.json"
 PARSER_COMMAND_REPORT_FORMAT_VERSION = 1
 DEFAULT_PARSER_COMMAND = [
     "cargo",
@@ -105,6 +106,64 @@ def matrix_rows(matrix_path: Path) -> dict[str, str]:
     return rows
 
 
+def matrix_command_rows(matrix_path: Path) -> dict[str, str]:
+    rows: dict[str, str] = {}
+    in_command_table = False
+    for line_number, line in enumerate(matrix_path.read_text(encoding="utf-8").splitlines(), 1):
+        if line == "## PG18 command rows":
+            in_command_table = True
+            continue
+        if line == "## Major language-feature rows":
+            break
+        if not in_command_table or not line.startswith("|") or line.startswith("|---"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3 or cells[0] == "Item":
+            continue
+        item, disposition = cells[0], cells[1]
+        if item in rows:
+            raise ValueError(f"{matrix_path}:{line_number}: duplicate command row: {item}")
+        rows[item] = disposition
+    if not rows:
+        raise ValueError(f"{matrix_path}: no command rows found")
+    return rows
+
+
+def load_inventory(path: Path) -> set[str]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{path}: invalid JSON: {error}") from error
+    if not isinstance(document, dict) or document.get("format_version") != 1:
+        raise ValueError(f"{path}: unsupported inventory format")
+    if document.get("postgresql_major") != 18:
+        raise ValueError(f"{path}: inventory must be pinned to PostgreSQL 18")
+    source = document.get("source")
+    if not isinstance(source, str) or "/docs/18/" not in source:
+        raise ValueError(f"{path}: inventory source must identify PostgreSQL 18 documentation")
+    commands = document.get("commands")
+    if not isinstance(commands, list) or not all(isinstance(command, str) for command in commands):
+        raise ValueError(f"{path}: commands must be a JSON string array")
+    if len(commands) != 190:
+        raise ValueError(f"{path}: expected exactly 190 commands, found {len(commands)}")
+    if len(set(commands)) != len(commands):
+        raise ValueError(f"{path}: duplicate command names are forbidden")
+    if commands != sorted(commands):
+        raise ValueError(f"{path}: commands must be sorted")
+    return set(commands)
+
+
+def validate_inventory_rows(rows: dict[str, str], inventory: set[str]) -> list[str]:
+    errors: list[str] = []
+    missing = sorted(inventory - rows.keys())
+    if missing:
+        errors.append("matrix is missing authoritative command row(s): " + ", ".join(missing))
+    extra = sorted(rows.keys() - inventory)
+    if extra:
+        errors.append("matrix command row(s) not in authoritative PG18 inventory: " + ", ".join(extra))
+    return errors
+
+
 def is_resolved_parser_disposition(disposition: str) -> bool:
     return disposition == "Implemented" or disposition.startswith(RESOLVED_PARSER_PREFIXES)
 
@@ -139,6 +198,24 @@ def self_test_errors(matrix: str, parser_commands: set[str]) -> list[str]:
 
 
 def run_self_test(parser_commands: set[str]) -> None:
+    inventory = load_inventory(DEFAULT_INVENTORY)
+    if len(inventory) != 190:
+        raise AssertionError("self-test expected the pinned inventory to contain exactly 190 commands")
+
+    missing_inventory = set(inventory)
+    missing_inventory.remove("ABORT")
+    inventory_errors = validate_inventory_rows(
+        {command: "Wave-assigned(test)" for command in missing_inventory}, inventory
+    )
+    if not any("missing authoritative command" in error for error in inventory_errors):
+        raise AssertionError("self-test expected missing-inventory-row direction to fail")
+
+    extra_rows = {command: "Wave-assigned(test)" for command in inventory}
+    extra_rows["RENAMED ABORT"] = "Wave-assigned(test)"
+    inventory_errors = validate_inventory_rows(extra_rows, inventory)
+    if not any("not in authoritative" in error for error in inventory_errors):
+        raise AssertionError("self-test expected extra/renamed-row direction to fail")
+
     required_commands = {"BEGIN", "END", "ROLLBACK", "START TRANSACTION"}
     missing_commands = sorted(required_commands - parser_commands)
     if missing_commands:
@@ -168,7 +245,9 @@ def main() -> int:
         parser_commands = accepted_commands()
         if args.self_test:
             run_self_test(parser_commands)
-        errors = validate(args.matrix, parser_commands)
+        inventory = load_inventory(DEFAULT_INVENTORY)
+        errors = validate_inventory_rows(matrix_command_rows(args.matrix), inventory)
+        errors.extend(validate(args.matrix, parser_commands))
     except (OSError, ValueError, AssertionError) as error:
         print(f"pg compat matrix check FAILED: {error}", file=sys.stderr)
         return 1
