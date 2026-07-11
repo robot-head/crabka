@@ -16,15 +16,18 @@ operator-owned `kubernetes.io/tls` range identity Secret.
 - Connecting directly to the r1-only SQL gateway and selecting rows owned by
   both r0 and r1 returned `1, 12, 15, 17, 18`, proving follower-backed routing
   and remote-r0 execution from a process that does not host r0.
-- Explicit multi-statement transactions containing sharded writes currently
-  fail closed with `sharded table writes inside explicit transactions are not
-  supported`. Parameterized shard keys likewise fail closed because routing
-  cannot infer their owner during Parse.
+- An explicit multi-statement sharded transaction inserted row-range keys `9`
+  and `3002`, committed once, and immediately returned both rows. Rollback and
+  multi-statement atomicity are also covered by the deterministic suite.
+- PostgreSQL extended Parse/Bind routing was exercised with a real bound shard
+  parameter through `pgbench -M extended`; the transaction completed with zero
+  failures and row `3003` was immediately visible.
 
 Raw results are under `target/g7-kind-clean-artifacts/multirange/`, notably
 `sql-scatter-after-barrier.txt`, `pgbench-extended-literal.txt`,
 `sql-extended-result.txt`, `sql-direct-r1-remote-r0-after-fix.txt`, and
-`sql-explicit-txn.txt`.
+`sql-explicit-sharded-final.txt`, `pgbench-parameterized-shard-final.txt`, and
+`sql-parameterized-shard-final.txt`.
 
 ## Recovery
 
@@ -33,6 +36,9 @@ Raw results are under `target/g7-kind-clean-artifacts/multirange/`, notably
   `1, 12, 15`.
 - A new cross-range write completed after both replacements, demonstrating that
   the recovered r0 TSO and r1 participant remained writable.
+- A sparse cross-range write `(6), (1000)` was visible immediately and remained
+  visible after independent r1 and r0 replacements, proving atomic publication
+  of participant scan terminals with timestamp resolution.
 
 Pod snapshots and query output are in `pods-before-kill.txt`,
 `pods-after-r1-kill.txt`, `pods-after-r0-kill.txt`, `sql-after-r1-kill.txt`, and
@@ -61,11 +67,15 @@ cargo test -p crabka-pgexec primary_prewrite_waits_for_range0_replica_barrier --
   1 passed
 cargo test -p crabka-gres-ranges --lib
   105 passed
+cargo test -p crabka-gres-ranges --test multirange --test crossrange_2pc
+  24 + 21 passed
 cargo check -p crabka-gres -p crabka-gres-ranges --all-targets
   passed
 cargo fmt --all -- --check
   passed
 ```
 
-The live fixes are `29aba497` (barrier primary reads) and `f5edf25b`
-(follower-backed rN routing).
+The live fixes include `29aba497` (barrier primary reads), `f5edf25b`
+(follower-backed rN routing), `79084e7c` (atomic sparse scan terminals),
+`efcfa68e` (typed deferred shard routing), and `4ec1e9f9`/`9ca47d2f`
+(explicit sharded transaction commit).
