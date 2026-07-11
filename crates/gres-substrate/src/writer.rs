@@ -210,6 +210,8 @@ pub enum WalWriterFaultStage {
     BeforeFirstSend,
     /// After every produce acknowledgement and before `EndTxn(commit)`.
     AfterSendAcks,
+    /// In the delivery-result branch, before awaiting the first send result.
+    PendingSendResult,
     /// Immediately before aborting a transaction after a send failure.
     BeforeAbort,
     /// After a successful broker commit but before acknowledging its caller.
@@ -233,9 +235,9 @@ enum CommitFailure {
 fn classify_commit_failure(error: &ProducerError) -> CommitFailure {
     match error {
         ProducerError::ConcurrentTransactions => CommitFailure::RejectedNeedsAbort,
-        ProducerError::FencedProducer
-        | ProducerError::TransactionAborted
-        | ProducerError::Server(_) => CommitFailure::Rejected,
+        ProducerError::FencedProducer | ProducerError::TransactionAborted => {
+            CommitFailure::Rejected
+        }
         _ => CommitFailure::Indeterminate,
     }
 }
@@ -352,6 +354,9 @@ impl ProducerWalWriter {
 
         let mut frames = Vec::with_capacity(sent.len());
         for (journal_seq, pending) in sent {
+            if let Some(error) = self.inject_fault(WalWriterFaultStage::PendingSendResult) {
+                return self.abort_after_send_error(transaction, error).await;
+            }
             let metadata = match pending.await {
                 Ok(Ok(metadata)) => metadata,
                 Ok(Err(error)) => return self.abort_after_send_error(transaction, error).await,
@@ -879,7 +884,7 @@ mod tests {
         ));
         assert!(matches!(
             classify_commit_failure(&ProducerError::Server(42)),
-            CommitFailure::Rejected
+            CommitFailure::Indeterminate
         ));
         assert!(matches!(
             classify_commit_failure(&ProducerError::FlushTimeout),

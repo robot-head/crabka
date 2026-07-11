@@ -9,9 +9,9 @@ later chapters complete.
   indeterminate `EndTxn`; transport/unknown commit and abort failures invoke a
   fatal compute handler and never resolve the commit caller. A fenced producer
   is a proven rejection and cannot be mislabeled indeterminate.
-- A deterministic post-produce/pre-`EndTxn` fault completes broker abort, fails
-  that group, and the next group commits. Fresh recovery proves the aborted
-  group's row is absent.
+- A deterministic delivery-result fault runs through the production pending
+  send-error branch, completes broker abort, fails that group, and the next
+  group commits. Fresh recovery proves the aborted group's row is absent.
 - Live recovery now applies Kafka's `aborted_transactions` producer-id/control
   marker algorithm. Before this fix, the new transient test failed with
   `SequenceGap { expected: 1, found: 0 }` because recovery replayed an aborted
@@ -24,7 +24,9 @@ later chapters complete.
   the successor barrier. A third recovery sees only the first and successor
   rows.
 - A real >1 MiB logical group (two 700,000-byte values) crosses the 1 MiB frame
-  cap, commits atomically as two WAL frames, and recovers both values.
+  cap, commits atomically as two WAL frames, and recovers both values. The
+  process gate writes the same two-row group before `SIGKILL`, then proves both
+  rows survive in the cache-empty successor.
 - The native three-node broker fixture explicitly compares `FindCoordinator`
   broker id with the WAL partition leader id and selects only a differing pair.
   Client producer registration now sends `AddPartitionsToTxn` to the remote
@@ -40,7 +42,7 @@ later chapters complete.
 - `cargo nextest run -p crabka-client-producer`
   - PASS: 63/63, 0 skipped.
 - `RUST_LOG=off cargo nextest run -p crabka-gres-substrate`
-  - PASS: 127/127, 0 skipped, including five live writer/fault tests and the
+  - PASS: 128/128, 0 skipped, including six live writer/fault tests and the
     explicit three-node coordinator-not-leader test.
 - `cargo nextest run -p crabka-broker --test transactions --test transaction_version`
   - PASS: 13/13, 0 skipped.
@@ -62,3 +64,8 @@ host hard limit) before starting three in-process brokers. At the default soft
 limit of 1024, the broker's replicated internal transaction partitions exhaust
 descriptors; the test performs this bounded capability setup itself rather than
 silently skipping.
+
+The nextest configuration caps all `crabka-gres-substrate` test binaries at two
+threads in both default and CI profiles. Shell readiness and cleanup use
+absolute deadlines; external CLI/psql calls are command-timeout bounded and
+cleanup escalates to `SIGKILL` before a bounded wait.

@@ -72,6 +72,17 @@ fn request(seq: u64, key: &[u8], value: &[u8]) -> GroupCommitRequest {
 }
 
 async fn boot() -> (BrokerHandle, String, TempDir) {
+    let limits = rustix::process::getrlimit(rustix::process::Resource::Nofile);
+    if limits.current.unwrap_or(0) < 8192 {
+        rustix::process::setrlimit(
+            rustix::process::Resource::Nofile,
+            rustix::process::Rlimit {
+                current: Some(8192),
+                maximum: limits.maximum,
+            },
+        )
+        .expect("raise soft file descriptor limit for live broker tests");
+    }
     let dir = TempDir::new().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
         .await
@@ -142,7 +153,7 @@ async fn transient_pre_end_txn_failure_aborts_and_next_group_commits() {
         .expect("initial recovery");
     let writer = ProducerWalWriter::new(recovered.producer, "__gres_wal.fault-transient.r0".into())
         .with_fault_injector(Arc::new(OneShotFault::new(
-            WalWriterFaultStage::AfterSendAcks,
+            WalWriterFaultStage::PendingSendResult,
         )));
 
     let first = writer
@@ -166,6 +177,45 @@ async fn transient_pre_end_txn_failure_aborts_and_next_group_commits() {
             .is_none()
     );
     assert!(rebuilt.get(b"row/successor").expect("read successor") == Some(b"committed".to_vec()));
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recovery_advances_over_aborted_only_fetch_page_to_its_barrier() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let cache = MemKv::default();
+    let recovered = recover_live(&bootstrap, "fault-aborted-page", None, &cache)
+        .await
+        .expect("initial recovery");
+    let writer = ProducerWalWriter::new(
+        recovered.producer,
+        "__gres_wal.fault-aborted-page.r0".into(),
+    )
+    .with_fault_injector(Arc::new(OneShotFault::new(
+        WalWriterFaultStage::PendingSendResult,
+    )));
+    writer
+        .commit_group(GroupCommitRequest {
+            generation: WriterGeneration(0),
+            frames: (0_u64..3)
+                .map(|journal_seq| WalFrame {
+                    journal_seq,
+                    ops: vec![WriteOp::Put {
+                        key: format!("aborted-only/{journal_seq}").into_bytes(),
+                        value: vec![b'x'; 600_000],
+                    }],
+                })
+                .collect(),
+        })
+        .await
+        .expect_err("group aborts");
+
+    let rebuilt = MemKv::default();
+    let successor = recover_live(&bootstrap, "fault-aborted-page", None, &rebuilt)
+        .await
+        .expect("recovery advances through aborted page");
+    assert!(successor.next_journal_seq == 0);
+    assert!(rebuilt.get(b"aborted-only/0").expect("get").is_none());
     broker.shutdown().await;
 }
 
