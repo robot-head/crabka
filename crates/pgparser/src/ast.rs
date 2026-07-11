@@ -182,6 +182,7 @@ pub enum RefusalCommand {
     PrepareTransaction,
     CommitPrepared,
     RollbackPrepared,
+    NonGoal(NonGoalCommand),
 }
 
 impl RefusalCommand {
@@ -196,6 +197,7 @@ impl RefusalCommand {
             Self::PrepareTransaction => "PREPARE TRANSACTION",
             Self::CommitPrepared => "COMMIT PREPARED",
             Self::RollbackPrepared => "ROLLBACK PREPARED",
+            Self::NonGoal(command) => command.command_name(),
         }
     }
 
@@ -219,9 +221,257 @@ impl RefusalCommand {
             Self::PrepareTransaction | Self::CommitPrepared | Self::RollbackPrepared => {
                 "SQL-level prepared transactions are not available"
             }
+            Self::NonGoal(command) => command.message(),
         }
     }
 }
+
+/// Architectural non-goal commands tracked by the PostgreSQL compatibility matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonGoalCommand {
+    AlterConversion,
+    AlterLanguage,
+    AlterLargeObject,
+    AlterOperator,
+    AlterOperatorClass,
+    AlterOperatorFamily,
+    AlterPublication,
+    AlterRule,
+    AlterSubscription,
+    AlterTablespace,
+    AlterTextSearchParser,
+    AlterTextSearchTemplate,
+    CreateAccessMethod,
+    CreateConversion,
+    CreateLanguage,
+    CreateOperator,
+    CreateOperatorClass,
+    CreateOperatorFamily,
+    CreatePublication,
+    CreateRule,
+    CreateSubscription,
+    CreateTablespace,
+    CreateTextSearchParser,
+    CreateTextSearchTemplate,
+    CreateTransform,
+    DropAccessMethod,
+    DropConversion,
+    DropLanguage,
+    DropOperator,
+    DropOperatorClass,
+    DropOperatorFamily,
+    DropPublication,
+    DropRule,
+    DropSubscription,
+    DropTablespace,
+    DropTextSearchParser,
+    DropTextSearchTemplate,
+    DropTransform,
+    Load,
+    SecurityLabel,
+}
+
+impl NonGoalCommand {
+    #[must_use]
+    pub const fn command_name(self) -> &'static str {
+        match self {
+            Self::AlterConversion => "ALTER CONVERSION",
+            Self::AlterLanguage => "ALTER LANGUAGE",
+            Self::AlterLargeObject => "ALTER LARGE OBJECT",
+            Self::AlterOperator => "ALTER OPERATOR",
+            Self::AlterOperatorClass => "ALTER OPERATOR CLASS",
+            Self::AlterOperatorFamily => "ALTER OPERATOR FAMILY",
+            Self::AlterPublication => "ALTER PUBLICATION",
+            Self::AlterRule => "ALTER RULE",
+            Self::AlterSubscription => "ALTER SUBSCRIPTION",
+            Self::AlterTablespace => "ALTER TABLESPACE",
+            Self::AlterTextSearchParser => "ALTER TEXT SEARCH PARSER",
+            Self::AlterTextSearchTemplate => "ALTER TEXT SEARCH TEMPLATE",
+            Self::CreateAccessMethod => "CREATE ACCESS METHOD",
+            Self::CreateConversion => "CREATE CONVERSION",
+            Self::CreateLanguage => "CREATE LANGUAGE",
+            Self::CreateOperator => "CREATE OPERATOR",
+            Self::CreateOperatorClass => "CREATE OPERATOR CLASS",
+            Self::CreateOperatorFamily => "CREATE OPERATOR FAMILY",
+            Self::CreatePublication => "CREATE PUBLICATION",
+            Self::CreateRule => "CREATE RULE",
+            Self::CreateSubscription => "CREATE SUBSCRIPTION",
+            Self::CreateTablespace => "CREATE TABLESPACE",
+            Self::CreateTextSearchParser => "CREATE TEXT SEARCH PARSER",
+            Self::CreateTextSearchTemplate => "CREATE TEXT SEARCH TEMPLATE",
+            Self::CreateTransform => "CREATE TRANSFORM",
+            Self::DropAccessMethod => "DROP ACCESS METHOD",
+            Self::DropConversion => "DROP CONVERSION",
+            Self::DropLanguage => "DROP LANGUAGE",
+            Self::DropOperator => "DROP OPERATOR",
+            Self::DropOperatorClass => "DROP OPERATOR CLASS",
+            Self::DropOperatorFamily => "DROP OPERATOR FAMILY",
+            Self::DropPublication => "DROP PUBLICATION",
+            Self::DropRule => "DROP RULE",
+            Self::DropSubscription => "DROP SUBSCRIPTION",
+            Self::DropTablespace => "DROP TABLESPACE",
+            Self::DropTextSearchParser => "DROP TEXT SEARCH PARSER",
+            Self::DropTextSearchTemplate => "DROP TEXT SEARCH TEMPLATE",
+            Self::DropTransform => "DROP TRANSFORM",
+            Self::Load => "LOAD",
+            Self::SecurityLabel => "SECURITY LABEL",
+        }
+    }
+
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::AlterConversion | Self::CreateConversion | Self::DropConversion => {
+                "conversion objects are unavailable on the UTF-8-only server"
+            }
+            Self::AlterLanguage | Self::CreateLanguage | Self::DropLanguage => {
+                "only built-in procedural languages are available"
+            }
+            Self::AlterLargeObject => "large objects are unavailable; use bytea storage",
+            Self::AlterOperator
+            | Self::AlterOperatorClass
+            | Self::AlterOperatorFamily
+            | Self::CreateOperator
+            | Self::CreateOperatorClass
+            | Self::CreateOperatorFamily
+            | Self::DropOperator
+            | Self::DropOperatorClass
+            | Self::DropOperatorFamily => "C-bound operator objects are not supported",
+            Self::AlterPublication
+            | Self::AlterSubscription
+            | Self::CreatePublication
+            | Self::CreateSubscription
+            | Self::DropPublication
+            | Self::DropSubscription => "physical replication SQL is not supported",
+            Self::AlterRule | Self::CreateRule | Self::DropRule => {
+                "the legacy rewrite rule system is not supported"
+            }
+            Self::AlterTablespace | Self::CreateTablespace | Self::DropTablespace => {
+                "tablespaces are not part of the chapter storage model"
+            }
+            Self::AlterTextSearchParser
+            | Self::AlterTextSearchTemplate
+            | Self::CreateTextSearchParser
+            | Self::CreateTextSearchTemplate
+            | Self::DropTextSearchParser
+            | Self::DropTextSearchTemplate => "C-bound text search objects are not supported",
+            Self::CreateAccessMethod | Self::DropAccessMethod => {
+                "C-bound access methods are not supported"
+            }
+            Self::CreateTransform | Self::DropTransform => {
+                "C-bound transform objects are not supported"
+            }
+            Self::Load => "C-bound code loading is not supported",
+            Self::SecurityLabel => "C-bound security labels are not supported",
+        }
+    }
+}
+
+/// One bounded PostgreSQL 18 syntax representative for an architectural refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NonGoalRefusalSpec {
+    pub command: RefusalCommand,
+    pub representative_sql: &'static str,
+}
+
+macro_rules! non_goal_specs {
+    ($(($variant:ident, $sql:literal)),+ $(,)?) => {
+        pub const NON_GOAL_REFUSALS: &[NonGoalRefusalSpec] = &[
+            $(NonGoalRefusalSpec {
+                command: RefusalCommand::NonGoal(NonGoalCommand::$variant),
+                representative_sql: $sql,
+            }),+
+        ];
+    };
+}
+
+non_goal_specs!(
+    (AlterConversion, "ALTER CONVERSION conv RENAME TO conv2"),
+    (AlterLanguage, "ALTER LANGUAGE lang RENAME TO lang2"),
+    (AlterLargeObject, "ALTER LARGE OBJECT 1 OWNER TO postgres"),
+    (
+        AlterOperator,
+        "ALTER OPERATOR +(integer, integer) OWNER TO postgres"
+    ),
+    (
+        AlterOperatorClass,
+        "ALTER OPERATOR CLASS opc USING btree RENAME TO opc2"
+    ),
+    (
+        AlterOperatorFamily,
+        "ALTER OPERATOR FAMILY opf USING btree RENAME TO opf2"
+    ),
+    (AlterPublication, "ALTER PUBLICATION pub ADD TABLE t"),
+    (AlterRule, "ALTER RULE r ON t RENAME TO r2"),
+    (AlterSubscription, "ALTER SUBSCRIPTION sub DISABLE"),
+    (AlterTablespace, "ALTER TABLESPACE ts RENAME TO ts2"),
+    (
+        AlterTextSearchParser,
+        "ALTER TEXT SEARCH PARSER p RENAME TO p2"
+    ),
+    (
+        AlterTextSearchTemplate,
+        "ALTER TEXT SEARCH TEMPLATE t RENAME TO t2"
+    ),
+    (
+        CreateAccessMethod,
+        "CREATE ACCESS METHOD am TYPE INDEX HANDLER handler"
+    ),
+    (
+        CreateConversion,
+        "CREATE CONVERSION conv FOR 'UTF8' TO 'LATIN1' FROM func"
+    ),
+    (CreateLanguage, "CREATE LANGUAGE lang"),
+    (
+        CreateOperator,
+        "CREATE OPERATOR === (FUNCTION = int4eq, LEFTARG = integer, RIGHTARG = integer)"
+    ),
+    (
+        CreateOperatorClass,
+        "CREATE OPERATOR CLASS opc FOR TYPE integer USING btree AS OPERATOR 1 < (integer, integer)"
+    ),
+    (
+        CreateOperatorFamily,
+        "CREATE OPERATOR FAMILY opf USING btree"
+    ),
+    (CreatePublication, "CREATE PUBLICATION pub"),
+    (
+        CreateRule,
+        "CREATE RULE r AS ON SELECT TO t DO INSTEAD NOTHING"
+    ),
+    (
+        CreateSubscription,
+        "CREATE SUBSCRIPTION sub CONNECTION 'host=x' PUBLICATION pub"
+    ),
+    (CreateTablespace, "CREATE TABLESPACE ts LOCATION '/tmp/ts'"),
+    (
+        CreateTextSearchParser,
+        "CREATE TEXT SEARCH PARSER p (START = f, GETTOKEN = f, END = f, LEXTYPES = f)"
+    ),
+    (
+        CreateTextSearchTemplate,
+        "CREATE TEXT SEARCH TEMPLATE t (LEXIZE = f)"
+    ),
+    (
+        CreateTransform,
+        "CREATE TRANSFORM FOR integer LANGUAGE sql (FROM SQL WITH FUNCTION f(integer), TO SQL WITH FUNCTION f(integer))"
+    ),
+    (DropAccessMethod, "DROP ACCESS METHOD am"),
+    (DropConversion, "DROP CONVERSION conv"),
+    (DropLanguage, "DROP LANGUAGE lang"),
+    (DropOperator, "DROP OPERATOR +(integer, integer)"),
+    (DropOperatorClass, "DROP OPERATOR CLASS opc USING btree"),
+    (DropOperatorFamily, "DROP OPERATOR FAMILY opf USING btree"),
+    (DropPublication, "DROP PUBLICATION pub"),
+    (DropRule, "DROP RULE r ON t"),
+    (DropSubscription, "DROP SUBSCRIPTION sub"),
+    (DropTablespace, "DROP TABLESPACE ts"),
+    (DropTextSearchParser, "DROP TEXT SEARCH PARSER p"),
+    (DropTextSearchTemplate, "DROP TEXT SEARCH TEMPLATE t"),
+    (DropTransform, "DROP TRANSFORM FOR integer LANGUAGE sql"),
+    (Load, "LOAD 'lib'"),
+    (SecurityLabel, "SECURITY LABEL ON TABLE t IS 'label'"),
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AlterTableRename {

@@ -6048,4 +6048,18 @@ mod compatibility_refusal_tests {
             assert!(error.message.contains(message), "{sql}: {error:?}");
         }
     }
+
+    #[tokio::test]
+    async fn every_non_goal_executes_through_session_as_exact_refusal() {
+        let engine = SqlEngine::new();
+        for spec in crabka_pgparser::ast::NON_GOAL_REFUSALS {
+            let mut session = engine.connect();
+            let error = session
+                .simple_query(spec.representative_sql)
+                .await
+                .expect_err(spec.representative_sql);
+            assert_eq!(error.code, "0A000", "{}", spec.command.command_name());
+            assert_eq!(error.message, spec.command.message());
+        }
+    }
 }

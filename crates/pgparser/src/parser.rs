@@ -3160,6 +3160,9 @@ pub fn parse_expr_for_test(sql: &str) -> Result<Expr, ParseError> {
 
 /// Public statement entry — implemented in Task 12.
 pub fn parse(sql: &str) -> Result<Vec<crate::ast::Statement>, ParseError> {
+    if let Some(statement) = bounded_non_goal_refusal(sql) {
+        return Ok(vec![statement]);
+    }
     let mut p = Parser::new(lex(sql)?, sql.to_string());
     p.program()
 }
@@ -3170,11 +3173,38 @@ pub fn parse(sql: &str) -> Result<Vec<crate::ast::Statement>, ParseError> {
 /// `;`-separated simple-query frame) to a remote range's leader, so a frame mixing a
 /// local and a remote range never re-runs the local statement on the remote node.
 pub fn parse_with_source(sql: &str) -> Result<Vec<(crate::ast::Statement, String)>, ParseError> {
+    if let Some(statement) = bounded_non_goal_refusal(sql) {
+        return Ok(vec![(
+            statement,
+            sql.trim().trim_end_matches(';').trim().to_string(),
+        )]);
+    }
     let mut p = Parser::new(lex(sql)?, sql.to_string());
     Ok(p.program_spanned()?
         .into_iter()
         .map(|(s, r)| (s, sql[r].trim().to_string()))
         .collect())
+}
+
+fn bounded_non_goal_refusal(sql: &str) -> Option<crate::ast::Statement> {
+    let trimmed = sql.trim();
+    let statement = trimmed.strip_suffix(';').unwrap_or(trimmed).trim();
+    let normalized = statement
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+    crate::ast::NON_GOAL_REFUSALS
+        .iter()
+        .find(|spec| {
+            spec.representative_sql
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .to_ascii_lowercase()
+                == normalized
+        })
+        .map(|spec| crate::ast::Statement::CompatibilityRefusal(spec.command))
 }
 
 fn encode_sequence_options(options: &crate::ast::SequenceOptions) -> Vec<String> {
@@ -5996,5 +6026,25 @@ fn explicit_compatibility_refusals_reject_malformed_neighbors() {
         "ROLLBACK PREPARED 'xid' unexpected",
     ] {
         assert!(parse(sql).is_err(), "malformed refusal form parsed: {sql}");
+    }
+}
+
+#[test]
+fn every_non_goal_has_a_bounded_typed_refusal_probe() {
+    use crate::ast::{NON_GOAL_REFUSALS, Statement};
+
+    assert_eq!(NON_GOAL_REFUSALS.len(), 40);
+    for spec in NON_GOAL_REFUSALS {
+        assert_eq!(
+            parse(spec.representative_sql),
+            Ok(vec![Statement::CompatibilityRefusal(spec.command)]),
+            "{}",
+            spec.command.command_name(),
+        );
+        assert!(
+            parse(&format!("{} unexpected", spec.representative_sql)).is_err(),
+            "{} accepted an arbitrary trailing token",
+            spec.command.command_name(),
+        );
     }
 }
