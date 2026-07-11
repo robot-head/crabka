@@ -60,6 +60,8 @@ pub struct LiveRecoveryConfig {
     pub security: Option<ClientSecurity>,
     /// Optional checkpoint object store used to seed recovery before WAL tail replay.
     pub checkpoints: Option<LiveRecoveryCheckpoints>,
+    /// WAL generation selected by lifecycle recreation. Generation zero is the initial topic.
+    pub wal_generation: u64,
 }
 
 /// Checkpoint inputs for live recovery.
@@ -91,6 +93,7 @@ impl LiveRecoveryConfig {
             range,
             security,
             checkpoints: None,
+            wal_generation: 0,
         }
     }
 
@@ -98,6 +101,13 @@ impl LiveRecoveryConfig {
     #[must_use]
     pub fn with_checkpoints(mut self, store: Arc<dyn CheckpointStore>) -> Self {
         self.checkpoints = Some(LiveRecoveryCheckpoints { store });
+        self
+    }
+
+    /// Select a recreated WAL generation whose topic offsets restart at zero.
+    #[must_use]
+    pub fn with_wal_generation(mut self, wal_generation: u64) -> Self {
+        self.wal_generation = wal_generation;
         self
     }
 
@@ -227,7 +237,7 @@ async fn recover_live_for_range_inner(
     let barrier_writer = crate::writer::ProducerWalWriter::new(producer.clone(), topic.clone());
     let barrier = barrier_writer
         .commit_group(GroupCommitRequest {
-            generation: WriterGeneration(0),
+            generation: WriterGeneration(config.wal_generation),
             frames: vec![WalFrame {
                 journal_seq: BARRIER_SEQ,
                 ops: Vec::new(),
@@ -249,7 +259,7 @@ async fn recover_live_for_range_inner(
         config.security,
     );
     let recovery_barrier = RecoveryBarrier {
-        generation: WriterGeneration(0),
+        generation: WriterGeneration(config.wal_generation),
         offset: barrier.offset,
     };
     let outcome = recover_store_after_barrier(
@@ -264,7 +274,7 @@ async fn recover_live_for_range_inner(
 
     Ok(LiveRecovered {
         producer,
-        generation: WriterGeneration(0),
+        generation: WriterGeneration(config.wal_generation),
         next_journal_seq: outcome.next_journal_seq,
         barrier_offset: barrier.offset,
     })

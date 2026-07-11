@@ -1692,7 +1692,7 @@ async fn open_substrate_runtime_with_tenant_record(
         log,
         barrier.generation,
         outcome.next_journal_seq,
-        snapshot_source,
+        &snapshot_source,
         checkpoint
             .as_ref()
             .map(|checkpoint| Arc::clone(&checkpoint.stats)),
@@ -1913,7 +1913,7 @@ async fn open_live_range_substrate_engine(
         Arc::clone(&writer),
         recovered.generation,
         recovered.next_journal_seq,
-        Arc::clone(&snapshot_source),
+        &snapshot_source,
         checkpoint
             .as_ref()
             .map(|runtime| Arc::clone(&runtime.stats)),
@@ -2521,7 +2521,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             Arc::clone(&writer),
             recovered.generation,
             recovered.next_journal_seq,
-            Arc::clone(&snapshot_source),
+            &snapshot_source,
             Some(Arc::clone(&checkpoint.stats)),
         )
         .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
@@ -2798,7 +2798,7 @@ async fn open_live_substrate_runtime(
         writer,
         recovered.generation,
         recovered.next_journal_seq,
-        snapshot_source,
+        &snapshot_source,
         checkpoint
             .as_ref()
             .map(|checkpoint| Arc::clone(&checkpoint.stats)),
@@ -2824,7 +2824,7 @@ fn build_replicated_substrate_engine<W>(
     writer: Arc<W>,
     generation: crabka_gres_substrate::WriterGeneration,
     next_journal_seq: u64,
-    snapshot_source: Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
+    snapshot_source: &Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint_stats: Option<Arc<crabka_gres_substrate::CheckpointStats>>,
 ) -> std::io::Result<SqlEngine>
 where
@@ -2846,12 +2846,16 @@ fn build_replicated_substrate_engine_with_committer<W>(
     writer: Arc<W>,
     generation: crabka_gres_substrate::WriterGeneration,
     next_journal_seq: u64,
-    snapshot_source: Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
+    snapshot_source: &Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint_stats: Option<Arc<crabka_gres_substrate::CheckpointStats>>,
 ) -> std::io::Result<(SqlEngine, Arc<crabka_gres_substrate::SubstrateCommitter<W>>)>
 where
     W: crabka_gres_substrate::TransactionalWalWriter + crabka_gres_substrate::FenceLease + 'static,
 {
+    snapshot_source.set_fence_lease(
+        writer.clone() as Arc<dyn crabka_gres_substrate::FenceLease>,
+        generation,
+    );
     let committer_store: Arc<dyn Kv> = store.clone();
     let engine_read_store: Arc<dyn Kv> = store.clone();
     let engine_write_store: Arc<dyn Kv> = store.clone();
@@ -2861,7 +2865,7 @@ where
         generation,
         next_journal_seq,
     )
-    .with_checkpoint_snapshot_source(snapshot_source);
+    .with_checkpoint_snapshot_source(Arc::clone(snapshot_source));
     let committer = if let Some(checkpoint_stats) = checkpoint_stats {
         committer.with_checkpoint_stats(checkpoint_stats)
     } else {
@@ -2879,6 +2883,12 @@ where
     engine
         .reseed_counters()
         .map_err(|error| std::io::Error::other(format!("reseed counters: {error:?}")))?;
+    let horizon = engine.checkpoint_horizon_provider();
+    snapshot_source.set_garbage_horizon_provider(Arc::new(move || {
+        horizon().map_err(|error| {
+            crabka_gres_substrate::SubstrateError::Checkpoint(format!("garbage horizon: {error:?}"))
+        })
+    }));
     Ok((engine, committer))
 }
 
@@ -3834,6 +3844,31 @@ mod tests {
             .shutdown()
             .await
             .expect("checkpoint shutdown");
+    }
+
+    #[tokio::test]
+    async fn substrate_engine_wires_nonzero_safe_checkpoint_horizon() {
+        let kv = Arc::new(MemKv::default());
+        let store: Arc<dyn SubstrateKv> = kv.clone();
+        let log = crabka_gres_substrate::InMemoryWalLog::shared();
+        let source = Arc::new(crabka_gres_substrate::CheckpointSnapshotSource::new(
+            -1,
+            0,
+            crabka_gres_substrate::WriterGeneration(0),
+        ));
+        let _engine = build_replicated_substrate_engine(
+            &store,
+            log,
+            crabka_gres_substrate::WriterGeneration(0),
+            0,
+            &source,
+            None,
+        )
+        .expect("substrate engine");
+
+        let (snapshot, _pairs) = source.capture(kv.as_ref()).await.expect("capture");
+
+        assert!(snapshot.garbage_horizon_xid >= crabka_pgmvcc::xid::FIRST_NORMAL_XID);
     }
 
     #[test]
