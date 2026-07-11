@@ -102,7 +102,7 @@ async fn simple_abort_cleanup_clears_cross_range_failed_gateway_state() {
 
 #[tokio::test]
 async fn extended_cleanup_clears_cross_range_failed_gateway_state() {
-    for (index, cleanup_statement) in ["ROLLBACK", "ROLLBACK;", "ABORT"].iter().enumerate() {
+    for (index, cleanup_statement) in cleanup_statements().iter().enumerate() {
         let (gateway, _handles) = MultiRangeTenant::start(tenant_config(&format!(
             "tenant_extended_{index}_{}",
             cleanup_tenant_suffix(cleanup_statement)
@@ -176,7 +176,10 @@ async fn extended_cross_range_writes_commit_with_gateway_commit() {
 
 #[tokio::test]
 async fn extended_valid_commit_forms_commit_open_gateway_transaction() {
-    for (index, commit_statement) in ["COMMIT", "COMMIT;"].iter().enumerate() {
+    for (index, commit_statement) in ["COMMIT", "COMMIT;", "COMMIT WORK", "COMMIT TRANSACTION"]
+        .iter()
+        .enumerate()
+    {
         let (gateway, _handles) = MultiRangeTenant::start(tenant_config(&format!(
             "tenant_extended_commit_form_{index}"
         )))
@@ -320,7 +323,7 @@ async fn extended_routed_error_marks_failed_until_cleanup_clears() {
     assert_eq!(error.code, "25P02");
 
     session
-        .extended_query_v2("ROLLBACK", &[])
+        .extended_query_v2("ROLLBACK WORK", &[])
         .await
         .expect("extended cleanup");
     assert!(

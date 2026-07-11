@@ -3986,11 +3986,30 @@ mod tests {
         };
         assert_eq!(rows.len(), 1);
         assert!(completion.is_none());
+        let ExecuteOutcome::Rows { rows, completion } =
+            session.execute("portal", 0).await.expect("resume")
+        else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(completion.as_deref(), Some("SELECT 2"));
         session
             .close(CloseTarget::Portal("portal"))
             .await
             .expect("close");
+        session
+            .bind("sync_portal", "statement", &[], &[])
+            .await
+            .expect("bind portal for sync");
         session.sync().await.expect("sync");
+        assert_eq!(
+            session
+                .execute("sync_portal", 0)
+                .await
+                .expect_err("sync clears portal")
+                .code,
+            "34000"
+        );
         session
             .describe_statement("statement")
             .await

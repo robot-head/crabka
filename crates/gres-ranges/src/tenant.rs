@@ -1755,6 +1755,24 @@ impl GatewaySession {
                 "extended statements must target one local range",
             ));
         }
+        if matches!(
+            route.kind,
+            StatementKind::Begin | StatementKind::Commit | StatementKind::Rollback
+        ) {
+            let description = PreparedDescription {
+                parameter_types: parameter_types.to_vec(),
+                fields: Vec::new(),
+            };
+            self.prepared.insert(
+                name.to_owned(),
+                GatewayPrepared {
+                    sql: sql.to_owned(),
+                    route,
+                    description: description.clone(),
+                },
+            );
+            return Ok(description);
+        }
         let description = self
             .session_for(route.range_id)?
             .parse(name, sql, parameter_types)
@@ -1796,6 +1814,28 @@ impl GatewaySession {
                 sqlstate::DUPLICATE_CURSOR,
                 format!("cursor \"{portal}\" already exists"),
             ));
+        }
+        if matches!(
+            prepared.route.kind,
+            StatementKind::Begin | StatementKind::Commit | StatementKind::Rollback
+        ) {
+            if !params.is_empty() {
+                return Err(PgError::protocol(format!(
+                    "bind message supplies {} parameters, but prepared statement requires 0",
+                    params.len()
+                )));
+            }
+            let description = PortalDescription { fields: Vec::new() };
+            self.portals.insert(
+                portal.to_owned(),
+                GatewayPortal {
+                    sql: prepared.sql,
+                    route: prepared.route,
+                    description: description.clone(),
+                    gateway_execution: None,
+                },
+            );
+            return Ok(description);
         }
         let description = self
             .session_for(prepared.route.range_id)?
