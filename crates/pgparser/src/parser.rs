@@ -6190,14 +6190,37 @@ fn dispatch_emits_exact_query_and_table_family_identities() {
         assert_eq!(parsed[0].1, expected, "{sql}");
     }
 
-    for sql in [
-        "CREATE TABLE t AS SELECT 1",
-        "CREATE TABLE t (id int4) PARTITION BY HASH (id)",
-        "ALTER TABLE t ATTACH PARTITION p DEFAULT",
+    for (family, sql) in [
+        ("CREATE TABLE AS", "CREATE TABLE t AS SELECT 1"),
+        (
+            "CREATE TABLE INHERITS",
+            "CREATE TABLE t (id int4) INHERITS (parent)",
+        ),
+        (
+            "CREATE TABLE PARTITION BY",
+            "CREATE TABLE t (id int4) PARTITION BY HASH (id)",
+        ),
+        (
+            "CREATE TABLE PARTITION OF",
+            "CREATE TABLE t PARTITION OF parent DEFAULT",
+        ),
+        (
+            "ALTER TABLE ATTACH PARTITION",
+            "ALTER TABLE t ATTACH PARTITION p DEFAULT",
+        ),
+        (
+            "ALTER TABLE DETACH PARTITION",
+            "ALTER TABLE t DETACH PARTITION p",
+        ),
+        (
+            "ALTER TABLE ENABLE ROW LEVEL SECURITY",
+            "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
+        ),
+        ("TABLE", "TABLE t"),
     ] {
         assert!(
             parse_with_command_identities(sql).is_err(),
-            "unsupported family parsed: {sql}"
+            "unsupported {family} must reject instead of emitting its generic parent identity: {sql}"
         );
     }
 }
