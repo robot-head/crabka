@@ -52,3 +52,18 @@ Commit follow-up verification on 2026-07-11:
 - `cargo clippy -p crabka-gres-ranges -p crabka-gres --all-targets -- -D warnings`: still blocked solely by `crates/gres-substrate/src/writer.rs:175:9`, `clippy::manual_assert_eq`, suggesting `debug_assert_eq!(*current, WriterPauseState::Pausing)`. `git diff 8f72f2f3 -- crates/gres-substrate/src/writer.rs` produced no output, confirming the blocker is unchanged from the task baseline.
 - `cargo +nightly fmt --all -- --check`: passed with no output.
 - `git diff --check`: passed with no output.
+
+## Second review repair
+
+The earlier statement that `COMMIT WORK` and `ROLLBACK WORK` were unsupported extended spellings was incorrect at the gateway boundary. Gateway-owned transaction-control Parse/Bind now bypasses the narrower underlying SQL-session parser while retaining the gateway classifier and execution path. Real Parse/Bind/Execute coverage again includes `COMMIT WORK`, `COMMIT TRANSACTION`, `ROLLBACK WORK`, and every cleanup spelling in `cleanup_statements()`.
+
+The RuntimeSession forwarding test now resumes its max_rows portal through completion (`SELECT 2`), closes it, binds a distinct portal, proves Sync removes that portal with `34000`, and separately proves the prepared statement survives.
+
+Fresh evidence:
+
+- Transaction-control focused review tests: `3 tests run: 3 passed, 18 skipped`.
+- Full cross-range transaction binary: `21 tests run: 21 passed, 0 skipped`.
+- RuntimeSession Single/Multi forwarding: `1 test run: 1 passed, 51 skipped`.
+- `cargo check -p crabka-gres-ranges -p crabka-gres --all-targets`: passed.
+- `cargo +nightly fmt --all -- --check`: passed with no output.
+- `git diff --check`: passed with no output.
