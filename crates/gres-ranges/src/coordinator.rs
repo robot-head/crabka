@@ -340,6 +340,7 @@ impl TxnRpc {
             | RangeResponse::SessionResult { .. }
             | RangeResponse::GlobalStatus { .. }
             | RangeResponse::GlobalXid { .. }
+            | RangeResponse::ExplicitGate(_)
             | RangeResponse::ScanRange(_)
             | RangeResponse::ScanCursor(_)
             | RangeResponse::ScanRangeError { .. }

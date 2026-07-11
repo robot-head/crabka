@@ -23,13 +23,13 @@ use crate::{
     RangeId,
     registry::{RangeRegistry, RegistryError},
     transport::{
-        FramedTcpClient, RangeRequest, RangeResponse, RangeService, ResolveTxnResp, ScanCursorReq,
-        ScanCursorResp, ScanRangeReq, ScanRangeResp, ScanRangeRow, TransportError,
-        WireColumnPredicate, WireDatum, WireErrorKind, WireExecuteOutcome, WireGlobalStatus,
-        WirePartialAggregateFunction, WirePartialAggregateSpec, WirePredicateOp,
-        WirePredicatePushdown, WireProjectionPushdown, WireQueryResult, WireRowInterval,
-        WireSessionOperation, WireSessionResult, WireSnapshot, WireSqlResultChunk, WireTopKColumn,
-        WireTopKSpec, write_frame,
+        ExplicitGateReq, ExplicitGateResp, FramedTcpClient, RangeRequest, RangeResponse,
+        RangeService, ResolveTxnResp, ScanCursorReq, ScanCursorResp, ScanRangeReq, ScanRangeResp,
+        ScanRangeRow, TransportError, WireColumnPredicate, WireDatum, WireErrorKind,
+        WireExecuteOutcome, WireGlobalStatus, WirePartialAggregateFunction,
+        WirePartialAggregateSpec, WirePredicateOp, WirePredicatePushdown, WireProjectionPushdown,
+        WireQueryResult, WireRowInterval, WireSessionOperation, WireSessionResult, WireSnapshot,
+        WireSqlResultChunk, WireTopKColumn, WireTopKSpec, write_frame,
     },
     tso::{GrantLease, TsoError, TsoRpc},
 };
@@ -44,6 +44,18 @@ pub struct HostedRangeService {
     tso: Option<Arc<dyn TsoRpc>>,
     next_session_id: AtomicU64,
     sessions: tokio::sync::Mutex<BTreeMap<u64, HostedSession>>,
+    explicit_gate: Arc<ExplicitGate>,
+}
+
+struct ExplicitGate {
+    state: tokio::sync::Mutex<Option<ExplicitGateOwner>>,
+    changed: tokio::sync::Notify,
+    next_token: AtomicU64,
+}
+
+struct ExplicitGateOwner {
+    token: u64,
+    deadline: Instant,
 }
 
 struct HostedSession {
@@ -54,6 +66,10 @@ struct HostedSession {
 
 const REMOTE_SESSION_IDLE: Duration = Duration::from_secs(60);
 const MAX_REMOTE_SESSIONS: usize = 1024;
+#[cfg(not(test))]
+const EXPLICIT_GATE_LEASE: Duration = Duration::from_secs(2);
+#[cfg(test)]
+const EXPLICIT_GATE_LEASE: Duration = Duration::from_millis(100);
 
 impl HostedRangeService {
     /// Build a hosted range service. Only range 0 may be given a TSO RPC.
@@ -64,6 +80,11 @@ impl HostedRangeService {
             tso: None,
             next_session_id: AtomicU64::new(1),
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+            explicit_gate: Arc::new(ExplicitGate {
+                state: tokio::sync::Mutex::new(None),
+                changed: tokio::sync::Notify::new(),
+                next_token: AtomicU64::new(1),
+            }),
         }
     }
 
@@ -81,6 +102,72 @@ impl HostedRangeService {
                 error: WireErrorKind::StaleEndpoint,
                 message: format!("range r{range_id} is not hosted here"),
             })
+    }
+
+    async fn handle_explicit_gate(&self, request: ExplicitGateReq) -> ExplicitGateResp {
+        match request {
+            ExplicitGateReq::Acquire => loop {
+                let notified = self.explicit_gate.changed.notified();
+                let wait = {
+                    let mut state = self.explicit_gate.state.lock().await;
+                    let now = Instant::now();
+                    if state.as_ref().is_some_and(|owner| owner.deadline <= now) {
+                        *state = None;
+                    }
+                    if state.is_none() {
+                        let token = self
+                            .explicit_gate
+                            .next_token
+                            .fetch_add(1, Ordering::Relaxed);
+                        *state = Some(ExplicitGateOwner {
+                            token,
+                            deadline: now + EXPLICIT_GATE_LEASE,
+                        });
+                        return ExplicitGateResp::Acquired {
+                            token,
+                            lease_millis: EXPLICIT_GATE_LEASE.as_millis() as u64,
+                        };
+                    }
+                    state
+                        .as_ref()
+                        .expect("checked occupied")
+                        .deadline
+                        .saturating_duration_since(now)
+                };
+                tokio::select! {
+                    () = notified => {}
+                    () = tokio::time::sleep(wait) => {}
+                }
+            },
+            ExplicitGateReq::Renew { token } => {
+                let mut state = self.explicit_gate.state.lock().await;
+                let now = Instant::now();
+                let Some(owner) = state.as_mut() else {
+                    return ExplicitGateResp::Stale;
+                };
+                if owner.token != token || owner.deadline <= now {
+                    if owner.deadline <= now {
+                        *state = None;
+                        self.explicit_gate.changed.notify_waiters();
+                    }
+                    return ExplicitGateResp::Stale;
+                }
+                owner.deadline = now + EXPLICIT_GATE_LEASE;
+                ExplicitGateResp::Renewed {
+                    lease_millis: EXPLICIT_GATE_LEASE.as_millis() as u64,
+                }
+            }
+            ExplicitGateReq::Release { token } => {
+                let mut state = self.explicit_gate.state.lock().await;
+                if state.as_ref().is_some_and(|owner| owner.token == token) {
+                    *state = None;
+                    self.explicit_gate.changed.notify_waiters();
+                    ExplicitGateResp::Released
+                } else {
+                    ExplicitGateResp::Stale
+                }
+            }
+        }
     }
 }
 
@@ -210,6 +297,12 @@ impl RangeService for HostedRangeService {
                         }
                     }
                 }
+            }
+            RangeRequest::ExplicitGate(request) => {
+                if let Err(response) = self.hosted_engine(RangeId::COORDINATOR) {
+                    return response;
+                }
+                RangeResponse::ExplicitGate(self.handle_explicit_gate(request).await)
             }
             RangeRequest::Sql { range_id, sql } => {
                 let engine = match self.hosted_engine(range_id) {
@@ -792,6 +885,84 @@ pub trait RemoteForward: Send + Sync {
 
     /// Open a stateful owner-side session for extended protocol and transactions.
     async fn open_session(&self, range_id: RangeId) -> Result<RemoteRangeSession, ForwardError>;
+
+    /// Acquire the range-0 ordinary explicit-transaction lease when this
+    /// forwarder represents a distributed topology.
+    async fn acquire_explicit_gate(&self) -> Result<Option<RemoteExplicitGateLease>, ForwardError> {
+        Ok(None)
+    }
+}
+
+#[derive(Debug)]
+pub struct RemoteExplicitGateLease {
+    token: Option<u64>,
+    registry: RangeRegistry,
+    client: FramedTcpClient,
+}
+
+impl RemoteExplicitGateLease {
+    pub async fn renew(&self) -> Result<(), ForwardError> {
+        let token = self.token.ok_or(ForwardError::UnexpectedResponse)?;
+        match self.call(ExplicitGateReq::Renew { token }).await? {
+            ExplicitGateResp::Renewed { .. } => Ok(()),
+            ExplicitGateResp::Stale => Err(ForwardError::RemoteSql {
+                code: "40001".into(),
+                message: "explicit transaction lease expired or was fenced".into(),
+            }),
+            _ => Err(ForwardError::UnexpectedResponse),
+        }
+    }
+
+    pub async fn release(&mut self) -> Result<(), ForwardError> {
+        let Some(token) = self.token.take() else {
+            return Ok(());
+        };
+        match self.call(ExplicitGateReq::Release { token }).await? {
+            ExplicitGateResp::Released | ExplicitGateResp::Stale => Ok(()),
+            _ => Err(ForwardError::UnexpectedResponse),
+        }
+    }
+
+    async fn call(&self, request: ExplicitGateReq) -> Result<ExplicitGateResp, ForwardError> {
+        let endpoint = self.registry.resolve(RangeId::COORDINATOR).await?;
+        match self
+            .client
+            .call(&endpoint.endpoint, &RangeRequest::ExplicitGate(request))
+            .await?
+        {
+            RangeResponse::ExplicitGate(response) => Ok(response),
+            RangeResponse::SqlError { code, message } => {
+                Err(ForwardError::RemoteSql { code, message })
+            }
+            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
+                kind: error,
+                message,
+            }),
+            _ => Err(ForwardError::UnexpectedResponse),
+        }
+    }
+}
+
+impl Drop for RemoteExplicitGateLease {
+    fn drop(&mut self) {
+        let Some(token) = self.token.take() else {
+            return;
+        };
+        let registry = self.registry.clone();
+        let client = self.client.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Ok(endpoint) = registry.resolve(RangeId::COORDINATOR).await {
+                    let _ = client
+                        .call(
+                            &endpoint.endpoint,
+                            &RangeRequest::ExplicitGate(ExplicitGateReq::Release { token }),
+                        )
+                        .await;
+                }
+            });
+        }
+    }
 }
 
 /// TCP implementation of [`RemoteForward`] backed by [`RangeRegistry`].
@@ -908,6 +1079,34 @@ impl RemoteForward for RegistryRemoteForward {
                 }
                 Err(error) => return Err(error.into()),
             }
+        }
+    }
+
+    async fn acquire_explicit_gate(&self) -> Result<Option<RemoteExplicitGateLease>, ForwardError> {
+        let endpoint = self.registry.resolve(RangeId::COORDINATOR).await?;
+        match self
+            .client
+            .call(
+                &endpoint.endpoint,
+                &RangeRequest::ExplicitGate(ExplicitGateReq::Acquire),
+            )
+            .await?
+        {
+            RangeResponse::ExplicitGate(ExplicitGateResp::Acquired { token, .. }) => {
+                Ok(Some(RemoteExplicitGateLease {
+                    token: Some(token),
+                    registry: self.registry.clone(),
+                    client: self.client.clone(),
+                }))
+            }
+            RangeResponse::SqlError { code, message } => {
+                Err(ForwardError::RemoteSql { code, message })
+            }
+            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
+                kind: error,
+                message,
+            }),
+            _ => Err(ForwardError::UnexpectedResponse),
         }
     }
 
@@ -2354,6 +2553,50 @@ mod tests {
 
     use super::*;
 
+    #[tokio::test]
+    async fn range_zero_explicit_gate_serializes_expires_and_fences_stale_owners() {
+        let service = Arc::new(HostedRangeService::new(BTreeMap::new()));
+        let ExplicitGateResp::Acquired { token: first, .. } =
+            service.handle_explicit_gate(ExplicitGateReq::Acquire).await
+        else {
+            panic!("first lease");
+        };
+
+        let contender = {
+            let service = Arc::clone(&service);
+            tokio::spawn(
+                async move { service.handle_explicit_gate(ExplicitGateReq::Acquire).await },
+            )
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!contender.is_finished(), "conflicting owner must wait");
+
+        let ExplicitGateResp::Acquired { token: second, .. } = contender.await.unwrap() else {
+            panic!("second lease after expiry");
+        };
+        assert_ne!(first, second);
+        assert_eq!(
+            service
+                .handle_explicit_gate(ExplicitGateReq::Release { token: first })
+                .await,
+            ExplicitGateResp::Stale
+        );
+        assert_eq!(
+            service
+                .handle_explicit_gate(ExplicitGateReq::Renew { token: second })
+                .await,
+            ExplicitGateResp::Renewed {
+                lease_millis: EXPLICIT_GATE_LEASE.as_millis() as u64,
+            }
+        );
+        assert_eq!(
+            service
+                .handle_explicit_gate(ExplicitGateReq::Release { token: second })
+                .await,
+            ExplicitGateResp::Released
+        );
+    }
+
     struct EndlessCursorScanner {
         dropped: Arc<AtomicUsize>,
     }
@@ -2436,6 +2679,7 @@ mod tests {
                 | RangeRequest::SessionClose { .. }
                 | RangeRequest::GlobalDecision { .. }
                 | RangeRequest::GlobalBegin { .. }
+                | RangeRequest::ExplicitGate(_)
                 | RangeRequest::Txn(_)
                 | RangeRequest::Tso(_)
                 | RangeRequest::ResolveTxn(_)
