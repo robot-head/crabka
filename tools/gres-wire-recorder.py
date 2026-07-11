@@ -10,50 +10,86 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import selectors
 import socket
 import struct
+import time
 from pathlib import Path
 
-ALLOWED_STARTUP = {
-    "DateStyle",
-    "TimeZone",
-    "application_name",
-    "client_encoding",
-    "extra_float_digits",
+ALLOWED_STARTUP_VALUES = {
+    "DateStyle": {"ISO, MDY"},
+    "TimeZone": {"UTC"},
+    "application_name": {"PgDog"},
+    "client_encoding": {"UTF8", "utf-8"},
+    "extra_float_digits": {"2"},
 }
-IDENTITY_STARTUP = {"user", "database", "options", "replication"}
+IDENTITY_STARTUP = {"user", "database"}
+ALLOWED_SET_VALUES = {
+    "datestyle": "ISO, MDY",
+    "extra_float_digits": "2",
+    "timezone": "UTC",
+}
+SET_PATTERN = re.compile(
+    r"\s*SET\s+(?:\"(?P<quoted>[a-z_]+)\"|(?P<plain>[a-z_]+))\s+TO\s+'(?P<value>[^']*)'\s*",
+    re.IGNORECASE,
+)
 
 
 def startup_parameters(packet: bytes) -> dict[str, str]:
-    if len(packet) < 8 or struct.unpack("!I", packet[4:8])[0] != 196608:
+    if (
+        len(packet) < 9
+        or struct.unpack("!I", packet[:4])[0] != len(packet)
+        or struct.unpack("!I", packet[4:8])[0] != 196608
+    ):
         raise ValueError("expected PostgreSQL protocol 3.0 startup packet")
-    fields = packet[8:].rstrip(b"\0").split(b"\0")
-    if len(fields) % 2:
+    body = packet[8:]
+    if not body.endswith(b"\0\0") or b"\0\0" in body[:-2]:
+        raise ValueError("malformed startup key/value sequence")
+    fields = body[:-2].split(b"\0")
+    if not fields or len(fields) % 2 or any(not field for field in fields):
         raise ValueError("malformed startup key/value sequence")
     result: dict[str, str] = {}
+    seen: set[str] = set()
     for raw_key, raw_value in zip(fields[::2], fields[1::2], strict=True):
-        key = raw_key.decode("ascii")
+        try:
+            key = raw_key.decode("ascii")
+            value = raw_value.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("startup key/value is not valid text") from error
+        if key in seen:
+            raise ValueError("duplicate startup key")
+        seen.add(key)
         if key in IDENTITY_STARTUP:
             continue
-        if key not in ALLOWED_STARTUP:
-            raise ValueError(f"unexpected startup key: {key}")
-        value = raw_value.decode("utf-8")
-        if any(token in value.lower() for token in ("password", "postgres://", "postgresql://")):
-            raise ValueError(f"unsafe startup value for {key}")
+        allowed = ALLOWED_STARTUP_VALUES.get(key)
+        if allowed is None:
+            raise ValueError("unexpected startup key")
+        if value not in allowed:
+            raise ValueError("unexpected startup value")
         result[key] = value
+    if "user" not in seen or "database" not in seen:
+        raise ValueError("startup identity fields are incomplete")
     return result
 
 
 def safe_set_batch(payload: bytes) -> str | None:
-    sql = payload.rstrip(b"\0").decode("utf-8")
-    statements = [statement.strip() for statement in sql.split(";") if statement.strip()]
-    if not statements or not all(statement.upper().startswith("SET ") for statement in statements):
+    if not payload.endswith(b"\0") or b"\0" in payload[:-1]:
+        raise ValueError("malformed simple-query payload")
+    try:
+        sql = payload[:-1].decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("simple-query payload is not valid UTF-8") from error
+    if re.match(r"\s*SET\b", sql, re.IGNORECASE) is None:
         return None
-    lowered = sql.lower()
-    if any(token in lowered for token in ("password", "postgres://", "postgresql://")):
-        raise ValueError("unsafe SQL in SET batch")
-    return sql
+    matched = SET_PATTERN.fullmatch(sql)
+    if matched is None:
+        raise ValueError("SET query is outside the capture allowlist")
+    guc = (matched.group("quoted") or matched.group("plain")).lower()
+    value = matched.group("value")
+    if ALLOWED_SET_VALUES.get(guc) != value:
+        raise ValueError("SET assignment is outside the capture allowlist")
+    return f'SET "{guc}" TO \'{value}\''
 
 
 class Decoder:
@@ -90,10 +126,20 @@ class Decoder:
                     self.set_batches.append(batch)
 
 
-def record(listen: tuple[str, int], upstream: tuple[str, int]) -> dict[str, object]:
+def record(
+    listen: tuple[str, int],
+    upstream: tuple[str, int],
+    *,
+    deadline_seconds: float = 30.0,
+) -> dict[str, object]:
+    if deadline_seconds <= 0:
+        raise ValueError("deadline_seconds must be positive")
+    deadline = time.monotonic() + deadline_seconds
     with socket.create_server(listen) as listener:
+        listener.settimeout(remaining(deadline))
         client, _ = listener.accept()
-        with client, socket.create_connection(upstream, timeout=10) as server:
+        client.settimeout(remaining(deadline))
+        with client, socket.create_connection(upstream, timeout=remaining(deadline)) as server:
             # Keep the captured frontend leg plaintext. PgDog probes TLS even
             # when its backend proceeds without it; replying `N` is the normal
             # PostgreSQL negotiation path and avoids retaining encrypted bytes.
@@ -110,7 +156,10 @@ def record(listen: tuple[str, int], upstream: tuple[str, int]) -> dict[str, obje
             selector.register(client, selectors.EVENT_READ, server)
             selector.register(server, selectors.EVENT_READ, client)
             while selector.get_map():
-                for key, _ in selector.select(timeout=15):
+                events = selector.select(timeout=remaining(deadline))
+                if not events:
+                    raise TimeoutError("wire capture reached its absolute deadline")
+                for key, _ in events:
                     source = key.fileobj
                     target = key.data
                     data = source.recv(65536)
@@ -127,6 +176,13 @@ def record(listen: tuple[str, int], upstream: tuple[str, int]) -> dict[str, obje
             if decoder.startup is None:
                 raise RuntimeError("connection ended before a startup packet was captured")
             return {"startup_parameters": decoder.startup, "set_batches": decoder.set_batches}
+
+
+def remaining(deadline: float) -> float:
+    value = deadline - time.monotonic()
+    if value <= 0:
+        raise TimeoutError("wire capture reached its absolute deadline")
+    return value
 
 
 def recv_initial_packet(sock: socket.socket) -> bytes:
@@ -157,8 +213,13 @@ def main() -> None:
     parser.add_argument("--listen", required=True)
     parser.add_argument("--upstream", required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--deadline-seconds", type=float, default=30.0)
     args = parser.parse_args()
-    captured = record(endpoint(args.listen), endpoint(args.upstream))
+    captured = record(
+        endpoint(args.listen),
+        endpoint(args.upstream),
+        deadline_seconds=args.deadline_seconds,
+    )
     args.out.write_text(json.dumps(captured, indent=2, sort_keys=True) + "\n")
 
 

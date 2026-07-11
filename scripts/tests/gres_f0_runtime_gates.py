@@ -129,10 +129,25 @@ assert active_requirements and all("==" in line and "--hash=sha256:" in line for
 
 contract_step = workflow_step("F-0 runtime wiring contract")
 assert "python3 scripts/tests/gres_f0_runtime_gates.py" in contract_step
+capture_contract = workflow_step("Driver capture safety contract")
+assert "python3 -m unittest tools/tests/test_gres_wire_recorder.py tools/tests/test_capture_gres_driver_goldens.py" in capture_contract
 front_door = workflow_step("Front-door PgDog e2e gate")
 assert "--skip-pgdog" not in front_door and "CRABKA_GRES_E2E_KEEP_ARTIFACTS=1" in front_door
 driver_goldens = workflow_step("Captured driver startup replay")
 assert "timeout 30s ./scripts/gres-driver-goldens-gate.sh" in driver_goldens
+
+workflow = source(".github/workflows/ci.yml")
+gres_filter = re.search(r"^\s{12}gres:\n(?P<body>.*?)(?=^\s{2}rust:)", workflow, re.MULTILINE | re.DOTALL)
+assert gres_filter, "missing Gres changed-files filter"
+for path in (
+    "tools/capture-gres-driver-goldens.py",
+    "tools/gres-wire-recorder.py",
+    "tools/tests/test_gres_wire_recorder.py",
+    "tools/tests/test_capture_gres_driver_goldens.py",
+    "scripts/gres-driver-goldens-gate.sh",
+    "scripts/tests/gres_f0_runtime_gates.py",
+):
+    assert f"- '{path}'" in gres_filter.group("body"), f"Gres filter missing {path}"
 
 for step_name, artifact in (
     ("Conformance harness against the parity baseline", "extended-parity-standalone"),

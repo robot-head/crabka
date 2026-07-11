@@ -23,14 +23,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         include_str!("../../requirements-driver-smoke.txt"),
     )?;
     for capture in &fixture.drivers {
-        replay_startup(
-            &args.host,
-            args.port,
-            &args.user,
-            &args.dbname,
+        for parameters in [
             &capture.startup_parameters,
-        )
-        .await?;
+            &capture.pgdog_backend_startup_parameters,
+        ] {
+            replay_startup(&args.host, args.port, &args.user, &args.dbname, parameters).await?;
+        }
     }
 
     let connection_string = format!(
@@ -47,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     drop(client);
     connection_task.await??;
     println!(
-        "PASS: replayed 3 captured startups and all captured PgDog backend SET batches directly against Gres"
+        "PASS: replayed 3 direct and 3 PgDog-backend captured startups plus all captured PgDog backend SET batches directly against Gres"
     );
     Ok(())
 }
