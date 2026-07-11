@@ -1,8 +1,8 @@
 # Gres compatibility truthfulness evidence — 2026-07-11
 
-**Status: review-pending — INCOMPLETE until independent re-review accepts the remediation.**
+**Status: reviewed — COMPLETE for compatibility truthfulness after clean independent re-review of `2f6cbc9a..8f968676`.**
 
-Scope: SQL-Parity Program Task 1 metadata and executable behavior only. This does not advance any later SQL wave.
+Scope: SQL-Parity Program Task 1 metadata and executable behavior only. The clean verdict closes compatibility truthfulness through `8f968676`; it does not advance any later SQL wave, and the full multi-plan goal remains incomplete.
 
 ## Authoritative inventory
 
