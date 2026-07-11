@@ -390,6 +390,7 @@ impl NonGoalCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NonGoalRefusalSpec {
     pub command: RefusalCommand,
+    pub identity: crate::command::CommandIdentity,
     pub representative_sql: &'static str,
 }
 
@@ -398,6 +399,7 @@ macro_rules! non_goal_specs {
         pub const NON_GOAL_REFUSALS: &[NonGoalRefusalSpec] = &[
             $(NonGoalRefusalSpec {
                 command: RefusalCommand::NonGoal(NonGoalCommand::$variant),
+                identity: crate::command::CommandIdentity::$variant,
                 representative_sql: $sql,
             }),+
         ];
