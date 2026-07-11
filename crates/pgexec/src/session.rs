@@ -159,6 +159,7 @@ impl GucSlot {
 enum GucValue {
     Bool(bool),
     Integer(i64),
+    DurationMillis(u64),
     Text(String),
 }
 
@@ -168,6 +169,8 @@ impl GucValue {
             Self::Bool(true) => "on".into(),
             Self::Bool(false) => "off".into(),
             Self::Integer(value) => value.to_string(),
+            Self::DurationMillis(0) => "0".into(),
+            Self::DurationMillis(value) => format!("{value}ms"),
             Self::Text(value) => value.clone(),
         }
     }
@@ -177,6 +180,7 @@ impl GucValue {
 enum GucKind {
     Bool,
     Integer { min: i64, max: i64 },
+    Duration,
     Text,
 }
 
@@ -243,10 +247,7 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         aliases: &[],
         vartype: "integer",
         boot_default: "0",
-        kind: GucKind::Integer {
-            min: 0,
-            max: i64::MAX,
-        },
+        kind: GucKind::Duration,
     },
     GucDefinition {
         name: "timezone",
@@ -414,6 +415,10 @@ fn parse_guc_value(definition: &GucDefinition, value: &str) -> Result<GucValue, 
             .parse()
             .map(GucValue::Integer)
             .map_err(|_| ExecError::InvalidParameterValue(value.into())),
+        GucKind::Duration => canonical
+            .parse()
+            .map(GucValue::DurationMillis)
+            .map_err(|_| ExecError::InvalidParameterValue(value.into())),
         GucKind::Text => Ok(GucValue::Text(canonical)),
     }
 }
@@ -438,13 +443,18 @@ fn canonical_guc_value(name: &str, value: &str) -> Result<String, ExecError> {
             }
         }
         "standard_conforming_strings" => canonical_bool(value),
-        "extra_float_digits" | "statement_timeout" => {
+        "extra_float_digits" => {
             let definition = guc_definition(name).expect("known integer GUC");
             let GucKind::Integer { min, max } = definition.kind else {
                 unreachable!()
             };
             canonical_integer_guc(value, min, max)
         }
+        "statement_timeout" => value
+            .trim()
+            .parse::<u64>()
+            .map(|number| number.to_string())
+            .map_err(|_| ExecError::InvalidParameterValue(value.to_string())),
         "datestyle" => Ok(value.to_string()),
         "intervalstyle" => {
             let lower = value.to_ascii_lowercase();
@@ -5329,6 +5339,19 @@ mod tests {
         );
 
         session.simple_query("BEGIN").await.unwrap();
+        session
+            .simple_query("SET statement_timeout = 17")
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SHOW statement_timeout")
+                    .await
+                    .unwrap()
+            ),
+            "17ms"
+        );
         let error = session
             .simple_query("DISCARD ALL")
             .await

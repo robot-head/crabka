@@ -513,4 +513,34 @@ with psycopg.connect(os.environ["DATABASE_URL"]) as connection:
 print("PASS: psycopg parameterized transaction-pooling smoke")
 PY
 
+DATABASE_URL="postgresql://bob:bob-secret@127.0.0.1:${PGDOG_PORT}/tenant-b?sslmode=prefer&connect_timeout=5" \
+timeout 30s python3 - <<'F1PY' >"${ARTIFACT_DIR}/f1-pooler-guc.log" 2>&1 || fail "F-1 PgDog GUC gate failed or timed out"
+import os
+import psycopg
+
+with psycopg.connect(os.environ["DATABASE_URL"]) as connection:
+    with connection.cursor() as cursor:
+        cursor.execute("BEGIN")
+        cursor.execute("SET application_name = 'f1-client-one'")
+        cursor.execute("SELECT current_setting('application_name')")
+        assert cursor.fetchone()[0] == "f1-client-one"
+        cursor.execute("SET LOCAL statement_timeout = 17")
+        cursor.execute("SHOW statement_timeout")
+        assert cursor.fetchone()[0] == "17ms"
+        connection.rollback()
+    with connection.transaction():
+        with connection.cursor() as cursor:
+            cursor.execute("RESET application_name")
+            cursor.execute("SHOW application_name")
+            assert cursor.fetchone()[0] == ""
+
+with psycopg.connect(os.environ["DATABASE_URL"]) as second_connection:
+    with second_connection.transaction():
+        with second_connection.cursor() as cursor:
+            cursor.execute("SET application_name = 'f1-client-two'")
+            cursor.execute("SHOW application_name")
+            assert cursor.fetchone()[0] == "f1-client-two"
+print("PASS: F-1 PgDog GUC transaction-pooler gate")
+F1PY
+
 log "PASS: Gres front-door e2e completed"
