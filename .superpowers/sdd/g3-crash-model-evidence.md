@@ -20,7 +20,12 @@ when the boundary permits it, and performs fresh live recovery. Each case has a
 truncation and proves `TornTruncation`. The zombie race blocks an old generation
 after a part upload, fences it, completes a successor checkpoint, then releases
 the old upload: the post-upload lease check returns `Fenced` before old
-`DeleteRecords`, and successor recovery wins.
+`DeleteRecords`, and successor recovery wins. Recreated WAL generations use
+immutable generation-qualified physical topic names (generation zero preserves
+the original name), so even the stricter fence-after-lease-check race can only
+send the zombie's Admin request to its old physical log. A deterministic test
+pauses at `LeaseValidated`, fences and checkpoints the successor, then proves
+the old/new prune calls target distinct topics.
 
 Command:
 
@@ -33,6 +38,8 @@ runtime, 1 coordinator-leader, 4 G-2 acceptance, 4 split runtime, and 6 live
 writer-fault tests passed. The live runtime suite boots the in-process broker,
 writes checkpoint objects, executes `DeleteRecords`, verifies the retained low
 watermark, and restores checkpoint plus tail.
+The live matrix includes both first-part and later-part aborts from a multipart
+upload; neither incomplete upload publishes a manifest.
 
 ## Snapshot, horizon, and fetch origins
 
