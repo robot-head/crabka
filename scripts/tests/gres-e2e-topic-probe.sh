@@ -13,6 +13,8 @@ run_classifier() {
 
 run_classifier 1 'TopicAuthorizationException: Not authorized to access topics: [__gres_tenants]' \
     | grep -Fx 'denied'
+run_classifier 0 'TOPIC_AUTHORIZATION_FAILED: TopicAuthorizationException: Not authorized to access topics: [__gres_tenants]' \
+    | grep -Fx 'denied'
 
 if run_classifier 0 ''; then
     echo 'classifier accepted a successful fetch' >&2
@@ -29,4 +31,4 @@ grep -Fq 'timeout 120s docker pull "$KAFKA_IMAGE"' scripts/gres-e2e.sh
 grep -Fq 'chmod 600 "$client_properties"' scripts/gres-e2e.sh
 grep -Fq -- '--user "$(id -u):$(id -g)"' scripts/gres-e2e.sh
 
-echo 'PASS: named-topic denial classification, Docker bounds, and credential mount ownership'
+echo 'PASS: named-topic denial classification including zero-exit auth errors, Docker bounds, and credential mount ownership'
