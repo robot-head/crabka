@@ -19,8 +19,8 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 
 - **Owner:** Chapter Gres SQL-Parity Program.
 - **Update rule:** every wave that changes SQL acceptance or semantics updates this file in the same change.
-- **Inventory rule:** [`pg18-command-inventory.json`](pg18-command-inventory.json) pins exactly 190 unique command titles to the PostgreSQL 18 SQL Commands reference. Major language features remain a separate table and never count as commands.
-- **Anti-rot rule:** `tools/check-pg-compat-matrix.sh` checks inventory and matrix in both directions, requires one behavior probe for every resolved or executable non-goal row, rejects orphan probes and disposition/behavior drift, and runs every representative through an in-memory SQL session. Refusals assert exact SQLSTATE plus a stable message fragment.
+- **Inventory rule:** [`pg18-command-inventory.json`](pg18-command-inventory.json) is derived from the checked `REL_18_0` `allfiles.sgml` snapshot whose SHA-256 is pinned by the checker. The deterministic extraction expands PostgreSQL's abbreviated entity filenames plus the seven separately tracked syntax families to exactly 190 unique titles. Major language features remain a separate typed manifest and never count as commands.
+- **Anti-rot rule:** parser acceptance is owned by the typed `CommandIdentity` dispatch registry and gated at every public parse boundary. `tools/check-pg-compat-matrix.sh` checks that registry, inventory, command rows, behavior probes, and the separate major-feature manifest in both directions, then runs executable representatives through an in-memory SQL session. Refusals assert exact SQLSTATE plus a stable message fragment.
 - **Bounded-refusal rule:** architectural `Non-goal(...)` rows recognize the representative PostgreSQL 18 syntax recorded in typed parser metadata and fail through the ordinary session path with `0A000`; unrecognized or trailing syntax is never swallowed by a prefix-only matcher.
 - **Allowed dispositions:** `Implemented`, `Wave-assigned(<wave>)`, `Mapped(<semantics>)`, `Error-with-notice(<SQLSTATE>)`, `Non-goal(<reason>)`.
 

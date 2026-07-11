@@ -12,6 +12,7 @@ the matrix remains a useful planning artifact between waves.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -23,6 +24,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX = ROOT / "docs" / "PG_COMPAT_MATRIX.md"
 DEFAULT_INVENTORY = ROOT / "docs" / "pg18-command-inventory.json"
+PG18_SOURCE_SHA256 = "4240987b5fddaa5ab5ffa2562551cb1325f2e5527b552c3bbe5be7ca6fd42fc7"
+PG18_SOURCE_ALIASES = {
+    "ALTER OPCLASS": "ALTER OPERATOR CLASS", "ALTER OPFAMILY": "ALTER OPERATOR FAMILY",
+    "ALTER TSCONFIG": "ALTER TEXT SEARCH CONFIGURATION", "ALTER TSDICTIONARY": "ALTER TEXT SEARCH DICTIONARY",
+    "ALTER TSPARSER": "ALTER TEXT SEARCH PARSER", "ALTER TSTEMPLATE": "ALTER TEXT SEARCH TEMPLATE",
+    "CREATE OPCLASS": "CREATE OPERATOR CLASS", "CREATE OPFAMILY": "CREATE OPERATOR FAMILY",
+    "CREATE TSCONFIG": "CREATE TEXT SEARCH CONFIGURATION", "CREATE TSDICTIONARY": "CREATE TEXT SEARCH DICTIONARY",
+    "CREATE TSPARSER": "CREATE TEXT SEARCH PARSER", "CREATE TSTEMPLATE": "CREATE TEXT SEARCH TEMPLATE",
+    "DROP OPCLASS": "DROP OPERATOR CLASS", "DROP OPFAMILY": "DROP OPERATOR FAMILY",
+    "DROP TSCONFIG": "DROP TEXT SEARCH CONFIGURATION", "DROP TSDICTIONARY": "DROP TEXT SEARCH DICTIONARY",
+    "DROP TSPARSER": "DROP TEXT SEARCH PARSER", "DROP TSTEMPLATE": "DROP TEXT SEARCH TEMPLATE",
+    "ROLLBACK TO": "ROLLBACK TO SAVEPOINT", "SET SESSION AUTH": "SET SESSION AUTHORIZATION",
+}
+PG18_TRACKED_SYNTAX_FAMILIES = {
+    "ALTER TABLE ATTACH PARTITION", "ALTER TABLE DETACH PARTITION",
+    "ALTER TABLE ENABLE ROW LEVEL SECURITY", "CREATE TABLE INHERITS",
+    "CREATE TABLE PARTITION BY", "CREATE TABLE PARTITION OF", "TABLE",
+}
 PARSER_COMMAND_REPORT_FORMAT_VERSION = 2
 DEFAULT_PARSER_COMMAND = [
     "cargo",
@@ -185,8 +204,16 @@ def load_inventory(path: Path) -> set[str]:
     if document.get("postgresql_major") != 18:
         raise ValueError(f"{path}: inventory must be pinned to PostgreSQL 18")
     source = document.get("source")
-    if not isinstance(source, str) or "/docs/18/" not in source:
-        raise ValueError(f"{path}: inventory source must identify PostgreSQL 18 documentation")
+    if not isinstance(source, str) or "REL_18_0" not in source:
+        raise ValueError(f"{path}: inventory source must identify immutable PostgreSQL REL_18_0")
+    snapshot_name = document.get("source_snapshot")
+    if not isinstance(snapshot_name, str) or Path(snapshot_name).name != snapshot_name:
+        raise ValueError(f"{path}: source_snapshot must be a sibling filename")
+    snapshot_path = path.parent / snapshot_name
+    snapshot = snapshot_path.read_bytes()
+    digest = hashlib.sha256(snapshot).hexdigest()
+    if document.get("source_sha256") != PG18_SOURCE_SHA256 or digest != PG18_SOURCE_SHA256:
+        raise ValueError(f"{path}: PostgreSQL REL_18_0 source snapshot SHA-256 mismatch")
     commands = document.get("commands")
     if not isinstance(commands, list) or not all(isinstance(command, str) for command in commands):
         raise ValueError(f"{path}: commands must be a JSON string array")
@@ -196,7 +223,34 @@ def load_inventory(path: Path) -> set[str]:
         raise ValueError(f"{path}: duplicate command names are forbidden")
     if commands != sorted(commands):
         raise ValueError(f"{path}: commands must be sorted")
+    derived = derive_pg18_commands(snapshot.decode("utf-8"))
+    if set(commands) != derived:
+        missing = sorted(derived - set(commands))
+        extra = sorted(set(commands) - derived)
+        raise ValueError(
+            f"{path}: inventory does not match derived REL_18_0 titles; missing={missing}, extra={extra}"
+        )
     return set(commands)
+
+
+def derive_pg18_commands(snapshot: str) -> set[str]:
+    try:
+        sql_section = snapshot.split("<!-- SQL commands -->", 1)[1].split(
+            "<!-- applications and utilities -->", 1
+        )[0]
+    except IndexError as error:
+        raise ValueError("PostgreSQL source snapshot lacks SQL command boundaries") from error
+    filenames = re.findall(r'^<!ENTITY\s+\S+\s+SYSTEM\s+"([^"]+)\.sgml">$', sql_section, re.MULTILINE)
+    if len(filenames) != 183:
+        raise ValueError(f"PostgreSQL REL_18_0 snapshot expected 183 SQL entities, found {len(filenames)}")
+    commands = {
+        PG18_SOURCE_ALIASES.get(filename.replace("_", " ").upper(), filename.replace("_", " ").upper())
+        for filename in filenames
+    }
+    commands.update(PG18_TRACKED_SYNTAX_FAMILIES)
+    if len(commands) != 190:
+        raise ValueError(f"derived PostgreSQL 18 command inventory has {len(commands)} titles, expected 190")
+    return commands
 
 
 def validate_inventory_rows(rows: dict[str, str], inventory: set[str]) -> list[str]:
@@ -367,25 +421,39 @@ def run_self_test(parser_commands: set[str]) -> None:
     if len(inventory) != 190:
         raise AssertionError("self-test expected the pinned inventory to contain exactly 190 commands")
     with tempfile.TemporaryDirectory() as directory:
-        duplicate_path = Path(directory) / "inventory.json"
-        duplicate_commands = sorted(inventory)
-        duplicate_commands[-1] = duplicate_commands[-2]
-        duplicate_path.write_text(
-            json.dumps({
-                "format_version": 1,
-                "postgresql_major": 18,
-                "source": "https://www.postgresql.org/docs/18/sql-commands.html",
-                "commands": duplicate_commands,
-            }),
-            encoding="utf-8",
+        directory_path = Path(directory)
+        snapshot_name = "pg18-allfiles-REL_18_0.sgml"
+        (directory_path / snapshot_name).write_bytes(
+            (DEFAULT_INVENTORY.parent / snapshot_name).read_bytes()
         )
-        try:
-            load_inventory(duplicate_path)
-        except ValueError as error:
-            if "duplicate command" not in str(error):
-                raise AssertionError(f"self-test expected duplicate-inventory failure, got: {error}") from error
-        else:
-            raise AssertionError("self-test expected duplicate-inventory direction to fail")
+        base = sorted(inventory)
+        mutations = {
+            "missing": base[:-1],
+            "extra": sorted(base + ["FAKE EXTRA COMMAND"]),
+            "rename": sorted(["ABORT RENAMED" if command == "ABORT" else command for command in base]),
+            "fake": sorted(["FAKE COMMAND" if command == "ABORT" else command for command in base]),
+            "duplicate": base[:-1] + [base[-2]],
+            "count": base[:188],
+        }
+        for label, mutated_commands in mutations.items():
+            mutation_path = directory_path / f"inventory-{label}.json"
+            mutation_path.write_text(
+                json.dumps({
+                    "format_version": 1,
+                    "postgresql_major": 18,
+                    "source": "https://github.com/postgres/postgres/blob/REL_18_0/doc/src/sgml/ref/allfiles.sgml",
+                    "source_snapshot": snapshot_name,
+                    "source_sha256": PG18_SOURCE_SHA256,
+                    "commands": mutated_commands,
+                }),
+                encoding="utf-8",
+            )
+            try:
+                load_inventory(mutation_path)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"self-test expected {label}-inventory direction to fail")
 
     missing_inventory = set(inventory)
     missing_inventory.remove("ABORT")

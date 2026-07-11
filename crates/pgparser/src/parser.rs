@@ -3233,8 +3233,30 @@ fn bounded_non_goal_refusal(sql: &str) -> Option<crate::ast::Statement> {
 
 fn refusal_tokens_match(candidate: &[(Token, usize)], representative: &str) -> bool {
     const IDENTIFIER_SLOTS: &[&str] = &[
-        "conv", "conv2", "lang", "lang2", "postgres", "opc", "opc2", "opf", "opf2", "pub", "r",
-        "r2", "sub", "ts", "ts2", "p", "p2", "t", "t2", "am", "handler", "func", "int4eq", "f",
+        "conv",
+        "conv2",
+        "lang",
+        "lang2",
+        "postgres",
+        "opc",
+        "opc2",
+        "opf",
+        "opf2",
+        "pub",
+        "r",
+        "r2",
+        "sub",
+        "ts",
+        "ts2",
+        "p",
+        "p2",
+        "t",
+        "t2",
+        "am",
+        "handler_fn",
+        "func",
+        "int4eq",
+        "f",
     ];
     let Ok(pattern) = lex(representative) else {
         return false;
@@ -6127,8 +6149,30 @@ fn every_non_goal_has_a_bounded_typed_refusal_probe() {
 #[cfg(test)]
 fn refusal_variant_sql(sql: &str) -> String {
     const PLACEHOLDERS: &[&str] = &[
-        "conv", "conv2", "lang", "lang2", "postgres", "opc", "opc2", "opf", "opf2", "pub", "r",
-        "r2", "sub", "ts", "ts2", "p", "p2", "t", "t2", "am", "handler", "func", "int4eq", "f",
+        "conv",
+        "conv2",
+        "lang",
+        "lang2",
+        "postgres",
+        "opc",
+        "opc2",
+        "opf",
+        "opf2",
+        "pub",
+        "r",
+        "r2",
+        "sub",
+        "ts",
+        "ts2",
+        "p",
+        "p2",
+        "t",
+        "t2",
+        "am",
+        "handler_fn",
+        "func",
+        "int4eq",
+        "f",
     ];
     let tokens = lex(sql).expect("representative lexes");
     let mut out = String::new();
