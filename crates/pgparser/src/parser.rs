@@ -3194,6 +3194,7 @@ pub fn parse_with_command_identities(
 /// local and a remote range never re-runs the local statement on the remote node.
 pub fn parse_with_source(sql: &str) -> Result<Vec<(crate::ast::Statement, String)>, ParseError> {
     if let Some(statement) = bounded_non_goal_refusal(sql) {
+        require_command_identity(&statement, sql)?;
         return Ok(vec![(
             statement,
             sql.trim().trim_end_matches(';').trim().to_string(),
@@ -6185,7 +6186,8 @@ fn refusal_variant_sql(sql: &str) -> String {
         }
         match token {
             Token::Ident(value) if PLACEHOLDERS.contains(&value.as_str()) => {
-                out.push_str(&format!("{value}_variant"));
+                out.push_str(&value);
+                out.push_str("_variant");
             }
             Token::StringLit(_) => out.push_str("'variant'"),
             Token::IntLit(_) => out.push_str("42"),
