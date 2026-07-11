@@ -1,4 +1,4 @@
-//! Parser-owned registry of accepted PostgreSQL command identities.
+//! Parser-owned registry of accepted `PostgreSQL` command identities.
 
 macro_rules! command_identities {
     ($(($variant:ident, $name:literal)),+ $(,)?) => {

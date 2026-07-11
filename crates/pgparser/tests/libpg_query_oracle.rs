@@ -113,7 +113,7 @@ const ACCEPTED: &[&str] = &[
     "SET SESSION application_name TO 'session-app'",
     "SET extra_float_digits = -15",
     "SET DateStyle TO ISO, MDY",
-    "SET DateStyle TO SQL DMY",
+    "SET DateStyle TO SQL, DMY",
     "SET TIME ZONE LOCAL",
     "SET TIME ZONE DEFAULT",
     "SET timezone = DEFAULT",
