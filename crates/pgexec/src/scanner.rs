@@ -306,6 +306,73 @@ impl RangeScanner for TimestampedRangeScanner {
 #[derive(Debug, Default)]
 pub struct LocalRangeScanner;
 
+struct LocalRangeCursor<'a> {
+    request: ScanRequest<'a>,
+    next_rowid: u64,
+    done: bool,
+}
+
+#[async_trait::async_trait]
+impl RangeCursor for LocalRangeCursor<'_> {
+    async fn next_page(&mut self, max_rows: usize) -> Result<ScanPage, ExecError> {
+        if max_rows == 0 {
+            return Err(ExecError::Unsupported(
+                "range cursor page size must be greater than zero".into(),
+            ));
+        }
+        if self.done {
+            return Ok(ScanPage {
+                rows: Box::new([]),
+                is_last: true,
+            });
+        }
+        let requested_end = self.request.interval.end.unwrap_or(u64::MAX);
+        let width = u64::try_from(max_rows).unwrap_or(u64::MAX);
+        let page_end = self.next_rowid.saturating_add(width).min(requested_end);
+        let interval = RowInterval {
+            start: Some(self.next_rowid),
+            end: Some(page_end),
+        };
+        let rows = if self.request.table.sharded {
+            let read_ts = self.request.read_ts.ok_or_else(|| {
+                ExecError::Unsupported(
+                    "sharded scans require a finite statement read timestamp".into(),
+                )
+            })?;
+            crate::exec::scan_ts_live_interval(
+                self.request.local,
+                self.request.global,
+                self.request.table,
+                read_ts,
+                interval,
+            )?
+        } else {
+            crate::exec::scan_live_interval(
+                self.request.local,
+                self.request.global,
+                self.request.global_snapshot,
+                self.request.snapshot,
+                self.request.own_xid,
+                self.request.table,
+                interval,
+            )?
+        };
+        let rows = apply_executable_scan_pushdown(
+            rows,
+            &self.request.predicate,
+            &self.request.projection,
+            None,
+            None,
+        )?;
+        self.next_rowid = page_end;
+        self.done = page_end >= requested_end || page_end == u64::MAX;
+        Ok(ScanPage {
+            rows: rows.into_boxed_slice(),
+            is_last: self.done,
+        })
+    }
+}
+
 impl RangeScanner for LocalRangeScanner {
     fn scan(&self, request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, ExecError> {
         if request.table.sharded {
@@ -345,6 +412,21 @@ impl RangeScanner for LocalRangeScanner {
             request.partial_aggregate.as_ref(),
             request.top_k.as_ref(),
         )
+    }
+
+    fn scan_cursor<'a>(
+        &'a self,
+        request: ScanRequest<'a>,
+    ) -> Result<Box<dyn RangeCursor + 'a>, ExecError> {
+        if request.partial_aggregate.is_some() || request.top_k.is_some() {
+            return Ok(Box::new(MaterializedRangeCursor::new(self.scan(request)?)));
+        }
+        let next_rowid = request.interval.start.unwrap_or(0);
+        Ok(Box::new(LocalRangeCursor {
+            request,
+            next_rowid,
+            done: false,
+        }))
     }
 }
 

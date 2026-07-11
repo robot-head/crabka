@@ -2220,7 +2220,7 @@ pub(crate) fn scan_live_interval(
     table: &crabka_pgcatalog::Table,
     interval: RowInterval,
 ) -> Result<Vec<ScannedRow>, ExecError> {
-    let scanned = kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))?;
+    let scanned = scan_table_interval(kv, table.id, interval)?;
     let mut out: Vec<ScannedRow> = Vec::new();
     let mut i = 0;
     while i < scanned.len() {
@@ -2276,7 +2276,7 @@ pub(crate) fn scan_ts_live_interval(
     read_ts: ReadTimestamp,
     interval: RowInterval,
 ) -> Result<Vec<ScannedRow>, ExecError> {
-    let scanned = kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))?;
+    let scanned = scan_table_interval(kv, table.id, interval)?;
     let mut out = Vec::new();
     let mut i = 0;
     while i < scanned.len() {
@@ -2365,6 +2365,28 @@ pub(crate) fn scan_ts_live_interval(
     }
     out.sort_by_key(|row| (row.rowid, row.xmin));
     Ok(out)
+}
+
+fn scan_table_interval(
+    kv: &dyn Kv,
+    table_id: u32,
+    interval: RowInterval,
+) -> Result<crabka_pgkv::KvScan, ExecError> {
+    let start = interval
+        .start
+        .map_or_else(|| crabka_pgkv::key::table_prefix(table_id), |rowid| {
+            crabka_pgkv::key::row_key(table_id, rowid)
+        });
+    let end = interval.end.map_or_else(
+        || {
+            let mut end = crabka_pgkv::key::table_prefix(table_id);
+            let last = end.last_mut().expect("table prefix is non-empty");
+            *last = last.checked_add(1).expect("primary index has a successor");
+            end
+        },
+        |rowid| crabka_pgkv::key::row_key(table_id, rowid),
+    );
+    Ok(kv.scan_range(&start, &end)?)
 }
 
 /// Evaluate an optional WHERE predicate against a row (NULL => false, like SELECT).
