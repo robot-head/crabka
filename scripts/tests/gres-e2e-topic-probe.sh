@@ -26,5 +26,7 @@ fi
 
 grep -Fq 'timeout 10s docker info' scripts/gres-e2e.sh
 grep -Fq 'timeout 120s docker pull "$KAFKA_IMAGE"' scripts/gres-e2e.sh
+grep -Fq 'chmod 600 "$client_properties"' scripts/gres-e2e.sh
+grep -Fq -- '--user "$(id -u):$(id -g)"' scripts/gres-e2e.sh
 
-echo 'PASS: named-topic denial classification and Docker timeout bounds'
+echo 'PASS: named-topic denial classification, Docker bounds, and credential mount ownership'

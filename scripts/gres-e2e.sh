@@ -233,9 +233,12 @@ security.protocol=SASL_PLAINTEXT
 sasl.mechanism=SCRAM-SHA-512
 sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${username}" password="${password}";
 EOF
+    chmod 600 "$client_properties"
 
     set +e
-    timeout 20s docker run --rm --network host \
+    # Run as the invoking user so the container can read the deliberately 0600
+    # bind-mounted credentials without weakening their host permissions.
+    timeout 20s docker run --rm --network host --user "$(id -u):$(id -g)" \
         -v "${PWD}/${client_properties}:/tmp/client.properties:ro" \
         "$KAFKA_IMAGE" \
         /opt/kafka/bin/kafka-console-consumer.sh \
