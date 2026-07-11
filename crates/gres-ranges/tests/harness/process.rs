@@ -14,8 +14,11 @@ use crabka_gres_control::{
     TenantState,
 };
 use tokio::{
-    net::TcpListener,
+    io::copy_bidirectional,
+    net::{TcpListener, TcpStream},
     process::{Child, Command},
+    sync::watch,
+    task::JoinHandle,
 };
 
 const PASSWORD: &str = "process-secret";
@@ -26,6 +29,8 @@ pub struct ProcessHarness {
     bootstrap: String,
     tenant: String,
     tls: TlsPaths,
+    r0_proxy: RangeProxy,
+    r1_proxy: RangeProxy,
     r0: ProcessNode,
     r1: ProcessNode,
 }
@@ -52,8 +57,10 @@ impl ProcessHarness {
         let r0_range = reserve_port().await;
         let r1_sql = reserve_port().await;
         let r1_range = reserve_port().await;
+        let r0_proxy = RangeProxy::start(r0_range).await;
+        let r1_proxy = RangeProxy::start(r1_range).await;
         let tls = write_tls_fixture(root.path());
-        provision_control(&bootstrap, &tenant, r0_range, r1_range).await;
+        provision_control(&bootstrap, &tenant, r0_proxy.port, r1_proxy.port).await;
 
         let r0 = spawn_node(
             root.path(),
@@ -81,6 +88,8 @@ impl ProcessHarness {
             bootstrap,
             tenant,
             tls,
+            r0_proxy,
+            r1_proxy,
             r0,
             r1,
         };
@@ -135,6 +144,16 @@ impl ProcessHarness {
     pub async fn restart(&mut self, range: u32) {
         let hosted_ranges = format!("r{range}");
         self.restart_node(range, &hosted_ranges).await;
+    }
+
+    pub async fn partition(&self, range: u32) {
+        self.proxy(range).set_enabled(false);
+        tokio::task::yield_now().await;
+    }
+
+    pub async fn heal(&self, range: u32) {
+        self.proxy(range).set_enabled(true);
+        tokio::task::yield_now().await;
     }
 
     async fn stop_node(&mut self, range: u32) {
@@ -204,6 +223,14 @@ impl ProcessHarness {
             &mut self.r1
         }
     }
+
+    fn proxy(&self, range: u32) -> &RangeProxy {
+        if range == 0 {
+            &self.r0_proxy
+        } else {
+            &self.r1_proxy
+        }
+    }
 }
 
 impl Drop for ProcessHarness {
@@ -217,6 +244,68 @@ struct TlsPaths {
     server_cert: PathBuf,
     server_key: PathBuf,
     ca: PathBuf,
+}
+
+struct RangeProxy {
+    port: u16,
+    enabled: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+impl RangeProxy {
+    async fn start(backend_port: u16) -> Self {
+        let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
+            .await
+            .expect("bind range proxy");
+        let port = listener.local_addr().expect("range proxy address").port();
+        let (enabled, _) = watch::channel(true);
+        let task_enabled = enabled.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut frontend, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut enabled = task_enabled.subscribe();
+                tokio::spawn(async move {
+                    if !*enabled.borrow() {
+                        return;
+                    }
+                    let Ok(mut backend) =
+                        TcpStream::connect((IpAddr::V4(Ipv4Addr::LOCALHOST), backend_port)).await
+                    else {
+                        return;
+                    };
+                    tokio::select! {
+                        _ = copy_bidirectional(&mut frontend, &mut backend) => {}
+                        _ = wait_until_disabled(&mut enabled) => {}
+                    }
+                });
+            }
+        });
+        Self {
+            port,
+            enabled,
+            task,
+        }
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.send_replace(enabled);
+    }
+}
+
+impl Drop for RangeProxy {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn wait_until_disabled(enabled: &mut watch::Receiver<bool>) {
+    while *enabled.borrow_and_update() {
+        if enabled.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 fn write_tls_fixture(root: &Path) -> TlsPaths {
