@@ -1411,7 +1411,6 @@ impl Engine for MultiRangeTenant {
             prepared: BTreeMap::new(),
             portals: BTreeMap::new(),
             next_internal_statement: 0,
-            pending_timestamp_statements: Vec::new(),
         }
     }
 }
@@ -1713,7 +1712,6 @@ pub struct GatewaySession {
     prepared: BTreeMap<String, GatewayPrepared>,
     portals: BTreeMap<String, GatewayPortal>,
     next_internal_statement: u64,
-    pending_timestamp_statements: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2422,43 +2420,6 @@ impl GatewaySession {
         });
         let _table_write_gate = self.acquire_routed_dml_gate(&route).await?;
 
-        if route.kind == StatementKind::Dml
-            && matches!(self.transaction, GatewayTransaction::Open { .. })
-        {
-            let serving = self.current_serving()?;
-            let catalog = serving
-                .engine(RangeId::COORDINATOR)
-                .or_else(|| serving.engines.values().next())
-                .ok_or_else(|| {
-                    PgError::error(
-                        sqlstate::FEATURE_NOT_SUPPORTED,
-                        "tenant has no hosted engine with a range-0 catalog view",
-                    )
-                })?;
-            let normalized = statement.trim_start().to_ascii_lowercase();
-            let table = table_refs_in_statement(&normalized).into_iter().next();
-            if let Some(table) = table
-                && catalog_table_is_sharded(catalog, &table.name)?
-            {
-                if !matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty())
-                {
-                    return Err(PgError::error(
-                        sqlstate::FEATURE_NOT_SUPPORTED,
-                        "mixing timestamp-sharded and ordinary writes in one transaction is not supported",
-                    ));
-                }
-                ensure_timestamp_scatter_is_supported(statement)?;
-                let values = normalized
-                    .find("values")
-                    .map(|index| values_tuples(&normalized[index + "values".len()..]).count())
-                    .unwrap_or(0);
-                self.pending_timestamp_statements.push(statement.to_owned());
-                return Ok(vec![QueryResult::Command {
-                    tag: format!("INSERT 0 {values}"),
-                }]);
-            }
-        }
-
         if let Some(ranges) = route.scatter_ranges.clone() {
             return self
                 .execute_timestamp_scatter(statement, ranges)
@@ -2486,7 +2447,6 @@ impl GatewaySession {
             touched: Vec::new(),
             escalated: false,
         };
-        self.pending_timestamp_statements.clear();
         self.explicit_transaction = true;
         self.inner
             .active_explicit_transactions
@@ -2506,34 +2466,6 @@ impl GatewaySession {
         };
         let touched = touched.clone();
         let escalated = *escalated;
-
-        if !self.pending_timestamp_statements.is_empty() {
-            if !touched.is_empty() {
-                return Err(PgError::error(
-                    sqlstate::FEATURE_NOT_SUPPORTED,
-                    "mixing timestamp-sharded and ordinary writes in one transaction is not supported",
-                ));
-            }
-            let statements = std::mem::take(&mut self.pending_timestamp_statements);
-            let merged = merge_timestamp_insert_statements(&statements)?;
-            self.transaction = GatewayTransaction::Idle;
-            let route = self.route_statement(&merged)?;
-            let ranges = route.scatter_ranges.unwrap_or_else(|| vec![route.range_id]);
-            if let Err(error) = self.execute_timestamp_scatter(&merged, ranges).await {
-                self.transaction = GatewayTransaction::Failed {
-                    touched: Vec::new(),
-                    escalated: false,
-                    recovery: None,
-                };
-                self.status = TxStatus::Failed;
-                return Err(error);
-            }
-            self.status = TxStatus::Idle;
-            self.release_explicit_transaction();
-            return Ok(vec![QueryResult::Command {
-                tag: "COMMIT".to_owned(),
-            }]);
-        }
 
         if touched.is_empty() {
             self.transaction = GatewayTransaction::Idle;
@@ -2587,7 +2519,6 @@ impl GatewaySession {
     }
 
     async fn rollback_transaction(&mut self) -> Result<Vec<QueryResult>, PgError> {
-        self.pending_timestamp_statements.clear();
         let previous = std::mem::replace(&mut self.transaction, GatewayTransaction::Idle);
         let Some((touched, escalated, recovery)) = transaction_participants(previous) else {
             self.status = TxStatus::Idle;
@@ -3058,20 +2989,11 @@ impl GatewaySession {
         statement: &str,
         ranges: Vec<RangeId>,
     ) -> Result<QueryResult, PgError> {
-        if matches!(self.transaction, GatewayTransaction::Open { .. }) {
-            if !matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty())
-            {
-                return Err(PgError::error(
-                    sqlstate::FEATURE_NOT_SUPPORTED,
-                    "mixing timestamp-sharded and ordinary writes in one transaction is not supported",
-                ));
-            }
-            ensure_timestamp_scatter_is_supported(statement)?;
-            let inserted = values_tuples(statement).count();
-            self.pending_timestamp_statements.push(statement.to_owned());
-            return Ok(QueryResult::Command {
-                tag: format!("INSERT 0 {inserted}"),
-            });
+        if !matches!(self.transaction, GatewayTransaction::Idle) {
+            return Err(PgError::error(
+                sqlstate::FEATURE_NOT_SUPPORTED,
+                "multi-range sharded timestamp DML is only supported in autocommit",
+            ));
         }
         for range_id in &ranges {
             if !self.sessions.contains_key(range_id) {
@@ -3086,9 +3008,6 @@ impl GatewaySession {
                 "range r0 is not hosted by this tenant",
             )
         })?;
-        if !matches!(self.transaction, GatewayTransaction::Idle) {
-            return Err(failed_transaction_error());
-        }
         let plan = coordinator
             .plan_timestamp_write_sql(statement)
             .map_err(ExecError::into_pg)?;
@@ -3481,41 +3400,6 @@ impl GatewaySession {
             .active_explicit_transactions
             .fetch_sub(1, Ordering::AcqRel);
     }
-}
-
-fn merge_timestamp_insert_statements(statements: &[String]) -> Result<String, PgError> {
-    let first = statements.first().ok_or_else(|| {
-        PgError::error(sqlstate::FEATURE_NOT_SUPPORTED, "empty sharded transaction")
-    })?;
-    let first_lower = first.to_ascii_lowercase();
-    let values_index = first_lower.find("values").ok_or_else(|| {
-        PgError::error(
-            sqlstate::FEATURE_NOT_SUPPORTED,
-            "explicit sharded transaction requires INSERT VALUES",
-        )
-    })?;
-    let prefix = first[..values_index + "values".len()].trim_end();
-    let canonical_prefix = first_lower[..values_index].trim();
-    let mut tuples = Vec::new();
-    for statement in statements {
-        let lower = statement.to_ascii_lowercase();
-        let index = lower.find("values").ok_or_else(|| {
-            PgError::error(
-                sqlstate::FEATURE_NOT_SUPPORTED,
-                "explicit sharded transaction requires INSERT VALUES",
-            )
-        })?;
-        if lower[..index].trim() != canonical_prefix {
-            return Err(PgError::error(
-                sqlstate::FEATURE_NOT_SUPPORTED,
-                "explicit sharded transaction currently requires one INSERT target",
-            ));
-        }
-        tuples.extend(
-            values_tuples(&statement[index + "values".len()..]).map(|tuple| format!("({tuple})")),
-        );
-    }
-    Ok(format!("{prefix} {}", tuples.join(", ")))
 }
 
 impl Drop for GatewaySession {

@@ -440,7 +440,7 @@ async fn in_process_scanner_merges_partial_aggregates_across_row_ranges() {
 }
 
 #[tokio::test]
-async fn sharded_multi_row_insert_in_explicit_transaction_commits_atomically() {
+async fn sharded_multi_row_insert_in_explicit_transaction_remains_fail_clear() {
     let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
     let mut session = gateway.connect();
     session
@@ -449,51 +449,16 @@ async fn sharded_multi_row_insert_in_explicit_transaction_commits_atomically() {
         .expect("create");
     session.simple_query("BEGIN").await.expect("begin");
 
-    session
+    let error = session
         .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
         .await
-        .expect("explicit scatter insert");
+        .expect_err("explicit transaction rejected");
 
-    session.simple_query("COMMIT").await.expect("commit");
-    assert_eq!(
-        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
-        vec![10, 20]
-    );
-}
-
-#[tokio::test]
-async fn multiple_sharded_statements_commit_once_and_rollback_discards_all() {
-    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
-    let mut session = gateway.connect();
-    session
-        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
-        .await
-        .expect("create");
-
-    session.simple_query("BEGIN").await.expect("begin");
-    session
-        .simple_query("INSERT INTO t150 VALUES (21, 10)")
-        .await
-        .expect("first buffered insert");
-    session
-        .simple_query("INSERT INTO t150 VALUES (121, 20)")
-        .await
-        .expect("second buffered insert");
-    session.simple_query("COMMIT").await.expect("commit");
-    assert_eq!(
-        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
-        vec![10, 20]
-    );
-
-    session.simple_query("BEGIN").await.expect("begin rollback");
-    session
-        .simple_query("INSERT INTO t150 VALUES (22, 30), (122, 40)")
-        .await
-        .expect("buffer rollback insert");
+    assert_eq!(error.code, "0A000");
     session.simple_query("ROLLBACK").await.expect("rollback");
     assert_eq!(
         select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
-        vec![10, 20]
+        Vec::<i32>::new()
     );
 }
 

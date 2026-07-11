@@ -16,9 +16,10 @@ operator-owned `kubernetes.io/tls` range identity Secret.
 - Connecting directly to the r1-only SQL gateway and selecting rows owned by
   both r0 and r1 returned `1, 12, 15, 17, 18`, proving follower-backed routing
   and remote-r0 execution from a process that does not host r0.
-- An explicit multi-statement sharded transaction inserted row-range keys `9`
-  and `3002`, committed once, and immediately returned both rows. Rollback and
-  multi-statement atomicity are also covered by the deterministic suite.
+- A provisional buffered explicit-transaction implementation produced keys `9`
+  and `3002` in Kind, but independent review rejected it because it lacked
+  read-your-writes and merged SQL text unsafely. That implementation was
+  removed; durable explicit sharded transactions remain an open G7 gate.
 - PostgreSQL extended Parse/Bind routing was exercised with a real bound shard
   parameter through `pgbench -M extended`; the transaction completed with zero
   failures and row `3003` was immediately visible.
@@ -26,7 +27,7 @@ operator-owned `kubernetes.io/tls` range identity Secret.
 Raw results are under `target/g7-kind-clean-artifacts/multirange/`, notably
 `sql-scatter-after-barrier.txt`, `pgbench-extended-literal.txt`,
 `sql-extended-result.txt`, `sql-direct-r1-remote-r0-after-fix.txt`, and
-`sql-explicit-sharded-final.txt`, `pgbench-parameterized-shard-final.txt`, and
+`pgbench-parameterized-shard-final.txt`, and
 `sql-parameterized-shard-final.txt`.
 
 ## Recovery
@@ -68,7 +69,7 @@ cargo test -p crabka-pgexec primary_prewrite_waits_for_range0_replica_barrier --
 cargo test -p crabka-gres-ranges --lib
   105 passed
 cargo test -p crabka-gres-ranges --test multirange --test crossrange_2pc
-  24 + 21 passed
+  23 + 21 passed before the rejected explicit-transaction prototype was removed
 cargo check -p crabka-gres -p crabka-gres-ranges --all-targets
   passed
 cargo fmt --all -- --check
@@ -77,5 +78,6 @@ cargo fmt --all -- --check
 
 The live fixes include `29aba497` (barrier primary reads), `f5edf25b`
 (follower-backed rN routing), `79084e7c` (atomic sparse scan terminals),
-`efcfa68e` (typed deferred shard routing), and `4ec1e9f9`/`9ca47d2f`
-(explicit sharded transaction commit).
+and `efcfa68e` (typed deferred shard routing). Commits `4ec1e9f9`/`9ca47d2f`
+were reviewed as insufficient and their behavior has been removed pending a
+real timestamp-transaction session with read-your-writes semantics.
