@@ -58,6 +58,10 @@ later chapters complete.
     state, and accepted successor writes`.
 - `bash -n scripts/gres-substrate-smoke.sh`
   - PASS.
+- `python3 scripts/tests/gres_f0_runtime_gates.py`
+  - PASS: structurally validated F-0 runtime and CI gates.
+- `git diff --check`
+  - PASS.
 
 The multi-broker test raises its soft file-descriptor limit to 8192 (within the
 host hard limit) before starting three in-process brokers. At the default soft
