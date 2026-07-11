@@ -527,6 +527,86 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
                 .expect("range scanner thread does not panic")
         })
     }
+
+    fn scan_cursor<'a>(
+        &'a self,
+        request: crabka_pgexec::ScanRequest<'a>,
+    ) -> Result<Box<dyn crabka_pgexec::RangeCursor + 'a>, crabka_pgexec::ExecError> {
+        if !request.table.sharded {
+            return crabka_pgexec::RangeScanner::scan_cursor(
+                &crabka_pgexec::LocalRangeScanner,
+                request,
+            );
+        }
+        if request.partial_aggregate.is_some() || request.top_k.is_some() {
+            return Ok(Box::new(crabka_pgexec::MaterializedRangeCursor::new(
+                self.scan(request)?,
+            )));
+        }
+        let next_rowid = request.interval.start.unwrap_or(0);
+        Ok(Box::new(RegistryRangeCursor {
+            scanner: self,
+            request,
+            next_rowid,
+            done: false,
+        }))
+    }
+}
+
+struct RegistryRangeCursor<'a> {
+    scanner: &'a RegistryRangeScanner,
+    request: crabka_pgexec::ScanRequest<'a>,
+    next_rowid: u64,
+    done: bool,
+}
+
+#[async_trait]
+impl crabka_pgexec::RangeCursor for RegistryRangeCursor<'_> {
+    async fn next_page(
+        &mut self,
+        max_rows: usize,
+    ) -> Result<crabka_pgexec::ScanPage, crabka_pgexec::ExecError> {
+        if max_rows == 0 {
+            return Err(crabka_pgexec::ExecError::Unsupported(
+                "range cursor page size must be greater than zero".into(),
+            ));
+        }
+        if self.done {
+            return Ok(crabka_pgexec::ScanPage {
+                rows: Box::new([]),
+                is_last: true,
+            });
+        }
+        let requested_end = self.request.interval.end.unwrap_or(u64::MAX);
+        let width = u64::try_from(max_rows).unwrap_or(u64::MAX);
+        let page_end = self.next_rowid.saturating_add(width).min(requested_end);
+        let rows = self
+            .scanner
+            .scan_async(crabka_pgexec::ScanRequest {
+                local: self.request.local,
+                global: self.request.global,
+                global_snapshot: self.request.global_snapshot,
+                snapshot: self.request.snapshot,
+                own_xid: self.request.own_xid,
+                read_ts: self.request.read_ts,
+                table: self.request.table,
+                interval: crabka_pgexec::RowInterval {
+                    start: Some(self.next_rowid),
+                    end: Some(page_end),
+                },
+                predicate: self.request.predicate.clone(),
+                projection: self.request.projection.clone(),
+                partial_aggregate: None,
+                top_k: None,
+            })
+            .await?;
+        self.next_rowid = page_end;
+        self.done = page_end >= requested_end || page_end == u64::MAX;
+        Ok(crabka_pgexec::ScanPage {
+            rows: rows.into_boxed_slice(),
+            is_last: self.done,
+        })
+    }
 }
 
 /// Range-compute service that evaluates scan visibility on the owning local engine.
