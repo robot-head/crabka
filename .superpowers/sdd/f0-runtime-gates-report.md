@@ -102,3 +102,63 @@ explicit skip path returns before requiring Docker or psycopg.
   `Session` implementation compiles in the integrated workspace.
 - The pinned pure-Python psycopg package relies on libpq supplied by the pinned
   PostgreSQL 18 client installation in CI.
+
+## Review fixes
+
+Two Important review findings were addressed after commits `0dbfe944` and
+`9de1a306`.
+
+### Review-fix RED
+
+The original line-oriented grep contract was replaced first with
+`scripts/tests/gres_f0_runtime_gates.py`. It structurally extracts named CI
+steps and executable shell blocks, parses the psycopg heredoc with Python's AST,
+and checks uncommented Rust function bodies. Before production/config changes:
+
+```text
+python3 scripts/tests/gres_f0_runtime_gates.py
+AssertionError: Rust driver smoke must have a command-level timeout
+exit status: 1
+```
+
+This was the intended RED: both real driver invocations were unbounded, their
+URLs lacked `connect_timeout`, and CI did not yet invoke the new contract.
+
+### Review-fix implementation
+
+- Both Rust and Python driver commands now run under `timeout 30s`; failures or
+  deadline expiry produce a driver-specific message without printing the URL.
+- Both environment-only URLs now contain `connect_timeout=5`; credentials stay
+  out of process arguments.
+- The structural validator verifies exact extended-corpus argument sets and
+  separately named artifacts for both CI legs and PgDog, summary publication,
+  non-cancelled upload/retention, rendered transaction pool mode, hash-pinned
+  Python installation, mandatory CI without `--skip-pgdog`, and executable
+  parameter binding/assertion plus two-transaction reuse for all three drivers.
+- The `gres-conformance` CI job runs the validator before builds and live gates.
+- The old comment/string-vulnerable grep-only shell contract was removed.
+
+### Review-fix GREEN
+
+```text
+python3 scripts/tests/gres_f0_runtime_gates.py
+PASS: structurally validated F-0 runtime and CI gates
+
+bash -n scripts/gres-e2e.sh
+PASS (no output)
+
+cargo nextest run -p crabka-gres-conformance --no-fail-fast
+Summary: 20 tests run: 20 passed, 0 skipped
+
+cargo check -p crabka-gres-conformance --all-targets
+Finished dev profile successfully
+
+cargo clippy -p crabka-gres-conformance --all-targets -- -D warnings
+Finished dev profile successfully
+
+cargo +nightly fmt --all -- --check
+PASS (no diff)
+
+git diff --check
+PASS (no output)
+```
