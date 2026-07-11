@@ -69,3 +69,11 @@ The nextest configuration caps all `crabka-gres-substrate` test binaries at two
 threads in both default and CI profiles. Shell readiness and cleanup use
 absolute deadlines; external CLI/psql calls are command-timeout bounded and
 cleanup escalates to `SIGKILL` before a bounded wait.
+
+## Independent review
+
+The first independent review found six blocking issues (EndTxn classification,
+filtered-page cursor progress, exact process chunking, nextest concurrency,
+shell bounds, and the transient seam). Commits `a0dcef10` and `601b1f49`
+resolve them. Re-review at `601b1f49` returned clean: no Critical, Important,
+or Minor findings remain in this G-2 scope.
