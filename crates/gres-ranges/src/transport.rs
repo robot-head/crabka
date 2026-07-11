@@ -44,6 +44,8 @@ pub enum RangeRequest {
 pub enum RangeResponse {
     /// SQL statement completed and returned a command tag/summary.
     Sql { result: String },
+    /// Complete simple-query results, including row descriptions and encoded cells.
+    SqlResults { results: Vec<WireQueryResult> },
     /// SQL execution failed with a `PostgreSQL` error preserved from the owner.
     SqlError { code: String, message: String },
     /// Visible rows returned by a range scan.
@@ -61,6 +63,40 @@ pub enum RangeResponse {
         error: WireErrorKind,
         message: String,
     },
+}
+
+/// Serializable simple-query result returned by a range owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum WireQueryResult {
+    Rows {
+        fields: Vec<WireFieldDescription>,
+        rows: Vec<Vec<Option<WireCell>>>,
+        tag: String,
+    },
+    Command {
+        tag: String,
+    },
+    Empty,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireCell {
+    pub text: Vec<u8>,
+    pub binary: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireFieldDescription {
+    pub name: String,
+    pub table_oid: u32,
+    pub column_id: i16,
+    pub type_oid: u32,
+    pub type_size: i16,
+    pub type_modifier: i32,
+    pub format: i16,
 }
 
 /// Timestamp-oracle RPC sent to range 0.
