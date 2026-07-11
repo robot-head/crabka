@@ -3720,8 +3720,8 @@ fn resolve_result_formats(requested: &[i16], count: usize) -> Result<Vec<i16>, P
     }
 }
 
-#[cfg(test)]
 impl SqlSession {
+    #[cfg(test)]
     async fn test_extended_query(
         &mut self,
         sql: &str,
@@ -3757,6 +3757,7 @@ impl SqlSession {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn test_describe(
         &mut self,
         sql: &str,
@@ -3764,6 +3765,180 @@ impl SqlSession {
         self.parse("", sql, &[]).await.map(|d| d.fields)
     }
 
+    async fn stream_eligible_select<S: crabka_pgwire::engine::ResultSink>(
+        &mut self,
+        stmt: &Statement,
+        result_index: usize,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> Option<Result<(), ExecError>> {
+        let Statement::Query(query) = stmt else {
+            return None;
+        };
+        let SetExpr::Query(QueryBody::Select(select)) = &query.body else {
+            return None;
+        };
+        if query.with.is_some() || query.locking.is_some() {
+            return None;
+        }
+        let mut select = (**select).clone();
+        select.order_by = query.order_by.clone();
+        select.limit = query.limit;
+        select.offset = query.offset;
+        select.locking = query.locking;
+        let [TableExpr::Table { name, alias }] = select.from.as_slice() else {
+            return None;
+        };
+        if select.distinct
+            || !select.group_by.is_empty()
+            || select.having.is_some()
+            || !select.order_by.is_empty()
+            || crate::agg::is_aggregate_query(&select)
+        {
+            return None;
+        }
+        let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name) {
+            Ok(table) if table.foreign.is_none() => table,
+            Ok(_) => return None,
+            Err(error) => return Some(Err(error.into())),
+        };
+
+        Some(
+            async {
+                self.reject_prepared_participant()?;
+                if matches!(self.state, TxnState::Failed(_)) {
+                    return Err(ExecError::InFailedTransaction);
+                }
+                let (snapshot, own, global_snapshot) = self.read_context().await?;
+                let read_ts = match &self.state {
+                    TxnState::InTransaction(context) if context.repeatable_read => {
+                        context.timestamp_read.ok_or_else(|| {
+                            ExecError::Unsupported("repeatable-read timestamp is missing".into())
+                        })?
+                    }
+                    TxnState::InTransaction(_) | TxnState::Idle => self
+                        .timestamp_oracle
+                        .allocate_read_timestamp_after(
+                            crate::timestamp_txn::durable_timestamp_horizon_with_catalog(
+                                self.kv.as_ref(),
+                                self.catalog_kv.as_ref(),
+                            )?,
+                        )
+                        .await
+                        .map_err(|error| ExecError::Unsupported(error.to_string()))?,
+                    TxnState::Prepared(_) | TxnState::Failed(_) => {
+                        return Err(ExecError::InFailedTransaction);
+                    }
+                };
+                let scanner = crate::scanner::TimestampedRangeScanner::new(
+                    Arc::clone(&self.range_scanner),
+                    read_ts,
+                );
+                let qualifier = alias.as_deref().unwrap_or(&table.name);
+                let scope = crate::scope::Scope::single(&table, qualifier);
+                let (fields, expressions, _) =
+                    crate::exec::resolve_projection(&select.projection, &scope)?;
+                let mut plan =
+                    crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection);
+                plan.projection = crate::ProjectionPushdown::All;
+                plan.partial_aggregate = None;
+                plan.top_k = None;
+                let mut cursor = crate::scanner::RangeScanner::scan_cursor(
+                    &scanner,
+                    crate::scanner::ScanRequest {
+                        local: self.kv.as_ref(),
+                        global: self.catalog_kv.as_ref(),
+                        global_snapshot: &global_snapshot,
+                        snapshot: &snapshot,
+                        own_xid: own,
+                        read_ts: None,
+                        table: &table,
+                        interval: crate::scanner::RowInterval::ALL,
+                        predicate: plan.predicate,
+                        projection: plan.projection,
+                        partial_aggregate: None,
+                        top_k: None,
+                    },
+                )?;
+                let ctx = self.eval_ctx();
+                let mut offset =
+                    usize::try_from(select.offset.unwrap_or(0).max(0)).unwrap_or(usize::MAX);
+                let mut remaining = select
+                    .limit
+                    .map(|limit| usize::try_from(limit.max(0)).unwrap_or(usize::MAX));
+                let mut fields = Some(fields);
+                let mut emitted = 0usize;
+
+                loop {
+                    let page = cursor.next_page(page_rows).await?;
+                    let mut source_rows = Vec::with_capacity(page.rows.len());
+                    for scanned in page.rows {
+                        if !crate::exec::row_matches(
+                            select.filter.as_ref(),
+                            &scope,
+                            &scanned.row,
+                            &ctx,
+                        )? {
+                            continue;
+                        }
+                        if offset > 0 {
+                            offset -= 1;
+                            continue;
+                        }
+                        if remaining == Some(0) {
+                            break;
+                        }
+                        source_rows.push(scanned.row);
+                        if let Some(remaining) = &mut remaining {
+                            *remaining -= 1;
+                        }
+                    }
+                    let projected =
+                        crate::exec::project_rows(&expressions, &scope, &source_rows, &ctx)?;
+                    let encoded =
+                        match crate::exec::rows_result(Vec::new(), &projected, &ctx.time_zone) {
+                            QueryResult::Rows { rows, .. } => rows,
+                            _ => unreachable!("rows_result always returns rows"),
+                        };
+                    emitted = emitted.saturating_add(encoded.len());
+                    let stopped = remaining == Some(0);
+                    let is_last = page.is_last || stopped;
+                    let mut chunks =
+                        into_bounded_row_pages(encoded, page_rows, RESULT_PAGE_MAX_BYTES)
+                            .peekable();
+                    if chunks.peek().is_none() && is_last {
+                        sink.send(crabka_pgwire::engine::ResultPage::Rows {
+                            result_index,
+                            fields: fields.take(),
+                            rows: Vec::new(),
+                            tag: Some(format!("SELECT {emitted}")),
+                        })
+                        .await
+                        .map_err(ExecError::Remote)?;
+                    }
+                    while let Some(rows) = chunks.next() {
+                        let rows = rows.map_err(ExecError::Remote)?;
+                        let final_chunk = is_last && chunks.peek().is_none();
+                        sink.send(crabka_pgwire::engine::ResultPage::Rows {
+                            result_index,
+                            fields: fields.take(),
+                            rows,
+                            tag: final_chunk.then(|| format!("SELECT {emitted}")),
+                        })
+                        .await
+                        .map_err(ExecError::Remote)?;
+                    }
+                    if is_last {
+                        break;
+                    }
+                }
+                Ok(())
+            }
+            .await,
+        )
+    }
+
+    #[cfg(test)]
     async fn test_describe_prepared(
         &mut self,
         sql: &str,
@@ -3816,6 +3991,23 @@ impl Session for SqlSession {
             return sink.send(ResultPage::Empty { result_index: 0 }).await;
         }
         for (result_index, stmt) in statements.iter().enumerate() {
+            if let Some(result) = self
+                .stream_eligible_select(stmt, result_index, page_rows, sink)
+                .await
+            {
+                match result {
+                    Ok(()) => {
+                        if let TxnState::InTransaction(ctx) = &mut self.state {
+                            ctx.activity_started = true;
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        self.mark_transaction_failed();
+                        return Err(error.into_pg());
+                    }
+                }
+            }
             match self.run_one(stmt).await.map_err(ExecError::into_pg)? {
                 QueryResult::Rows { fields, rows, tag } => {
                     let mut fields = Some(fields);

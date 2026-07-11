@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use crabka_pgcatalog::{Column, Table};
 use crabka_pgexec::{
     ColumnPredicate, PartialAggregateFunction, PartialAggregateSpec, PredicateOp,
-    PredicatePushdown, ProjectionPushdown, RangeScanner, ScanRequest, ScannedRow, SqlEngine,
-    TopKColumn, TopKSpec,
+    PredicatePushdown, ProjectionPushdown, RangeCursor, RangeScanner, ScanPage, ScanRequest,
+    ScannedRow, SqlEngine, TopKColumn, TopKSpec,
     plan_dist::{plan_scan, strict_predicate_for_filter},
     scanner::{
         LocalRangeScanner, apply_executable_scan_pushdown, apply_scan_pushdown,
@@ -716,6 +716,94 @@ impl RangeScanner for RejectExecutableScanner {
         }
         LocalRangeScanner.scan(request)
     }
+}
+
+#[derive(Debug, Default)]
+struct PagingScanner {
+    scan_calls: std::sync::atomic::AtomicUsize,
+    page_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct PagingCursor {
+    next: u64,
+    page_calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl RangeCursor for PagingCursor {
+    async fn next_page(&mut self, max_rows: usize) -> Result<ScanPage, crabka_pgexec::ExecError> {
+        self.page_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let rows = (0..max_rows)
+            .map(|_| {
+                let value = self.next;
+                self.next += 1;
+                ScannedRow {
+                    rowid: value,
+                    xmin: 1,
+                    row: vec![Datum::Int4(i32::try_from(value).expect("test value fits"))],
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Ok(ScanPage {
+            rows,
+            is_last: false,
+        })
+    }
+}
+
+impl RangeScanner for PagingScanner {
+    fn scan(&self, _request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, crabka_pgexec::ExecError> {
+        self.scan_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+
+    fn scan_cursor<'a>(
+        &'a self,
+        _request: ScanRequest<'a>,
+    ) -> Result<Box<dyn RangeCursor + 'a>, crabka_pgexec::ExecError> {
+        Ok(Box::new(PagingCursor {
+            next: 1,
+            page_calls: Arc::clone(&self.page_calls),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn simple_select_limit_stops_native_cursor_before_materialization() {
+    use crabka_pgwire::engine::{CollectingResultSink, Session};
+
+    let scanner = Arc::new(PagingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    let mut setup = engine.connect();
+    setup
+        .simple_query("CREATE TABLE items (id int4) SHARDED")
+        .await
+        .expect("table setup");
+    let mut session = engine.connect();
+    let mut sink = CollectingResultSink::default();
+
+    session
+        .simple_query_into("SELECT id FROM items LIMIT 1", 2, &mut sink)
+        .await
+        .expect("streamed select");
+    let results = sink.finish().expect("valid result pages");
+
+    assert_eq!(
+        cells(results.into_iter().next().expect("one result")),
+        vec![vec![Some("1".into())]]
+    );
+    assert_eq!(
+        scanner.page_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        scanner.scan_calls.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 }
 
 async fn query_cells(engine: SqlEngine, sql: &str) -> Vec<Vec<Option<String>>> {
