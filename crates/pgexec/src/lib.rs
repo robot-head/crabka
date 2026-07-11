@@ -854,6 +854,43 @@ impl SqlEngine {
         self.committer.commit(ops).await
     }
 
+    /// Advance local scan terminals to include recovered timestamp operations.
+    pub async fn recover_timestamp_scan_terminals(
+        &self,
+        operations: &[TimestampTxnOperation],
+    ) -> Result<(), ExecError> {
+        let mut maxima = std::collections::BTreeMap::<u32, u64>::new();
+        for operation in operations {
+            maxima
+                .entry(operation.table_id)
+                .and_modify(|max| *max = (*max).max(operation.rowid))
+                .or_insert(operation.rowid);
+        }
+        let mut ops = Vec::new();
+        for (table_id, max_rowid) in maxima {
+            let key = crabka_pgkv::key::seq_key(table_id);
+            let current = self
+                .kv
+                .get(&key)?
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                .map(u64::from_be_bytes)
+                .unwrap_or(1);
+            let next = max_rowid.checked_add(1).ok_or_else(|| {
+                ExecError::Unsupported("row id exhausted during timestamp recovery".into())
+            })?;
+            if next > current {
+                ops.push(crabka_pgkv::WriteOp::Put {
+                    key,
+                    value: next.to_be_bytes().to_vec(),
+                });
+            }
+        }
+        if !ops.is_empty() {
+            self.committer.commit(ops).await?;
+        }
+        Ok(())
+    }
+
     /// Return the catalog KV used by this engine.
     pub fn catalog_kv(&self) -> &dyn Kv {
         self.catalog_kv.as_ref()

@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -11,14 +11,35 @@ use async_trait::async_trait;
 use crabka_gres_control::{RangeLayoutEntry, SqlUser, TenantId, TenantRecord, TenantState};
 use crabka_gres_ranges::{
     CheckpointManifest, ClaimedStagedSuccessor, CommittedTailRecord, FramedTcpClient,
-    HostedRangeService, LocalSqlSplitError, MultiRangeTenant, MultiRangeTenantConfig, RangeId,
-    RangeRegistry, RangeService, RangeTlsClientConfig, RangeTlsServerConfig, RangeTransferBarrier,
-    RangeTransferCapability, RangeTransferError, StagedRangeSuccessor, TableId,
-    TableTransferRequest, TenantName, serve_tls, tenant::EmptyTableSplitTestHook,
+    GatewayCommitFault, HostedRangeService, LocalSqlSplitError, MultiRangeTenant,
+    MultiRangeTenantConfig, RangeId, RangeRegistry, RangeRequest, RangeResponse, RangeService,
+    RangeTlsClientConfig, RangeTlsServerConfig, RangeTransferBarrier, RangeTransferCapability,
+    RangeTransferError, StagedRangeSuccessor, TableId, TableTransferRequest, TenantName, serve_tls,
+    tenant::EmptyTableSplitTestHook,
 };
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{Kv, MemKv};
 use crabka_pgwire::engine::{Engine, QueryResult, Session};
+
+struct CountingTimestampService {
+    inner: HostedRangeService,
+    prewrites: AtomicUsize,
+    resolves: AtomicUsize,
+    recoveries: AtomicUsize,
+}
+
+#[async_trait]
+impl RangeService for CountingTimestampService {
+    async fn handle(&self, request: RangeRequest) -> RangeResponse {
+        match &request {
+            RangeRequest::TimestampPrewrite(_) => self.prewrites.fetch_add(1, Ordering::Relaxed),
+            RangeRequest::TimestampResolve(_) => self.resolves.fetch_add(1, Ordering::Relaxed),
+            RangeRequest::TimestampRecover(_) => self.recoveries.fetch_add(1, Ordering::Relaxed),
+            _ => 0,
+        };
+        self.inner.handle(request).await
+    }
+}
 
 struct MtlsFixture {
     _dir: tempfile::TempDir,
@@ -92,6 +113,20 @@ async fn spawn_tls(
         let _ = serve_tls(listener, service, config).await;
     });
     address
+}
+
+async fn spawn_tls_with_handle(
+    service: Arc<dyn RangeService>,
+    config: RangeTlsServerConfig,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind TLS listener");
+    let address = listener.local_addr().expect("TLS listener address");
+    let handle = tokio::spawn(async move {
+        let _ = serve_tls(listener, service, config).await;
+    });
+    (address, handle)
 }
 
 fn start_gateway() -> MultiRangeTenant {
@@ -764,8 +799,10 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_timestamp_scatter_prewrite_and_resolve_commit_atomically() {
-    let mut remote = crabka_pgexec::SqlEngine::new();
+async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart() {
+    let local_dir = tempfile::tempdir().expect("local durable ranges");
+    let remote_dir = tempfile::tempdir().expect("remote durable range");
+    let mut remote = crabka_pgexec::SqlEngine::open(remote_dir.path()).expect("remote engine");
     let fixture = MtlsFixture::new();
     let record = TenantRecord::new(
         1,
@@ -786,7 +823,7 @@ async fn remote_timestamp_scatter_prewrite_and_resolve_commit_atomically() {
         },
         RangeLayoutEntry {
             range_id: 1,
-            end_key: Some(crabka_gres_control::RangeBoundary::new(50, 2)),
+            end_key: Some(crabka_gres_control::RangeBoundary::new(50, 10)),
             endpoint: "local-r1".into(),
             wal_generation: 1,
         },
@@ -801,27 +838,32 @@ async fn remote_timestamp_scatter_prewrite_and_resolve_commit_atomically() {
     let registry = RangeRegistry::from_tenant_record(&record).expect("registry");
     let config = MultiRangeTenantConfig::from_boundaries(
         TenantName::parse("tenant_remote_scatter").expect("tenant"),
-        "0,50:1:0,50:2:0",
+        "0,50:0,50:10",
     )
     .expect("config")
+    .with_data_dir(local_dir.path().to_path_buf())
     .with_hosted_ranges(vec![RangeId::COORDINATOR, RangeId::new(1)])
     .expect("host coordinator and first shard")
     .with_range_registry(registry.clone())
     .with_range_client(FramedTcpClient::with_tls(fixture.client).expect("mTLS range client"));
-    let (gateway, handles) = MultiRangeTenant::start(config).expect("gateway");
+    let restart_config = config.clone();
+    let (gateway, handles) = MultiRangeTenant::start(
+        config.with_commit_fault_for_testing(GatewayCommitFault::AfterTimestampCommitDecision),
+    )
+    .expect("gateway");
     let hosted = gateway.hosted_range_engines();
     let coordinator = hosted.get(&RangeId::COORDINATOR).expect("r0");
     remote.set_catalog_kv(coordinator.kv_handle());
     coordinator.share_gtm_to(&mut remote);
     remote.set_timestamp_oracle(coordinator.timestamp_oracle_handle());
-    let address = spawn_tls(
-        Arc::new(HostedRangeService::new(BTreeMap::from([(
-            RangeId::new(2),
-            remote.clone_handle(),
-        )]))),
-        fixture.server,
-    )
-    .await;
+    let service = Arc::new(CountingTimestampService {
+        inner: HostedRangeService::new(BTreeMap::from([(RangeId::new(2), remote.clone_handle())])),
+        prewrites: AtomicUsize::new(0),
+        resolves: AtomicUsize::new(0),
+        recoveries: AtomicUsize::new(0),
+    });
+    let (address, server_task) =
+        spawn_tls_with_handle(service.clone(), fixture.server.clone()).await;
     let mut live_record = record;
     live_record.ranges[2].endpoint = address.to_string();
     registry
@@ -834,29 +876,143 @@ async fn remote_timestamp_scatter_prewrite_and_resolve_commit_atomically() {
         .simple_query("CREATE TABLE t50 (id int4) SHARDED")
         .await
         .expect("create");
-    session.simple_query("INSERT INTO t50 VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15),(16)").await.expect("remote scatter commit");
-    let mut local_owner = hosted.get(&RangeId::new(1)).expect("r1").connect();
-    let mut remote_owner = remote.connect();
-    let local = local_owner
-        .simple_query("SELECT id FROM t50")
-        .await
-        .expect("local rows");
-    let remote_rows = remote_owner
-        .simple_query("SELECT id FROM t50")
-        .await
-        .expect("remote rows");
-    let count = [&local, &remote_rows]
+    let table = crabka_pgcatalog::list_tables(coordinator.catalog_kv())
+        .expect("catalog")
         .into_iter()
-        .map(|results| match &results[..] {
-            [QueryResult::Rows { rows, .. }] => rows.len(),
-            _ => 0,
-        })
-        .sum::<usize>();
+        .find(|table| table.name == "t50")
+        .expect("t50");
+    assert!(
+        table.sharding.is_none(),
+        "row-range fixture must not use hash routing"
+    );
+    session
+        .simple_query("INSERT INTO t50 VALUES (1),(11)")
+        .await
+        .expect_err("post-decision failure is ambiguous");
+    assert!(service.prewrites.load(Ordering::Relaxed) > 0);
     assert_eq!(
-        count,
-        16,
-        "local={local:?}; remote={remote_rows:?}; routes={:?}",
-        handles.route_log().await
+        service.resolves.load(Ordering::Relaxed),
+        0,
+        "ambiguous commit is not retried"
+    );
+    assert_eq!(service.recoveries.load(Ordering::Relaxed), 0);
+    let descriptor = coordinator
+        .timestamp_transaction_descriptors()
+        .expect("descriptor scan")
+        .into_iter()
+        .next()
+        .expect("durable timestamp descriptor");
+    drop(session);
+    drop(gateway);
+    drop(handles);
+    drop(hosted);
+    server_task.abort();
+    let _ = server_task.await;
+    drop(service);
+    drop(remote);
+
+    let mut recovered_engines = BTreeMap::from([
+        (
+            RangeId::COORDINATOR,
+            SqlEngine::open(local_dir.path().join("r0")).expect("reopen r0"),
+        ),
+        (
+            RangeId::new(1),
+            SqlEngine::open(local_dir.path().join("r1")).expect("reopen r1"),
+        ),
+    ]);
+    let mut remote = SqlEngine::open(remote_dir.path()).expect("reopen remote compute");
+    let recovered_coordinator = recovered_engines
+        .get(&RangeId::COORDINATOR)
+        .expect("recovered r0");
+    remote.set_catalog_kv(recovered_coordinator.kv_handle());
+    let recovered_service = Arc::new(CountingTimestampService {
+        inner: HostedRangeService::new(BTreeMap::from([(RangeId::new(2), remote.clone_handle())])),
+        prewrites: AtomicUsize::new(0),
+        resolves: AtomicUsize::new(0),
+        recoveries: AtomicUsize::new(0),
+    });
+    let (recovered_address, _recovered_server) =
+        spawn_tls_with_handle(recovered_service.clone(), fixture.server).await;
+    live_record.ranges[2].endpoint = recovered_address.to_string();
+    registry
+        .refresh_from_tenant_record(&live_record)
+        .await
+        .expect("publish restarted endpoint");
+    let (restarted, _restart_handles) =
+        MultiRangeTenant::start_with_engine_factory(restart_config, move |_dir, range_id| {
+            Ok(recovered_engines
+                .remove(&range_id)
+                .expect("recovered engine"))
+        })
+        .expect("restart resolves durable remote decision");
+    assert_eq!(
+        recovered_service.resolves.load(Ordering::Relaxed),
+        0,
+        "normal resolve was never retried"
+    );
+    assert_eq!(
+        recovered_service.recoveries.load(Ordering::Relaxed),
+        1,
+        "exactly one recovery RPC"
+    );
+    let restarted_hosted = restarted.hosted_range_engines();
+    remote.set_timestamp_oracle(
+        restarted_hosted
+            .get(&RangeId::COORDINATOR)
+            .expect("restarted r0")
+            .timestamp_oracle_handle(),
+    );
+    let commit_ts = match descriptor.decision {
+        crabka_pgexec::PrimaryTxnDecision::Committed(ts) => ts,
+        other => panic!("expected committed descriptor, got {other:?}"),
+    };
+    for operation in &descriptor.operations {
+        let kv = if operation.range_id == 2 {
+            remote.kv_handle()
+        } else {
+            restarted_hosted
+                .get(&RangeId::new(operation.range_id))
+                .expect("reopened owner")
+                .kv_handle()
+        };
+        let key = crabka_pgmvcc::version::version_key_ts(
+            operation.table_id,
+            operation.rowid,
+            descriptor.start_ts.get(),
+        );
+        let bytes = kv
+            .get(&key)
+            .expect("read version")
+            .expect("recovered version exists");
+        let version = crabka_pgmvcc::version::decode_ts_tuple(&bytes).expect("decode version");
+        assert_eq!(
+            version.state,
+            crabka_pgmvcc::version::TsVersionState::Committed {
+                commit_ts: commit_ts.get()
+            }
+        );
+    }
+    let read_ts = restarted_hosted
+        .get(&RangeId::new(1))
+        .expect("r1")
+        .allocate_timestamp_read_timestamp()
+        .await
+        .expect("read timestamp");
+    assert!(
+        read_ts.get() >= commit_ts.get(),
+        "read_ts={} commit_ts={}",
+        read_ts.get(),
+        commit_ts.get()
+    );
+    let mut recovered_session = restarted.connect();
+    let rows = recovered_session
+        .simple_query("SELECT id FROM t50 ORDER BY id")
+        .await
+        .expect("recovered rows");
+    assert!(
+        matches!(&rows[..], [QueryResult::Rows { rows, .. }] if rows.len() == 2),
+        "{rows:?}"
     );
 }
 
