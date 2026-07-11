@@ -52,9 +52,6 @@ const APP_NAME: &str = "crabka-gres";
 const DEFAULT_IMAGE: &str = concat!("ghcr.io/robot-head/crabka-gres:", env!("CARGO_PKG_VERSION"));
 const COMPUTE_PORT: i32 = 5432;
 const LIFECYCLE_REQUEUE: Duration = Duration::from_secs(5);
-const UNSUPPORTED_TOPOLOGY_REQUEUE: Duration = Duration::from_mins(5);
-const MULTI_RANGE_UNSUPPORTED_REASON: &str = "MultiRangeUnsupported";
-const MULTI_RANGE_UNSUPPORTED_MESSAGE: &str = "multi-range tenant placement is unavailable: it would start multiple computes that each host r0 and write the r0 WAL; wait for remote range-0 replication and a fencing barrier";
 
 /// Run the controller forever.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
@@ -122,49 +119,38 @@ async fn reconcile_inner(
         }
     };
 
-    if obj.meta().deletion_timestamp.is_none() && has_multiple_ranges(&obj.spec.ranges) {
-        patch_unsupported_multi_range_status(&tenant_api, &name, &obj, None).await?;
-        return Ok(Action::requeue(UNSUPPORTED_TOPOLOGY_REQUEUE));
-    }
-
-    let has_sticky_unsupported_status = is_multi_range_unsupported(&obj);
-
     let gres_api: Api<Gres> = Api::namespaced(ctx.client.clone(), &ns);
     let Some(gres) = gres_api.get_opt(&obj.spec.gres).await? else {
-        if !has_sticky_unsupported_status {
-            patch_status(
-                &tenant_api,
-                &name,
-                &obj,
-                "False",
-                "GresNotFound",
-                "referenced Gres does not exist",
-                None,
-                preserved_lifecycle_state(&obj),
-                false,
-            )
-            .await?;
-        }
+        patch_status(
+            &tenant_api,
+            &name,
+            &obj,
+            "False",
+            "GresNotFound",
+            "referenced Gres does not exist",
+            None,
+            preserved_lifecycle_state(&obj),
+            false,
+        )
+        .await?;
         return Ok(Action::requeue(Duration::from_secs(30)));
     };
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
     let cluster = gres.spec.kafka_cluster.clone();
     let kafka = kafka_api.get_opt(&cluster).await?;
     let Some(bootstrap) = kafka.as_ref().and_then(internal_listener_bootstrap) else {
-        if !has_sticky_unsupported_status {
-            patch_status(
-                &tenant_api,
-                &name,
-                &obj,
-                "False",
-                "ClusterNotReady",
-                "referenced Kafka is not Ready or has no internal listener",
-                None,
-                preserved_lifecycle_state(&obj),
-                false,
-            )
-            .await?;
-        }
+        patch_status(
+            &tenant_api,
+            &name,
+            &obj,
+            "False",
+            "ClusterNotReady",
+            "referenced Kafka is not Ready or has no internal listener",
+            None,
+            preserved_lifecycle_state(&obj),
+            false,
+        )
+        .await?;
         return Ok(Action::requeue(Duration::from_secs(30)));
     };
 
@@ -186,11 +172,6 @@ async fn reconcile_inner(
     let control = ctx.gres_control_for(&cluster, &bootstrap).await?;
     let current_record = control.get_tenant(&tenant_name).await?;
     let tenant_ranges = reconcile_ranges(current_record.as_ref(), &spec_ranges);
-    if has_multiple_ranges(&tenant_ranges) {
-        patch_unsupported_multi_range_status(&tenant_api, &name, &obj, current_record.as_ref())
-            .await?;
-        return Ok(Action::requeue(UNSUPPORTED_TOPOLOGY_REQUEUE));
-    }
     let lifecycle_state = current_record
         .as_ref()
         .map_or_else(|| requested_state(&obj), |record| record.state);
@@ -829,40 +810,6 @@ fn compute_replicas(state: TenantState) -> i32 {
     }
 }
 
-fn has_multiple_ranges(ranges: &[GresTenantRangeSpec]) -> bool {
-    ranges.len() > 1
-}
-
-fn is_multi_range_unsupported(obj: &GresTenant) -> bool {
-    obj.status.as_ref().is_some_and(|status| {
-        status.conditions.iter().any(|condition| {
-            condition.type_ == "Ready"
-                && condition.status == "False"
-                && condition.reason == MULTI_RANGE_UNSUPPORTED_REASON
-        })
-    })
-}
-
-async fn patch_unsupported_multi_range_status(
-    api: &Api<GresTenant>,
-    name: &str,
-    obj: &GresTenant,
-    current_record: Option<&TenantRecord>,
-) -> Result<(), ReconcileError> {
-    patch_status(
-        api,
-        name,
-        obj,
-        "False",
-        MULTI_RANGE_UNSUPPORTED_REASON,
-        MULTI_RANGE_UNSUPPORTED_MESSAGE,
-        current_record.map(|record| record.record_version),
-        current_record.map_or_else(|| preserved_lifecycle_state(obj), |record| record.state),
-        false,
-    )
-    .await
-}
-
 fn tenant_acls(principal: &str, tenant: &TenantName) -> Vec<AclEntry> {
     let wal_prefix = format!("__gres_wal.{tenant}");
     let cfg = tenant_config_topic(tenant);
@@ -1084,7 +1031,7 @@ fn render_deployment(
 ) -> Result<Deployment, ReconcileError> {
     let name = obj.name_any();
     let selector = range_labels(obj, range.range_id);
-    let host_ranges = host_ranges_arg();
+    let host_ranges = host_ranges_arg(range.range_id);
     let ranges = ranges_arg(all_ranges);
     let mut args = vec![
         "--listen".to_owned(),
@@ -1199,8 +1146,8 @@ fn ranges_arg(ranges: &[GresTenantRangeSpec]) -> String {
         .join(",")
 }
 
-fn host_ranges_arg() -> String {
-    "r0".to_string()
+fn host_ranges_arg(range_id: u32) -> String {
+    format!("r{range_id}")
 }
 
 fn render_range_compute_network_policy(obj: &GresTenant) -> Result<NetworkPolicy, ReconcileError> {
@@ -1534,6 +1481,51 @@ mod tests {
         assert!(json.contains("GRES_KAFKA_PASSWORD"));
         assert!(json.contains("secretKeyRef"));
         assert!(!json.contains("hunter2"));
+    }
+
+    #[test]
+    fn each_multi_range_deployment_hosts_only_its_own_range() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
+        let deployment = render_deployment(
+            &obj,
+            &ranges[1],
+            &ranges,
+            "image",
+            "k:9092",
+            "__gres_wal.tenant-a.r1",
+            "__gres_cfg.tenant-a",
+            1,
+            &ConfigArgs::parse_from(["operator"]).config,
+            false,
+        )
+        .expect("render r1 deployment");
+        let args = deployment
+            .spec
+            .expect("spec")
+            .template
+            .spec
+            .expect("pod")
+            .containers[0]
+            .args
+            .clone()
+            .expect("args");
+        assert!(args.windows(2).any(|pair| pair == ["--host-ranges", "r1"]));
+        assert!(!args.windows(2).any(|pair| pair == ["--host-ranges", "r0"]));
     }
 
     #[test]
