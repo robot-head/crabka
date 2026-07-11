@@ -475,6 +475,11 @@ TENANT_A_PID=""
 expect_sql_equals "tenant B survives tenant A compute death" "$TENANT_B_CONN" bob-secret "SELECT name FROM e2e_marker WHERE id = 1" tenant-b
 
 start_oracle
+CRABKA_GRES_PGDOG_TEST_URL="postgresql://carol:carol-secret@127.0.0.1:${PGDOG_PORT}/tenant-c?sslmode=disable&connect_timeout=5" \
+    cargo test --locked -p crabka-gres-conformance \
+    --test extended_transaction_pinning -- --nocapture \
+    >"${ARTIFACT_DIR}/extended-transaction-pinning.log" 2>&1 || \
+    fail "extended transaction-pinning regression failed"
 ./target/debug/crabka-gres-conformance \
     --oracle-url "host=127.0.0.1 port=${ORACLE_PORT} user=postgres dbname=postgres" \
     --subject-url "$TENANT_C_CONN password=carol-secret" \
@@ -488,11 +493,11 @@ start_oracle
     --summary "${ARTIFACT_DIR}/parity-pgdog.md" \
     >"${ARTIFACT_DIR}/conformance-pgdog.log" 2>&1
 
-DATABASE_URL="postgresql://alice:alice-secret@127.0.0.1:${PGDOG_PORT}/tenant-a?sslmode=prefer&connect_timeout=5" \
+DATABASE_URL="postgresql://bob:bob-secret@127.0.0.1:${PGDOG_PORT}/tenant-b?sslmode=prefer&connect_timeout=5" \
     timeout 30s ./target/debug/crabka-gres-driver-smoke \
     >"${ARTIFACT_DIR}/rust-driver-smoke.log" 2>&1 || fail "Rust driver smoke failed or timed out"
 
-DATABASE_URL="postgresql://alice:alice-secret@127.0.0.1:${PGDOG_PORT}/tenant-a?sslmode=prefer&connect_timeout=5" \
+DATABASE_URL="postgresql://bob:bob-secret@127.0.0.1:${PGDOG_PORT}/tenant-b?sslmode=prefer&connect_timeout=5" \
 timeout 30s python3 - <<'PY' >"${ARTIFACT_DIR}/python-driver-smoke.log" 2>&1 || fail "Python driver smoke failed or timed out"
 import os
 import psycopg
