@@ -39,6 +39,7 @@ tokio-rustls = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
+crc32c = { workspace = true }
 mockall = { workspace = true }
 mutants = { workspace = true }
 proptest = { workspace = true }

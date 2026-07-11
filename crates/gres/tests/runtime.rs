@@ -5,9 +5,12 @@ use std::{
 };
 
 use crabka_broker::{Broker, BrokerConfig};
+use crabka_client_core::Client;
+use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use crabka_gres_ranges::{RangeId, TableId};
 use crabka_pgkv::Kv as _;
 use crabka_pgwire::engine::{Engine as _, Session as _};
+use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use tokio::net::TcpListener;
 
 struct RangeMtlsFixture {
@@ -238,6 +241,106 @@ async fn connect_with_password(port: u16, user: &str, password: &str) -> tokio_p
         );
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
+}
+
+async fn produce_raw_fixture(bootstrap: &str, topic: &str, payload: &'static [u8]) {
+    let client = Client::builder()
+        .bootstrap(bootstrap.to_string())
+        .client_id("gres-g6-runtime-admin")
+        .build()
+        .await
+        .expect("admin client");
+    let response = client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: topic.to_string(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("create raw fixture topic");
+    assert_eq!(response.topics[0].error_code, 0);
+    client.close();
+
+    let producer = Producer::builder()
+        .bootstrap(bootstrap.to_string())
+        .client_id("gres-g6-runtime-producer")
+        .acks(Acks::All)
+        .build()
+        .await
+        .expect("fixture producer");
+    let ack = producer
+        .send(ProducerRecord {
+            topic: topic.to_string(),
+            partition: Some(0),
+            value: Some(bytes::Bytes::from_static(payload)),
+            ..Default::default()
+        })
+        .await;
+    producer.flush().await.expect("fixture flush");
+    assert_eq!(
+        ack.await
+            .expect("fixture ack channel")
+            .expect("fixture produce")
+            .offset,
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
+    let broker_dir = tempfile::tempdir().expect("broker tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    let bootstrap = broker.listen_addr().to_string();
+    produce_raw_fixture(&bootstrap, "g6-runtime-events", b"substrate-fdw").await;
+
+    let mut runtime = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
+        bootstrap: bootstrap.clone(),
+        tenant: "g6-runtime".to_string(),
+        cache_dir: None,
+        checkpoints: None,
+        kafka_security: None,
+        ranges: Some("0,5".to_string()),
+        host_ranges: None,
+        range_rpc: None,
+    })
+    .await
+    .expect("open live multi-range substrate runtime");
+    crabka_gres::register_kafka_scanner_with_default_bootstrap(
+        &mut runtime.engine,
+        Some(bootstrap),
+    );
+    let mut session = runtime.engine.connect();
+    session
+        .simple_query("CREATE SERVER own_cluster FOREIGN DATA WRAPPER crabka_gres_fdw")
+        .await
+        .expect("create zero-config own-cluster server");
+    session
+        .simple_query(
+            "CREATE FOREIGN TABLE g6_runtime_events (value bytea) SERVER own_cluster OPTIONS (topic 'g6-runtime-events', value_format 'raw')",
+        )
+        .await
+        .expect("create raw foreign table");
+    let results = session
+        .simple_query("SELECT value FROM g6_runtime_events ORDER BY _offset")
+        .await
+        .expect("select through substrate default server");
+    let [crabka_pgwire::engine::QueryResult::Rows { rows, .. }] = results.as_slice() else {
+        panic!("expected one row result, got {results:?}");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0][0].as_ref().expect("value").text,
+        b"\\x7375627374726174652d666477"[..]
+    );
+
+    broker.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

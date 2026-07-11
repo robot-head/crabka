@@ -12,7 +12,9 @@ use std::{
 
 use arc_swap::ArcSwap;
 use crabka_pgcatalog::ShardingStrategy;
-use crabka_pgexec::{ExecError, PredicateOp, PredicatePushdown, SqlEngine};
+use crabka_pgexec::{
+    ExecError, PredicateOp, PredicatePushdown, SqlEngine, foreign::ForeignScanner,
+};
 use crabka_pgtypes::Datum;
 use crabka_pgwire::{
     engine::{
@@ -477,6 +479,29 @@ impl MultiRangeTenant {
             .collect()
     }
 
+    /// Install one foreign scanner on every currently served range engine.
+    ///
+    /// The serving snapshot is replaced atomically so new gateway sessions
+    /// cannot observe a mixture of scanner-enabled and scanner-less engines.
+    pub fn set_foreign_scanner(&self, scanner: &Arc<dyn ForeignScanner>) {
+        let serving = self.inner.serving.load_full();
+        let mut engines = serving
+            .engines
+            .iter()
+            .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
+            .collect::<BTreeMap<_, _>>();
+        for engine in engines.values_mut() {
+            engine.set_foreign_scanner(Arc::clone(scanner));
+        }
+        self.inner
+            .serving
+            .store(Arc::new(ServingSnapshot::ready_with_keepalives(
+                serving.range_map.clone(),
+                engines,
+                serving.keepalives.clone(),
+            )));
+    }
+
     /// Split off one physically empty ordinary table into a locally hosted successor.
     ///
     /// This first bridge intentionally performs no physical data migration. It accepts only a
@@ -643,6 +668,9 @@ impl MultiRangeTenant {
         successor.set_catalog_kv(coordinator.kv_handle());
         coordinator.share_gtm_to(&mut successor);
         successor.set_timestamp_oracle(coordinator.timestamp_oracle_handle());
+        if let Some(scanner) = coordinator.foreign_scanner_handle() {
+            successor.set_foreign_scanner(scanner);
+        }
 
         let mut engines = serving
             .engines
@@ -1487,6 +1515,9 @@ impl SplitHooks for LocalSqlSplitBridge<'_> {
         coordinator.share_gtm_to(&mut successor);
         successor.set_timestamp_oracle(coordinator.timestamp_oracle_handle());
         successor.set_range_scanner(coordinator.range_scanner_handle());
+        if let Some(scanner) = coordinator.foreign_scanner_handle() {
+            successor.set_foreign_scanner(scanner);
+        }
 
         let mut engines = serving
             .engines

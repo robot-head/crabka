@@ -457,6 +457,12 @@ impl SqlEngine {
         self.foreign_scanner = Some(s);
     }
 
+    /// Return the foreign scanner shared by subsequently initialized engines.
+    #[must_use]
+    pub fn foreign_scanner_handle(&self) -> Option<Arc<dyn foreign::ForeignScanner>> {
+        self.foreign_scanner.as_ref().map(Arc::clone)
+    }
+
     /// Register the table scanner seam used for ordinary table scans.
     pub fn set_range_scanner(&mut self, scanner: Arc<dyn scanner::RangeScanner>) {
         self.range_scanner = scanner;

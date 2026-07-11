@@ -26,8 +26,12 @@ text:
 ```
 
 The same roundtrip proves the empty-header form is `{}` and that header-only
-projection composes with partition/offset pushdown. Client-core's complete unit
-suite passed 51/51.
+projection composes with partition/offset pushdown. An independent hand-built
+record-batch v2 fixture (no production record/batch encoder) covers an empty
+header array, null and present-empty duplicate values, and 130-byte key/value
+lengths requiring multi-byte signed varints. Whole-`FetchedRecord` equality
+proves the original long-key/dup/dup wire order reaches client-core unchanged.
+Client-core's complete unit suite passed 52/52.
 
 ### Protobuf
 
@@ -52,13 +56,17 @@ It returned `ProtoEvent(42, "protobuf row", true)` and referenced
 
 ### Own-cluster default server
 
-Gres derives the FDW scanner default only in substrate mode. The real broker
-roundtrip creates a server with no `bootstrap` option and reads the tenant's
-topic through that default. A second real-I/O leg gives the scanner an
-unusable default (`127.0.0.1:1`) and supplies the real bootstrap explicitly;
-metadata, import, and fetch all succeed, proving explicit server options win.
-The Gres wiring units passed, including local-mode `None` and substrate-mode
-bootstrap propagation.
+Gres derives the FDW scanner default only in substrate mode. A live
+multi-range `SubstrateRuntime` over the real in-process broker installs the
+default on every served range engine, creates a server with no `bootstrap`
+option, creates a raw foreign table, and reads the exact `substrate-fdw`
+payload. The registration is atomically published across the multi-range
+serving snapshot and newly published successor engines inherit the scanner.
+
+The FDW roundtrip independently gives the scanner an unusable default
+(`127.0.0.1:1`) and supplies the real bootstrap explicitly; metadata, import,
+and fetch all succeed, proving explicit server options win. Gres wiring units
+also cover local-mode `None` and substrate-mode bootstrap propagation.
 
 ### Baseline ratchet
 
@@ -74,11 +82,14 @@ Passed:
 
 ```text
 cargo nextest run -p crabka-client-core
-  51 passed, 4 skipped
+  52 passed, 4 skipped
 cargo nextest run -p crabka-gres-fdw
   54 passed
 cargo nextest run -p crabka-gres-fdw --features roundtrip --test roundtrip
   1 passed (real broker + registry; repeated after explicit-override addition)
+cargo test -p crabka-gres --test runtime \
+  live_multirange_substrate_default_fdw_server_reads_own_broker -- --exact
+  1 passed (real multi-range substrate runtime + own broker)
 cargo clippy -p crabka-client-core -p crabka-gres-fdw -p crabka-gres \
   --all-targets --features crabka-gres-fdw/roundtrip -- -D warnings
 cargo check --workspace --all-targets
@@ -107,4 +118,3 @@ The wider gates have two explicit non-G-6 contradictions:
 
 These are recorded as wider-goal work, not reclassified as G-6 failures. Every
 G-6 completion item has direct source and real-runtime evidence above.
-

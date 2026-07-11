@@ -3047,12 +3047,12 @@ pub fn register_kafka_scanner_with_default_bootstrap(
     engine: &mut RuntimeEngine,
     default_bootstrap: Option<String>,
 ) {
-    let RuntimeEngine::Single(engine) = engine else {
-        return;
-    };
-    engine.set_foreign_scanner(Arc::new(crabka_gres_fdw::KafkaFdw::with_defaults(
-        default_bootstrap,
-    )));
+    let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> =
+        Arc::new(crabka_gres_fdw::KafkaFdw::with_defaults(default_bootstrap));
+    match engine {
+        RuntimeEngine::Single(engine) => engine.set_foreign_scanner(scanner),
+        RuntimeEngine::Multi(tenant) => tenant.set_foreign_scanner(&scanner),
+    }
 }
 
 fn kafka_scanner_default_bootstrap(args: &ServeArgs) -> Option<String> {
