@@ -69,8 +69,8 @@ pub use self::{
     },
     transport::{
         FramedTcpClient, RangeRequest, RangeResponse, RangeService, RangeTlsClientConfig,
-        RangeTlsServerConfig, TransportError, TsoReq, TsoResp, TxnReq, TxnResp, WireErrorKind,
-        serve_tls,
+        RangeTlsServerConfig, ScanCursorReq, ScanCursorResp, TransportError, TsoReq, TsoResp,
+        TxnReq, TxnResp, WireErrorKind, serve_tls,
     },
     tso::{
         BatchedTsoClient, EpochHeartbeat, GrantLease, HeartbeatVerdict, MemoryTsoHorizon, TsoError,

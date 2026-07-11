@@ -34,6 +34,8 @@ pub enum RangeRequest {
     Sql { range_id: RangeId, sql: String },
     /// Ask an owning range to scan a table rowid interval under caller snapshots.
     ScanRange(ScanRangeReq),
+    /// Pull one bounded page from an owner-issued range cursor token.
+    ScanCursor(ScanCursorReq),
     /// Run one transaction-coordinator RPC.
     Txn(TxnReq),
     /// Run one timestamp-oracle RPC against range 0.
@@ -59,6 +61,8 @@ pub enum RangeResponse {
     SqlError { code: String, message: String },
     /// Visible rows returned by a range scan.
     ScanRange(ScanRangeResp),
+    /// One bounded owner-cursor page.
+    ScanCursor(ScanCursorResp),
     /// Range-scan execution failed with the owner's `PostgreSQL` error code.
     ScanRangeError { code: String, message: String },
     /// Transaction RPC response.
@@ -315,6 +319,24 @@ pub struct ScanRangeRow {
 #[serde(deny_unknown_fields)]
 pub struct ScanRangeResp {
     pub rows: Vec<ScanRangeRow>,
+}
+
+/// One pull against an owner-controlled cursor. `token` is opaque to gateways.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanCursorReq {
+    pub scan: Box<ScanRangeReq>,
+    pub token: Option<Vec<u8>>,
+    pub max_rows: usize,
+}
+
+/// One bounded cursor page and the token required for the next pull.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanCursorResp {
+    pub rows: Vec<ScanRangeRow>,
+    pub token: Option<Vec<u8>>,
+    pub is_last: bool,
 }
 
 /// Transaction RPC sent over [`RangeRequest::Txn`].
@@ -1032,6 +1054,11 @@ mod tests {
                         xmin: request.local_snapshot.xmin,
                         tuple: vec![1, 2, 3],
                     }],
+                }),
+                RangeRequest::ScanCursor(request) => RangeResponse::ScanCursor(ScanCursorResp {
+                    rows: Vec::new(),
+                    token: request.token,
+                    is_last: true,
                 }),
                 RangeRequest::Txn(_) => RangeResponse::Txn(TxnResp::Prepared),
             }

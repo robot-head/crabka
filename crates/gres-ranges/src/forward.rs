@@ -12,11 +12,11 @@ use crate::{
     RangeId,
     registry::{RangeRegistry, RegistryError},
     transport::{
-        FramedTcpClient, RangeRequest, RangeResponse, RangeService, ResolveTxnResp, ScanRangeReq,
-        ScanRangeResp, ScanRangeRow, TransportError, WireColumnPredicate, WireDatum, WireErrorKind,
-        WirePartialAggregateFunction, WirePartialAggregateSpec, WirePredicateOp,
-        WirePredicatePushdown, WireProjectionPushdown, WireQueryResult, WireRowInterval,
-        WireSnapshot, WireTopKColumn, WireTopKSpec,
+        FramedTcpClient, RangeRequest, RangeResponse, RangeService, ResolveTxnResp, ScanCursorReq,
+        ScanCursorResp, ScanRangeReq, ScanRangeResp, ScanRangeRow, TransportError,
+        WireColumnPredicate, WireDatum, WireErrorKind, WirePartialAggregateFunction,
+        WirePartialAggregateSpec, WirePredicateOp, WirePredicatePushdown, WireProjectionPushdown,
+        WireQueryResult, WireRowInterval, WireSnapshot, WireTopKColumn, WireTopKSpec,
     },
     tso::{GrantLease, TsoError, TsoRpc},
 };
@@ -81,6 +81,22 @@ impl RangeService for HostedRangeService {
                 };
                 match handle_scan_range(engine, request) {
                     Ok(response) => RangeResponse::ScanRange(response),
+                    Err(error) => {
+                        let error = error.into_pg();
+                        RangeResponse::ScanRangeError {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    }
+                }
+            }
+            RangeRequest::ScanCursor(request) => {
+                let engine = match self.hosted_engine(request.scan.range_id) {
+                    Ok(engine) => engine,
+                    Err(response) => return response,
+                };
+                match handle_scan_cursor(engine, request) {
+                    Ok(response) => RangeResponse::ScanCursor(response),
                     Err(error) => {
                         let error = error.into_pg();
                         RangeResponse::ScanRangeError {
@@ -506,6 +522,67 @@ impl RegistryRangeScanner {
             }
         }
     }
+
+    async fn scan_remote_cursor(
+        &self,
+        range_id: RangeId,
+        request: ScanCursorReq,
+    ) -> Result<ScanCursorResp, crabka_pgexec::ExecError> {
+        let mut retry_used = false;
+        loop {
+            let endpoint = self
+                .registry
+                .resolve(range_id)
+                .await
+                .map_err(|error| scanner_error(error.into()))?;
+            match self
+                .client
+                .call(
+                    &endpoint.endpoint,
+                    &RangeRequest::ScanCursor(request.clone()),
+                )
+                .await
+            {
+                Ok(RangeResponse::ScanCursor(response)) => return Ok(response),
+                Ok(RangeResponse::ScanRangeError { code, message }) => {
+                    return Err(crabka_pgexec::ExecError::Remote(PgError::error(
+                        &code, message,
+                    )));
+                }
+                Ok(RangeResponse::Error { error, message }) if error.permits_reresolve() => {
+                    if retry_used {
+                        return Err(scanner_error(ForwardError::Remote {
+                            kind: error,
+                            message,
+                        }));
+                    }
+                    retry_used = true;
+                    self.registry
+                        .refresh_authoritatively()
+                        .await
+                        .map_err(|error| scanner_error(error.into()))?;
+                }
+                Ok(RangeResponse::Error { error, message }) => {
+                    return Err(scanner_error(ForwardError::Remote {
+                        kind: error,
+                        message,
+                    }));
+                }
+                Ok(_) => return Err(scanner_error(ForwardError::UnexpectedResponse)),
+                Err(TransportError::Remote { kind, message }) if kind.permits_reresolve() => {
+                    if retry_used {
+                        return Err(scanner_error(ForwardError::Remote { kind, message }));
+                    }
+                    retry_used = true;
+                    self.registry
+                        .refresh_authoritatively()
+                        .await
+                        .map_err(|error| scanner_error(error.into()))?;
+                }
+                Err(error) => return Err(scanner_error(ForwardError::Transport(error))),
+            }
+        }
+    }
 }
 
 impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
@@ -543,12 +620,13 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
                 self.scan(request)?,
             )));
         }
-        let next_rowid = request.interval.start.unwrap_or(0);
         Ok(Box::new(RegistryRangeCursor {
             scanner: self,
             request,
-            next_rowid,
             done: false,
+            tokens: BTreeMap::new(),
+            finished: std::collections::BTreeSet::new(),
+            pending: std::collections::VecDeque::new(),
         }))
     }
 }
@@ -556,8 +634,10 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
 struct RegistryRangeCursor<'a> {
     scanner: &'a RegistryRangeScanner,
     request: crabka_pgexec::ScanRequest<'a>,
-    next_rowid: u64,
     done: bool,
+    tokens: BTreeMap<RangeId, Option<Vec<u8>>>,
+    finished: std::collections::BTreeSet<RangeId>,
+    pending: std::collections::VecDeque<crabka_pgexec::ScannedRow>,
 }
 
 #[async_trait]
@@ -577,31 +657,67 @@ impl crabka_pgexec::RangeCursor for RegistryRangeCursor<'_> {
                 is_last: true,
             });
         }
-        let requested_end = self.request.interval.end.unwrap_or(u64::MAX);
-        let width = u64::try_from(max_rows).unwrap_or(u64::MAX);
-        let page_end = self.next_rowid.saturating_add(width).min(requested_end);
-        let rows = self
-            .scanner
-            .scan_async(crabka_pgexec::ScanRequest {
-                local: self.request.local,
-                global: self.request.global,
-                global_snapshot: self.request.global_snapshot,
-                snapshot: self.request.snapshot,
-                own_xid: self.request.own_xid,
-                read_ts: self.request.read_ts,
-                table: self.request.table,
-                interval: crabka_pgexec::RowInterval {
-                    start: Some(self.next_rowid),
-                    end: Some(page_end),
-                },
-                predicate: self.request.predicate.clone(),
-                projection: self.request.projection.clone(),
-                partial_aggregate: None,
-                top_k: None,
-            })
-            .await?;
-        self.next_rowid = page_end;
-        self.done = page_end >= requested_end || page_end == u64::MAX;
+        if self.pending.is_empty() {
+            let range_ids = self.scanner.registry.range_ids().await;
+            let active = range_ids
+                .into_iter()
+                .filter(|range_id| !self.finished.contains(range_id))
+                .collect::<Vec<_>>();
+            if active.is_empty() {
+                self.done = true;
+            } else {
+                let per_owner = max_rows.div_ceil(active.len()).max(1);
+                let mut rows = Vec::new();
+                let mut updates = Vec::with_capacity(active.len());
+                for range_id in active {
+                    let scan = ScanRangeReq {
+                        range_id,
+                        table_name: self.request.table.name.clone(),
+                        interval: WireRowInterval {
+                            start: self.request.interval.start,
+                            end: self.request.interval.end,
+                        },
+                        local_snapshot: WireSnapshot::from(self.request.snapshot),
+                        global_snapshot: WireSnapshot::from(self.request.global_snapshot),
+                        own_xid: self.request.own_xid,
+                        read_ts: self
+                            .request
+                            .read_ts
+                            .map(crabka_pgexec::timestamp_txn::ReadTimestamp::get),
+                        predicate: encode_predicate(&self.request.predicate)?,
+                        projection: encode_projection(&self.request.projection),
+                        partial_aggregate: None,
+                        top_k: None,
+                    };
+                    let request = ScanCursorReq {
+                        scan: Box::new(scan),
+                        token: self.tokens.get(&range_id).cloned().flatten(),
+                        max_rows: per_owner,
+                    };
+                    let response = if let Some(engine) = self.scanner.local_engines.get(&range_id) {
+                        handle_scan_cursor(engine, request)?
+                    } else {
+                        self.scanner.scan_remote_cursor(range_id, request).await?
+                    };
+                    rows.extend(decode_scan_rows(ScanRangeResp {
+                        rows: response.rows,
+                    })?);
+                    updates.push((range_id, response.token, response.is_last));
+                }
+                for (range_id, token, is_last) in updates {
+                    self.tokens.insert(range_id, token);
+                    if is_last {
+                        self.finished.insert(range_id);
+                    }
+                }
+                rows.sort_by_key(|row| (row.rowid, row.xmin));
+                self.pending.extend(rows);
+            }
+        }
+        let take = max_rows.min(self.pending.len());
+        let rows = self.pending.drain(..take).collect::<Vec<_>>();
+        self.done = self.pending.is_empty()
+            && self.finished.len() == self.scanner.registry.range_ids().await.len();
         Ok(crabka_pgexec::ScanPage {
             rows: rows.into_boxed_slice(),
             is_last: self.done,
@@ -679,20 +795,29 @@ impl RangeScanService {
 #[async_trait]
 impl RangeService for RangeScanService {
     async fn handle(&self, request: RangeRequest) -> RangeResponse {
-        let RangeRequest::ScanRange(request) = request else {
-            return RangeResponse::Error {
-                error: WireErrorKind::Failed,
-                message: "expected scan_range rpc".to_string(),
-            };
+        let (range_id, scan_request, cursor_request) = match request {
+            RangeRequest::ScanRange(request) => (request.range_id, Some(request), None),
+            RangeRequest::ScanCursor(request) => (request.scan.range_id, None, Some(request)),
+            _ => {
+                return RangeResponse::Error {
+                    error: WireErrorKind::Failed,
+                    message: "expected scan_range rpc".to_string(),
+                };
+            }
         };
-        let Some(engine) = self.engines.get(&request.range_id) else {
+        let Some(engine) = self.engines.get(&range_id) else {
             return RangeResponse::Error {
                 error: WireErrorKind::StaleEndpoint,
-                message: format!("range r{} is not hosted here", request.range_id),
+                message: format!("range r{range_id} is not hosted here"),
             };
         };
-        match handle_scan_range(engine, request) {
-            Ok(response) => RangeResponse::ScanRange(response),
+        let response = match cursor_request {
+            Some(request) => handle_scan_cursor(engine, request).map(RangeResponse::ScanCursor),
+            None => handle_scan_range(engine, scan_request.expect("scan request present"))
+                .map(RangeResponse::ScanRange),
+        };
+        match response {
+            Ok(response) => response,
             Err(error) => {
                 let error = error.into_pg();
                 RangeResponse::ScanRangeError {
@@ -748,6 +873,71 @@ fn handle_scan_range(
             })
             .collect(),
     })
+}
+
+fn handle_scan_cursor(
+    engine: &crabka_pgexec::SqlEngine,
+    mut request: ScanCursorReq,
+) -> Result<ScanCursorResp, crabka_pgexec::ExecError> {
+    if request.max_rows == 0 {
+        return Err(crabka_pgexec::ExecError::Unsupported(
+            "range cursor page size must be greater than zero".into(),
+        ));
+    }
+    if request.scan.partial_aggregate.is_some() || request.scan.top_k.is_some() {
+        return Err(crabka_pgexec::ExecError::Unsupported(
+            "blocking scan pushdowns cannot use the row cursor protocol".into(),
+        ));
+    }
+    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.scan.table_name)?;
+    let (next, terminal) = match request.token.as_deref() {
+        Some(token) => decode_owner_cursor_token(token)?,
+        None => {
+            let start = request.scan.interval.start.unwrap_or(0);
+            let terminal = request
+                .scan
+                .interval
+                .end
+                .unwrap_or(engine.scan_local_terminal(&table)?);
+            (start, terminal)
+        }
+    };
+    if next >= terminal {
+        return Ok(ScanCursorResp {
+            rows: Vec::new(),
+            token: None,
+            is_last: true,
+        });
+    }
+    let width = u64::try_from(request.max_rows).unwrap_or(u64::MAX);
+    let page_end = next.saturating_add(width).min(terminal);
+    request.scan.interval = WireRowInterval {
+        start: Some(next),
+        end: Some(page_end),
+    };
+    let response = handle_scan_range(engine, *request.scan)?;
+    let is_last = page_end >= terminal;
+    Ok(ScanCursorResp {
+        rows: response.rows,
+        token: (!is_last).then(|| encode_owner_cursor_token(page_end, terminal)),
+        is_last,
+    })
+}
+
+fn encode_owner_cursor_token(next: u64, terminal: u64) -> Vec<u8> {
+    let mut token = Vec::with_capacity(16);
+    token.extend_from_slice(&next.to_be_bytes());
+    token.extend_from_slice(&terminal.to_be_bytes());
+    token
+}
+
+fn decode_owner_cursor_token(token: &[u8]) -> Result<(u64, u64), crabka_pgexec::ExecError> {
+    let token: [u8; 16] = token.try_into().map_err(|_| {
+        crabka_pgexec::ExecError::Unsupported("invalid owner range cursor token".into())
+    })?;
+    let next = u64::from_be_bytes(token[..8].try_into().expect("token half is eight bytes"));
+    let terminal = u64::from_be_bytes(token[8..].try_into().expect("token half is eight bytes"));
+    Ok((next, terminal))
 }
 
 fn merge_partial_aggregate_rows(
@@ -1039,6 +1229,7 @@ mod tests {
             match request {
                 RangeRequest::Sql { sql, .. } => RangeResponse::Sql { result: sql },
                 RangeRequest::ScanRange(_)
+                | RangeRequest::ScanCursor(_)
                 | RangeRequest::Txn(_)
                 | RangeRequest::Tso(_)
                 | RangeRequest::ResolveTxn(_) => RangeResponse::Error {
@@ -1801,6 +1992,71 @@ mod tests {
         let (_xmin, _xmax, row) = crabka_pgmvcc::version::decode_tuple(&response.rows[0].tuple)
             .expect("decode projected tuple");
         assert_eq!(row, vec![Datum::Text("keep".to_string())]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scan_cursor_uses_owner_token_without_skips_or_duplicates() {
+        let owner = crabka_pgexec::SqlEngine::new();
+        let mut owner_session = owner.connect();
+        owner_session
+            .simple_query("CREATE TABLE cursor_items (id int4) SHARDED")
+            .await
+            .expect("create owner table");
+        owner_session
+            .simple_query("INSERT INTO cursor_items VALUES (10), (20)")
+            .await
+            .expect("insert owner rows");
+        let service = RangeScanService::new(std::collections::BTreeMap::from([(
+            RangeId::new(1),
+            owner.clone_handle(),
+        )]));
+        let scan = ScanRangeReq {
+            range_id: RangeId::new(1),
+            table_name: "cursor_items".to_string(),
+            interval: WireRowInterval {
+                start: None,
+                end: None,
+            },
+            local_snapshot: WireSnapshot {
+                xmin: 1,
+                xmax: 100,
+                xip: vec![],
+            },
+            global_snapshot: WireSnapshot {
+                xmin: 1,
+                xmax: 100,
+                xip: vec![],
+            },
+            own_xid: None,
+            read_ts: Some(100),
+            predicate: WirePredicatePushdown::FullScan,
+            projection: WireProjectionPushdown::All,
+            partial_aggregate: None,
+            top_k: None,
+        };
+
+        let mut token = None;
+        let mut rowids = Vec::new();
+        loop {
+            let response = service
+                .handle(RangeRequest::ScanCursor(ScanCursorReq {
+                    scan: Box::new(scan.clone()),
+                    token,
+                    max_rows: 1,
+                }))
+                .await;
+            let RangeResponse::ScanCursor(response) = response else {
+                panic!("expected cursor page");
+            };
+            rowids.extend(response.rows.into_iter().map(|row| row.rowid));
+            if response.is_last {
+                assert!(response.token.is_none());
+                break;
+            }
+            token = response.token;
+        }
+        assert_eq!(rowids.len(), 2);
+        assert!(rowids.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

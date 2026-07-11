@@ -518,6 +518,11 @@ impl SqlEngine {
         )
     }
 
+    /// Snapshot the exclusive terminal rowid for a local table cursor.
+    pub fn scan_local_terminal(&self, table: &crabka_pgcatalog::Table) -> Result<u64, ExecError> {
+        crate::exec::read_seq_kv(self.kv.as_ref(), table.id)
+    }
+
     /// Return whether a catalog table uses global visibility semantics.
     pub fn table_uses_global_visibility(&self, name: &str) -> Result<bool, ExecError> {
         let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name)?;
