@@ -460,6 +460,7 @@ impl MultiRangeTenant {
             split_lock: Mutex::new(()),
             schema_gate: Arc::new(Mutex::new(())),
             table_write_gates: StdMutex::new(BTreeMap::new()),
+            explicit_transaction_gate: Arc::new(Mutex::new(())),
             active_explicit_transactions: AtomicUsize::new(0),
             empty_table_split_test_hook: config.empty_table_split_test_hook,
             commit_fault_for_testing: config
@@ -1406,6 +1407,7 @@ impl Engine for MultiRangeTenant {
             remote_sessions: BTreeMap::new(),
             serving_epoch: serving.range_map.epoch(),
             explicit_transaction: false,
+            explicit_transaction_guard: None,
             transaction: GatewayTransaction::Idle,
             status: TxStatus::Idle,
             prepared: BTreeMap::new(),
@@ -1426,6 +1428,7 @@ struct TenantInner {
     split_lock: Mutex<()>,
     schema_gate: Arc<Mutex<()>>,
     table_write_gates: StdMutex<BTreeMap<TableId, Arc<Mutex<()>>>>,
+    explicit_transaction_gate: Arc<Mutex<()>>,
     active_explicit_transactions: AtomicUsize,
     empty_table_split_test_hook: Option<EmptyTableSplitTestHook>,
     commit_fault_for_testing: Option<Arc<StdMutex<Option<GatewayCommitFault>>>>,
@@ -1707,6 +1710,7 @@ pub struct GatewaySession {
     remote_sessions: BTreeMap<RangeId, RemoteRangeSession>,
     serving_epoch: MapEpoch,
     explicit_transaction: bool,
+    explicit_transaction_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
     transaction: GatewayTransaction,
     status: TxStatus,
     prepared: BTreeMap<String, GatewayPrepared>,
@@ -2442,7 +2446,7 @@ impl GatewaySession {
         }
 
         match route.kind {
-            StatementKind::Begin => self.begin_transaction(),
+            StatementKind::Begin => self.begin_transaction().await,
             StatementKind::Commit => self.commit_transaction().await,
             StatementKind::Rollback => self.rollback_transaction().await,
             StatementKind::Ddl => self.execute_ddl(statement).await,
@@ -2453,10 +2457,17 @@ impl GatewaySession {
         }
     }
 
-    fn begin_transaction(&mut self) -> Result<Vec<QueryResult>, PgError> {
+    async fn begin_transaction(&mut self) -> Result<Vec<QueryResult>, PgError> {
         if !matches!(self.transaction, GatewayTransaction::Idle) {
             return Err(PgError::error("25001", "transaction already in progress"));
         }
+        self.explicit_transaction_guard = Some(
+            self.inner
+                .explicit_transaction_gate
+                .clone()
+                .lock_owned()
+                .await,
+        );
         self.transaction = GatewayTransaction::Open {
             touched: Vec::new(),
             escalated: false,
@@ -3410,6 +3421,7 @@ impl GatewaySession {
             return;
         }
         self.explicit_transaction = false;
+        self.explicit_transaction_guard = None;
         self.inner
             .active_explicit_transactions
             .fetch_sub(1, Ordering::AcqRel);

@@ -7,7 +7,9 @@ use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc};
 use crabka_gres_ranges::{MemoryTsoHorizon, RangeId, TsoError, TsoOracle};
 use crabka_pgkv::MemKv;
 use crabka_pgwire::engine::Engine;
-use harness::{SystemHarness, row_count, run, try_run};
+use harness::{SystemHarness, process::ProcessHarness, row_count, run, try_run};
+use stateright::semantics::{ConsistencyTester, LinearizabilityTester, SequentialSpec};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TxnOp {
@@ -27,10 +29,131 @@ struct AppendMutation {
     key: Key,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 enum Key {
     Left,
     Right,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+struct ListAppendSpec {
+    left: Vec<i32>,
+    right: Vec<i32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ListAppendOp {
+    key: Key,
+    value: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ListAppendRet {
+    left: Vec<i32>,
+    right: Vec<i32>,
+}
+
+impl SequentialSpec for ListAppendSpec {
+    type Op = ListAppendOp;
+    type Ret = ListAppendRet;
+
+    fn invoke(&mut self, op: &Self::Op) -> Self::Ret {
+        let observed = ListAppendRet {
+            left: self.left.clone(),
+            right: self.right.clone(),
+        };
+        match op.key {
+            Key::Left => self.left.push(op.value),
+            Key::Right => self.right.push(op.value),
+        }
+        observed
+    }
+}
+
+type ElleChecker = Arc<Mutex<LinearizabilityTester<u8, ListAppendSpec>>>;
+
+#[tokio::test]
+async fn stateright_elle_accepts_real_process_history_across_participant_kill() {
+    let mut system = ProcessHarness::start("tenant-real-elle").await;
+    system
+        .create_table_on_all("CREATE TABLE elle50 (id int4); CREATE TABLE elle150 (id int4)")
+        .await;
+    let checker = Arc::new(Mutex::new(LinearizabilityTester::new(
+        ListAppendSpec::default(),
+    )));
+
+    let first =
+        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 0, Key::Left, 1);
+    let second =
+        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 1, Key::Right, 1);
+    let (first, second) = tokio::join!(first, second);
+    first.expect("first concurrent list append");
+    second.expect("second concurrent list append");
+
+    system.kill(1).await;
+    assert!(
+        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 2, Key::Right, 2)
+            .await
+            .is_err(),
+        "operation against killed participant must be indeterminate"
+    );
+    system.restart(1).await;
+
+    real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 3, Key::Left, 2)
+        .await
+        .expect("post-recovery list append");
+
+    let checker = checker.lock().await;
+    assert_eq!(checker.len(), 4);
+    assert!(
+        checker.is_consistent(),
+        "real process list-append history is not linearizable: {checker:?}"
+    );
+}
+
+async fn real_observe_then_append(
+    client: tokio_postgres::Client,
+    checker: ElleChecker,
+    process: u8,
+    key: Key,
+    value: i32,
+) -> Result<(), tokio_postgres::Error> {
+    let op = ListAppendOp { key, value };
+    checker
+        .lock()
+        .await
+        .on_invoke(process, op)
+        .expect("valid Elle invocation");
+
+    client.simple_query("BEGIN").await?;
+    let left = query_list(&client, "elle50").await?;
+    let right = query_list(&client, "elle150").await?;
+    client
+        .simple_query(&format!(
+            "INSERT INTO {} VALUES ({value})",
+            key.table_name()
+        ))
+        .await?;
+    client.simple_query("COMMIT").await?;
+
+    checker
+        .lock()
+        .await
+        .on_return(process, ListAppendRet { left, right })
+        .expect("matching Elle return");
+    Ok(())
+}
+
+async fn query_list(
+    client: &tokio_postgres::Client,
+    table: &str,
+) -> Result<Vec<i32>, tokio_postgres::Error> {
+    Ok(client
+        .query(&format!("SELECT id FROM {table} ORDER BY id"), &[])
+        .await?
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect())
 }
 
 #[tokio::test]
