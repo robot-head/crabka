@@ -621,6 +621,7 @@ impl SqlEngine {
             range_id,
         )
         .with_primary_barrier(self.range0_barrier.as_ref().map(Arc::clone))
+        .with_sequence_manager(Arc::clone(&self.seq))
     }
 
     /// Allocate a timestamp transaction id from this engine's configured oracle.

@@ -403,6 +403,27 @@ mod tests {
     }
 
     #[test]
+    fn cache_batch_is_immediately_visible_to_point_and_range_reads() {
+        let dir = temp();
+        let kv = FjallKv::open_cache(dir.path()).expect("open cache");
+
+        kv.write_batch(&[WriteOp::Put {
+            key: b"row/21".to_vec(),
+            value: b"committed".to_vec(),
+        }])
+        .expect("batch");
+
+        assert_eq!(
+            kv.get(b"row/21").expect("point read"),
+            Some(b"committed".to_vec())
+        );
+        assert_eq!(
+            kv.scan_range(b"row/", b"row0").expect("range read"),
+            vec![(b"row/21".to_vec(), b"committed".to_vec())]
+        );
+    }
+
+    #[test]
     fn write_batch_is_atomic() {
         let dir = temp();
         let kv = FjallKv::open(dir.path()).expect("open");
