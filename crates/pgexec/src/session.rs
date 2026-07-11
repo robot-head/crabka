@@ -3416,83 +3416,88 @@ impl Session for SqlSession {
         sql: &str,
         param_types: &[u32],
     ) -> Result<PreparedDescription, PgError> {
-        if matches!(self.state, TxnState::Failed(_)) {
-            return Err(ExecError::InFailedTransaction.into_pg());
-        }
-        if !name.is_empty() && self.prepared.contains_key(name) {
-            return Err(PgError::error(
-                sqlstate::DUPLICATE_PREPARED_STATEMENT,
-                format!("prepared statement \"{name}\" already exists"),
-            ));
-        }
-        if sql.trim().is_empty() {
-            let description = PreparedDescription {
-                parameter_types: param_types.to_vec(),
-                fields: vec![],
-            };
+        let result = async {
+            if matches!(self.state, TxnState::Failed(_)) {
+                return Err(ExecError::InFailedTransaction.into_pg());
+            }
+            if !name.is_empty() && self.prepared.contains_key(name) {
+                return Err(PgError::error(
+                    sqlstate::DUPLICATE_PREPARED_STATEMENT,
+                    format!("prepared statement \"{name}\" already exists"),
+                ));
+            }
+            if sql.trim().is_empty() {
+                let description = PreparedDescription {
+                    parameter_types: param_types.to_vec(),
+                    fields: vec![],
+                };
+                self.prepared.insert(
+                    name.to_owned(),
+                    SqlPrepared {
+                        statement: None,
+                        description: description.clone(),
+                    },
+                );
+                return Ok(description);
+            }
+            self.reject_prepared_participant()
+                .map_err(ExecError::into_pg)?;
+            let result = (|| {
+                let statement = parse_single_extended_statement(sql)?;
+                let mut inferred_statement = statement.clone();
+                let parameter_count = max_statement_param(&statement).max(param_types.len());
+                let params = (0..parameter_count)
+                    .map(|index| BoundParam {
+                        type_oid: match param_types.get(index).copied().unwrap_or(0) {
+                            0 => None,
+                            type_oid => Some(type_oid),
+                        },
+                        format: 0,
+                        value: None,
+                    })
+                    .collect::<Vec<_>>();
+                let timezone_name = self.guc.effective("timezone").map_err(ExecError::into_pg)?;
+                let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
+                    jiff::tz::TimeZone::UTC
+                } else {
+                    jiff::tz::TimeZone::get(timezone_name).map_err(|_| {
+                        PgError::error(
+                            "22023",
+                            format!("invalid value for parameter: \"{timezone_name}\""),
+                        )
+                    })?
+                };
+                let binder = ParamBinder {
+                    catalog_kv: &*self.catalog_kv,
+                    params: &params,
+                    time_zone: &time_zone,
+                    inferred_param_types: RefCell::new(vec![None; params.len()]),
+                };
+                binder.bind_statement_params(&mut inferred_statement)?;
+                let fields =
+                    crate::exec::describe_statement(&*self.catalog_kv, &inferred_statement)
+                        .map_err(ExecError::into_pg)?;
+                let description = PreparedDescription {
+                    fields,
+                    parameter_types: binder.resolved_param_types()?,
+                };
+                Ok((statement, description))
+            })();
+            let (statement, description) = result?;
             self.prepared.insert(
                 name.to_owned(),
                 SqlPrepared {
-                    statement: None,
+                    statement: Some(statement),
                     description: description.clone(),
                 },
             );
-            return Ok(description);
+            Ok(description)
         }
-        self.reject_prepared_participant()
-            .map_err(ExecError::into_pg)?;
-        let result = (|| {
-            let statement = parse_single_extended_statement(sql)?;
-            let mut inferred_statement = statement.clone();
-            let parameter_count = max_statement_param(&statement).max(param_types.len());
-            let params = (0..parameter_count)
-                .map(|index| BoundParam {
-                    type_oid: match param_types.get(index).copied().unwrap_or(0) {
-                        0 => None,
-                        type_oid => Some(type_oid),
-                    },
-                    format: 0,
-                    value: None,
-                })
-                .collect::<Vec<_>>();
-            let timezone_name = self.guc.effective("timezone").map_err(ExecError::into_pg)?;
-            let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
-                jiff::tz::TimeZone::UTC
-            } else {
-                jiff::tz::TimeZone::get(timezone_name).map_err(|_| {
-                    PgError::error(
-                        "22023",
-                        format!("invalid value for parameter: \"{timezone_name}\""),
-                    )
-                })?
-            };
-            let binder = ParamBinder {
-                catalog_kv: &*self.catalog_kv,
-                params: &params,
-                time_zone: &time_zone,
-                inferred_param_types: RefCell::new(vec![None; params.len()]),
-            };
-            binder.bind_statement_params(&mut inferred_statement)?;
-            let fields = crate::exec::describe_statement(&*self.catalog_kv, &inferred_statement)
-                .map_err(ExecError::into_pg)?;
-            let description = PreparedDescription {
-                fields,
-                parameter_types: binder.resolved_param_types()?,
-            };
-            Ok((statement, description))
-        })();
+        .await;
         if result.is_err() {
             self.mark_transaction_failed();
         }
-        let (statement, description) = result?;
-        self.prepared.insert(
-            name.to_owned(),
-            SqlPrepared {
-                statement: Some(statement),
-                description: description.clone(),
-            },
-        );
-        Ok(description)
+        result
     }
 
     async fn bind(
@@ -3502,63 +3507,71 @@ impl Session for SqlSession {
         params: &[BoundParam],
         result_formats: &[i16],
     ) -> Result<PortalDescription, PgError> {
-        if matches!(self.state, TxnState::Failed(_)) {
-            return Err(ExecError::InFailedTransaction.into_pg());
-        }
-        if !portal.is_empty() && self.portals.contains_key(portal) {
-            return Err(PgError::error(
-                sqlstate::DUPLICATE_CURSOR,
-                format!("cursor \"{portal}\" already exists"),
-            ));
-        }
-        let prepared = self.prepared.get(statement).cloned().ok_or_else(|| {
-            PgError::error(
-                sqlstate::INVALID_SQL_STATEMENT_NAME,
-                format!("prepared statement \"{statement}\" does not exist"),
-            )
-        })?;
-        if params.len() != prepared.description.parameter_types.len() {
-            return Err(PgError::protocol(format!(
-                "bind message supplies {} parameters, but prepared statement requires {}",
-                params.len(),
-                prepared.description.parameter_types.len()
-            )));
-        }
-        let formats = resolve_result_formats(result_formats, prepared.description.fields.len())?;
-        let mut bound = prepared.statement;
-        let typed_params = params
-            .iter()
-            .zip(&prepared.description.parameter_types)
-            .map(|(p, oid)| BoundParam {
-                type_oid: Some(*oid).filter(|v| *v != 0).or(p.type_oid),
-                ..p.clone()
-            })
-            .collect::<Vec<_>>();
-        if let Some(stmt) = &mut bound {
-            self.bind_extended_statement_params(stmt, &typed_params)?;
-        }
-        let description = PortalDescription {
-            fields: prepared
-                .description
-                .fields
+        let result = async {
+            if matches!(self.state, TxnState::Failed(_)) {
+                return Err(ExecError::InFailedTransaction.into_pg());
+            }
+            if !portal.is_empty() && self.portals.contains_key(portal) {
+                return Err(PgError::error(
+                    sqlstate::DUPLICATE_CURSOR,
+                    format!("cursor \"{portal}\" already exists"),
+                ));
+            }
+            let prepared = self.prepared.get(statement).cloned().ok_or_else(|| {
+                PgError::error(
+                    sqlstate::INVALID_SQL_STATEMENT_NAME,
+                    format!("prepared statement \"{statement}\" does not exist"),
+                )
+            })?;
+            if params.len() != prepared.description.parameter_types.len() {
+                return Err(PgError::protocol(format!(
+                    "bind message supplies {} parameters, but prepared statement requires {}",
+                    params.len(),
+                    prepared.description.parameter_types.len()
+                )));
+            }
+            let formats =
+                resolve_result_formats(result_formats, prepared.description.fields.len())?;
+            let mut bound = prepared.statement;
+            let typed_params = params
                 .iter()
-                .zip(&formats)
-                .map(|(f, &format)| FieldDescription {
-                    format,
-                    ..f.clone()
+                .zip(&prepared.description.parameter_types)
+                .map(|(p, oid)| BoundParam {
+                    type_oid: Some(*oid).filter(|v| *v != 0).or(p.type_oid),
+                    ..p.clone()
                 })
-                .collect(),
-        };
-        self.portals.insert(
-            portal.to_owned(),
-            SqlPortal {
-                statement: bound,
-                description: description.clone(),
-                formats,
-                execution: SqlPortalExecution::NotStarted,
-            },
-        );
-        Ok(description)
+                .collect::<Vec<_>>();
+            if let Some(stmt) = &mut bound {
+                self.bind_extended_statement_params(stmt, &typed_params)?;
+            }
+            let description = PortalDescription {
+                fields: prepared
+                    .description
+                    .fields
+                    .iter()
+                    .zip(&formats)
+                    .map(|(f, &format)| FieldDescription {
+                        format,
+                        ..f.clone()
+                    })
+                    .collect(),
+            };
+            self.portals.insert(
+                portal.to_owned(),
+                SqlPortal {
+                    statement: bound,
+                    description: description.clone(),
+                    formats,
+                    execution: SqlPortalExecution::NotStarted,
+                },
+            );
+            Ok(description)
+        }
+        .await;
+        if result.is_err() {
+            self.mark_transaction_failed();
+        }
+        result
     }
 
     async fn describe_statement(&mut self, name: &str) -> Result<PreparedDescription, PgError> {
@@ -3752,9 +3765,9 @@ mod tests {
     };
 
     use crabka_pgkv::{Kv, MemKv};
-    use crabka_pgwire::engine::{Engine, Session};
+    use crabka_pgwire::engine::{Engine, Session, TxStatus};
 
-    use super::{ColumnType, decode_bound_param};
+    use super::{ColumnType, SqlSession, decode_bound_param};
     use crate::{ExecError, SqlEngine};
 
     struct FailOnCommitter {
@@ -4602,6 +4615,79 @@ mod tests {
 
         assert_eq!(err.code, crabka_pgwire::error::sqlstate::PROTOCOL_VIOLATION);
         assert!(err.message.contains("supplies 2 parameters"));
+    }
+
+    #[tokio::test]
+    async fn extended_registry_errors_fail_explicit_transaction_and_preserve_resources() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .parse("kept", "SELECT 1", &[])
+            .await
+            .expect("parse kept");
+        session
+            .bind("kept_portal", "kept", &[], &[])
+            .await
+            .expect("bind kept");
+
+        async fn begin(session: &mut SqlSession) {
+            session.simple_query("BEGIN").await.expect("begin");
+            assert_eq!(session.tx_status(), TxStatus::InTransaction);
+        }
+        async fn recover_and_assert_resources(session: &mut SqlSession) {
+            assert_eq!(session.tx_status(), TxStatus::Failed);
+            session.simple_query("ROLLBACK").await.expect("rollback");
+            session
+                .describe_statement("kept")
+                .await
+                .expect("prepared preserved");
+            session
+                .describe_portal("kept_portal")
+                .await
+                .expect("portal preserved");
+        }
+
+        begin(&mut session).await;
+        session
+            .parse("kept", "SELECT 2", &[])
+            .await
+            .expect_err("duplicate statement");
+        recover_and_assert_resources(&mut session).await;
+
+        begin(&mut session).await;
+        session
+            .bind("new", "missing", &[], &[])
+            .await
+            .expect_err("missing statement");
+        recover_and_assert_resources(&mut session).await;
+
+        begin(&mut session).await;
+        session
+            .bind("kept_portal", "kept", &[], &[])
+            .await
+            .expect_err("duplicate portal");
+        recover_and_assert_resources(&mut session).await;
+
+        begin(&mut session).await;
+        session
+            .bind("new", "kept", &[text_param(Some("extra"), None)], &[])
+            .await
+            .expect_err("wrong count");
+        recover_and_assert_resources(&mut session).await;
+
+        begin(&mut session).await;
+        session
+            .bind("new", "kept", &[], &[7])
+            .await
+            .expect_err("invalid result format");
+        recover_and_assert_resources(&mut session).await;
+
+        begin(&mut session).await;
+        session
+            .parse("bad", "SELECT (", &[])
+            .await
+            .expect_err("parse error");
+        recover_and_assert_resources(&mut session).await;
     }
 
     #[tokio::test]
