@@ -253,18 +253,18 @@ force_suspend() {
     stop_compute
 }
 
-patch_pgdog_listen_port() {
-    python3 - "$PGDOG_PORT" "$P95_CEILING_MS" "${ARTIFACT_DIR}/pgdog/pgdog.toml" <<'PY'
+patch_pgdog_timeouts() {
+    python3 - "$P95_CEILING_MS" "${ARTIFACT_DIR}/pgdog/pgdog.toml" <<'PY'
 import pathlib
 import sys
 
-port = sys.argv[1]
-ceiling_ms = int(sys.argv[2])
-path = pathlib.Path(sys.argv[3])
+ceiling_ms = int(sys.argv[1])
+path = pathlib.Path(sys.argv[2])
 text = path.read_text()
-text = text.replace("listen_port = 6432", f"listen_port = {port}", 1)
-text = text.replace("connect_timeout = 10", f"connect_timeout = {ceiling_ms + 10000}", 1)
-text = text.replace("checkout_timeout = 30", f"checkout_timeout = {ceiling_ms + 10000}", 1)
+text = text.replace("connect_timeout = 10000", f"connect_timeout = {ceiling_ms + 10000}", 1)
+text = text.replace("checkout_timeout = 30000", f"checkout_timeout = {ceiling_ms + 10000}", 1)
+if f"connect_timeout = {ceiling_ms + 10000}" not in text or f"checkout_timeout = {ceiling_ms + 10000}" not in text:
+    raise SystemExit("failed to configure PgDog cold-start timeout budget")
 path.write_text(text)
 PY
 }
@@ -472,8 +472,9 @@ force_suspend
     --bootstrap "127.0.0.1:${BROKER_PORT}" \
     --activator "127.0.0.1:${ACTIVATOR_PORT}" \
     --out-dir "${ARTIFACT_DIR}/pgdog" \
+    --listen-port "$PGDOG_PORT" \
     >"${ARTIFACT_DIR}/render-pgdog.log" 2>&1
-patch_pgdog_listen_port
+patch_pgdog_timeouts
 patch_pgdog_local_users
 start_activator
 start_pgdog
