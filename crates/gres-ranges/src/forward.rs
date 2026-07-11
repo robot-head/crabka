@@ -306,6 +306,14 @@ pub trait RemoteForward: Send + Sync {
         range_id: RangeId,
         sql: String,
     ) -> Result<Vec<QueryResult>, ForwardError>;
+
+    /// Forward SQL while preserving transport backpressure end to end.
+    async fn forward_query_into(
+        &self,
+        range_id: RangeId,
+        sql: String,
+        sink: &mut dyn crabka_pgwire::engine::ResultSink,
+    ) -> Result<(), ForwardError>;
 }
 
 /// TCP implementation of [`RemoteForward`] backed by [`RangeRegistry`].
@@ -404,6 +412,26 @@ impl RemoteForward for RegistryRemoteForward {
             }),
             _ => Err(ForwardError::UnexpectedResponse),
         }
+    }
+
+    async fn forward_query_into(
+        &self,
+        range_id: RangeId,
+        sql: String,
+        sink: &mut dyn crabka_pgwire::engine::ResultSink,
+    ) -> Result<(), ForwardError> {
+        let endpoint = self.registry.resolve(range_id).await?;
+        self.client
+            .call_sql_into(
+                &endpoint.endpoint,
+                &RangeRequest::Sql { range_id, sql },
+                sink,
+            )
+            .await
+            .map_err(|error| match error {
+                TransportError::Sql { code, message } => ForwardError::RemoteSql { code, message },
+                error => ForwardError::Transport(error),
+            })
     }
 }
 
