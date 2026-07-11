@@ -4,12 +4,13 @@ Date: 2026-07-11
 
 ## Status
 
-INCOMPLETE pending independent clean re-review. The typed registry/transaction
-stack, parser surface, DISCARD core, hardened capture-backed exact-driver/PgDog
-goldens, executable direct-Gres replay, compatibility anti-rot, mandatory live
-PgDog E2E, and dated M0 evidence are implemented and green. M0 is not marked
-complete until review confirms the remediation below; it covers F-0/F-1 only
-and does not claim later SQL waves or full PostgreSQL parity.
+COMPLETE for F-1/M0. The typed registry/transaction stack, parser surface,
+DISCARD core, hardened capture-backed exact-driver/PgDog goldens, executable
+direct-Gres replay, compatibility anti-rot, mandatory live PgDog E2E, and dated
+M0 evidence are implemented and green. Independent spec and quality re-review
+after cleanup commit `dc2752b8` returned a clean verdict. This completes F-0/F-1
+M0 only; later SQL waves, full PostgreSQL parity, and the wider multi-plan goal
+remain outside this completion claim.
 
 ## PostgreSQL 18 oracle
 
@@ -230,8 +231,10 @@ replay, bounded Gres gate, and mandatory CI wiring.
 
 ## Independent-review remediation (2026-07-11)
 
-Status: **INCOMPLETE pending clean re-review**. Commits `1ed678a4` and
-`01ddcbb9` address all findings from the first review and its cleanup follow-up.
+Status: **COMPLETE after clean independent spec and quality re-review**. Commits
+`1ed678a4`, `01ddcbb9`, and evidence reconciliation through `dc2752b8` address
+all findings from the first review and its cleanup follow-up. The verified
+implementation/remediation range is `986caf81..dc2752b8`.
 
 ### RED/GREEN
 
