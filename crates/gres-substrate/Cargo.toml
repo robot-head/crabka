@@ -42,8 +42,12 @@ tracing = { workspace = true }
 [dev-dependencies]
 assert2 = { workspace = true }
 proptest = { workspace = true }
-crabka-broker = { version = "0.3.9", path = "../broker" }
+crabka-broker = { version = "0.3.9", path = "../broker", features = ["test-helpers"] }
+crabka-raft = { version = "0.3.8", path = "../raft" }
 crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
 stateright = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+rustix = { workspace = true, features = ["process"] }

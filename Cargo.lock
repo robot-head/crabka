@@ -2926,10 +2926,12 @@ dependencies = [
  "crabka-pgmvcc",
  "crabka-pgtypes",
  "crabka-protocol",
+ "crabka-raft",
  "crabka-security",
  "hex",
  "object_store",
  "proptest",
+ "rustix 1.1.4",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2938,6 +2940,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

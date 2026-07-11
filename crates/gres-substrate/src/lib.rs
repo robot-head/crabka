@@ -62,6 +62,6 @@ pub use self::{
         CheckpointSnapshotSource, DEFAULT_MAX_FRAME_BYTES, FenceLease, GroupCommitAck,
         GroupCommitRequest, PausedWalWriter, ProducerWalWriter, SubstrateCommitter,
         SubstrateLinearizer, SubstrateTsoHorizon, TransactionalWalWriter, WalAppendAck,
-        WriterGeneration, chunk_wal_batch,
+        WalWriterFaultInjector, WalWriterFaultStage, WriterGeneration, chunk_wal_batch,
     },
 };

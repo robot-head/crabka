@@ -562,9 +562,30 @@ fn decode_replay_items(
     let Some(batches) = payload.as_v2() else {
         return Vec::new();
     };
+    let mut aborted: std::collections::VecDeque<(i64, i64)> = partition
+        .aborted_transactions
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(|transaction| (transaction.first_offset, transaction.producer_id))
+        .collect::<Vec<_>>()
+        .into();
+    aborted.make_contiguous().sort_unstable();
+    let mut aborted_producers = std::collections::HashSet::new();
     let mut records = Vec::new();
     for batch in batches {
+        while let Some(&(first_offset, producer_id)) = aborted.front() {
+            if first_offset > batch.base_offset {
+                break;
+            }
+            aborted_producers.insert(producer_id);
+            aborted.pop_front();
+        }
         if batch.attributes.is_control_batch() {
+            aborted_producers.remove(&batch.producer_id);
+            continue;
+        }
+        if batch.attributes.is_transactional() && aborted_producers.contains(&batch.producer_id) {
             continue;
         }
         records.extend(batch.records.iter().filter_map(|record| {
