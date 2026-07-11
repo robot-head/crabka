@@ -4443,7 +4443,7 @@ mod tests {
             .expect_err("remote query cannot use range zero");
 
         assert_eq!(error.code, sqlstate::FEATURE_NOT_SUPPORTED);
-        assert!(error.message.contains("remote range queries"));
+        assert!(error.message.contains("range r1 is not hosted"));
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
