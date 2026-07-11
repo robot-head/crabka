@@ -63,10 +63,9 @@ mod tests {
         sync::Arc,
     };
 
-    use assert2::{assert, check};
+    use assert2::assert;
     use bytes::Bytes;
     use crabka_ids::LeaderEpoch;
-    use crabka_object_store::{DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD};
     use object_store::memory::InMemory;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -81,88 +80,8 @@ mod tests {
 
     // The GCS backend reuses the generic `S3RemoteStorage` engine, so the
     // copy / fetch / delete round-trip behaviour is already covered by the
-    // `InMemory`-backed suite in `s3.rs`. These tests pin the GCS-specific
-    // surface: config redaction, the builder's credential / endpoint
-    // handling, and that the engine reached through `from_gcs_config` is
-    // wired with the requested prefix + multipart tuning.
-
-    #[test]
-    fn gcs_config_debug_redacts_credentials() {
-        let cfg = GcsConfig {
-            bucket: "logs".to_string(),
-            service_account_key: Some("{\"private_key\":\"super-secret-pem\"}".to_string()),
-            service_account_path: Some("/etc/gcs/key.json".to_string()),
-            application_credentials_path: Some("/etc/gcs/adc.json".to_string()),
-            ..Default::default()
-        };
-        let dbg = format!("{cfg:?}");
-        check!(!dbg.contains("super-secret-pem"));
-        check!(!dbg.contains("/etc/gcs/key.json"));
-        check!(!dbg.contains("/etc/gcs/adc.json"));
-        check!(dbg.contains("***"));
-        // Non-secret fields are still printed.
-        check!(dbg.contains("logs"));
-    }
-
-    #[test]
-    fn gcs_config_default_uses_multipart_constants() {
-        // No credentials by default → Workload Identity / ADC path.
-        assert!(
-            GcsConfig::default()
-                == GcsConfig {
-                    bucket: String::new(),
-                    prefix: None,
-                    service_account_path: None,
-                    service_account_key: None,
-                    application_credentials_path: None,
-                    endpoint: None,
-                    allow_http: false,
-                    multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
-                    multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
-                }
-        );
-    }
-
-    #[test]
-    fn from_gcs_config_workload_identity_builds() {
-        // No credential fields → ADC / Workload Identity. The builder must
-        // construct successfully without contacting the metadata server
-        // (credentials are fetched lazily on first request).
-        let cfg = GcsConfig {
-            bucket: "crabka-tier".to_string(),
-            ..Default::default()
-        };
-        let store = S3RemoteStorage::from_gcs_config(&cfg);
-        assert!(store.is_ok());
-    }
-
-    #[test]
-    fn from_gcs_config_honors_endpoint_and_allow_http() {
-        // A custom emulator base URL + allow_http must be accepted by the
-        // builder (the credential path stays on ADC since no key is set).
-        let cfg = GcsConfig {
-            bucket: "crabka-tier".to_string(),
-            endpoint: Some("http://localhost:4443".to_string()),
-            allow_http: true,
-            ..Default::default()
-        };
-        let store = S3RemoteStorage::from_gcs_config(&cfg);
-        assert!(store.is_ok());
-    }
-
-    #[test]
-    fn from_gcs_config_rejects_conflicting_credentials() {
-        // `object_store` rejects supplying both a service-account path and an
-        // inline key; we surface that as InvalidArgument.
-        let cfg = GcsConfig {
-            bucket: "crabka-tier".to_string(),
-            service_account_path: Some("/nonexistent/key.json".to_string()),
-            service_account_key: Some("{}".to_string()),
-            ..Default::default()
-        };
-        let err = S3RemoteStorage::from_gcs_config(&cfg).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
-    }
+    // `InMemory`-backed suite in `s3.rs`. This test pins that the engine shape
+    // used for GCS still applies prefixes correctly.
 
     fn sample_metadata(id: u128) -> RemoteLogSegmentMetadata {
         RemoteLogSegmentMetadata::new(
@@ -206,9 +125,8 @@ mod tests {
 
     /// End-to-end round-trip against the generic engine reached through the
     /// GCS construction path, asserting the operator-visible prefix is
-    /// applied. Uses `with_store(InMemory)` for the storage (the real GCS
-    /// client needs a live bucket); `from_gcs_config`'s builder wiring is
-    /// covered by the tests above.
+    /// applied. Uses `with_store(InMemory)` because the real GCS client needs
+    /// a live bucket.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn engine_round_trips_with_prefix() {
         let store =

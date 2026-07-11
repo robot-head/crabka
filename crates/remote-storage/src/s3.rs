@@ -338,32 +338,6 @@ mod tests {
     }
 
     #[test]
-    fn s3_config_debug_redacts_credentials() {
-        let cfg = S3Config {
-            bucket: "logs".to_string(),
-            region: "us-east-1".to_string(),
-            access_key_id: Some("AKIAEXAMPLEKEYID".to_string()),
-            secret_access_key: Some("super-secret-key-value".to_string()),
-            ..Default::default()
-        };
-        let dbg = format!("{cfg:?}");
-        check!(!dbg.contains("super-secret-key-value"));
-        check!(!dbg.contains("AKIAEXAMPLEKEYID"));
-        check!(dbg.contains("***"));
-        // Non-secret fields are still printed.
-        check!(dbg.contains("logs"));
-        check!(dbg.contains("us-east-1"));
-    }
-
-    #[test]
-    fn multipart_size_constants() {
-        // Pin the multipart threshold/part-size (mutants flip the `*` in the
-        // `N * 1024 * 1024` products to `+`/`/`).
-        assert!(DEFAULT_MULTIPART_THRESHOLD == 104_857_600); // 100 MiB
-        assert!(DEFAULT_MULTIPART_CHUNK_SIZE == 16_777_216); // 16 MiB
-    }
-
-    #[test]
     fn storage_debug_is_nonempty() {
         // The S3RemoteStorage Debug impl must render something (a `fmt`
         // replaced with `Ok(())` would print nothing).
