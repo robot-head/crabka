@@ -527,6 +527,72 @@ mod tests {
 
     proptest! {
         #[test]
+        fn prop_whole_history_rewrite_preserves_every_key_for_all_bounded_snapshots(
+            specs in prop::collection::vec((0_u8..2, 2_u64..14, 0_u8..3, 0_u64..14, 0_u8..3, any::<bool>()), 1..12),
+            xip_mask in any::<u16>(),
+        ) {
+            let horizon = 7_u64;
+            let mut clog = BTreeMap::new();
+            let mut pairs = Vec::new();
+            for (ordinal, (rowid, raw_xmin, xmin_selector, raw_xmax, xmax_selector, frozen)) in
+                specs.into_iter().enumerate()
+            {
+                let xmin = if frozen { FROZEN_XID } else { raw_xmin };
+                let xmax = if raw_xmax == xmin { INVALID_XID } else { raw_xmax };
+                if xmin != FROZEN_XID {
+                    clog.insert(xmin, selected_status(xmin_selector));
+                }
+                if xmax != INVALID_XID {
+                    clog.insert(xmax, selected_status(xmax_selector));
+                }
+                pairs.push((
+                    version_key_xid(7, u64::from(rowid), xmin),
+                    version::encode_tuple(
+                        xmin,
+                        xmax,
+                        &[Datum::Int4(i32::try_from(ordinal).expect("bounded ordinal"))],
+                    ),
+                ));
+            }
+            for (&xid, &status) in &clog {
+                pairs.push((key::clog_key(xid), encoded_status(status)));
+            }
+            let pairs = pairs
+                .into_iter()
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+
+            let mut rewritten = Vec::new();
+            for (key, value) in &pairs {
+                match rewrite_for_checkpoint(key, value, horizon, &clog).expect("rewrite history") {
+                    RewriteDecision::Keep => rewritten.push((key.clone(), value.clone())),
+                    RewriteDecision::Replace(value) => rewritten.push((key.clone(), value)),
+                    RewriteDecision::Drop => {}
+                }
+            }
+            let rewritten_clog = collect_clog_statuses(&rewritten).expect("rewritten clog");
+
+            for snapshot_xmin in horizon..=horizon + 3 {
+                for snapshot_xmax in snapshot_xmin + 1..=horizon + 7 {
+                    let xip = (snapshot_xmin..snapshot_xmax)
+                        .filter(|xid| xip_mask & (1 << (xid % 16)) != 0)
+                        .collect::<Vec<_>>();
+                    let snapshot = Snapshot {
+                        xmin: snapshot_xmin,
+                        xmax: snapshot_xmax,
+                        xip,
+                    };
+                    let before = visible_history(&pairs, &snapshot, &clog);
+                    let after = visible_history(&rewritten, &snapshot, &rewritten_clog);
+                    prop_assert_eq!(after, before);
+                }
+            }
+        }
+    }
+
+    proptest! {
+        #[test]
         fn prop_rewrite_preserves_visibility_at_or_above_horizon(
             xmin in 2_u64..20,
             xmax in 0_u64..20,
@@ -597,6 +663,53 @@ mod tests {
             Just(XidStatus::Aborted),
             Just(XidStatus::InProgress),
         ]
+    }
+
+    fn selected_status(selector: u8) -> XidStatus {
+        match selector {
+            0 => XidStatus::Committed,
+            1 => XidStatus::Aborted,
+            _ => XidStatus::InProgress,
+        }
+    }
+
+    fn encoded_status(status: XidStatus) -> Vec<u8> {
+        match status {
+            XidStatus::InProgress => vec![0],
+            XidStatus::Committed => vec![1],
+            XidStatus::Aborted => vec![2],
+            XidStatus::Prepared(global) => prepared_status(global),
+        }
+    }
+
+    fn visible_history(
+        pairs: &[KvPair],
+        snapshot: &Snapshot,
+        clog: &BTreeMap<u64, XidStatus>,
+    ) -> BTreeMap<u64, Vec<String>> {
+        let mut visible = BTreeMap::<u64, Vec<String>>::new();
+        for (key, value) in pairs {
+            let Ok(row_prefix) = version::row_prefix_of(key) else {
+                continue;
+            };
+            let Some((_table, rowid)) = key::table_rowid_of(row_prefix) else {
+                continue;
+            };
+            let Ok((xmin, xmax, row)) = version::decode_tuple(value) else {
+                continue;
+            };
+            if satisfies_mvcc(xmin, xmax, snapshot, None, |xid| {
+                Ok(clog.get(&xid).copied().unwrap_or(XidStatus::InProgress))
+            })
+            .expect("visibility")
+            {
+                visible.entry(rowid).or_default().push(format!("{row:?}"));
+            }
+        }
+        for rows in visible.values_mut() {
+            rows.sort();
+        }
+        visible
     }
 
     fn prepared_status(global_xid: u64) -> Vec<u8> {

@@ -129,6 +129,26 @@ pub(crate) async fn write_captured_checkpoint(
 }
 
 #[cfg(feature = "checkpoint-test-hooks")]
+pub(crate) async fn write_captured_checkpoint_with_failpoint(
+    store: &dyn CheckpointStore,
+    tenant: &str,
+    kv_snapshot: Box<dyn KvSnapshot>,
+    snapshot: CheckpointSnapshot,
+    part_max_bytes: usize,
+    failpoint: &super::CheckpointFailpoint,
+) -> Result<Manifest, SubstrateError> {
+    write_checkpoint_inner(
+        store,
+        tenant,
+        kv_snapshot,
+        snapshot,
+        part_max_bytes,
+        Some(failpoint),
+    )
+    .await
+}
+
+#[cfg(feature = "checkpoint-test-hooks")]
 pub(crate) async fn write_checkpoint_with_failpoint(
     store: &dyn CheckpointStore,
     tenant: &str,

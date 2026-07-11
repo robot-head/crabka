@@ -388,17 +388,19 @@ where
         let _guard = self.attempt_lock.lock().await;
         let checkpointed_stats = self.stats.snapshot();
         let (snapshot, kv_snapshot) = source.capture(self.kv.as_ref()).await?;
-        self.finish_captured_checkpoint(snapshot, kv_snapshot, trigger, checkpointed_stats)
+        self.finish_captured_checkpoint(source, snapshot, kv_snapshot, trigger, checkpointed_stats)
             .await
     }
 
     async fn finish_captured_checkpoint(
         &self,
+        source: &CheckpointSnapshotSource,
         snapshot: CheckpointSnapshot,
         kv_snapshot: Box<dyn KvSnapshot>,
         trigger: CheckpointTrigger,
         checkpointed_stats: (u64, u64),
     ) -> Result<CheckpointRun, SubstrateError> {
+        #[cfg(not(feature = "checkpoint-test-hooks"))]
         let manifest = super::runtime::write_captured_checkpoint(
             self.store.as_ref(),
             &self.config.tenant,
@@ -407,6 +409,31 @@ where
             self.config.part_max_bytes,
         )
         .await?;
+        #[cfg(feature = "checkpoint-test-hooks")]
+        let manifest = match &self.failpoint {
+            Some(failpoint) => {
+                super::runtime::write_captured_checkpoint_with_failpoint(
+                    self.store.as_ref(),
+                    &self.config.tenant,
+                    kv_snapshot,
+                    snapshot,
+                    self.config.part_max_bytes,
+                    failpoint,
+                )
+                .await?
+            }
+            None => {
+                super::runtime::write_captured_checkpoint(
+                    self.store.as_ref(),
+                    &self.config.tenant,
+                    kv_snapshot,
+                    snapshot,
+                    self.config.part_max_bytes,
+                )
+                .await?
+            }
+        };
+        source.assert_current().await?;
         self.finish_manifest(manifest, trigger, checkpointed_stats)
             .await
     }
@@ -426,9 +453,13 @@ where
         )
         .await?;
         self.pruner.delete_records(&prune.delete_records).await?;
+        #[cfg(feature = "checkpoint-test-hooks")]
+        self.fail_at(CheckpointServiceStep::Truncated)?;
         for key in &prune.delete_object_keys {
             self.store.delete(key).await?;
         }
+        #[cfg(feature = "checkpoint-test-hooks")]
+        self.fail_at(CheckpointServiceStep::Pruned)?;
         let metadata = latest_checkpoint_metadata(
             self.store.as_ref(),
             &self.config.tenant,

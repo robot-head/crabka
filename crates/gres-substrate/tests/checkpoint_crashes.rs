@@ -1,17 +1,25 @@
+use std::sync::Arc;
+
 use assert2::assert;
+use crabka_broker::{Broker, BrokerConfig};
+use crabka_client_admin::{AdminClient, DeleteRecordsOp};
+use crabka_client_producer::{Acks, Producer};
+use crabka_gres_ranges::{RangeId, TenantName};
 use crabka_gres_substrate::{
-    CheckpointPart, DEFAULT_PART_MAX_BYTES, GroupCommitRequest, InMemoryWalLog, Manifest,
-    SubstrateError, TransactionalWalWriter, WalFrame, WriterGeneration, apply_frame,
+    CheckpointPart, CheckpointSnapshotSource, DEFAULT_PART_MAX_BYTES, GroupCommitRequest,
+    InMemoryWalLog, Manifest, ProducerWalWriter, RecoveryFencer, SubstrateError,
+    TransactionalWalWriter, WalFrame, WriterGeneration, apply_frame,
     checkpoint::{
         CheckpointConfig, CheckpointFailpoint, CheckpointService, CheckpointServiceStep,
         CheckpointSnapshot, CheckpointStats, CheckpointStore, CheckpointTrigger,
-        InMemoryCheckpointStore,
+        CheckpointWalPruner, InMemoryCheckpointStore,
     },
-    ckpt_dir, manifest_key, part_key,
+    ckpt_dir, ensure_wal_topic_for_range, manifest_key, part_key,
+    recover_live_for_range_with_restore, transactional_id_for_range,
 };
 
 #[test]
-fn production_service_exposes_compile_time_test_only_boundaries() {
+fn test_feature_callback_records_named_boundary() {
     let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = observed.clone();
     let hook: CheckpointFailpoint = std::sync::Arc::new(move |step| {
@@ -53,6 +61,262 @@ async fn production_service_crash_matrix_recovers_exact_acked_state() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_broker_captured_service_crash_matrix_recovers_exact_state() {
+    for (case, step) in [
+        ("before", CheckpointServiceStep::BeforeParts),
+        ("parts", CheckpointServiceStep::PartsUploaded),
+        ("manifest", CheckpointServiceStep::ManifestWritten),
+        ("truncate", CheckpointServiceStep::Truncated),
+        ("prune", CheckpointServiceStep::Pruned),
+    ] {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            live_broker_crash_case(case, step),
+        )
+        .await
+        .expect("live crash deadline")
+        .expect("live crash case");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_fresh_generation_restores_old_checkpoint_and_fetches_offset_zero() {
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let dir = tempfile::TempDir::new().expect("broker tempdir");
+        let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .expect("broker start");
+        let bootstrap = broker.listen_addr().to_string();
+        let tenant = TenantName::parse("g3-fresh-generation").expect("tenant");
+        let range = RangeId::COORDINATOR;
+        let objects = InMemoryCheckpointStore::shared();
+        let old = MemKv::default();
+        old.put(b"old".to_vec(), b"checkpoint".to_vec())
+            .expect("old state");
+        crabka_gres_substrate::checkpoint::write_checkpoint(
+            objects.as_ref(),
+            &format!("{tenant}/r0"),
+            &old,
+            snapshot_at(0, 7, 0),
+            DEFAULT_PART_MAX_BYTES,
+        )
+        .await
+        .expect("old-generation checkpoint");
+
+        let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+            .await
+            .expect("admin");
+        let topic = ensure_wal_topic_for_range(&mut admin, &tenant, range)
+            .await
+            .expect("fresh topic");
+        drop(admin);
+        let producer = Arc::new(
+            Producer::builder()
+                .bootstrap(bootstrap.clone())
+                .client_id("g3-fresh-generation-writer")
+                .acks(Acks::All)
+                .transactional_id(transactional_id_for_range(&tenant, range))
+                .build()
+                .await
+                .expect("producer"),
+        );
+        producer
+            .init_transactions()
+            .await
+            .expect("init transactions");
+        ProducerWalWriter::new(producer, topic)
+            .commit_group(GroupCommitRequest {
+                generation: WriterGeneration(1),
+                frames: vec![frame(0, b"fresh", b"offset-zero")],
+            })
+            .await
+            .expect("fresh offset-zero frame");
+
+        let restored = MemKv::default();
+        let outcome = recover_live_for_range_with_restore(
+            crabka_gres_substrate::LiveRecoveryConfig::new(bootstrap, tenant, range, None)
+                .with_wal_generation(1)
+                .with_checkpoints(objects),
+            &restored,
+        )
+        .await
+        .expect("fresh-generation recovery");
+
+        assert!(outcome.generation == WriterGeneration(1));
+        assert!(outcome.next_journal_seq == 1);
+        assert!(restored.get(b"old").expect("old") == Some(b"checkpoint".to_vec()));
+        assert!(restored.get(b"fresh").expect("fresh") == Some(b"offset-zero".to_vec()));
+        drop(broker);
+    })
+    .await
+    .expect("fresh-generation deadline");
+}
+
+async fn live_broker_crash_case(
+    case: &str,
+    stop: CheckpointServiceStep,
+) -> Result<(), SubstrateError> {
+    let dir = tempfile::TempDir::new().expect("broker tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    let bootstrap = broker.listen_addr().to_string();
+    let tenant = TenantName::parse(format!("g3-crash-{case}"))
+        .map_err(|error| SubstrateError::Unavailable(error.to_string()))?;
+    let range = RangeId::COORDINATOR;
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .map_err(|error| SubstrateError::Unavailable(error.to_string()))?;
+    let topic = ensure_wal_topic_for_range(&mut admin, &tenant, range).await?;
+    drop(admin);
+    let producer = Arc::new(
+        Producer::builder()
+            .bootstrap(bootstrap.clone())
+            .client_id(format!("g3-crash-{case}"))
+            .acks(Acks::All)
+            .transactional_id(transactional_id_for_range(&tenant, range))
+            .build()
+            .await
+            .map_err(|error| SubstrateError::Unavailable(error.to_string()))?,
+    );
+    producer
+        .init_transactions()
+        .await
+        .map_err(|error| SubstrateError::Unavailable(error.to_string()))?;
+    let writer = ProducerWalWriter::new(producer, topic.clone());
+    let kv = Arc::new(MemKv::default());
+    let objects = InMemoryCheckpointStore::shared();
+    let pruner = Arc::new(LiveAdminPruner::connect(&bootstrap).await?);
+    let namespace = format!("{tenant}/r0");
+
+    let mut last_offset = -1;
+    for wal_frame in [frame(0, b"a", b"base"), frame(1, b"b", b"second")] {
+        let ack = writer
+            .commit_group(GroupCommitRequest {
+                generation: WriterGeneration(0),
+                frames: vec![wal_frame.clone()],
+            })
+            .await?;
+        last_offset = ack.frames[0].offset;
+        apply_frame(kv.as_ref(), &wal_frame.ops)?;
+    }
+    let baseline = live_service(
+        &namespace,
+        &topic,
+        kv.clone(),
+        objects.clone(),
+        pruner.clone(),
+        None,
+    )?;
+    run_captured_service(baseline, last_offset, 2).await?;
+
+    let third = frame(2, b"c", b"third");
+    let ack = writer
+        .commit_group(GroupCommitRequest {
+            generation: WriterGeneration(0),
+            frames: vec![third.clone()],
+        })
+        .await?;
+    last_offset = ack.frames[0].offset;
+    apply_frame(kv.as_ref(), &third.ops)?;
+    let hook: CheckpointFailpoint = Arc::new(move |step| step == stop);
+    let crashing = live_service(&namespace, &topic, kv, objects.clone(), pruner, Some(hook))?;
+    assert!(
+        run_captured_service(crashing, last_offset, 3)
+            .await
+            .is_err()
+    );
+
+    let restored = MemKv::default();
+    let recovery = crabka_gres_substrate::LiveRecoveryConfig::new(bootstrap, tenant, range, None)
+        .with_checkpoints(objects);
+    let outcome = recover_live_for_range_with_restore(recovery, &restored).await?;
+    assert!(outcome.next_journal_seq == 3);
+    assert!(restored.get(b"a")? == Some(b"base".to_vec()));
+    assert!(restored.get(b"b")? == Some(b"second".to_vec()));
+    assert!(restored.get(b"c")? == Some(b"third".to_vec()));
+    drop(broker);
+    Ok(())
+}
+
+fn live_service(
+    namespace: &str,
+    topic: &str,
+    kv: Arc<MemKv>,
+    objects: Arc<InMemoryCheckpointStore>,
+    pruner: Arc<LiveAdminPruner>,
+    hook: Option<CheckpointFailpoint>,
+) -> Result<CheckpointService<LiveAdminPruner>, SubstrateError> {
+    let mut service = CheckpointService::new(
+        CheckpointConfig::new(namespace.into(), topic.into(), 1, 0, 24, 2)?,
+        kv as Arc<dyn SnapshotKv>,
+        objects,
+        pruner,
+        Arc::new(CheckpointStats::default()),
+    )?;
+    if let Some(hook) = hook {
+        service = service.with_test_failpoint(hook);
+    }
+    Ok(service)
+}
+
+async fn run_captured_service(
+    service: CheckpointService<LiveAdminPruner>,
+    covered_offset: i64,
+    journal_seq: u64,
+) -> Result<(), SubstrateError> {
+    let handle = Arc::new(service).spawn();
+    let result = handle
+        .checkpoint_from_source(
+            Arc::new(CheckpointSnapshotSource::new(
+                covered_offset,
+                journal_seq,
+                WriterGeneration(0),
+            )),
+            CheckpointTrigger::Manual,
+        )
+        .await
+        .map(|_| ());
+    handle.shutdown().await?;
+    result
+}
+
+struct LiveAdminPruner {
+    admin: Mutex<AdminClient>,
+}
+
+impl LiveAdminPruner {
+    async fn connect(bootstrap: &str) -> Result<Self, SubstrateError> {
+        let admin = AdminClient::connect(&[bootstrap.to_owned()])
+            .await
+            .map_err(|error| SubstrateError::Unavailable(error.to_string()))?;
+        Ok(Self {
+            admin: Mutex::new(admin),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl CheckpointWalPruner for LiveAdminPruner {
+    async fn delete_records(&self, ops: &[DeleteRecordsOp]) -> Result<(), SubstrateError> {
+        let outcomes = self
+            .admin
+            .lock()
+            .await
+            .delete_records(ops, 5_000)
+            .await
+            .map_err(|error| SubstrateError::Checkpoint(error.to_string()))?;
+        if let Some(failed) = outcomes.iter().find(|outcome| outcome.error_code != 0) {
+            return Err(SubstrateError::Checkpoint(format!(
+                "DeleteRecords {}-{} failed with {}",
+                failed.topic, failed.partition, failed.error_code
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn production_service_manifest_loss_after_truncate_refuses() {
     let harness = ProductionCrashHarness::new().await;
@@ -73,26 +337,110 @@ async fn production_service_manifest_loss_after_truncate_refuses() {
     ));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn production_zombie_service_cannot_supersede_successor_manifest() {
-    let harness = ProductionCrashHarness::new().await;
-    harness
-        .run_checkpoint(snapshot_at(0, 2, 2), None)
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        let objects = InMemoryCheckpointStore::shared();
+        let log = InMemoryWalLog::shared();
+        let old_kv = Arc::new(MemKv::default());
+        old_kv
+            .put(b"owner".to_vec(), b"zombie".to_vec())
+            .expect("old state");
+        let (reached_tx, reached_rx) = std::sync::mpsc::sync_channel(1);
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let release_hook = Arc::clone(&release);
+        let hook: CheckpointFailpoint = Arc::new(move |step| {
+            if step == CheckpointServiceStep::PartsUploaded {
+                reached_tx.send(()).expect("report zombie upload");
+                let (lock, condition) = &*release_hook;
+                let mut released = lock.lock().expect("release lock");
+                while !*released {
+                    released = condition.wait(released).expect("release wait");
+                }
+            }
+            false
+        });
+        let old_service = CheckpointService::new(
+            CheckpointConfig::new("zombie-race".into(), "wal".into(), 1, 0, 24, 2).expect("config"),
+            old_kv as Arc<dyn SnapshotKv>,
+            objects.clone(),
+            log.clone(),
+            Arc::new(CheckpointStats::default()),
+        )
+        .expect("old service")
+        .with_test_failpoint(hook);
+        let old_source = Arc::new(CheckpointSnapshotSource::new(2, 3, WriterGeneration(0)));
+        old_source.set_fence_lease(log.clone(), WriterGeneration(0));
+        let old_handle = Arc::new(old_service).spawn();
+        let old_checkpoint = tokio::spawn({
+            let source = Arc::clone(&old_source);
+            async move {
+                let result = old_handle
+                    .checkpoint_from_source(source, CheckpointTrigger::Manual)
+                    .await;
+                (old_handle, result)
+            }
+        });
+        tokio::task::spawn_blocking(move || {
+            reached_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("zombie reached upload boundary");
+        })
         .await
-        .expect("successor checkpoint");
-    let zombie_kv = std::sync::Arc::new(MemKv::default());
-    zombie_kv
-        .put(b"a".to_vec(), b"zombie-stale".to_vec())
-        .expect("zombie state");
-    harness
-        .run_checkpoint_with_kv(snapshot_at(0, 1, 0), None, zombie_kv)
-        .await
-        .expect("older compute finishes checkpoint step");
+        .expect("wait for zombie");
 
-    let restored = harness.recover().await.expect("recover newest checkpoint");
-    assert!(restored.source.expect("source").covered_offset == 2);
-    assert!(restored.value(b"a") == Some(b"base".to_vec()));
-    assert!(restored.value(b"c") == Some(b"third".to_vec()));
+        let barrier = log.fence_with_barrier().await.expect("fence zombie");
+        let successor_kv = Arc::new(MemKv::default());
+        successor_kv
+            .put(b"owner".to_vec(), b"successor".to_vec())
+            .expect("successor state");
+        let successor_service = CheckpointService::new(
+            CheckpointConfig::new("zombie-race".into(), "wal".into(), 1, 0, 24, 2).expect("config"),
+            successor_kv as Arc<dyn SnapshotKv>,
+            objects.clone(),
+            log.clone(),
+            Arc::new(CheckpointStats::default()),
+        )
+        .expect("successor service");
+        let successor_source = Arc::new(CheckpointSnapshotSource::new(
+            barrier.offset,
+            0,
+            barrier.generation,
+        ));
+        successor_source.set_fence_lease(log.clone(), barrier.generation);
+        let successor_handle = Arc::new(successor_service).spawn();
+        successor_handle
+            .checkpoint_from_source(successor_source, CheckpointTrigger::Manual)
+            .await
+            .expect("successor checkpoint");
+        successor_handle
+            .shutdown()
+            .await
+            .expect("successor shutdown");
+
+        let (lock, condition) = &*release;
+        *lock.lock().expect("release lock") = true;
+        condition.notify_all();
+        let (old_handle, old_result) = old_checkpoint.await.expect("zombie task");
+        assert!(matches!(old_result, Err(SubstrateError::Fenced)));
+        old_handle.shutdown().await.expect("old shutdown");
+
+        let restored = MemKv::default();
+        let source = crabka_gres_substrate::checkpoint::restore_latest(
+            objects.as_ref(),
+            "zombie-race",
+            &restored,
+            barrier.generation.0,
+            None,
+        )
+        .await
+        .expect("restore")
+        .expect("successor manifest");
+        assert!(source.wal_generation == barrier.generation.0);
+        assert!(restored.get(b"owner").expect("owner") == Some(b"successor".to_vec()));
+    })
+    .await
+    .expect("zombie race deadline");
 }
 
 struct ProductionCrashHarness {
@@ -178,10 +526,18 @@ impl ProductionCrashHarness {
         if let Some(hook) = hook {
             service = service.with_test_failpoint(hook);
         }
-        service
-            .checkpoint(snapshot, CheckpointTrigger::Manual)
+        let source = Arc::new(CheckpointSnapshotSource::new(
+            snapshot.covered_offset,
+            snapshot.journal_seq,
+            WriterGeneration(snapshot.wal_generation),
+        ));
+        let handle = Arc::new(service).spawn();
+        let result = handle
+            .checkpoint_from_source(source, CheckpointTrigger::Manual)
             .await
-            .map(|_| ())
+            .map(|_| ());
+        handle.shutdown().await?;
+        result
     }
 
     async fn recover(&self) -> Result<RestoredState, SubstrateError> {
@@ -217,7 +573,7 @@ impl ProductionCrashHarness {
     }
 
     async fn delete_new_manifest(&self) {
-        let key = manifest_key(&ckpt_dir("tenant-production-crash", 0, 2, 1));
+        let key = manifest_key(&ckpt_dir("tenant-production-crash", 0, 2, 0));
         self.objects
             .delete(&key)
             .await
@@ -225,6 +581,7 @@ impl ProductionCrashHarness {
     }
 }
 use crabka_pgkv::{Kv, MemKv, SnapshotKv, WriteOp};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CrashStep {

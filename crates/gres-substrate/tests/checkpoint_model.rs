@@ -77,6 +77,9 @@ struct State {
     restored_value: Option<u8>,
     refused_recovery: bool,
     injected_manifest_loss: bool,
+    manifest_loss_generation: Option<u8>,
+    last_replay_start: Option<u8>,
+    last_restored_generation: Option<u8>,
 }
 
 struct CheckpointModel {
@@ -131,6 +134,9 @@ impl Model for CheckpointModel {
             restored_value: None,
             refused_recovery: false,
             injected_manifest_loss: false,
+            manifest_loss_generation: None,
+            last_replay_start: None,
+            last_restored_generation: None,
         }]
     }
 
@@ -195,12 +201,28 @@ impl Model for CheckpointModel {
             Property::always(
                 "a safe recovery path remains absent injected loss",
                 |_: &Self, state: &State| {
-                    state.injected_manifest_loss
-                        || state.log_start == 0
-                        || newest_manifest(state).is_some_and(|checkpoint| {
-                            checkpoint.generation != state.current_generation
-                                || state.log_start <= checkpoint.covered.saturating_add(1)
-                        })
+                    state.manifest_loss_generation == Some(state.current_generation)
+                        || !matches!(recovery_result(state), RecoveryResult::Refuse)
+                },
+            ),
+            Property::always(
+                "torn manifest loss never remains serving",
+                |_: &Self, state: &State| {
+                    state.manifest_loss_generation != Some(state.current_generation)
+                        || state
+                            .computes
+                            .iter()
+                            .all(|compute| !matches!(compute.lifecycle, ComputeLifecycle::Serving))
+                },
+            ),
+            Property::always(
+                "fresh generation recovery starts at offset zero",
+                |_: &Self, state: &State| {
+                    !matches!(
+                        (state.last_restored_generation, state.last_replay_start),
+                        (Some(restored), Some(start))
+                            if restored < state.current_generation && start != 0
+                    )
                 },
             ),
             Property::always(
@@ -387,9 +409,26 @@ fn park_and_recreate_wal(state: &mut State) -> Option<()> {
     if checkpoint.generation != state.current_generation || checkpoint.covered < newest_offset {
         return None;
     }
+    for compute in &mut state.computes {
+        if matches!(
+            compute.lifecycle,
+            ComputeLifecycle::Serving | ComputeLifecycle::Recovering
+        ) {
+            compute.lifecycle = ComputeLifecycle::Crashed;
+        }
+    }
     state.current_generation = state.current_generation.checked_add(1)?;
     state.log_start = 0;
+    state.last_replay_start = None;
+    state.last_restored_generation = None;
     state.current_epoch = state.current_epoch.checked_add(1)?;
+    let successor = state
+        .computes
+        .iter_mut()
+        .find(|compute| matches!(compute.lifecycle, ComputeLifecycle::Crashed))?;
+    successor.epoch = state.current_epoch;
+    successor.lifecycle = ComputeLifecycle::Recovering;
+    successor.checkpoint = CheckpointPhase::Idle;
     state.restored_value = None;
     Some(())
 }
@@ -403,10 +442,59 @@ fn lose_newest_manifest(state: &mut State) -> Option<()> {
     if state.log_start < checkpoint.covered.saturating_add(1) {
         return None;
     }
+    if state
+        .checkpoints
+        .iter()
+        .enumerate()
+        .any(|(index, candidate)| {
+            index != newest_index
+                && candidate.manifest_present
+                && candidate.generation == state.current_generation
+                && state.log_start <= candidate.covered.saturating_add(1)
+        })
+    {
+        return None;
+    }
     state.checkpoints[newest_index].manifest_present = false;
     state.injected_manifest_loss = true;
+    state.manifest_loss_generation = Some(state.current_generation);
     state.restored_value = None;
+    for compute in &mut state.computes {
+        if matches!(compute.lifecycle, ComputeLifecycle::Serving) {
+            compute.lifecycle = ComputeLifecycle::Crashed;
+        }
+    }
     Some(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryResult {
+    ServeFromStart,
+    ServeFromCheckpoint { generation: u8, replay_start: u8 },
+    Refuse,
+}
+
+fn recovery_result(state: &State) -> RecoveryResult {
+    let Some(checkpoint) = newest_manifest(state) else {
+        return if state.log_start > 0 {
+            RecoveryResult::Refuse
+        } else {
+            RecoveryResult::ServeFromStart
+        };
+    };
+    if checkpoint.generation == state.current_generation
+        && state.log_start > checkpoint.covered.saturating_add(1)
+    {
+        return RecoveryResult::Refuse;
+    }
+    RecoveryResult::ServeFromCheckpoint {
+        generation: checkpoint.generation,
+        replay_start: if checkpoint.generation == state.current_generation {
+            checkpoint.covered.saturating_add(1)
+        } else {
+            0
+        },
+    }
 }
 
 fn recover(state: &mut State, index: usize) -> Option<()> {
@@ -420,45 +508,62 @@ fn recover(state: &mut State, index: usize) -> Option<()> {
         state.computes[index].lifecycle = ComputeLifecycle::Crashed;
         return Some(());
     }
-    let Some(checkpoint) = newest_manifest(state).cloned() else {
-        if state.log_start > 0 {
+    match recovery_result(state) {
+        RecoveryResult::Refuse => {
             state.refused_recovery = true;
             state.restored_value = None;
             state.computes[index].lifecycle = ComputeLifecycle::Refused;
-            return Some(());
+            state.last_replay_start = None;
+            state.last_restored_generation = None;
+            Some(())
         }
-        state.refused_recovery = false;
-        state.restored_value = Some(reference_state(state));
-        state.computes[index].applied_prefix = reference_state(state);
-        state.computes[index].lifecycle = ComputeLifecycle::Serving;
-        return Some(());
-    };
-    if checkpoint.generation == state.current_generation
-        && state.log_start > checkpoint.covered.saturating_add(1)
-    {
-        state.refused_recovery = true;
-        state.restored_value = None;
-        state.computes[index].lifecycle = ComputeLifecycle::Refused;
-        return Some(());
+        RecoveryResult::ServeFromStart => {
+            let recovered = reference_state(state);
+            state.refused_recovery = false;
+            state.restored_value = Some(recovered);
+            state.computes[index].applied_prefix = recovered;
+            state.computes[index].lifecycle = ComputeLifecycle::Serving;
+            state.last_replay_start = Some(0);
+            state.last_restored_generation = None;
+            Some(())
+        }
+        RecoveryResult::ServeFromCheckpoint {
+            generation,
+            replay_start,
+        } => {
+            let checkpoint = newest_manifest(state)
+                .cloned()
+                .expect("classified checkpoint");
+            let recovered = recovered_state(state, &checkpoint);
+            state.refused_recovery = false;
+            state.restored_value = Some(recovered);
+            state.computes[index].applied_prefix = recovered;
+            state.computes[index].lifecycle = ComputeLifecycle::Serving;
+            state.last_replay_start = Some(replay_start);
+            state.last_restored_generation = Some(generation);
+            Some(())
+        }
     }
-    state.refused_recovery = false;
-    let recovered = recovered_state(state, &checkpoint);
-    state.restored_value = Some(recovered);
-    state.computes[index].applied_prefix = recovered;
-    state.computes[index].lifecycle = ComputeLifecycle::Serving;
-    Some(())
 }
 
 fn upsert_checkpoint(state: &mut State, checkpoint: Checkpoint) {
+    let repairs_loss = checkpoint.generation == state.current_generation
+        && state.log_start <= checkpoint.covered.saturating_add(1);
     if let Some(existing) = state.checkpoints.iter_mut().find(|existing| {
         existing.generation == checkpoint.generation
             && existing.covered == checkpoint.covered
             && existing.epoch == checkpoint.epoch
     }) {
         *existing = checkpoint;
+        if repairs_loss {
+            state.manifest_loss_generation = None;
+        }
         return;
     }
     state.checkpoints.push(checkpoint);
+    if repairs_loss {
+        state.manifest_loss_generation = None;
+    }
 }
 
 fn recovered_state(state: &State, checkpoint: &Checkpoint) -> u8 {

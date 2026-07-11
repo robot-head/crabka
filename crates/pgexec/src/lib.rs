@@ -331,6 +331,24 @@ impl SqlEngine {
         })
     }
 
+    /// Oldest xid that a checkpoint may vacuum without changing visibility.
+    ///
+    /// The active-snapshot xmin is capped by the first non-terminal clog entry
+    /// at or above the durable recovery scan watermark, so prepared/in-progress
+    /// state can never be pruned or frozen past.
+    pub fn checkpoint_garbage_horizon(&self) -> Result<u64, ExecError> {
+        checkpoint_garbage_horizon(self.procarray.as_ref(), self.kv.as_ref())
+    }
+
+    /// A shareable horizon callback for checkpoint runtimes that outlive engine setup.
+    pub fn checkpoint_horizon_provider(
+        &self,
+    ) -> Arc<dyn Fn() -> Result<u64, ExecError> + Send + Sync> {
+        let procarray = Arc::clone(&self.procarray);
+        let kv = Arc::clone(&self.kv);
+        Arc::new(move || checkpoint_garbage_horizon(procarray.as_ref(), kv.as_ref()))
+    }
+
     /// Build an engine whose reads come from `sm_kv` (the applied state machine)
     /// and whose writes are proposed through `committer` (a RaftCommitter). Uses
     /// the Replicated persist mode so counters fold into the proposed batch.
@@ -1150,6 +1168,35 @@ impl SqlEngine {
             .expect("finish_global on a non-GTM engine")
             .finish_global(g);
     }
+}
+
+fn checkpoint_garbage_horizon(procarray: &ProcArray, kv: &dyn Kv) -> Result<u64, ExecError> {
+    use crabka_pgmvcc::{clog::XidStatus, xid::FIRST_NORMAL_XID};
+
+    let active_xmin = procarray.snapshot().xmin;
+    let scan_lo = match kv.get(&crabka_pgkv::key::clog_scan_lo_key())? {
+        Some(bytes) if bytes.len() == 8 => {
+            u64::from_be_bytes(bytes[..8].try_into().expect("checked length"))
+        }
+        _ => FIRST_NORMAL_XID,
+    }
+    .max(FIRST_NORMAL_XID)
+    .min(active_xmin);
+    for (key, value) in kv.scan_range(
+        &crabka_pgkv::key::clog_key(scan_lo),
+        &crabka_pgkv::key::clog_key(active_xmin),
+    )? {
+        let Some(xid) = crabka_pgkv::key::clog_xid_of(&key) else {
+            continue;
+        };
+        if matches!(
+            crabka_pgmvcc::clog::decode(&value)?,
+            XidStatus::InProgress | XidStatus::Prepared(_)
+        ) {
+            return Ok(xid.min(active_xmin));
+        }
+    }
+    Ok(active_xmin)
 }
 
 /// A sentinel global snapshot for single-range (non-GTM) engines. Any global xid
@@ -1981,5 +2028,26 @@ mod tests {
         assert_eq!(engine.clog_scan_lo().expect("lo"), 5);
         engine.advance_clog_scan_lo(3).await.expect("no-op"); // lower -> no-op
         assert_eq!(engine.clog_scan_lo().expect("lo"), 5, "monotone");
+    }
+
+    #[test]
+    fn checkpoint_horizon_advances_over_terminal_clog_but_stops_at_prepared() {
+        let engine = SqlEngine::new();
+        let committed = engine.procarray.begin_write().expect("committed xid");
+        let prepared = engine.procarray.begin_write().expect("prepared xid");
+        engine
+            .kv
+            .write_batch(&[
+                crabka_pgmvcc::clog::put_op(committed, crabka_pgmvcc::clog::XidStatus::Committed),
+                crabka_pgmvcc::clog::put_op(prepared, crabka_pgmvcc::clog::XidStatus::Prepared(99)),
+            ])
+            .expect("seed clog");
+        engine.procarray.finish(committed);
+        engine.procarray.finish(prepared);
+
+        assert_eq!(
+            engine.checkpoint_garbage_horizon().expect("horizon"),
+            prepared
+        );
     }
 }

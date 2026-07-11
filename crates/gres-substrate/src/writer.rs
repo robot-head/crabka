@@ -41,13 +41,26 @@ pub struct WalAppendAck {
 }
 
 /// Shared source of exact snapshot metadata for checkpoint requests.
-#[derive(Debug)]
 pub struct CheckpointSnapshotSource {
     covered_offset: std::sync::atomic::AtomicI64,
     journal_seq: std::sync::atomic::AtomicU64,
     wal_generation: std::sync::atomic::AtomicU64,
     producer_epoch: std::sync::atomic::AtomicI16,
     group_gate: Arc<Semaphore>,
+    garbage_horizon: Mutex<Option<GarbageHorizonProvider>>,
+    fence_lease: Mutex<Option<(Arc<dyn FenceLease>, WriterGeneration)>>,
+}
+
+/// Runtime callback that computes the current safe checkpoint garbage horizon.
+pub type GarbageHorizonProvider = Arc<dyn Fn() -> Result<u64, SubstrateError> + Send + Sync>;
+
+impl std::fmt::Debug for CheckpointSnapshotSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CheckpointSnapshotSource")
+            .field("snapshot", &self.snapshot())
+            .finish_non_exhaustive()
+    }
 }
 
 impl CheckpointSnapshotSource {
@@ -60,6 +73,8 @@ impl CheckpointSnapshotSource {
             wal_generation: std::sync::atomic::AtomicU64::new(generation.0),
             producer_epoch: std::sync::atomic::AtomicI16::new(producer_epoch(generation)),
             group_gate: Arc::new(Semaphore::new(1)),
+            garbage_horizon: Mutex::new(None),
+            fence_lease: Mutex::new(None),
         }
     }
 
@@ -76,7 +91,8 @@ impl CheckpointSnapshotSource {
             .acquire_owned()
             .await
             .map_err(|_| SubstrateError::Unavailable("checkpoint group gate closed".into()))?;
-        let metadata = self.snapshot();
+        let mut metadata = self.snapshot();
+        metadata.garbage_horizon_xid = self.garbage_horizon_xid()?;
         let snapshot = kv.snapshot()?;
         Ok((metadata, snapshot))
     }
@@ -89,8 +105,41 @@ impl CheckpointSnapshotSource {
             journal_seq: self.journal_seq.load(Ordering::SeqCst),
             producer_epoch: self.producer_epoch.load(Ordering::SeqCst),
             wal_generation: self.wal_generation.load(Ordering::SeqCst),
-            garbage_horizon_xid: 0,
+            garbage_horizon_xid: self.garbage_horizon_xid().unwrap_or(0),
         }
+    }
+
+    /// Install the engine's active-snapshot/recovery-watermark horizon callback.
+    pub fn set_garbage_horizon_provider(&self, provider: GarbageHorizonProvider) {
+        *self
+            .garbage_horizon
+            .lock()
+            .expect("garbage horizon provider") = Some(provider);
+    }
+
+    /// Install the writer lease checked again after upload and before WAL truncation.
+    pub fn set_fence_lease(&self, lease: Arc<dyn FenceLease>, generation: WriterGeneration) {
+        *self.fence_lease.lock().expect("checkpoint fence lease") = Some((lease, generation));
+    }
+
+    pub(crate) async fn assert_current(&self) -> Result<(), SubstrateError> {
+        let guard = self
+            .fence_lease
+            .lock()
+            .expect("checkpoint fence lease")
+            .clone();
+        match guard {
+            Some((lease, generation)) => lease.assert_current(generation).await,
+            None => Ok(()),
+        }
+    }
+
+    fn garbage_horizon_xid(&self) -> Result<u64, SubstrateError> {
+        self.garbage_horizon
+            .lock()
+            .expect("garbage horizon provider")
+            .as_ref()
+            .map_or(Ok(0), |provider| provider())
     }
 
     pub(crate) fn record_commit(&self, ack: WalAppendAck) {
