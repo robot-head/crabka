@@ -14,7 +14,7 @@ use crabka_gres_substrate::{
         CheckpointSnapshot, CheckpointStats, CheckpointStore, CheckpointTrigger,
         CheckpointWalPruner, InMemoryCheckpointStore,
     },
-    ckpt_dir, ensure_wal_topic_for_range, manifest_key, part_key,
+    ckpt_dir, ensure_wal_topic_for_range, ensure_wal_topic_name, manifest_key, part_key,
     recover_live_for_range_with_restore, transactional_id_for_range,
 };
 
@@ -63,20 +63,26 @@ async fn production_service_crash_matrix_recovers_exact_acked_state() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_broker_captured_service_crash_matrix_recovers_exact_state() {
-    for (case, step) in [
-        ("before", CheckpointServiceStep::BeforeParts),
-        ("parts", CheckpointServiceStep::PartsUploaded),
-        ("manifest", CheckpointServiceStep::ManifestWritten),
-        ("truncate", CheckpointServiceStep::Truncated),
-        ("prune", CheckpointServiceStep::Pruned),
+    let dir = tempfile::TempDir::new().expect("broker tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    let bootstrap = broker.listen_addr().to_string();
+    for (case, step, occurrence) in [
+        ("before", CheckpointServiceStep::BeforeParts, 1),
+        ("parts-one", CheckpointServiceStep::PartsUploaded, 1),
+        ("parts-later", CheckpointServiceStep::PartsUploaded, 2),
+        ("manifest", CheckpointServiceStep::ManifestWritten, 1),
+        ("truncate", CheckpointServiceStep::Truncated, 1),
+        ("prune", CheckpointServiceStep::Pruned, 1),
     ] {
         tokio::time::timeout(
             std::time::Duration::from_secs(15),
-            live_broker_crash_case(case, step),
+            live_broker_crash_case(&bootstrap, case, step, occurrence),
         )
         .await
         .expect("live crash deadline")
-        .expect("live crash case");
+        .unwrap_or_else(|error| panic!("live crash case {case}: {error}"));
     }
 }
 
@@ -104,10 +110,17 @@ async fn live_fresh_generation_restores_old_checkpoint_and_fetches_offset_zero()
         .await
         .expect("old-generation checkpoint");
 
+        let fresh_config = crabka_gres_substrate::LiveRecoveryConfig::new(
+            bootstrap.clone(),
+            tenant.clone(),
+            range,
+            None,
+        )
+        .with_wal_generation(1);
         let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
             .await
             .expect("admin");
-        let topic = ensure_wal_topic_for_range(&mut admin, &tenant, range)
+        let topic = ensure_wal_topic_name(&mut admin, &fresh_config.wal_topic())
             .await
             .expect("fresh topic");
         drop(admin);
@@ -134,45 +147,38 @@ async fn live_fresh_generation_restores_old_checkpoint_and_fetches_offset_zero()
             .expect("fresh offset-zero frame");
 
         let restored = MemKv::default();
-        let outcome = recover_live_for_range_with_restore(
-            crabka_gres_substrate::LiveRecoveryConfig::new(bootstrap, tenant, range, None)
-                .with_wal_generation(1)
-                .with_checkpoints(objects),
-            &restored,
-        )
-        .await
-        .expect("fresh-generation recovery");
+        let outcome =
+            recover_live_for_range_with_restore(fresh_config.with_checkpoints(objects), &restored)
+                .await
+                .expect("fresh-generation recovery");
 
         assert!(outcome.generation == WriterGeneration(1));
         assert!(outcome.next_journal_seq == 1);
         assert!(restored.get(b"old").expect("old") == Some(b"checkpoint".to_vec()));
         assert!(restored.get(b"fresh").expect("fresh") == Some(b"offset-zero".to_vec()));
-        drop(broker);
+        drop(outcome);
     })
     .await
     .expect("fresh-generation deadline");
 }
 
 async fn live_broker_crash_case(
+    bootstrap: &str,
     case: &str,
     stop: CheckpointServiceStep,
+    occurrence: usize,
 ) -> Result<(), SubstrateError> {
-    let dir = tempfile::TempDir::new().expect("broker tempdir");
-    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
-        .await
-        .expect("broker start");
-    let bootstrap = broker.listen_addr().to_string();
     let tenant = TenantName::parse(format!("g3-crash-{case}"))
         .map_err(|error| SubstrateError::Unavailable(error.to_string()))?;
     let range = RangeId::COORDINATOR;
-    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+    let mut admin = AdminClient::connect(&[bootstrap.to_owned()])
         .await
         .map_err(|error| SubstrateError::Unavailable(error.to_string()))?;
     let topic = ensure_wal_topic_for_range(&mut admin, &tenant, range).await?;
     drop(admin);
     let producer = Arc::new(
         Producer::builder()
-            .bootstrap(bootstrap.clone())
+            .bootstrap(bootstrap.to_owned())
             .client_id(format!("g3-crash-{case}"))
             .acks(Acks::All)
             .transactional_id(transactional_id_for_range(&tenant, range))
@@ -187,7 +193,7 @@ async fn live_broker_crash_case(
     let writer = ProducerWalWriter::new(producer, topic.clone());
     let kv = Arc::new(MemKv::default());
     let objects = InMemoryCheckpointStore::shared();
-    let pruner = Arc::new(LiveAdminPruner::connect(&bootstrap).await?);
+    let pruner = Arc::new(LiveAdminPruner::connect(bootstrap).await?);
     let namespace = format!("{tenant}/r0");
 
     let mut last_offset = -1;
@@ -220,7 +226,13 @@ async fn live_broker_crash_case(
         .await?;
     last_offset = ack.frames[0].offset;
     apply_frame(kv.as_ref(), &third.ops)?;
-    let hook: CheckpointFailpoint = Arc::new(move |step| step == stop);
+    let seen = std::sync::atomic::AtomicUsize::new(0);
+    let hook: CheckpointFailpoint = Arc::new(move |step| {
+        if step != stop {
+            return false;
+        }
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == occurrence
+    });
     let crashing = live_service(&namespace, &topic, kv, objects.clone(), pruner, Some(hook))?;
     assert!(
         run_captured_service(crashing, last_offset, 3)
@@ -236,7 +248,7 @@ async fn live_broker_crash_case(
     assert!(restored.get(b"a")? == Some(b"base".to_vec()));
     assert!(restored.get(b"b")? == Some(b"second".to_vec()));
     assert!(restored.get(b"c")? == Some(b"third".to_vec()));
-    drop(broker);
+    drop(outcome);
     Ok(())
 }
 
@@ -284,6 +296,19 @@ async fn run_captured_service(
 
 struct LiveAdminPruner {
     admin: Mutex<AdminClient>,
+}
+
+#[derive(Default)]
+struct RecordingPruner {
+    calls: Mutex<Vec<DeleteRecordsOp>>,
+}
+
+#[async_trait::async_trait]
+impl CheckpointWalPruner for RecordingPruner {
+    async fn delete_records(&self, ops: &[DeleteRecordsOp]) -> Result<(), SubstrateError> {
+        self.calls.lock().await.extend_from_slice(ops);
+        Ok(())
+    }
 }
 
 impl LiveAdminPruner {
@@ -338,10 +363,15 @@ async fn production_service_manifest_loss_after_truncate_refuses() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the zombie race keeps each durable boundary and release ordering visible"
+)]
 async fn production_zombie_service_cannot_supersede_successor_manifest() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let objects = InMemoryCheckpointStore::shared();
         let log = InMemoryWalLog::shared();
+        let pruner = Arc::new(RecordingPruner::default());
         let old_kv = Arc::new(MemKv::default());
         old_kv
             .put(b"owner".to_vec(), b"zombie".to_vec())
@@ -350,7 +380,7 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
         let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
         let release_hook = Arc::clone(&release);
         let hook: CheckpointFailpoint = Arc::new(move |step| {
-            if step == CheckpointServiceStep::PartsUploaded {
+            if step == CheckpointServiceStep::LeaseValidated {
                 reached_tx.send(()).expect("report zombie upload");
                 let (lock, condition) = &*release_hook;
                 let mut released = lock.lock().expect("release lock");
@@ -361,10 +391,11 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
             false
         });
         let old_service = CheckpointService::new(
-            CheckpointConfig::new("zombie-race".into(), "wal".into(), 1, 0, 24, 2).expect("config"),
+            CheckpointConfig::new("zombie-race".into(), "wal.g0".into(), 1, 0, 24, 2)
+                .expect("config"),
             old_kv as Arc<dyn SnapshotKv>,
             objects.clone(),
-            log.clone(),
+            pruner.clone(),
             Arc::new(CheckpointStats::default()),
         )
         .expect("old service")
@@ -395,10 +426,11 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
             .put(b"owner".to_vec(), b"successor".to_vec())
             .expect("successor state");
         let successor_service = CheckpointService::new(
-            CheckpointConfig::new("zombie-race".into(), "wal".into(), 1, 0, 24, 2).expect("config"),
+            CheckpointConfig::new("zombie-race".into(), "wal.g1".into(), 1, 0, 24, 2)
+                .expect("config"),
             successor_kv as Arc<dyn SnapshotKv>,
             objects.clone(),
-            log.clone(),
+            pruner.clone(),
             Arc::new(CheckpointStats::default()),
         )
         .expect("successor service");
@@ -422,8 +454,18 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
         *lock.lock().expect("release lock") = true;
         condition.notify_all();
         let (old_handle, old_result) = old_checkpoint.await.expect("zombie task");
-        assert!(matches!(old_result, Err(SubstrateError::Fenced)));
+        old_result.expect("zombie prunes only its immutable old topic");
         old_handle.shutdown().await.expect("old shutdown");
+        let pruned_topics = pruner
+            .calls
+            .lock()
+            .await
+            .iter()
+            .map(|op| op.topic.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(
+            pruned_topics == std::collections::BTreeSet::from(["wal.g0".into(), "wal.g1".into()])
+        );
 
         let restored = MemKv::default();
         let source = crabka_gres_substrate::checkpoint::restore_latest(

@@ -21,7 +21,7 @@ use crate::{
     error::SubstrateError,
     frame::{BARRIER_SEQ, WalFrame},
     replay::{ReplayItem, ReplayOutcome, replay_committed_frames, replay_committed_frames_from},
-    topic::{ensure_wal_topic_for_range, transactional_id_for_range, wal_topic_for_range},
+    topic::{ensure_wal_topic_name, transactional_id_for_range, wal_topic_for_generation},
     writer::{
         FenceLease, GroupCommitAck, GroupCommitRequest, TransactionalWalWriter, WalAppendAck,
         WriterGeneration,
@@ -114,7 +114,7 @@ impl LiveRecoveryConfig {
     /// WAL topic selected for replay and barrier writes.
     #[must_use]
     pub fn wal_topic(&self) -> String {
-        wal_topic_for_range(&self.tenant, self.range)
+        wal_topic_for_generation(&self.tenant, self.range, self.wal_generation)
     }
 
     /// Transactional producer id selected for fencing this range.
@@ -216,7 +216,7 @@ async fn recover_live_for_range_inner(
     let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
         .await
         .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
-    let topic = ensure_wal_topic_for_range(&mut admin, &config.tenant, config.range).await?;
+    let topic = ensure_wal_topic_name(&mut admin, &config.wal_topic()).await?;
 
     let producer = Arc::new(
         Producer::builder()

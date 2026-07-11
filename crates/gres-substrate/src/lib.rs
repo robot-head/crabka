@@ -51,8 +51,8 @@ pub use self::{
     split_runtime::{InMemorySplitStateStore, RawKvSplitRuntime},
     stats::{InMemoryRangeStatsProvider, RangeStats, RangeStatsProvider, RangeStatsSnapshot},
     topic::{
-        TopicAdmin, ensure_wal_topic, ensure_wal_topic_for_range, transactional_id_for_range,
-        wal_topic, wal_topic_for_range,
+        TopicAdmin, ensure_wal_topic, ensure_wal_topic_for_range, ensure_wal_topic_name,
+        transactional_id_for_range, wal_topic, wal_topic_for_generation, wal_topic_for_range,
     },
     transfer::{
         TableTransferIdentity, TableTransferMaterialization, TableTransferSelector,
