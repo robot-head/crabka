@@ -195,6 +195,22 @@ impl RangeService for HostedRangeService {
                     }
                 }
             }
+            RangeRequest::GlobalBegin { range_id } => {
+                let engine = match self.hosted_engine(range_id) {
+                    Ok(engine) => engine,
+                    Err(response) => return response,
+                };
+                match engine.begin_global_durable().await {
+                    Ok(global_xid) => RangeResponse::GlobalXid { global_xid },
+                    Err(error) => {
+                        let error = error.into_pg();
+                        RangeResponse::SqlError {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    }
+                }
+            }
             RangeRequest::Sql { range_id, sql } => {
                 let engine = match self.hosted_engine(range_id) {
                     Ok(engine) => engine,
@@ -606,6 +622,51 @@ pub struct RegistryRemoteForward {
     client: FramedTcpClient,
 }
 
+#[derive(Debug, Clone)]
+pub struct RegistryTsoRpc {
+    registry: RangeRegistry,
+    client: FramedTcpClient,
+}
+
+impl RegistryTsoRpc {
+    #[must_use]
+    pub const fn new(registry: RangeRegistry, client: FramedTcpClient) -> Self {
+        Self { registry, client }
+    }
+}
+
+#[async_trait]
+impl TsoRpc for RegistryTsoRpc {
+    async fn grant(&self, count: NonZeroU64) -> Result<GrantLease, TsoError> {
+        let endpoint = self
+            .registry
+            .resolve(RangeId::COORDINATOR)
+            .await
+            .map_err(|error| TsoError::Rpc(error.to_string()))?;
+        match self
+            .client
+            .call(
+                &endpoint.endpoint,
+                &RangeRequest::Tso(crate::transport::TsoReq::Grant { count: count.get() }),
+            )
+            .await
+            .map_err(|error| TsoError::Rpc(error.to_string()))?
+        {
+            RangeResponse::Tso(crate::transport::TsoResp::Granted { first_ts, count }) => {
+                let first_ts = crate::tso::TsoTimestamp::new(
+                    NonZeroU64::new(first_ts).ok_or(TsoError::TimestampOverflow)?,
+                );
+                let count = NonZeroU64::new(count).ok_or(TsoError::TimestampOverflow)?;
+                Ok(GrantLease::new(first_ts, count))
+            }
+            RangeResponse::Error { message, .. } | RangeResponse::SqlError { message, .. } => {
+                Err(TsoError::Rpc(message))
+            }
+            _ => Err(TsoError::Rpc("unexpected range-zero TSO response".into())),
+        }
+    }
+}
+
 impl RegistryRemoteForward {
     /// Build a forwarding client with an injected authenticated range client.
     #[must_use]
@@ -751,6 +812,34 @@ pub struct RemoteRangeSession {
 }
 
 impl RemoteRangeSession {
+    pub async fn begin_global(&mut self) -> Result<u64, PgError> {
+        let endpoint = self
+            .registry
+            .resolve(self.range_id)
+            .await
+            .map_err(|error| ForwardError::Registry(error).into_pg())?;
+        match self
+            .client
+            .call(
+                &endpoint.endpoint,
+                &RangeRequest::GlobalBegin {
+                    range_id: self.range_id,
+                },
+            )
+            .await
+            .map_err(|error| ForwardError::Transport(error).into_pg())?
+        {
+            RangeResponse::GlobalXid { global_xid } => Ok(global_xid),
+            RangeResponse::SqlError { code, message } => Err(PgError::error(&code, message)),
+            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
+                kind: error,
+                message,
+            }
+            .into_pg()),
+            _ => Err(ForwardError::UnexpectedResponse.into_pg()),
+        }
+    }
+
     async fn call(
         &mut self,
         operation: WireSessionOperation,
@@ -2016,6 +2105,7 @@ mod tests {
                 | RangeRequest::Session { .. }
                 | RangeRequest::SessionClose { .. }
                 | RangeRequest::GlobalDecision { .. }
+                | RangeRequest::GlobalBegin { .. }
                 | RangeRequest::Txn(_)
                 | RangeRequest::Tso(_)
                 | RangeRequest::ResolveTxn(_) => RangeResponse::Error {
@@ -2276,6 +2366,41 @@ mod tests {
         assert_eq!(rows[0][0].as_ref().expect("id").text, "7");
         assert_eq!(rows[0][1].as_ref().expect("value").text, "remote");
         assert_eq!(tag, "SELECT 1");
+    }
+
+    #[tokio::test]
+    async fn remote_range_zero_allocates_and_records_global_decision() {
+        let mut engine = crabka_pgexec::SqlEngine::new();
+        engine
+            .init_gtm_coordinator()
+            .expect("initialize range zero GTM");
+        let address = spawn_loopback(Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::COORDINATOR,
+            engine,
+        )]))))
+        .await
+        .expect("start range zero service");
+        let registry =
+            RangeRegistry::from_tenant_record(&record_with_layout(vec![RangeLayoutEntry {
+                range_id: 0,
+                end_key: None,
+                endpoint: address.to_string(),
+                wal_generation: 1,
+            }]))
+            .expect("registry");
+        let forward = RegistryRemoteForward::new(registry, FramedTcpClient::default());
+        let mut session = forward
+            .open_session(RangeId::COORDINATOR)
+            .await
+            .expect("open remote range zero session");
+
+        let global_xid = session.begin_global().await.expect("allocate global xid");
+        let status = session
+            .record_global_decision(global_xid, crabka_pgmvcc::clog::XidStatus::Committed)
+            .await
+            .expect("record remote decision");
+
+        assert_eq!(status, crabka_pgmvcc::clog::XidStatus::Committed);
     }
 
     #[tokio::test]

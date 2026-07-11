@@ -33,7 +33,7 @@ use crate::{
     barrier::{Range0Barrier, Range0EndSampler},
     coordinator::{LocalCoordinator, LocalCoordinatorError, TransactionDecision},
     forward::{
-        ForwardError, RegistryRangeScanner, RegistryRemoteForward, RemoteForward,
+        ForwardError, RegistryRangeScanner, RegistryRemoteForward, RegistryTsoRpc, RemoteForward,
         RemoteRangeSession,
     },
     registry::RangeRegistry,
@@ -395,7 +395,20 @@ impl MultiRangeTenant {
         match timestamp_oracle {
             Some(timestamp_oracle) => install_timestamp_oracle(&mut engines, &timestamp_oracle),
             None if hosts_range0 => install_memory_timestamp_oracle(&mut engines)?,
-            None => install_unavailable_timestamp_oracle(&mut engines),
+            None => {
+                if let (Some(registry), Some(client)) =
+                    (config.range_registry.clone(), config.range_client.clone())
+                {
+                    let rpc = Arc::new(RegistryTsoRpc::new(registry, client));
+                    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampOracle> =
+                        Arc::new(PgexecTsoOracle {
+                            client: BatchedTsoClient::new(rpc),
+                        });
+                    install_timestamp_oracle(&mut engines, &timestamp_oracle);
+                } else {
+                    install_unavailable_timestamp_oracle(&mut engines);
+                }
+            }
         }
 
         recover_durable_timestamp_transactions(&engines)?;
@@ -2508,19 +2521,21 @@ impl GatewaySession {
         true
     }
 
-    async fn begin_global_transaction(&self, participants: &[RangeId]) -> Result<u64, PgError> {
+    async fn begin_global_transaction(&mut self, participants: &[RangeId]) -> Result<u64, PgError> {
         let serving = self.current_serving()?;
-        let global_xid = serving
-            .engine(RangeId::COORDINATOR)
-            .ok_or_else(|| {
-                PgError::error(
-                    sqlstate::FEATURE_NOT_SUPPORTED,
-                    "range r0 is not hosted by this tenant",
-                )
-            })?
-            .begin_global_durable()
-            .await
-            .map_err(ExecError::into_pg)?;
+        let global_xid = if let Some(coordinator) = serving.engine(RangeId::COORDINATOR) {
+            coordinator
+                .begin_global_durable()
+                .await
+                .map_err(ExecError::into_pg)?
+        } else {
+            self.ensure_remote_session(RangeId::COORDINATOR).await?;
+            self.remote_sessions
+                .get_mut(&RangeId::COORDINATOR)
+                .expect("remote range 0 session inserted")
+                .begin_global()
+                .await?
+        };
         self.inner
             .coordinator
             .begin_existing_xid(global_xid, participants.to_vec())
@@ -2629,7 +2644,7 @@ impl GatewaySession {
     }
 
     async fn record_global_decision(
-        &self,
+        &mut self,
         global_xid: u64,
         decision: TransactionDecision,
     ) -> Result<TransactionDecision, PgError> {
@@ -2664,7 +2679,7 @@ impl GatewaySession {
     }
 
     async fn record_range0_global_decision(
-        &self,
+        &mut self,
         global_xid: u64,
         decision: TransactionDecision,
     ) -> Result<(), PgError> {
@@ -2674,21 +2689,24 @@ impl GatewaySession {
     }
 
     async fn record_range0_global_status(
-        &self,
+        &mut self,
         global_xid: u64,
         status: crabka_pgmvcc::clog::XidStatus,
     ) -> Result<crabka_pgmvcc::clog::XidStatus, PgError> {
-        self.current_serving()?
-            .engine(RangeId::COORDINATOR)
-            .ok_or_else(|| {
-                PgError::error(
-                    sqlstate::FEATURE_NOT_SUPPORTED,
-                    "range r0 is not hosted by this tenant",
-                )
-            })?
-            .commit_global_decision(global_xid, status)
-            .await
-            .map_err(ExecError::into_pg)
+        let serving = self.current_serving()?;
+        if let Some(coordinator) = serving.engine(RangeId::COORDINATOR) {
+            coordinator
+                .commit_global_decision(global_xid, status)
+                .await
+                .map_err(ExecError::into_pg)
+        } else {
+            self.ensure_remote_session(RangeId::COORDINATOR).await?;
+            self.remote_sessions
+                .get_mut(&RangeId::COORDINATOR)
+                .expect("remote range 0 session inserted")
+                .record_global_decision(global_xid, status)
+                .await
+        }
     }
 
     async fn release_prepared_participants(
