@@ -107,6 +107,27 @@ async fn gateway_owned_command_portal_executes_side_effect_once() {
     session.execute("ddl", 0).await.expect("cached execute");
 }
 
+#[tokio::test]
+async fn gateway_transaction_parse_rejects_parameter_type_hints() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+
+    let error = session
+        .parse("commit", "COMMIT WORK", &[23])
+        .await
+        .expect_err("transaction control has no parameters");
+
+    assert_eq!(error.code, "42P02");
+    assert_eq!(
+        session
+            .describe_statement("commit")
+            .await
+            .expect_err("failed parse owns no statement")
+            .code,
+        "26000"
+    );
+}
+
 fn tenant_config() -> MultiRangeTenantConfig {
     MultiRangeTenantConfig::from_boundaries(
         TenantName::parse("tenant_a").expect("tenant"),

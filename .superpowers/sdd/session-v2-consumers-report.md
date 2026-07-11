@@ -53,6 +53,18 @@ Commit follow-up verification on 2026-07-11:
 - `cargo +nightly fmt --all -- --check`: passed with no output.
 - `git diff --check`: passed with no output.
 
+## Final parameter-metadata repair
+
+Gateway-owned transaction-control Parse now rejects nonempty parameter type hints with stock undefined-parameter SQLSTATE `42P02` and only successful parses report an empty parameter list, matching Bind's zero-parameter contract.
+
+Fresh evidence:
+
+- `gateway_transaction_parse_rejects_parameter_type_hints`: `1 test run: 1 passed, 22 skipped`.
+- Full cross-range transaction binary: `21 tests run: 21 passed, 0 skipped`.
+- `cargo check -p crabka-gres-ranges -p crabka-gres --all-targets`: passed.
+- `cargo +nightly fmt --all -- --check`: passed with no output.
+- `git diff --check`: passed with no output.
+
 ## Second review repair
 
 The earlier statement that `COMMIT WORK` and `ROLLBACK WORK` were unsupported extended spellings was incorrect at the gateway boundary. Gateway-owned transaction-control Parse/Bind now bypasses the narrower underlying SQL-session parser while retaining the gateway classifier and execution path. Real Parse/Bind/Execute coverage again includes `COMMIT WORK`, `COMMIT TRANSACTION`, `ROLLBACK WORK`, and every cleanup spelling in `cleanup_statements()`.

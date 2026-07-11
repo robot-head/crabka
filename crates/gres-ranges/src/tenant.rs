@@ -1759,8 +1759,11 @@ impl GatewaySession {
             route.kind,
             StatementKind::Begin | StatementKind::Commit | StatementKind::Rollback
         ) {
+            if !parameter_types.is_empty() {
+                return Err(PgError::error("42P02", "there is no parameter $1"));
+            }
             let description = PreparedDescription {
-                parameter_types: parameter_types.to_vec(),
+                parameter_types: Vec::new(),
                 fields: Vec::new(),
             };
             self.prepared.insert(
