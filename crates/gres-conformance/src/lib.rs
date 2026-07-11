@@ -1,6 +1,7 @@
 //! Differential conformance harness: run the same SQL against real `PostgreSQL`
 //! (the oracle) and Crabka Gres (the subject), diff the outcomes.
 
+pub mod driver_goldens;
 mod parser_commands;
 
 use std::{

@@ -928,6 +928,8 @@ jobs:
       - name: Install pinned Python PostgreSQL driver
         run: python3 -m pip install --require-hashes --no-deps -r crates/gres-conformance/requirements-driver-smoke.txt
       - run: cargo build --locked -p crabka-cli -p crabka-broker -p crabka-gres -p crabka-gres-activator -p crabka-gres-conformance
+      - name: Captured driver startup replay
+        run: CRABKA_GRES_SKIP_BUILD=1 timeout 30s ./scripts/gres-driver-goldens-gate.sh
       - run: ./scripts/gres-psql-smoke.sh
       - name: Durable restart smoke
         run: ./scripts/gres-durable-restart-smoke.sh
