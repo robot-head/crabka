@@ -26,9 +26,10 @@ mod plan;
 pub use plan::FetchWriteOp;
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+
     use super::*;
     use crate::{Decode, Encode};
-    use bytes::BytesMut;
     fn roundtrip(case: &str, msg: &FetchResponse, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();

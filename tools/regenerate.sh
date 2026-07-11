@@ -23,6 +23,6 @@ cargo clippy --fix --allow-dirty --allow-staged -p crabka-protocol --all-targets
 # so cargo fmt never reaches them); clippy --fix may leave its edits unformatted.
 # Re-run rustfmt on the generated bodies, then cargo fmt for the real module files.
 find crates/protocol/generated -name '*.rs' -print0 | xargs -0 rustfmt --edition 2024
-cargo fmt -p crabka-protocol
+cargo +nightly fmt -p crabka-protocol
 
 echo "Regenerated. Review the diff with: git diff crates/protocol/generated crates/protocol/src"

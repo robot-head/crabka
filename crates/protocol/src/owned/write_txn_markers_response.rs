@@ -23,9 +23,10 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+
     use super::*;
     use crate::{Decode, Encode};
-    use bytes::BytesMut;
     fn roundtrip(case: &str, msg: &WriteTxnMarkersResponse, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();

@@ -36,6 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - run: rustup toolchain install nightly --profile minimal --component rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           key: codegen-check

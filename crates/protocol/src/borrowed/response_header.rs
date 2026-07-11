@@ -23,9 +23,10 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
+    use bytes::BytesMut;
+
     use super::*;
     use crate::{DecodeBorrow, Encode};
-    use bytes::BytesMut;
     fn check(case: &str, msg_bytes: &bytes::Bytes, v: i16) {
         let mut cur: &[u8] = msg_bytes;
         let decoded = ResponseHeader::decode_borrow(&mut cur, v).unwrap();
