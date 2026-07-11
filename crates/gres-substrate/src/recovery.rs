@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use crabka_client_admin::AdminClient;
-use crabka_client_core::{Connection, ConnectionOptions, security::ClientSecurity};
+use crabka_client_core::{
+    Connection, ConnectionOptions, fetch_partition_with_isolation_progress,
+    security::ClientSecurity,
+};
 use crabka_client_producer::{Acks, Producer};
 use crabka_gres_ranges::{RangeId, TenantName};
 use crabka_pgkv::{Kv, RestoreKv};
@@ -530,20 +533,40 @@ impl KafkaCommittedWalReader {
         conn: &Connection,
         fetch_offset: i64,
     ) -> Result<FetchedWalPartition, SubstrateError> {
-        let response: FetchResponse = conn
-            .send(build_fetch_request(
-                &self.topic,
-                self.topic_uuid,
-                fetch_offset,
+        let result = fetch_partition_with_isolation_progress(
+            conn,
+            &self.topic,
+            self.topic_uuid,
+            PARTITION,
+            fetch_offset,
+            FETCH_MAX_WAIT_MS,
+            FETCH_MAX_BYTES,
+            READ_COMMITTED,
+        )
+        .await
+        .map_err(|error| {
+            SubstrateError::Unavailable(format!(
+                "fetch {} partition {PARTITION} offset {fetch_offset}: {error}",
+                self.topic
             ))
-            .await
-            .map_err(|error| {
-                SubstrateError::Unavailable(format!(
-                    "fetch {} partition {PARTITION} offset {fetch_offset}: {error}",
-                    self.topic
-                ))
-            })?;
-        decode_fetch_response(&response, FetchDecodeMode::ReplayRecords)
+        })?;
+        Ok(FetchedWalPartition {
+            log_start_offset: 0,
+            high_watermark: self.barrier_offset.saturating_add(1),
+            last_stable_offset: self.barrier_offset.saturating_add(1),
+            decoded_batches: usize::from(result.next_offset.is_some()),
+            next_offset: result.next_offset.unwrap_or(fetch_offset),
+            records: result
+                .records
+                .into_iter()
+                .filter_map(|record| {
+                    record.value.map(|bytes| ReplayItem {
+                        offset: record.offset,
+                        bytes: bytes.to_vec(),
+                    })
+                })
+                .collect(),
+        })
     }
 
     async fn fetch_partition_log_start(
@@ -559,14 +582,8 @@ impl KafkaCommittedWalReader {
                     self.topic
                 ))
             })?;
-        decode_fetch_response(&response, FetchDecodeMode::LogStart)
+        decode_fetch_response(&response, true)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FetchDecodeMode {
-    ReplayRecords,
-    LogStart,
 }
 
 fn build_fetch_request(topic: &str, topic_id: WireUuid, fetch_offset: i64) -> FetchRequest {
@@ -592,7 +609,7 @@ fn build_fetch_request(topic: &str, topic_id: WireUuid, fetch_offset: i64) -> Fe
 
 fn decode_fetch_response(
     response: &FetchResponse,
-    mode: FetchDecodeMode,
+    allow_offset_out_of_range: bool,
 ) -> Result<FetchedWalPartition, SubstrateError> {
     for topic in &response.responses {
         for partition in &topic.partitions {
@@ -600,8 +617,7 @@ fn decode_fetch_response(
                 continue;
             }
             if partition.error_code != 0 {
-                if mode == FetchDecodeMode::LogStart && partition.error_code == OFFSET_OUT_OF_RANGE
-                {
+                if allow_offset_out_of_range && partition.error_code == OFFSET_OUT_OF_RANGE {
                     return Ok(FetchedWalPartition {
                         log_start_offset: partition.log_start_offset,
                         high_watermark: partition.high_watermark,
@@ -1445,7 +1461,7 @@ mod tests {
             ..Default::default()
         };
 
-        let fetched = decode_fetch_response(&response, FetchDecodeMode::LogStart)
+        let fetched = decode_fetch_response(&response, true)
             .expect("log start from offset out of range response");
 
         assert!(fetched.log_start_offset == 7);
@@ -1467,7 +1483,7 @@ mod tests {
             ..Default::default()
         };
 
-        let error = decode_fetch_response(&response, FetchDecodeMode::ReplayRecords)
+        let error = decode_fetch_response(&response, false)
             .expect_err("replay must fail on offset out of range");
 
         assert!(matches!(error, SubstrateError::Unavailable(_)));
