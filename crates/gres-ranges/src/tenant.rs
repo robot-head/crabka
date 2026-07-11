@@ -1582,6 +1582,7 @@ struct GatewayPortal {
     sql: String,
     route: StatementRoute,
     description: PortalDescription,
+    gateway_execution: Option<ExecuteOutcome>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1671,6 +1672,7 @@ impl Session for GatewaySession {
     }
 
     async fn describe_statement(&mut self, name: &str) -> Result<PreparedDescription, PgError> {
+        self.current_serving()?;
         self.prepared
             .get(name)
             .map(|prepared| prepared.description.clone())
@@ -1678,6 +1680,7 @@ impl Session for GatewaySession {
     }
 
     async fn describe_portal(&mut self, name: &str) -> Result<PortalDescription, PgError> {
+        self.current_serving()?;
         self.portals
             .get(name)
             .map(|portal| portal.description.clone())
@@ -1737,20 +1740,20 @@ impl GatewaySession {
                 format!("prepared statement \"{name}\" already exists"),
             ));
         }
+        if name.is_empty()
+            && let Some(old) = self.prepared.remove(name)
+        {
+            let old_range = old.route.range_id;
+            self.session_for(old_range)?
+                .close(CloseTarget::Statement(name))
+                .await?;
+        }
         let route = self.route_statement(sql)?;
         if route.scatter_ranges.is_some() || !self.sessions.contains_key(&route.range_id) {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
                 "extended statements must target one local range",
             ));
-        }
-        if name.is_empty()
-            && let Some(old) = self.prepared.get(name)
-        {
-            let old_range = old.route.range_id;
-            self.session_for(old_range)?
-                .close(CloseTarget::Statement(name))
-                .await?;
         }
         let description = self
             .session_for(route.range_id)?
@@ -1775,6 +1778,14 @@ impl GatewaySession {
         result_formats: &[i16],
     ) -> Result<PortalDescription, PgError> {
         self.current_serving()?;
+        if portal.is_empty()
+            && let Some(old) = self.portals.remove(portal)
+        {
+            let old_range = old.route.range_id;
+            self.session_for(old_range)?
+                .close(CloseTarget::Portal(portal))
+                .await?;
+        }
         let prepared = self
             .prepared
             .get(statement)
@@ -1786,14 +1797,6 @@ impl GatewaySession {
                 format!("cursor \"{portal}\" already exists"),
             ));
         }
-        if portal.is_empty()
-            && let Some(old) = self.portals.get(portal)
-        {
-            let old_range = old.route.range_id;
-            self.session_for(old_range)?
-                .close(CloseTarget::Portal(portal))
-                .await?;
-        }
         let description = self
             .session_for(prepared.route.range_id)?
             .bind(portal, statement, params, result_formats)
@@ -1804,6 +1807,7 @@ impl GatewaySession {
                 sql: prepared.sql,
                 route: prepared.route,
                 description: description.clone(),
+                gateway_execution: None,
             },
         );
         Ok(description)
@@ -1825,9 +1829,17 @@ impl GatewaySession {
             | StatementKind::Commit
             | StatementKind::Rollback
             | StatementKind::Ddl => {
+                if let Some(outcome) = portal_state.gateway_execution {
+                    return Ok(outcome);
+                }
                 let mut results = self.execute_one(&portal_state.sql).await?;
                 let result = results.pop().unwrap_or(QueryResult::Empty);
-                return Ok(query_result_to_outcome(result));
+                let outcome = query_result_to_outcome(result);
+                self.portals
+                    .get_mut(portal)
+                    .expect("portal exists throughout gateway execution")
+                    .gateway_execution = Some(outcome.clone());
+                return Ok(outcome);
             }
             StatementKind::Dml | StatementKind::Query | StatementKind::Local => {}
         }

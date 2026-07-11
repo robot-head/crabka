@@ -140,6 +140,14 @@ async fn empty_table_boundary_split_publishes_ready_successor_and_requires_old_s
         .simple_query("CREATE TABLE t100 (id int4)")
         .await
         .expect("create empty moved table");
+    old_session
+        .parse("stale", "SELECT id FROM t100", &[])
+        .await
+        .expect("parse before split");
+    old_session
+        .bind("stale", "stale", &[], &[])
+        .await
+        .expect("bind before split");
 
     gateway
         .split_empty_table_successor("empty-t100", RangeId::new(2), TableId::new(100))
@@ -151,6 +159,22 @@ async fn empty_table_boundary_split_publishes_ready_successor_and_requires_old_s
         .await
         .expect_err("old session must reconnect after map publication");
     assert_eq!(old_session_error.code, "0A000");
+    assert_eq!(
+        old_session
+            .describe_statement("stale")
+            .await
+            .expect_err("stale statement describe")
+            .code,
+        "0A000"
+    );
+    assert_eq!(
+        old_session
+            .describe_portal("stale")
+            .await
+            .expect_err("stale portal describe")
+            .code,
+        "0A000"
+    );
 
     let mut current_session = gateway.connect();
     current_session

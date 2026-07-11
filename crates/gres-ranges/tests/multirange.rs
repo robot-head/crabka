@@ -62,6 +62,51 @@ async fn gateway_owns_multiple_portals_cursor_close_and_sync_lifetimes() {
         .expect("prepared survives sync");
 }
 
+#[tokio::test]
+async fn failed_unnamed_replacements_remove_old_gateway_resources() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session.parse("", "SELECT 1", &[]).await.expect("parse");
+    session.bind("", "", &[], &[]).await.expect("bind");
+
+    session
+        .parse("", "SELECT FROM", &[])
+        .await
+        .expect_err("bad parse");
+    assert_eq!(
+        session
+            .describe_statement("")
+            .await
+            .expect_err("removed")
+            .code,
+        "26000"
+    );
+
+    session.parse("", "SELECT 1", &[]).await.expect("reparse");
+    session.bind("", "", &[], &[]).await.expect("rebind");
+    session
+        .bind("", "missing", &[], &[])
+        .await
+        .expect_err("bad bind");
+    assert_eq!(
+        session.describe_portal("").await.expect_err("removed").code,
+        "34000"
+    );
+}
+
+#[tokio::test]
+async fn gateway_owned_command_portal_executes_side_effect_once() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .parse("ddl", "CREATE TABLE t150 (id int4)", &[])
+        .await
+        .expect("parse");
+    session.bind("ddl", "ddl", &[], &[]).await.expect("bind");
+    session.execute("ddl", 0).await.expect("first execute");
+    session.execute("ddl", 0).await.expect("cached execute");
+}
+
 fn tenant_config() -> MultiRangeTenantConfig {
     MultiRangeTenantConfig::from_boundaries(
         TenantName::parse("tenant_a").expect("tenant"),
