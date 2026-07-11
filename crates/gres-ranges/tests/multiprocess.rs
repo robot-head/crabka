@@ -3,6 +3,45 @@ mod harness;
 use harness::{TwoComputeHarness, process::ProcessHarness};
 
 #[tokio::test]
+async fn concurrent_process_harnesses_publish_distinct_ports_and_shutdown_cleanly() {
+    let (first, second) = tokio::join!(
+        ProcessHarness::start("tenant-concurrent-harness-a"),
+        ProcessHarness::start("tenant-concurrent-harness-b"),
+    );
+    let first_endpoints = first.endpoints();
+    let second_endpoints = second.endpoints();
+    assert!(
+        first_endpoints
+            .iter()
+            .all(|endpoint| endpoint.0 != 0 && endpoint.1 != 0)
+    );
+    assert!(
+        second_endpoints
+            .iter()
+            .all(|endpoint| endpoint.0 != 0 && endpoint.1 != 0)
+    );
+    for first in first_endpoints {
+        for second in second_endpoints {
+            assert_ne!(first.0, second.0);
+            assert_ne!(first.1, second.1);
+        }
+    }
+    first
+        .sql(0)
+        .await
+        .simple_query("SELECT 1")
+        .await
+        .expect("first ready");
+    second
+        .sql(1)
+        .await
+        .simple_query("SELECT 1")
+        .await
+        .expect("second ready");
+    tokio::join!(first.shutdown(), second.shutdown());
+}
+
+#[tokio::test]
 async fn range_zero_lease_serializes_explicit_transactions_across_compute_gateways_and_expires() {
     let computes = ProcessHarness::start("tenant-real-explicit-gate").await;
     let r0 = computes.sql(0).await;
@@ -41,6 +80,7 @@ async fn range_zero_lease_serializes_explicit_transactions_across_compute_gatewa
         .await
         .expect("release lease");
     drop(abandoned);
+    computes.shutdown().await;
 }
 
 #[tokio::test]
@@ -79,4 +119,5 @@ async fn real_range_process_recovers_durable_forwarded_rows_after_kill() {
         .expect("read recovered remote-owned row");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get::<_, i32>(0), 7);
+    computes.shutdown().await;
 }

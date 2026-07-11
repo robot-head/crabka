@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     fs::File,
-    net::{IpAddr, Ipv4Addr},
+    net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -14,7 +14,7 @@ use crabka_gres_control::{
     TenantState,
 };
 use tokio::{
-    io::copy_bidirectional,
+    io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, copy_bidirectional},
     net::{TcpListener, TcpStream},
     process::{Child, Command},
     sync::{mpsc, oneshot, watch},
@@ -42,6 +42,13 @@ struct ProcessNode {
     _cache_dir: PathBuf,
     log_path: PathBuf,
     child: Child,
+    ready: Option<oneshot::Receiver<ProcessReady>>,
+    log_task: JoinHandle<()>,
+}
+
+struct ProcessReady {
+    sql: SocketAddr,
+    range: Option<SocketAddr>,
 }
 
 impl ProcessHarness {
@@ -53,35 +60,13 @@ impl ProcessHarness {
             .expect("start real broker");
         let bootstrap = broker.listen_addr().to_string();
         let tenant = name.to_owned();
-        let r0_sql = reserve_port().await;
-        let r0_range = reserve_port().await;
-        let r1_sql = reserve_port().await;
-        let r1_range = reserve_port().await;
-        let r0_proxy = RangeProxy::start(r0_range).await;
-        let r1_proxy = RangeProxy::start(r1_range).await;
+        let r0_proxy = RangeProxy::start().await;
+        let r1_proxy = RangeProxy::start().await;
         let tls = write_tls_fixture(root.path());
         provision_control(&bootstrap, &tenant, r0_proxy.port, r1_proxy.port).await;
 
-        let r0 = spawn_node(
-            root.path(),
-            &bootstrap,
-            &tenant,
-            0,
-            r0_sql,
-            r0_range,
-            "r0",
-            &tls,
-        );
-        let r1 = spawn_node(
-            root.path(),
-            &bootstrap,
-            &tenant,
-            1,
-            r1_sql,
-            r1_range,
-            "r1",
-            &tls,
-        );
+        let r0 = spawn_node(root.path(), &bootstrap, &tenant, 0, "r0", &tls);
+        let r1 = spawn_node(root.path(), &bootstrap, &tenant, 1, "r1", &tls);
         let mut harness = Self {
             _root: root,
             _broker: broker,
@@ -108,6 +93,13 @@ impl ProcessHarness {
 
     pub fn pid(&self, range: u32) -> u32 {
         self.node(range).child.id().expect("child pid")
+    }
+
+    pub fn endpoints(&self) -> [(u16, u16); 2] {
+        [
+            (self.r0.sql_port, self.r0_proxy.port),
+            (self.r1.sql_port, self.r1_proxy.port),
+        ]
     }
 
     pub fn log(&self, range: u32) -> String {
@@ -154,61 +146,56 @@ impl ProcessHarness {
         self.proxy(range).set_enabled(true).await;
     }
 
+    pub async fn shutdown(mut self) {
+        self.stop_node(0).await;
+        self.stop_node(1).await;
+    }
+
     async fn stop_node(&mut self, range: u32) {
         let node = self.node_mut(range);
         if node.child.try_wait().expect("child status").is_none() {
             node.child.kill().await.expect("kill compute child");
-            let _ = node.child.wait().await;
+            let _ = tokio::time::timeout(Duration::from_secs(5), node.child.wait())
+                .await
+                .expect("compute child shutdown timeout");
         }
+        let _ = tokio::time::timeout(Duration::from_secs(5), &mut node.log_task)
+            .await
+            .expect("compute log task shutdown timeout");
     }
 
     async fn restart_node(&mut self, range: u32, hosted_ranges: &str) {
-        let (node_range, sql_port, range_port) = {
+        let node_range = {
             let node = self.node(range);
-            (node.range, node.sql_port, node.range_port)
+            node.range
         };
         let replacement = spawn_node(
             self._root.path(),
             &self.bootstrap,
             &self.tenant,
             node_range,
-            sql_port,
-            range_port,
             hosted_ranges,
             &self.tls,
         );
-        self.node_mut(range).child = replacement.child;
+        *self.node_mut(range) = replacement;
         self.wait_ready(range).await;
     }
 
     async fn wait_ready(&mut self, range: u32) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            if self
-                .node_mut(range)
-                .child
-                .try_wait()
-                .expect("child status")
-                .is_some()
-            {
-                let log_path = &self.node(range).log_path;
-                let log = std::fs::read_to_string(log_path).unwrap_or_else(|error| {
-                    format!("<read {} failed: {error}>", log_path.display())
-                });
-                panic!("r{range} child exited; {}:\n{log}", log_path.display());
-            }
-            if try_connect(self.node(range).sql_port, &self.tenant)
-                .await
-                .is_some()
-            {
-                return;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "r{range} readiness timeout"
-            );
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        let ready = self
+            .node_mut(range)
+            .ready
+            .take()
+            .expect("readiness receiver");
+        let ready = tokio::time::timeout(Duration::from_secs(30), ready)
+            .await
+            .expect("compute readiness timeout")
+            .expect("compute readiness channel closed");
+        let range_addr = ready.range.expect("range listener address");
+        let node = self.node_mut(range);
+        node.sql_port = ready.sql.port();
+        node.range_port = range_addr.port();
+        self.proxy(range).set_backend(range_addr.port());
     }
 
     fn node(&self, range: u32) -> &ProcessNode {
@@ -246,6 +233,7 @@ struct TlsPaths {
 
 struct RangeProxy {
     port: u16,
+    backend: watch::Sender<Option<u16>>,
     commands: mpsc::Sender<ProxyCommand>,
     task: JoinHandle<()>,
 }
@@ -256,12 +244,14 @@ struct ProxyCommand {
 }
 
 impl RangeProxy {
-    async fn start(backend_port: u16) -> Self {
+    async fn start() -> Self {
         let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
             .await
             .expect("bind range proxy");
         let port = listener.local_addr().expect("range proxy address").port();
         let (enabled, _) = watch::channel(true);
+        let (backend, _) = watch::channel(None);
+        let task_backend = backend.clone();
         let (commands, mut command_rx) = mpsc::channel::<ProxyCommand>(4);
         let task = tokio::spawn(async move {
             let mut streams = JoinSet::new();
@@ -270,12 +260,13 @@ impl RangeProxy {
                     accepted = listener.accept() => {
                         let Ok((mut frontend, _)) = accepted else { return; };
                         let mut enabled = enabled.subscribe();
+                        let backend = task_backend.subscribe();
                         streams.spawn(async move {
                             if !*enabled.borrow() {
                                 return;
                             }
-                            let Ok(mut backend) =
-                                TcpStream::connect((IpAddr::V4(Ipv4Addr::LOCALHOST), backend_port)).await
+                            let Some(backend_port) = *backend.borrow() else { return; };
+                            let Ok(mut backend) = TcpStream::connect((IpAddr::V4(Ipv4Addr::LOCALHOST), backend_port)).await
                             else {
                                 return;
                             };
@@ -299,9 +290,14 @@ impl RangeProxy {
         });
         Self {
             port,
+            backend,
             commands,
             task,
         }
+    }
+
+    fn set_backend(&self, port: u16) {
+        self.backend.send_replace(Some(port));
     }
 
     async fn set_enabled(&self, enabled: bool) {
@@ -365,21 +361,18 @@ fn spawn_node(
     bootstrap: &str,
     tenant: &str,
     range: u32,
-    sql_port: u16,
-    range_port: u16,
     hosted_ranges: &str,
     tls: &TlsPaths,
 ) -> ProcessNode {
     let cache_dir = root.join(format!("r{range}-cache"));
     std::fs::create_dir_all(&cache_dir).expect("cache dir");
     let log_path = root.join(format!("r{range}.log"));
-    let stdout = File::create(&log_path).expect("node log");
-    let stderr = stdout.try_clone().expect("clone log");
+    let stderr = File::create(&log_path).expect("node log");
     let binary = gres_binary();
     let child = Command::new(binary)
         .args([
             "--listen",
-            &format!("127.0.0.1:{sql_port}"),
+            "127.0.0.1:0",
             "--substrate-bootstrap",
             bootstrap,
             "--tenant",
@@ -391,7 +384,7 @@ fn spawn_node(
             "--host-ranges",
             hosted_ranges,
             "--range-listen",
-            &format!("127.0.0.1:{range_port}"),
+            "127.0.0.1:0",
             "--range-tls-cert",
             tls.server_cert.to_str().expect("cert"),
             "--range-tls-key",
@@ -403,18 +396,53 @@ fn spawn_node(
             "--range-allowed-principal",
             "CN=process-range",
         ])
-        .stdout(Stdio::from(stdout))
+        .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr))
         .kill_on_drop(true)
         .spawn()
         .expect("spawn gres child");
+    let mut child = child;
+    let stdout = child.stdout.take().expect("child stdout pipe");
+    let (ready_tx, ready) = oneshot::channel();
+    let task_log_path = log_path.clone();
+    let log_task = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut ready_tx = Some(ready_tx);
+        let mut log = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&task_log_path)
+            .await
+            .expect("open child log append");
+        while let Ok(Some(line)) = lines.next_line().await {
+            let _ = log.write_all(line.as_bytes()).await;
+            let _ = log.write_all(b"\n").await;
+            if let Some(payload) = line.strip_prefix("CRABKA_GRES_READY ") {
+                let mut addresses = payload.split_whitespace();
+                let event = addresses
+                    .next()
+                    .and_then(|sql| sql.parse().ok())
+                    .zip(addresses.next())
+                    .and_then(|(sql, range)| {
+                        Some(ProcessReady {
+                            sql,
+                            range: (range != "-").then(|| range.parse().ok()).flatten(),
+                        })
+                    });
+                if let (Some(event), Some(sender)) = (event, ready_tx.take()) {
+                    let _ = sender.send(event);
+                }
+            }
+        }
+    });
     ProcessNode {
         range,
-        sql_port,
-        range_port,
+        sql_port: 0,
+        range_port: 0,
         _cache_dir: cache_dir,
         log_path,
         child,
+        ready: Some(ready),
+        log_task,
     }
 }
 
@@ -478,13 +506,6 @@ async fn provision_control(bootstrap: &str, tenant: &str, r0_port: u16, r1_port:
         .upsert_tenant_config(&record, 1)
         .await
         .expect("tenant config");
-}
-
-async fn reserve_port() -> u16 {
-    let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::LOCALHOST), 0))
-        .await
-        .expect("bind port");
-    listener.local_addr().expect("addr").port()
 }
 
 async fn try_connect(port: u16, database: &str) -> Option<tokio_postgres::Client> {
