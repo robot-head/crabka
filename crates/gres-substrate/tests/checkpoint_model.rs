@@ -165,10 +165,10 @@ impl Model for CheckpointModel {
             Action::Append => append_frame(&mut state),
             Action::StartCheckpoint(index) => start_checkpoint(&mut state, index)?,
             Action::StepCheckpoint(index) => {
-                step_checkpoint(&mut state, index, self.preserves_manifest_before_truncate)?
+                step_checkpoint(&mut state, index, self.preserves_manifest_before_truncate)?;
             }
             Action::ZombieCheckpointStep(index) => {
-                zombie_checkpoint_step(&mut state, index, self.preserves_manifest_before_truncate)?
+                zombie_checkpoint_step(&mut state, index, self.preserves_manifest_before_truncate)?;
             }
             Action::PruneStep => prune_step(&mut state)?,
             Action::Crash(index) => crash_compute(&mut state, index)?,
