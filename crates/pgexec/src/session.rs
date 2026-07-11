@@ -115,46 +115,156 @@ enum TxnState {
 
 #[derive(Debug, Clone)]
 struct GucSlot {
-    committed: String,
-    txn_session_override: Option<String>,
-    txn_local_override: Option<String>,
+    source: GucValue,
+    committed: GucValue,
+    txn_current: Option<GucValue>,
+    txn_session: Option<GucValue>,
 }
 
 impl GucSlot {
-    fn new(default: &str) -> Self {
+    fn new(source: GucValue) -> Self {
         Self {
-            committed: default.into(),
-            txn_session_override: None,
-            txn_local_override: None,
+            committed: source.clone(),
+            source,
+            txn_current: None,
+            txn_session: None,
         }
     }
 
-    fn effective(&self) -> &str {
-        self.txn_local_override
-            .as_deref()
-            .or(self.txn_session_override.as_deref())
-            .unwrap_or(&self.committed)
+    fn effective(&self) -> &GucValue {
+        self.txn_current.as_ref().unwrap_or(&self.committed)
     }
 
-    fn set(&mut self, value: String, local: bool) {
-        if local {
-            self.txn_local_override = Some(value);
-        } else {
-            self.txn_session_override = Some(value);
+    fn set(&mut self, value: GucValue, local: bool) {
+        self.txn_current = Some(value.clone());
+        if !local {
+            self.txn_session = Some(value);
         }
     }
 
     fn commit(&mut self) {
-        if let Some(value) = self.txn_session_override.take() {
+        if let Some(value) = self.txn_session.take() {
             self.committed = value;
         }
-        self.txn_local_override = None;
+        self.txn_current = None;
     }
 
     fn rollback(&mut self) {
-        self.txn_session_override = None;
-        self.txn_local_override = None;
+        self.txn_session = None;
+        self.txn_current = None;
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GucValue {
+    Bool(bool),
+    Integer(i64),
+    Text(String),
+}
+
+impl GucValue {
+    fn render(&self) -> String {
+        match self {
+            Self::Bool(true) => "on".into(),
+            Self::Bool(false) => "off".into(),
+            Self::Integer(value) => value.to_string(),
+            Self::Text(value) => value.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum GucKind {
+    Bool,
+    Integer { min: i64, max: i64 },
+    Text,
+}
+
+struct GucDefinition {
+    name: &'static str,
+    aliases: &'static [&'static str],
+    vartype: &'static str,
+    boot_default: &'static str,
+    kind: GucKind,
+}
+
+static GUC_DEFINITIONS: &[GucDefinition] = &[
+    GucDefinition {
+        name: "application_name",
+        aliases: &[],
+        vartype: "string",
+        boot_default: "",
+        kind: GucKind::Text,
+    },
+    GucDefinition {
+        name: "client_encoding",
+        aliases: &[],
+        vartype: "string",
+        boot_default: "UTF8",
+        kind: GucKind::Text,
+    },
+    GucDefinition {
+        name: "datestyle",
+        aliases: &["DateStyle"],
+        vartype: "string",
+        boot_default: "ISO, MDY",
+        kind: GucKind::Text,
+    },
+    GucDefinition {
+        name: "extra_float_digits",
+        aliases: &[],
+        vartype: "integer",
+        boot_default: "1",
+        kind: GucKind::Integer { min: -15, max: 3 },
+    },
+    GucDefinition {
+        name: "intervalstyle",
+        aliases: &["IntervalStyle"],
+        vartype: "string",
+        boot_default: "postgres",
+        kind: GucKind::Text,
+    },
+    GucDefinition {
+        name: "search_path",
+        aliases: &[],
+        vartype: "string",
+        boot_default: "\"$user\", public",
+        kind: GucKind::Text,
+    },
+    GucDefinition {
+        name: "standard_conforming_strings",
+        aliases: &[],
+        vartype: "bool",
+        boot_default: "on",
+        kind: GucKind::Bool,
+    },
+    GucDefinition {
+        name: "statement_timeout",
+        aliases: &[],
+        vartype: "integer",
+        boot_default: "0",
+        kind: GucKind::Integer {
+            min: 0,
+            max: i64::MAX,
+        },
+    },
+    GucDefinition {
+        name: "timezone",
+        aliases: &["TimeZone", "time zone"],
+        vartype: "string",
+        boot_default: "UTC",
+        kind: GucKind::Text,
+    },
+];
+
+fn guc_definition(name: &str) -> Option<&'static GucDefinition> {
+    GUC_DEFINITIONS.iter().find(|definition| {
+        definition.name.eq_ignore_ascii_case(name)
+            || definition
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(name))
+    })
 }
 
 /// F-1: transactional session configuration registry for the practical GUC subset
@@ -174,33 +284,54 @@ pub(crate) struct GucSettingRow {
 
 impl Default for GucState {
     fn default() -> Self {
-        let slots = guc_names()
-            .iter()
-            .map(|name| ((*name).into(), GucSlot::new(guc_default(name))))
-            .collect();
-        Self { slots }
+        Self::with_source_values(BTreeMap::new()).expect("compiled GUC defaults are valid")
     }
 }
 
 impl GucState {
-    pub(crate) fn effective(&self, name: &str) -> Result<&str, ExecError> {
+    fn with_source_values(source_values: BTreeMap<String, String>) -> Result<Self, ExecError> {
+        for name in source_values.keys() {
+            if guc_definition(name).is_none() {
+                return Err(ExecError::UnrecognizedParameter(name.clone()));
+            }
+        }
+        let mut slots = BTreeMap::new();
+        for definition in GUC_DEFINITIONS {
+            let source = source_values
+                .iter()
+                .find(|(name, _)| {
+                    guc_definition(name).is_some_and(|found| std::ptr::eq(found, definition))
+                })
+                .map_or(definition.boot_default, |(_, value)| value.as_str());
+            slots.insert(
+                definition.name.into(),
+                GucSlot::new(parse_guc_value(definition, source)?),
+            );
+        }
+        Ok(Self { slots })
+    }
+
+    pub(crate) fn effective(&self, name: &str) -> Result<String, ExecError> {
         let key = normalize_guc_name(name);
         self.slots
             .get(&key)
             .map(GucSlot::effective)
+            .map(GucValue::render)
             .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))
     }
 
     fn effective_map(&self) -> BTreeMap<String, String> {
         self.slots
             .iter()
-            .map(|(name, slot)| (name.clone(), slot.effective().to_string()))
+            .map(|(name, slot)| (name.clone(), slot.effective().render()))
             .collect()
     }
 
     pub(crate) fn set(&mut self, name: &str, value: &str, local: bool) -> Result<(), ExecError> {
         let key = normalize_guc_name(name);
-        let value = canonical_guc_value(&key, value)?;
+        let definition = guc_definition(&key)
+            .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?;
+        let value = parse_guc_value(definition, value)?;
         let slot = self
             .slots
             .get_mut(&key)
@@ -211,18 +342,17 @@ impl GucState {
 
     pub(crate) fn reset(&mut self, name: &str) -> Result<(), ExecError> {
         let key = normalize_guc_name(name);
-        let default = guc_default(&key).to_string();
         let slot = self
             .slots
             .get_mut(&key)
             .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?;
-        slot.set(default, false);
+        slot.set(slot.source.clone(), false);
         Ok(())
     }
 
     pub(crate) fn reset_all(&mut self) {
-        for (name, slot) in &mut self.slots {
-            slot.set(guc_default(name).into(), false);
+        for slot in self.slots.values_mut() {
+            slot.set(slot.source.clone(), false);
         }
     }
 
@@ -239,33 +369,8 @@ impl GucState {
     }
 }
 
-fn guc_names() -> &'static [&'static str] {
-    &[
-        "application_name",
-        "client_encoding",
-        "datestyle",
-        "extra_float_digits",
-        "intervalstyle",
-        "search_path",
-        "standard_conforming_strings",
-        "statement_timeout",
-        "timezone",
-    ]
-}
-
 fn guc_default(name: &str) -> &'static str {
-    match name {
-        "application_name" => "",
-        "client_encoding" => "UTF8",
-        "datestyle" => "ISO, MDY",
-        "extra_float_digits" => "1",
-        "intervalstyle" => "postgres",
-        "search_path" => "\"$user\", public",
-        "standard_conforming_strings" => "on",
-        "statement_timeout" => "0",
-        "timezone" => "UTC",
-        _ => "",
-    }
+    guc_definition(name).map_or("", |definition| definition.boot_default)
 }
 
 pub(crate) fn guc_default_value(name: &str) -> &'static str {
@@ -291,18 +396,26 @@ pub(crate) fn guc_settings_runtime() -> Result<Vec<GucSettingRow>, ExecError> {
 }
 
 fn guc_vartype(name: &str) -> &'static str {
-    match name {
-        "standard_conforming_strings" => "bool",
-        "extra_float_digits" | "statement_timeout" => "integer",
-        _ => "string",
-    }
+    guc_definition(name).map_or("string", |definition| definition.vartype)
 }
 
 fn normalize_guc_name(name: &str) -> String {
-    if name.eq_ignore_ascii_case("time zone") || name.eq_ignore_ascii_case("timezone") {
-        return "timezone".into();
+    guc_definition(name).map_or_else(
+        || name.to_ascii_lowercase(),
+        |definition| definition.name.into(),
+    )
+}
+
+fn parse_guc_value(definition: &GucDefinition, value: &str) -> Result<GucValue, ExecError> {
+    let canonical = canonical_guc_value(definition.name, value)?;
+    match definition.kind {
+        GucKind::Bool => Ok(GucValue::Bool(canonical == "on")),
+        GucKind::Integer { .. } => canonical
+            .parse()
+            .map(GucValue::Integer)
+            .map_err(|_| ExecError::InvalidParameterValue(value.into())),
+        GucKind::Text => Ok(GucValue::Text(canonical)),
     }
-    name.to_ascii_lowercase()
 }
 
 fn canonical_guc_value(name: &str, value: &str) -> Result<String, ExecError> {
@@ -325,8 +438,13 @@ fn canonical_guc_value(name: &str, value: &str) -> Result<String, ExecError> {
             }
         }
         "standard_conforming_strings" => canonical_bool(value),
-        "extra_float_digits" => canonical_integer_guc(value, -15, 3),
-        "statement_timeout" => canonical_timeout(value),
+        "extra_float_digits" | "statement_timeout" => {
+            let definition = guc_definition(name).expect("known integer GUC");
+            let GucKind::Integer { min, max } = definition.kind else {
+                unreachable!()
+            };
+            canonical_integer_guc(value, min, max)
+        }
         "datestyle" => Ok(value.to_string()),
         "intervalstyle" => {
             let lower = value.to_ascii_lowercase();
@@ -392,14 +510,6 @@ fn canonical_integer_guc(value: &str, min: i64, max: i64) -> Result<String, Exec
         .filter(|number| (min..=max).contains(number))
         .map(|number| number.to_string())
         .ok_or_else(|| ExecError::InvalidParameterValue(value.to_string()))
-}
-
-fn canonical_timeout(value: &str) -> Result<String, ExecError> {
-    if value.parse::<u64>().is_ok() {
-        Ok(value.into())
-    } else {
-        Err(ExecError::InvalidParameterValue(value.to_string()))
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -646,11 +756,14 @@ impl SqlSession {
         // SP37: the effective session zone (validated at SET time, so `get`
         // succeeds; `unwrap_or(UTC)` is a defensive fallback). `UTC` is
         // special-cased to the const so the common case never touches the tzdb.
-        let tzname = self.guc.effective("timezone").unwrap_or("UTC");
+        let tzname = self
+            .guc
+            .effective("timezone")
+            .unwrap_or_else(|_| "UTC".into());
         let time_zone = if tzname.eq_ignore_ascii_case("UTC") {
             jiff::tz::TimeZone::UTC
         } else {
-            jiff::tz::TimeZone::get(tzname).unwrap_or(jiff::tz::TimeZone::UTC)
+            jiff::tz::TimeZone::get(&tzname).unwrap_or(jiff::tz::TimeZone::UTC)
         };
         crate::clock::EvalCtx {
             now,
@@ -843,11 +956,14 @@ impl SqlSession {
 
     fn discard_all(&mut self) -> Result<QueryResult, ExecError> {
         if !matches!(self.state, TxnState::Idle) {
-            return Err(ExecError::Unsupported(
+            return Err(ExecError::ActiveSqlTransaction(
                 "DISCARD ALL cannot run inside a transaction block".into(),
             ));
         }
         self.guc = GucState::default();
+        self.current_role.clone_from(&self.session_user);
+        self.prepared.clear();
+        self.portals.clear();
         Ok(QueryResult::Command {
             tag: "DISCARD ALL".into(),
         })
@@ -897,7 +1013,7 @@ impl SqlSession {
         let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
             jiff::tz::TimeZone::UTC
         } else {
-            jiff::tz::TimeZone::get(timezone_name).map_err(|_| {
+            jiff::tz::TimeZone::get(&timezone_name).map_err(|_| {
                 PgError::error(
                     "22023",
                     format!("invalid value for parameter: \"{timezone_name}\""),
@@ -3505,7 +3621,7 @@ impl Session for SqlSession {
                 let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
                     jiff::tz::TimeZone::UTC
                 } else {
-                    jiff::tz::TimeZone::get(timezone_name).map_err(|_| {
+                    jiff::tz::TimeZone::get(&timezone_name).map_err(|_| {
                         PgError::error(
                             "22023",
                             format!("invalid value for parameter: \"{timezone_name}\""),
@@ -3804,16 +3920,20 @@ impl Session for SqlSession {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+    use std::{
+        collections::BTreeMap,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicU64, Ordering},
+        },
     };
 
     use crabka_pgkv::{Kv, MemKv};
     use crabka_pgwire::engine::{Engine, Session, TxStatus};
 
     use super::{
-        ColumnType, SqlSession, canonical_guc_value, decode_bound_param, guc_default, guc_vartype,
+        ColumnType, GucState, SqlSession, canonical_guc_value, decode_bound_param, guc_default,
+        guc_vartype,
     };
     use crate::{ExecError, SqlEngine};
 
@@ -5091,6 +5211,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn guc_mutations_follow_statement_order_and_reset_to_source() {
+        let mut gucs = GucState::default();
+        gucs.set("application_name", "session-one", false).unwrap();
+        gucs.set("application_name", "local-one", true).unwrap();
+        assert_eq!(gucs.effective("application_name").unwrap(), "local-one");
+        gucs.set("application_name", "session-two", false).unwrap();
+        assert_eq!(gucs.effective("application_name").unwrap(), "session-two");
+        gucs.commit();
+        assert_eq!(gucs.effective("application_name").unwrap(), "session-two");
+
+        let mut source = BTreeMap::new();
+        source.insert("application_name".to_string(), "from-source".to_string());
+        let mut gucs = GucState::with_source_values(source).unwrap();
+        gucs.set("application_name", "changed", false).unwrap();
+        gucs.commit();
+        gucs.reset("application_name").unwrap();
+        gucs.commit();
+        assert_eq!(gucs.effective("application_name").unwrap(), "from-source");
+    }
+
     #[tokio::test]
     async fn current_setting_and_set_config_follow_transaction_scope() {
         let engine = SqlEngine::new();
@@ -5134,6 +5275,66 @@ mod tests {
             single_text(&s.simple_query("SHOW application_name").await.expect("show")),
             "from-func"
         );
+    }
+
+    #[tokio::test]
+    async fn guc_sql_interleavings_match_postgres_18() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+
+        session.simple_query("BEGIN").await.unwrap();
+        session
+            .simple_query("SET application_name = 's1'")
+            .await
+            .unwrap();
+        session
+            .simple_query("SET LOCAL application_name = 'l1'")
+            .await
+            .unwrap();
+        session
+            .simple_query("SET application_name = 's2'")
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW application_name").await.unwrap()),
+            "s2"
+        );
+        session.simple_query("COMMIT").await.unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW application_name").await.unwrap()),
+            "s2"
+        );
+
+        session.simple_query("BEGIN").await.unwrap();
+        session
+            .simple_query("SET LOCAL application_name = 'l2'")
+            .await
+            .unwrap();
+        session
+            .simple_query("SET application_name = 's3'")
+            .await
+            .unwrap();
+        session
+            .simple_query("SET LOCAL application_name = 'l3'")
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW application_name").await.unwrap()),
+            "l3"
+        );
+        session.simple_query("COMMIT").await.unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW application_name").await.unwrap()),
+            "s3"
+        );
+
+        session.simple_query("BEGIN").await.unwrap();
+        let error = session
+            .simple_query("DISCARD ALL")
+            .await
+            .expect_err("transaction block");
+        assert_eq!(error.code, "25001");
+        session.simple_query("ROLLBACK").await.unwrap();
     }
 
     /// A session dropped while a write transaction is open (client disconnect)

@@ -74,6 +74,8 @@ pub enum ExecError {
     /// A statement was issued in an aborted transaction block (25P02): every
     /// command after an error (until COMMIT/ROLLBACK) is rejected.
     InFailedTransaction,
+    /// A command forbidden inside an explicit transaction block (25001).
+    ActiveSqlTransaction(String),
     /// A write conflicted with a concurrently-committed change under REPEATABLE
     /// READ (40001) — the client should retry the transaction.
     SerializationFailure,
@@ -190,6 +192,7 @@ impl ExecError {
                 "25P02",
                 "current transaction is aborted, commands ignored until end of transaction block",
             ),
+            ExecError::ActiveSqlTransaction(message) => PgError::error("25001", message),
             ExecError::SerializationFailure => PgError::error(
                 "40001",
                 "could not serialize access due to concurrent update",
