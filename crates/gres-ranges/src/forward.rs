@@ -1333,6 +1333,64 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
+
+    struct EndlessCursorScanner {
+        dropped: Arc<AtomicUsize>,
+    }
+
+    struct EndlessCursor {
+        page: usize,
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Drop for EndlessCursor {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl crabka_pgexec::RangeCursor for EndlessCursor {
+        async fn next_page(
+            &mut self,
+            _max_rows: usize,
+        ) -> Result<crabka_pgexec::ScanPage, crabka_pgexec::ExecError> {
+            self.page += 1;
+            let value = if self.page == 1 {
+                "first".to_string()
+            } else {
+                "x".repeat(100_000)
+            };
+            Ok(crabka_pgexec::ScanPage {
+                rows: vec![crabka_pgexec::ScannedRow {
+                    rowid: u64::try_from(self.page).expect("test page fits"),
+                    xmin: 1,
+                    row: vec![Datum::Text(value)],
+                }]
+                .into_boxed_slice(),
+                is_last: false,
+            })
+        }
+    }
+
+    impl RangeScanner for EndlessCursorScanner {
+        fn scan(
+            &self,
+            _request: crabka_pgexec::ScanRequest<'_>,
+        ) -> Result<Vec<crabka_pgexec::ScannedRow>, crabka_pgexec::ExecError> {
+            panic!("hosted streaming test must not materialize")
+        }
+
+        fn scan_cursor<'a>(
+            &'a self,
+            _request: crabka_pgexec::ScanRequest<'a>,
+        ) -> Result<Box<dyn crabka_pgexec::RangeCursor + 'a>, crabka_pgexec::ExecError> {
+            Ok(Box::new(EndlessCursor {
+                page: 0,
+                dropped: Arc::clone(&self.dropped),
+            }))
+        }
+    }
     use crate::transport::{RangeService, spawn_loopback};
 
     struct StaleThenOk {
@@ -1613,6 +1671,63 @@ mod tests {
         assert_eq!(rows[0][0].as_ref().expect("id").text, "7");
         assert_eq!(rows[0][1].as_ref().expect("value").text, "remote");
         assert_eq!(tag, "SELECT 1");
+    }
+
+    #[tokio::test]
+    async fn hosted_query_writes_first_frame_before_completion_and_disconnect_cancels_cursor() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let mut engine = crabka_pgexec::SqlEngine::new();
+        engine.set_range_scanner(Arc::new(EndlessCursorScanner {
+            dropped: Arc::clone(&dropped),
+        }));
+        engine
+            .connect()
+            .simple_query("CREATE TABLE live_frames (value text) SHARDED")
+            .await
+            .expect("create streamed table");
+        let address = spawn_loopback(Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::new(1),
+            engine,
+        )]))))
+        .await
+        .expect("start range service");
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect range service");
+        let request = serde_json::to_vec(&RangeRequest::Sql {
+            range_id: RangeId::new(1),
+            sql: "SELECT value FROM live_frames".into(),
+        })
+        .expect("serialize request");
+        stream
+            .write_u32(u32::try_from(request.len()).expect("request length fits"))
+            .await
+            .expect("write request length");
+        stream.write_all(&request).await.expect("write request");
+
+        let frame_len = tokio::time::timeout(Duration::from_secs(2), stream.read_u32())
+            .await
+            .expect("first frame arrives before query completion")
+            .expect("read first frame length");
+        let mut frame = vec![0; usize::try_from(frame_len).expect("frame length fits")];
+        stream
+            .read_exact(&mut frame)
+            .await
+            .expect("read first frame");
+        let first: RangeResponse = serde_json::from_slice(&frame).expect("decode first frame");
+        assert!(matches!(first, RangeResponse::SqlResultsChunk { .. }));
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+
+        drop(stream);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while dropped.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("disconnect cancels and drops the active cursor");
     }
 
     #[tokio::test]
