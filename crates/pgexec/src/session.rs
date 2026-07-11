@@ -3804,7 +3804,9 @@ impl Session for SqlSession {
         use crabka_pgwire::engine::ResultPage;
 
         if page_rows == 0 {
-            return Err(PgError::protocol("result page size must be greater than zero"));
+            return Err(PgError::protocol(
+                "result page size must be greater than zero",
+            ));
         }
         if sql.trim().is_empty() {
             return sink.send(ResultPage::Empty { result_index: 0 }).await;
@@ -3815,11 +3817,7 @@ impl Session for SqlSession {
         }
         for (result_index, stmt) in statements.iter().enumerate() {
             match self.run_one(stmt).await.map_err(ExecError::into_pg)? {
-                QueryResult::Rows {
-                    fields,
-                    mut rows,
-                    tag,
-                } => {
+                QueryResult::Rows { fields, rows, tag } => {
                     let mut fields = Some(fields);
                     if rows.is_empty() {
                         sink.send(ResultPage::Rows {
@@ -3831,24 +3829,17 @@ impl Session for SqlSession {
                         .await?;
                         continue;
                     }
-                    while rows.len() > page_rows {
-                        let tail = rows.split_off(page_rows);
+                    let mut pages = into_row_pages(rows, page_rows).peekable();
+                    while let Some(rows) = pages.next() {
+                        let final_page = pages.peek().is_none();
                         sink.send(ResultPage::Rows {
                             result_index,
                             fields: fields.take(),
                             rows,
-                            tag: None,
+                            tag: final_page.then(|| tag.clone()),
                         })
                         .await?;
-                        rows = tail;
                     }
-                    sink.send(ResultPage::Rows {
-                        result_index,
-                        fields: fields.take(),
-                        rows,
-                        tag: Some(tag),
-                    })
-                    .await?;
                 }
                 QueryResult::Command { tag } => {
                     sink.send(ResultPage::Command { result_index, tag }).await?;
@@ -4208,6 +4199,15 @@ impl Session for SqlSession {
     }
 }
 
+fn into_row_pages<T>(rows: Vec<T>, page_rows: usize) -> impl Iterator<Item = Vec<T>> {
+    debug_assert!(page_rows > 0);
+    let mut rows = rows.into_iter();
+    std::iter::from_fn(move || {
+        let page: Vec<_> = rows.by_ref().take(page_rows).collect();
+        (!page.is_empty()).then_some(page)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -4320,7 +4320,20 @@ mod tests {
             page,
             ResultPage::Rows { rows, .. } if rows.len() == 2
         )));
-        assert_eq!(sink.finish(), expected);
+        assert_eq!(sink.finish().expect("valid page stream"), expected);
+    }
+
+    #[test]
+    fn row_pages_consume_many_page_input_once_in_order() {
+        let rows: Vec<_> = (0..10_003).collect();
+        let pages: Vec<_> = super::into_row_pages(rows, 17).collect();
+
+        assert_eq!(pages.len(), 589);
+        assert!(pages.iter().all(|page| page.len() <= 17));
+        assert_eq!(
+            pages.into_iter().flatten().collect::<Vec<_>>(),
+            (0..10_003).collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -4346,7 +4359,11 @@ mod tests {
         let mut session = engine.connect();
         let mut sink = RejectingSink { pages: 0 };
         let error = session
-            .simple_query_into("SELECT 1; CREATE TABLE must_not_run (id int4)", 1, &mut sink)
+            .simple_query_into(
+                "SELECT 1; CREATE TABLE must_not_run (id int4)",
+                1,
+                &mut sink,
+            )
             .await
             .expect_err("sink refusal must cancel production");
         assert_eq!(error.code, "57014");
