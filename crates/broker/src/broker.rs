@@ -80,6 +80,33 @@ const CLIENT_METRICS_STALE_PUSH_INTERVALS: u32 = 3;
 /// push intervals are not evicted between pushes.
 const CLIENT_METRICS_STALE_FLOOR: std::time::Duration = std::time::Duration::from_mins(10);
 
+fn self_registration_record(config: &BrokerConfig) -> crabka_metadata::BrokerRegistrationRecord {
+    let (host, port) = parse_advertised_host_port(&config.advertised_listener);
+    let endpoints = config
+        .effective_listeners()
+        .iter()
+        .map(|listener| {
+            let (host, port) = parse_advertised_host_port(&listener.advertised);
+            crabka_metadata::BrokerEndpoint {
+                name: listener.name.clone(),
+                host,
+                port,
+                protocol: listener.protocol,
+            }
+        })
+        .collect();
+
+    crabka_metadata::BrokerRegistrationRecord {
+        node_id: config.node_id,
+        broker_epoch: 0,
+        incarnation_id: config.incarnation_id,
+        host,
+        port,
+        rack: config.rack.clone(),
+        endpoints,
+    }
+}
+
 /// Safety-net timeout shared by the test-helper `wait_*` awaiters: a
 /// condition that has not held within this window fails the test loudly.
 #[cfg(any(test, feature = "test-helpers"))]
@@ -454,35 +481,8 @@ async fn register_broker(
         return Ok(());
     }
     config.incarnation_id = crate::incarnation::load_or_generate(&config.log_dir);
-    let endpoints = config
-        .effective_listeners()
-        .iter()
-        .map(|listener| {
-            let (host, port) = parse_advertised_host_port(&listener.advertised);
-            crabka_metadata::BrokerEndpoint {
-                name: listener.name.clone(),
-                host,
-                port,
-                protocol: listener.protocol,
-            }
-        })
-        .collect();
-    let registration = crabka_metadata::MetadataRecord::V1BrokerRegistration(
-        crabka_metadata::BrokerRegistrationRecord {
-            node_id: config.node_id,
-            broker_epoch: 0,
-            incarnation_id: config.incarnation_id,
-            host: config
-                .advertised_listener
-                .split(':')
-                .next()
-                .unwrap_or("127.0.0.1")
-                .to_owned(),
-            port: config.listen_addr.port(),
-            rack: config.rack.clone(),
-            endpoints,
-        },
-    );
+    let registration =
+        crabka_metadata::MetadataRecord::V1BrokerRegistration(self_registration_record(config));
     let backoff = exponential_backoff::Backoff::new(
         SELF_REGISTRATION_MAX_ATTEMPTS,
         SELF_REGISTRATION_BACKOFF_MIN,
@@ -3612,32 +3612,6 @@ impl Broker {
         // Auto-join, leader readiness, registration, and bootstrap submission
         // are completed by `start_metadata_phase`.
 
-        // 2. Wait for a leader, then submit a self-registration record so
-        //    other brokers can discover us. Best-effort: if the submit
-        //    fails the next caller's request will surface the error and
-        //    membership reconciliation can retry later.
-        {
-            // 2b. First-start bootstrap-records submit.
-            //
-            //     On a fresh-cluster cold boot (`BootstrapMode::Bootstrap`),
-            //     consume `log_dir/bootstrap.records.bin` if present and submit
-            //     its records through raft as a single batched change. This is
-            //     how operator-supplied SCRAM credentials (and any future
-            //     bootstrap-only metadata) enter the cluster before any client
-            //     connection succeeds — `submit_change` blocks until raft has
-            //     committed and applied the batch, so by the time we proceed
-            //     past this point the records are visible in
-            //     `controller.current_image()`.
-            //
-            //     `Join` brokers skip this entirely: bootstrap records are a
-            //     fresh-cluster initialization concern, never replayed by
-            //     joining voters (the leader already has the committed state).
-            //
-            //     Missing-file is treated as empty (handled by the loader),
-            //     so the legacy zero-record path is a no-op and existing
-            //     deployments / tests are byte-identical.
-        }
-
         let StorageStartup {
             log_dir_status,
             log_dir_ids,
@@ -5048,6 +5022,54 @@ mod tests {
                 "input {input:?}"
             );
         }
+    }
+
+    #[test]
+    fn file_config_self_registration_uses_advertised_listener_for_legacy_endpoint() {
+        let file: crate::file_config::FileConfig = toml::from_str(
+            r#"
+inter_broker_listener_name = "INTERNAL"
+
+[[listeners]]
+name = "EXTERNAL"
+bind_addr = "127.0.0.1:19094"
+advertised = "external.example:29094"
+protocol = "Plaintext"
+
+[[listeners]]
+name = "INTERNAL"
+bind_addr = "127.0.0.1:19093"
+advertised = "internal.example:29093"
+protocol = "Plaintext"
+"#,
+        )
+        .expect("parse file config");
+        let mut config = BrokerConfig::default();
+        assert!(
+            config.listen_addr.port() == 9092,
+            "preserve CLI default precondition"
+        );
+        file.apply_to(&mut config).expect("apply file config");
+
+        let registration = self_registration_record(&config);
+
+        assert!(registration.host == "internal.example");
+        assert!(registration.port == 29093);
+        assert!(
+            registration
+                .endpoints
+                .iter()
+                .map(|endpoint| (
+                    endpoint.name.as_str(),
+                    endpoint.host.as_str(),
+                    endpoint.port
+                ))
+                .collect::<Vec<_>>()
+                == vec![
+                    ("EXTERNAL", "external.example", 29094),
+                    ("INTERNAL", "internal.example", 29093),
+                ]
+        );
     }
 
     #[test]
