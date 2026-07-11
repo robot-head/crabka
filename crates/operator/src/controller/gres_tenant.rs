@@ -25,7 +25,7 @@ use k8s_openapi::{
 };
 use kube::{
     Resource, ResourceExt as _,
-    api::{Api, Patch, PatchParams},
+    api::{Api, DeleteParams, Patch, PatchParams},
     runtime::{
         controller::{Action, Controller},
         reflector::ObjectRef,
@@ -252,6 +252,8 @@ async fn reconcile_inner(
         // registry. Deployments may still be progressing, but clients never
         // observe a registry endpoint whose Kubernetes object is absent.
         let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
+        cleanup_obsolete_range_resources(&ctx, &ns, &obj, current_record.as_ref(), &tenant_ranges)
+            .await?;
         if tenant_ranges.len() > 1 {
             apply_object(
                 &svc_api,
@@ -959,6 +961,91 @@ fn front_door_service_name(name: &str) -> String {
 fn range_service_name(name: &str, range_id: u32) -> String {
     deployment_name(name, range_id)
 }
+
+#[derive(Debug, PartialEq, Eq)]
+struct ObsoleteRangeResources {
+    deployments: Vec<String>,
+    services: Vec<String>,
+}
+
+fn obsolete_range_resources(
+    tenant: &str,
+    previous: &[u32],
+    desired: &[u32],
+) -> ObsoleteRangeResources {
+    let withdrawn: Vec<_> = previous
+        .iter()
+        .copied()
+        .filter(|range_id| !desired.contains(range_id))
+        .collect();
+    let deployments = withdrawn
+        .iter()
+        .map(|range_id| deployment_name(tenant, *range_id))
+        .collect();
+    let mut services: Vec<_> = withdrawn
+        .iter()
+        .map(|range_id| range_service_name(tenant, *range_id))
+        .collect();
+    if previous.len() > 1 && desired.len() <= 1 {
+        services.push(front_door_service_name(tenant));
+    }
+    ObsoleteRangeResources {
+        deployments,
+        services,
+    }
+}
+
+async fn cleanup_obsolete_range_resources(
+    ctx: &Context,
+    namespace: &str,
+    tenant: &GresTenant,
+    current: Option<&TenantRecord>,
+    desired: &[GresTenantRangeSpec],
+) -> Result<(), ReconcileError> {
+    let Some(current) = current else {
+        return Ok(());
+    };
+    let previous: Vec<_> = current.ranges.iter().map(|range| range.range_id).collect();
+    let desired: Vec<_> = desired.iter().map(|range| range.range_id).collect();
+    let obsolete = obsolete_range_resources(&tenant.name_any(), &previous, &desired);
+    let deployment_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
+    let service_api: Api<Service> = Api::namespaced(ctx.client.clone(), namespace);
+    for name in obsolete.deployments {
+        if let Some(object) = deployment_api.get_opt(&name).await?
+            && is_managed_by_tenant(&object.metadata, tenant)
+        {
+            deployment_api
+                .delete(&name, &DeleteParams::default())
+                .await?;
+        }
+    }
+    for name in obsolete.services {
+        if let Some(object) = service_api.get_opt(&name).await?
+            && is_managed_by_tenant(&object.metadata, tenant)
+        {
+            service_api.delete(&name, &DeleteParams::default()).await?;
+        }
+    }
+    Ok(())
+}
+
+fn is_managed_by_tenant(
+    metadata: &k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta,
+    tenant: &GresTenant,
+) -> bool {
+    let tenant_uid = tenant.metadata.uid.as_deref();
+    metadata.owner_references.as_ref().is_some_and(|owners| {
+        owners.iter().any(|owner| {
+            owner.controller == Some(true)
+                && Some(owner.uid.as_str()) == tenant_uid
+                && owner.kind == GresTenant::kind(&())
+        })
+    }) && metadata.labels.as_ref().is_some_and(|labels| {
+        labels.get("app.kubernetes.io/name").map(String::as_str) == Some(APP_NAME)
+            && labels.get("app.kubernetes.io/instance").map(String::as_str)
+                == Some(tenant.name_any().as_str())
+    })
+}
 fn deployment_name(name: &str, range_id: u32) -> String {
     if range_id == 0 {
         return format!("{name}-gres");
@@ -1636,6 +1723,43 @@ mod tests {
             .expect("status")
             .available_replicas = Some(0);
         assert!(!deployment_is_ready(&deployment));
+    }
+
+    #[test]
+    fn layout_shrink_identifies_withdrawn_ranges_and_multi_range_front_door() {
+        let previous = [0, 1, 2];
+        let desired = [0];
+
+        let obsolete = obsolete_range_resources("tenant-a", &previous, &desired);
+
+        assert_eq!(
+            obsolete,
+            ObsoleteRangeResources {
+                deployments: vec!["tenant-a-gres-r1".into(), "tenant-a-gres-r2".into()],
+                services: vec![
+                    "tenant-a-gres-r1".into(),
+                    "tenant-a-gres-r2".into(),
+                    "tenant-a-gres-pg".into(),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn obsolete_cleanup_requires_matching_controller_owner_and_managed_labels() {
+        let mut tenant = tenant();
+        tenant.metadata.uid = Some("tenant-uid".into());
+        let mut service = render_range_service(&tenant, 1).expect("managed service");
+
+        assert!(is_managed_by_tenant(&service.metadata, &tenant));
+
+        service
+            .metadata
+            .labels
+            .as_mut()
+            .unwrap()
+            .insert("app.kubernetes.io/instance".into(), "another-tenant".into());
+        assert!(!is_managed_by_tenant(&service.metadata, &tenant));
     }
 
     #[test]
