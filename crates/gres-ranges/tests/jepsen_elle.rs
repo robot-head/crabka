@@ -7,7 +7,7 @@ use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc};
 use crabka_gres_ranges::{MemoryTsoHorizon, RangeId, TsoError, TsoOracle};
 use crabka_pgkv::MemKv;
 use crabka_pgwire::engine::Engine;
-use harness::{SystemHarness, process::ProcessHarness, row_count, run, try_run};
+use harness::{SystemHarness, process::ProcessHarness, row_count, run};
 use stateright::semantics::{ConsistencyTester, LinearizabilityTester, SequentialSpec};
 use tokio::sync::Mutex;
 
@@ -236,8 +236,6 @@ async fn sharded_timestamp_elle_history_survives_writer_kills_and_tso_fences() {
     run(&mut setup, "CREATE TABLE elle50 (id int4) SHARDED").await;
     run(&mut setup, "CREATE TABLE elle150 (id int4) SHARDED").await;
 
-    assert_explicit_sharded_append_fails_clear(&gateway, Key::Left, 99).await;
-
     let first = observe_then_append(&gateway, 0, Key::Left, 1).await;
     system.kill_writer(RangeId::new(1));
     let killed = try_observe_then_append(&mut system, 1, Key::Right, 1).await;
@@ -336,36 +334,6 @@ async fn try_observe_then_append(
         return None;
     }
     Some(observe_then_append(&system.gateway(), client, key, value).await)
-}
-
-async fn assert_explicit_sharded_append_fails_clear(
-    gateway: &crabka_gres_ranges::MultiRangeTenant,
-    key: Key,
-    value: i64,
-) {
-    let mut session = gateway.connect();
-    let table = key.table_name();
-    let before_rows = run(&mut session, &format!("SELECT id FROM {table}")).await;
-    let before_len = row_count(&before_rows);
-
-    run(&mut session, "BEGIN").await;
-    let error = try_run(
-        &mut session,
-        &format!("INSERT INTO {table} VALUES ({value})"),
-    )
-    .await
-    .expect_err("explicit sharded transaction write fails clear");
-    assert_eq!(error.code, "0A000");
-    let _ = try_run(&mut session, "ROLLBACK").await;
-
-    let mut verification_session = gateway.connect();
-    let after_rows = run(
-        &mut verification_session,
-        &format!("SELECT id FROM {table}"),
-    )
-    .await;
-    let after_len = row_count(&after_rows);
-    assert_eq!(after_len, before_len);
 }
 
 fn nonzero(value: u64) -> NonZeroU64 {

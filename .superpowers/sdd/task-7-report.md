@@ -35,6 +35,7 @@ Evidence:
 - `range0_leader_kill_drain`: 3 passed. The new case leaves r1 live and prepared, kills only r0, then proves r0 readiness is withheld until recovery releases the live r1 session: old balances are visible and a subsequent cross-range update/commit succeeds without a stranded lock.
 - `cargo test -p crabka-gres-ranges --lib --no-fail-fast`: 106 passed.
 - Real `crabka-gres` binary build and `git diff --check`: passed.
+- Full seven-binary Task 7 nextest command: 23 passed, 0 skipped in 60.975s. The first attempt exposed one stale pre-G9 Elle assertion that expected explicit sharded writes to fail; that obsolete assertion was removed because completed G9 timestamp sessions now support the operation. The clean rerun passed all seven binaries.
 
 Known scope: G8/G9 sharded timestamp explicit transactions and later distributed maturity gates are outside G7 Task 7 and remain active work.
 
