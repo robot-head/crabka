@@ -98,6 +98,7 @@ pub(crate) fn join_relations(
     };
 
     let mut rows = Vec::new();
+    let mut result_bytes = 0usize;
     match kind {
         JoinKind::Inner | JoinKind::Cross => {
             for l in &left.rows {
@@ -105,7 +106,7 @@ pub(crate) fn join_relations(
                     if matches(l, r)? {
                         let mut row = l.clone();
                         row.extend(r.iter().cloned());
-                        rows.push(row);
+                        push_bounded_join_row(&mut rows, &mut result_bytes, row)?;
                     }
                 }
             }
@@ -123,13 +124,13 @@ pub(crate) fn join_relations(
                         right_matched[ri] = true;
                         let mut row = l.clone();
                         row.extend(r.iter().cloned());
-                        rows.push(row);
+                        push_bounded_join_row(&mut rows, &mut result_bytes, row)?;
                     }
                 }
                 if !any && want_left {
                     let mut row = l.clone();
                     row.extend(vec![Datum::Null; rw]);
-                    rows.push(row);
+                    push_bounded_join_row(&mut rows, &mut result_bytes, row)?;
                 }
             }
             if want_right {
@@ -137,7 +138,7 @@ pub(crate) fn join_relations(
                     if !right_matched[ri] {
                         let mut row = vec![Datum::Null; lw];
                         row.extend(r.iter().cloned());
-                        rows.push(row);
+                        push_bounded_join_row(&mut rows, &mut result_bytes, row)?;
                     }
                 }
             }
@@ -160,6 +161,20 @@ pub(crate) fn join_relations(
             rows,
         ))
     }
+}
+
+fn push_bounded_join_row(
+    rows: &mut Vec<Vec<Datum>>,
+    used: &mut usize,
+    row: Vec<Datum>,
+) -> Result<(), ExecError> {
+    let bytes = crate::scanner::datum_row_bytes(&row);
+    if used.saturating_add(bytes) > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+        return Err(crate::scanner::memory_budget_exceeded());
+    }
+    *used += bytes;
+    rows.push(row);
+    Ok(())
 }
 
 /// The column names common to both scopes (matched by name), in left order,
@@ -317,6 +332,31 @@ mod tests {
             .expect("cross join");
         assert_eq!(j.rows.len(), 2);
         assert_eq!(j.scope.width(), 2);
+    }
+
+    #[test]
+    fn cross_join_rejects_result_before_memory_budget_is_crossed() {
+        let scope = |qualifier: &str| Scope {
+            columns: vec![crate::scope::ColumnBinding {
+                qualifier: Some(qualifier.into()),
+                name: "value".into(),
+                ty: ColumnType::Text,
+            }],
+        };
+        let wide = "x".repeat(5 * 1024 * 1024);
+        let left = Relation {
+            scope: scope("l"),
+            rows: vec![vec![Datum::Text(wide.clone())], vec![Datum::Text(wide)]],
+        };
+        let right = Relation {
+            scope: scope("r"),
+            rows: vec![vec![Datum::Text("a".into())], vec![Datum::Text("b".into())]],
+        };
+
+        let error = join_relations(left, right, JoinKind::Cross, &JoinConstraint::None, &tctx())
+            .expect_err("join output must respect blocking memory budget");
+
+        assert_eq!(error.into_pg().code, "53200");
     }
 
     #[test]

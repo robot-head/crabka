@@ -303,12 +303,7 @@ pub fn collect_cursor_bounded(
                         for row in page.rows {
                             let bytes = scanned_row_bytes(&row);
                             if used.saturating_add(bytes) > max_bytes {
-                                return Err(ExecError::Remote(
-                                    crabka_pgwire::error::PgError::error(
-                                        "53200",
-                                        "blocking query exceeded the memory budget",
-                                    ),
-                                ));
+                                return Err(memory_budget_exceeded());
                             }
                             used += bytes;
                             rows.push(row);
@@ -324,8 +319,8 @@ pub fn collect_cursor_bounded(
     })
 }
 
-fn scanned_row_bytes(row: &ScannedRow) -> usize {
-    let payload = row.row.iter().fold(0usize, |bytes, datum| {
+pub(crate) fn datum_row_bytes(row: &[crabka_pgtypes::Datum]) -> usize {
+    row.iter().fold(0usize, |bytes, datum| {
         let variable = match datum {
             crabka_pgtypes::Datum::Text(value) => value.len(),
             crabka_pgtypes::Datum::Bytea(value) => value.len(),
@@ -335,8 +330,18 @@ fn scanned_row_bytes(row: &ScannedRow) -> usize {
         bytes
             .saturating_add(std::mem::size_of::<crabka_pgtypes::Datum>())
             .saturating_add(variable)
-    });
-    std::mem::size_of::<ScannedRow>().saturating_add(payload)
+    })
+}
+
+fn scanned_row_bytes(row: &ScannedRow) -> usize {
+    std::mem::size_of::<ScannedRow>().saturating_add(datum_row_bytes(&row.row))
+}
+
+pub(crate) fn memory_budget_exceeded() -> ExecError {
+    ExecError::Remote(crabka_pgwire::error::PgError::error(
+        "53200",
+        "blocking query exceeded the memory budget",
+    ))
 }
 
 /// Decorates a scanner with the read point allocated once for a SQL statement.
