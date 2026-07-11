@@ -794,7 +794,7 @@ async fn remote_extended_statement_fails_explicit_transaction_until_rollback() {
         .expect("local participant is touched");
 
     let error = session
-        .extended_query("INSERT INTO t150 VALUES ($1)", &[])
+        .extended_query_v2("INSERT INTO t150 VALUES ($1)", &[])
         .await
         .expect_err("remote extended operation is unsupported");
     assert_eq!(error.code, "0A000");
@@ -816,3 +816,6 @@ async fn remote_extended_statement_fails_explicit_transaction_until_rollback() {
     };
     assert!(rows.is_empty());
 }
+mod support;
+
+use support::ExtendedQueryV2 as _;

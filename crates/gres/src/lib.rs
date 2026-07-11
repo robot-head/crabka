@@ -14,7 +14,10 @@ use crabka_gres_control::{
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
 use crabka_pgwire::{
-    engine::{BoundParam, Engine, FieldDescription, QueryResult, Session, TxStatus},
+    engine::{
+        BoundParam, CloseTarget, Engine, ExecuteOutcome, PortalDescription, PreparedDescription,
+        QueryResult, Session, TxStatus,
+    },
     session::{AuthMode, SessionConfig},
 };
 use crabka_security::{
@@ -755,24 +758,84 @@ impl Session for RuntimeSession {
         }
     }
 
-    async fn extended_query(
+    async fn parse(
         &mut self,
+        name: &str,
         sql: &str,
-        params: &[BoundParam],
-    ) -> Result<Vec<QueryResult>, crabka_pgwire::error::PgError> {
+        parameter_types: &[u32],
+    ) -> Result<PreparedDescription, crabka_pgwire::error::PgError> {
         match self {
-            Self::Single(session) => session.extended_query(sql, params).await,
-            Self::Multi(session) => session.extended_query(sql, params).await,
+            Self::Single(session) => session.parse(name, sql, parameter_types).await,
+            Self::Multi(session) => session.parse(name, sql, parameter_types).await,
         }
     }
 
-    async fn describe(
+    async fn bind(
         &mut self,
-        sql: &str,
-    ) -> Result<Vec<FieldDescription>, crabka_pgwire::error::PgError> {
+        portal: &str,
+        statement: &str,
+        params: &[BoundParam],
+        result_formats: &[i16],
+    ) -> Result<PortalDescription, crabka_pgwire::error::PgError> {
         match self {
-            Self::Single(session) => session.describe(sql).await,
-            Self::Multi(session) => session.describe(sql).await,
+            Self::Single(session) => {
+                session
+                    .bind(portal, statement, params, result_formats)
+                    .await
+            }
+            Self::Multi(session) => {
+                session
+                    .bind(portal, statement, params, result_formats)
+                    .await
+            }
+        }
+    }
+
+    async fn describe_statement(
+        &mut self,
+        name: &str,
+    ) -> Result<PreparedDescription, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.describe_statement(name).await,
+            Self::Multi(session) => session.describe_statement(name).await,
+        }
+    }
+
+    async fn describe_portal(
+        &mut self,
+        name: &str,
+    ) -> Result<PortalDescription, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.describe_portal(name).await,
+            Self::Multi(session) => session.describe_portal(name).await,
+        }
+    }
+
+    async fn execute(
+        &mut self,
+        portal: &str,
+        max_rows: u32,
+    ) -> Result<ExecuteOutcome, crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.execute(portal, max_rows).await,
+            Self::Multi(session) => session.execute(portal, max_rows).await,
+        }
+    }
+
+    async fn close(
+        &mut self,
+        target: CloseTarget<'_>,
+    ) -> Result<(), crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.close(target).await,
+            Self::Multi(session) => session.close(target).await,
+        }
+    }
+
+    async fn sync(&mut self) -> Result<(), crabka_pgwire::error::PgError> {
+        match self {
+            Self::Single(session) => session.sync().await,
+            Self::Multi(session) => session.sync().await,
         }
     }
 

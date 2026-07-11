@@ -15,7 +15,10 @@ use crabka_pgcatalog::ShardingStrategy;
 use crabka_pgexec::{ExecError, PredicateOp, PredicatePushdown, SqlEngine};
 use crabka_pgtypes::Datum;
 use crabka_pgwire::{
-    engine::{BoundParam, Engine, FieldDescription, QueryResult, Session, TxStatus},
+    engine::{
+        BoundParam, CloseTarget, Engine, ExecuteOutcome, PortalDescription, PreparedDescription,
+        QueryResult, Session, TxStatus,
+    },
     error::{PgError, sqlstate},
 };
 use tokio::sync::Mutex;
@@ -1267,6 +1270,8 @@ impl Engine for MultiRangeTenant {
             explicit_transaction: false,
             transaction: GatewayTransaction::Idle,
             status: TxStatus::Idle,
+            prepared: BTreeMap::new(),
+            portals: BTreeMap::new(),
         }
     }
 }
@@ -1561,6 +1566,22 @@ pub struct GatewaySession {
     explicit_transaction: bool,
     transaction: GatewayTransaction,
     status: TxStatus,
+    prepared: BTreeMap<String, GatewayPrepared>,
+    portals: BTreeMap<String, GatewayPortal>,
+}
+
+#[derive(Debug, Clone)]
+struct GatewayPrepared {
+    sql: String,
+    route: StatementRoute,
+    description: PreparedDescription,
+}
+
+#[derive(Debug, Clone)]
+struct GatewayPortal {
+    sql: String,
+    route: StatementRoute,
+    description: PortalDescription,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1626,24 +1647,74 @@ impl Session for GatewaySession {
         Ok(all_results)
     }
 
-    async fn extended_query(
+    async fn parse(
         &mut self,
+        name: &str,
         sql: &str,
-        params: &[BoundParam],
-    ) -> Result<Vec<QueryResult>, PgError> {
-        let result = self.extended_query_inner(sql, params).await;
+        parameter_types: &[u32],
+    ) -> Result<PreparedDescription, PgError> {
+        let result = self.parse_inner(name, sql, parameter_types).await;
         self.finish_statement(result)
     }
 
-    async fn describe(&mut self, sql: &str) -> Result<Vec<FieldDescription>, PgError> {
-        let result = async {
-            self.current_serving()?;
-            self.reject_statement_in_failed_transaction(sql)?;
-            let route = self.route_statement(sql)?;
-            self.session_for(route.range_id)?.describe(sql).await
-        }
-        .await;
+    async fn bind(
+        &mut self,
+        portal: &str,
+        statement: &str,
+        params: &[BoundParam],
+        result_formats: &[i16],
+    ) -> Result<PortalDescription, PgError> {
+        let result = self
+            .bind_inner(portal, statement, params, result_formats)
+            .await;
         self.finish_statement(result)
+    }
+
+    async fn describe_statement(&mut self, name: &str) -> Result<PreparedDescription, PgError> {
+        self.prepared
+            .get(name)
+            .map(|prepared| prepared.description.clone())
+            .ok_or_else(|| missing_statement(name))
+    }
+
+    async fn describe_portal(&mut self, name: &str) -> Result<PortalDescription, PgError> {
+        self.portals
+            .get(name)
+            .map(|portal| portal.description.clone())
+            .ok_or_else(|| missing_portal(name))
+    }
+
+    async fn execute(&mut self, portal: &str, max_rows: u32) -> Result<ExecuteOutcome, PgError> {
+        let result = self.execute_portal_inner(portal, max_rows).await;
+        self.finish_statement(result)
+    }
+
+    async fn close(&mut self, target: CloseTarget<'_>) -> Result<(), PgError> {
+        match target {
+            CloseTarget::Statement(name) => {
+                if let Some(prepared) = self.prepared.remove(name) {
+                    self.session_for(prepared.route.range_id)?
+                        .close(CloseTarget::Statement(name))
+                        .await?;
+                }
+            }
+            CloseTarget::Portal(name) => {
+                if let Some(portal) = self.portals.remove(name) {
+                    self.session_for(portal.route.range_id)?
+                        .close(CloseTarget::Portal(name))
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<(), PgError> {
+        for session in self.sessions.values_mut() {
+            session.sync().await?;
+        }
+        self.portals.clear();
+        Ok(())
     }
 
     fn tx_status(&self) -> TxStatus {
@@ -1652,6 +1723,128 @@ impl Session for GatewaySession {
 }
 
 impl GatewaySession {
+    async fn parse_inner(
+        &mut self,
+        name: &str,
+        sql: &str,
+        parameter_types: &[u32],
+    ) -> Result<PreparedDescription, PgError> {
+        self.current_serving()?;
+        self.reject_statement_in_failed_transaction(sql)?;
+        if !name.is_empty() && self.prepared.contains_key(name) {
+            return Err(PgError::error(
+                sqlstate::DUPLICATE_PREPARED_STATEMENT,
+                format!("prepared statement \"{name}\" already exists"),
+            ));
+        }
+        let route = self.route_statement(sql)?;
+        if route.scatter_ranges.is_some() || !self.sessions.contains_key(&route.range_id) {
+            return Err(PgError::error(
+                sqlstate::FEATURE_NOT_SUPPORTED,
+                "extended statements must target one local range",
+            ));
+        }
+        if name.is_empty()
+            && let Some(old) = self.prepared.get(name)
+        {
+            let old_range = old.route.range_id;
+            self.session_for(old_range)?
+                .close(CloseTarget::Statement(name))
+                .await?;
+        }
+        let description = self
+            .session_for(route.range_id)?
+            .parse(name, sql, parameter_types)
+            .await?;
+        self.prepared.insert(
+            name.to_owned(),
+            GatewayPrepared {
+                sql: sql.to_owned(),
+                route,
+                description: description.clone(),
+            },
+        );
+        Ok(description)
+    }
+
+    async fn bind_inner(
+        &mut self,
+        portal: &str,
+        statement: &str,
+        params: &[BoundParam],
+        result_formats: &[i16],
+    ) -> Result<PortalDescription, PgError> {
+        self.current_serving()?;
+        let prepared = self
+            .prepared
+            .get(statement)
+            .cloned()
+            .ok_or_else(|| missing_statement(statement))?;
+        if !portal.is_empty() && self.portals.contains_key(portal) {
+            return Err(PgError::error(
+                sqlstate::DUPLICATE_CURSOR,
+                format!("cursor \"{portal}\" already exists"),
+            ));
+        }
+        if portal.is_empty()
+            && let Some(old) = self.portals.get(portal)
+        {
+            let old_range = old.route.range_id;
+            self.session_for(old_range)?
+                .close(CloseTarget::Portal(portal))
+                .await?;
+        }
+        let description = self
+            .session_for(prepared.route.range_id)?
+            .bind(portal, statement, params, result_formats)
+            .await?;
+        self.portals.insert(
+            portal.to_owned(),
+            GatewayPortal {
+                sql: prepared.sql,
+                route: prepared.route,
+                description: description.clone(),
+            },
+        );
+        Ok(description)
+    }
+
+    async fn execute_portal_inner(
+        &mut self,
+        portal: &str,
+        max_rows: u32,
+    ) -> Result<ExecuteOutcome, PgError> {
+        self.current_serving()?;
+        let portal_state = self
+            .portals
+            .get(portal)
+            .cloned()
+            .ok_or_else(|| missing_portal(portal))?;
+        match portal_state.route.kind {
+            StatementKind::Begin
+            | StatementKind::Commit
+            | StatementKind::Rollback
+            | StatementKind::Ddl => {
+                let mut results = self.execute_one(&portal_state.sql).await?;
+                let result = results.pop().unwrap_or(QueryResult::Empty);
+                return Ok(query_result_to_outcome(result));
+            }
+            StatementKind::Dml | StatementKind::Query | StatementKind::Local => {}
+        }
+        self.inner.route_log.lock().await.push(RouteRecord {
+            kind: portal_state.route.kind,
+            range_id: portal_state.route.range_id,
+            table_id: portal_state.route.table_id,
+        });
+        let _table_write_gate = self.acquire_routed_dml_gate(&portal_state.route).await?;
+        if portal_state.route.kind == StatementKind::Dml {
+            self.touch_write_range(portal_state.route.range_id).await?;
+        }
+        self.session_for(portal_state.route.range_id)?
+            .execute(portal, max_rows)
+            .await
+    }
+
     fn current_serving(&self) -> Result<Arc<ServingSnapshot>, PgError> {
         let serving = self.inner.serving.load_full();
         if serving.range_map.epoch() != self.serving_epoch {
@@ -1661,39 +1854,6 @@ impl GatewaySession {
             ));
         }
         Ok(serving)
-    }
-
-    async fn extended_query_inner(
-        &mut self,
-        sql: &str,
-        params: &[BoundParam],
-    ) -> Result<Vec<QueryResult>, PgError> {
-        self.current_serving()?;
-        self.reject_statement_in_failed_transaction(sql)?;
-        let route = self.route_statement(sql)?;
-        if route.kind == StatementKind::Rollback {
-            return self.rollback_transaction().await;
-        }
-        if route.kind == StatementKind::Commit {
-            return self.commit_transaction().await;
-        }
-        if route.kind == StatementKind::Ddl {
-            return self.execute_one(sql).await;
-        }
-        self.inner.route_log.lock().await.push(RouteRecord {
-            kind: route.kind,
-            range_id: route.range_id,
-            table_id: route.table_id,
-        });
-        let _table_write_gate = self.acquire_routed_dml_gate(&route).await?;
-        if let Some(ranges) = route.scatter_ranges.clone() {
-            return self
-                .execute_timestamp_scatter(sql, ranges)
-                .await
-                .map(|result| vec![result]);
-        }
-        self.execute_extended_routed_statement(sql, params, route.kind, route.range_id)
-            .await
     }
 
     async fn execute_one(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
@@ -2262,33 +2422,6 @@ impl GatewaySession {
         result
     }
 
-    async fn execute_extended_routed_statement(
-        &mut self,
-        statement: &str,
-        params: &[BoundParam],
-        kind: StatementKind,
-        range_id: RangeId,
-    ) -> Result<Vec<QueryResult>, PgError> {
-        if !self.sessions.contains_key(&range_id) {
-            return Err(self.fail_remote_operation_in_transaction(PgError::error(
-                sqlstate::FEATURE_NOT_SUPPORTED,
-                "extended statements targeting a remote range are unsupported until parameterized range RPC is designed",
-            )));
-        }
-        if kind == StatementKind::Dml {
-            self.touch_write_range(range_id).await?;
-        }
-        let result = self
-            .session_for(range_id)?
-            .extended_query(statement, params)
-            .await;
-        if result.is_err() && matches!(self.transaction, GatewayTransaction::Open { .. }) {
-            self.fail_transaction_preserving_participants();
-            self.status = TxStatus::Failed;
-        }
-        result
-    }
-
     async fn execute_remote_statement(
         &mut self,
         statement: &str,
@@ -2814,6 +2947,38 @@ fn failed_transaction_error() -> PgError {
         sqlstate::IN_FAILED_SQL_TRANSACTION,
         "current transaction is aborted, commands ignored until end of transaction block",
     )
+}
+
+fn missing_statement(name: &str) -> PgError {
+    PgError::error(
+        sqlstate::INVALID_SQL_STATEMENT_NAME,
+        format!("prepared statement \"{name}\" does not exist"),
+    )
+}
+
+fn missing_portal(name: &str) -> PgError {
+    PgError::error(
+        sqlstate::INVALID_CURSOR_NAME,
+        format!("portal \"{name}\" does not exist"),
+    )
+}
+
+fn query_result_to_outcome(result: QueryResult) -> ExecuteOutcome {
+    match result {
+        QueryResult::Rows { rows, tag, .. } => ExecuteOutcome::Rows {
+            rows: rows
+                .into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|cell| cell.map(|cell| cell.text))
+                        .collect()
+                })
+                .collect(),
+            completion: Some(tag),
+        },
+        QueryResult::Command { tag } => ExecuteOutcome::CommandComplete { tag },
+        QueryResult::Empty => ExecuteOutcome::EmptyQuery,
+    }
 }
 
 fn rollback_command_response() -> Vec<QueryResult> {

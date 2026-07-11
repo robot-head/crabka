@@ -112,7 +112,7 @@ async fn extended_cleanup_clears_cross_range_failed_gateway_state() {
 
         create_failed_cross_range_transaction(&mut session).await;
         session
-            .extended_query(cleanup_statement, &[])
+            .extended_query_v2(cleanup_statement, &[])
             .await
             .expect("extended cleanup");
         session.simple_query("BEGIN").await.expect("begin again");
@@ -132,11 +132,11 @@ async fn extended_insert_in_explicit_transaction_commits_with_gateway_commit() {
         .expect("create");
     session.simple_query("BEGIN").await.expect("begin");
     session
-        .extended_query("INSERT INTO t150 VALUES ($1)", &[text_param("7")])
+        .extended_query_v2("INSERT INTO t150 VALUES ($1)", &[text_param("7")])
         .await
         .expect("extended insert");
     session
-        .extended_query("COMMIT", &[])
+        .extended_query_v2("COMMIT", &[])
         .await
         .expect("extended commit");
 
@@ -157,15 +157,15 @@ async fn extended_cross_range_writes_commit_with_gateway_commit() {
         .expect("create");
     session.simple_query("BEGIN").await.expect("begin");
     session
-        .extended_query("INSERT INTO t150 VALUES ($1)", &[text_param("7")])
+        .extended_query_v2("INSERT INTO t150 VALUES ($1)", &[text_param("7")])
         .await
         .expect("extended insert first range");
     session
-        .extended_query("INSERT INTO t250 VALUES ($1)", &[text_param("8")])
+        .extended_query_v2("INSERT INTO t250 VALUES ($1)", &[text_param("8")])
         .await
         .expect("extended insert second range");
     session
-        .extended_query("COMMIT", &[])
+        .extended_query_v2("COMMIT", &[])
         .await
         .expect("extended commit");
 
@@ -193,14 +193,14 @@ async fn extended_valid_commit_forms_commit_open_gateway_transaction() {
             .expect("create");
         session.simple_query("BEGIN").await.expect("begin");
         session
-            .extended_query(
+            .extended_query_v2(
                 "INSERT INTO t150 VALUES ($1)",
                 &[text_param(&row_id.to_string())],
             )
             .await
             .expect("extended insert");
         session
-            .extended_query(commit_statement, &[])
+            .extended_query_v2(commit_statement, &[])
             .await
             .expect("extended commit");
 
@@ -228,18 +228,18 @@ async fn extended_invalid_commit_like_statements_do_not_commit_open_gateway_tran
             .expect("create");
         session.simple_query("BEGIN").await.expect("begin");
         session
-            .extended_query(
+            .extended_query_v2(
                 "INSERT INTO t150 VALUES ($1)",
                 &[text_param(&row_id.to_string())],
             )
             .await
             .expect("extended insert");
         session
-            .extended_query(invalid_commit_statement, &[])
+            .extended_query_v2(invalid_commit_statement, &[])
             .await
             .expect_err("invalid commit-like statement rejected");
         session
-            .extended_query("ROLLBACK", &[])
+            .extended_query_v2("ROLLBACK", &[])
             .await
             .expect("extended rollback");
 
@@ -266,11 +266,11 @@ async fn extended_insert_in_explicit_transaction_rolls_back_with_gateway_cleanup
             .expect("create");
         session.simple_query("BEGIN").await.expect("begin");
         session
-            .extended_query("INSERT INTO t150 VALUES ($1)", &[text_param("11")])
+            .extended_query_v2("INSERT INTO t150 VALUES ($1)", &[text_param("11")])
             .await
             .expect("extended insert");
         session
-            .extended_query(cleanup_statement, &[])
+            .extended_query_v2(cleanup_statement, &[])
             .await
             .expect("extended cleanup");
 
@@ -295,35 +295,35 @@ async fn extended_routed_error_marks_failed_until_cleanup_clears() {
         .expect("create");
     session.simple_query("BEGIN").await.expect("begin");
     session
-        .extended_query("INSERT INTO t150 VALUES ($1)", &[text_param("13")])
+        .extended_query_v2("INSERT INTO t150 VALUES ($1)", &[text_param("13")])
         .await
         .expect("extended insert");
     let error = session
-        .extended_query("INSERT INTO t150 VALUES ($1)", &[text_param("not-an-int")])
+        .extended_query_v2("INSERT INTO t150 VALUES ($1)", &[text_param("not-an-int")])
         .await
         .expect_err("bad extended insert marks failed");
     assert_ne!(error.code, "25P02");
 
     let error = session
-        .extended_query("SELECT id FROM t150", &[])
+        .extended_query_v2("SELECT id FROM t150", &[])
         .await
         .expect_err("failed transaction rejects extended statement");
     assert_eq!(error.code, "25P02");
 
     let error = session
-        .extended_query("COMMIT", &[])
+        .extended_query_v2("COMMIT", &[])
         .await
         .expect_err("failed transaction rejects extended commit");
     assert_eq!(error.code, "25P02");
 
     let error = session
-        .extended_query("SELECT id FROM t150", &[])
+        .extended_query_v2("SELECT id FROM t150", &[])
         .await
         .expect_err("failed transaction remains failed after extended commit");
     assert_eq!(error.code, "25P02");
 
     session
-        .extended_query("ROLLBACK WORK", &[])
+        .extended_query_v2("ROLLBACK WORK", &[])
         .await
         .expect("extended cleanup");
     assert!(
@@ -342,20 +342,20 @@ async fn extended_invalid_commit_like_statements_do_not_clear_failed_gateway_sta
     create_failed_cross_range_transaction(&mut session).await;
     for invalid_commit_statement in ["COMMITMENT", "COMMIT garbage"] {
         let error = session
-            .extended_query(invalid_commit_statement, &[])
+            .extended_query_v2(invalid_commit_statement, &[])
             .await
             .expect_err("invalid commit-like statement rejected while failed");
         assert_eq!(error.code, "25P02");
     }
 
     let error = session
-        .extended_query("SELECT id FROM t150", &[])
+        .extended_query_v2("SELECT id FROM t150", &[])
         .await
         .expect_err("failed transaction remains failed");
     assert_eq!(error.code, "25P02");
 
     session
-        .extended_query("ROLLBACK", &[])
+        .extended_query_v2("ROLLBACK", &[])
         .await
         .expect("extended rollback");
     assert!(
@@ -382,7 +382,7 @@ async fn invalid_rollback_prefix_does_not_clear_failed_gateway_state() {
         assert_eq!(error.code, "25P02");
     }
     let error = session
-        .extended_query("SELECT id FROM t150", &[])
+        .extended_query_v2("SELECT id FROM t150", &[])
         .await
         .expect_err("extended statement remains failed");
     assert_eq!(error.code, "25P02");
@@ -642,7 +642,7 @@ async fn autocommit_dml_errors_do_not_poison_gateway_transaction_state() {
         .await
         .expect("begin after error");
     session
-        .extended_query("INSERT INTO t150 VALUES ($1)", &[text_param("3")])
+        .extended_query_v2("INSERT INTO t150 VALUES ($1)", &[text_param("3")])
         .await
         .expect("extended insert after autocommit error");
     session.simple_query("COMMIT").await.expect("commit");
@@ -981,3 +981,6 @@ async fn select_ids(
         })
         .collect()
 }
+mod support;
+
+use support::ExtendedQueryV2 as _;
