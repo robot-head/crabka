@@ -772,11 +772,11 @@ async fn validate_transactional_produce(
     if !batch.attributes.is_transactional() || batch.producer_id < 0 {
         return Ok(None);
     }
-    let Some(transactional_id) = coordinator.tid_for_pid(crabka_log::ProducerId(batch.producer_id))
+    let transactional_id = coordinator.tid_for_pid(crabka_log::ProducerId(batch.producer_id));
+    let Some(entry_mutex) = transactional_id
+        .as_ref()
+        .and_then(|transactional_id| coordinator.get(transactional_id))
     else {
-        return Ok(Some(codes::INVALID_PRODUCER_ID_MAPPING));
-    };
-    let Some(entry_mutex) = coordinator.get(&transactional_id) else {
         return Ok(None);
     };
     let mut entry = entry_mutex.lock().await;

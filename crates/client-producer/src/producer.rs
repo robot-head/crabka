@@ -14,6 +14,8 @@ use crabka_client_consumer::ConsumerGroupMetadata;
 use crabka_client_core::{Client, security::ClientSecurity};
 use crabka_protocol::owned::{
     add_offsets_to_txn_request::AddOffsetsToTxnRequest,
+    add_partitions_to_txn_request::{AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction},
+    common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic,
     end_txn_request::EndTxnRequest,
     find_coordinator_request::FindCoordinatorRequest,
     init_producer_id_request::InitProducerIdRequest,
@@ -152,6 +154,56 @@ pub struct Producer {
 }
 
 impl Producer {
+    async fn register_transaction_partition(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Result<(), ProducerError> {
+        let Some(transactional_id) = &self.transactional_id else {
+            return Ok(());
+        };
+        let coordinator = self.txn_coord_client.lock().await.clone().ok_or(
+            ProducerError::InvalidTransactionState(
+                "no txn coordinator cached — did init_transactions succeed?",
+            ),
+        )?;
+        let (producer_id, producer_epoch) = *self.txn_pid_epoch.lock().await;
+        let topic = AddPartitionsToTxnTopic {
+            name: topic.to_owned(),
+            partitions: vec![partition],
+            ..Default::default()
+        };
+        let response = coordinator
+            .send(AddPartitionsToTxnRequest {
+                transactions: vec![AddPartitionsToTxnTransaction {
+                    transactional_id: transactional_id.clone(),
+                    producer_id,
+                    producer_epoch,
+                    topics: vec![topic.clone()],
+                    ..Default::default()
+                }],
+                v3_and_below_transactional_id: transactional_id.clone(),
+                v3_and_below_producer_id: producer_id,
+                v3_and_below_producer_epoch: producer_epoch,
+                v3_and_below_topics: vec![topic],
+                ..Default::default()
+            })
+            .await?;
+        let code = response
+            .results_by_transaction
+            .first()
+            .and_then(|transaction| transaction.topic_results.first())
+            .and_then(|topic| topic.results_by_partition.first())
+            .map_or(response.error_code, |partition| {
+                partition.partition_error_code
+            });
+        match code {
+            0 => Ok(()),
+            47 => Err(ProducerError::FencedProducer),
+            other => Err(ProducerError::Server(other)),
+        }
+    }
+
     #[must_use]
     pub fn producer_id(&self) -> i64 {
         self.identity.id
@@ -691,6 +743,15 @@ impl Producer {
                 return rx;
             }
         };
+        if transaction_generation.is_some()
+            && let Err(error) = self
+                .register_transaction_partition(&record.topic, partition)
+                .await
+        {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Err(error));
+            return rx;
+        }
         let mut a = acc.lock().await;
         // try_append currently only ever returns `Appended`; if a future
         // change adds `BatchFull` we want a compile error, so match

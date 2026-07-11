@@ -88,7 +88,7 @@ mod tests {
             3,
         );
 
-        assert!(selected == vec![NodeId(1), NodeId(2), NodeId(3)]);
+        assert_eq!(selected, vec![NodeId(1), NodeId(2), NodeId(3)]);
     }
 
     #[test]
@@ -99,7 +99,7 @@ mod tests {
             3,
         );
 
-        assert!(selected == vec![NodeId(1), NodeId(2), NodeId(3)]);
+        assert_eq!(selected, vec![NodeId(1), NodeId(2), NodeId(3)]);
     }
 
     fn broker(id: u64, rack: Option<&str>) -> BrokerRegistrationRecord {
