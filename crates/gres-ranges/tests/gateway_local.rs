@@ -764,7 +764,15 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
 }
 
 #[tokio::test]
-async fn remote_extended_statement_fails_explicit_transaction_until_rollback() {
+async fn remote_extended_statement_participates_in_cross_range_commit() {
+    use crabka_pgwire::engine::BoundParam;
+
+    let mut remote = crabka_pgexec::SqlEngine::new();
+    let mut remote_setup = remote.connect();
+    remote_setup
+        .simple_query("CREATE TABLE t150 (id int4)")
+        .await
+        .expect("create owner table");
     let fixture = MtlsFixture::new();
     let record = TenantRecord::new(
         1,
@@ -787,11 +795,12 @@ async fn remote_extended_statement_fails_explicit_transaction_until_rollback() {
         RangeLayoutEntry {
             range_id: 1,
             end_key: None,
-            endpoint: "remote".to_string(),
+            endpoint: "127.0.0.1:1".to_string(),
             wal_generation: 1,
         },
     ])
     .expect("layout");
+    let registry = RangeRegistry::from_tenant_record(&record).expect("registry");
     let config = MultiRangeTenantConfig::from_boundaries(
         TenantName::parse("tenant_gateway_explicit").expect("tenant"),
         "0,100",
@@ -799,9 +808,35 @@ async fn remote_extended_statement_fails_explicit_transaction_until_rollback() {
     .expect("config")
     .with_hosted_ranges(vec![RangeId::COORDINATOR])
     .expect("host r0")
-    .with_range_registry(RangeRegistry::from_tenant_record(&record).expect("registry"))
+    .with_range_registry(registry.clone())
     .with_range_client(FramedTcpClient::with_tls(fixture.client).expect("mTLS range client"));
     let gateway = MultiRangeTenant::start(config).expect("gateway").0;
+    gateway
+        .hosted_range_engines()
+        .get(&RangeId::COORDINATOR)
+        .expect("gateway range 0")
+        .share_gtm_to(&mut remote);
+    remote.set_catalog_kv(
+        gateway
+            .hosted_range_engines()
+            .get(&RangeId::COORDINATOR)
+            .expect("gateway range 0")
+            .kv_handle(),
+    );
+    let remote_address = spawn_tls(
+        Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::new(1),
+            remote.clone_handle(),
+        )]))),
+        fixture.server,
+    )
+    .await;
+    let mut live_record = record.clone();
+    live_record.ranges[1].endpoint = remote_address.to_string();
+    registry
+        .refresh_from_tenant_record(&live_record)
+        .await
+        .expect("publish live remote endpoint");
     let mut session = gateway.connect();
     session
         .simple_query("CREATE TABLE t50 (id int4)")
@@ -817,28 +852,40 @@ async fn remote_extended_statement_fails_explicit_transaction_until_rollback() {
         .await
         .expect("local participant is touched");
 
-    let error = session
-        .extended_query_v2("INSERT INTO t150 VALUES ($1)", &[])
+    session
+        .extended_query_v2(
+            "INSERT INTO t150 VALUES ($1)",
+            &[BoundParam {
+                type_oid: Some(23),
+                format: 0,
+                value: Some(Vec::from(b"2".as_slice()).into()),
+            }],
+        )
         .await
-        .expect_err("remote extended operation is unsupported");
-    assert_eq!(error.code, "0A000");
-    assert_eq!(session.tx_status(), crabka_pgwire::engine::TxStatus::Failed);
-    let error = session
-        .simple_query("SELECT 1")
+        .expect("remote extended participant executes");
+    session
+        .simple_query("COMMIT")
         .await
-        .expect_err("failed transaction rejects statements");
-    assert_eq!(error.code, "25P02");
-
-    session.simple_query("ROLLBACK").await.expect("rollback");
+        .expect("cross-range commit");
     assert_eq!(session.tx_status(), crabka_pgwire::engine::TxStatus::Idle);
     let rows = session
         .simple_query("SELECT * FROM t50")
         .await
-        .expect("participant rollback clears local write");
+        .expect("local participant committed");
     let [QueryResult::Rows { rows, .. }] = &rows[..] else {
         panic!("expected rows");
     };
-    assert!(rows.is_empty());
+    assert_eq!(rows.len(), 1);
+    let remote_rows = remote
+        .connect()
+        .simple_query("SELECT id FROM t150")
+        .await
+        .expect("remote participant committed");
+    let [QueryResult::Rows { rows, .. }] = &remote_rows[..] else {
+        panic!("expected remote rows");
+    };
+    assert_eq!(rows.len(), 1, "remote participant row must become visible");
+    assert_eq!(rows[0][0].as_ref().expect("id").text, "2");
 }
 mod support;
 

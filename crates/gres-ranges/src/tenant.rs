@@ -32,7 +32,10 @@ use crate::{
     SplitStateStore, TableId, TableTransferRequest, TenantName,
     barrier::{Range0Barrier, Range0EndSampler},
     coordinator::{LocalCoordinator, LocalCoordinatorError, TransactionDecision},
-    forward::{ForwardError, RegistryRangeScanner, RegistryRemoteForward, RemoteForward},
+    forward::{
+        ForwardError, RegistryRangeScanner, RegistryRemoteForward, RemoteForward,
+        RemoteRangeSession,
+    },
     registry::RangeRegistry,
     run_split,
     transport::FramedTcpClient,
@@ -1294,6 +1297,7 @@ impl Engine for MultiRangeTenant {
         GatewaySession {
             inner: Arc::clone(&self.inner),
             sessions,
+            remote_sessions: BTreeMap::new(),
             serving_epoch: serving.range_map.epoch(),
             explicit_transaction: false,
             transaction: GatewayTransaction::Idle,
@@ -1593,6 +1597,7 @@ pub enum StatementKind {
 pub struct GatewaySession {
     inner: Arc<TenantInner>,
     sessions: BTreeMap<RangeId, crabka_pgexec::SqlSession>,
+    remote_sessions: BTreeMap<RangeId, RemoteRangeSession>,
     serving_epoch: MapEpoch,
     explicit_transaction: bool,
     transaction: GatewayTransaction,
@@ -1789,15 +1794,13 @@ impl Session for GatewaySession {
         match target {
             CloseTarget::Statement(name) => {
                 if let Some(prepared) = self.prepared.remove(name) {
-                    self.session_for(prepared.route.range_id)?
-                        .close(CloseTarget::Statement(name))
+                    self.close_on_range(prepared.route.range_id, CloseTarget::Statement(name))
                         .await?;
                 }
             }
             CloseTarget::Portal(name) => {
                 if let Some(portal) = self.portals.remove(name) {
-                    self.session_for(portal.route.range_id)?
-                        .close(CloseTarget::Portal(name))
+                    self.close_on_range(portal.route.range_id, CloseTarget::Portal(name))
                         .await?;
                 }
             }
@@ -1808,6 +1811,9 @@ impl Session for GatewaySession {
     async fn sync(&mut self) -> Result<(), PgError> {
         for session in self.sessions.values_mut() {
             session.sync().await?;
+        }
+        for session in self.remote_sessions.values_mut() {
+            self.status = session.sync().await?;
         }
         self.portals.clear();
         Ok(())
@@ -1884,6 +1890,114 @@ async fn send_gateway_result<S: crabka_pgwire::engine::ResultSink>(
 }
 
 impl GatewaySession {
+    async fn ensure_remote_session(&mut self, range_id: RangeId) -> Result<(), PgError> {
+        if self.remote_sessions.contains_key(&range_id) {
+            return Ok(());
+        }
+        let forward = self.inner.remote_forward.clone().ok_or_else(|| {
+            PgError::error(
+                sqlstate::FEATURE_NOT_SUPPORTED,
+                format!(
+                    "range r{range_id} is not hosted by tenant {}",
+                    self.inner.tenant
+                ),
+            )
+        })?;
+        let session = forward
+            .open_session(range_id)
+            .await
+            .map_err(ForwardError::into_pg)?;
+        self.remote_sessions.insert(range_id, session);
+        Ok(())
+    }
+
+    async fn close_on_range(
+        &mut self,
+        range_id: RangeId,
+        target: CloseTarget<'_>,
+    ) -> Result<(), PgError> {
+        if let Some(session) = self.sessions.get_mut(&range_id) {
+            session.close(target).await
+        } else {
+            self.ensure_remote_session(range_id).await?;
+            self.remote_sessions
+                .get_mut(&range_id)
+                .expect("remote session inserted")
+                .close(target)
+                .await
+        }
+    }
+
+    async fn simple_on_range(
+        &mut self,
+        range_id: RangeId,
+        sql: &str,
+    ) -> Result<Vec<QueryResult>, PgError> {
+        if let Some(session) = self.sessions.get_mut(&range_id) {
+            session.simple_query(sql).await
+        } else {
+            self.ensure_remote_session(range_id).await?;
+            self.remote_sessions
+                .get_mut(&range_id)
+                .expect("remote session inserted")
+                .simple_query(sql.to_owned())
+                .await
+        }
+    }
+
+    async fn prepare_on_range(
+        &mut self,
+        range_id: RangeId,
+        global_xid: u64,
+    ) -> Result<u64, PgError> {
+        if let Some(session) = self.sessions.get_mut(&range_id) {
+            session
+                .prepare_global_participant(global_xid)
+                .await
+                .map_err(ExecError::into_pg)
+        } else {
+            self.ensure_remote_session(range_id).await?;
+            self.remote_sessions
+                .get_mut(&range_id)
+                .expect("remote session inserted")
+                .prepare_global(global_xid)
+                .await
+        }
+    }
+
+    async fn release_on_range(
+        &mut self,
+        range_id: RangeId,
+        global_xid: u64,
+        commit: bool,
+    ) -> Result<(), PgError> {
+        if let Some(session) = self.sessions.get_mut(&range_id) {
+            if commit {
+                session.release_global_participant_commit(global_xid).await
+            } else {
+                session.release_global_participant_abort(global_xid).await
+            }
+            .map_err(ExecError::into_pg)
+        } else {
+            self.ensure_remote_session(range_id).await?;
+            let session = self
+                .remote_sessions
+                .get_mut(&range_id)
+                .expect("remote session inserted");
+            session
+                .record_global_decision(
+                    global_xid,
+                    if commit {
+                        crabka_pgmvcc::clog::XidStatus::Committed
+                    } else {
+                        crabka_pgmvcc::clog::XidStatus::Aborted
+                    },
+                )
+                .await?;
+            session.release_global(global_xid, commit).await
+        }
+    }
+
     async fn parse_inner(
         &mut self,
         name: &str,
@@ -1902,15 +2016,14 @@ impl GatewaySession {
             && let Some(old) = self.prepared.remove(name)
         {
             let old_range = old.route.range_id;
-            self.session_for(old_range)?
-                .close(CloseTarget::Statement(name))
+            self.close_on_range(old_range, CloseTarget::Statement(name))
                 .await?;
         }
         let route = self.route_statement(sql)?;
-        if route.scatter_ranges.is_some() || !self.sessions.contains_key(&route.range_id) {
+        if route.scatter_ranges.is_some() {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
-                "extended statements must target one local range",
+                "extended statements must target one range",
             ));
         }
         if matches!(
@@ -1934,10 +2047,16 @@ impl GatewaySession {
             );
             return Ok(description);
         }
-        let description = self
-            .session_for(route.range_id)?
-            .parse(name, sql, parameter_types)
-            .await?;
+        let description = if let Some(session) = self.sessions.get_mut(&route.range_id) {
+            session.parse(name, sql, parameter_types).await?
+        } else {
+            self.ensure_remote_session(route.range_id).await?;
+            self.remote_sessions
+                .get_mut(&route.range_id)
+                .expect("remote session inserted")
+                .parse(name.to_owned(), sql.to_owned(), parameter_types.to_vec())
+                .await?
+        };
         self.prepared.insert(
             name.to_owned(),
             GatewayPrepared {
@@ -1961,8 +2080,7 @@ impl GatewaySession {
             && let Some(old) = self.portals.remove(portal)
         {
             let old_range = old.route.range_id;
-            self.session_for(old_range)?
-                .close(CloseTarget::Portal(portal))
+            self.close_on_range(old_range, CloseTarget::Portal(portal))
                 .await?;
         }
         let prepared = self
@@ -1998,10 +2116,23 @@ impl GatewaySession {
             );
             return Ok(description);
         }
-        let description = self
-            .session_for(prepared.route.range_id)?
-            .bind(portal, statement, params, result_formats)
-            .await?;
+        let description = if let Some(session) = self.sessions.get_mut(&prepared.route.range_id) {
+            session
+                .bind(portal, statement, params, result_formats)
+                .await?
+        } else {
+            self.ensure_remote_session(prepared.route.range_id).await?;
+            self.remote_sessions
+                .get_mut(&prepared.route.range_id)
+                .expect("remote session inserted")
+                .bind(
+                    portal.to_owned(),
+                    statement.to_owned(),
+                    params,
+                    result_formats.to_vec(),
+                )
+                .await?
+        };
         self.portals.insert(
             portal.to_owned(),
             GatewayPortal {
@@ -2053,9 +2184,17 @@ impl GatewaySession {
         if portal_state.route.kind == StatementKind::Dml {
             self.touch_write_range(portal_state.route.range_id).await?;
         }
-        self.session_for(portal_state.route.range_id)?
-            .execute(portal, max_rows)
-            .await
+        if let Some(session) = self.sessions.get_mut(&portal_state.route.range_id) {
+            session.execute(portal, max_rows).await
+        } else {
+            self.ensure_remote_session(portal_state.route.range_id)
+                .await?;
+            self.remote_sessions
+                .get_mut(&portal_state.route.range_id)
+                .expect("remote session inserted")
+                .execute(portal.to_owned(), max_rows)
+                .await
+        }
     }
 
     fn current_serving(&self) -> Result<Arc<ServingSnapshot>, PgError> {
@@ -2164,7 +2303,7 @@ impl GatewaySession {
                     "single-range transaction reached commit with multiple participants",
                 ));
             };
-            if let Err(error) = self.session_for(*range_id)?.simple_query("COMMIT").await {
+            if let Err(error) = self.simple_on_range(*range_id, "COMMIT").await {
                 self.transaction = GatewayTransaction::Failed {
                     touched,
                     escalated,
@@ -2217,7 +2356,7 @@ impl GatewaySession {
             .abort(touched.clone(), escalated)
             .await;
         for (index, range_id) in touched.iter().copied().enumerate() {
-            if let Err(error) = self.session_for(range_id)?.simple_query("ROLLBACK").await {
+            if let Err(error) = self.simple_on_range(range_id, "ROLLBACK").await {
                 self.transaction = GatewayTransaction::Failed {
                     touched: touched[index..].to_vec(),
                     escalated,
@@ -2240,11 +2379,7 @@ impl GatewaySession {
         let mut prepared = Vec::with_capacity(touched.len());
 
         for range_id in touched.iter().copied() {
-            match self
-                .session_for(range_id)?
-                .prepare_global_participant(global_xid)
-                .await
-            {
+            match self.prepare_on_range(range_id, global_xid).await {
                 Ok(effective_global_xid) => {
                     self.inner
                         .coordinator
@@ -2284,7 +2419,7 @@ impl GatewaySession {
                                 decision: None,
                             }),
                         })?;
-                    return Err(error.into_pg().into());
+                    return Err(error.into());
                 }
             }
         }
@@ -2425,9 +2560,7 @@ impl GatewaySession {
             {
                 continue;
             }
-            self.session_for(range_id)
-                .map_err(GlobalCommitError::from)?
-                .simple_query("ROLLBACK")
+            self.simple_on_range(range_id, "ROLLBACK")
                 .await
                 .map_err(GlobalCommitError::from)?;
         }
@@ -2441,23 +2574,16 @@ impl GatewaySession {
         decision: TransactionDecision,
     ) -> Result<(), GlobalCommitError> {
         for (index, participant) in prepared.iter().copied().enumerate() {
-            let result = match decision {
-                TransactionDecision::Commit => {
-                    self.session_for(participant.range_id)
-                        .map_err(GlobalCommitError::from)?
-                        .release_global_participant_commit(participant.global_xid)
-                        .await
-                }
-                TransactionDecision::Abort => {
-                    self.session_for(participant.range_id)
-                        .map_err(GlobalCommitError::from)?
-                        .release_global_participant_abort(participant.global_xid)
-                        .await
-                }
-            };
+            let result = self
+                .release_on_range(
+                    participant.range_id,
+                    participant.global_xid,
+                    decision == TransactionDecision::Commit,
+                )
+                .await;
             if let Err(error) = result {
                 return Err(GlobalCommitError {
-                    error: error.into_pg(),
+                    error,
                     recovery: Some(GlobalCommitRecovery {
                         global_xid,
                         prepared: prepared[index..].to_vec(),
@@ -2497,7 +2623,7 @@ impl GatewaySession {
             {
                 continue;
             }
-            self.session_for(range_id)?.simple_query("ROLLBACK").await?;
+            self.simple_on_range(range_id, "ROLLBACK").await?;
         }
         Ok(())
     }
@@ -2571,20 +2697,12 @@ impl GatewaySession {
         decision: TransactionDecision,
     ) -> Result<(), PgError> {
         for participant in prepared.iter().copied() {
-            match decision {
-                TransactionDecision::Commit => {
-                    self.session_for(participant.range_id)?
-                        .release_global_participant_commit(participant.global_xid)
-                        .await
-                        .map_err(ExecError::into_pg)?;
-                }
-                TransactionDecision::Abort => {
-                    self.session_for(participant.range_id)?
-                        .release_global_participant_abort(participant.global_xid)
-                        .await
-                        .map_err(ExecError::into_pg)?;
-                }
-            }
+            self.release_on_range(
+                participant.range_id,
+                participant.global_xid,
+                decision == TransactionDecision::Commit,
+            )
+            .await?;
         }
         Ok(())
     }
@@ -2641,12 +2759,6 @@ impl GatewaySession {
         kind: StatementKind,
         range_id: RangeId,
     ) -> Result<Vec<QueryResult>, PgError> {
-        if !matches!(self.transaction, GatewayTransaction::Idle) {
-            return Err(self.fail_remote_operation_in_transaction(PgError::error(
-                sqlstate::FEATURE_NOT_SUPPORTED,
-                "remote range transactions are unsupported until a stateful participant RPC is designed",
-            )));
-        }
         if kind != StatementKind::Dml && kind != StatementKind::Query {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
@@ -2656,26 +2768,15 @@ impl GatewaySession {
                 ),
             ));
         }
-        let forward = self.inner.remote_forward.as_ref().ok_or_else(|| {
-            PgError::error(
-                sqlstate::FEATURE_NOT_SUPPORTED,
-                format!(
-                    "range r{range_id} is not hosted by tenant {}",
-                    self.inner.tenant
-                ),
-            )
-        })?;
-        if kind == StatementKind::Query {
-            return forward
-                .forward_query(range_id, statement.to_string())
-                .await
-                .map_err(ForwardError::into_pg);
+        if kind == StatementKind::Dml {
+            self.touch_write_range(range_id).await?;
         }
-        let tag = forward
-            .forward_sql(range_id, statement.to_string())
+        self.ensure_remote_session(range_id).await?;
+        self.remote_sessions
+            .get_mut(&range_id)
+            .expect("remote session inserted")
+            .simple_query(statement.to_owned())
             .await
-            .map_err(ForwardError::into_pg)?;
-        Ok(vec![QueryResult::Command { tag }])
     }
 
     #[allow(
@@ -2987,14 +3088,6 @@ impl GatewaySession {
         result
     }
 
-    fn fail_remote_operation_in_transaction(&mut self, error: PgError) -> PgError {
-        if matches!(self.transaction, GatewayTransaction::Open { .. }) {
-            self.fail_transaction_preserving_participants();
-            self.status = TxStatus::Failed;
-        }
-        error
-    }
-
     async fn touch_write_range(&mut self, range_id: RangeId) -> Result<(), PgError> {
         let GatewayTransaction::Open { touched, .. } = &self.transaction else {
             return Ok(());
@@ -3003,7 +3096,16 @@ impl GatewaySession {
             return Ok(());
         }
         let escalates_transaction = !touched.is_empty();
-        self.session_for(range_id)?.simple_query("BEGIN").await?;
+        if let Some(session) = self.sessions.get_mut(&range_id) {
+            session.simple_query("BEGIN").await?;
+        } else {
+            self.ensure_remote_session(range_id).await?;
+            self.remote_sessions
+                .get_mut(&range_id)
+                .expect("remote session inserted")
+                .simple_query("BEGIN".into())
+                .await?;
+        }
 
         let GatewayTransaction::Open { touched, escalated } = &mut self.transaction else {
             return Ok(());

@@ -336,6 +336,9 @@ impl TxnRpc {
             | RangeResponse::SqlResultsChunk { .. }
             | RangeResponse::SqlResultsDone
             | RangeResponse::SqlError { .. }
+            | RangeResponse::SessionOpened { .. }
+            | RangeResponse::SessionResult { .. }
+            | RangeResponse::GlobalStatus { .. }
             | RangeResponse::ScanRange(_)
             | RangeResponse::ScanCursor(_)
             | RangeResponse::ScanRangeError { .. }

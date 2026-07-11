@@ -1,11 +1,20 @@
 //! Registry-backed remote SQL forwarding with bounded stale-endpoint retry.
 
-use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    num::NonZeroU64,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use crabka_pgwire::{
     engine::{
-        Cell, Engine as _, FieldDescription, QueryResult, ResultPage, ResultSink, Session as _,
+        BoundParam, Cell, CloseTarget, Engine as _, ExecuteOutcome, FieldDescription, QueryResult,
+        ResultPage, ResultSink, Session as _, TxStatus,
     },
     error::PgError,
 };
@@ -16,9 +25,10 @@ use crate::{
     transport::{
         FramedTcpClient, RangeRequest, RangeResponse, RangeService, ResolveTxnResp, ScanCursorReq,
         ScanCursorResp, ScanRangeReq, ScanRangeResp, ScanRangeRow, TransportError,
-        WireColumnPredicate, WireDatum, WireErrorKind, WirePartialAggregateFunction,
-        WirePartialAggregateSpec, WirePredicateOp, WirePredicatePushdown, WireProjectionPushdown,
-        WireQueryResult, WireRowInterval, WireSnapshot, WireSqlResultChunk, WireTopKColumn,
+        WireColumnPredicate, WireDatum, WireErrorKind, WireExecuteOutcome, WireGlobalStatus,
+        WirePartialAggregateFunction, WirePartialAggregateSpec, WirePredicateOp,
+        WirePredicatePushdown, WireProjectionPushdown, WireQueryResult, WireRowInterval,
+        WireSessionOperation, WireSessionResult, WireSnapshot, WireSqlResultChunk, WireTopKColumn,
         WireTopKSpec, write_frame,
     },
     tso::{GrantLease, TsoError, TsoRpc},
@@ -32,13 +42,29 @@ use crate::{
 pub struct HostedRangeService {
     engines: BTreeMap<RangeId, crabka_pgexec::SqlEngine>,
     tso: Option<Arc<dyn TsoRpc>>,
+    next_session_id: AtomicU64,
+    sessions: tokio::sync::Mutex<BTreeMap<u64, HostedSession>>,
 }
+
+struct HostedSession {
+    range_id: RangeId,
+    session: crabka_pgexec::SqlSession,
+    last_used: Instant,
+}
+
+const REMOTE_SESSION_IDLE: Duration = Duration::from_secs(60);
+const MAX_REMOTE_SESSIONS: usize = 1024;
 
 impl HostedRangeService {
     /// Build a hosted range service. Only range 0 may be given a TSO RPC.
     #[must_use]
     pub fn new(engines: BTreeMap<RangeId, crabka_pgexec::SqlEngine>) -> Self {
-        Self { engines, tso: None }
+        Self {
+            engines,
+            tso: None,
+            next_session_id: AtomicU64::new(1),
+            sessions: tokio::sync::Mutex::new(BTreeMap::new()),
+        }
     }
 
     /// Attach range 0's durable timestamp oracle RPC.
@@ -62,6 +88,113 @@ impl HostedRangeService {
 impl RangeService for HostedRangeService {
     async fn handle(&self, request: RangeRequest) -> RangeResponse {
         match request {
+            RangeRequest::SessionOpen { range_id } => {
+                let engine = match self.hosted_engine(range_id) {
+                    Ok(engine) => engine,
+                    Err(response) => return response,
+                };
+                let mut sessions = self.sessions.lock().await;
+                let now = Instant::now();
+                sessions
+                    .retain(|_, lease| now.duration_since(lease.last_used) < REMOTE_SESSION_IDLE);
+                if sessions.len() >= MAX_REMOTE_SESSIONS {
+                    return RangeResponse::SqlError {
+                        code: "53300".into(),
+                        message: "too many remote range sessions".into(),
+                    };
+                }
+                let session_id = self.next_session_id.fetch_add(1, Ordering::Relaxed);
+                sessions.insert(
+                    session_id,
+                    HostedSession {
+                        range_id,
+                        session: engine.connect(),
+                        last_used: now,
+                    },
+                );
+                RangeResponse::SessionOpened { session_id }
+            }
+            RangeRequest::Session {
+                range_id,
+                session_id,
+                operation,
+            } => {
+                let mut lease = {
+                    let mut sessions = self.sessions.lock().await;
+                    sessions.remove(&session_id)
+                };
+                let Some(mut lease) = lease.take() else {
+                    return RangeResponse::SqlError {
+                        code: "08003".into(),
+                        message: "remote range session does not exist".into(),
+                    };
+                };
+                if lease.range_id != range_id {
+                    return RangeResponse::SqlError {
+                        code: "08003".into(),
+                        message: "remote range session belongs to another range".into(),
+                    };
+                }
+                let result = handle_session_operation(&mut lease.session, operation).await;
+                lease.last_used = Instant::now();
+                self.sessions.lock().await.insert(session_id, lease);
+                match result {
+                    Ok(result) => RangeResponse::SessionResult { result },
+                    Err(error) => RangeResponse::SqlError {
+                        code: error.code,
+                        message: error.message,
+                    },
+                }
+            }
+            RangeRequest::SessionClose {
+                range_id,
+                session_id,
+            } => {
+                let removed = self.sessions.lock().await.remove(&session_id);
+                if removed
+                    .as_ref()
+                    .is_some_and(|lease| lease.range_id != range_id)
+                {
+                    return RangeResponse::SqlError {
+                        code: "08003".into(),
+                        message: "remote range session belongs to another range".into(),
+                    };
+                }
+                RangeResponse::SessionResult {
+                    result: WireSessionResult::Closed,
+                }
+            }
+            RangeRequest::GlobalDecision {
+                range_id,
+                global_xid,
+                status,
+            } => {
+                let engine = match self.hosted_engine(range_id) {
+                    Ok(engine) => engine,
+                    Err(response) => return response,
+                };
+                let status = match decode_global_status(status) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        return RangeResponse::SqlError {
+                            code: error.code,
+                            message: error.message,
+                        };
+                    }
+                };
+                match engine.commit_global_decision(global_xid, status).await {
+                    Ok(status) => RangeResponse::GlobalStatus {
+                        status: encode_global_status(status),
+                    },
+                    Err(error) => {
+                        let error = error.into_pg();
+                        RangeResponse::SqlError {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    }
+                }
+            }
             RangeRequest::Sql { range_id, sql } => {
                 let engine = match self.hosted_engine(range_id) {
                     Ok(engine) => engine,
@@ -203,10 +336,157 @@ impl RangeService for HostedRangeService {
     }
 }
 
+fn encode_global_status(status: crabka_pgmvcc::clog::XidStatus) -> WireGlobalStatus {
+    match status {
+        crabka_pgmvcc::clog::XidStatus::InProgress => WireGlobalStatus::InProgress,
+        crabka_pgmvcc::clog::XidStatus::Prepared(global_xid) => {
+            WireGlobalStatus::Prepared { global_xid }
+        }
+        crabka_pgmvcc::clog::XidStatus::Committed => WireGlobalStatus::Committed,
+        crabka_pgmvcc::clog::XidStatus::Aborted => WireGlobalStatus::Aborted,
+    }
+}
+
+fn decode_global_status(
+    status: WireGlobalStatus,
+) -> Result<crabka_pgmvcc::clog::XidStatus, PgError> {
+    Ok(match status {
+        WireGlobalStatus::InProgress => crabka_pgmvcc::clog::XidStatus::InProgress,
+        WireGlobalStatus::Prepared { global_xid } => {
+            crabka_pgmvcc::clog::XidStatus::Prepared(global_xid)
+        }
+        WireGlobalStatus::Committed => crabka_pgmvcc::clog::XidStatus::Committed,
+        WireGlobalStatus::Aborted => crabka_pgmvcc::clog::XidStatus::Aborted,
+    })
+}
+
 struct RangeFrameSink<'a> {
     writer: &'a mut (dyn tokio::io::AsyncWrite + Unpin + Send),
     transport_error: Option<TransportError>,
     terminal_error_sent: bool,
+}
+
+async fn handle_session_operation(
+    session: &mut crabka_pgexec::SqlSession,
+    operation: WireSessionOperation,
+) -> Result<WireSessionResult, PgError> {
+    match operation {
+        WireSessionOperation::SimpleQuery { sql } => {
+            session
+                .simple_query(&sql)
+                .await
+                .map(|results| WireSessionResult::Query {
+                    results: results.into_iter().map(Into::into).collect(),
+                })
+        }
+        WireSessionOperation::Parse {
+            name,
+            sql,
+            parameter_types,
+        } => session
+            .parse(&name, &sql, &parameter_types)
+            .await
+            .map(|description| WireSessionResult::Prepared {
+                parameter_types: description.parameter_types,
+                fields: description.fields.into_iter().map(Into::into).collect(),
+            }),
+        WireSessionOperation::Bind {
+            portal,
+            statement,
+            params,
+            result_formats,
+        } => {
+            let params = params
+                .into_iter()
+                .map(|param| BoundParam {
+                    type_oid: param.type_oid,
+                    format: param.format,
+                    value: param.value.map(Into::into),
+                })
+                .collect::<Vec<_>>();
+            session
+                .bind(&portal, &statement, &params, &result_formats)
+                .await
+                .map(|description| WireSessionResult::Portal {
+                    fields: description.fields.into_iter().map(Into::into).collect(),
+                })
+        }
+        WireSessionOperation::DescribeStatement { name } => session
+            .describe_statement(&name)
+            .await
+            .map(|description| WireSessionResult::Prepared {
+                parameter_types: description.parameter_types,
+                fields: description.fields.into_iter().map(Into::into).collect(),
+            }),
+        WireSessionOperation::DescribePortal { name } => {
+            session
+                .describe_portal(&name)
+                .await
+                .map(|description| WireSessionResult::Portal {
+                    fields: description.fields.into_iter().map(Into::into).collect(),
+                })
+        }
+        WireSessionOperation::Execute { portal, max_rows } => session
+            .execute(&portal, max_rows)
+            .await
+            .and_then(|outcome| match outcome {
+                ExecuteOutcome::Rows { rows, completion } => {
+                    Ok(WireSessionResult::Execute(WireExecuteOutcome::Rows {
+                        rows: rows
+                            .into_iter()
+                            .map(|row| {
+                                row.into_iter()
+                                    .map(|cell| cell.map(|value| value.to_vec()))
+                                    .collect()
+                            })
+                            .collect(),
+                        completion,
+                    }))
+                }
+                ExecuteOutcome::CommandComplete { tag } => {
+                    Ok(WireSessionResult::Execute(WireExecuteOutcome::Command {
+                        tag,
+                    }))
+                }
+                ExecuteOutcome::EmptyQuery => {
+                    Ok(WireSessionResult::Execute(WireExecuteOutcome::Empty))
+                }
+                _ => Err(PgError::error(
+                    "0A000",
+                    "remote range session does not support this execute outcome",
+                )),
+            }),
+        WireSessionOperation::PrepareGlobal { global_xid } => session
+            .prepare_global_participant(global_xid)
+            .await
+            .map(|global_xid| WireSessionResult::GlobalPrepared { global_xid })
+            .map_err(crabka_pgexec::ExecError::into_pg),
+        WireSessionOperation::CommitGlobal { global_xid } => session
+            .release_global_participant_commit(global_xid)
+            .await
+            .map(|()| WireSessionResult::Closed)
+            .map_err(crabka_pgexec::ExecError::into_pg),
+        WireSessionOperation::AbortGlobal { global_xid } => session
+            .release_global_participant_abort(global_xid)
+            .await
+            .map(|()| WireSessionResult::Closed)
+            .map_err(crabka_pgexec::ExecError::into_pg),
+        WireSessionOperation::CloseStatement { name } => session
+            .close(CloseTarget::Statement(&name))
+            .await
+            .map(|()| WireSessionResult::Closed),
+        WireSessionOperation::ClosePortal { name } => session
+            .close(CloseTarget::Portal(&name))
+            .await
+            .map(|()| WireSessionResult::Closed),
+        WireSessionOperation::Sync => session.sync().await.map(|()| WireSessionResult::Synced {
+            tx_status: match session.tx_status() {
+                TxStatus::Idle => b'I',
+                TxStatus::InTransaction => b'T',
+                TxStatus::Failed => b'E',
+            },
+        }),
+    }
 }
 
 #[async_trait]
@@ -314,6 +594,9 @@ pub trait RemoteForward: Send + Sync {
         sql: String,
         sink: &mut dyn crabka_pgwire::engine::ResultSink,
     ) -> Result<(), ForwardError>;
+
+    /// Open a stateful owner-side session for extended protocol and transactions.
+    async fn open_session(&self, range_id: RangeId) -> Result<RemoteRangeSession, ForwardError>;
 }
 
 /// TCP implementation of [`RemoteForward`] backed by [`RangeRegistry`].
@@ -432,6 +715,281 @@ impl RemoteForward for RegistryRemoteForward {
                 TransportError::Sql { code, message } => ForwardError::RemoteSql { code, message },
                 error => ForwardError::Transport(error),
             })
+    }
+
+    async fn open_session(&self, range_id: RangeId) -> Result<RemoteRangeSession, ForwardError> {
+        let endpoint = self.registry.resolve(range_id).await?;
+        match self
+            .client
+            .call(&endpoint.endpoint, &RangeRequest::SessionOpen { range_id })
+            .await?
+        {
+            RangeResponse::SessionOpened { session_id } => Ok(RemoteRangeSession {
+                range_id,
+                session_id,
+                registry: self.registry.clone(),
+                client: self.client.clone(),
+            }),
+            RangeResponse::SqlError { code, message } => {
+                Err(ForwardError::RemoteSql { code, message })
+            }
+            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
+                kind: error,
+                message,
+            }),
+            _ => Err(ForwardError::UnexpectedResponse),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoteRangeSession {
+    range_id: RangeId,
+    session_id: u64,
+    registry: RangeRegistry,
+    client: FramedTcpClient,
+}
+
+impl RemoteRangeSession {
+    async fn call(
+        &mut self,
+        operation: WireSessionOperation,
+    ) -> Result<WireSessionResult, PgError> {
+        let endpoint = self
+            .registry
+            .resolve(self.range_id)
+            .await
+            .map_err(|error| ForwardError::Registry(error).into_pg())?;
+        match self
+            .client
+            .call(
+                &endpoint.endpoint,
+                &RangeRequest::Session {
+                    range_id: self.range_id,
+                    session_id: self.session_id,
+                    operation,
+                },
+            )
+            .await
+            .map_err(|error| ForwardError::Transport(error).into_pg())?
+        {
+            RangeResponse::SessionResult { result } => Ok(result),
+            RangeResponse::SqlError { code, message } => Err(PgError::error(&code, message)),
+            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
+                kind: error,
+                message,
+            }
+            .into_pg()),
+            _ => Err(ForwardError::UnexpectedResponse.into_pg()),
+        }
+    }
+
+    pub async fn simple_query(&mut self, sql: String) -> Result<Vec<QueryResult>, PgError> {
+        match self.call(WireSessionOperation::SimpleQuery { sql }).await? {
+            WireSessionResult::Query { results } => {
+                Ok(results.into_iter().map(Into::into).collect())
+            }
+            _ => Err(PgError::protocol("unexpected remote simple-query response")),
+        }
+    }
+
+    pub async fn parse(
+        &mut self,
+        name: String,
+        sql: String,
+        parameter_types: Vec<u32>,
+    ) -> Result<crabka_pgwire::engine::PreparedDescription, PgError> {
+        match self
+            .call(WireSessionOperation::Parse {
+                name,
+                sql,
+                parameter_types,
+            })
+            .await?
+        {
+            WireSessionResult::Prepared {
+                parameter_types,
+                fields,
+            } => Ok(crabka_pgwire::engine::PreparedDescription {
+                parameter_types,
+                fields: fields.into_iter().map(Into::into).collect(),
+            }),
+            _ => Err(PgError::protocol("unexpected remote parse response")),
+        }
+    }
+
+    pub async fn bind(
+        &mut self,
+        portal: String,
+        statement: String,
+        params: &[BoundParam],
+        result_formats: Vec<i16>,
+    ) -> Result<crabka_pgwire::engine::PortalDescription, PgError> {
+        let params = params
+            .iter()
+            .map(|param| crate::transport::WireBoundParam {
+                type_oid: param.type_oid,
+                format: param.format,
+                value: param.value.as_ref().map(|value| value.to_vec()),
+            })
+            .collect();
+        match self
+            .call(WireSessionOperation::Bind {
+                portal,
+                statement,
+                params,
+                result_formats,
+            })
+            .await?
+        {
+            WireSessionResult::Portal { fields } => Ok(crabka_pgwire::engine::PortalDescription {
+                fields: fields.into_iter().map(Into::into).collect(),
+            }),
+            _ => Err(PgError::protocol("unexpected remote bind response")),
+        }
+    }
+
+    pub async fn describe_statement(
+        &mut self,
+        name: String,
+    ) -> Result<crabka_pgwire::engine::PreparedDescription, PgError> {
+        match self
+            .call(WireSessionOperation::DescribeStatement { name })
+            .await?
+        {
+            WireSessionResult::Prepared {
+                parameter_types,
+                fields,
+            } => Ok(crabka_pgwire::engine::PreparedDescription {
+                parameter_types,
+                fields: fields.into_iter().map(Into::into).collect(),
+            }),
+            _ => Err(PgError::protocol("unexpected remote describe response")),
+        }
+    }
+
+    pub async fn describe_portal(
+        &mut self,
+        name: String,
+    ) -> Result<crabka_pgwire::engine::PortalDescription, PgError> {
+        match self
+            .call(WireSessionOperation::DescribePortal { name })
+            .await?
+        {
+            WireSessionResult::Portal { fields } => Ok(crabka_pgwire::engine::PortalDescription {
+                fields: fields.into_iter().map(Into::into).collect(),
+            }),
+            _ => Err(PgError::protocol("unexpected remote describe response")),
+        }
+    }
+
+    pub async fn execute(
+        &mut self,
+        portal: String,
+        max_rows: u32,
+    ) -> Result<ExecuteOutcome, PgError> {
+        match self
+            .call(WireSessionOperation::Execute { portal, max_rows })
+            .await?
+        {
+            WireSessionResult::Execute(WireExecuteOutcome::Rows { rows, completion }) => {
+                Ok(ExecuteOutcome::Rows {
+                    rows: rows
+                        .into_iter()
+                        .map(|row| row.into_iter().map(|cell| cell.map(Into::into)).collect())
+                        .collect(),
+                    completion,
+                })
+            }
+            WireSessionResult::Execute(WireExecuteOutcome::Command { tag }) => {
+                Ok(ExecuteOutcome::CommandComplete { tag })
+            }
+            WireSessionResult::Execute(WireExecuteOutcome::Empty) => Ok(ExecuteOutcome::EmptyQuery),
+            _ => Err(PgError::protocol("unexpected remote execute response")),
+        }
+    }
+
+    pub async fn prepare_global(&mut self, global_xid: u64) -> Result<u64, PgError> {
+        match self
+            .call(WireSessionOperation::PrepareGlobal { global_xid })
+            .await?
+        {
+            WireSessionResult::GlobalPrepared { global_xid } => Ok(global_xid),
+            _ => Err(PgError::protocol("unexpected remote prepare response")),
+        }
+    }
+
+    pub async fn release_global(&mut self, global_xid: u64, commit: bool) -> Result<(), PgError> {
+        let operation = if commit {
+            WireSessionOperation::CommitGlobal { global_xid }
+        } else {
+            WireSessionOperation::AbortGlobal { global_xid }
+        };
+        match self.call(operation).await? {
+            WireSessionResult::Closed => Ok(()),
+            _ => Err(PgError::protocol("unexpected remote release response")),
+        }
+    }
+
+    pub async fn record_global_decision(
+        &mut self,
+        global_xid: u64,
+        status: crabka_pgmvcc::clog::XidStatus,
+    ) -> Result<crabka_pgmvcc::clog::XidStatus, PgError> {
+        let endpoint = self
+            .registry
+            .resolve(self.range_id)
+            .await
+            .map_err(|error| ForwardError::Registry(error).into_pg())?;
+        match self
+            .client
+            .call(
+                &endpoint.endpoint,
+                &RangeRequest::GlobalDecision {
+                    range_id: self.range_id,
+                    global_xid,
+                    status: encode_global_status(status),
+                },
+            )
+            .await
+            .map_err(|error| ForwardError::Transport(error).into_pg())?
+        {
+            RangeResponse::GlobalStatus { status } => decode_global_status(status),
+            RangeResponse::SqlError { code, message } => Err(PgError::error(&code, message)),
+            RangeResponse::Error { error, message } => Err(ForwardError::Remote {
+                kind: error,
+                message,
+            }
+            .into_pg()),
+            _ => Err(ForwardError::UnexpectedResponse.into_pg()),
+        }
+    }
+
+    pub async fn close(&mut self, target: CloseTarget<'_>) -> Result<(), PgError> {
+        let operation = match target {
+            CloseTarget::Statement(name) => WireSessionOperation::CloseStatement {
+                name: name.to_owned(),
+            },
+            CloseTarget::Portal(name) => WireSessionOperation::ClosePortal {
+                name: name.to_owned(),
+            },
+        };
+        match self.call(operation).await? {
+            WireSessionResult::Closed => Ok(()),
+            _ => Err(PgError::protocol("unexpected remote close response")),
+        }
+    }
+
+    pub async fn sync(&mut self) -> Result<TxStatus, PgError> {
+        match self.call(WireSessionOperation::Sync).await? {
+            WireSessionResult::Synced { tx_status } => match tx_status {
+                b'I' => Ok(TxStatus::Idle),
+                b'T' => Ok(TxStatus::InTransaction),
+                b'E' => Ok(TxStatus::Failed),
+                _ => Err(PgError::protocol("invalid remote transaction status")),
+            },
+            _ => Err(PgError::protocol("unexpected remote sync response")),
+        }
     }
 }
 
@@ -1454,6 +2012,10 @@ mod tests {
                 RangeRequest::Sql { sql, .. } => RangeResponse::Sql { result: sql },
                 RangeRequest::ScanRange(_)
                 | RangeRequest::ScanCursor(_)
+                | RangeRequest::SessionOpen { .. }
+                | RangeRequest::Session { .. }
+                | RangeRequest::SessionClose { .. }
+                | RangeRequest::GlobalDecision { .. }
                 | RangeRequest::Txn(_)
                 | RangeRequest::Tso(_)
                 | RangeRequest::ResolveTxn(_) => RangeResponse::Error {

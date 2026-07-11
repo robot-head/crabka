@@ -33,6 +33,22 @@ const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 pub enum RangeRequest {
     /// Forward one SQL statement to its owning range.
     Sql { range_id: RangeId, sql: String },
+    /// Open one owner-side connection session.
+    SessionOpen { range_id: RangeId },
+    /// Execute one stateful protocol operation in an owner session.
+    Session {
+        range_id: RangeId,
+        session_id: u64,
+        operation: WireSessionOperation,
+    },
+    /// Release all statements, portals and transaction state for a session.
+    SessionClose { range_id: RangeId, session_id: u64 },
+    /// Replicate a durable global transaction decision to one range owner.
+    GlobalDecision {
+        range_id: RangeId,
+        global_xid: u64,
+        status: WireGlobalStatus,
+    },
     /// Ask an owning range to scan a table rowid interval under caller snapshots.
     ScanRange(ScanRangeReq),
     /// Pull one bounded page from an owner-issued range cursor token.
@@ -60,6 +76,12 @@ pub enum RangeResponse {
     SqlResultsDone,
     /// SQL execution failed with a `PostgreSQL` error preserved from the owner.
     SqlError { code: String, message: String },
+    /// A newly allocated owner session.
+    SessionOpened { session_id: u64 },
+    /// Result of one stateful owner-session operation.
+    SessionResult { result: WireSessionResult },
+    /// Effective immutable global decision status.
+    GlobalStatus { status: WireGlobalStatus },
     /// Visible rows returned by a range scan.
     ScanRange(ScanRangeResp),
     /// One bounded owner-cursor page.
@@ -129,6 +151,104 @@ pub struct WireFieldDescription {
     pub type_size: i16,
     pub type_modifier: i32,
     pub format: i16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WireBoundParam {
+    pub type_oid: Option<u32>,
+    pub format: i16,
+    pub value: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum WireGlobalStatus {
+    InProgress,
+    Prepared { global_xid: u64 },
+    Committed,
+    Aborted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum WireSessionOperation {
+    SimpleQuery {
+        sql: String,
+    },
+    Parse {
+        name: String,
+        sql: String,
+        parameter_types: Vec<u32>,
+    },
+    Bind {
+        portal: String,
+        statement: String,
+        params: Vec<WireBoundParam>,
+        result_formats: Vec<i16>,
+    },
+    DescribeStatement {
+        name: String,
+    },
+    DescribePortal {
+        name: String,
+    },
+    Execute {
+        portal: String,
+        max_rows: u32,
+    },
+    PrepareGlobal {
+        global_xid: u64,
+    },
+    CommitGlobal {
+        global_xid: u64,
+    },
+    AbortGlobal {
+        global_xid: u64,
+    },
+    CloseStatement {
+        name: String,
+    },
+    ClosePortal {
+        name: String,
+    },
+    Sync,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum WireSessionResult {
+    Query {
+        results: Vec<WireQueryResult>,
+    },
+    Prepared {
+        parameter_types: Vec<u32>,
+        fields: Vec<WireFieldDescription>,
+    },
+    Portal {
+        fields: Vec<WireFieldDescription>,
+    },
+    Execute(WireExecuteOutcome),
+    GlobalPrepared {
+        global_xid: u64,
+    },
+    Closed,
+    Synced {
+        tx_status: u8,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum WireExecuteOutcome {
+    Rows {
+        rows: Vec<Vec<Option<Vec<u8>>>>,
+        completion: Option<String>,
+    },
+    Command {
+        tag: String,
+    },
+    Empty,
 }
 
 /// Timestamp-oracle RPC sent to range 0.
@@ -1178,6 +1298,13 @@ mod tests {
                     token: request.token,
                     is_last: true,
                 }),
+                RangeRequest::SessionOpen { .. }
+                | RangeRequest::Session { .. }
+                | RangeRequest::SessionClose { .. }
+                | RangeRequest::GlobalDecision { .. } => RangeResponse::Error {
+                    error: WireErrorKind::Failed,
+                    message: "wrong rpc".into(),
+                },
                 RangeRequest::Txn(_) => RangeResponse::Txn(TxnResp::Prepared),
             }
         }
