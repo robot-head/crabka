@@ -41,3 +41,12 @@ baseline-discovery fix.
 The exclusion is limited to the exact reserved basename `baseline.json`, at any
 recursive level. Other JSON files remain discoverable and parse failures remain
 visible. No corpus or baseline data changed.
+
+## Review follow-up
+
+Wrapped extended-case file reads and JSON deserialization in typed errors that
+include the offending `path.display()` while retaining the original error as
+the source. Strict TDD reproduced the missing-path assertion before the change;
+the strengthened malformed-file test now asserts both the serde diagnostic and
+the complete filename/path. The focused test and the full 22-test conformance
+suite pass, along with check, clippy, nightly format, and diff checks.

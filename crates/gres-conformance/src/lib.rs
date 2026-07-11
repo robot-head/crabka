@@ -11,6 +11,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio_postgres::types::{ToSql, Type};
 
 pub use self::parser_commands::{
@@ -76,6 +77,17 @@ pub enum ExtendedParamValue {
 pub struct ExtendedCaseFile {
     pub file: String,
     pub cases: Vec<ExtendedCase>,
+}
+
+#[derive(Debug, Error)]
+enum ExtendedCaseFileError {
+    #[error("failed to read extended case file {}: {source}", path.display())]
+    Read { path: PathBuf, source: io::Error },
+    #[error("failed to parse extended case file {}: {source}", path.display())]
+    Parse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -304,8 +316,17 @@ pub fn load_extended_case_files(
 ) -> Result<Vec<ExtendedCaseFile>, Box<dyn std::error::Error>> {
     let mut case_files = Vec::new();
     for path in discover_extended_case_files(corpus)? {
-        let text = std::fs::read_to_string(&path)?;
-        let cases = serde_json::from_str::<Vec<ExtendedCase>>(&text)?;
+        let text =
+            std::fs::read_to_string(&path).map_err(|source| ExtendedCaseFileError::Read {
+                path: path.clone(),
+                source,
+            })?;
+        let cases = serde_json::from_str::<Vec<ExtendedCase>>(&text).map_err(|source| {
+            ExtendedCaseFileError::Parse {
+                path: path.clone(),
+                source,
+            }
+        })?;
         case_files.push(ExtendedCaseFile {
             file: corpus_file_name(corpus, &path),
             cases,
@@ -940,12 +961,15 @@ mod tests {
     #[test]
     fn rejects_malformed_non_baseline_extended_case_file() {
         let root = temp_corpus_dir();
-        std::fs::write(root.join("malformed.json"), r#"{ "not": "cases" }"#)
+        let malformed_path = root.join("malformed.json");
+        std::fs::write(&malformed_path, r#"{ "not": "cases" }"#)
             .expect("write malformed extended case file");
 
         let error = load_extended_case_files(&root).expect_err("reject malformed case file");
+        let message = error.to_string();
 
-        assert!(error.to_string().contains("expected a sequence"));
+        assert!(message.contains("expected a sequence"));
+        assert!(message.contains(&malformed_path.display().to_string()));
 
         std::fs::remove_dir_all(root).expect("clean extended corpus directory");
     }
