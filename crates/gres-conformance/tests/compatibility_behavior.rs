@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crabka_gres_conformance::parser_command_report;
+use crabka_gres_conformance::{
+    feature_manifest::{FEATURE_PROBES, FeatureBehavior},
+    parser_command_report,
+};
 use crabka_pgexec::{
     ExecError, SqlEngine,
     foreign::{ForeignScanner, ImportFilter, ImportedTable, ScanBounds},
 };
 use crabka_pgtypes::Datum;
-use crabka_pgwire::engine::{Engine, Session};
+use crabka_pgwire::engine::{BoundParam, Engine, Session};
 
 struct EmptyImporter;
 
@@ -131,4 +134,65 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     }
     assert_eq!(executed, 42);
     assert_eq!(refused, 50);
+}
+
+#[tokio::test]
+async fn every_major_feature_probe_matches_its_typed_behavior() {
+    assert_eq!(FEATURE_PROBES.len(), 23);
+    for probe in FEATURE_PROBES {
+        if probe.behavior == FeatureBehavior::ParserRejectPending {
+            assert!(
+                crabka_pgparser::parse(probe.sql).is_err(),
+                "pending feature unexpectedly parses: {}",
+                probe.item,
+            );
+            continue;
+        }
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for setup in probe.setup {
+            session.simple_query(setup).await.expect(setup);
+        }
+        match probe.behavior {
+            FeatureBehavior::SessionExecute => {
+                session.simple_query(probe.sql).await.expect(probe.item);
+            }
+            FeatureBehavior::ExtendedExecute => {
+                session
+                    .parse("feature", probe.sql, &[23])
+                    .await
+                    .expect(probe.item);
+                session
+                    .bind(
+                        "feature_portal",
+                        "feature",
+                        &[BoundParam {
+                            type_oid: Some(23),
+                            format: 0,
+                            value: Some(Bytes::from_static(b"7")),
+                        }],
+                        &[],
+                    )
+                    .await
+                    .expect(probe.item);
+                session
+                    .execute("feature_portal", 0)
+                    .await
+                    .expect(probe.item);
+            }
+            FeatureBehavior::SessionRefuse => {
+                let error = session.simple_query(probe.sql).await.expect_err(probe.item);
+                assert_eq!(Some(error.code.as_str()), probe.sqlstate, "{}", probe.item);
+                assert!(
+                    error
+                        .message
+                        .contains(probe.message_fragment.expect("message")),
+                    "{}: {error:?}",
+                    probe.item,
+                );
+            }
+            FeatureBehavior::ParserRejectPending => unreachable!(),
+        }
+    }
 }

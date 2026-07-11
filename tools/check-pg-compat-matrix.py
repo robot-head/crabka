@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def parser_behavior_report() -> tuple[set[str], list[dict[str, object]]]:
+def parser_behavior_report() -> tuple[set[str], list[dict[str, object]], list[dict[str, object]]]:
     result = subprocess.run(
         DEFAULT_PARSER_COMMAND,
         cwd=ROOT,
@@ -89,7 +89,10 @@ def parser_behavior_report() -> tuple[set[str], list[dict[str, object]]]:
     probes = report.get("probes")
     if not isinstance(probes, list) or not all(isinstance(probe, dict) for probe in probes):
         raise ValueError("parser command helper report probes must be a JSON object array")
-    return set(commands), probes
+    features = report.get("features")
+    if not isinstance(features, list) or not all(isinstance(probe, dict) for probe in features):
+        raise ValueError("parser command helper report features must be a JSON object array")
+    return set(commands), probes, features
 
 
 def validate_runtime_behavior() -> None:
@@ -149,6 +152,26 @@ def matrix_command_rows(matrix_path: Path) -> dict[str, str]:
         rows[item] = disposition
     if not rows:
         raise ValueError(f"{matrix_path}: no command rows found")
+    return rows
+
+
+def matrix_feature_rows(matrix_path: Path) -> dict[str, str]:
+    rows: dict[str, str] = {}
+    in_features = False
+    for line_number, line in enumerate(matrix_path.read_text(encoding="utf-8").splitlines(), 1):
+        if line == "## Major language-feature rows":
+            in_features = True
+            continue
+        if not in_features or not line.startswith("|") or line.startswith("|---"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 3 or cells[0] == "Item":
+            continue
+        if cells[0] in rows:
+            raise ValueError(f"{matrix_path}:{line_number}: duplicate feature row: {cells[0]}")
+        rows[cells[0]] = cells[1]
+    if not rows:
+        raise ValueError(f"{matrix_path}: no major language-feature rows found")
     return rows
 
 
@@ -256,6 +279,56 @@ def validate_behavior_probes(
     return errors
 
 
+def validate_feature_probes(
+    feature_rows: dict[str, str], probes: list[dict[str, object]]
+) -> list[str]:
+    errors: list[str] = []
+    by_item: dict[str, dict[str, object]] = {}
+    for probe in probes:
+        item = probe.get("item")
+        if not isinstance(item, str) or not item:
+            errors.append("major feature probe has missing/invalid item")
+            continue
+        if item in by_item:
+            errors.append(f"duplicate major feature probe: {item}")
+            continue
+        by_item[item] = probe
+        if not isinstance(probe.get("sql"), str) or not probe["sql"]:
+            errors.append(f"major feature probe {item} lacks representative SQL")
+
+    missing = sorted(feature_rows.keys() - by_item.keys())
+    if missing:
+        errors.append("major feature row(s) lack probe: " + ", ".join(missing))
+    orphan = sorted(by_item.keys() - feature_rows.keys())
+    if orphan:
+        errors.append("major feature probe(s) lack row: " + ", ".join(orphan))
+
+    for item in sorted(feature_rows.keys() & by_item.keys()):
+        disposition = feature_rows[item]
+        probe = by_item[item]
+        behavior = probe.get("behavior")
+        if disposition == "Implemented" or disposition.startswith("Mapped("):
+            if behavior not in ("session-execute", "extended-execute"):
+                errors.append(f"major feature disposition/behavior mismatch for {item}")
+        elif disposition.startswith("Error-with-notice("):
+            expected = disposition.removeprefix("Error-with-notice(").removesuffix(")")
+            if behavior != "session-refuse" or probe.get("sqlstate") != expected:
+                errors.append(f"major feature disposition/behavior mismatch for {item}")
+        elif disposition.startswith("Wave-assigned("):
+            if behavior not in (
+                "parser-reject-pending", "session-refuse", "session-execute", "extended-execute"
+            ):
+                errors.append(f"major feature wave probe has invalid behavior for {item}")
+        else:
+            errors.append(f"major feature unsupported disposition for {item}: {disposition}")
+        if behavior == "session-refuse" and (
+            not isinstance(probe.get("sqlstate"), str)
+            or not isinstance(probe.get("message_fragment"), str)
+        ):
+            errors.append(f"major feature refusal lacks exact contract for {item}")
+    return errors
+
+
 def is_resolved_parser_disposition(disposition: str) -> bool:
     return disposition == "Implemented" or disposition.startswith(RESOLVED_PARSER_PREFIXES)
 
@@ -354,6 +427,31 @@ def run_self_test(parser_commands: set[str]) -> None:
     if not any("lack intentional refusal" in error for error in wave_errors):
         raise AssertionError("self-test expected parser-accepted wave-assigned direction to fail")
 
+    feature_rows = {"Feature A": "Implemented", "Feature B": "Wave-assigned(T)"}
+    feature_probes = [
+        {"item": "Feature A", "sql": "SELECT 1", "behavior": "session-execute", "setup": []},
+        {"item": "Feature B", "sql": "SELECT bad", "behavior": "parser-reject-pending", "setup": []},
+    ]
+    if validate_feature_probes(feature_rows, feature_probes):
+        raise AssertionError("self-test expected matching major feature manifest to pass")
+    feature_directions = [
+        (feature_probes[:1], "major feature row(s) lack probe"),
+        (feature_probes + [{"item": "Orphan", "sql": "SELECT 1", "behavior": "session-execute"}], "major feature probe(s) lack row"),
+        ([{**feature_probes[0], "behavior": "parser-reject-pending"}, feature_probes[1]], "major feature disposition/behavior mismatch"),
+    ]
+    for probes, fragment in feature_directions:
+        if not any(fragment in error for error in validate_feature_probes(feature_rows, probes)):
+            raise AssertionError(f"self-test expected feature failure direction: {fragment}")
+
+    injected_identity_matrix = """| Item | Disposition | Notes |\n|---|---|---|\n| BEGIN | Implemented | ok |\n"""
+    injected_errors = self_test_errors(
+        injected_identity_matrix, {"BEGIN", "FAKE BEGIN ALIAS"}
+    )
+    if not any("FAKE BEGIN ALIAS" in error for error in injected_errors):
+        raise AssertionError(
+            "self-test expected an accepted existing-shape alias absent from the manifest to fail"
+        )
+
     required_commands = {"BEGIN", "END", "ROLLBACK", "START TRANSACTION"}
     missing_commands = sorted(required_commands - parser_commands)
     if missing_commands:
@@ -380,13 +478,14 @@ def run_self_test(parser_commands: set[str]) -> None:
 def main() -> int:
     args = parse_args()
     try:
-        parser_commands, behavior_probes = parser_behavior_report()
+        parser_commands, behavior_probes, feature_probes = parser_behavior_report()
         if args.self_test:
             run_self_test(parser_commands)
         inventory = load_inventory(DEFAULT_INVENTORY)
         errors = validate_inventory_rows(matrix_command_rows(args.matrix), inventory)
         errors.extend(validate(args.matrix, parser_commands))
         errors.extend(validate_behavior_probes(matrix_command_rows(args.matrix), behavior_probes))
+        errors.extend(validate_feature_probes(matrix_feature_rows(args.matrix), feature_probes))
         validate_runtime_behavior()
     except (OSError, ValueError, AssertionError) as error:
         print(f"pg compat matrix check FAILED: {error}", file=sys.stderr)

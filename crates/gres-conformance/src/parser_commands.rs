@@ -16,6 +16,8 @@ pub struct ParserCommandReport {
     pub commands: Vec<String>,
     /// One bidirectional behavior contract for every resolved command.
     pub probes: Vec<BehaviorProbe>,
+    /// Major language features, deliberately separate from command identities.
+    pub features: &'static [crate::feature_manifest::FeatureProbe],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -50,6 +52,11 @@ pub enum ParserCommandError {
     UnexpectedStatement {
         command: &'static str,
         expected: &'static str,
+        actual: &'static str,
+    },
+    #[error("parser command probe {command} was classified as {actual}")]
+    UnexpectedIdentity {
+        command: &'static str,
         actual: &'static str,
     },
 }
@@ -335,12 +342,14 @@ const COMMAND_PROBES: &[CommandProbe] = &[
 /// Returns an error when a probe is rejected, produces multiple statements, or
 /// maps to an unexpected AST shape.
 pub fn parser_command_report() -> Result<ParserCommandReport, ParserCommandError> {
-    let mut commands = Vec::with_capacity(COMMAND_PROBES.len());
+    let commands = crabka_pgparser::command::CommandIdentity::ALL
+        .iter()
+        .map(|identity| identity.name().to_string())
+        .collect();
     let mut probes =
         Vec::with_capacity(COMMAND_PROBES.len() + crabka_pgparser::ast::NON_GOAL_REFUSALS.len());
     for probe in COMMAND_PROBES {
         validate_probe(probe)?;
-        commands.push(probe.command.to_string());
         probes.push(behavior_probe(probe)?);
     }
     for spec in crabka_pgparser::ast::NON_GOAL_REFUSALS {
@@ -350,16 +359,15 @@ pub fn parser_command_report() -> Result<ParserCommandReport, ParserCommandError
             expected_statement: "CompatibilityRefusal",
         };
         validate_probe(&probe)?;
-        commands.push(probe.command.to_string());
         probes.push(behavior_probe(&probe)?);
     }
-    commands.sort_unstable();
     probes.sort_unstable_by(|left, right| left.command.cmp(&right.command));
 
     Ok(ParserCommandReport {
         format_version: PARSER_COMMAND_REPORT_FORMAT_VERSION,
         commands,
         probes,
+        features: crate::feature_manifest::FEATURE_PROBES,
     })
 }
 
@@ -392,17 +400,26 @@ fn behavior_probe(probe: &CommandProbe) -> Result<BehaviorProbe, ParserCommandEr
 }
 
 fn validate_probe(probe: &CommandProbe) -> Result<(), ParserCommandError> {
-    let statements = parse(probe.sql).map_err(|source| ParserCommandError::Rejected {
-        command: probe.command,
-        sql: probe.sql,
-        source,
-    })?;
-    let [statement] = statements.as_slice() else {
+    let classified =
+        crabka_pgparser::parse_with_command_identities(probe.sql).map_err(|source| {
+            ParserCommandError::Rejected {
+                command: probe.command,
+                sql: probe.sql,
+                source,
+            }
+        })?;
+    let [(statement, identity)] = classified.as_slice() else {
         return Err(ParserCommandError::StatementCount {
             command: probe.command,
-            count: statements.len(),
+            count: classified.len(),
         });
     };
+    if identity.name() != probe.command {
+        return Err(ParserCommandError::UnexpectedIdentity {
+            command: probe.command,
+            actual: identity.name(),
+        });
+    }
 
     let actual = statement_shape(statement);
     if actual != probe.expected_statement {
@@ -487,6 +504,23 @@ mod tests {
                     .iter()
                     .any(|name| name == spec.command.command_name())
             );
+        }
+    }
+
+    #[test]
+    fn parser_registry_distinguishes_aliases_that_share_ast_shapes() {
+        use crabka_pgparser::{command::CommandIdentity, parse_with_command_identities};
+
+        for (sql, identity) in [
+            ("BEGIN", CommandIdentity::Begin),
+            ("START TRANSACTION", CommandIdentity::StartTransaction),
+            ("COMMIT", CommandIdentity::Commit),
+            ("END", CommandIdentity::End),
+            ("CREATE ROLE r", CommandIdentity::CreateRole),
+            ("CREATE USER u", CommandIdentity::CreateUser),
+        ] {
+            let parsed = parse_with_command_identities(sql).expect(sql);
+            assert_eq!(parsed[0].1, identity);
         }
     }
 

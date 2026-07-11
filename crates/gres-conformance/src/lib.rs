@@ -2,6 +2,7 @@
 //! (the oracle) and Crabka Gres (the subject), diff the outcomes.
 
 pub mod driver_goldens;
+pub mod feature_manifest;
 mod parser_commands;
 
 use std::{
