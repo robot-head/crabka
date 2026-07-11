@@ -182,6 +182,8 @@ pub enum RefusalCommand {
     PrepareTransaction,
     CommitPrepared,
     RollbackPrepared,
+    AlterServer,
+    AlterUserMapping,
     NonGoal(NonGoalCommand),
 }
 
@@ -197,6 +199,8 @@ impl RefusalCommand {
             Self::PrepareTransaction => "PREPARE TRANSACTION",
             Self::CommitPrepared => "COMMIT PREPARED",
             Self::RollbackPrepared => "ROLLBACK PREPARED",
+            Self::AlterServer => "ALTER SERVER",
+            Self::AlterUserMapping => "ALTER USER MAPPING",
             Self::NonGoal(command) => command.command_name(),
         }
     }
@@ -221,7 +225,22 @@ impl RefusalCommand {
             Self::PrepareTransaction | Self::CommitPrepared | Self::RollbackPrepared => {
                 "SQL-level prepared transactions are not available"
             }
+            Self::AlterServer => "ALTER SERVER is not supported",
+            Self::AlterUserMapping => "ALTER USER MAPPING is not supported",
             Self::NonGoal(command) => command.message(),
+        }
+    }
+}
+
+impl Statement {
+    /// Return the centralized refusal contract for richer refusal AST variants.
+    #[must_use]
+    pub const fn compatibility_refusal(&self) -> Option<RefusalCommand> {
+        match self {
+            Self::CompatibilityRefusal(command) => Some(*command),
+            Self::AlterServer { .. } => Some(RefusalCommand::AlterServer),
+            Self::AlterUserMapping { .. } => Some(RefusalCommand::AlterUserMapping),
+            _ => None,
         }
     }
 }

@@ -3189,22 +3189,35 @@ pub fn parse_with_source(sql: &str) -> Result<Vec<(crate::ast::Statement, String
 fn bounded_non_goal_refusal(sql: &str) -> Option<crate::ast::Statement> {
     let trimmed = sql.trim();
     let statement = trimmed.strip_suffix(';').unwrap_or(trimmed).trim();
-    let normalized = statement
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase();
+    let candidate = lex(statement).ok()?;
     crate::ast::NON_GOAL_REFUSALS
         .iter()
-        .find(|spec| {
-            spec.representative_sql
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-                .to_ascii_lowercase()
-                == normalized
-        })
+        .find(|spec| refusal_tokens_match(&candidate, spec.representative_sql))
         .map(|spec| crate::ast::Statement::CompatibilityRefusal(spec.command))
+}
+
+fn refusal_tokens_match(candidate: &[(Token, usize)], representative: &str) -> bool {
+    const IDENTIFIER_SLOTS: &[&str] = &[
+        "conv", "conv2", "lang", "lang2", "postgres", "opc", "opc2", "opf", "opf2", "pub", "r",
+        "r2", "sub", "ts", "ts2", "p", "p2", "t", "t2", "am", "handler", "func", "int4eq", "f",
+    ];
+    let Ok(pattern) = lex(representative) else {
+        return false;
+    };
+    candidate.len() == pattern.len()
+        && candidate
+            .iter()
+            .zip(pattern)
+            .all(|((actual, _), (expected, _))| match (&expected, actual) {
+                (Token::Ident(slot), Token::Ident(_))
+                    if IDENTIFIER_SLOTS.contains(&slot.as_str()) =>
+                {
+                    true
+                }
+                (Token::StringLit(_), Token::StringLit(_))
+                | (Token::IntLit(_), Token::IntLit(_)) => true,
+                _ => actual == &expected,
+            })
 }
 
 fn encode_sequence_options(options: &crate::ast::SequenceOptions) -> Vec<String> {
@@ -6014,6 +6027,25 @@ fn explicit_compatibility_refusals_parse_to_typed_statements() {
 }
 
 #[test]
+fn fdw_alter_refusals_share_typed_metadata() {
+    use crate::ast::RefusalCommand;
+
+    for (sql, expected) in [
+        (
+            "ALTER SERVER s OPTIONS (host 'localhost')",
+            RefusalCommand::AlterServer,
+        ),
+        (
+            "ALTER USER MAPPING FOR PUBLIC SERVER s OPTIONS (username 'u')",
+            RefusalCommand::AlterUserMapping,
+        ),
+    ] {
+        let statement = parse(sql).expect(sql).pop().expect("one statement");
+        assert_eq!(statement.compatibility_refusal(), Some(expected));
+    }
+}
+
+#[test]
 fn explicit_compatibility_refusals_reject_malformed_neighbors() {
     for sql in [
         "CREATE DATABASE",
@@ -6046,5 +6078,55 @@ fn every_non_goal_has_a_bounded_typed_refusal_probe() {
             "{} accepted an arbitrary trailing token",
             spec.command.command_name(),
         );
+        let variant = refusal_variant_sql(spec.representative_sql);
+        assert_ne!(variant, spec.representative_sql);
+        assert_eq!(
+            parse(&variant),
+            Ok(vec![Statement::CompatibilityRefusal(spec.command)]),
+            "{} variant: {variant}",
+            spec.command.command_name(),
+        );
+    }
+}
+
+#[cfg(test)]
+fn refusal_variant_sql(sql: &str) -> String {
+    const PLACEHOLDERS: &[&str] = &[
+        "conv", "conv2", "lang", "lang2", "postgres", "opc", "opc2", "opf", "opf2", "pub", "r",
+        "r2", "sub", "ts", "ts2", "p", "p2", "t", "t2", "am", "handler", "func", "int4eq", "f",
+    ];
+    let tokens = lex(sql).expect("representative lexes");
+    let mut out = String::new();
+    for (token, _) in tokens {
+        if token == Token::Eof {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        match token {
+            Token::Ident(value) if PLACEHOLDERS.contains(&value.as_str()) => {
+                out.push_str(&format!("{value}_variant"));
+            }
+            Token::StringLit(_) => out.push_str("'variant'"),
+            Token::IntLit(_) => out.push_str("42"),
+            other => out.push_str(&token_sql(&other)),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+fn token_sql(token: &Token) -> String {
+    match token {
+        Token::Ident(value) => value.clone(),
+        Token::Keyword(keyword) => format!("{keyword:?}").to_ascii_lowercase(),
+        Token::LParen => "(".into(),
+        Token::RParen => ")".into(),
+        Token::Comma => ",".into(),
+        Token::Eq => "=".into(),
+        Token::Lt => "<".into(),
+        Token::Plus => "+".into(),
+        other => panic!("unhandled representative token {other:?}"),
     }
 }
