@@ -47,6 +47,83 @@ pub enum QueryResult {
     Empty,
 }
 
+/// A bounded fragment of a simple-query result. Row pages carry the description
+/// only on the first page and the command tag only on the final page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResultPage {
+    Rows {
+        result_index: usize,
+        fields: Option<Vec<FieldDescription>>,
+        rows: Vec<Vec<Option<Cell>>>,
+        tag: Option<String>,
+    },
+    Command { result_index: usize, tag: String },
+    Empty { result_index: usize },
+}
+
+/// Backpressured consumer for bounded simple-query result pages.
+#[async_trait::async_trait]
+pub trait ResultSink: Send {
+    async fn send(&mut self, page: ResultPage) -> Result<(), PgError>;
+}
+
+/// Compatibility sink used by callers that still require `Vec<QueryResult>`.
+#[derive(Debug, Default)]
+pub struct CollectingResultSink {
+    pages: Vec<ResultPage>,
+}
+
+impl CollectingResultSink {
+    #[must_use]
+    pub fn pages(&self) -> &[ResultPage] {
+        &self.pages
+    }
+
+    #[must_use]
+    pub fn finish(self) -> Vec<QueryResult> {
+        let mut results = Vec::new();
+        for page in self.pages {
+            match page {
+                ResultPage::Command { result_index, tag } => {
+                    debug_assert_eq!(result_index, results.len());
+                    results.push(QueryResult::Command { tag });
+                }
+                ResultPage::Empty { result_index } => {
+                    debug_assert_eq!(result_index, results.len());
+                    results.push(QueryResult::Empty);
+                }
+                ResultPage::Rows { result_index, fields, mut rows, tag } => {
+                    if result_index == results.len() {
+                        results.push(QueryResult::Rows {
+                            fields: fields.unwrap_or_default(),
+                            rows: Vec::new(),
+                            tag: String::new(),
+                        });
+                    }
+                    let QueryResult::Rows { rows: all, tag: final_tag, .. } =
+                        &mut results[result_index]
+                    else {
+                        unreachable!("row page changed result kind")
+                    };
+                    all.append(&mut rows);
+                    if let Some(tag) = tag {
+                        *final_tag = tag;
+                    }
+                }
+            }
+        }
+        results
+    }
+}
+
+#[async_trait::async_trait]
+impl ResultSink for CollectingResultSink {
+    async fn send(&mut self, page: ResultPage) -> Result<(), PgError> {
+        self.pages.push(page);
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyInResponse {
     /// 0 = text, 1 = binary.
@@ -135,6 +212,50 @@ pub trait Session: Send {
         &mut self,
         sql: &str,
     ) -> impl Future<Output = Result<Vec<QueryResult>, PgError>> + Send;
+
+    /// Execute simple-query text into a backpressured bounded sink.
+    fn simple_query_into<S: ResultSink>(
+        &mut self,
+        sql: &str,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> impl Future<Output = Result<(), PgError>> + Send {
+        async move {
+            if page_rows == 0 {
+                return Err(PgError::protocol("result page size must be greater than zero"));
+            }
+            for (result_index, result) in self.simple_query(sql).await?.into_iter().enumerate() {
+                match result {
+                    QueryResult::Rows { fields, rows, tag } => {
+                        if rows.is_empty() {
+                            sink.send(ResultPage::Rows {
+                                result_index,
+                                fields: Some(fields),
+                                rows,
+                                tag: Some(tag),
+                            }).await?;
+                            continue;
+                        }
+                        let mut fields = Some(fields);
+                        let chunks = rows.len().div_ceil(page_rows);
+                        for (index, rows) in rows.chunks(page_rows).enumerate() {
+                            sink.send(ResultPage::Rows {
+                                result_index,
+                                fields: fields.take(),
+                                rows: rows.to_vec(),
+                                tag: (index + 1 == chunks).then(|| tag.clone()),
+                            }).await?;
+                        }
+                    }
+                    QueryResult::Command { tag } => sink
+                        .send(ResultPage::Command { result_index, tag })
+                        .await?,
+                    QueryResult::Empty => sink.send(ResultPage::Empty { result_index }).await?,
+                }
+            }
+            Ok(())
+        }
+    }
 
     fn parse(
         &mut self,
