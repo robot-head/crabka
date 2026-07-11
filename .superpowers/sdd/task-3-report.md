@@ -1,0 +1,43 @@
+# Task 3 report: live scaling CI closure
+
+## Outcome
+
+- Converted `gres-range-scaling` from synthetic, non-gating dry-run CI to a real live-fast gate.
+- Installed Rust 1.96, Rust cache, and `postgresql-client`; the script builds required binaries with `cargo build --locked` in CI.
+- Removed `continue-on-error`, raised timeout from 5 to 30 minutes, retained artifact upload on failure, and added a post-run JSON assertion for `mode == live` plus every threshold gate.
+- Kept the G-8 flattened decision-ceiling contrast and current G-9 measured commit-rate curve in the per-PR JSON.
+- Added a static anti-rot test and wired it into the Gres path filter/job.
+- Added dated, environment-qualified live evidence.
+
+## TDD
+
+`bash scripts/tests/gres-range-scaling-ci.sh` failed against the old workflow because the job lacked a stable toolchain/cache, PostgreSQL client, fast/live mode, and gating semantics. After the workflow change it prints `PASS: live Gres scaling CI contract`.
+
+## Verification
+
+```text
+bash scripts/tests/gres-range-scaling-ci.sh
+bash -n scripts/gres-range-scaling.sh
+bash -n scripts/tests/gres-range-scaling-ci.sh
+```
+
+All passed.
+
+Fresh live-fast command:
+
+```text
+CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_RANGE_SCALING_MODE=fast CRABKA_GRES_RANGE_SCALING_ARTIFACT_DIR=target/gres-scaling-task3-final CRABKA_GRES_RANGE_SCALING_KEEP_ARTIFACTS=1 ./scripts/gres-range-scaling.sh
+```
+
+Result: exit 0; live mode; range-local 4x/1x `3.7538`; sharded 4x/1x `3.2558`; range-4 G-9/G-8 ceiling ratio `1.6279`; every JSON gate true.
+
+## Self-review
+
+- CI does not reuse local binaries; the skip-build variable appears only in documented local evidence.
+- Artifact upload remains `if: !cancelled()`, so measurement or gate failures still publish diagnostics.
+- The script allocates three distinct ephemeral ports per run and tears down Gres before reusing its chosen port across tenant cases. No duplicate mutable port locals or same-run port reuse was found.
+- The fast live workload is deliberately small and noisy; thresholds and raw artifacts, not exact ratios, are the gate.
+
+## Concerns
+
+- GitHub-hosted runner scheduling noise may occasionally require increasing the fast sample count; the current 30-minute timeout leaves room to do so without reverting to synthetic evidence.
