@@ -534,18 +534,32 @@ mod tests {
             xmax_status in status_strategy(),
             horizon in 2_u64..20,
             snapshot_xmax_delta in 0_u64..8,
+            frozen_xmin in any::<bool>(),
+            track_xmin_in_progress in any::<bool>(),
+            track_xmax_in_progress in any::<bool>(),
         ) {
+            let xmin = if frozen_xmin { FROZEN_XID } else { xmin };
             let xmax = if xmax == xmin { INVALID_XID } else { xmax };
             let mut clog = BTreeMap::new();
             clog.insert(xmin, xmin_status);
             if xmax != INVALID_XID {
                 clog.insert(xmax, xmax_status);
             }
+            let snapshot_xmax = horizon.saturating_add(snapshot_xmax_delta).saturating_add(1);
+            let mut xip = Vec::new();
+            if track_xmin_in_progress && xmin >= horizon && xmin < snapshot_xmax {
+                xip.push(xmin);
+            }
+            if track_xmax_in_progress && xmax >= horizon && xmax < snapshot_xmax {
+                xip.push(xmax);
+            }
+            xip.sort_unstable();
+            xip.dedup();
             let tuple = version::encode_tuple(xmin, xmax, &[Datum::Int4(1)]);
             let snapshot = Snapshot {
                 xmin: horizon,
-                xmax: horizon.saturating_add(snapshot_xmax_delta).saturating_add(1),
-                xip: Vec::new(),
+                xmax: snapshot_xmax,
+                xip,
             };
             let original = satisfies_mvcc(xmin, xmax, &snapshot, None, |xid| {
                 Ok(clog.get(&xid).copied().unwrap_or(XidStatus::InProgress))

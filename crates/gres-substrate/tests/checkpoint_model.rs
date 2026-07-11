@@ -52,7 +52,18 @@ enum CheckpointPhase {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct Compute {
-    phase: CheckpointPhase,
+    epoch: u8,
+    applied_prefix: u8,
+    lifecycle: ComputeLifecycle,
+    checkpoint: CheckpointPhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ComputeLifecycle {
+    Serving,
+    Recovering,
+    Crashed,
+    Refused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -68,18 +79,22 @@ struct State {
     injected_manifest_loss: bool,
 }
 
-struct CheckpointModel;
+struct CheckpointModel {
+    preserves_manifest_before_truncate: bool,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Action {
     Append,
     StartCheckpoint(usize),
     StepCheckpoint(usize),
-    CrashCheckpoint(usize),
+    ZombieCheckpointStep(usize),
+    PruneStep,
+    Crash(usize),
     StartSuccessor,
     ParkAndRecreateWal,
     LoseNewestManifestAfterTruncate,
-    Recover,
+    RecoverStep(usize),
 }
 
 impl Model for CheckpointModel {
@@ -95,10 +110,22 @@ impl Model for CheckpointModel {
             checkpoints: Vec::new(),
             computes: vec![
                 Compute {
-                    phase: CheckpointPhase::Idle,
+                    epoch: 0,
+                    applied_prefix: 0,
+                    lifecycle: ComputeLifecycle::Serving,
+                    checkpoint: CheckpointPhase::Idle,
                 },
                 Compute {
-                    phase: CheckpointPhase::Idle,
+                    epoch: 0,
+                    applied_prefix: 0,
+                    lifecycle: ComputeLifecycle::Crashed,
+                    checkpoint: CheckpointPhase::Idle,
+                },
+                Compute {
+                    epoch: 0,
+                    applied_prefix: 0,
+                    lifecycle: ComputeLifecycle::Crashed,
+                    checkpoint: CheckpointPhase::Idle,
                 },
             ],
             restored_value: None,
@@ -121,11 +148,15 @@ impl Model for CheckpointModel {
             for index in 0..state.computes.len() {
                 actions.push(Action::StartCheckpoint(index));
                 actions.push(Action::StepCheckpoint(index));
-                actions.push(Action::CrashCheckpoint(index));
+                actions.push(Action::ZombieCheckpointStep(index));
             }
         }
+        for index in 0..state.computes.len() {
+            actions.push(Action::Crash(index));
+            actions.push(Action::RecoverStep(index));
+        }
+        actions.push(Action::PruneStep);
         actions.push(Action::LoseNewestManifestAfterTruncate);
-        actions.push(Action::Recover);
     }
 
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
@@ -133,12 +164,18 @@ impl Model for CheckpointModel {
         match action {
             Action::Append => append_frame(&mut state),
             Action::StartCheckpoint(index) => start_checkpoint(&mut state, index)?,
-            Action::StepCheckpoint(index) => step_checkpoint(&mut state, index)?,
-            Action::CrashCheckpoint(index) => crash_checkpoint(&mut state, index)?,
+            Action::StepCheckpoint(index) => {
+                step_checkpoint(&mut state, index, self.preserves_manifest_before_truncate)?
+            }
+            Action::ZombieCheckpointStep(index) => {
+                zombie_checkpoint_step(&mut state, index, self.preserves_manifest_before_truncate)?
+            }
+            Action::PruneStep => prune_step(&mut state)?,
+            Action::Crash(index) => crash_compute(&mut state, index)?,
             Action::StartSuccessor => start_successor(&mut state)?,
             Action::ParkAndRecreateWal => park_and_recreate_wal(&mut state)?,
             Action::LoseNewestManifestAfterTruncate => lose_newest_manifest(&mut state)?,
-            Action::Recover => recover(&mut state),
+            Action::RecoverStep(index) => recover(&mut state, index)?,
         }
         Some(state)
     }
@@ -149,8 +186,21 @@ impl Model for CheckpointModel {
                 "serving_matches_acked_journal",
                 |_: &Self, state: &State| {
                     state
-                        .restored_value
-                        .is_none_or(|serving| serving == reference_state(state))
+                        .computes
+                        .iter()
+                        .filter(|compute| matches!(compute.lifecycle, ComputeLifecycle::Serving))
+                        .all(|compute| usize::from(compute.applied_prefix) == state.journal.len())
+                },
+            ),
+            Property::always(
+                "a safe recovery path remains absent injected loss",
+                |_: &Self, state: &State| {
+                    state.injected_manifest_loss
+                        || state.log_start == 0
+                        || newest_manifest(state).is_some_and(|checkpoint| {
+                            checkpoint.generation != state.current_generation
+                                || state.log_start <= checkpoint.covered.saturating_add(1)
+                        })
                 },
             ),
             Property::always(
@@ -188,20 +238,31 @@ impl Model for CheckpointModel {
 }
 
 fn append_frame(state: &mut State) {
+    let Some(active_index) = state.computes.iter().position(|compute| {
+        compute.epoch == state.current_epoch
+            && matches!(compute.lifecycle, ComputeLifecycle::Serving)
+    }) else {
+        return;
+    };
     let offset = frames_in_generation(state, state.current_generation);
     state.journal.push(Frame {
         generation: state.current_generation,
         offset,
     });
+    state.computes[active_index].applied_prefix = state.computes[active_index]
+        .applied_prefix
+        .saturating_add(1);
     state.restored_value = None;
 }
 
 fn start_checkpoint(state: &mut State, index: usize) -> Option<()> {
-    if !matches!(state.computes[index].phase, CheckpointPhase::Idle) {
+    if !matches!(state.computes[index].checkpoint, CheckpointPhase::Idle)
+        || !matches!(state.computes[index].lifecycle, ComputeLifecycle::Serving)
+    {
         return None;
     }
     let covered = newest_offset(state, state.current_generation)?;
-    state.computes[index].phase = CheckpointPhase::Snapshotted {
+    state.computes[index].checkpoint = CheckpointPhase::Snapshotted {
         generation: state.current_generation,
         covered,
         state: state_at_checkpoint(state, state.current_generation, covered),
@@ -210,8 +271,8 @@ fn start_checkpoint(state: &mut State, index: usize) -> Option<()> {
     Some(())
 }
 
-fn step_checkpoint(state: &mut State, index: usize) -> Option<()> {
-    let next = match state.computes[index].phase.clone() {
+fn step_checkpoint(state: &mut State, index: usize, ordered: bool) -> Option<()> {
+    let next = match state.computes[index].checkpoint.clone() {
         CheckpointPhase::Idle => return None,
         CheckpointPhase::Snapshotted {
             generation,
@@ -253,7 +314,12 @@ fn step_checkpoint(state: &mut State, index: usize) -> Option<()> {
             state: snap_state,
             epoch,
         } => {
-            if generation == state.current_generation {
+            if !ordered {
+                state.checkpoints.retain(|checkpoint| {
+                    checkpoint.generation != generation || checkpoint.covered != covered
+                });
+            }
+            if generation == state.current_generation && epoch == state.current_epoch {
                 state.log_start = state.log_start.max(covered.saturating_add(1));
             }
             CheckpointPhase::Truncated {
@@ -265,20 +331,52 @@ fn step_checkpoint(state: &mut State, index: usize) -> Option<()> {
         }
         CheckpointPhase::Truncated { .. } => CheckpointPhase::Idle,
     };
-    state.computes[index].phase = next;
+    state.computes[index].checkpoint = next;
     Some(())
 }
 
-fn crash_checkpoint(state: &mut State, index: usize) -> Option<()> {
-    if matches!(state.computes[index].phase, CheckpointPhase::Idle) {
+fn crash_compute(state: &mut State, index: usize) -> Option<()> {
+    if matches!(state.computes[index].lifecycle, ComputeLifecycle::Crashed) {
         return None;
     }
-    state.computes[index].phase = CheckpointPhase::Idle;
+    state.computes[index].lifecycle = ComputeLifecycle::Crashed;
+    Some(())
+}
+
+fn zombie_checkpoint_step(state: &mut State, index: usize, ordered: bool) -> Option<()> {
+    if state.computes[index].epoch >= state.current_epoch
+        || matches!(state.computes[index].checkpoint, CheckpointPhase::Idle)
+    {
+        return None;
+    }
+    step_checkpoint(state, index, ordered)
+}
+
+fn prune_step(state: &mut State) -> Option<()> {
+    if state.checkpoints.len() <= 1 {
+        return None;
+    }
+    state
+        .checkpoints
+        .sort_by_key(|checkpoint| (checkpoint.generation, checkpoint.covered, checkpoint.epoch));
+    state.checkpoints.remove(0);
     Some(())
 }
 
 fn start_successor(state: &mut State) -> Option<()> {
+    for compute in &mut state.computes {
+        if matches!(compute.lifecycle, ComputeLifecycle::Serving) {
+            compute.lifecycle = ComputeLifecycle::Crashed;
+        }
+    }
     state.current_epoch = state.current_epoch.checked_add(1)?;
+    let successor = state
+        .computes
+        .iter_mut()
+        .find(|compute| matches!(compute.lifecycle, ComputeLifecycle::Crashed))?;
+    successor.epoch = state.current_epoch;
+    successor.lifecycle = ComputeLifecycle::Recovering;
+    successor.checkpoint = CheckpointPhase::Idle;
     state.restored_value = None;
     Some(())
 }
@@ -311,26 +409,44 @@ fn lose_newest_manifest(state: &mut State) -> Option<()> {
     Some(())
 }
 
-fn recover(state: &mut State) {
+fn recover(state: &mut State, index: usize) -> Option<()> {
+    if !matches!(
+        state.computes[index].lifecycle,
+        ComputeLifecycle::Recovering
+    ) {
+        return None;
+    }
+    if state.computes[index].epoch != state.current_epoch {
+        state.computes[index].lifecycle = ComputeLifecycle::Crashed;
+        return Some(());
+    }
     let Some(checkpoint) = newest_manifest(state).cloned() else {
         if state.log_start > 0 {
             state.refused_recovery = true;
             state.restored_value = None;
-            return;
+            state.computes[index].lifecycle = ComputeLifecycle::Refused;
+            return Some(());
         }
         state.refused_recovery = false;
         state.restored_value = Some(reference_state(state));
-        return;
+        state.computes[index].applied_prefix = reference_state(state);
+        state.computes[index].lifecycle = ComputeLifecycle::Serving;
+        return Some(());
     };
     if checkpoint.generation == state.current_generation
         && state.log_start > checkpoint.covered.saturating_add(1)
     {
         state.refused_recovery = true;
         state.restored_value = None;
-        return;
+        state.computes[index].lifecycle = ComputeLifecycle::Refused;
+        return Some(());
     }
     state.refused_recovery = false;
-    state.restored_value = Some(recovered_state(state, &checkpoint));
+    let recovered = recovered_state(state, &checkpoint);
+    state.restored_value = Some(recovered);
+    state.computes[index].applied_prefix = recovered;
+    state.computes[index].lifecycle = ComputeLifecycle::Serving;
+    Some(())
 }
 
 fn upsert_checkpoint(state: &mut State, checkpoint: Checkpoint) {
@@ -433,13 +549,15 @@ fn frames_in_generation(state: &State, generation: u8) -> u8 {
 
 #[test]
 fn checkpoint_wal_recovery_protocol_is_safe() {
-    let checker = CheckpointModel
-        .checker()
-        .target_max_depth(MAX_DEPTH)
-        .target_state_count(MAX_STATES)
-        .timeout(CHECK_TIMEOUT)
-        .spawn_bfs()
-        .join();
+    let checker = CheckpointModel {
+        preserves_manifest_before_truncate: true,
+    }
+    .checker()
+    .target_max_depth(MAX_DEPTH)
+    .target_state_count(MAX_STATES)
+    .timeout(CHECK_TIMEOUT)
+    .spawn_bfs()
+    .join();
     eprintln!(
         "[checkpoint_model] unique_states={} generated={} max_depth={}",
         checker.unique_state_count(),
@@ -447,4 +565,22 @@ fn checkpoint_wal_recovery_protocol_is_safe() {
         checker.max_depth()
     );
     checker.assert_properties();
+}
+
+#[test]
+fn broken_manifest_before_truncate_order_has_a_counterexample() {
+    let checker = CheckpointModel {
+        preserves_manifest_before_truncate: false,
+    }
+    .checker()
+    .target_max_depth(10)
+    .target_state_count(100_000)
+    .timeout(CHECK_TIMEOUT)
+    .spawn_bfs()
+    .join();
+    assert!(
+        checker
+            .discoveries()
+            .contains_key("no_torn_truncation_without_manifest_loss")
+    );
 }

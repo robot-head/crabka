@@ -1106,6 +1106,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fresh_generation_recovery_fetches_actual_tail_from_zero() {
+        let checkpoints = InMemoryCheckpointStore::shared();
+        let base = MemKv::default();
+        base.put(b"base".to_vec(), b"older-generation".to_vec())
+            .expect("base put");
+        write_checkpoint(
+            checkpoints.as_ref(),
+            "tenant-a",
+            &base,
+            checkpoint_snapshot(7, 9),
+            DEFAULT_PART_MAX_BYTES,
+        )
+        .await
+        .expect("older-generation checkpoint");
+        let reader = TrackingReader::new(
+            vec![
+                replay_item(0, &frame(0, b"fresh", b"offset-zero")),
+                replay_item(
+                    1,
+                    &WalFrame {
+                        journal_seq: BARRIER_SEQ,
+                        ops: Vec::new(),
+                    },
+                ),
+            ],
+            Some(0),
+        );
+        let restored = MemKv::default();
+
+        let outcome = recover_store_after_barrier(
+            &restored,
+            Some(&restored),
+            Some(&LiveRecoveryCheckpoints { store: checkpoints }),
+            "tenant-a",
+            &reader,
+            &RecoveryBarrier {
+                generation: WriterGeneration(1),
+                offset: 1,
+            },
+        )
+        .await
+        .expect("fresh generation recovery");
+
+        assert!(reader.requested_start() == 0);
+        assert!(outcome.next_journal_seq == 1);
+        assert!(restored.get(b"base").expect("base") == Some(b"older-generation".to_vec()));
+        assert!(restored.get(b"fresh").expect("fresh") == Some(b"offset-zero".to_vec()));
+    }
+
+    #[tokio::test]
     async fn checkpoint_recovery_from_range_namespace_covers_pruned_wal() {
         let tenant = TenantName::parse("tenant-a").expect("tenant");
         let config = LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::COORDINATOR, None);
