@@ -479,6 +479,15 @@ mod tests {
             .collect();
         let expected = std::collections::BTreeMap::from([
             (
+                "match".to_string(),
+                DescribeConfigsResourceResult {
+                    name: "match".into(),
+                    value: Some(String::new()),
+                    config_source: super::CONFIG_SOURCE_DEFAULT,
+                    ..Default::default()
+                },
+            ),
+            (
                 "interval.ms".to_string(),
                 DescribeConfigsResourceResult {
                     name: "interval.ms".into(),

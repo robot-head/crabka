@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "max capacity")]
+    #[should_panic(expected = "assertion failed")]
     async fn exceeding_max_records_shuts_down() {
         let mut stores = StoreRegistry::default();
         seed_windowed_store(&mut stores);
@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "bytes")]
+    #[should_panic(expected = "assertion failed")]
     async fn exceeding_max_bytes_shuts_down() {
         let mut stores = StoreRegistry::default();
         seed_windowed_store(&mut stores);
