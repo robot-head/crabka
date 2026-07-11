@@ -11,6 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crabka_gres_ranges::{MultiRangeTenant, MultiRangeTenantConfig, RangeId, TenantName};
 use crabka_pgwire::engine::{Engine, QueryResult, Session};
 
+pub mod process;
+
 pub struct SystemHarness {
     config: MultiRangeTenantConfig,
     _data_dir: tempfile::TempDir,
