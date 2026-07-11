@@ -1221,6 +1221,91 @@ mod tests {
         assert_eq!(tag, "SELECT 1");
     }
 
+    #[tokio::test]
+    async fn remote_query_pages_results_larger_than_one_transport_frame() {
+        let engine = crabka_pgexec::SqlEngine::new();
+        let mut setup = engine.connect();
+        setup
+            .simple_query("CREATE TABLE big (id int, value text, nullable text)")
+            .await
+            .expect("create table");
+        let payload = "x".repeat(320);
+        let values = (0..2_000)
+            .map(|id| format!("({id}, '{payload}', NULL)"))
+            .collect::<Vec<_>>()
+            .join(",");
+        setup
+            .simple_query(&format!("INSERT INTO big VALUES {values}"))
+            .await
+            .expect("insert rows");
+        let address = spawn_loopback(Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::new(1),
+            engine,
+        )]))))
+        .await
+        .expect("start range service");
+        let registry =
+            RangeRegistry::from_tenant_record(&record(address.to_string())).expect("registry");
+
+        let results = RegistryRemoteForward::new(registry, FramedTcpClient::default())
+            .forward_query(
+                RangeId::new(1),
+                "SELECT id, value, nullable FROM big".to_string(),
+            )
+            .await
+            .expect("paged query succeeds");
+
+        let [QueryResult::Rows { fields, rows, tag }] = results.as_slice() else {
+            panic!("expected rows: {results:?}");
+        };
+        assert_eq!(fields.len(), 3);
+        assert_eq!(rows.len(), 2_000);
+        assert_eq!(rows[1_999][0].as_ref().expect("id").text, "1999");
+        let value = rows[0][1].as_ref().expect("value");
+        assert_eq!(value.text.len(), 320);
+        assert_eq!(value.binary.len(), 320);
+        assert!(rows[0][2].is_none());
+        assert_eq!(tag, "SELECT 2000");
+    }
+
+    #[tokio::test]
+    async fn oversized_single_row_returns_bounded_error_and_does_not_poison_server() {
+        let engine = crabka_pgexec::SqlEngine::new();
+        let mut setup = engine.connect();
+        setup
+            .simple_query("CREATE TABLE huge (value text)")
+            .await
+            .expect("create table");
+        let payload = "z".repeat(600_000);
+        setup
+            .simple_query(&format!("INSERT INTO huge VALUES ('{payload}')"))
+            .await
+            .expect("insert huge row");
+        let address = spawn_loopback(Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::new(1),
+            engine,
+        )]))))
+        .await
+        .expect("start range service");
+        let registry =
+            RangeRegistry::from_tenant_record(&record(address.to_string())).expect("registry");
+        let forward = RegistryRemoteForward::new(registry, FramedTcpClient::default());
+
+        let error = forward
+            .forward_query(RangeId::new(1), "SELECT value FROM huge".to_string())
+            .await
+            .expect_err("one row cannot be split");
+        let pg = error.into_pg();
+        assert_eq!(pg.code, "54000");
+        assert!(pg.message.contains("one remote SQL row"));
+
+        let results = forward
+            .forward_query(RangeId::new(1), "SELECT 7".to_string())
+            .await
+            .expect("next connection remains healthy");
+        assert!(matches!(results.as_slice(), [QueryResult::Rows { .. }]));
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn remote_scan_error_preserves_owner_sqlstate_and_message() {
         let snapshot = crabka_pgmvcc::visibility::Snapshot {

@@ -16,6 +16,10 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 use crate::RangeId;
 
 const MAX_FRAME_BYTES: usize = 1 << 20;
+// Leave room for response structure, the final command tag, and JSON punctuation.
+// Individual rows are measured exactly; this conservative envelope keeps every
+// emitted frame below the hard decoder limit without accumulating an encoded copy.
+const SQL_CHUNK_TARGET_BYTES: usize = MAX_FRAME_BYTES - (4 << 10);
 const DEFAULT_RPC_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Request sent between range computes.
@@ -46,6 +50,11 @@ pub enum RangeResponse {
     Sql { result: String },
     /// Complete simple-query results, including row descriptions and encoded cells.
     SqlResults { results: Vec<WireQueryResult> },
+    /// One bounded part of a SQL result stream. This is internal to the framed
+    /// transport and is reassembled by [`FramedTcpClient::call`].
+    SqlResultsChunk { chunk: WireSqlResultChunk },
+    /// Terminates a bounded SQL result stream.
+    SqlResultsDone,
     /// SQL execution failed with a `PostgreSQL` error preserved from the owner.
     SqlError { code: String, message: String },
     /// Visible rows returned by a range scan.
@@ -78,6 +87,24 @@ pub enum WireQueryResult {
         tag: String,
     },
     Empty,
+}
+
+/// A frame-bounded fragment of one simple-query result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum WireSqlResultChunk {
+    Rows {
+        result_index: u32,
+        /// Present only on the first chunk, avoiding metadata amplification.
+        fields: Option<Vec<WireFieldDescription>>,
+        rows: Vec<Vec<Option<WireCell>>>,
+        /// Present only on the final chunk for this result.
+        tag: Option<String>,
+    },
+    Complete {
+        result_index: u32,
+        result: WireQueryResult,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -364,6 +391,9 @@ pub enum TransportError {
     /// The peer returned the wrong response variant.
     #[error("range endpoint returned an unexpected response")]
     UnexpectedResponse,
+    /// The peer violated framed stream ordering or shape invariants.
+    #[error("range transport protocol error: {0}")]
+    Protocol(String),
     /// TLS setup or handshake failed.
     #[error("range transport tls error: {0}")]
     Tls(String),
@@ -617,7 +647,85 @@ where
 {
     timeout(wait, write_frame(&mut stream, request)).await??;
     timeout(wait, stream.flush()).await??;
-    timeout(wait, read_frame(&mut stream)).await?
+    let first = timeout(wait, read_frame(&mut stream)).await??;
+    let chunk = match first {
+        RangeResponse::SqlResultsChunk { chunk } => chunk,
+        RangeResponse::SqlResultsDone => return Ok(RangeResponse::SqlResults { results: vec![] }),
+        response => return Ok(response),
+    };
+    let mut results = Vec::new();
+    consume_sql_chunk(&mut results, chunk)?;
+    loop {
+        match timeout(wait, read_frame(&mut stream)).await?? {
+            RangeResponse::SqlResultsChunk { chunk } => consume_sql_chunk(&mut results, chunk)?,
+            RangeResponse::SqlResultsDone => return Ok(RangeResponse::SqlResults { results }),
+            RangeResponse::SqlError { code, message } => {
+                return Ok(RangeResponse::SqlError { code, message });
+            }
+            _ => {
+                return Err(TransportError::Protocol(
+                    "unexpected SQL result stream frame".into(),
+                ));
+            }
+        }
+    }
+}
+
+fn consume_sql_chunk(
+    results: &mut Vec<WireQueryResult>,
+    chunk: WireSqlResultChunk,
+) -> Result<(), TransportError> {
+    match chunk {
+        WireSqlResultChunk::Complete {
+            result_index,
+            result,
+        } => {
+            if usize::try_from(result_index).ok() != Some(results.len()) {
+                return Err(TransportError::Protocol(
+                    "out-of-order SQL result chunk".into(),
+                ));
+            }
+            results.push(result);
+        }
+        WireSqlResultChunk::Rows {
+            result_index,
+            fields,
+            mut rows,
+            tag,
+        } => {
+            let index = usize::try_from(result_index)
+                .map_err(|_| TransportError::Protocol("invalid SQL result index".into()))?;
+            if index == results.len() {
+                let fields = fields.ok_or_else(|| {
+                    TransportError::Protocol("first row chunk omitted fields".into())
+                })?;
+                results.push(WireQueryResult::Rows {
+                    fields,
+                    rows: Vec::new(),
+                    tag: String::new(),
+                });
+            } else if index + 1 != results.len() || fields.is_some() {
+                return Err(TransportError::Protocol(
+                    "out-of-order SQL row chunk".into(),
+                ));
+            }
+            let WireQueryResult::Rows {
+                rows: accumulated,
+                tag: accumulated_tag,
+                ..
+            } = &mut results[index]
+            else {
+                return Err(TransportError::Protocol(
+                    "SQL row chunk changed result kind".into(),
+                ));
+            };
+            accumulated.append(&mut rows);
+            if let Some(tag) = tag {
+                *accumulated_tag = tag;
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn handle_stream<S>(
@@ -629,9 +737,150 @@ where
 {
     let request = read_frame(&mut stream).await?;
     let response = service.handle(request).await;
-    write_frame(&mut stream, &response).await?;
+    if let RangeResponse::SqlResults { results } = response {
+        write_sql_results(&mut stream, results).await?;
+    } else {
+        write_frame(&mut stream, &response).await?;
+    }
     stream.flush().await?;
     Ok(())
+}
+
+async fn write_sql_results<W>(
+    writer: &mut W,
+    results: Vec<WireQueryResult>,
+) -> Result<(), TransportError>
+where
+    W: AsyncWrite + Unpin,
+{
+    for (index, result) in results.into_iter().enumerate() {
+        let result_index = u32::try_from(index).map_err(|_| TransportError::FrameTooLarge {
+            actual: index,
+            limit: u32::MAX as usize,
+        })?;
+        match result {
+            WireQueryResult::Rows { fields, rows, tag } => {
+                write_row_chunks(writer, result_index, fields, rows, tag).await?;
+            }
+            result => {
+                let response = RangeResponse::SqlResultsChunk {
+                    chunk: WireSqlResultChunk::Complete {
+                        result_index,
+                        result,
+                    },
+                };
+                match write_frame(writer, &response).await {
+                    Ok(()) => {}
+                    Err(TransportError::FrameTooLarge { .. }) => {
+                        write_frame(
+                            writer,
+                            &RangeResponse::SqlError {
+                                code: "54000".into(),
+                                message: "one remote SQL result exceeds the transport frame limit"
+                                    .into(),
+                            },
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    write_frame(writer, &RangeResponse::SqlResultsDone).await
+}
+
+async fn write_row_chunks<W>(
+    writer: &mut W,
+    result_index: u32,
+    fields: Vec<WireFieldDescription>,
+    rows: Vec<Vec<Option<WireCell>>>,
+    tag: String,
+) -> Result<(), TransportError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut fields = Some(fields);
+    let mut page = Vec::new();
+    let mut page_bytes = 0usize;
+    for row in rows {
+        let row_bytes = serde_json::to_vec(&row)?.len().saturating_add(1);
+        let overhead = if page.is_empty() {
+            let probe = RangeResponse::SqlResultsChunk {
+                chunk: WireSqlResultChunk::Rows {
+                    result_index,
+                    fields: fields.clone(),
+                    rows: Vec::new(),
+                    tag: None,
+                },
+            };
+            serde_json::to_vec(&probe)?.len()
+        } else {
+            0
+        };
+        if !page.is_empty() && page_bytes.saturating_add(row_bytes) > SQL_CHUNK_TARGET_BYTES {
+            write_row_page(
+                writer,
+                result_index,
+                fields.take(),
+                std::mem::take(&mut page),
+                None,
+            )
+            .await?;
+            page_bytes = 0;
+        }
+        if page.is_empty() {
+            page_bytes = overhead;
+            if page_bytes.saturating_add(row_bytes) > SQL_CHUNK_TARGET_BYTES {
+                write_frame(
+                    writer,
+                    &RangeResponse::SqlError {
+                        code: "54000".into(),
+                        message: "one remote SQL row exceeds the transport frame limit".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+        }
+        page_bytes = page_bytes.saturating_add(row_bytes);
+        page.push(row);
+    }
+    write_row_page(writer, result_index, fields.take(), page, Some(tag)).await
+}
+
+async fn write_row_page<W>(
+    writer: &mut W,
+    result_index: u32,
+    fields: Option<Vec<WireFieldDescription>>,
+    rows: Vec<Vec<Option<WireCell>>>,
+    tag: Option<String>,
+) -> Result<(), TransportError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let response = RangeResponse::SqlResultsChunk {
+        chunk: WireSqlResultChunk::Rows {
+            result_index,
+            fields,
+            rows,
+            tag,
+        },
+    };
+    match write_frame(writer, &response).await {
+        Ok(()) => Ok(()),
+        Err(TransportError::FrameTooLarge { .. }) => write_frame(
+            writer,
+            &RangeResponse::SqlError {
+                code: "54000".into(),
+                message: "one remote SQL row description or command tag exceeds the transport frame limit"
+                    .into(),
+            },
+        )
+        .await,
+        Err(error) => Err(error),
+    }
 }
 
 async fn write_frame<W, T>(writer: &mut W, value: &T) -> Result<(), TransportError>
