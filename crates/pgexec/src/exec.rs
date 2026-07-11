@@ -2389,7 +2389,7 @@ fn scan_table_interval(
 }
 
 /// Evaluate an optional WHERE predicate against a row (NULL => false, like SELECT).
-fn row_matches(
+pub(crate) fn row_matches(
     filter: Option<&Expr>,
     scope: &Scope,
     row: &[crabka_pgtypes::Datum],
@@ -4321,7 +4321,7 @@ fn project_order_limit(
 
 /// Evaluate the projection expressions for each source row, yielding output
 /// Datum rows (one `Datum` per output column).
-fn project_rows(
+pub(crate) fn project_rows(
     out_exprs: &[Expr],
     scope: &Scope,
     rows: &[Vec<Datum>],
