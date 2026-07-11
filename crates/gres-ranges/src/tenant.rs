@@ -2290,15 +2290,22 @@ impl GatewaySession {
                     )
                     .await?;
             }
-            let description = session
+            let bind_result = session
                 .bind(portal, &owner_statement, params, result_formats)
-                .await?;
+                .await;
             if deferred {
-                session
+                let close_result = session
                     .close(CloseTarget::Statement(&owner_statement))
-                    .await?;
+                    .await;
+                if close_result.is_err() && bind_result.is_ok() {
+                    let _ = session.close(CloseTarget::Portal(portal)).await;
+                }
+                if let Err(error) = bind_result {
+                    return Err(error);
+                }
+                close_result?;
             }
-            description
+            bind_result?
         } else {
             self.ensure_remote_session(route.range_id).await?;
             let session = self
@@ -2314,20 +2321,27 @@ impl GatewaySession {
                     )
                     .await?;
             }
-            let description = session
+            let bind_result = session
                 .bind(
                     portal.to_owned(),
                     owner_statement.clone(),
                     params,
                     result_formats.to_vec(),
                 )
-                .await?;
+                .await;
             if deferred {
-                session
+                let close_result = session
                     .close(CloseTarget::Statement(&owner_statement))
-                    .await?;
+                    .await;
+                if close_result.is_err() && bind_result.is_ok() {
+                    let _ = session.close(CloseTarget::Portal(portal)).await;
+                }
+                if let Err(error) = bind_result {
+                    return Err(error);
+                }
+                close_result?;
             }
-            description
+            bind_result?
         };
         self.portals.insert(
             portal.to_owned(),
@@ -4428,6 +4442,46 @@ fn routing_sql_with_bound_params(
     let mut single_quoted = false;
     let mut double_quoted = false;
     while index < bytes.len() {
+        if !single_quoted && !double_quoted && bytes[index..].starts_with(b"--") {
+            let end = bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |offset| index + offset);
+            result.push_str(&sql[index..end]);
+            index = end;
+            continue;
+        }
+        if !single_quoted && !double_quoted && bytes[index..].starts_with(b"/*") {
+            let end = sql[index + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |offset| index + 2 + offset + 2);
+            result.push_str(&sql[index..end]);
+            index = end;
+            continue;
+        }
+        if !single_quoted
+            && !double_quoted
+            && bytes[index] == b'$'
+            && let Some(tag_end) = sql[index + 1..].find('$')
+        {
+            let delimiter_end = index + 1 + tag_end;
+            let tag = &sql[index + 1..delimiter_end];
+            if tag.is_empty()
+                || tag
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+            {
+                let delimiter = &sql[index..=delimiter_end];
+                let body_start = delimiter_end + 1;
+                let end = sql[body_start..]
+                    .find(delimiter)
+                    .map_or(bytes.len(), |offset| body_start + offset + delimiter.len());
+                result.push_str(&sql[index..end]);
+                index = end;
+                continue;
+            }
+        }
         match bytes[index] {
             b'\'' if !double_quoted => {
                 result.push('\'');
@@ -4443,6 +4497,20 @@ fn routing_sql_with_bound_params(
                 double_quoted = !double_quoted;
                 result.push('"');
                 index += 1;
+            }
+            b'\\' if single_quoted && index + 1 < bytes.len() => {
+                let character = sql[index..]
+                    .chars()
+                    .next()
+                    .expect("backslash is within SQL string");
+                result.push(character);
+                index += character.len_utf8();
+                let escaped = sql[index..]
+                    .chars()
+                    .next()
+                    .expect("escaped character exists");
+                result.push(escaped);
+                index += escaped.len_utf8();
             }
             b'$' if !single_quoted && !double_quoted => {
                 let start = index + 1;

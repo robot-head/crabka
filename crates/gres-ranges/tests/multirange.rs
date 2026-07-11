@@ -476,10 +476,14 @@ async fn parameterized_row_insert_routes_at_bind() {
         .extended_query_v2("INSERT INTO t150 VALUES ($1, 7)", &params)
         .await
         .expect("parameterized row insert");
+    session
+        .extended_query_v2("INSERT INTO t150 VALUES ($1, 8)", &[binary_i32_param(120)])
+        .await
+        .expect("binary parameterized remote row insert");
 
     assert_eq!(
         select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
-        vec![7]
+        vec![7, 8]
     );
 }
 
@@ -616,6 +620,46 @@ async fn parameterized_hash_select_routes_at_bind() {
 }
 
 #[tokio::test]
+async fn deferred_bind_error_cleans_owner_statement_and_allows_reparse() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session
+        .parse("deferred", "INSERT INTO t150 VALUES ($1, 7)", &[])
+        .await
+        .expect("deferred parse");
+    let error = session
+        .bind(
+            "bad",
+            "deferred",
+            &[BoundParam {
+                type_oid: None,
+                format: 0,
+                value: None,
+            }],
+            &[],
+        )
+        .await
+        .expect_err("null shard key rejected at bind");
+    assert_eq!(error.code, "0A000");
+    session
+        .close(crabka_pgwire::engine::CloseTarget::Statement("deferred"))
+        .await
+        .expect("close deferred statement");
+    session
+        .parse("deferred", "INSERT INTO t150 VALUES ($1, 7)", &[])
+        .await
+        .expect("reparse same name");
+    session
+        .bind("good", "deferred", &[text_param("20")], &[])
+        .await
+        .expect("bind after cleanup");
+}
+
+#[tokio::test]
 async fn sharded_scan_fails_when_required_range_is_not_hosted() {
     let config = hash_split_tenant_config()
         .with_hosted_ranges(vec![RangeId::COORDINATOR, RangeId::new(1)])
@@ -676,6 +720,14 @@ fn text_param(value: &str) -> BoundParam {
         type_oid: None,
         format: 0,
         value: Some(value.as_bytes().to_vec().into()),
+    }
+}
+
+fn binary_i32_param(value: i32) -> BoundParam {
+    BoundParam {
+        type_oid: None,
+        format: 1,
+        value: Some(value.to_be_bytes().to_vec().into()),
     }
 }
 
