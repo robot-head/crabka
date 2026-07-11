@@ -95,6 +95,9 @@ The provisioned `crabka-pg18-control` (`postgres:18`) returned:
 - `BEGIN; SELECT 1; SET TRANSACTION ISOLATION LEVEL REPEATABLE READ` -> error
   `SET TRANSACTION ISOLATION LEVEL must be called before any query` (25001
   class);
+- the same late SET TRANSACTION error follows successful INSERT, UPDATE, DELETE,
+  and CREATE TEMP TABLE; SHOW, SET GUC, RESET GUC, and repeated transaction
+  controls do not establish activity and leave SET TRANSACTION allowed;
 - negative timeout -> invalid/out-of-range.
 
 Commands used `docker exec crabka-pg18-control psql -U bob -d tenant-b
@@ -134,6 +137,11 @@ parser target and direct PostgreSQL 18 grammar/value probes remained green.
   current typed components, bounded multi-token parsing stops at statement
   boundaries, `.5s`/hours/days render like PostgreSQL 18, and post-query SET
   TRANSACTION fails with SQLSTATE 25001 and aborts the block.
+- RED: INSERT/UPDATE/DELETE and supported CREATE TABLE left SET TRANSACTION legal.
+  GREEN: an exhaustive statement classifier marks successful query, DML, and DDL
+  variants as transaction activity while preserving PostgreSQL 18's non-marking
+  SHOW/SET/RESET/transaction-control behavior; late SET returns 25001 and fails
+  the block for every covered activity class.
 
 ### Implementation corrections
 

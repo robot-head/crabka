@@ -73,9 +73,9 @@ pub(crate) struct TxnCtx {
     /// Remains held even when DDL releases `table_write_guard` before it waits
     /// for the catalog lock.
     pub(crate) writer_fence_guard: Option<crate::WriterFenceGuard>,
-    /// Whether a data query has already established transaction semantics.
+    /// Whether a query, DML, or DDL statement has established transaction semantics.
     /// PostgreSQL rejects SET TRANSACTION after this point.
-    pub(crate) query_started: bool,
+    pub(crate) activity_started: bool,
 }
 
 /// Shared physical gate held while a transaction issues ordinary writes.
@@ -747,6 +747,48 @@ fn with_guc_runtime<T>(
     })
 }
 
+/// PostgreSQL allows SET TRANSACTION after session/transaction controls, but
+/// not after a successful data query, DML statement, or DDL statement. Keep the
+/// classification exhaustive so a newly supported statement cannot silently
+/// bypass the transaction-activity rule.
+fn establishes_transaction_activity(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Query(_)
+        | Statement::Insert { .. }
+        | Statement::Update { .. }
+        | Statement::Delete { .. }
+        | Statement::CreateTable { .. }
+        | Statement::CreateIndex { .. }
+        | Statement::DropIndex { .. }
+        | Statement::DropTable { .. }
+        | Statement::AlterTableRename { .. }
+        | Statement::CreateView { .. }
+        | Statement::DropView { .. }
+        | Statement::CreateFdw { .. }
+        | Statement::DropFdw { .. }
+        | Statement::CreateServer { .. }
+        | Statement::AlterServer { .. }
+        | Statement::DropServer { .. }
+        | Statement::CreateUserMapping { .. }
+        | Statement::AlterUserMapping { .. }
+        | Statement::DropUserMapping { .. }
+        | Statement::CreateForeignTable { .. }
+        | Statement::DropForeignTable { .. }
+        | Statement::CreateRole { .. }
+        | Statement::DropRole { .. }
+        | Statement::GrantTablePrivileges { .. }
+        | Statement::RevokeTablePrivileges { .. }
+        | Statement::ImportForeignSchema { .. } => true,
+        Statement::Begin { .. }
+        | Statement::Commit
+        | Statement::Rollback
+        | Statement::Set { .. }
+        | Statement::Show { .. }
+        | Statement::Reset { .. }
+        | Statement::SetRole { .. } => false,
+    }
+}
+
 /// Reconstruct the global visibility snapshot from range 0's DURABLE state (never
 /// an in-memory running set — correction C2). xmax = next_global_xid; xip = [] (a
 /// g < xmax is resolved by reading range 0's global clog directly). Caller must
@@ -1089,7 +1131,7 @@ impl SqlSession {
         if matches!(
             &self.state,
             TxnState::InTransaction(TxnCtx {
-                query_started: true,
+                activity_started: true,
                 ..
             })
         ) {
@@ -1281,10 +1323,10 @@ impl SqlSession {
         // leave us Idle (the statement was its own transaction).
         if result.is_err() {
             self.mark_transaction_failed();
-        } else if matches!(stmt, Statement::Query(_))
+        } else if establishes_transaction_activity(stmt)
             && let TxnState::InTransaction(ctx) = &mut self.state
         {
-            ctx.query_started = true;
+            ctx.activity_started = true;
         }
         result
     }
@@ -1373,7 +1415,7 @@ impl SqlSession {
             unique_index_guard: None,
             table_write_guard: None,
             writer_fence_guard: None,
-            query_started: false,
+            activity_started: false,
         });
         Ok(QueryResult::Command {
             tag: "BEGIN".into(),
@@ -5510,6 +5552,75 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.code, "25001");
         assert_eq!(session.tx_status(), TxStatus::Failed);
+        session.simple_query("ROLLBACK").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_transaction_rejects_after_successful_dml() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE f1_activity_dml (id int4)")
+            .await
+            .unwrap();
+        session
+            .simple_query("INSERT INTO f1_activity_dml VALUES (1)")
+            .await
+            .unwrap();
+
+        for sql in [
+            "INSERT INTO f1_activity_dml VALUES (2)",
+            "UPDATE f1_activity_dml SET id = 3 WHERE id = 1",
+            "DELETE FROM f1_activity_dml WHERE id = 1",
+        ] {
+            session.simple_query("BEGIN").await.unwrap();
+            session.simple_query(sql).await.unwrap();
+            let error = session
+                .simple_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "25001", "late SET after {sql}");
+            assert_eq!(session.tx_status(), TxStatus::Failed);
+            session.simple_query("ROLLBACK").await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn set_transaction_rejects_after_successful_ddl() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session.simple_query("BEGIN").await.unwrap();
+        session
+            .simple_query("CREATE TABLE f1_activity_ddl (id int4)")
+            .await
+            .unwrap();
+        let error = session
+            .simple_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "25001");
+        assert_eq!(session.tx_status(), TxStatus::Failed);
+        session.simple_query("ROLLBACK").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_transaction_remains_allowed_after_session_controls() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session.simple_query("BEGIN").await.unwrap();
+        session.simple_query("SHOW application_name").await.unwrap();
+        session
+            .simple_query("SET application_name = 'control-only'")
+            .await
+            .unwrap();
+        session
+            .simple_query("RESET application_name")
+            .await
+            .unwrap();
+        session
+            .simple_query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .await
+            .unwrap();
         session.simple_query("ROLLBACK").await.unwrap();
     }
 
