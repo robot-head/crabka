@@ -1,20 +1,32 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "captured_on": "2026-07-11",
   "recapture_command": "python3 tools/capture-gres-driver-goldens.py --write",
+  "postgres": {
+    "version": "18",
+    "image": "postgres@sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4",
+    "image_id": "sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4"
+  },
   "pgdog": {
     "version": "0.1.6",
-    "image": "ghcr.io/pgdogdev/pgdog:0.1.6@sha256:5d21fa668d091ae6ce30e5cb1536c7bcaba1f96b0d492227b1a46852d1f3ab2c",
-    "commit": "c99282e"
+    "image": "ghcr.io/pgdogdev/pgdog@sha256:5d21fa668d091ae6ce30e5cb1536c7bcaba1f96b0d492227b1a46852d1f3ab2c",
+    "image_id": "sha256:5d21fa668d091ae6ce30e5cb1536c7bcaba1f96b0d492227b1a46852d1f3ab2c",
+    "revision": "c99282e9001f66194b03b108ba2a66ad7a27a75d",
+    "source": "https://github.com/pgdogdev/pgdog",
+    "oci_version": "v0.1.6"
   },
   "drivers": [
     {
       "driver": "tokio-postgres",
       "version": "0.7.18",
       "lock_source": "Cargo.lock registry checksum a528f7d280f6d5b9cd149635c8705b0dd049754bc67d81d31fa25169a93809d3",
-      "capture_target": "postgres:18 via payload-safe TCP recorder; PgDog 0.1.6 backend via the same recorder",
+      "capture_target": "pinned PostgreSQL 18 and PgDog 0.1.6 via payload-safe TCP recorder",
       "startup_parameters": {
         "client_encoding": "UTF8"
+      },
+      "pgdog_backend_startup_parameters": {
+        "application_name": "PgDog",
+        "client_encoding": "utf-8"
       },
       "pgdog_backend_set_batches": []
     },
@@ -22,12 +34,16 @@
       "driver": "sqlx",
       "version": "0.9.0",
       "lock_source": "Cargo.lock registry checksum 378620ccc25c62c89d8be1c819e76a88d59bdcc3304733330788948e619bfd71",
-      "capture_target": "postgres:18 via payload-safe TCP recorder; PgDog 0.1.6 backend via the same recorder",
+      "capture_target": "pinned PostgreSQL 18 and PgDog 0.1.6 via payload-safe TCP recorder",
       "startup_parameters": {
         "DateStyle": "ISO, MDY",
         "TimeZone": "UTC",
         "client_encoding": "UTF8",
         "extra_float_digits": "2"
+      },
+      "pgdog_backend_startup_parameters": {
+        "application_name": "PgDog",
+        "client_encoding": "utf-8"
       },
       "pgdog_backend_set_batches": [
         "SET \"datestyle\" TO 'ISO, MDY'",
@@ -39,8 +55,12 @@
       "driver": "psycopg",
       "version": "3.2.9",
       "lock_source": "requirements-driver-smoke.txt sha256:2fbb46fcd17bc81f993f28c47f1ebea38d66ae97cc2dbc3cad73b37cefbff700",
-      "capture_target": "postgres:18 via payload-safe TCP recorder; PgDog 0.1.6 backend via the same recorder",
+      "capture_target": "pinned PostgreSQL 18 and PgDog 0.1.6 via payload-safe TCP recorder",
       "startup_parameters": {},
+      "pgdog_backend_startup_parameters": {
+        "application_name": "PgDog",
+        "client_encoding": "utf-8"
+      },
       "pgdog_backend_set_batches": []
     }
   ]

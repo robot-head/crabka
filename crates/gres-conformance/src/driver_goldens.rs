@@ -1,25 +1,26 @@
 //! Capture-backed `PostgreSQL` driver startup and pooler replay fixtures.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    io,
-};
+use std::{collections::BTreeMap, io};
 
-use serde::Deserialize;
+use serde::{
+    Deserialize, Deserializer,
+    de::{MapAccess, Visitor},
+};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
 
-pub const SCHEMA_VERSION: u32 = 1;
-const ALLOWED_STARTUP_KEYS: &[&str] = &[
-    "DateStyle",
-    "TimeZone",
-    "application_name",
-    "client_encoding",
-    "extra_float_digits",
-];
+pub const SCHEMA_VERSION: u32 = 2;
+const PGDOG_IMAGE: &str = "ghcr.io/pgdogdev/pgdog@sha256:5d21fa668d091ae6ce30e5cb1536c7bcaba1f96b0d492227b1a46852d1f3ab2c";
+const PGDOG_IMAGE_ID: &str =
+    "sha256:5d21fa668d091ae6ce30e5cb1536c7bcaba1f96b0d492227b1a46852d1f3ab2c";
+const PGDOG_REVISION: &str = "c99282e9001f66194b03b108ba2a66ad7a27a75d";
+const POSTGRES_IMAGE: &str =
+    "postgres@sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4";
+const POSTGRES_IMAGE_ID: &str =
+    "sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +28,7 @@ pub struct Fixture {
     pub schema_version: u32,
     pub captured_on: String,
     pub recapture_command: String,
+    pub postgres: PostgresPin,
     pub pgdog: PgDogPin,
     pub drivers: Vec<DriverCapture>,
 }
@@ -36,7 +38,18 @@ pub struct Fixture {
 pub struct PgDogPin {
     pub version: String,
     pub image: String,
-    pub commit: String,
+    pub image_id: String,
+    pub revision: String,
+    pub source: String,
+    pub oci_version: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PostgresPin {
+    pub version: String,
+    pub image: String,
+    pub image_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,7 +59,10 @@ pub struct DriverCapture {
     pub version: String,
     pub lock_source: String,
     pub capture_target: String,
+    #[serde(deserialize_with = "deserialize_unique_startup_parameters")]
     pub startup_parameters: BTreeMap<String, String>,
+    #[serde(deserialize_with = "deserialize_unique_startup_parameters")]
+    pub pgdog_backend_startup_parameters: BTreeMap<String, String>,
     pub pgdog_backend_set_batches: Vec<String>,
 }
 
@@ -56,6 +72,38 @@ pub enum FixtureError {
     Json(#[from] serde_json::Error),
     #[error("driver-golden invariant failed: {0}")]
     Invariant(String),
+}
+
+fn deserialize_unique_startup_parameters<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct UniqueMapVisitor;
+
+    impl<'de> Visitor<'de> for UniqueMapVisitor {
+        type Value = BTreeMap<String, String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a startup parameter object with unique keys")
+        }
+
+        fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            let mut parameters = BTreeMap::new();
+            while let Some((key, value)) = access.next_entry::<String, String>()? {
+                if parameters.insert(key, value).is_some() {
+                    return Err(serde::de::Error::custom("duplicate startup parameter key"));
+                }
+            }
+            Ok(parameters)
+        }
+    }
+
+    deserializer.deserialize_map(UniqueMapVisitor)
 }
 
 pub fn parse_and_validate(
@@ -91,7 +139,7 @@ fn validate_fixture(
 fn validate_provenance(fixture: &Fixture) -> Result<(), FixtureError> {
     require(
         fixture.schema_version == SCHEMA_VERSION,
-        "schema_version must be 1",
+        "schema_version must be 2",
     )?;
     require(
         is_iso_date(&fixture.captured_on),
@@ -106,84 +154,142 @@ fn validate_provenance(fixture: &Fixture) -> Result<(), FixtureError> {
         "PgDog version must be 0.1.6",
     )?;
     require(
-        fixture.pgdog.commit == "c99282e",
-        "PgDog commit must be c99282e",
+        fixture.pgdog.image == PGDOG_IMAGE,
+        "PgDog digest reference drifted",
     )?;
     require(
-        fixture.pgdog.image.contains("0.1.6") && !fixture.pgdog.image.contains("latest"),
-        "PgDog image must carry the pinned version",
+        fixture.pgdog.image_id == PGDOG_IMAGE_ID,
+        "PgDog inspected image id drifted",
+    )?;
+    require(
+        fixture.pgdog.revision == PGDOG_REVISION,
+        "PgDog OCI revision drifted",
+    )?;
+    require(
+        fixture.pgdog.source == "https://github.com/pgdogdev/pgdog",
+        "PgDog OCI source drifted",
+    )?;
+    require(
+        fixture.pgdog.oci_version == "v0.1.6",
+        "PgDog OCI version drifted",
+    )?;
+    require(
+        fixture.postgres.version == "18",
+        "PostgreSQL version must be 18",
+    )?;
+    require(
+        fixture.postgres.image == POSTGRES_IMAGE,
+        "PostgreSQL digest reference drifted",
+    )?;
+    require(
+        fixture.postgres.image_id == POSTGRES_IMAGE_ID,
+        "PostgreSQL inspected image id drifted",
     )?;
 
     Ok(())
 }
 
 fn validate_driver_captures(fixture: &Fixture) -> Result<(), FixtureError> {
-    let expected = BTreeMap::from([
-        ("tokio-postgres", "0.7.18"),
-        ("sqlx", "0.9.0"),
-        ("psycopg", "3.2.9"),
+    let expected_order = ["tokio-postgres", "sqlx", "psycopg"];
+    require(
+        fixture
+            .drivers
+            .iter()
+            .map(|capture| capture.driver.as_str())
+            .eq(expected_order),
+        "driver captures are missing, duplicated, or reordered",
+    )?;
+    let backend_startup = BTreeMap::from([
+        ("application_name".to_string(), "PgDog".to_string()),
+        ("client_encoding".to_string(), "utf-8".to_string()),
     ]);
-    let mut seen = BTreeSet::new();
     for capture in &fixture.drivers {
-        let Some(version) = expected.get(capture.driver.as_str()) else {
-            return Err(invariant(format!("unexpected driver {}", capture.driver)));
-        };
+        let (version, startup, batches): (&str, BTreeMap<String, String>, &[&str]) =
+            match capture.driver.as_str() {
+                "tokio-postgres" => (
+                    "0.7.18",
+                    BTreeMap::from([("client_encoding".to_string(), "UTF8".to_string())]),
+                    &[],
+                ),
+                "sqlx" => (
+                    "0.9.0",
+                    BTreeMap::from([
+                        ("DateStyle".to_string(), "ISO, MDY".to_string()),
+                        ("TimeZone".to_string(), "UTC".to_string()),
+                        ("client_encoding".to_string(), "UTF8".to_string()),
+                        ("extra_float_digits".to_string(), "2".to_string()),
+                    ]),
+                    &[
+                        "SET \"datestyle\" TO 'ISO, MDY'",
+                        "SET \"extra_float_digits\" TO '2'",
+                        "SET \"timezone\" TO 'UTC'",
+                    ],
+                ),
+                "psycopg" => ("3.2.9", BTreeMap::new(), &[]),
+                other => return Err(invariant(format!("unexpected driver {other}"))),
+            };
         require(
-            capture.version == *version,
+            capture.version == version,
             "driver version does not match the pin",
         )?;
         require(
-            seen.insert(capture.driver.as_str()),
-            "duplicate driver capture",
-        )?;
-        require(
             capture.capture_target
-                == "postgres:18 via payload-safe TCP recorder; PgDog 0.1.6 backend via the same recorder",
+                == "pinned PostgreSQL 18 and PgDog 0.1.6 via payload-safe TCP recorder",
             "capture target must name both observed paths",
         )?;
         require(
-            !capture.lock_source.is_empty(),
-            "lock_source must be populated",
+            capture.startup_parameters == startup,
+            "direct startup capture drifted",
         )?;
-        if capture.driver == "psycopg" {
-            require(
-                capture
-                    .lock_source
-                    .ends_with("2fbb46fcd17bc81f993f28c47f1ebea38d66ae97cc2dbc3cad73b37cefbff700"),
-                "psycopg fixture checksum differs from requirements",
-            )?;
-        }
-        for key in capture.startup_parameters.keys() {
-            require(
-                ALLOWED_STARTUP_KEYS.contains(&key.as_str()),
-                "startup key is not allowlisted",
-            )?;
-        }
+        validate_startup_parameters(&capture.startup_parameters)?;
+        require(
+            capture.pgdog_backend_startup_parameters == backend_startup,
+            "PgDog backend startup capture drifted",
+        )?;
+        validate_startup_parameters(&capture.pgdog_backend_startup_parameters)?;
+        require(
+            capture
+                .pgdog_backend_set_batches
+                .iter()
+                .map(String::as_str)
+                .eq(batches.iter().copied()),
+            "PgDog backend SET capture drifted",
+        )?;
         for batch in &capture.pgdog_backend_set_batches {
-            require(
-                !batch.trim().is_empty(),
-                "backend SQL batch must not be empty",
-            )?;
-            let statements = batch
-                .split(';')
-                .map(str::trim)
-                .filter(|statement| !statement.is_empty());
-            require(
-                statements.into_iter().all(|statement| {
-                    let normalized = statement.to_ascii_uppercase();
-                    normalized.starts_with("SET ") || normalized.starts_with("SET\n")
-                }),
-                "backend SQL batch must contain only SET statements",
-            )?;
-            require(!batch.contains('\0'), "backend SQL batch contains a NUL")?;
+            validate_safe_set_batch(batch)?;
         }
     }
-    require(
-        seen.len() == expected.len(),
-        "one exact capture per pinned driver is required",
-    )?;
-
     Ok(())
+}
+
+fn validate_startup_parameters(parameters: &BTreeMap<String, String>) -> Result<(), FixtureError> {
+    for (key, value) in parameters {
+        let allowed = matches!(
+            (key.as_str(), value.as_str()),
+            ("DateStyle", "ISO, MDY")
+                | ("TimeZone", "UTC")
+                | ("application_name", "PgDog")
+                | ("client_encoding", "UTF8" | "utf-8")
+                | ("extra_float_digits", "2")
+        );
+        require(
+            allowed,
+            "startup parameter or value is outside the exact allowlist",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_safe_set_batch(batch: &str) -> Result<(), FixtureError> {
+    require(
+        matches!(
+            batch,
+            "SET \"datestyle\" TO 'ISO, MDY'"
+                | "SET \"extra_float_digits\" TO '2'"
+                | "SET \"timezone\" TO 'UTC'"
+        ),
+        "backend SQL batch is outside the exact GUC/value grammar",
+    )
 }
 
 fn validate_dependency_pins(
@@ -214,9 +320,12 @@ fn validate_dependency_pins(
         )?;
     }
     require(
-        python_requirements
-            .lines()
-            .any(|line| line.starts_with("psycopg==3.2.9 ")),
+        fixture
+            .drivers
+            .iter()
+            .find(|capture| capture.driver == "psycopg")
+            .map(|capture| capture.lock_source.as_str())
+            == psycopg_lock_source(python_requirements).as_deref(),
         "psycopg pin differs from requirements-driver-smoke.txt",
     )?;
 
@@ -224,9 +333,34 @@ fn validate_dependency_pins(
 }
 
 fn package_checksum<'a>(cargo_lock: &'a str, package: &str) -> Option<&'a str> {
-    let block = cargo_lock.get(cargo_lock.find(package)?..)?;
+    let block = cargo_lock
+        .get(cargo_lock.find(package)?..)?
+        .split("[[package]]")
+        .next()?;
     let value = block.get(block.find("checksum = \"")? + "checksum = \"".len()..)?;
     value.get(..value.find('"')?)
+}
+
+fn psycopg_lock_source(requirements: &str) -> Option<String> {
+    let mut matches = requirements
+        .lines()
+        .filter(|line| line.starts_with("psycopg==3.2.9 "));
+    let line = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let mut fields = line.split_whitespace();
+    if fields.next()? != "psycopg==3.2.9" {
+        return None;
+    }
+    let hash = fields.next()?.strip_prefix("--hash=sha256:")?;
+    if fields.next().is_some()
+        || hash.len() != 64
+        || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(format!("requirements-driver-smoke.txt sha256:{hash}"))
 }
 
 fn validate_payload_safety(source: &str) -> Result<(), FixtureError> {
@@ -359,6 +493,17 @@ mod tests {
 
     use super::parse_and_validate;
 
+    fn assert_rejected(text: &str) {
+        assert!(
+            parse_and_validate(
+                text,
+                include_str!("../../../Cargo.lock"),
+                include_str!("../requirements-driver-smoke.txt")
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn checked_fixture_matches_pinned_dependencies_and_safe_schema() {
         let fixture = include_str!("../fixtures/driver-connect-v1.json");
@@ -374,47 +519,37 @@ mod tests {
     fn unsafe_or_drifted_fixture_is_rejected() {
         let safe = include_str!("../fixtures/driver-connect-v1.json");
         let unsafe_fixture = safe.replace("client_encoding", "password");
-        assert!(
-            parse_and_validate(
-                &unsafe_fixture,
-                include_str!("../../../Cargo.lock"),
-                include_str!("../requirements-driver-smoke.txt")
-            )
-            .is_err()
+        assert_rejected(&unsafe_fixture);
+        let duplicate_startup = safe.replacen(
+            "\"client_encoding\": \"UTF8\"",
+            "\"client_encoding\": \"UTF8\", \"client_encoding\": \"UTF8\"",
+            1,
         );
+        assert_rejected(&duplicate_startup);
+        let unknown_guc = safe.replace(
+            "SET \\\"timezone\\\" TO 'UTC'",
+            "SET \\\"search_path\\\" TO 'private'",
+        );
+        assert_rejected(&unknown_guc);
+        let set_role = safe.replace("SET \\\"timezone\\\" TO 'UTC'", "SET ROLE private");
+        assert_rejected(&set_role);
+        let comment_trick = safe.replace(
+            "SET \\\"timezone\\\" TO 'UTC'",
+            "SET \\\"timezone\\\" TO 'UTC' /* private */",
+        );
+        assert_rejected(&comment_trick);
         let drifted = safe.replace("0.7.18", "0.7.17");
-        assert!(
-            parse_and_validate(
-                &drifted,
-                include_str!("../../../Cargo.lock"),
-                include_str!("../requirements-driver-smoke.txt")
-            )
-            .is_err()
-        );
+        assert_rejected(&drifted);
         let false_provenance = safe.replace(
             "a528f7d280f6d5b9cd149635c8705b0dd049754bc67d81d31fa25169a93809d3",
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         );
-        assert!(
-            parse_and_validate(
-                &false_provenance,
-                include_str!("../../../Cargo.lock"),
-                include_str!("../requirements-driver-smoke.txt")
-            )
-            .is_err()
-        );
+        assert_rejected(&false_provenance);
         let mixed_batch = safe.replace(
             "SET \\\"datestyle\\\" TO 'ISO, MDY'",
             "SET \\\"datestyle\\\" TO 'ISO, MDY'; SELECT 1",
         );
-        assert!(
-            parse_and_validate(
-                &mixed_batch,
-                include_str!("../../../Cargo.lock"),
-                include_str!("../requirements-driver-smoke.txt")
-            )
-            .is_err()
-        );
+        assert_rejected(&mixed_batch);
     }
 
     #[test]
@@ -430,5 +565,52 @@ mod tests {
                 .windows(b"client_encoding\0UTF8\0".len())
                 .any(|window| window == b"client_encoding\0UTF8\0")
         );
+    }
+
+    #[test]
+    fn exact_capture_evidence_cannot_be_deleted_reordered_or_mutated() {
+        let source = include_str!("../fixtures/driver-connect-v1.json");
+        let original: serde_json::Value = serde_json::from_str(source).unwrap();
+        let mut mutations = Vec::new();
+
+        let mut deleted = original.clone();
+        deleted["drivers"][1]["pgdog_backend_set_batches"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        mutations.push(deleted);
+
+        let mut reordered = original.clone();
+        reordered["drivers"][1]["pgdog_backend_set_batches"]
+            .as_array_mut()
+            .unwrap()
+            .swap(0, 2);
+        mutations.push(reordered);
+
+        let mut emptied = original.clone();
+        emptied["drivers"][0]["startup_parameters"] = serde_json::json!({});
+        mutations.push(emptied);
+
+        let mut backend_deleted = original.clone();
+        backend_deleted["drivers"][2]["pgdog_backend_startup_parameters"] = serde_json::json!({});
+        mutations.push(backend_deleted);
+
+        let mut private_batch = original.clone();
+        private_batch["drivers"][1]["pgdog_backend_set_batches"][2] =
+            serde_json::json!("SET \"timezone\" TO 'private-token'");
+        mutations.push(private_batch);
+
+        let mut pgdog_digest = original.clone();
+        pgdog_digest["pgdog"]["image"] = serde_json::json!("ghcr.io/pgdogdev/pgdog:0.1.6");
+        mutations.push(pgdog_digest);
+
+        let mut postgres_digest = original;
+        postgres_digest["postgres"]["image"] = serde_json::json!("postgres:18");
+        mutations.push(postgres_digest);
+
+        for mutation in mutations {
+            let text = serde_json::to_string(&mutation).unwrap();
+            assert_rejected(&text);
+        }
     }
 }

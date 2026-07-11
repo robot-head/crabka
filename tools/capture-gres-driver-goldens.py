@@ -7,6 +7,7 @@ import argparse
 import datetime
 import json
 import pathlib
+import re
 import socket
 import subprocess
 import sys
@@ -16,19 +17,33 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "crates/gres-conformance/fixtures/driver-connect-v1.json"
 RECORDER = ROOT / "tools/gres-wire-recorder.py"
-PGDOG_IMAGE = "ghcr.io/pgdogdev/pgdog:0.1.6"
 PGDOG_DIGEST = "sha256:5d21fa668d091ae6ce30e5cb1536c7bcaba1f96b0d492227b1a46852d1f3ab2c"
-PGDOG_COMMIT = "c99282e"
-POSTGRES_IMAGE = "postgres:18"
+PGDOG_IMAGE = f"ghcr.io/pgdogdev/pgdog@{PGDOG_DIGEST}"
+PGDOG_REVISION = "c99282e9001f66194b03b108ba2a66ad7a27a75d"
+POSTGRES_DIGEST = "sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4"
+POSTGRES_IMAGE = f"postgres@{POSTGRES_DIGEST}"
 POSTGRES_CONTAINER = "crabka-driver-golden-postgres"
 PGDOG_CONTAINER = "crabka-driver-golden-pgdog"
 CAPTURE_USER = "capture_user"
 CAPTURE_PASSWORD = "capture_password"
 CAPTURE_DB = "capture"
+SUBPROCESS_TIMEOUT = 30
+RECORDER_DEADLINE = 20
 
 
-def run(*args: str, check: bool = True, **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run(args, check=check, text=True, **kwargs)
+def run(
+    *args: str,
+    check: bool = True,
+    timeout_seconds: float = SUBPROCESS_TIMEOUT,
+    **kwargs,
+) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        args,
+        check=check,
+        text=True,
+        timeout=timeout_seconds,
+        **kwargs,
+    )
 
 
 def free_port() -> int:
@@ -67,9 +82,20 @@ def wait_postgres() -> None:
 def start_recorder(listen_port: int, upstream_port: int, output: pathlib.Path) -> subprocess.Popen:
     return subprocess.Popen(
         [sys.executable, str(RECORDER), "--listen", f"127.0.0.1:{listen_port}",
-         "--upstream", f"127.0.0.1:{upstream_port}", "--out", str(output)],
+         "--upstream", f"127.0.0.1:{upstream_port}", "--out", str(output),
+         "--deadline-seconds", str(RECORDER_DEADLINE)],
         cwd=ROOT,
     )
+
+
+def stop_process(process: subprocess.Popen) -> None:
+    if process.poll() is None:
+        process.kill()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        process.wait(timeout=5)
 
 
 def rust_driver(driver: str, port: int) -> None:
@@ -81,6 +107,7 @@ def rust_driver(driver: str, port: int) -> None:
         "--database-url", url,
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
+        timeout_seconds=20,
     )
 
 
@@ -94,7 +121,7 @@ with psycopg.connect(host='127.0.0.1', port=PORT, user='capture_user',
         cur.execute('SELECT %s::int4', (61,))
         assert cur.fetchone() == (61,)
 """.replace("PORT", str(port))
-    run(sys.executable, "-c", code, cwd=ROOT, stdout=subprocess.DEVNULL)
+    run(sys.executable, "-c", code, cwd=ROOT, stdout=subprocess.DEVNULL, timeout_seconds=20)
 
 
 def direct_capture(driver: str, postgres_port: int, temp: pathlib.Path) -> dict:
@@ -110,8 +137,7 @@ def direct_capture(driver: str, postgres_port: int, temp: pathlib.Path) -> dict:
         if recorder.wait(timeout=10) != 0:
             raise RuntimeError(f"direct {driver} recorder failed")
     finally:
-        if recorder.poll() is None:
-            recorder.kill()
+        stop_process(recorder)
     captured = json.loads(output.read_text())
     if captured["set_batches"]:
         raise RuntimeError(f"direct {driver} unexpectedly emitted simple-query SET batches")
@@ -151,15 +177,15 @@ def pgdog_capture(driver: str, postgres_port: int, temp: pathlib.Path) -> dict:
     output = temp / f"pgdog-backend-{driver}.json"
     recorder = start_recorder(recorder_port, postgres_port, output)
     config = pgdog_files(temp, pgdog_port, recorder_port)
-    run("docker", "rm", "-f", PGDOG_CONTAINER, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    run(
-        "docker", "run", "-d", "--rm", "--network", "host", "--name", PGDOG_CONTAINER,
-        "-v", f"{config}:/etc/pgdog:ro", PGDOG_IMAGE,
-        "/usr/local/bin/pgdog", "--config", "/etc/pgdog/pgdog.toml",
-        "--users", "/etc/pgdog/users.toml", "run",
-        stdout=subprocess.DEVNULL,
-    )
     try:
+        run("docker", "rm", "-f", PGDOG_CONTAINER, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        run(
+            "docker", "run", "-d", "--rm", "--network", "host", "--name", PGDOG_CONTAINER,
+            "-v", f"{config}:/etc/pgdog:ro", PGDOG_IMAGE,
+            "/usr/local/bin/pgdog", "--config", "/etc/pgdog/pgdog.toml",
+            "--users", "/etc/pgdog/users.toml", "run",
+            stdout=subprocess.DEVNULL,
+        )
         wait_port(pgdog_port)
         if driver == "psycopg":
             psycopg_driver(pgdog_port)
@@ -167,12 +193,11 @@ def pgdog_capture(driver: str, postgres_port: int, temp: pathlib.Path) -> dict:
             rust_driver(driver, pgdog_port)
     finally:
         run("docker", "rm", "-f", PGDOG_CONTAINER, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        if recorder.wait(timeout=10) != 0:
-            raise RuntimeError(f"PgDog {driver} recorder failed")
-    finally:
-        if recorder.poll() is None:
-            recorder.kill()
+        try:
+            if recorder.wait(timeout=10) != 0:
+                raise RuntimeError(f"PgDog {driver} recorder failed")
+        finally:
+            stop_process(recorder)
     return json.loads(output.read_text())
 
 
@@ -183,24 +208,72 @@ def cargo_pin(name: str, version: str) -> str:
     if start < 0:
         raise RuntimeError(f"Cargo.lock does not pin {name} {version}")
     checksum_marker = 'checksum = "'
-    checksum_start = lock.find(checksum_marker, start) + len(checksum_marker)
-    checksum_end = lock.find('"', checksum_start)
-    return f"Cargo.lock registry checksum {lock[checksum_start:checksum_end]}"
+    end = lock.find("[[package]]", start + len(marker))
+    block = lock[start : len(lock) if end < 0 else end]
+    checksum_start = block.find(checksum_marker) + len(checksum_marker)
+    if checksum_start < len(checksum_marker):
+        raise RuntimeError(f"Cargo.lock package {name} {version} has no checksum")
+    checksum_end = block.find('"', checksum_start)
+    return f"Cargo.lock registry checksum {block[checksum_start:checksum_end]}"
 
 
-def verify_environment() -> None:
-    run("cargo", "build", "--locked", "-p", "crabka-gres-conformance", "--bin", "crabka-gres-driver-smoke", cwd=ROOT)
-    inspect = run("docker", "image", "inspect", PGDOG_IMAGE, "--format", "{{.Id}}", capture_output=True).stdout.strip()
-    if inspect != PGDOG_DIGEST:
-        raise RuntimeError(f"PgDog image digest drift: {inspect}")
+def requirement_pin() -> str:
     requirements = (ROOT / "crates/gres-conformance/requirements-driver-smoke.txt").read_text()
-    if "psycopg==3.2.9 --hash=sha256:2fbb46fcd17bc81f993f28c47f1ebea38d66ae97cc2dbc3cad73b37cefbff700" not in requirements:
+    matches = re.findall(r"^psycopg==3\.2\.9 --hash=sha256:([0-9a-f]{64})$", requirements, re.MULTILINE)
+    if len(matches) != 1:
         raise RuntimeError("psycopg requirement pin drifted")
+    return f"requirements-driver-smoke.txt sha256:{matches[0]}"
+
+
+def inspect_image(reference: str) -> tuple[str, dict | None]:
+    inspected = run(
+        "docker", "image", "inspect", reference,
+        "--format", "{{json .}}",
+        capture_output=True,
+    )
+    document = json.loads(inspected.stdout)
+    return document["Id"], document["Config"].get("Labels")
+
+
+def verify_environment() -> dict:
+    run(
+        "cargo", "build", "--locked", "-p", "crabka-gres-conformance",
+        "--bin", "crabka-gres-driver-smoke", cwd=ROOT, timeout_seconds=120,
+    )
+    run("docker", "pull", PGDOG_IMAGE, stdout=subprocess.DEVNULL, timeout_seconds=120)
+    run("docker", "pull", POSTGRES_IMAGE, stdout=subprocess.DEVNULL, timeout_seconds=120)
+    pgdog_id, labels = inspect_image(PGDOG_IMAGE)
+    if pgdog_id != PGDOG_DIGEST:
+        raise RuntimeError(f"PgDog image id drift: {pgdog_id}")
+    expected_labels = {
+        "org.opencontainers.image.revision": PGDOG_REVISION,
+        "org.opencontainers.image.source": "https://github.com/pgdogdev/pgdog",
+        "org.opencontainers.image.version": "v0.1.6",
+    }
+    if labels is None or any(labels.get(key) != value for key, value in expected_labels.items()):
+        raise RuntimeError("PgDog OCI provenance labels drifted")
+    postgres_id, postgres_labels = inspect_image(POSTGRES_IMAGE)
+    if postgres_id != POSTGRES_DIGEST:
+        raise RuntimeError(f"PostgreSQL image id drift: {postgres_id}")
+    if postgres_labels is not None:
+        raise RuntimeError("PostgreSQL image unexpectedly gained unvalidated OCI labels")
+    requirement_pin()
     run(sys.executable, "-c", "import psycopg; assert psycopg.__version__ == '3.2.9'")
+    return {
+        "postgres": {"version": "18", "image": POSTGRES_IMAGE, "image_id": postgres_id},
+        "pgdog": {
+            "version": "0.1.6",
+            "image": PGDOG_IMAGE,
+            "image_id": pgdog_id,
+            "revision": labels["org.opencontainers.image.revision"],
+            "source": labels["org.opencontainers.image.source"],
+            "oci_version": labels["org.opencontainers.image.version"],
+        },
+    }
 
 
 def capture() -> dict:
-    verify_environment()
+    provenance = verify_environment()
     postgres_port = free_port()
     run("docker", "rm", "-f", POSTGRES_CONTAINER, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     run(
@@ -224,9 +297,9 @@ def capture() -> dict:
     sources = {
         "tokio-postgres": cargo_pin("tokio-postgres", "0.7.18"),
         "sqlx": cargo_pin("sqlx", "0.9.0"),
-        "psycopg": "requirements-driver-smoke.txt sha256:2fbb46fcd17bc81f993f28c47f1ebea38d66ae97cc2dbc3cad73b37cefbff700",
+        "psycopg": requirement_pin(),
     }
-    target = "postgres:18 via payload-safe TCP recorder; PgDog 0.1.6 backend via the same recorder"
+    target = "pinned PostgreSQL 18 and PgDog 0.1.6 via payload-safe TCP recorder"
     drivers = []
     for driver in ("tokio-postgres", "sqlx", "psycopg"):
         drivers.append({
@@ -235,19 +308,40 @@ def capture() -> dict:
             "lock_source": sources[driver],
             "capture_target": target,
             "startup_parameters": direct[driver]["startup_parameters"],
+            "pgdog_backend_startup_parameters": backend[driver]["startup_parameters"],
             "pgdog_backend_set_batches": backend[driver]["set_batches"],
         })
-    return {
-        "schema_version": 1,
+    document = {
+        "schema_version": 2,
         "captured_on": datetime.datetime.now(datetime.UTC).date().isoformat(),
         "recapture_command": "python3 tools/capture-gres-driver-goldens.py --write",
-        "pgdog": {
-            "version": "0.1.6",
-            "image": f"{PGDOG_IMAGE}@{PGDOG_DIGEST}",
-            "commit": PGDOG_COMMIT,
-        },
+        **provenance,
         "drivers": drivers,
     }
+    assert_expected_capture(document)
+    return document
+
+
+def assert_expected_capture(document: dict) -> None:
+    expected = {
+        "tokio-postgres": ({"client_encoding": "UTF8"}, []),
+        "sqlx": (
+            {"DateStyle": "ISO, MDY", "TimeZone": "UTC", "client_encoding": "UTF8", "extra_float_digits": "2"},
+            ["SET \"datestyle\" TO 'ISO, MDY'", "SET \"extra_float_digits\" TO '2'", "SET \"timezone\" TO 'UTC'"],
+        ),
+        "psycopg": ({}, []),
+    }
+    backend_startup = {"application_name": "PgDog", "client_encoding": "utf-8"}
+    if [capture["driver"] for capture in document["drivers"]] != list(expected):
+        raise RuntimeError("driver capture order drifted")
+    for capture in document["drivers"]:
+        startup, batches = expected[capture["driver"]]
+        if capture["startup_parameters"] != startup:
+            raise RuntimeError(f"{capture['driver']} direct startup capture drifted")
+        if capture["pgdog_backend_startup_parameters"] != backend_startup:
+            raise RuntimeError(f"{capture['driver']} PgDog backend startup capture drifted")
+        if capture["pgdog_backend_set_batches"] != batches:
+            raise RuntimeError(f"{capture['driver']} PgDog backend SET capture drifted")
 
 
 def main() -> None:

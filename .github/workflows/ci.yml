@@ -239,6 +239,10 @@ jobs:
               - 'tools/check-pg-compat-matrix.sh'
               - 'tools/check-pg-compat-matrix.py'
               - 'tools/gres-adopt-regress.sh'
+              - 'tools/capture-gres-driver-goldens.py'
+              - 'tools/gres-wire-recorder.py'
+              - 'tools/tests/test_gres_wire_recorder.py'
+              - 'tools/tests/test_capture_gres_driver_goldens.py'
               - 'NOTICE'
               - 'crates/gres-control/**'
               - 'crates/operator/src/controller/gres.rs'
@@ -264,6 +268,8 @@ jobs:
               - 'scripts/gres-durable-restart-smoke.sh'
               - 'scripts/gres-substrate-smoke.sh'
               - 'scripts/gres-e2e.sh'
+              - 'scripts/gres-driver-goldens-gate.sh'
+              - 'scripts/tests/gres_f0_runtime_gates.py'
               - 'scripts/gres-coldstart.sh'
               - 'scripts/gres-range-scaling.sh'
               - 'scripts/gres-sharded-conformance.sh'
@@ -917,6 +923,8 @@ jobs:
           key: gres-conformance
       - name: F-0 runtime wiring contract
         run: python3 scripts/tests/gres_f0_runtime_gates.py
+      - name: Driver capture safety contract
+        run: python3 -m unittest tools/tests/test_gres_wire_recorder.py tools/tests/test_capture_gres_driver_goldens.py
       - name: PostgreSQL compatibility matrix anti-rot check
         run: ./tools/check-pg-compat-matrix.sh --self-test
       - name: Install psql 18 (pgdg)
