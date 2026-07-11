@@ -1,7 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
 use assert2::assert;
-use crabka_gres_control::{SqlUser, TenantId, TenantName, TenantRecord, TenantState};
+use crabka_gres_control::{
+    RangeLayoutEntry, SqlUser, TenantId, TenantName, TenantRecord, TenantState,
+};
 use crabka_operator::{
     context::{GresControlLike, GresControlWriteError},
     controller::gres_tenant::reconcile,
@@ -10,6 +12,7 @@ use crabka_operator::{
         SecretKeyRef,
     },
 };
+use crabka_security::scram::PgScramVerifier;
 use http::Method;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Time;
 use kube::runtime::controller::Action;
@@ -263,11 +266,19 @@ fn tenant_record(state: TenantState, generation: u64) -> TenantRecord {
         tenant_name,
         state,
         SqlUser::try_from("alice").unwrap(),
-        "SCRAM-SHA-256$4096:salt$stored:server".into(),
+        PgScramVerifier::generate("hunter2", 8192)
+            .expect("fixture SCRAM verifier")
+            .to_string(),
         1,
     )
     .unwrap();
     record.wal_generation = generation;
+    record.ranges = vec![RangeLayoutEntry {
+        range_id: 0,
+        end_key: None,
+        endpoint: "tenant-a-gres.ns.svc.cluster.local:5432".into(),
+        wal_generation: generation,
+    }];
     record
 }
 
@@ -493,8 +504,7 @@ async fn deleting_multi_range_tenant_cleans_up_and_removes_its_finalizer() {
 }
 
 #[tokio::test]
-async fn dependency_failure_preserves_sticky_legacy_multi_range_status_until_registry_read_succeeds()
- {
+async fn dependency_failure_replaces_obsolete_multi_range_status() {
     let mut legacy_tenant = tenant();
     legacy_tenant.status = Some(GresTenantStatus {
         conditions: vec![crabka_operator::crd::KafkaCondition {
@@ -506,29 +516,38 @@ async fn dependency_failure_preserves_sticky_legacy_multi_range_status_until_reg
         }],
         ..Default::default()
     });
-    let state = MockState::new(vec![MockRule {
-        method: Method::GET,
-        path_substr: "/greses/fleet".into(),
-        response: json_response(
-            404,
-            &serde_json::json!({
-                "apiVersion":"v1", "kind":"Status", "metadata":{}, "status":"Failure",
-                "message":"not found", "reason":"NotFound", "code":404
-            }),
-        ),
-    }]);
+    let state = MockState::new(vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: "/greses/fleet".into(),
+            response: json_response(
+                404,
+                &serde_json::json!({
+                    "apiVersion":"v1", "kind":"Status", "metadata":{}, "status":"Failure",
+                    "message":"not found", "reason":"NotFound", "code":404
+                }),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/grestenants/tenant-a/status".into(),
+            response: json_response(200, &tenant_body()),
+        },
+    ]);
     let ctx = fixture_ctx(mock_client(&state, "ns"), "ns");
 
-    reconcile(Arc::new(legacy_tenant), Arc::new(ctx))
+    let action = reconcile(Arc::new(legacy_tenant), Arc::new(ctx))
         .await
-        .expect("missing Gres is represented without replacing the sticky condition");
+        .expect("missing Gres is represented by a dependency requeue");
+    assert!(action == Action::requeue(Duration::from_secs(30)));
 
     let observed = state.take_observed();
-    assert!(
-        !observed
-            .iter()
-            .any(|request| request.uri().path().ends_with("/status"))
-    );
+    let status = observed
+        .iter()
+        .find(|request| request.uri().path().ends_with("/status"))
+        .expect("dependency status patch");
+    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
+    assert!(body["status"]["conditions"][0]["reason"] == "GresNotFound");
 }
 
 #[tokio::test]
@@ -711,7 +730,7 @@ async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     admin.lock().await.add_topic(
-        "__gres_wal.tenant-a.r0",
+        "__gres_wal.tenant-a.r0.g0000000004",
         TopicState {
             partitions: 1,
             replicas: 1,
@@ -736,7 +755,7 @@ async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
     reconcile(Arc::new(tenant()), Arc::new(ctx)).await.unwrap();
 
     let calls = admin.lock().await.calls();
-    assert!(calls.iter().any(|call| matches!(call, RecordedCall::DeleteTopics(names) if names == &vec!["__gres_wal.tenant-a.r0".to_string()])));
+    assert!(calls.iter().any(|call| matches!(call, RecordedCall::DeleteTopics(names) if names == &vec!["__gres_wal.tenant-a.r0.g0000000004".to_string()])));
     let upserts = control.upserts.lock().await;
     assert!(upserts.len() == 2);
     assert!(upserts[0].state == TenantState::Parking);
@@ -777,7 +796,7 @@ async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     admin.lock().await.add_topic(
-        "__gres_wal.tenant-a.r0",
+        "__gres_wal.tenant-a.r0.g0000000004",
         TopicState {
             partitions: 1,
             replicas: 1,
@@ -807,7 +826,7 @@ async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
     assert!(action == Action::requeue(Duration::from_secs(5)));
     assert!(control.current.lock().await.as_ref().unwrap().state == TenantState::Parking);
     let calls = admin.lock().await.calls();
-    assert!(!calls.iter().any(|call| matches!(call, RecordedCall::CreateTopics(specs) if specs.iter().any(|spec| spec.name == "__gres_wal.tenant-a.r0"))));
+    assert!(!calls.iter().any(|call| matches!(call, RecordedCall::CreateTopics(specs) if specs.iter().any(|spec| spec.name == "__gres_wal.tenant-a.r0.g0000000004"))));
     drop(calls);
     let observed = state.take_observed();
     let deployment = observed
@@ -822,7 +841,10 @@ async fn parking_waits_for_wal_metadata_to_confirm_asynchronous_deletion() {
     let body: serde_json::Value = serde_json::from_slice(deployment.body()).unwrap();
     assert!(body["spec"]["replicas"] == 0);
 
-    admin.lock().await.remove_topic("__gres_wal.tenant-a.r0");
+    admin
+        .lock()
+        .await
+        .remove_topic("__gres_wal.tenant-a.r0.g0000000004");
     reconcile(Arc::new(tenant()), Arc::new(ctx))
         .await
         .expect("absent WAL metadata completes parking");
@@ -839,7 +861,7 @@ async fn failed_parking_intent_replacement_keeps_wal_until_retry_then_converges_
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     admin.lock().await.add_topic(
-        "__gres_wal.tenant-a.r0",
+        "__gres_wal.tenant-a.r0.g0000000004",
         TopicState {
             partitions: 1,
             replicas: 1,
@@ -918,7 +940,7 @@ async fn failed_wal_deletion_keeps_parking_intent_and_retry_converges() {
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     admin.lock().await.add_topic(
-        "__gres_wal.tenant-a.r0",
+        "__gres_wal.tenant-a.r0.g0000000004",
         TopicState {
             partitions: 1,
             replicas: 1,
@@ -967,13 +989,13 @@ async fn failed_wal_deletion_keeps_parking_intent_and_retry_converges() {
 }
 
 #[tokio::test]
-async fn resume_request_remains_fenced_while_wal_deletion_is_pending() {
+async fn resume_request_starts_current_generation_without_deleting_previous_generation() {
     let state = MockState::new(tenant_reconcile_rules());
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     admin.lock().await.add_topic(
-        "__gres_wal.tenant-a.r0",
+        "__gres_wal.tenant-a.r0.g0000000004",
         TopicState {
             partitions: 1,
             replicas: 1,
@@ -1004,7 +1026,7 @@ async fn resume_request_remains_fenced_while_wal_deletion_is_pending() {
             .topics
             .lock()
             .unwrap()
-            .contains_key("__gres_wal.tenant-a.r0")
+            .contains_key("__gres_wal.tenant-a.r0.g0000000004")
     );
     let calls = admin.lock().await.calls();
     assert!(
@@ -1013,7 +1035,7 @@ async fn resume_request_remains_fenced_while_wal_deletion_is_pending() {
             .any(|call| matches!(call, RecordedCall::DeleteTopics(_)))
     );
     assert!(!calls.iter().any(
-        |call| matches!(call, RecordedCall::CreateTopics(specs) if specs.iter().any(|spec| spec.name == "__gres_wal.tenant-a.r0"))
+        |call| matches!(call, RecordedCall::CreateTopics(specs) if specs.iter().any(|spec| spec.name == "__gres_wal.tenant-a.r0.g0000000004"))
     ));
     drop(calls);
     let observed = state.take_observed();
@@ -1030,7 +1052,7 @@ async fn resume_request_remains_fenced_while_wal_deletion_is_pending() {
     assert!(deployments.len() == 1);
     for deployment in deployments {
         let body: serde_json::Value = serde_json::from_slice(deployment.body()).unwrap();
-        assert!(body["spec"]["replicas"] == 0);
+        assert!(body["spec"]["replicas"] == 1);
     }
 }
 
@@ -1140,7 +1162,7 @@ async fn missing_final_checkpoint_manifest_blocks_suspended_parking() {
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     admin.lock().await.add_topic(
-        "__gres_wal.tenant-a.r0",
+        "__gres_wal.tenant-a.r0.g0000000004",
         TopicState {
             partitions: 1,
             replicas: 1,
@@ -1177,7 +1199,7 @@ async fn parked_tenant_reconciles_again_without_revalidating_stale_checkpoint() 
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
     admin.lock().await.add_topic(
-        "__gres_wal.tenant-a.r0",
+        "__gres_wal.tenant-a.r0.g0000000004",
         TopicState {
             partitions: 1,
             replicas: 1,
@@ -1281,7 +1303,7 @@ async fn resume_requested_ensures_wal_and_scales_compute_to_one() {
     reconcile(Arc::new(tenant()), Arc::new(ctx)).await.unwrap();
 
     let calls = admin.lock().await.calls();
-    assert!(calls.iter().any(|call| matches!(call, RecordedCall::CreateTopics(specs) if specs.iter().any(|spec| spec.name == "__gres_wal.tenant-a.r0"))));
+    assert!(calls.iter().any(|call| matches!(call, RecordedCall::CreateTopics(specs) if specs.iter().any(|spec| spec.name == "__gres_wal.tenant-a.r0.g0000000005"))));
     assert!(
         !calls
             .iter()
@@ -1302,5 +1324,5 @@ async fn resume_requested_ensures_wal_and_scales_compute_to_one() {
     assert!(body["spec"]["replicas"] == 1);
     let resumed = control.current.lock().await.clone().unwrap();
     assert!(resumed.state == TenantState::ResumeRequested);
-    assert!(resumed.record_version == 10);
+    assert!(resumed.record_version == 9);
 }
