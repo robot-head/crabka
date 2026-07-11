@@ -785,7 +785,8 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         | Statement::Set { .. }
         | Statement::Show { .. }
         | Statement::Reset { .. }
-        | Statement::SetRole { .. } => false,
+        | Statement::SetRole { .. }
+        | Statement::CompatibilityRefusal(_) => false,
     }
 }
 
@@ -1269,6 +1270,9 @@ impl SqlSession {
             return Err(ExecError::InFailedTransaction);
         }
         let result = match stmt {
+            Statement::CompatibilityRefusal(command) => {
+                Err(ExecError::CompatibilityRefusal(*command))
+            }
             Statement::Begin { isolation } => self.begin(*isolation).await,
             Statement::Commit => self.commit_cmd().await,
             Statement::Rollback => self.rollback_cmd().await,
@@ -5995,5 +5999,53 @@ mod tests {
             crabka_pgcatalog::get_table(&*engine.kv, "payments").is_err(),
             "payments was not in LIMIT TO and must not be imported"
         );
+    }
+}
+#[cfg(test)]
+mod compatibility_refusal_tests {
+    use crabka_pgwire::engine::{Engine, Session};
+
+    use crate::SqlEngine;
+
+    #[tokio::test]
+    async fn compatibility_refusals_execute_with_centralized_error_contracts() {
+        let engine = SqlEngine::new();
+        let cases = [
+            (
+                "ALTER DATABASE postgres RENAME TO other",
+                "0A000",
+                "database lifecycle",
+            ),
+            ("CREATE DATABASE other", "0A000", "database lifecycle"),
+            ("DROP DATABASE other", "0A000", "database lifecycle"),
+            (
+                "ALTER EXTENSION plpgsql UPDATE",
+                "0A000",
+                "extension lifecycle",
+            ),
+            ("DROP EXTENSION plpgsql", "0A000", "extension lifecycle"),
+            (
+                "PREPARE TRANSACTION 'xid-1'",
+                "55000",
+                "SQL-level prepared transactions",
+            ),
+            (
+                "COMMIT PREPARED 'xid-1'",
+                "55000",
+                "SQL-level prepared transactions",
+            ),
+            (
+                "ROLLBACK PREPARED 'xid-1'",
+                "55000",
+                "SQL-level prepared transactions",
+            ),
+        ];
+
+        for (sql, sqlstate, message) in cases {
+            let mut session = engine.connect();
+            let error = session.simple_query(sql).await.expect_err(sql);
+            assert_eq!(error.code, sqlstate, "{sql}");
+            assert!(error.message.contains(message), "{sql}: {error:?}");
+        }
     }
 }
