@@ -451,6 +451,7 @@ if [ "$SKIP_PGDOG" = "1" ]; then
     log "SKIP: PgDog assertions explicitly skipped"
     exit 0
 fi
+python3 -c 'import psycopg' >/dev/null 2>&1 || fail "Python psycopg is required for PgDog driver smoke tests"
 docker_is_available || fail "Docker/PgDog runtime unavailable; pass --skip-pgdog only for local development"
 
 docker pull "$PGDOG_IMAGE" >"${ARTIFACT_DIR}/pull-pgdog.log" 2>&1
@@ -487,8 +488,31 @@ start_oracle
     --subject-url "$TENANT_C_CONN password=carol-secret" \
     --corpus crates/gres-conformance/corpus \
     --baseline crates/gres-conformance/baseline.json \
+    --extended-corpus crates/gres-conformance/corpus-extended \
+    --extended-baseline crates/gres-conformance/corpus-extended/baseline.json \
+    --extended-out "${ARTIFACT_DIR}/extended-parity-pgdog.json" \
+    --extended-summary "${ARTIFACT_DIR}/extended-parity-pgdog.md" \
     --out "${ARTIFACT_DIR}/parity-pgdog.json" \
     --summary "${ARTIFACT_DIR}/parity-pgdog.md" \
     >"${ARTIFACT_DIR}/conformance-pgdog.log" 2>&1
+
+DATABASE_URL="postgresql://alice:alice-secret@127.0.0.1:${PGDOG_PORT}/tenant-a?sslmode=prefer" \
+    ./target/debug/crabka-gres-driver-smoke >"${ARTIFACT_DIR}/rust-driver-smoke.log" 2>&1
+
+DATABASE_URL="postgresql://alice:alice-secret@127.0.0.1:${PGDOG_PORT}/tenant-a?sslmode=prefer" \
+python3 - <<'PY' >"${ARTIFACT_DIR}/python-driver-smoke.log" 2>&1
+import os
+import psycopg
+
+with psycopg.connect(os.environ["DATABASE_URL"]) as connection:
+    for expected in (61, 62):
+        with connection.transaction():
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT %s::int4", (expected,))
+                actual = cursor.fetchone()[0]
+                if actual != expected:
+                    raise AssertionError(f"psycopg returned {actual}, expected {expected}")
+print("PASS: psycopg parameterized transaction-pooling smoke")
+PY
 
 log "PASS: Gres front-door e2e completed"
