@@ -49,7 +49,7 @@ PG18_SYNTAX_PATTERNS = (
     ("pg18-create_table-REL_18_0.sgml", "CREATE TABLE", r"(?m)^\s*\[\s*(INHERITS)\s*\("),
     ("pg18-create_table-REL_18_0.sgml", "CREATE TABLE", r"(?m)^\s*\[\s*(PARTITION BY)\s"),
     ("pg18-create_table-REL_18_0.sgml", "CREATE TABLE", r"(?m)^\s*(PARTITION OF)\s"),
-    ("pg18-select-REL_18_0.sgml", "", r"(?m)^\s*(TABLE)\s+\[\s*ONLY\s*\]"),
+    ("pg18-select-REL_18_0.sgml", "TABLE", r"(?m)^\s*(TABLE)\s+\[\s*ONLY\s*\]"),
 )
 PARSER_COMMAND_REPORT_FORMAT_VERSION = 2
 DEFAULT_PARSER_COMMAND = [
@@ -280,14 +280,27 @@ def derive_pg18_commands(
         aliases.get(filename.replace("_", " ").upper(), filename.replace("_", " ").upper())
         for filename in filenames
     }
-    for source_name, base_command, pattern in syntax_patterns:
+    for source_name, required_refname, pattern in syntax_patterns:
         source = syntax_sources.get(source_name)
         if source is None:
             raise ValueError(f"missing PostgreSQL syntax source artifact: {source_name}")
+        source_refnames = re.findall(r"<refname>\s*([^<]+?)\s*</refname>", source)
+        try:
+            base_command = next(
+                refname for refname in source_refnames if refname == required_refname
+            )
+        except StopIteration as error:
+            raise ValueError(
+                f"PostgreSQL syntax source {source_name} lacks required refname {required_refname!r}"
+            ) from error
         match = re.search(pattern, source)
         if match is None:
             raise ValueError(f"PostgreSQL syntax source {source_name} lacks required synopsis {pattern}")
-        commands.add(" ".join(part for part in (base_command, match.group(1)) if part))
+        synopsis_suffix = match.group(1)
+        source_derived_parts = (
+            (base_command,) if synopsis_suffix == base_command else (base_command, synopsis_suffix)
+        )
+        commands.add(" ".join(part for part in source_derived_parts if part))
     if len(commands) != 190:
         raise ValueError(f"derived PostgreSQL 18 command inventory has {len(commands)} titles, expected 190")
     return commands
@@ -538,6 +551,20 @@ def run_self_test(parser_commands: set[str]) -> None:
             continue
         if mutated == inventory:
             raise AssertionError(f"self-test expected {label} direction to fail")
+
+    mutated_base_prefix = ("pg18-alter_table-REL_18_0.sgml", "FAKE ALTER TABLE", PG18_SYNTAX_PATTERNS[0][2])
+    try:
+        derive_pg18_commands(
+            allfiles_source,
+            syntax_sources,
+            syntax_patterns=(mutated_base_prefix,) + PG18_SYNTAX_PATTERNS[1:],
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(
+            "self-test expected a configured base prefix not present in the hashed source to fail internally"
+        )
 
     missing_inventory = set(inventory)
     missing_inventory.remove("ABORT")
