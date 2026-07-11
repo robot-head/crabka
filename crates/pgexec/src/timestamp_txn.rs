@@ -611,6 +611,27 @@ impl TimestampTxnDescriptor {
         Ok(())
     }
 
+    /// Add a participant while the primary decision is still pending.
+    pub fn add_participant(&mut self, participant: u32) -> Result<(), TimestampTxnError> {
+        if self.decision != PrimaryTxnDecision::Pending {
+            return Err(TimestampTxnError::MissingIntent {
+                table_id: participant,
+                rowid: 0,
+                start_ts: self.start_ts.get(),
+            });
+        }
+        if self.participants.contains(&participant) {
+            return Ok(());
+        }
+        self.participants.push(participant);
+        self.participants.sort_unstable();
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(TimestampTxnError::TimestampExhausted)?;
+        Ok(())
+    }
+
     /// Advance the descriptor to a terminal decision exactly once.
     pub fn decide(&mut self, decision: PrimaryTxnDecision) -> Result<(), TimestampTxnError> {
         if self.decision != PrimaryTxnDecision::Pending {
@@ -2411,6 +2432,16 @@ mod tests {
         assert!(descriptor.prepared.is_empty());
         assert!(descriptor.operations.is_empty());
         assert_eq!(descriptor.generation, 0);
+    }
+
+    #[test]
+    fn pending_descriptor_adds_new_participants_canonically() {
+        let start_ts = TimestampTransactionId::new(7).expect("start");
+        let mut descriptor = TimestampTxnDescriptor::begun(start_ts, 9, vec![1]);
+        descriptor.add_participant(2).expect("expand");
+        descriptor.add_participant(2).expect("idempotent");
+        assert_eq!(descriptor.participants, vec![1, 2]);
+        assert_eq!(descriptor.generation, 1);
     }
 
     #[test]

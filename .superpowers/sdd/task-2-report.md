@@ -61,7 +61,45 @@ Additional focused run:
 - Added remote scan wire propagation after noticing that the first RYW implementation covered only in-process range scanning.
 - Routed later single-range sharded statements through the already-open timestamp identity instead of accidentally falling back to ordinary/autocommit execution.
 
-## Concerns
+## Review-fix wave
 
-- The durable descriptor's participant set is fixed by the first cross-range statement. Later statements can target any participant already declared by that statement, but introducing a brand-new range that was absent from the first statement is rejected by the descriptor acknowledgement rules. Supporting dynamic participant-set expansion would require a separately tested descriptor CAS transition (or a changed begin protocol) and was not added here.
-- Extended-query scatter remains intentionally unsupported by the pre-existing gateway restriction; this change covers the simple-query explicit timestamp path that previously had the fail-clear test gap.
+The requested review fixes were applied in a second TDD wave:
+
+- A single-range first sharded write now starts the timestamp session. `TimestampTxnDescriptor::add_participant` and `SqlEngine::add_timestamp_transaction_participant` durably expand pending participants with generation-fenced CAS, making later new-range statements legal.
+- Bound extended-protocol sharded DML is materialized as typed bound SQL at Bind and executed once at the gateway through the same structural timestamp write path. It no longer enters an owner-local transaction or bypasses accumulation.
+- Dropping a gateway session transfers its timestamp identity, participants, serving snapshot, and remote participant handles to a runtime cleanup task. Cleanup chooses the descriptor's write-once effective decision and resolves every participant; the integration test proves conflicting writes can immediately proceed after a dropped session yields.
+- Explicit statement bookkeeping is durably committed before statement success rather than retained solely in gateway memory until after the primary decision. A crash after the decision can therefore reconstruct/resolve the descriptor without losing sequence bookkeeping.
+- Failed-statement cleanup now clones rather than moves timestamp recovery state before fallible cleanup. The identity and participants remain available if cleanup errors.
+- Explicit COMMIT uses the existing before/after-decision fault points. Abort cleanup observes the write-once primary result, so an after-decision failure resolves as committed rather than changing the decision to abort.
+- Stateful remote SQL sessions gained a typed `SetTimestampOwner` operation, in addition to scan-RPC owner propagation, so directly routed remote queries can read their transaction's pending intents.
+- The catalog-wide table scan was removed; sharded routing checks now use the statement's table reference and the existing catalog lookup helper.
+
+### Added RED evidence
+
+- `cargo test -p crabka-pgexec pending_descriptor_adds --lib` initially failed to compile because `add_participant` did not exist.
+- `cargo test -p crabka-gres-ranges --test multirange explicit_timestamp_transaction_expands -- --nocapture` initially failed with `0A000` on the first single-range write.
+- `cargo test -p crabka-gres-ranges --test multirange extended_sharded_writes_join -- --nocapture` initially failed with `0A000` because extended scatter was rejected at Bind.
+- `cargo test -p crabka-gres-ranges --test multirange dropping_explicit_timestamp -- --nocapture` initially failed with `40001` because Drop leaked the abandoned intents.
+
+### Review-wave final verification
+
+```text
+cargo test -p crabka-gres-ranges --test multirange &&
+cargo test -p crabka-gres-ranges --test sharded_visibility &&
+cargo test -p crabka-gres-ranges --lib &&
+cargo test -p crabka-pgexec --lib &&
+cargo check -p crabka-gres-ranges --all-targets &&
+git diff --check
+```
+
+Results:
+
+- multirange: 29 passed, 0 failed.
+- sharded_visibility: 7 passed, 0 failed.
+- gres-ranges lib: 105 passed, 0 failed.
+- pgexec lib: 337 passed, 0 failed.
+- all-target check and diff check: passed.
+
+### Remaining operational note
+
+Drop cleanup requires an active Tokio runtime; `Drop` cannot synchronously await network/durable participant resolution. Normal gateway sessions are runtime-owned, and the tested path transfers cleanup deterministically to that runtime. If a session were dropped outside every runtime, descriptor recovery remains the fallback.

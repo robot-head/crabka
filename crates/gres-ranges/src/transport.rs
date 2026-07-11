@@ -218,6 +218,9 @@ pub enum WireSessionOperation {
     AbortGlobal {
         global_xid: u64,
     },
+    SetTimestampOwner {
+        start_ts: Option<u64>,
+    },
     CloseStatement {
         name: String,
     },
