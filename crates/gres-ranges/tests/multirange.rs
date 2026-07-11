@@ -463,7 +463,7 @@ async fn sharded_multi_row_insert_in_explicit_transaction_remains_fail_clear() {
 }
 
 #[tokio::test]
-async fn parameterized_row_insert_is_rejected_before_binding() {
+async fn parameterized_row_insert_routes_at_bind() {
     let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
     let mut session = gateway.connect();
     session
@@ -472,15 +472,14 @@ async fn parameterized_row_insert_is_rejected_before_binding() {
         .expect("create");
     let params = [text_param("20")];
 
-    let error = session
+    session
         .extended_query_v2("INSERT INTO t150 VALUES ($1, 7)", &params)
         .await
-        .expect_err("parameterized row insert rejected");
+        .expect("parameterized row insert");
 
-    assert_eq!(error.code, "0A000");
     assert_eq!(
         select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
-        Vec::<i32>::new()
+        vec![7]
     );
 }
 
@@ -564,7 +563,7 @@ async fn hash_sharded_multi_row_insert_spanning_ranges_commits_atomically() {
 }
 
 #[tokio::test]
-async fn parameterized_hash_insert_is_rejected_before_binding() {
+async fn parameterized_hash_insert_routes_at_bind() {
     let (gateway, _handles) = MultiRangeTenant::start(hash_split_tenant_config()).expect("tenant");
     let mut session = gateway.connect();
     session
@@ -573,30 +572,47 @@ async fn parameterized_hash_insert_is_rejected_before_binding() {
         .expect("create");
     let params = [text_param("42")];
 
-    let error = session
+    session
         .extended_query_v2("INSERT INTO t150 VALUES ($1, 7)", &params)
         .await
-        .expect_err("parameterized insert rejected");
+        .expect("parameterized insert");
 
-    assert_eq!(error.code, "0A000");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![7]
+    );
 }
 
 #[tokio::test]
-async fn parameterized_hash_select_is_rejected_before_binding() {
+async fn parameterized_hash_select_routes_at_bind() {
     let (gateway, _handles) = MultiRangeTenant::start(hash_split_tenant_config()).expect("tenant");
     let mut session = gateway.connect();
     session
         .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED BY HASH (id) BUCKETS 16")
         .await
         .expect("create");
+    session
+        .simple_query("INSERT INTO t150 VALUES (42, 9)")
+        .await
+        .expect("insert");
     let params = [text_param("42")];
 
-    let error = session
+    let results = session
         .extended_query_v2("SELECT value FROM t150 WHERE id = $1", &params)
         .await
-        .expect_err("parameterized select rejected");
+        .expect("parameterized select");
 
-    assert_eq!(error.code, "0A000");
+    let [QueryResult::Rows { rows, .. }] = results.as_slice() else {
+        panic!("expected rows")
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        std::str::from_utf8(&rows[0][0].as_ref().expect("value").text)
+            .expect("utf8")
+            .parse::<i32>()
+            .expect("i32"),
+        9
+    );
 }
 
 #[tokio::test]

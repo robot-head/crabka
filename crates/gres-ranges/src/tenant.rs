@@ -1410,6 +1410,7 @@ impl Engine for MultiRangeTenant {
             status: TxStatus::Idle,
             prepared: BTreeMap::new(),
             portals: BTreeMap::new(),
+            next_internal_statement: 0,
         }
     }
 }
@@ -1710,12 +1711,13 @@ pub struct GatewaySession {
     status: TxStatus,
     prepared: BTreeMap<String, GatewayPrepared>,
     portals: BTreeMap<String, GatewayPortal>,
+    next_internal_statement: u64,
 }
 
 #[derive(Debug, Clone)]
 struct GatewayPrepared {
     sql: String,
-    route: StatementRoute,
+    route: Option<StatementRoute>,
     description: PreparedDescription,
 }
 
@@ -1900,8 +1902,10 @@ impl Session for GatewaySession {
         match target {
             CloseTarget::Statement(name) => {
                 if let Some(prepared) = self.prepared.remove(name) {
-                    self.close_on_range(prepared.route.range_id, CloseTarget::Statement(name))
-                        .await?;
+                    if let Some(route) = prepared.route {
+                        self.close_on_range(route.range_id, CloseTarget::Statement(name))
+                            .await?;
+                    }
                 }
             }
             CloseTarget::Portal(name) => {
@@ -2121,11 +2125,40 @@ impl GatewaySession {
         if name.is_empty()
             && let Some(old) = self.prepared.remove(name)
         {
-            let old_range = old.route.range_id;
-            self.close_on_range(old_range, CloseTarget::Statement(name))
-                .await?;
+            if let Some(old_route) = old.route {
+                self.close_on_range(old_route.range_id, CloseTarget::Statement(name))
+                    .await?;
+            }
         }
-        let route = self.route_statement(sql)?;
+        let route = match self.route_statement(sql) {
+            Ok(route) => Some(route),
+            Err(error) if error.message == parameterized_shard_key_error().message => None,
+            Err(error) => return Err(error),
+        };
+        if route.is_none() {
+            let serving = self.current_serving()?;
+            let catalog = serving
+                .engine(RangeId::COORDINATOR)
+                .or_else(|| serving.engines.values().next())
+                .ok_or_else(|| {
+                    PgError::error(
+                        sqlstate::FEATURE_NOT_SUPPORTED,
+                        "tenant has no hosted engine with a range-0 catalog view",
+                    )
+                })?;
+            let mut inference = catalog.connect();
+            let description = inference.parse("", sql, parameter_types).await?;
+            self.prepared.insert(
+                name.to_owned(),
+                GatewayPrepared {
+                    sql: sql.to_owned(),
+                    route: None,
+                    description: description.clone(),
+                },
+            );
+            return Ok(description);
+        }
+        let route = route.expect("concrete route checked above");
         if route.scatter_ranges.is_some() {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
@@ -2147,7 +2180,7 @@ impl GatewaySession {
                 name.to_owned(),
                 GatewayPrepared {
                     sql: sql.to_owned(),
-                    route,
+                    route: Some(route),
                     description: description.clone(),
                 },
             );
@@ -2167,7 +2200,7 @@ impl GatewaySession {
             name.to_owned(),
             GatewayPrepared {
                 sql: sql.to_owned(),
-                route,
+                route: Some(route),
                 description: description.clone(),
             },
         );
@@ -2200,8 +2233,25 @@ impl GatewaySession {
                 format!("cursor \"{portal}\" already exists"),
             ));
         }
+        let route = if let Some(route) = prepared.route.clone() {
+            route
+        } else {
+            let routing_sql = routing_sql_with_bound_params(
+                &prepared.sql,
+                &prepared.description.parameter_types,
+                params,
+            )?;
+            let route = self.route_statement(&routing_sql)?;
+            if route.scatter_ranges.is_some() {
+                return Err(PgError::error(
+                    sqlstate::FEATURE_NOT_SUPPORTED,
+                    "extended statements must target one range",
+                ));
+            }
+            route
+        };
         if matches!(
-            prepared.route.kind,
+            route.kind,
             StatementKind::Begin | StatementKind::Commit | StatementKind::Rollback
         ) {
             if !params.is_empty() {
@@ -2215,35 +2265,75 @@ impl GatewaySession {
                 portal.to_owned(),
                 GatewayPortal {
                     sql: prepared.sql,
-                    route: prepared.route,
+                    route,
                     description: description.clone(),
                     gateway_execution: None,
                 },
             );
             return Ok(description);
         }
-        let description = if let Some(session) = self.sessions.get_mut(&prepared.route.range_id) {
-            session
-                .bind(portal, statement, params, result_formats)
-                .await?
+        let deferred = prepared.route.is_none();
+        let owner_statement = if deferred {
+            let id = self.next_internal_statement;
+            self.next_internal_statement = self.next_internal_statement.wrapping_add(1);
+            format!("__crabka_gateway_{id}")
         } else {
-            self.ensure_remote_session(prepared.route.range_id).await?;
-            self.remote_sessions
-                .get_mut(&prepared.route.range_id)
-                .expect("remote session inserted")
+            statement.to_owned()
+        };
+        let description = if let Some(session) = self.sessions.get_mut(&route.range_id) {
+            if deferred {
+                session
+                    .parse(
+                        &owner_statement,
+                        &prepared.sql,
+                        &prepared.description.parameter_types,
+                    )
+                    .await?;
+            }
+            let description = session
+                .bind(portal, &owner_statement, params, result_formats)
+                .await?;
+            if deferred {
+                session
+                    .close(CloseTarget::Statement(&owner_statement))
+                    .await?;
+            }
+            description
+        } else {
+            self.ensure_remote_session(route.range_id).await?;
+            let session = self
+                .remote_sessions
+                .get_mut(&route.range_id)
+                .expect("remote session inserted");
+            if deferred {
+                session
+                    .parse(
+                        owner_statement.clone(),
+                        prepared.sql.clone(),
+                        prepared.description.parameter_types.clone(),
+                    )
+                    .await?;
+            }
+            let description = session
                 .bind(
                     portal.to_owned(),
-                    statement.to_owned(),
+                    owner_statement.clone(),
                     params,
                     result_formats.to_vec(),
                 )
-                .await?
+                .await?;
+            if deferred {
+                session
+                    .close(CloseTarget::Statement(&owner_statement))
+                    .await?;
+            }
+            description
         };
         self.portals.insert(
             portal.to_owned(),
             GatewayPortal {
                 sql: prepared.sql,
-                route: prepared.route,
+                route,
                 description: description.clone(),
                 gateway_execution: None,
             },
@@ -4313,6 +4403,118 @@ fn parameterized_shard_key_error() -> PgError {
         sqlstate::FEATURE_NOT_SUPPORTED,
         "parameterized shard keys cannot be routed by the gateway",
     )
+}
+
+fn routing_sql_with_bound_params(
+    sql: &str,
+    parameter_types: &[u32],
+    params: &[BoundParam],
+) -> Result<String, PgError> {
+    if params.len() != parameter_types.len() {
+        return Err(PgError::protocol(format!(
+            "bind message supplies {} parameters, but prepared statement requires {}",
+            params.len(),
+            parameter_types.len()
+        )));
+    }
+    let literals = params
+        .iter()
+        .zip(parameter_types)
+        .map(|(param, oid)| routing_param_literal(param, *oid))
+        .collect::<Result<Vec<_>, _>>()?;
+    let bytes = sql.as_bytes();
+    let mut result = String::with_capacity(sql.len());
+    let mut index = 0usize;
+    let mut single_quoted = false;
+    let mut double_quoted = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' if !double_quoted => {
+                result.push('\'');
+                index += 1;
+                if single_quoted && index < bytes.len() && bytes[index] == b'\'' {
+                    result.push('\'');
+                    index += 1;
+                } else {
+                    single_quoted = !single_quoted;
+                }
+            }
+            b'"' if !single_quoted => {
+                double_quoted = !double_quoted;
+                result.push('"');
+                index += 1;
+            }
+            b'$' if !single_quoted && !double_quoted => {
+                let start = index + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end].is_ascii_digit() {
+                    end += 1;
+                }
+                if end == start {
+                    result.push('$');
+                    index += 1;
+                    continue;
+                }
+                let number = sql[start..end]
+                    .parse::<usize>()
+                    .map_err(|_| PgError::error("42P02", "invalid parameter reference"))?;
+                let literal = number
+                    .checked_sub(1)
+                    .and_then(|parameter| literals.get(parameter))
+                    .ok_or_else(|| {
+                        PgError::error("42P02", format!("there is no parameter ${number}"))
+                    })?;
+                result.push_str(literal);
+                index = end;
+            }
+            _ => {
+                let character = sql[index..]
+                    .chars()
+                    .next()
+                    .expect("index is within SQL string");
+                result.push(character);
+                index += character.len_utf8();
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn routing_param_literal(param: &BoundParam, inferred_oid: u32) -> Result<String, PgError> {
+    let oid = param.type_oid.unwrap_or(inferred_oid);
+    if oid != inferred_oid {
+        return Err(PgError::protocol(format!(
+            "bound parameter type {oid} does not match inferred type {inferred_oid}"
+        )));
+    }
+    let Some(value) = param.value.as_deref() else {
+        return Ok("null".to_owned());
+    };
+    match (oid, param.format) {
+        (23, 0) | (20, 0) => std::str::from_utf8(value)
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .map(|value| value.to_string())
+            .ok_or_else(|| PgError::error("22P02", "invalid integer parameter")),
+        (23, 1) if value.len() == 4 => {
+            Ok(i32::from_be_bytes(value.try_into().expect("length checked")).to_string())
+        }
+        (20, 1) if value.len() == 8 => {
+            Ok(i64::from_be_bytes(value.try_into().expect("length checked")).to_string())
+        }
+        (25, 0 | 1) => {
+            let value = std::str::from_utf8(value)
+                .map_err(|_| PgError::error("22021", "invalid UTF-8 text parameter"))?;
+            Ok(format!("'{}'", value.replace('\'', "''")))
+        }
+        (_, 0 | 1) => Err(PgError::error(
+            sqlstate::FEATURE_NOT_SUPPORTED,
+            format!("parameter type {oid} cannot be used as a shard key"),
+        )),
+        (_, format) => Err(PgError::protocol(format!(
+            "unsupported parameter format code {format}"
+        ))),
+    }
 }
 
 fn unknown_shard_key_error() -> PgError {
