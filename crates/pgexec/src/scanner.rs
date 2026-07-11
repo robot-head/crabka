@@ -304,6 +304,16 @@ impl RangeScanner for TimestampedRangeScanner {
         }
         self.inner.scan(request)
     }
+
+    fn scan_cursor<'a>(
+        &'a self,
+        mut request: ScanRequest<'a>,
+    ) -> Result<Box<dyn RangeCursor + 'a>, ExecError> {
+        if request.table.sharded {
+            request.read_ts = Some(self.read_ts);
+        }
+        self.inner.scan_cursor(request)
+    }
 }
 
 /// Scanner used by default: reads only the local MVCC store.
@@ -1036,8 +1046,19 @@ fn project_scanned_row(
 
 #[cfg(test)]
 mod cursor_contract_tests {
-    use super::{MaterializedRangeCursor, RangeCursor};
-    use crabka_pgtypes::Datum;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use super::{
+        MaterializedRangeCursor, PredicatePushdown, ProjectionPushdown, RangeCursor, RangeScanner,
+        RowInterval, ScanRequest, TimestampedRangeScanner,
+    };
+    use crabka_pgcatalog::{Column, Table};
+    use crabka_pgkv::MemKv;
+    use crabka_pgmvcc::Snapshot;
+    use crabka_pgtypes::{ColumnType, Datum};
 
     fn row(rowid: u64) -> super::ScannedRow {
         super::ScannedRow {
@@ -1066,5 +1087,76 @@ mod cursor_contract_tests {
         assert!(cursor.next_page(0).await.is_err());
         let page = cursor.next_page(1).await.expect("valid page succeeds");
         assert_eq!(page.rows[0].rowid, 1);
+    }
+
+    #[derive(Default)]
+    struct CursorSpy {
+        scan_calls: AtomicUsize,
+        cursor_calls: AtomicUsize,
+    }
+
+    impl RangeScanner for CursorSpy {
+        fn scan(
+            &self,
+            _request: ScanRequest<'_>,
+        ) -> Result<Vec<super::ScannedRow>, super::ExecError> {
+            self.scan_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(Vec::new())
+        }
+
+        fn scan_cursor<'a>(
+            &'a self,
+            request: ScanRequest<'a>,
+        ) -> Result<Box<dyn RangeCursor + 'a>, super::ExecError> {
+            self.cursor_calls.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(request.read_ts.map(|timestamp| timestamp.get()), Some(42));
+            Ok(Box::new(MaterializedRangeCursor::new(Vec::new())))
+        }
+    }
+
+    #[tokio::test]
+    async fn timestamped_scanner_delegates_to_native_cursor_without_materializing() {
+        let inner = Arc::new(CursorSpy::default());
+        let scanner = TimestampedRangeScanner::new(
+            inner.clone(),
+            crate::timestamp_txn::ReadTimestamp::new(42).expect("valid read timestamp"),
+        );
+        let local = MemKv::new();
+        let global = MemKv::new();
+        let snapshot = Snapshot {
+            xmin: 1,
+            xmax: 2,
+            xip: Vec::new(),
+        };
+        let table = Table {
+            id: 42,
+            name: "items".into(),
+            columns: vec![Column::new("id", ColumnType::Int8)],
+            sharded: true,
+            sharding: None,
+            foreign: None,
+        };
+
+        let mut cursor = scanner
+            .scan_cursor(ScanRequest {
+                local: &local,
+                global: &global,
+                global_snapshot: &snapshot,
+                snapshot: &snapshot,
+                own_xid: None,
+                read_ts: None,
+                table: &table,
+                interval: RowInterval::default(),
+                predicate: PredicatePushdown::FullScan,
+                projection: ProjectionPushdown::All,
+                partial_aggregate: None,
+                top_k: None,
+            })
+            .expect("native cursor opens");
+        let page = cursor.next_page(1).await.expect("cursor page succeeds");
+
+        assert!(page.is_last);
+        assert_eq!(inner.cursor_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(inner.scan_calls.load(Ordering::Relaxed), 0);
     }
 }
