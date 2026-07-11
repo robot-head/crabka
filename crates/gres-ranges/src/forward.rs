@@ -747,6 +747,7 @@ impl crabka_pgexec::RangeScanner for RegistryRangeScanner {
             scanner: self,
             request,
             done: false,
+            owners: None,
             tokens: BTreeMap::new(),
             finished: std::collections::BTreeSet::new(),
             pending: std::collections::VecDeque::new(),
@@ -758,6 +759,9 @@ struct RegistryRangeCursor<'a> {
     scanner: &'a RegistryRangeScanner,
     request: crabka_pgexec::ScanRequest<'a>,
     done: bool,
+    /// Range membership is statement-stable. Endpoint refresh may move an
+    /// owner, but must never add/remove owners halfway through a snapshot.
+    owners: Option<Vec<RangeId>>,
     tokens: BTreeMap<RangeId, Option<Vec<u8>>>,
     finished: std::collections::BTreeSet<RangeId>,
     pending: std::collections::VecDeque<crabka_pgexec::ScannedRow>,
@@ -780,10 +784,16 @@ impl crabka_pgexec::RangeCursor for RegistryRangeCursor<'_> {
                 is_last: true,
             });
         }
+        if self.owners.is_none() {
+            self.owners = Some(self.scanner.registry.range_ids().await);
+        }
         if self.pending.is_empty() {
-            let range_ids = self.scanner.registry.range_ids().await;
-            let active = range_ids
-                .into_iter()
+            let active = self
+                .owners
+                .as_ref()
+                .expect("owners initialized above")
+                .iter()
+                .copied()
                 .filter(|range_id| !self.finished.contains(range_id))
                 .collect::<Vec<_>>();
             if active.is_empty() {
@@ -840,7 +850,12 @@ impl crabka_pgexec::RangeCursor for RegistryRangeCursor<'_> {
         let take = max_rows.min(self.pending.len());
         let rows = self.pending.drain(..take).collect::<Vec<_>>();
         self.done = self.pending.is_empty()
-            && self.finished.len() == self.scanner.registry.range_ids().await.len();
+            && self.finished.len()
+                == self
+                    .owners
+                    .as_ref()
+                    .expect("owners initialized above")
+                    .len();
         Ok(crabka_pgexec::ScanPage {
             rows: rows.into_boxed_slice(),
             is_last: self.done,
