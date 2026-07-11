@@ -5,7 +5,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 /// Version of the JSON report emitted by `crabka-gres-parser-commands`.
-pub const PARSER_COMMAND_REPORT_FORMAT_VERSION: u32 = 1;
+pub const PARSER_COMMAND_REPORT_FORMAT_VERSION: u32 = 2;
 
 /// Stable machine-readable inventory of SQL commands accepted by the parser.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -14,6 +14,20 @@ pub struct ParserCommandReport {
     pub format_version: u32,
     /// Uppercase `PostgreSQL` command names in lexical order.
     pub commands: Vec<String>,
+    /// One bidirectional behavior contract for every resolved command.
+    pub probes: Vec<BehaviorProbe>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BehaviorProbe {
+    pub command: String,
+    pub sql: String,
+    pub parser_shape: String,
+    pub behavior: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sqlstate: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_fragment: Option<&'static str>,
 }
 
 /// Failure while proving that a documented command is accepted by the parser.
@@ -189,7 +203,7 @@ const COMMAND_PROBES: &[CommandProbe] = &[
     },
     CommandProbe {
         command: "SET",
-        sql: "SET parser_commands_setting TO 1",
+        sql: "SET extra_float_digits TO 2",
         expected_statement: "Set",
     },
     CommandProbe {
@@ -199,12 +213,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
     },
     CommandProbe {
         command: "SHOW",
-        sql: "SHOW parser_commands_setting",
+        sql: "SHOW extra_float_digits",
         expected_statement: "Show",
     },
     CommandProbe {
         command: "RESET",
-        sql: "RESET parser_commands_setting",
+        sql: "RESET extra_float_digits",
         expected_statement: "Reset",
     },
     CommandProbe {
@@ -322,9 +336,12 @@ const COMMAND_PROBES: &[CommandProbe] = &[
 /// maps to an unexpected AST shape.
 pub fn parser_command_report() -> Result<ParserCommandReport, ParserCommandError> {
     let mut commands = Vec::with_capacity(COMMAND_PROBES.len());
+    let mut probes =
+        Vec::with_capacity(COMMAND_PROBES.len() + crabka_pgparser::ast::NON_GOAL_REFUSALS.len());
     for probe in COMMAND_PROBES {
         validate_probe(probe)?;
         commands.push(probe.command.to_string());
+        probes.push(behavior_probe(probe)?);
     }
     for spec in crabka_pgparser::ast::NON_GOAL_REFUSALS {
         let probe = CommandProbe {
@@ -334,12 +351,51 @@ pub fn parser_command_report() -> Result<ParserCommandReport, ParserCommandError
         };
         validate_probe(&probe)?;
         commands.push(probe.command.to_string());
+        probes.push(behavior_probe(&probe)?);
     }
     commands.sort_unstable();
+    probes.sort_unstable_by(|left, right| left.command.cmp(&right.command));
 
     Ok(ParserCommandReport {
         format_version: PARSER_COMMAND_REPORT_FORMAT_VERSION,
         commands,
+        probes,
+    })
+}
+
+fn behavior_probe(probe: &CommandProbe) -> Result<BehaviorProbe, ParserCommandError> {
+    let statements = parse(probe.sql).map_err(|source| ParserCommandError::Rejected {
+        command: probe.command,
+        sql: probe.sql,
+        source,
+    })?;
+    let [statement] = statements.as_slice() else {
+        return Err(ParserCommandError::StatementCount {
+            command: probe.command,
+            count: statements.len(),
+        });
+    };
+    let (behavior, sqlstate, message_fragment) = match statement {
+        Statement::CompatibilityRefusal(command) => {
+            ("refuse", Some(command.sqlstate()), Some(command.message()))
+        }
+        Statement::AlterServer { .. } => {
+            ("refuse", Some("0A000"), Some("ALTER SERVER not supported"))
+        }
+        Statement::AlterUserMapping { .. } => (
+            "refuse",
+            Some("0A000"),
+            Some("ALTER USER MAPPING not supported"),
+        ),
+        _ => ("session-execute", None, None),
+    };
+    Ok(BehaviorProbe {
+        command: probe.command.to_string(),
+        sql: probe.sql.to_string(),
+        parser_shape: probe.expected_statement.to_string(),
+        behavior,
+        sqlstate,
+        message_fragment,
     })
 }
 
@@ -449,5 +505,14 @@ mod tests {
 
         assert_eq!(json["format_version"], PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert_eq!(json["commands"][0], "ABORT");
+        assert_eq!(json["probes"].as_array().map(Vec::len), Some(92));
+        let refusal = json["probes"]
+            .as_array()
+            .expect("probe array")
+            .iter()
+            .find(|probe| probe["command"] == "CREATE DATABASE")
+            .expect("CREATE DATABASE probe");
+        assert_eq!(refusal["behavior"], "refuse");
+        assert_eq!(refusal["sqlstate"], "0A000");
     }
 }

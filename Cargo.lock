@@ -2781,8 +2781,13 @@ name = "crabka-gres-conformance"
 version = "0.3.9"
 dependencies = [
  "assert2",
+ "bytes",
  "clap",
+ "crabka-pgcatalog",
+ "crabka-pgexec",
  "crabka-pgparser",
+ "crabka-pgtypes",
+ "crabka-pgwire",
  "serde",
  "serde_json",
  "sqlx",
