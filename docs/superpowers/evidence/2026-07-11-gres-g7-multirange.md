@@ -61,6 +61,31 @@ See `tls-server-rejections.log`, `tls-plaintext.txt`,
 `tls-no-client-cert.txt`, `tls-wrong-principal.txt`, and
 `tls-allowed-principal.txt`.
 
+## Real-process system suites
+
+- The test harness starts an in-process broker and two actual `crabka-gres`
+  child processes with stable cache directories and a generated tenant mTLS
+  identity. Readiness is connection-driven; no fixed startup sleeps are used.
+- Kill and respawn tests assert replacement OS PIDs and recover forwarded rows,
+  participant-bank state, range-0 coordinator state, and cascade-killed state.
+- A transparent per-range TCP proxy partitions active and new range-RPC streams
+  without killing the participant. The partition test asserts the r1 PID is
+  unchanged, the affected transfer aborts, and a post-heal 2PC transfer commits.
+- The real-process Elle test records concurrent list-append transaction
+  invocations and returns in Stateright's `LinearizabilityTester`, includes an
+  indeterminate operation during an r1 kill, and requires a valid strict
+  serialization. The test exposed write skew; explicit transactions now hold
+  the intended range-0 serialization gate through commit, rollback, failure, or
+  session drop.
+- The real Jepsen bank workload runs concurrent transfers, aborts one while r1
+  is down, resumes after recovery, and proves exact final balances
+  `(104, 96)` and total `200`.
+
+The seven named Task 7 binaries are assigned to a two-thread nextest group. A
+single nextest invocation ran 17 tests across all seven binaries: 17 passed,
+zero skipped, in 39.261 seconds (run id
+`855d6d93-272c-4750-8bc4-c18e6d5500bc`).
+
 ## Verification
 
 ```text
@@ -68,6 +93,11 @@ cargo test -p crabka-pgexec primary_prewrite_waits_for_range0_replica_barrier --
   1 passed
 cargo test -p crabka-gres-ranges --lib
   105 passed
+cargo nextest run -p crabka-gres-ranges --test multiprocess --test jepsen_bank \
+  --test participant_kill_bank --test range0_cascade_kill_bank \
+  --test range0_leader_kill_drain --test crossrange_2pc_nemesis \
+  --test jepsen_elle
+  17 passed, 0 skipped
 cargo test -p crabka-gres-ranges --test multirange --test crossrange_2pc
   23 + 21 passed before the rejected explicit-transaction prototype was removed
 cargo check -p crabka-gres -p crabka-gres-ranges --all-targets

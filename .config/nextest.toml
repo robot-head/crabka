@@ -10,6 +10,7 @@ consumer-cooperative-rebalance = { max-threads = 1 }
 # Chapter Gres FDW roundtrip tests: each boots an in-process broker + schema
 # registry; cap concurrency to avoid broker saturation on constrained runners.
 gres-fdw = { max-threads = 2 }
+gres-ranges-process = { max-threads = 2 }
 gres-substrate = { max-threads = 2 }
 schema-registry-fixed-port-captures = { max-threads = 1 }
 
@@ -53,6 +54,11 @@ test-group = 'gres-fdw'
 filter = 'package(crabka-gres-substrate) & kind(test)'
 test-group = 'gres-substrate'
 
+[[profile.default.overrides]]
+# Gres range system suites boot an in-process broker plus real compute children.
+filter = 'package(crabka-gres-ranges) & (binary(multiprocess) | binary(jepsen_bank) | binary(participant_kill_bank) | binary(range0_cascade_kill_bank) | binary(range0_leader_kill_drain) | binary(crossrange_2pc_nemesis) | binary(jepsen_elle))'
+test-group = 'gres-ranges-process'
+
 [[profile.ci.overrides]]
 filter = 'package(crabka-broker) & (binary(jvm_acceptance) | binary(jvm_consumer_group_next_gen))'
 test-group = 'broker-jvm-acceptance'
@@ -86,3 +92,7 @@ threads-required = 'num-test-threads'
 [[profile.ci.overrides]]
 filter = 'package(crabka-gres-substrate) & kind(test)'
 test-group = 'gres-substrate'
+
+[[profile.ci.overrides]]
+filter = 'package(crabka-gres-ranges) & (binary(multiprocess) | binary(jepsen_bank) | binary(participant_kill_bank) | binary(range0_cascade_kill_bank) | binary(range0_leader_kill_drain) | binary(crossrange_2pc_nemesis) | binary(jepsen_elle))'
+test-group = 'gres-ranges-process'
