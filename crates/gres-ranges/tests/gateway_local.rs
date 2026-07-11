@@ -763,6 +763,103 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
     assert_eq!(rows[0][0].as_ref().expect("cell").text, "7");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_timestamp_scatter_prewrite_and_resolve_commit_atomically() {
+    let mut remote = crabka_pgexec::SqlEngine::new();
+    let fixture = MtlsFixture::new();
+    let record = TenantRecord::new(
+        1,
+        TenantId::try_from("tenant-remote-scatter").expect("tenant id"),
+        crabka_gres_control::TenantName::try_from("tenant-remote-scatter").expect("record tenant"),
+        TenantState::Active,
+        SqlUser::try_from("alice").expect("user"),
+        "SCRAM-SHA-256$4096:salt$stored:server".to_string(),
+        1,
+    )
+    .expect("record")
+    .with_range_layout(vec![
+        RangeLayoutEntry {
+            range_id: 0,
+            end_key: Some(crabka_gres_control::RangeBoundary::new(50, 0)),
+            endpoint: "local-r0".into(),
+            wal_generation: 1,
+        },
+        RangeLayoutEntry {
+            range_id: 1,
+            end_key: Some(crabka_gres_control::RangeBoundary::new(50, 2)),
+            endpoint: "local-r1".into(),
+            wal_generation: 1,
+        },
+        RangeLayoutEntry {
+            range_id: 2,
+            end_key: None,
+            endpoint: "127.0.0.1:1".into(),
+            wal_generation: 1,
+        },
+    ])
+    .expect("layout");
+    let registry = RangeRegistry::from_tenant_record(&record).expect("registry");
+    let config = MultiRangeTenantConfig::from_boundaries(
+        TenantName::parse("tenant_remote_scatter").expect("tenant"),
+        "0,50:1:0,50:2:0",
+    )
+    .expect("config")
+    .with_hosted_ranges(vec![RangeId::COORDINATOR, RangeId::new(1)])
+    .expect("host coordinator and first shard")
+    .with_range_registry(registry.clone())
+    .with_range_client(FramedTcpClient::with_tls(fixture.client).expect("mTLS range client"));
+    let (gateway, handles) = MultiRangeTenant::start(config).expect("gateway");
+    let hosted = gateway.hosted_range_engines();
+    let coordinator = hosted.get(&RangeId::COORDINATOR).expect("r0");
+    remote.set_catalog_kv(coordinator.kv_handle());
+    coordinator.share_gtm_to(&mut remote);
+    remote.set_timestamp_oracle(coordinator.timestamp_oracle_handle());
+    let address = spawn_tls(
+        Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::new(2),
+            remote.clone_handle(),
+        )]))),
+        fixture.server,
+    )
+    .await;
+    let mut live_record = record;
+    live_record.ranges[2].endpoint = address.to_string();
+    registry
+        .refresh_from_tenant_record(&live_record)
+        .await
+        .expect("publish endpoint");
+
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t50 (id int4) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("INSERT INTO t50 VALUES (1),(2),(3),(4),(5),(6),(7),(8),(9),(10),(11),(12),(13),(14),(15),(16)").await.expect("remote scatter commit");
+    let mut local_owner = hosted.get(&RangeId::new(1)).expect("r1").connect();
+    let mut remote_owner = remote.connect();
+    let local = local_owner
+        .simple_query("SELECT id FROM t50")
+        .await
+        .expect("local rows");
+    let remote_rows = remote_owner
+        .simple_query("SELECT id FROM t50")
+        .await
+        .expect("remote rows");
+    let count = [&local, &remote_rows]
+        .into_iter()
+        .map(|results| match &results[..] {
+            [QueryResult::Rows { rows, .. }] => rows.len(),
+            _ => 0,
+        })
+        .sum::<usize>();
+    assert_eq!(
+        count,
+        16,
+        "local={local:?}; remote={remote_rows:?}; routes={:?}",
+        handles.route_log().await
+    );
+}
+
 #[tokio::test]
 async fn remote_extended_statement_participates_in_cross_range_commit() {
     use crabka_pgwire::engine::BoundParam;
