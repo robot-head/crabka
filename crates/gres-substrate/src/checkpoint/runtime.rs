@@ -180,7 +180,9 @@ async fn write_checkpoint_inner(
 ) -> Result<Manifest, SubstrateError> {
     let pairs = collect_snapshot_pairs(kv_snapshot.as_mut())?;
     let pairs = rewrite_snapshot_pairs(pairs, snapshot.garbage_horizon_xid)?;
-    checkpoint_fail(failpoint, CheckpointServiceStep::BeforeParts)?;
+    if let Some(error) = checkpoint_failure(failpoint, CheckpointServiceStep::BeforeParts) {
+        return Err(error);
+    }
     let dir = ckpt_dir(
         tenant,
         snapshot.wal_generation,
@@ -195,7 +197,9 @@ async fn write_checkpoint_inner(
         let bytes = part.encode();
         store.put(&key, bytes.clone()).await?;
         entries.push(PartEntry::from_encoded_part(key, &bytes)?);
-        checkpoint_fail(failpoint, CheckpointServiceStep::PartsUploaded)?;
+        if let Some(error) = checkpoint_failure(failpoint, CheckpointServiceStep::PartsUploaded) {
+            return Err(error);
+        }
     }
 
     let manifest = Manifest::new(
@@ -207,7 +211,9 @@ async fn write_checkpoint_inner(
         entries,
     );
     store.put(&manifest_key(&dir), manifest.encode()?).await?;
-    checkpoint_fail(failpoint, CheckpointServiceStep::ManifestWritten)?;
+    if let Some(error) = checkpoint_failure(failpoint, CheckpointServiceStep::ManifestWritten) {
+        return Err(error);
+    }
     Ok(manifest)
 }
 
@@ -226,24 +232,24 @@ enum CheckpointServiceStep {
 }
 
 #[cfg(feature = "checkpoint-test-hooks")]
-fn checkpoint_fail(
+fn checkpoint_failure(
     failpoint: Option<&CheckpointFailpoint>,
     step: CheckpointServiceStep,
-) -> Result<(), SubstrateError> {
+) -> Option<SubstrateError> {
     if failpoint.is_some_and(|hook| hook(step)) {
-        return Err(SubstrateError::Checkpoint(format!(
+        return Some(SubstrateError::Checkpoint(format!(
             "test failpoint stopped checkpoint after {step:?}"
         )));
     }
-    Ok(())
+    None
 }
 
 #[cfg(not(feature = "checkpoint-test-hooks"))]
-fn checkpoint_fail(
+fn checkpoint_failure(
     _failpoint: Option<&CheckpointFailpoint>,
     _step: CheckpointServiceStep,
-) -> Result<(), SubstrateError> {
-    Ok(())
+) -> Option<SubstrateError> {
+    None
 }
 
 /// Restore the newest valid checkpoint for `tenant`, skipping incomplete attempts.
